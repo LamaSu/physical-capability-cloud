@@ -198,4 +198,47 @@ describe("buildAssuranceCeilingMap / ceilingFor", () => {
     expect(ceilingFor(map, "b")).toBe(0);
     expect(ceilingFor(map, "missing")).toBe(0);
   });
+
+  // Astra pack 90 F1: the map holds the SERVED ceiling, effectiveMaxAssuranceTier
+  // (min of the kernel's claim and its authorized ceiling), the bound contracting
+  // applies, never the authorized ceiling alone.
+  it("[neg] holds min(claim, authorized ceiling): a proven kernel claiming 1 is 1, claiming 2 is 2, claiming 3 is 3, claiming 0 is 0", () => {
+    const rows = [0, 1, 2, 3].map((claim) =>
+      signed({ id: `claims-${claim}`, reputation: 900, totalJobsCompleted: 50, maxAssuranceTier: claim }),
+    );
+    const map = buildAssuranceCeilingMap(rows);
+    for (const claim of [0, 1, 2, 3]) expect(ceilingFor(map, `claims-${claim}`), `claim ${claim}`).toBe(claim);
+  });
+
+  it("the authorized ceiling still binds a kernel that claims more (signed fresh claiming 3 is 1; unsigned claiming 3 is 0)", () => {
+    const map = buildAssuranceCeilingMap([
+      signed({ id: "fresh", reputation: 0, totalJobsCompleted: 0, maxAssuranceTier: 3 }),
+      signed({ id: "unsigned", signingKeyAlgorithm: null, signingKeyPublicKey: null, reputation: 950, totalJobsCompleted: 127, maxAssuranceTier: 3 }),
+    ]);
+    expect(ceilingFor(map, "fresh")).toBe(1);
+    expect(ceilingFor(map, "unsigned")).toBe(0);
+  });
+
+  it("[neg] a malformed claim, or a row loaded WITHOUT the claim column, reads as a claim of 0 (fail closed)", () => {
+    const base = { reputation: 900, totalJobsCompleted: 50 };
+    const map = buildAssuranceCeilingMap([
+      signed({ id: "seven", ...base, maxAssuranceTier: 7 }),
+      signed({ id: "string", ...base, maxAssuranceTier: "3" }),
+      signed({ id: "null", ...base, maxAssuranceTier: null }),
+      signed({ id: "absent", ...base, maxAssuranceTier: undefined }),
+    ]);
+    for (const id of ["seven", "string", "null", "absent"]) expect(ceilingFor(map, id), id).toBe(0);
+  });
+
+  it("agrees with effectiveMaxAssuranceTier for every row (one rule, two entry points)", () => {
+    const rows = [0, 1, 2, 3, 9].flatMap((claim) =>
+      [
+        signed({ reputation: 900, totalJobsCompleted: 50 }),
+        signed({ reputation: 0, totalJobsCompleted: 0 }),
+        signed({ signingKeyAlgorithm: null, signingKeyPublicKey: null, reputation: 950, totalJobsCompleted: 127 }),
+      ].map((r, i) => ({ ...r, id: `row-${claim}-${i}`, maxAssuranceTier: claim })),
+    );
+    const map = buildAssuranceCeilingMap(rows);
+    for (const r of rows) expect(ceilingFor(map, r.id), r.id).toBe(effectiveMaxAssuranceTier(r));
+  });
 });

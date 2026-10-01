@@ -34,10 +34,13 @@
  *
  * Assurance tiers (WP-C R1, MUST-CLOSE 5). A node's `assuranceTier` is a CLAIM
  * made by whoever registered it. Every search serves each node at
- * min(claim, authorizedAssuranceCeiling(its kernel row)), loaded with ONE
- * batched kernel lookup per search; a node whose kernel has no row is served at
- * 0. Filtering, `quality` ranking, the returned steps and the stored proposal
- * all use that served tier, never the raw claim (services/assurance-ceiling.ts).
+ * min(claim, effectiveMaxAssuranceTier(its kernel row)), the kernel's served
+ * ceiling, which is min(the kernel's own claimed tier, its authorized ceiling)
+ * and so the bound contracting holds a job to (astra pack 90 F1). The kernel
+ * rows are loaded with ONE batched lookup per search; a node whose kernel has no
+ * row is served at 0. Filtering, `quality` ranking, the returned steps and the
+ * stored proposal all use that served tier, never the raw claim
+ * (services/assurance-ceiling.ts).
  * compose.ts reaches this search as its multi-step and outcomeChain fallback,
  * so the same clamp covers /api/compose.
  *
@@ -128,7 +131,7 @@ function loadNodes(): CapabilityGraphNode[] {
 
 /**
  * WP-C R1: the same nodes, each at its SERVED tier,
- * min(claimed tier, authorizedAssuranceCeiling(kernel row of node.kernelId)).
+ * min(claimed tier, effectiveMaxAssuranceTier(kernel row of node.kernelId)).
  * One batched kernel lookup for the whole snapshot. A node whose kernel has no
  * row is served at 0.
  */
@@ -734,7 +737,8 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
   //   - the authenticated actor must own `kernelId` (requireKernelOwner:
   //     401 / 404 / 403 not_kernel_owner), checked before anything is written;
   //   - the stored `operatorAddress` is that actor, never a body value.
-  // The claimed tier is stored as given; searches serve it clamped.
+  // The claimed tier is stored as given; searches serve it clamped, and so does
+  // the response (`assuranceTier` served, `claimedAssuranceTier` the raw claim).
   app.post("/api/capabilities/graph/_dev/register-node", async (req, reply) => {
     if (!requireDevOrAdmin(req, reply)) return reply;
     // Steward rule 7: a PRESENT actor before body validation or any lookup.
@@ -750,7 +754,16 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
     }
     if (!(await requireOwnerOf(actor, reply, parsed.data.kernelId))) return reply;
     const node = upsertNode({ ...parsed.data, operatorAddress: actor });
-    return reply.status(201).send({ ok: true, node });
+    // The response serves the node the way every search will (astra pack 90
+    // F2): `assuranceTier` is the claim capped at the kernel's served ceiling,
+    // from the same helper searches use, and the raw claim stays visible under
+    // its own name. The STORED node keeps the raw claim; only what is served
+    // is capped.
+    const [served] = withServedTiers([node]);
+    return reply.status(201).send({
+      ok: true,
+      node: { ...served, claimedAssuranceTier: node.assuranceTier },
+    });
   });
 
   // ── POST /api/capabilities/graph/_dev/register-edge ──────────────────────

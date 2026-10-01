@@ -16,10 +16,20 @@ import { initStore, closeStore, getRepos } from "../db.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-async function createSession(app: FastifyInstance, track: string): Promise<string> {
+/** The operator that owns every seeded kernel. */
+const KERNEL_OPERATOR = "op@example.com";
+/** Stands in for apiGate: the authenticated caller, named by the x-test-operator header. */
+const asKernelOperator = { "x-test-operator": KERNEL_OPERATOR };
+
+async function createSession(
+  app: FastifyInstance,
+  track: string,
+  headers: Record<string, string> = {},
+): Promise<string> {
   const res = await app.inject({
     method: "POST",
     url: "/api/wizard/sessions",
+    headers,
     payload: { track },
   });
   return res.json().session.id;
@@ -30,10 +40,12 @@ async function saveStep(
   sessionId: string,
   step: number,
   data: Record<string, unknown>,
+  headers: Record<string, string> = {},
 ): Promise<void> {
   await app.inject({
     method: "PUT",
     url: `/api/wizard/sessions/${sessionId}/steps/${step}`,
+    headers,
     payload: { data },
   });
 }
@@ -42,7 +54,7 @@ function seedKernel(id: string): void {
   getRepos().kernels.insert({
     id,
     name: `Kernel ${id}`,
-    operatorAddress: "op@example.com",
+    operatorAddress: KERNEL_OPERATOR,
     location: { lat: 0, lng: 0 },
     physicalAddress: "1 Test St",
     maxAssuranceTier: 2,
@@ -68,6 +80,10 @@ describe("Wizard completion with a real store (Z3)", () => {
     initStore({ seed: false });
 
     app = Fastify({ logger: false });
+    app.addHook("onRequest", async (req) => {
+      const h = req.headers["x-test-operator"];
+      if (typeof h === "string" && h) (req as unknown as { operatorId?: string }).operatorId = h;
+    });
     await app.register(wizardRoutes);
     await app.ready();
   });
@@ -122,16 +138,19 @@ describe("Wizard completion with a real store (Z3)", () => {
   it("device-builder registers REAL device rows when the kernel exists", async () => {
     seedKernel("kernel_wiz_devices");
 
-    const sessionId = await createSession(app, "device-builder");
-    await saveStep(app, sessionId, 0, { deviceName: "Prusa MK4", deviceType: "machine" });
-    await saveStep(app, sessionId, 1, { adapterType: "mock" });
-    await saveStep(app, sessionId, 2, { capabilities: ["fdm"] });
-    await saveStep(app, sessionId, 3, { connectionTested: true });
-    await saveStep(app, sessionId, 4, { kernelId: "kernel_wiz_devices" });
+    // Devices are registered only on a kernel the session's owner operates, so
+    // the session is the kernel operator's (see wizard-device-builder-owner.test.ts).
+    const sessionId = await createSession(app, "device-builder", asKernelOperator);
+    await saveStep(app, sessionId, 0, { deviceName: "Prusa MK4", deviceType: "machine" }, asKernelOperator);
+    await saveStep(app, sessionId, 1, { adapterType: "mock" }, asKernelOperator);
+    await saveStep(app, sessionId, 2, { capabilities: ["fdm"] }, asKernelOperator);
+    await saveStep(app, sessionId, 3, { connectionTested: true }, asKernelOperator);
+    await saveStep(app, sessionId, 4, { kernelId: "kernel_wiz_devices" }, asKernelOperator);
 
     const res = await app.inject({
       method: "POST",
       url: `/api/wizard/sessions/${sessionId}/complete`,
+      headers: asKernelOperator,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();

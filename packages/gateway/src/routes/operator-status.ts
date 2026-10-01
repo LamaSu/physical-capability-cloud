@@ -107,8 +107,10 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
             name: shopKernels.name,
             status: shopKernels.status,
             lastHeartbeat: shopKernels.lastHeartbeat,
-            // Internal only: inputs to the assurance ceiling (WP-C). Never
-            // copied into the response.
+            // Internal only: inputs to the SERVED ceiling, min(claim, authorized
+            // ceiling) (WP-C; pack 90 F1). Never copied into the response. The
+            // claim must be selected too: a row without it reads as a claim of 0.
+            maxAssuranceTier: shopKernels.maxAssuranceTier,
             signingAddress: shopKernels.signingAddress,
             signingKeyAlgorithm: shopKernels.signingKeyAlgorithm,
             signingKeyPublicKey: shopKernels.signingKeyPublicKey,
@@ -125,9 +127,9 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
           status: r.status as string,
           lastHeartbeat: (r.lastHeartbeat as string) ?? null,
         }));
-        // Capability tiers are served clamped to their kernel's authorized
-        // ceiling, the same as the capability DTO. This is a public read, so it
-        // must not echo raw self-declared tiers.
+        // Capability tiers are served clamped to their kernel's served ceiling
+        // (min(claim, authorized ceiling)), the same as the capability DTO. This
+        // is a public read, so it must not echo raw self-declared tiers.
         const ceilings = buildAssuranceCeilingMap(kernelRows);
 
         if (kernels.length > 0) {

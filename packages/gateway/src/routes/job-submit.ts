@@ -258,15 +258,24 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
     // with its connection config, under the kernel: the same class as
     // POST /api/setup/register-device (WP-C R3). This route used to check only
     // that the kernel exists, so any key could register devices on another
-    // operator's kernel. A present actor comes first (401, rule 7). When the body
-    // names a kernel, the actor must own it (403 not_kernel_owner), and all of this
-    // happens before any write. An unknown kernel keeps its 400 kernel_not_found,
-    // answered here: it is not left to the facade, because a kernel created in
-    // between would then skip this check.
+    // operator's kernel. A present actor comes first (401, rule 7). Then the body:
+    // a kernelId that is present must be a STRING (400 invalid_kernel_id). That
+    // check precedes the owner check on purpose (astra pack 83 HIGH 3): the guard
+    // below is only entered for a string, and the facade looks the kernel up with
+    // whatever the body holds, so an array naming another operator's kernel
+    // skipped the guard and was still found (better-sqlite3 flattens an array
+    // parameter). When the body names a kernel, the actor must own it (403
+    // not_kernel_owner), and all of this happens before any write. A missing
+    // kernelId stays the facade's 400 missing_required_fields. An unknown kernel
+    // keeps its 400 kernel_not_found, answered here: it is not left to the
+    // facade, because a kernel created in between would then skip this check.
     const { requireActor, checkKernelOwner } = await import("../auth/kernel-owner-guard.js");
     const actor = requireActor(req, reply);
     if (!actor) return reply;
     const namedKernel = (req.body as { kernelId?: unknown } | undefined)?.kernelId;
+    if (namedKernel !== undefined && namedKernel !== null && typeof namedKernel !== "string") {
+      return reply.code(400).send({ error: "invalid_kernel_id", message: "kernelId must be a string" });
+    }
     if (typeof namedKernel === "string" && namedKernel !== "") {
       const verdict = await checkKernelOwner(actor, namedKernel);
       if (!verdict.ok) {

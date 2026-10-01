@@ -17,8 +17,10 @@
  *
  * Assurance tier (WP-C): a manifest's `maxAssuranceTier` is the builder's
  * CLAIM, and a verify smoke test (HTTP 2xx) certifies nothing about it. The
- * marketplace serves and filters on min(claim, authorized ceiling) of the
- * manifest's kernel row (services/assurance-ceiling.ts). That row only counts
+ * marketplace serves and filters on min(claim, the kernel row's served tier),
+ * the row's served tier being min(its own claim, its authorized ceiling): the
+ * bound contracting holds a job on that kernel to (services/assurance-ceiling.ts;
+ * astra pack 90 F1). That row only counts
  * when it is owned by the same authenticated actor that registered the
  * manifest, which is exactly the kernel-sdk flow: one key registers the
  * manifest and then POST /api/kernels with the signing proof. Otherwise the
@@ -38,9 +40,9 @@ import type {
 } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import {
-  authorizedAssuranceCeiling,
+  effectiveMaxAssuranceTier,
   normalizeClaim,
-  type AssuranceCeilingKernel,
+  type AssuranceClaimKernel,
 } from "../services/assurance-ceiling.js";
 import { checkAdminKey } from "../auth/admin-key.js";
 import { ownsKernel, resolveRequestActor } from "../auth/kernel-owner-guard.js";
@@ -221,16 +223,17 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
 
 /**
  * Served tier for each manifest: min(normalizeClaim(manifest claim),
- * authorizedAssuranceCeiling(kernel row)). The kernel row counts only when it
- * exists AND is owned by the manifest's registrant. Otherwise the tier is 0.
- * Kernel rows are loaded with one batched query. A store that is unavailable
- * also means 0 (fail closed).
+ * effectiveMaxAssuranceTier(kernel row)), the bound contracting holds a job on
+ * that kernel to (min of the row's own claim and its authorized ceiling; astra
+ * pack 90 F1). The kernel row counts only when it exists AND is owned by the
+ * manifest's registrant. Otherwise the tier is 0. Kernel rows are loaded with
+ * one batched query. A store that is unavailable also means 0 (fail closed).
  */
 function servedManifestTiers(
   manifests: DigitalKernelManifest[],
 ): Map<string, AssuranceTier> {
   const out = new Map<string, AssuranceTier>();
-  let rows: Array<AssuranceCeilingKernel & { id: string; operatorAddress?: string | null }> = [];
+  let rows: Array<AssuranceClaimKernel & { id: string; operatorAddress?: string | null }> = [];
   try {
     const ids = [...new Set(manifests.map((m) => m.kernelId))];
     rows = ids.length > 0 ? getRepos().kernels.findByIds(ids) : [];
@@ -242,7 +245,7 @@ function servedManifestTiers(
     const row = rowById.get(m.kernelId);
     const registrant = manifestRegistrants.get(m.kernelId);
     const ceiling =
-      row && ownsKernel(row.operatorAddress, registrant) ? authorizedAssuranceCeiling(row) : 0;
+      row && ownsKernel(row.operatorAddress, registrant) ? effectiveMaxAssuranceTier(row) : 0;
     out.set(m.kernelId, Math.min(normalizeClaim(m.maxAssuranceTier), ceiling) as AssuranceTier);
   }
   return out;

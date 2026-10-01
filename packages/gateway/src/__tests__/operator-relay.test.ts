@@ -4,6 +4,14 @@
  *   POST /api/operator/evidence
  *   POST /api/operator/heartbeat
  *   POST /api/operator/job-status
+ *
+ * N85 b: jobs, evidence and job-status are owner-or-admin, like the heartbeat
+ * (WP-C). The happy-path and validation cases below therefore send the
+ * identity apiGate would attach: the owner of the seeded kernel, via the
+ * x-test-operator shim, or the admin secret where there is no kernel owner
+ * (an unknown kernel). An unknown JOB is a 404 now, no longer a graceful 200.
+ * The negative and ordering cases (a stranger, no identity, a wrong admin
+ * secret, an unowned kernel) live in n85-operator-relay-owner.test.ts.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -72,6 +80,22 @@ function ownerOf(kernelId: string): string {
   return getRepos().kernels.findById(kernelId)!.operatorAddress;
 }
 
+/** The identity shim header: the owner of `kernelId`, as apiGate would attach it. */
+function asOwnerOf(kernelId: string): Record<string, string> {
+  return { "x-test-operator": ownerOf(kernelId) };
+}
+
+/**
+ * An authenticated identity that owns NO kernel, for cases answered before any
+ * ownership is checked (400 body validation, 404 unknown job or kernel).
+ */
+const ANY_OPERATOR = { "x-test-operator": "operator-relay-test-nobody@x.test" };
+
+/** The admin secret (N85 b: the owner-or-admin relay routes accept it; set around the suite). */
+const ADMIN_SECRET = "operator-relay-test-admin-secret";
+const asAdmin = { "x-admin-key": ADMIN_SECRET };
+const savedAdminKey = process.env.PCC_ADMIN_KEY;
+
 /** Returns the first queued job ID for a kernel, or null. */
 async function getQueuedJobId(
   app: FastifyInstance,
@@ -93,44 +117,64 @@ describe("Operator Relay Routes", () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
+    process.env.PCC_ADMIN_KEY = ADMIN_SECRET;
     app = await buildApp();
   });
 
   afterAll(async () => {
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   // ── GET /api/operator/jobs ───────────────────────────────────────
 
   describe("GET /api/operator/jobs", () => {
     it("requires kernelId query param", async () => {
+      // N85 b: the actor is resolved before the query is validated, so this
+      // sends an identity to reach the 400 (with none it is a 401).
       const res = await app.inject({
         method: "GET",
         url: "/api/operator/jobs",
+        headers: ANY_OPERATOR,
       });
       expect(res.statusCode).toBe(400);
       const body = res.json();
       expect(body.error).toBe("kernelId query param required");
+
+      const anonymous = await app.inject({ method: "GET", url: "/api/operator/jobs" });
+      expect(anonymous.statusCode).toBe(401);
     });
 
-    it("returns empty jobs for unknown kernel", async () => {
+    it("returns empty jobs for unknown kernel (the admin; a caller with only an identity gets 404)", async () => {
+      // No kernel, no owner: only the admin secret reaches the (empty) listing.
       const res = await app.inject({
         method: "GET",
         url: "/api/operator/jobs?kernelId=kernel-unknown-xyz&status=queued",
+        headers: asAdmin,
       });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.jobs).toEqual([]);
+
+      const identified = await app.inject({
+        method: "GET",
+        url: "/api/operator/jobs?kernelId=kernel-unknown-xyz&status=queued",
+        headers: ANY_OPERATOR,
+      });
+      expect(identified.statusCode).toBe(404);
+      expect(identified.json().error).toBe("kernel_not_found");
     });
 
-    it("returns jobs for known kernel with status filter", async () => {
+    it("returns jobs for known kernel with status filter (to its owner)", async () => {
       const kernelId = await getSeededKernelId(app);
       if (!kernelId) return; // No seed data
 
       const res = await app.inject({
         method: "GET",
         url: `/api/operator/jobs?kernelId=${kernelId}&status=queued`,
+        headers: asOwnerOf(kernelId),
       });
       expect(res.statusCode).toBe(200);
       const body = res.json();
@@ -144,6 +188,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "GET",
         url: `/api/operator/jobs?kernelId=${kernelId}`,
+        headers: asOwnerOf(kernelId),
       });
       // Should not 400 (status defaulted to "queued")
       expect(res.statusCode).toBe(200);
@@ -157,6 +202,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: ANY_OPERATOR,
         payload: { evidence: { printed: true } },
       });
       expect(res.statusCode).toBe(400);
@@ -168,6 +214,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: ANY_OPERATOR,
         payload: { jobId: "j-test" },
       });
       expect(res.statusCode).toBe(400);
@@ -175,10 +222,11 @@ describe("Operator Relay Routes", () => {
       expect(body.error).toBe("evidence required");
     });
 
-    it("returns stored:false for unknown job (graceful)", async () => {
+    it("returns 404 job_not_found for an unknown job and stores nothing (was a graceful 200 stored:false)", async () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: ANY_OPERATOR,
         payload: {
           jobId: "job-totally-unknown-12345",
           kernelId: "kernel-1",
@@ -186,13 +234,14 @@ describe("Operator Relay Routes", () => {
           timestamp: Date.now() / 1000,
         },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(404);
       const body = res.json();
-      expect(body.stored).toBe(false);
-      expect(body.warning).toBe("job_not_found");
+      expect(body.error).toBe("job_not_found");
+      expect(body.stored).toBeUndefined();
+      expect(getRepos().evidence.findByJob("job-totally-unknown-12345")).toEqual([]);
     });
 
-    it("stores evidence for known job", async () => {
+    it("stores evidence for known job (sent by its kernel's owner)", async () => {
       const kernelId = await getSeededKernelId(app);
       if (!kernelId) return;
       const jobId = await getQueuedJobId(app, kernelId);
@@ -201,6 +250,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: asOwnerOf(kernelId),
         payload: {
           jobId,
           kernelId,
@@ -234,6 +284,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: asOwnerOf(kernelId),
         payload: { jobId, kernelId, evidence: bundle, timestamp: Date.now() / 1000 },
       });
       expect(res.statusCode).toBe(200);
@@ -262,6 +313,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: asOwnerOf(kernelId),
         payload: { jobId, kernelId, evidence: { printed: true, returncode: 0 } },
       });
       expect(res.statusCode).toBe(200);
@@ -384,6 +436,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/job-status",
+        headers: ANY_OPERATOR,
         payload: { status: "completed" },
       });
       expect(res.statusCode).toBe(400);
@@ -395,6 +448,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/job-status",
+        headers: ANY_OPERATOR,
         payload: { jobId: "j-1" },
       });
       expect(res.statusCode).toBe(400);
@@ -406,6 +460,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/job-status",
+        headers: ANY_OPERATOR,
         payload: { jobId: "j-1", status: "flying" },
       });
       expect(res.statusCode).toBe(400);
@@ -414,22 +469,23 @@ describe("Operator Relay Routes", () => {
       expect(body.valid).toContain("completed");
     });
 
-    it("returns updated:false for unknown job (graceful)", async () => {
+    it("returns 404 job_not_found for an unknown job (was a graceful 200 updated:false)", async () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/job-status",
+        headers: ANY_OPERATOR,
         payload: {
           jobId: "job-does-not-exist-xyz",
           status: "completed",
         },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(404);
       const body = res.json();
-      expect(body.updated).toBe(false);
-      expect(body.warning).toBe("job_not_found");
+      expect(body.error).toBe("job_not_found");
+      expect(body.updated).toBeUndefined();
     });
 
-    it("updates status for known job", async () => {
+    it("updates status for known job (sent by its kernel's owner)", async () => {
       const kernelId = await getSeededKernelId(app);
       if (!kernelId) return;
       const jobId = await getQueuedJobId(app, kernelId);
@@ -438,6 +494,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/job-status",
+        headers: asOwnerOf(kernelId),
         payload: {
           jobId,
           kernelId,
@@ -454,19 +511,30 @@ describe("Operator Relay Routes", () => {
     });
 
     it("accepts all canonical statuses plus the `running` alias", async () => {
+      const kernelId = await getSeededKernelId(app);
+      if (!kernelId) return;
+      const jobId = getRepos().jobs.findByKernel(kernelId)[0]?.id;
+      if (!jobId) return;
+
       const ACCEPTED = [
         "pending", "queued", "in_progress", "paused",
         "completed", "failed", "cancelled",
         "running", // tolerated alias → in_progress
       ];
       for (const status of ACCEPTED) {
+        // A REAL job, sent by its kernel's owner (an unknown job is a 404 now,
+        // so the old `not 400` on a fake job id would prove nothing).
         const res = await app.inject({
           method: "POST",
           url: "/api/operator/job-status",
-          payload: { jobId: "j-fake-" + status, status },
+          headers: asOwnerOf(kernelId),
+          payload: { jobId, status },
         });
-        // May be 200 with updated:false (unknown job), but must not be 400
-        expect(res.statusCode, `status ${status}`).not.toBe(400);
+        expect(res.statusCode, `status ${status}`).toBe(200);
+        // `running` is stored as its canonical form, every other status as itself.
+        expect(getRepos().jobs.findById(jobId)?.status, `status ${status}`).toBe(
+          status === "running" ? "in_progress" : status,
+        );
       }
     });
   });

@@ -21,6 +21,19 @@
  *   normalizeClaim(x)            = integer in 0..3, else 0   (NOT 2)
  *   effectiveMaxAssuranceTier(k) = min(normalizeClaim(k.maxAssuranceTier),
  *                                      authorizedAssuranceCeiling(k))
+ *   servedTiers(declared, k)     = clampAssuranceTiers(declared, effectiveMaxAssuranceTier(k))
+ *
+ * ONE BOUND FOR EVERY READ (astra pack 90 F1). What a kernel's listings are
+ * SERVED, SEARCHED and SELECTED at is bounded by effectiveMaxAssuranceTier, the
+ * SAME bound JobFacade.submit holds a job to. The authorized ceiling alone is
+ * not that bound: a kernel may claim LESS than it is authorized for, and
+ * discovery that offered a tier contracting rejects would advertise something
+ * nobody can buy. So the ceiling maps below (buildAssuranceCeilingMap,
+ * loadAssuranceCeilingMap) hold the EFFECTIVE max of each kernel, and every
+ * search, DTO, graph and compose path clamps with it. The authorized ceiling
+ * still bounds what a write path may PERSIST for a kernel (heartbeat
+ * insertion): a stored tier is a claim that a later claim raise may legitimately
+ * widen, and a read always re-clamps.
  *
  * AUTHORITY. Reputation (decayed and cold-start gated by ReputationService) is
  * the INTERIM authority. The intended future authority is an MS-11
@@ -178,31 +191,37 @@ export function clampAssuranceTiers(tiers: unknown, ceiling: unknown): Assurance
 }
 
 /**
- * Build a kernelId → ceiling map from pre-loaded kernel rows. Batch callers use
- * this so each kernel is evaluated once. Look-ups for ids missing from the map
- * must fall back to 0 (see {@link ceilingFor}).
+ * Build a kernelId → SERVED ceiling map from pre-loaded kernel rows: for each
+ * kernel, effectiveMaxAssuranceTier(row) = min(its claimed maxAssuranceTier, its
+ * authorized ceiling), the bound contracting applies (astra pack 90 F1). Batch
+ * callers use this so each kernel is evaluated once. The rows must carry the
+ * claim: a row loaded without `maxAssuranceTier` would read as a claim of 0
+ * (fail closed, so every listing would collapse to tier 0 silently), which is
+ * why the parameter type requires the column. Look-ups for ids missing from the
+ * map must fall back to 0 (see {@link ceilingFor}).
  */
 export function buildAssuranceCeilingMap(
-  kernels: Iterable<(AssuranceCeilingKernel & { id: string }) | null | undefined>,
+  kernels: Iterable<(AssuranceClaimKernel & { id: string; maxAssuranceTier: unknown }) | null | undefined>,
 ): Map<string, AssuranceTier> {
   const map = new Map<string, AssuranceTier>();
   for (const k of kernels) {
-    if (k && typeof k.id === "string") map.set(k.id, authorizedAssuranceCeiling(k));
+    if (k && typeof k.id === "string") map.set(k.id, effectiveMaxAssuranceTier(k));
   }
   return map;
 }
 
-/** Ceiling for `kernelId` from a pre-built map. An unknown kernel is 0 (fail closed). */
+/** Served ceiling for `kernelId` from a pre-built map. An unknown kernel is 0 (fail closed). */
 export function ceilingFor(map: ReadonlyMap<string, AssuranceTier>, kernelId: string): AssuranceTier {
   return map.get(kernelId) ?? 0;
 }
 
 /**
- * Load the authorized ceiling of every kernel in `kernelIds` with ONE batched
- * query (`IKernelRepository.findByIds`), for callers that hold rows which only
- * name a kernel (graph-search nodes, compose candidates). A kernel with no row,
- * or a lookup that fails, is left out of the map, so {@link ceilingFor} reads
- * it as 0 (fail closed).
+ * Load the SERVED ceiling (effectiveMaxAssuranceTier, see
+ * {@link buildAssuranceCeilingMap}) of every kernel in `kernelIds` with ONE
+ * batched query (`IKernelRepository.findByIds`), for callers that hold rows
+ * which only name a kernel (graph-search nodes, compose candidates). A kernel
+ * with no row, or a lookup that fails, is left out of the map, so
+ * {@link ceilingFor} reads it as 0 (fail closed).
  */
 export function loadAssuranceCeilingMap(kernelIds: Iterable<unknown>): Map<string, AssuranceTier> {
   const unique = [...new Set([...kernelIds].filter((id): id is string => typeof id === "string" && id.length > 0))];
@@ -215,8 +234,9 @@ export function loadAssuranceCeilingMap(kernelIds: Iterable<unknown>): Map<strin
 }
 
 /**
- * The tier a CLAIMED tier is served, searched and selected at under `ceiling`:
- * `min(normalizeClaim(claim), ceiling)`. A malformed claim or ceiling reads as 0.
+ * The tier a CLAIMED tier is served, searched and selected at under `ceiling`
+ * (a served ceiling from the maps above): `min(normalizeClaim(claim), ceiling)`.
+ * A malformed claim or ceiling reads as 0.
  */
 export function servedAssuranceTier(claim: unknown, ceiling: unknown): AssuranceTier {
   return Math.min(normalizeClaim(claim), normalizeClaim(ceiling)) as AssuranceTier;

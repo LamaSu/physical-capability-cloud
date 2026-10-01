@@ -14,7 +14,13 @@
  *     WP-C's guard uses). The only row read is register's own read of the
  *     kernel it was asked to update, keyed on the body's id.
  * A second table sends MALFORMED bodies without an actor: still 401, because
- * the actor is resolved before the body is validated. A positive control sends
+ * the actor is resolved before the body is validated.
+ *
+ * N85 b: the operator relay's GET /api/operator/jobs, POST /api/operator/evidence
+ * and POST /api/operator/job-status are in both tables. They are owner-or-admin;
+ * a request that presents no admin secret and no actor is the same actor-first
+ * refusal as the rest, and the job lookup the two writes make must not run
+ * before it either (the observer also spies on repos.jobs.findById). A positive control sends
  * each well-formed request with the owner's key to the same bare app and gets
  * a 2xx, so the refusals are about the missing actor, not a bad request.
  *
@@ -54,12 +60,14 @@ interface Seed {
   capId: string;
   approvalId: string;
   deviceId: string;
+  /** A queued job on the kernel (the operator relay routes act on it). */
+  jobId: string;
 }
 
 /**
  * A kernel owned by OWNER with the maximum ceiling (so any injection would
  * matter), one capability, a policy that is NOT e-stopped, one pending
- * approval and one device.
+ * approval, one device and one queued job.
  */
 function seed(): Seed {
   const kernelId = uid("rule7-k");
@@ -126,7 +134,20 @@ function seed(): Seed {
     capabilities: [],
     healthStatus: "healthy",
   } as never);
-  return { kernelId, capId, approvalId, deviceId };
+  const jobId = uid("rule7-relay-job");
+  repos.jobs.insert({
+    id: jobId,
+    stepId: `step-${jobId}`,
+    cwmId: `cwm-${jobId}`,
+    capabilityId: capId,
+    kernelId,
+    status: "queued",
+    assignedDevices: [],
+    startedAt: now,
+    progress: 0,
+    assuranceTier: 0,
+  } as never);
+  return { kernelId, capId, approvalId, deviceId, jobId };
 }
 
 /** Everything a guarded route could write, for one seeded kernel. */
@@ -141,6 +162,8 @@ function snapshot(s: Seed): string {
       null,
     approvals: db.select().from(schema.pendingApprovals).where(eq(schema.pendingApprovals.kernelId, s.kernelId)).all(),
     devices: repos.kernels.findDevicesByKernel(s.kernelId),
+    jobs: repos.jobs.findByKernel(s.kernelId),
+    evidence: repos.evidence.findByKernel(s.kernelId),
     graphNodes: db.select().from(schema.graphSearchNodes).all(),
     composeCandidates: db.select().from(schema.compositionCandidates).all(),
   });
@@ -316,6 +339,29 @@ const ROWS: Row[] = [
     ok: 201,
   },
   {
+    route: "GET /api/operator/jobs?kernelId=",
+    method: "GET",
+    url: (s) => `/api/operator/jobs?kernelId=${s.kernelId}`,
+    refused: 401,
+    ok: 200,
+  },
+  {
+    route: "POST /api/operator/evidence",
+    method: "POST",
+    url: () => "/api/operator/evidence",
+    body: (s) => ({ jobId: s.jobId, kernelId: s.kernelId, evidence: { printed: true, returncode: 0 } }),
+    refused: 401,
+    ok: 200,
+  },
+  {
+    route: "POST /api/operator/job-status",
+    method: "POST",
+    url: () => "/api/operator/job-status",
+    body: (s) => ({ jobId: s.jobId, kernelId: s.kernelId, status: "in_progress" }),
+    refused: 401,
+    ok: 200,
+  },
+  {
     route: "POST /api/setup/register-device",
     method: "POST",
     url: () => "/api/setup/register-device",
@@ -363,6 +409,24 @@ const MALFORMED: Array<{ route: string; method: Method; url: (s: Seed) => string
     body: {},
   },
   { route: "POST /api/setup/register-device {}", method: "POST", url: () => "/api/setup/register-device", body: {} },
+  { route: "GET /api/operator/jobs (no kernelId)", method: "GET", url: () => "/api/operator/jobs" },
+  { route: "GET /api/operator/jobs?kernelId= (unknown kernel)", method: "GET", url: () => `/api/operator/jobs?kernelId=${uid("no-such-kernel")}` },
+  { route: "POST /api/operator/evidence {}", method: "POST", url: () => "/api/operator/evidence", body: {} },
+  { route: "POST /api/operator/evidence (non-string jobId)", method: "POST", url: () => "/api/operator/evidence", body: { jobId: 123, evidence: { x: 1 } } },
+  {
+    route: "POST /api/operator/evidence (unknown job)",
+    method: "POST",
+    url: () => "/api/operator/evidence",
+    body: { jobId: uid("no-such-job"), evidence: { x: 1 } },
+  },
+  { route: "POST /api/operator/job-status {}", method: "POST", url: () => "/api/operator/job-status", body: {} },
+  { route: "POST /api/operator/job-status (invalid status)", method: "POST", url: () => "/api/operator/job-status", body: { jobId: "j-1", status: "flying" } },
+  {
+    route: "POST /api/operator/job-status (unknown job)",
+    method: "POST",
+    url: () => "/api/operator/job-status",
+    body: { jobId: uid("no-such-job"), status: "completed" },
+  },
   {
     route: "POST /api/capabilities/:capId/heartbeat (unknown capability)",
     method: "POST",
@@ -372,9 +436,9 @@ const MALFORMED: Array<{ route: string; method: Method; url: (s: Seed) => string
 ];
 
 /**
- * Send one request and observe the kernel lookups it makes. Returns the
- * response plus every kernel-owner lookup (KernelFacade.getById) and every
- * kernel row lookup (repos.kernels.findById) argument.
+ * Send one request and observe the lookups it makes. Returns the response plus
+ * every kernel-owner lookup (KernelFacade.getById), every kernel row lookup
+ * (repos.kernels.findById) and every job lookup (repos.jobs.findById) argument.
  */
 async function observe(
   method: Method,
@@ -384,16 +448,19 @@ async function observe(
 ) {
   const ownerLookups = vi.spyOn(KernelFacade.prototype, "getById");
   const rowLookups = vi.spyOn(getRepos().kernels, "findById");
+  const jobLookups = vi.spyOn(getRepos().jobs, "findById");
   try {
     const res = await bare.inject({ method, url, headers, ...(body !== undefined ? { payload: body as object } : {}) });
     return {
       res,
       ownerLookupArgs: ownerLookups.mock.calls.map((c) => c[0]),
       rowLookupArgs: rowLookups.mock.calls.map((c) => c[0]),
+      jobLookupArgs: jobLookups.mock.calls.map((c) => c[0]),
     };
   } finally {
     ownerLookups.mockRestore();
     rowLookups.mockRestore();
+    jobLookups.mockRestore();
   }
 }
 
@@ -422,7 +489,7 @@ describe("steward rule 7: every WP-C owner guard fails closed without an actor (
   it.each(ROWS)("[neg] no actor: $route -> refused, nothing written, no owner lookup", async (row) => {
     const s = seed();
     const before = snapshot(s);
-    const { res, ownerLookupArgs, rowLookupArgs } = await observe(row.method, row.url(s), row.body?.(s));
+    const { res, ownerLookupArgs, rowLookupArgs, jobLookupArgs } = await observe(row.method, row.url(s), row.body?.(s));
 
     expect(res.statusCode).toBe(row.refused);
     expect(snapshot(s)).toBe(before);
@@ -433,17 +500,20 @@ describe("steward rule 7: every WP-C owner guard fails closed without an actor (
     // body's id, never on the actor) and then refuses.
     expect(ownerLookupArgs).toEqual([]);
     expect(rowLookupArgs).toEqual(row.route.startsWith("POST /api/kernels (") ? [s.kernelId] : []);
+    // Nor a job lookup (the relay's writes look the job up, after the actor).
+    expect(jobLookupArgs).toEqual([]);
   });
 
   it.each(MALFORMED)("[neg] no actor + malformed body: $route -> 401 (actor before body validation)", async (row) => {
     const s = seed();
     const before = snapshot(s);
-    const { res, ownerLookupArgs, rowLookupArgs } = await observe(row.method, row.url(s), row.body);
+    const { res, ownerLookupArgs, rowLookupArgs, jobLookupArgs } = await observe(row.method, row.url(s), row.body);
     expect(res.statusCode).toBe(401);
     expect(res.json().error).toBe("api_key_required");
     expect(snapshot(s)).toBe(before);
     expect(ownerLookupArgs).toEqual([]);
     expect(rowLookupArgs).toEqual([]);
+    expect(jobLookupArgs).toEqual([]);
   });
 
   it.each(ROWS)("control: the same request with the OWNER's key -> $ok ($route)", async (row) => {
