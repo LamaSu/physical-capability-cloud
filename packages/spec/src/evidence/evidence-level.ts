@@ -78,7 +78,9 @@
  *    verdict counts as a failed inspection (fail closed) and none does not.
  *    Keys are matched after an ASCII trim and ASCII lowercase (`Passed`,
  *    ` passed`, `PASS`, `Status` all count as present); a spelling of the pinned
- *    field that is not the exact key is malformed, not a pass.
+ *    field that is not the exact key is malformed, not a pass, even beside the
+ *    exact key. A DIFFERENT verdict-looking key beside a valid exact pinned
+ *    field is ignored: the pinned field decides.
  *    Pinned: instrument_result `pass` (boolean), cv_inspection_result
  *    `passed` (boolean) and batch_sample_result `status` ("PASS" or "FAIL").
  *    photo_comparison_result has no producer, so no pinned field. A cv
