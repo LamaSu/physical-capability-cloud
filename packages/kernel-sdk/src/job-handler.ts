@@ -80,7 +80,11 @@ export interface KernelJobRequest {
 export interface KernelJobResponse {
   /** Signed + hashed evidence bundle */
   evidenceBundle: EvidenceBundle;
-  /** Output payload returned by the builder's execute() */
+  /**
+   * The output payload the builder's execute() returned, as the canonical-JSON snapshot the
+   * evidence commits to (not the builder's own object): -0 reads 0, an undefined member is
+   * omitted, and every object in it has no prototype (see `CanonicalSnapshot`).
+   */
   output: Record<string, unknown>;
   /** Session key used by the kernel to sign evidence (hex pubkey) */
   kernelSessionPublicKey: string;
@@ -241,8 +245,16 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     // ── Execute the builder's code ──────────────────────────────────────
     const executionStart = new Date().toISOString();
-    const output = await execute(inputSnapshot.value);
+    const returned = await execute(inputSnapshot.value);
     const executionEnd = new Date().toISOString();
+
+    // -- Snapshot the output --------------------------------------------
+    // The same discipline as the input: canonicalize FIRST and parse the canonical text ONCE,
+    // commit to that text, and hand the caller that parsed value. The builder's own object (a
+    // Proxy, or one the builder keeps and changes after returning) is never read again, so the
+    // output commitment covers exactly the output the caller receives. An output with no JSON
+    // form is refused here, with the same NonCanonicalValueError an input with none gets.
+    const outputSnapshot = canonicalSnapshot<Record<string, unknown>>(returned);
 
     // ── Assemble evidence events ────────────────────────────────────────
     const source: EvidenceSource = {
@@ -326,8 +338,8 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       events.push(stepEvent);
     }
 
-    // Output commitment
-    const outputHash = await sha256(canonicalize(output));
+    // Output commitment: the hash of the snapshot the caller receives
+    const outputHash = await sha256(outputSnapshot.text);
 
     // Execution completed
     const completedEvent: EvidenceEvent = {
@@ -385,7 +397,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     return {
       evidenceBundle,
-      output,
+      output: outputSnapshot.value,
       kernelSessionPublicKey: toHex(sessionKey.publicKey),
     };
   };

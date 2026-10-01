@@ -186,3 +186,81 @@ describe("createKernelHandler -- a polluted Object.prototype supplies the builde
     expect(Object.getOwnPropertyNames(Object.prototype).sort()).toEqual(OBJECT_PROTOTYPE_AT_LOAD);
   });
 });
+
+// ---------------------------------------------------------------------------
+// N15 round 5 (cross-family review A05c, finding F2)
+// ---------------------------------------------------------------------------
+
+/** The execution_completed event carries the output commitment. */
+const committedOutputHash = (response: { evidenceBundle: { events: Array<{ type: string; payload: unknown }> } }) =>
+  (response.evidenceBundle.events.find((e) => e.type === "execution_completed")?.payload as { outputHash: string }).outputHash;
+
+/**
+ * The handler hashed canonicalize(output) but returned the builder's own object, so a Proxy
+ * (or an object the builder kept and changed) could be committed as one thing and returned as
+ * another. It now snapshots the output once, right after execute returns, hashes the snapshot's
+ * text and returns the snapshot's value.
+ */
+describe("createKernelHandler -- commits to, and returns, the one snapshot of the builder's output (N15 round 5, A05c F2)", () => {
+  it("A05c F2: the verdict's repro: an output Proxy whose descriptors say safe and whose get trap says danger", async () => {
+    const keysRead: string[] = [];
+    const handler = handlerWith(async () =>
+      new Proxy({ command: "safe" } as Record<string, unknown>, {
+        get(target, key, receiver) {
+          keysRead.push(String(key));
+          return key === "command" ? "danger" : Reflect.get(target, key, receiver);
+        },
+      }),
+    );
+    const response = await handler({ jobId: "job-6", input: {} });
+    expect(committedOutputHash(response)).toBe(await sha256(canonicalize({ command: "safe" })));
+    expect(response.output.command).toBe("safe"); // faac0003 returned "danger" next to a commitment to "safe"
+    expect(response.output).toEqual({ command: "safe" });
+    // The handler never reads the builder's object through [[Get]], before or after the commitment. (The
+    // one read there is, "then", is the language's own thenable check when an async function returns an
+    // object; it asks for no data.)
+    expect(keysRead.filter((key) => key !== "then")).toEqual([]);
+  });
+
+  it("A05c F2: the response is a detached copy: a builder that keeps its object cannot change the output after the commitment", async () => {
+    const returned = { command: "safe", list: [1, 2] };
+    const handler = handlerWith(async () => returned);
+    const response = await handler({ jobId: "job-7", input: {} });
+    const committed = committedOutputHash(response);
+    returned.command = "changed after the commitment";
+    returned.list.push(3);
+    expect(response.output).toEqual({ command: "safe", list: [1, 2] }); // faac0003: the same object, now "changed ..."
+    expect(await sha256(canonicalize(response.output))).toBe(committed);
+  });
+
+  it("A05c F2: a polluted Object.prototype supplies nothing to whoever reads the response's output", async () => {
+    const handler = handlerWith(async () => ({ nested: {} }));
+    const reads = await withPollutedPrototype({ command: "danger" }, async () => {
+      const response = await handler({ jobId: "job-8", input: {} });
+      const nested = response.output.nested as Record<string, unknown>;
+      return [response.output.command, nested.command, "command" in response.output];
+    });
+    expect(reads).toEqual([undefined, undefined, false]); // faac0003: ["danger", "danger", true]
+  });
+
+  it("A05c F2: refuses a non-JSON output the way it refuses a non-JSON input: a typed NonCanonicalValueError", async () => {
+    for (const output of [{ n: Number.NaN }, { f: () => 1 }, { when: new Date(0) }, { big: BigInt(1) }]) {
+      const handler = handlerWith(async () => output as unknown as Record<string, unknown>);
+      await expect(handler({ jobId: "job-9", input: {} })).rejects.toMatchObject({ name: "NonCanonicalValueError" });
+    }
+    const accessor = Object.defineProperty({}, "x", { enumerable: true, get: () => 1 });
+    await expect(handlerWith(async () => accessor)({ jobId: "job-9", input: {} })).rejects.toMatchObject({ name: "NonCanonicalValueError" });
+  });
+
+  it("A05c F2: an honest builder keeps its commitment bytes; the response is the canonical JSON that commitment covers (-0 reads 0, an undefined member is omitted)", async () => {
+    const out = { b: [1, { deep: -0 }], a: "x", skip: undefined, nested: { k: null } };
+    const handler = handlerWith(async () => out as unknown as Record<string, unknown>);
+    const response = await handler({ jobId: "job-10", input: { n: 1 } });
+    expect(committedOutputHash(response)).toBe(await sha256(canonicalize(out)));
+    expect(response.output).toEqual({ a: "x", b: [1, { deep: 0 }], nested: { k: null } });
+  });
+
+  it("A05c F2: leaves Object.prototype exactly as it found it (no test above leaks a pollution)", () => {
+    expect(Object.getOwnPropertyNames(Object.prototype).sort()).toEqual(OBJECT_PROTOTYPE_AT_LOAD);
+  });
+});
