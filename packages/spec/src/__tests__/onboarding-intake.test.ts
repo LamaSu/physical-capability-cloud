@@ -18,6 +18,7 @@ import {
   IntakeRecordSchema,
   validateIntake,
   executionModeTierCap,
+  NO_EXECUTION_MODE_CAP,
   intakeFieldArtifactMap,
   scanIntakeStrings,
   redactIntakeSecrets,
@@ -656,7 +657,7 @@ describe("validateIntake — unknown fields", () => {
 
 // ── 8. Execution-mode tier cap — "may only LOWER the tier" ───────────────
 
-describe("executionModeTierCap — caps, never raises", () => {
+describe("executionModeTierCap — caps, never raises, fails closed", () => {
   function recordWithExecutionMode(mode: string | undefined): IntakeRecord {
     const record = cloneRecord(buildFullValidRecord());
     if (mode === undefined) delete record.answers["evidence.executionMode"];
@@ -669,9 +670,38 @@ describe("executionModeTierCap — caps, never raises", () => {
     expect(executionModeTierCap(recordWithExecutionMode("dry_run"))).toBe(0);
   });
 
-  it("imposes no cap for real, or when unanswered", () => {
-    expect(executionModeTierCap(recordWithExecutionMode("real"))).toBe(3);
-    expect(executionModeTierCap(recordWithExecutionMode(undefined))).toBe(3);
+  it("imposes no cap only for an answer whose value is exactly real", () => {
+    expect(executionModeTierCap(recordWithExecutionMode("real"))).toBe(NO_EXECUTION_MODE_CAP);
+    expect(NO_EXECUTION_MODE_CAP).toBe(3);
+  });
+
+  it("caps at 0 when the answer is missing, malformed, or any other value or casing", () => {
+    expect(executionModeTierCap(recordWithExecutionMode(undefined))).toBe(0);
+    for (const odd of ["MOCK", "Real", "REAL", " real", "real ", "live", "", "dry-run"]) {
+      expect(executionModeTierCap(recordWithExecutionMode(odd)), JSON.stringify(odd)).toBe(0);
+    }
+    const malformed = cloneRecord(buildFullValidRecord());
+    (malformed.answers as Record<string, unknown>)["evidence.executionMode"] = { value: "real", provenance: "garbage" };
+    expect(executionModeTierCap(malformed)).toBe(0);
+    const researchNoSource = cloneRecord(buildFullValidRecord());
+    (researchNoSource.answers as Record<string, unknown>)["evidence.executionMode"] = {
+      value: "real",
+      provenance: "research",
+    };
+    expect(executionModeTierCap(researchNoSource)).toBe(0);
+  });
+
+  it("caps at 0 for input that is not an intake record at all, and never throws", () => {
+    for (const bad of [null, undefined, 42, "real", [], {}, { schema: "pcc.device-intake.v1" }, { answers: {} }]) {
+      expect(executionModeTierCap(bad), JSON.stringify(bad)).toBe(0);
+    }
+    const hostile = {
+      schema: "pcc.device-intake.v1",
+      get answers(): never {
+        throw new Error("boom");
+      },
+    };
+    expect(executionModeTierCap(hostile)).toBe(0);
   });
 
   it("only ever LOWERS a computed tier via Math.min — never raises it", () => {
@@ -1173,6 +1203,169 @@ describe("validateIntake — secrets in any string (astra 120b, finding 1)", () 
   });
 });
 
+describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () => {
+  it("returns structuralErrors, never throws, for input that is not an intake record", () => {
+    for (const bad of [null, undefined, 42, "text", true, [], {}, { schema: "nope", answers: {} }, { schema: "pcc.device-intake.v1" }]) {
+      const report = validateIntake(bad, "register");
+      expect(report.ok, JSON.stringify(bad)).toBe(false);
+      expect(report.structuralErrors.length, JSON.stringify(bad)).toBeGreaterThan(0);
+    }
+  });
+
+  it("refuses an answers map that holds a non-object answer or an array", () => {
+    const base = { schema: "pcc.device-intake.v1" };
+    expect(validateIntake({ ...base, answers: [] }, "register").ok).toBe(false);
+    expect(validateIntake({ ...base, answers: { "device.model": "Prusa" } }, "register").ok).toBe(false);
+    expect(validateIntake({ ...base, answers: { "device.model": null } }, "register").ok).toBe(false);
+  });
+
+  it("refuses unknown top-level and answer-level keys (strict)", () => {
+    const record = buildFullValidRecord();
+    expect(validateIntake({ ...record, extra: 1 }, "register").ok).toBe(false);
+    const answers = { ...record.answers, "device.model": { ...probed("MK4S"), extra: 1 } };
+    expect(validateIntake({ ...record, answers }, "register").structuralErrors).not.toEqual([]);
+  });
+
+  it("structuralErrors carry paths and messages, never the offending values", () => {
+    const sentinel = "SENTINEL-not-an-enum-value";
+    const report = validateIntake(
+      withAnswer("device.description", { value: "A printer.", provenance: sentinel }),
+      "identify",
+    );
+    expect(report.ok).toBe(false);
+    expect(report.structuralErrors).toEqual(["answers/device.description/provenance: invalid_enum_value"]);
+    expect(JSON.stringify(report)).not.toContain(sentinel);
+  });
+
+  it("describes issue kinds without quoting values", () => {
+    const report = validateIntake(
+      {
+        schema: "pcc.device-intake.v1",
+        answers: {
+          "device.model": { value: "x", provenance: "research" },
+          "device.vendor": { value: "x", provenance: "human", source: { doc: "", url: "not a url" } },
+        },
+      },
+      "register",
+    );
+    expect(report.structuralErrors).toEqual(
+      expect.arrayContaining([
+        'answers/device.model/source: provenance "research" requires a source',
+        "answers/device.vendor/source/doc: too_small",
+        "answers/device.vendor/source/url: invalid_string (url)",
+      ]),
+    );
+    expect(JSON.stringify(report)).not.toContain("not a url");
+  });
+
+  it("an unknown milestone is a structural error, not a free pass", () => {
+    const report = validateIntake(buildFullValidRecord(), "launch-party" as never);
+    expect(report.ok).toBe(false);
+    expect(report.structuralErrors).toContain("milestone: not a known intake milestone");
+  });
+
+  it("an unreadable input (throwing getter) fails closed instead of throwing", () => {
+    const hostile = {
+      schema: "pcc.device-intake.v1",
+      get answers(): never {
+        throw new Error("boom");
+      },
+    };
+    const report = validateIntake(hostile, "register");
+    expect(report.ok).toBe(false);
+    expect(report.structuralErrors).toContain("(root): input could not be read");
+  });
+
+  it("still reports forbidden keys, unknown fields and secrets from the raw input when the parse fails", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    const raw = JSON.parse(JSON.stringify({ ...record, answers: { ...record.answers } })) as {
+      answers: Record<string, unknown>;
+    };
+    raw.answers["calibration.procedureRef"] = {
+      value: "Prusa bed-leveling procedure v2",
+      provenance: "confirmed",
+      source: { doc: "manual", freshness: "now" },
+    };
+    raw.answers["device.description"] = { value: FAKE.hex64, provenance: "garbage" };
+    raw.answers["bogus.field"] = { value: "x", provenance: "human" };
+    const report = validateIntake(raw, "register");
+    expect(report.ok).toBe(false);
+    expect(report.structuralErrors.length).toBeGreaterThan(0);
+    expect(report.forbiddenKeys).toContain("calibration.procedureRef.freshness");
+    expect(report.unknownFields).toContain("bogus.field");
+    expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind: "hex-secret" }]);
+    // The milestone checks are not run on a record that did not parse.
+    expect(report.missing).toEqual([]);
+    expect(report.invalidFields).toEqual([]);
+  });
+
+  it("sees an answers entry named __proto__ that a parse would silently drop", () => {
+    const raw = JSON.parse(
+      JSON.stringify({ ...buildFullValidRecord(), answers: {} }).replace(
+        '"answers":{}',
+        '"answers":{"__proto__":{"value":"x","provenance":"human"}}',
+      ),
+    ) as unknown;
+    const report = validateIntake(raw, "register");
+    expect(report.ok).toBe(false);
+    expect(report.unknownFields).toContain("__proto__");
+  });
+
+  it("never echoes a secret-looking field id or key text into the report", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    (record.answers as Record<string, unknown>)[FAKE.stripeLive] = human("x");
+    (record.answers as Record<string, unknown>)["evidence.camera"] = human({
+      seesWorkArea: true,
+      seesOutput: true,
+      mount: "fixed",
+      captureDeviceId: "cam-1",
+      [FAKE.githubClassic]: "v",
+    });
+    const report = validateIntake(record, "register");
+    expect(report.unknownFields).toEqual(["[redacted:vendor-key]"]);
+    expect(report.invalidFields).toContain("evidence.camera");
+    expect(JSON.stringify(report)).not.toContain(FAKE.stripeLive);
+    expect(JSON.stringify(report)).not.toContain(FAKE.githubClassic);
+  });
+
+  describe("every present known field is validated against its own schema, whatever the milestone", () => {
+    it("lists a malformed value in invalidFields and is not ok, even when the milestone does not require it", () => {
+      const bad = withAnswer("safety.limits", confirmed([{ quantity: "bed temperature", unit: "C", min: 10, max: 1 }]));
+      const report = validateIntake(bad, "register"); // safety.limits is not required for register
+      expect(report.ok).toBe(false);
+      expect(report.invalidFields).toEqual(["safety.limits"]);
+      expect(report.missing).not.toContain("safety.limits");
+    });
+
+    it("lists a malformed value of a required field in both missing and invalidFields", () => {
+      const report = validateIntake(withAnswer("device.description", human(42)), "identify");
+      expect(report.ok).toBe(false);
+      expect(report.missing).toContain("device.description");
+      expect(report.invalidFields).toContain("device.description");
+    });
+
+    it("a sensitive field holding anything but {set:true} is in sensitiveViolations and invalidFields", () => {
+      const report = validateIntake(withAnswer("payout.destination", human({ destination: "acct-1" })), "register");
+      expect(report.sensitiveViolations).toEqual(["payout.destination"]);
+      expect(report.invalidFields).toEqual(["payout.destination"]);
+      expect(report.ok).toBe(false);
+    });
+
+    it("an answer with no value key at all is invalid for every field", () => {
+      const raw = { schema: "pcc.device-intake.v1", answers: { "device.model": { provenance: "human" } } };
+      const report = validateIntake(raw, "register");
+      expect(report.invalidFields).toEqual(["device.model"]);
+      expect(report.ok).toBe(false);
+    });
+
+    it("a clean record has no invalidFields and no structuralErrors", () => {
+      const report = validateIntake(buildFullValidRecord(), "identify");
+      expect(report.invalidFields).toEqual([]);
+      expect(report.structuralErrors).toEqual([]);
+    });
+  });
+});
+
 describe("astra pack 120b", () => {
   it("baseline: the full fixture is ok for identify (else the cases below prove nothing)", () => {
     expect(validateIntake(buildFullValidRecord(), "identify").ok).toBe(true);
@@ -1191,5 +1384,27 @@ describe("astra pack 120b", () => {
     expect(
       validateIntake(withAnswer("device.description", human("Printer lives at 1600 Pennsylvania Avenue")), "identify").ok,
     ).toBe(false);
+  });
+
+  it("HIGH 2a: a confirmed safety.limits answer with no source fails through validateIntake", () => {
+    const answer = { value: [{ quantity: "bed temperature", unit: "C", min: 0, max: 120 }], provenance: "confirmed" };
+    expect(validateIntake(withAnswer("safety.limits", answer), "accept-jobs").ok).toBe(false);
+  });
+  it("HIGH 2b: an invalid provenance on a required field fails", () => {
+    expect(
+      validateIntake(withAnswer("device.description", { value: "A printer.", provenance: "garbage" }), "identify").ok,
+    ).toBe(false);
+  });
+  it("HIGH 2c: a malformed answered field outside the milestone still fails", () => {
+    const answer = {
+      value: [{ quantity: "bed temperature", unit: "C", min: 10, max: 1 }],
+      provenance: "confirmed",
+      source: { doc: "m", section: "s" },
+    };
+    expect(validateIntake(withAnswer("safety.limits", answer), "register").ok).toBe(false);
+  });
+
+  it("HIGH 5c: a malformed execution mode caps at 0, not the no-cap 3", () => {
+    expect(executionModeTierCap(withAnswer("evidence.executionMode", probed("MOCK")))).toBe(0);
   });
 });

@@ -15,12 +15,13 @@ import { z } from "zod";
 import {
   INTAKE_FIELDS,
   INTAKE_FORBIDDEN_KEYS,
+  INTAKE_MILESTONES,
   INTAKE_PROVENANCE_VALUES,
   MILESTONE_IMPLIES,
   type IntakeFieldDef,
   type IntakeMilestone,
 } from "./fields.js";
-import { scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
+import { joinPath, pathSegment, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
 
 export * from "./fields.js";
 export * from "./json-schema.js";
@@ -78,10 +79,10 @@ export const IntakeRecordSchema = z
   .strict();
 export type IntakeRecord = z.infer<typeof IntakeRecordSchema>;
 
-// ── validateIntake — R2 rules 4-6 as a milestone gate ───────────────────
+// ── validateIntake — the runtime boundary ───────────────────────────────
 
 export interface IntakeValidationReport {
-  /** True iff every check below is clean. */
+  /** True iff every list below is empty. */
   ok: boolean;
   /** Field ids required for `milestone` that lack a satisfying answer. */
   missing: string[];
@@ -98,10 +99,52 @@ export interface IntakeValidationReport {
   sensitiveViolations: string[];
   /** Keys in `record.answers` that are not a known INTAKE_FIELD_IDS entry. */
   unknownFields: string[];
-  /** Where a string anywhere in the record matches a secret/sensitive-value
+  /** Where a string anywhere in the input matches a secret/sensitive-value
    *  detector (`scanIntakeStrings`): `{path, kind}` only, never the text. A
    *  record with a hit is not ok — reject it, do not store or log it. */
   secretsInText: IntakeSecretHit[];
+  /** The input does not parse as an IntakeRecord (strict, provenance + source
+   *  rules included), or `milestone` is not a known milestone: zod issue
+   *  paths and messages, never values. When this is non-empty the milestone
+   *  checks were not run, so `missing`, `neverDefaultViolations`,
+   *  `sensitiveViolations` and `invalidFields` are empty; `forbiddenKeys`,
+   *  `unknownFields` and `secretsInText` are still reported from the raw input. */
+  structuralErrors: string[];
+  /** Field ids that are present (whether or not `milestone` requires them) and
+   *  whose value does not satisfy the field's own `valueSchema`. */
+  invalidFields: string[];
+}
+
+/** Every list-valued member of the report: `ok` is true iff all are empty. The
+ *  `satisfies` makes the compiler fail when a list is added without being
+ *  counted here. */
+type IntakeReportList = {
+  [K in keyof IntakeValidationReport]: IntakeValidationReport[K] extends readonly unknown[] ? K : never;
+}[keyof IntakeValidationReport];
+
+const REPORT_LISTS = Object.keys({
+  missing: true,
+  neverDefaultViolations: true,
+  forbiddenKeys: true,
+  sensitiveViolations: true,
+  unknownFields: true,
+  secretsInText: true,
+  structuralErrors: true,
+  invalidFields: true,
+} satisfies Record<IntakeReportList, true>) as IntakeReportList[];
+
+function emptyReport(): IntakeValidationReport {
+  return {
+    ok: false,
+    missing: [],
+    neverDefaultViolations: [],
+    forbiddenKeys: [],
+    sensitiveViolations: [],
+    unknownFields: [],
+    secretsInText: [],
+    structuralErrors: [],
+    invalidFields: [],
+  };
 }
 
 const FIELD_INDEX: ReadonlyMap<string, IntakeFieldDef> = new Map(
@@ -123,76 +166,94 @@ function isForbiddenKey(key: string): boolean {
   return FORBIDDEN_KEY_NORMALIZED_SET.has(normalizeForbiddenKey(key));
 }
 
-/** Recursively collect any INTAKE_FORBIDDEN_KEYS key (loosely matched — see
- *  isForbiddenKey) found as an object key inside `node` (arrays are walked,
- *  primitives are ignored). The literal key encountered is recorded (not its
- *  canonical spelling), so the report shows exactly what was found. */
-function collectForbiddenKeys(node: unknown, out: Set<string>): void {
-  if (node === null || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    for (const item of node) collectForbiddenKeys(item, out);
-    return;
-  }
-  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-    if (isForbiddenKey(key)) out.add(key);
-    collectForbiddenKeys(value, out);
+function isRecordObject(node: unknown): node is Record<string, unknown> {
+  return node !== null && typeof node === "object" && !Array.isArray(node);
+}
+
+/** Collect any INTAKE_FORBIDDEN_KEYS key (loosely matched — see isForbiddenKey)
+ *  found as an object key inside `root` (arrays are walked, primitives are
+ *  ignored). The literal key encountered is recorded (not its canonical
+ *  spelling), so the report shows exactly what was found. Iterative, so depth
+ *  cannot overflow the stack; an object reachable twice is visited once. */
+function collectForbiddenKeys(root: unknown, out: Set<string>): void {
+  const seen = new Set<object>();
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === null || typeof node !== "object" || seen.has(node)) continue;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      stack.push(...node);
+      continue;
+    }
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (isForbiddenKey(key)) out.add(key);
+      stack.push(value);
+    }
   }
 }
 
-/** Does this answer's value satisfy `field`'s own shape rules (schema shape,
- *  and — for sensitive fields — the {set:true}-only rule, which `valueSchema`
- *  already encodes for every sensitive field in INTAKE_FIELDS)? */
-function valueSatisfiesField(field: IntakeFieldDef, value: unknown): boolean {
-  return field.valueSchema.safeParse(value).success;
+/** A zod issue as `path: description`. Only the issue code, static text and
+ *  type names are used — never `issue.message` for built-in issues, because
+ *  zod's own messages can quote the offending value. */
+function describeIssue(issue: z.ZodIssue): string {
+  const where = issue.path.length === 0 ? "(root)" : joinPath(issue.path.map(String));
+  switch (issue.code) {
+    case z.ZodIssueCode.invalid_type:
+      return `${where}: expected ${issue.expected}, received ${issue.received}`;
+    case z.ZodIssueCode.custom:
+      return `${where}: ${issue.message}`;
+    case z.ZodIssueCode.invalid_string:
+      return `${where}: invalid_string (${typeof issue.validation === "string" ? issue.validation : "pattern"})`;
+    default:
+      return `${where}: ${issue.code}`;
+  }
 }
 
-/**
- * Validate an intake record against one milestone gate. Enforces:
- *   - rule 4 (never-defaulted): a `neverDefault` field only satisfies a
- *     milestone with provenance "human" or "confirmed"; an unconfirmed
- *     probe/research answer on a neverDefault field is ALWAYS flagged
- *     (independent of milestone) via `neverDefaultViolations`.
- *   - rule 5 (sensitive): a `sensitive` field's value must be exactly
- *     {set: true} — never the real payload.
- *   - rule 6 (provenance + source): structural — enforced by
- *     `IntakeAnswerSchema` at record-construction time, not re-checked here.
- * Milestone matching is CUMULATIVE (review fix): a field is required for
- * `milestone` if its own `requiredFor` contains `milestone` OR any milestone
- * that `milestone` implies (MILESTONE_IMPLIES in fields.ts — e.g. accept-jobs
- * implies publish, so a record missing a publish-level field can never be
- * "ready" for accept-jobs; tier2 implies tier1, register-device, identify and
- * register). "optional" implies nothing, so an optional field never blocks
- * any other milestone.
- */
-export function validateIntake(
-  record: IntakeRecord,
-  milestone: IntakeMilestone,
-): IntakeValidationReport {
-  const impliedMilestones: ReadonlySet<IntakeMilestone> = new Set(MILESTONE_IMPLIES[milestone]);
-  const neverDefaultViolations = new Set<string>();
+/** Checks that read the RAW input, so they hold whether or not it parses (and
+ *  see what a parse would drop, e.g. an `answers["__proto__"]` entry). */
+function scanRawInput(input: unknown, report: IntakeValidationReport): void {
+  report.secretsInText.push(...scanIntakeStrings(input));
+
+  const answers = isRecordObject(input) && isRecordObject(input.answers) ? input.answers : {};
   const forbiddenKeyHits = new Set<string>();
-  const sensitiveViolations = new Set<string>();
   const unknownFields = new Set<string>();
-  const secretsInText = scanIntakeStrings(record);
-
-  for (const [fieldId, answer] of Object.entries(record.answers)) {
-    const field = FIELD_INDEX.get(fieldId);
-    if (!field) unknownFields.add(fieldId);
-    if (isForbiddenKey(fieldId)) forbiddenKeyHits.add(fieldId);
+  for (const [fieldId, answer] of Object.entries(answers)) {
+    const shownId = pathSegment(fieldId);
+    if (isForbiddenKey(fieldId)) forbiddenKeyHits.add(shownId);
+    if (!FIELD_INDEX.has(fieldId)) unknownFields.add(shownId);
+    if (!isRecordObject(answer)) continue;
 
     const keyHits = new Set<string>();
     collectForbiddenKeys(answer.value, keyHits);
     collectForbiddenKeys(answer.source, keyHits);
-    for (const key of keyHits) forbiddenKeyHits.add(`${fieldId}.${key}`);
+    for (const key of keyHits) forbiddenKeyHits.add(`${shownId}.${pathSegment(key)}`);
+  }
+  report.forbiddenKeys.push(...forbiddenKeyHits);
+  report.unknownFields.push(...unknownFields);
+}
 
+/** The milestone checks, over a record that already parsed. */
+function checkParsedRecord(record: IntakeRecord, milestone: IntakeMilestone, report: IntakeValidationReport): void {
+  const impliedMilestones: ReadonlySet<IntakeMilestone> = new Set(MILESTONE_IMPLIES[milestone]);
+  const neverDefaultViolations = new Set<string>();
+  const sensitiveViolations = new Set<string>();
+  const invalidFields = new Set<string>();
+  const valueValid = new Map<string, boolean>();
+
+  // Every present known field, whatever the milestone: its value must satisfy
+  // its own schema, and the global provenance/sensitive invariants hold.
+  for (const [fieldId, answer] of Object.entries(record.answers)) {
+    const field = FIELD_INDEX.get(fieldId);
     if (!field) continue;
 
+    const valid = field.valueSchema.safeParse(answer.value).success;
+    valueValid.set(fieldId, valid);
+    if (!valid) invalidFields.add(fieldId);
     if (field.neverDefault && (answer.provenance === "probe" || answer.provenance === "research")) {
       neverDefaultViolations.add(fieldId);
     }
-    if (field.sensitive && !valueSatisfiesField(field, answer.value)) {
-      sensitiveViolations.add(fieldId);
-    }
+    if (field.sensitive && !valid) sensitiveViolations.add(fieldId);
   }
 
   const missing: string[] = [];
@@ -207,32 +268,74 @@ export function validateIntake(
       missing.push(field.id);
       continue;
     }
-    if (!valueSatisfiesField(field, answer.value)) {
+    if (valueValid.get(field.id) !== true) {
       missing.push(field.id);
       continue;
     }
   }
 
-  const neverDefaultList = [...neverDefaultViolations];
-  const forbiddenKeys = [...forbiddenKeyHits];
-  const sensitiveList = [...sensitiveViolations];
-  const unknownList = [...unknownFields];
+  report.missing.push(...missing);
+  report.neverDefaultViolations.push(...neverDefaultViolations);
+  report.sensitiveViolations.push(...sensitiveViolations);
+  report.invalidFields.push(...invalidFields);
+}
 
-  return {
-    ok:
-      missing.length === 0 &&
-      neverDefaultList.length === 0 &&
-      forbiddenKeys.length === 0 &&
-      sensitiveList.length === 0 &&
-      unknownList.length === 0 &&
-      secretsInText.length === 0,
-    missing,
-    neverDefaultViolations: neverDefaultList,
-    forbiddenKeys,
-    sensitiveViolations: sensitiveList,
-    unknownFields: unknownList,
-    secretsInText,
-  };
+/**
+ * Validate an UNPARSED intake record against one milestone gate. This is the
+ * runtime boundary: `input` is `unknown`, it is parsed here, and nothing about
+ * its shape is assumed.
+ *
+ *   1. The whole input is parsed with `IntakeRecordSchema` (strict; the
+ *      provenance + source rule of IntakeAnswerSchema included). A parse
+ *      failure returns `ok: false` with `structuralErrors` (zod paths and
+ *      messages, never values) — it does not throw. An input that cannot even
+ *      be read (a throwing getter) is also a structural error, never an
+ *      exception. An unknown `milestone` is a structural error too.
+ *   2. EVERY present known field's value is checked against its own
+ *      `valueSchema`, independent of the milestone; a failure is listed in
+ *      `invalidFields` and makes the report not ok even when the milestone
+ *      does not require that field. (Sensitive fields: the value must be
+ *      exactly {set: true}, R2 rule 5 — also listed in `sensitiveViolations`.)
+ *   3. Every string anywhere in the input is scanned for secrets and
+ *      sensitive values (`scanIntakeStrings`; see secret-scan.ts), reported in
+ *      `secretsInText`. Forbidden keys and unknown field ids are read from the
+ *      raw input as well, so they are reported even when the parse fails.
+ *   4. Milestone readiness (rule 4: a `neverDefault` field only satisfies a
+ *      milestone with provenance "human" or "confirmed"; an unconfirmed
+ *      probe/research answer on a neverDefault field is ALWAYS flagged
+ *      independent of milestone via `neverDefaultViolations`).
+ * Milestone matching is CUMULATIVE (review fix): a field is required for
+ * `milestone` if its own `requiredFor` contains `milestone` OR any milestone
+ * that `milestone` implies (MILESTONE_IMPLIES in fields.ts — e.g. accept-jobs
+ * implies publish, so a record missing a publish-level field can never be
+ * "ready" for accept-jobs; tier2 implies tier1, register-device, identify and
+ * register). "optional" implies nothing, so an optional field never blocks
+ * any other milestone.
+ *
+ * Producers: call this before logging or persisting a record, and again before
+ * any public projection; a record that is not ok is rejected, not stored.
+ */
+export function validateIntake(input: unknown, milestone: IntakeMilestone): IntakeValidationReport {
+  const report = emptyReport();
+  try {
+    const milestoneKnown = (INTAKE_MILESTONES as readonly string[]).includes(milestone);
+    if (!milestoneKnown) report.structuralErrors.push("milestone: not a known intake milestone");
+
+    scanRawInput(input, report);
+
+    const parsed = IntakeRecordSchema.safeParse(input);
+    if (!parsed.success) {
+      report.structuralErrors.push(...parsed.error.issues.map(describeIssue));
+    } else if (milestoneKnown) {
+      checkParsedRecord(parsed.data, milestone, report);
+    }
+  } catch {
+    // An input that cannot be read (a throwing getter, a hostile proxy) fails
+    // closed instead of throwing.
+    report.structuralErrors.push("(root): input could not be read");
+  }
+  report.ok = REPORT_LISTS.every((list) => report[list].length === 0);
+  return report;
 }
 
 // ── Execution-mode tier cap (addendum: "may only LOWER the tier") ───────
@@ -243,15 +346,23 @@ export const NO_EXECUTION_MODE_CAP = 3 as const;
 
 /**
  * The tier ceiling `evidence.executionMode` imposes, independent of anything
- * else in the record: "mock"/"dry_run" caps at 0 (mirrors evidence/primitives.ts
- * `confirm.execution_mode`'s `gates: true` negative gate); "real", or no answer
- * yet, imposes no cap. This can only LOWER an otherwise-eligible tier — it is
- * never itself a source of eligibility, so callers combine it via
+ * else in the record, and FAIL-CLOSED: `input` is parsed here, and only an
+ * answer whose value is exactly "real" imposes no cap (NO_EXECUTION_MODE_CAP).
+ * Everything else returns 0 — "mock"/"dry_run" (mirrors evidence/primitives.ts
+ * `confirm.execution_mode`'s `gates: true` negative gate), but also a missing
+ * answer, a malformed answer or record (it does not parse), and any other
+ * value or casing ("Real", "MOCK"). This can only LOWER an otherwise-eligible
+ * tier — it is never itself a source of eligibility, so callers combine it via
  * `Math.min(computedTier, executionModeTierCap(record))`.
  */
-export function executionModeTierCap(record: IntakeRecord): 0 | 1 | 2 | 3 {
-  const mode = record.answers["evidence.executionMode"]?.value;
-  return mode === "mock" || mode === "dry_run" ? 0 : NO_EXECUTION_MODE_CAP;
+export function executionModeTierCap(input: unknown): 0 | 1 | 2 | 3 {
+  try {
+    const parsed = IntakeRecordSchema.safeParse(input);
+    if (!parsed.success) return 0;
+    return parsed.data.answers["evidence.executionMode"]?.value === "real" ? NO_EXECUTION_MODE_CAP : 0;
+  } catch {
+    return 0;
+  }
 }
 
 // ── Artifact map ─────────────────────────────────────────────────────────
