@@ -161,6 +161,16 @@ describe("onboard-chat purge runbook inventory (astra pack 91b F4)", () => {
     expect(stdout).not.toContain(SESSION_TOKEN);
   });
 
+  it.each([
+    ["a token and no seed phrase", () => toolResultRow({ success: true, token: SESSION_TOKEN, user_id: USER_ID })],
+    ["a seed phrase and no token", () => toolResultRow({ success: true, user_id: USER_ID, keys: { mnemonic: MNEMONIC } })],
+  ])("lists the identity-service account of %s, so Step 3 item 6 knows whose sessions to end", (_label, row) => {
+    insertRow(row());
+    const { status, stderr, report } = runInventory();
+    expect(status, stderr).toBe(0);
+    expect(report.identity_service_accounts_exposed).toEqual([USER_ID]);
+  });
+
   it("[neg] does not call a row exposed for a `token` field that is not a redemption token, or for values the redacting code already removed", () => {
     // A token-named field in an unrelated result (an ERC-20 address), and rows written by the WP-D code.
     insertRow(toolResultRow({ token: "0x" + "ab12".repeat(10), symbol: "USDC" }));
