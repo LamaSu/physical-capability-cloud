@@ -545,3 +545,13 @@ describe("principal ids — the registry and the D1/D2 bindings read a signer th
     });
   });
 });
+
+describe("principalTupleWord — only the three kinds", () => {
+  it("refuses a kind outside operator, kernel and device, even for a valid principal id", () => {
+    const op = `eip155:84532:0x${"ab".repeat(20)}`;
+    for (const kind of ["bogus", "", "Operator", "OPERATOR", "kernel ", undefined, null, 1]) {
+      expect(() => principalTupleWord(kind as never, op), String(kind)).toThrow(PrincipalIdError);
+    }
+    expect(principalTupleWord("operator", op)).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+});

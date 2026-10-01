@@ -225,6 +225,10 @@ function toHex(bytes: Uint8Array): string {
  * must authenticate the exact kernel registry row the id names before it funds.
  */
 export function principalTupleWord(kind: "operator" | "kernel" | "device", id: string): `0x${string}` {
+  // A kind outside the three would skip every check below and hash any string.
+  if (kind !== "operator" && kind !== "kernel" && kind !== "device") {
+    throw new PrincipalIdError("tuple word kind must be operator, kernel or device");
+  }
   if (kind === "operator" && !parseOperatorPrincipalId(id)) {
     throw new PrincipalIdError("operator tuple word needs a pinned eip155:<chainId>:0x<address> id");
   }
