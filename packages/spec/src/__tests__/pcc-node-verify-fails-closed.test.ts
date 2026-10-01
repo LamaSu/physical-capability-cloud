@@ -33,11 +33,16 @@ try:
     os.makedirs(os.path.join(tmp, "repo", ".git"))
     in_checkout = os.path.join(tmp, "repo", "packages", "pcc-node", "pcc-keys.json")
     outside = os.path.join(tmp, "outside", "keys.json")
+    # The checkout check is decided from an open directory, so give it one.
+    os.makedirs(os.path.dirname(in_checkout))
+    checkout_dir = os.open(os.path.dirname(in_checkout), os.O_RDONLY | os.O_DIRECTORY)
     try:
-        m._refuse_checkout(in_checkout)
+        m._refuse_checkout(checkout_dir, in_checkout)
         checkout_refused = False
     except m.KeyFileError:
         checkout_refused = True
+    finally:
+        os.close(checkout_dir)
     refused = 0
     for attempt in (lambda: m.load_or_create_keys(outside), lambda: m.load_or_create_keys(in_checkout),
                     lambda: m.generate_node_keys(), lambda: m.sign_announcement({"a": 1}, "11" * 32)):

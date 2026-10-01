@@ -134,6 +134,7 @@ class TestLoadOrCreateKeys:
 # N35b: verification fails closed; no key file inside the checkout
 # ---------------------------------------------------------------------------
 
+import errno  # noqa: E402
 import hashlib  # noqa: E402
 import re  # noqa: E402
 import stat  # noqa: E402
@@ -393,7 +394,7 @@ class TestKeyFilePermissionsAndPlace:
         monkeypatch.setattr(crypto_module.os, "getuid", lambda: real_uid + 1)
         with pytest.raises(crypto_module.KeyFileError, match="not owned by this user"):
             load_or_create_keys(str(path))
-        monkeypatch.setattr(crypto_module, "_check_directory", lambda directory: None)
+        monkeypatch.setattr(crypto_module, "_check_directory", lambda *args: None)
         with pytest.raises(crypto_module.KeyFileError, match="not owned by this user"):
             load_or_create_keys(str(path))
 
@@ -415,3 +416,252 @@ class TestWithoutPyNaClNoKeyIsUsed:
         with pytest.raises(crypto_module.CryptoUnavailableError):
             sign_announcement({"kernelId": "k"}, "bb" * 32)
         assert verify_signature({"kernelId": "k"}, "00" * 64, "aa" * 32) is False
+
+
+# ---------------------------------------------------------------------------
+# N35b round 4 (cross-family A02b, astra at 258166a5): the checkout check is
+# decided from the very directory the key file is opened through, a hard link
+# to a key in a checkout is refused, and a platform that cannot do either
+# fails closed. Races are simulated with no timing: a hook runs at the exact
+# point where a swap would hurt.
+# ---------------------------------------------------------------------------
+
+def _private_dir(path):
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def _new_key_pair_file(path):
+    """A valid, consistent key file at *path* (0600); returns (public, secret)."""
+    public, secret = generate_node_keys()
+    _write_key_file(path, public, secret)
+    return public, secret
+
+
+def _checkout_holding(tmp_path, *, key=False):
+    """A work tree (``repo/.git``) with a private ``repo/keys`` directory, optionally holding a valid key."""
+    held = _private_dir(tmp_path / "repo" / "keys")
+    (tmp_path / "repo" / ".git").mkdir()
+    pair = _new_key_pair_file(held / "keys.json") if key else None
+    return held, pair
+
+
+def _repoint_after_the_checkout_check(monkeypatch, alias, new_target):
+    """The race, with no timing: the first time the checkout check returns, the
+    directory link *alias* is re-pointed at *new_target*, so whatever the load
+    does next sees the swapped link, as a real swap in that gap would."""
+    check = crypto_module._refuse_checkout
+    done = []
+
+    def check_then_swap(*args, **kwargs):
+        result = check(*args, **kwargs)
+        if not done:
+            done.append(True)
+            alias.unlink()
+            alias.symlink_to(new_target, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(crypto_module, "_refuse_checkout", check_then_swap)
+    return done
+
+
+def _open_descriptors():
+    """How many of the low file descriptors are open right now."""
+    count = 0
+    for fd in range(512):
+        try:
+            os.fstat(fd)
+        except OSError:
+            continue
+        count += 1
+    return count
+
+
+def _loader(monkeypatch, path, via_env):
+    """``load_or_create_keys`` aimed at *path*, by argument or through PCC_NODE_KEY_PATH."""
+    if via_env:
+        monkeypatch.setenv("PCC_NODE_KEY_PATH", str(path))
+        return load_or_create_keys
+    return lambda: load_or_create_keys(str(path))
+
+
+BY_ARGUMENT_OR_ENV = pytest.mark.parametrize("via_env", [False, True], ids=["path-argument", "PCC_NODE_KEY_PATH"])
+
+
+@needs_nacl
+class TestKeyLocationIsBoundToTheDirectoryOpened:
+    """A02b F1: the check and the open must concern the same directory."""
+
+    @BY_ARGUMENT_OR_ENV
+    def test_a_directory_link_swapped_after_the_check_cannot_redirect_the_load(self, monkeypatch, tmp_path, via_env):
+        safe = _private_dir(tmp_path / "safe")
+        safe_pair = _new_key_pair_file(safe / "keys.json")
+        held, checkout_pair = _checkout_holding(tmp_path, key=True)
+        the_pairs_differ = safe_pair != checkout_pair
+        assert the_pairs_differ
+        alias = tmp_path / "alias"
+        alias.symlink_to(safe, target_is_directory=True)
+        swapped = _repoint_after_the_checkout_check(monkeypatch, alias, held)
+        load = _loader(monkeypatch, alias / "keys.json", via_env)
+        try:
+            got = load()
+        except crypto_module.KeyFileError:
+            got = None  # refusing is correct too
+        assert swapped, "the checkout check never ran, so no swap happened"
+        # Booleans, so a failure never prints a secret into a log.
+        accepted_the_checkout_key = got == checkout_pair
+        assert not accepted_the_checkout_key, "the key file inside the checkout was accepted"
+        used_the_directory_it_checked = got is None or got == safe_pair
+        assert used_the_directory_it_checked
+
+    @BY_ARGUMENT_OR_ENV
+    def test_a_directory_link_swapped_after_the_check_cannot_redirect_a_new_key(self, monkeypatch, tmp_path, via_env):
+        safe = _private_dir(tmp_path / "safe")
+        held, _ = _checkout_holding(tmp_path)
+        alias = tmp_path / "alias"
+        alias.symlink_to(safe, target_is_directory=True)
+        swapped = _repoint_after_the_checkout_check(monkeypatch, alias, held)
+        load = _loader(monkeypatch, alias / "keys.json", via_env)
+        try:
+            load()
+        except crypto_module.KeyFileError:
+            pass  # refusing is correct too
+        assert swapped, "the checkout check never ran, so no swap happened"
+        assert os.listdir(held) == [], "a new secret was created inside the checkout"
+
+    @BY_ARGUMENT_OR_ENV
+    def test_no_key_file_is_opened_through_its_multi_component_pathname(self, monkeypatch, tmp_path, via_env):
+        calls = []
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, *, dir_fd=None):
+            calls.append((str(path), flags, dir_fd))
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        load = _loader(monkeypatch, tmp_path / "new" / "keys.json", via_env)
+        monkeypatch.setattr(crypto_module.os, "open", spy)
+        created = load()
+        loaded = load()
+        loaded_what_it_created = created == loaded
+        assert loaded_what_it_created
+        by_pathname = [c for c in calls if c[2] is None and not c[1] & os.O_DIRECTORY]
+        assert by_pathname == [], "opened by pathname, not through a verified directory: %r" % by_pathname
+        assert any(c[2] is not None for c in calls)
+
+    @pytest.mark.parametrize("form", ["directory", "file", "dangling-symlink", "symlink-to-directory"])
+    def test_a_git_entry_of_any_form_in_an_ancestor_counts_as_a_checkout(self, tmp_path, form):
+        work = _private_dir(tmp_path / "work")
+        git = work / ".git"
+        if form == "directory":
+            git.mkdir()
+        elif form == "file":  # a linked work tree or a submodule
+            git.write_text("gitdir: /elsewhere/.git/worktrees/w\n")
+        elif form == "dangling-symlink":
+            git.symlink_to(tmp_path / "does-not-exist")
+        else:
+            (tmp_path / "gitdir").mkdir()
+            git.symlink_to(tmp_path / "gitdir", target_is_directory=True)
+        for target in (work / "keys.json", work / "a" / "b" / "keys.json"):
+            with pytest.raises(crypto_module.KeyFileError, match="inside a source checkout"):
+                load_or_create_keys(str(target))
+        assert os.listdir(work) == [".git"], "something was created inside the checkout"
+
+    def test_a_checkout_several_levels_above_an_existing_key_directory_is_found(self, tmp_path):
+        made = tmp_path / "made" / "keys.json"
+        load_or_create_keys(str(made))
+        deep = _private_dir(tmp_path / "repo" / "a" / "b" / "c")
+        (tmp_path / "repo" / ".git").mkdir()
+        (deep / "keys.json").write_bytes(made.read_bytes())
+        os.chmod(deep / "keys.json", 0o600)
+        with pytest.raises(crypto_module.KeyFileError, match="inside a source checkout"):
+            load_or_create_keys(str(deep / "keys.json"))
+
+    def test_missing_directories_are_created_private_outside_a_checkout(self, tmp_path):
+        target = tmp_path / "a" / "b" / "keys.json"
+        load_or_create_keys(str(target))
+        assert stat.S_IMODE(os.stat(target.parent).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
+
+    def test_a_git_file_in_an_ancestor_refuses_an_existing_key_too(self, tmp_path):
+        made = tmp_path / "made" / "keys.json"
+        load_or_create_keys(str(made))
+        work = _private_dir(tmp_path / "worktree")
+        (work / ".git").write_text("gitdir: /elsewhere/.git/worktrees/w\n")
+        inside = _private_dir(work / "sub") / "keys.json"
+        inside.write_bytes(made.read_bytes())
+        os.chmod(inside, 0o600)
+        with pytest.raises(crypto_module.KeyFileError, match="inside a source checkout"):
+            load_or_create_keys(str(inside))
+
+    def test_an_ancestor_that_cannot_be_opened_refuses_instead_of_skipping_the_check(self, monkeypatch, tmp_path):
+        real_open = os.open
+
+        def open_without_the_parent(path, flags, mode=0o777, *, dir_fd=None):
+            if path == "..":  # a directory that is searchable but not readable, say
+                raise PermissionError(errno.EACCES, "Permission denied", path)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        target = _private_dir(tmp_path / "keys") / "keys.json"
+        monkeypatch.setattr(crypto_module.os, "open", open_without_the_parent)
+        before = _open_descriptors()
+        with pytest.raises(crypto_module.KeyFileError, match="cannot tell whether"):
+            load_or_create_keys(str(target))
+        assert _open_descriptors() == before
+        assert not target.exists()
+
+    def test_no_descriptor_is_left_open_on_any_path(self, tmp_path):
+        repo_dir = _private_dir(tmp_path / "repo" / "a" / "b")
+        (tmp_path / "repo" / ".git").mkdir()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        os.chmod(shared, 0o777)
+        new = tmp_path / "new" / "deeper" / "keys.json"
+        before = _open_descriptors()
+        load_or_create_keys(str(new))  # creates the missing directories and the file
+        load_or_create_keys(str(new))  # loads it
+        for refused in (repo_dir / "keys.json", shared / "keys.json"):  # a checkout two levels up; a writable directory
+            for _ in range(3):
+                with pytest.raises(crypto_module.KeyFileError):
+                    load_or_create_keys(str(refused))
+        assert _open_descriptors() == before
+
+    def test_a_dangling_symbolic_link_as_the_key_file_is_refused_not_followed(self, tmp_path):
+        keys_dir = _private_dir(tmp_path / "keys")
+        target = tmp_path / "elsewhere" / "stolen.json"
+        (keys_dir / "keys.json").symlink_to(target)
+        with pytest.raises(crypto_module.KeyFileError, match="symbolic link"):
+            load_or_create_keys(str(keys_dir / "keys.json"))
+        assert not target.parent.exists()
+
+    def test_a_relative_path_is_taken_from_the_working_directory(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        created = load_or_create_keys("rel/keys.json")
+        assert (tmp_path / "rel" / "keys.json").exists()
+        loaded_what_it_created = load_or_create_keys("rel/keys.json") == created
+        assert loaded_what_it_created
+
+    def test_a_path_that_names_no_file_is_refused(self):
+        with pytest.raises(crypto_module.KeyFileError, match="does not name a file"):
+            load_or_create_keys("/")
+
+    @pytest.mark.parametrize(
+        "missing",
+        ["dir_fd:open", "dir_fd:stat", "dir_fd:mkdir", "dir_fd:unlink", "follow_symlinks:stat", "O_DIRECTORY", "O_NOFOLLOW"],
+    )
+    def test_a_platform_that_cannot_bind_to_a_directory_descriptor_fails_closed(self, monkeypatch, tmp_path, missing):
+        kind, _, name = missing.partition(":")
+        if kind == "dir_fd":
+            monkeypatch.setattr(os, "supports_dir_fd", frozenset(os.supports_dir_fd) - {getattr(os, name)})
+        elif kind == "follow_symlinks":
+            monkeypatch.setattr(os, "supports_follow_symlinks", frozenset(os.supports_follow_symlinks) - {getattr(os, name)})
+        else:
+            monkeypatch.delattr(os, kind)
+        with pytest.raises(crypto_module.KeyFileError, match="relative to a verified directory"):
+            load_or_create_keys(str(tmp_path / "new" / "keys.json"))
+        existing = _private_dir(tmp_path / "old")
+        _new_key_pair_file(existing / "keys.json")
+        with pytest.raises(crypto_module.KeyFileError, match="relative to a verified directory"):
+            load_or_create_keys(str(existing / "keys.json"))
+        assert not (tmp_path / "new").exists()
+

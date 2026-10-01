@@ -54,7 +54,8 @@ def _require_nacl(action):
 class KeyFileError(RuntimeError):
     """A key file that cannot be used as it is: malformed, holding a public key
     that does not belong to its secret, readable by other users, or about to be
-    created inside a source checkout."""
+    created inside a source checkout. Also raised where the platform cannot
+    check that location."""
 
 
 def _strict_hex(value, byte_length):
@@ -202,37 +203,102 @@ def default_key_path():
     return os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
 
 
-def _checkout_root(directory):
-    """The git work tree holding *directory* (symlinks resolved), or None.
-    Every ancestor up to the filesystem root counts, the user's home included:
-    a key file anywhere in a work tree is one ``git add`` from being published."""
-    current = os.path.realpath(directory)
-    while True:
-        if os.path.exists(os.path.join(current, ".git")):
-            return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            return None
-        current = parent
+# A sanity bound, not a limit anyone meets: ".." reaches the filesystem root long before.
+_MAX_ANCESTORS = 4096
 
 
-def _refuse_checkout(abs_path):
-    root = _checkout_root(os.path.dirname(abs_path) or os.getcwd())
-    if root is not None:
+def _require_descriptor_support():
+    """Fail closed where the location checks cannot be bound to the directory
+    the key file is opened through.
+
+    That binding needs file calls relative to a directory descriptor (``dir_fd``
+    on ``os.open``, ``os.stat``, ``os.mkdir`` and ``os.unlink``, and
+    ``follow_symlinks=False`` on ``os.stat``) and the ``O_DIRECTORY`` and
+    ``O_NOFOLLOW`` open flags. POSIX systems have them; native Windows has
+    none. Falling back to pathnames there would bring back the race this design
+    closes, so the key is refused instead (A02b F1).
+
+    The calls are matched by name, so an ``os`` function that something has
+    wrapped is not mistaken for one the platform lacks.
+    """
+    with_dir_fd = {call.__name__ for call in os.supports_dir_fd}
+    if (
+        not {"open", "stat", "mkdir", "unlink"} <= with_dir_fd
+        or "stat" not in {call.__name__ for call in os.supports_follow_symlinks}
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+    ):
         raise KeyFileError(
-            "refusing to use a key file inside a source checkout (%s is under %s): a key there "
-            "is one `git add` away from being published. Set %s to a path outside every "
-            "repository." % (abs_path, root, KEY_PATH_ENV)
+            "this platform cannot open a key file relative to a verified directory (that needs dir_fd "
+            "support in os.open, os.stat, os.mkdir and os.unlink, and the O_DIRECTORY and O_NOFOLLOW "
+            "flags), so it cannot prove where the key lives; refusing to load or create a key here"
         )
 
 
-def _check_directory(directory):
-    """The key's directory must belong to this user and be writable by no one
-    else, or another user could swap the key file. POSIX only: Windows ACLs are
-    not modelled here."""
-    if os.name != "posix":
-        return
-    st = os.stat(directory)
+def _directory_flags():
+    return os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+
+
+def _refuse_checkout(dir_fd, key_path):
+    """Refuse when the directory open as *dir_fd* lies inside a git work tree.
+
+    Decided from the open directory, never from a pathname. From *dir_fd* the
+    walk goes up through ``..``, relative to each level's own descriptor, to
+    the filesystem root (the level whose ``..`` is itself), and a ``.git``
+    entry of ANY kind at ANY level, the starting directory included, means a
+    work tree: a directory, a file (a linked work tree or a submodule), even a
+    dangling symbolic link. The answer is about the directory the key file is
+    then opened in, however the pathname that led there is pointed later. The
+    user's home counts like any other directory: a key anywhere in a work tree
+    is one ``git add`` from being published. A walk that cannot finish (an
+    unreadable ancestor) refuses too: a location that is not proven is not used.
+
+    Descriptors opened here are closed here; *dir_fd* stays the caller's.
+    """
+    flags = _directory_flags()
+    current = dir_fd
+    try:
+        for level in range(_MAX_ANCESTORS):
+            try:
+                os.stat(".git", dir_fd=current, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                where = "in its directory" if level == 0 else "%d level%s above its directory" % (
+                    level, "" if level == 1 else "s")
+                raise KeyFileError(
+                    "refusing to use a key file inside a source checkout (%s: a .git entry was found %s): "
+                    "a key there is one `git add` away from being published. Set %s to a path outside "
+                    "every repository." % (key_path, where, KEY_PATH_ENV)
+                )
+            here = os.fstat(current)
+            above = os.open("..", flags, dir_fd=current)
+            if current != dir_fd:
+                os.close(current)
+            current = above
+            up = os.fstat(current)
+            if (up.st_dev, up.st_ino) == (here.st_dev, here.st_ino):
+                return  # the root: ".." is the directory itself, so every level has been looked at
+        raise KeyFileError(
+            "%s lies more than %d directories deep, so it cannot be proven to be outside a source "
+            "checkout" % (key_path, _MAX_ANCESTORS)
+        )
+    except OSError as err:
+        raise KeyFileError(
+            "cannot tell whether %s is inside a source checkout (%s); a location that is not proven "
+            "is not used" % (key_path, err)
+        ) from None
+    finally:
+        if current != dir_fd:
+            os.close(current)
+
+
+def _check_directory(dir_fd, directory):
+    """The key's directory, judged on the open descriptor, must belong to this
+    user and be writable by no one else, or another user could swap the key
+    file. (POSIX owners and modes: a platform without them never gets here, see
+    :func:`_require_descriptor_support`.)"""
+    st = os.fstat(dir_fd)
     if st.st_uid != os.getuid():
         raise KeyFileError("%s is not owned by this user; keep the key in a directory you own" % directory)
     if st.st_mode & 0o022:
@@ -241,33 +307,83 @@ def _check_directory(directory):
         )
 
 
-def _read_key_file(abs_path):
-    """Open the key file itself, never through a symbolic link, and judge the
-    same open file it reads: a regular file owned by this user, readable by the
-    owner only (a wider mode is corrected on that descriptor, or refused)."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+def _open_key_directory(parent, key_path):
+    """Open the directory the key file lives in, ONCE, and return its descriptor.
+
+    Everything after this goes through that descriptor: the checkout check, the
+    owner and mode check, and opening or creating the key file. The pathname
+    *parent* is resolved to a directory once, here (when part of it does not
+    exist yet, the deepest part that does is opened), so a directory link
+    swapped afterwards changes nothing. Directories that do not exist yet are
+    created (0700) one level at a time, relative to the descriptor of the level
+    above, and only once the deepest existing directory has been shown to lie
+    outside every checkout; the directory finally used is checked again.
+    """
+    flags = _directory_flags()
+    missing = []
+    probe = parent
+    while True:
+        try:
+            dir_fd = os.open(probe, flags)
+            break
+        except FileNotFoundError:
+            head, tail = os.path.split(probe)
+            if not tail or head == probe:
+                raise
+            missing.append(tail)
+            probe = head
     try:
-        fd = os.open(abs_path, flags)
+        _refuse_checkout(dir_fd, key_path)
+        if missing:
+            for name in reversed(missing):
+                try:
+                    os.mkdir(name, 0o700, dir_fd=dir_fd)
+                except FileExistsError:
+                    pass
+                child = os.open(name, flags | os.O_NOFOLLOW, dir_fd=dir_fd)
+                dir_fd, above = child, dir_fd
+                os.close(above)
+            _refuse_checkout(dir_fd, key_path)
+        _check_directory(dir_fd, parent)
+        return dir_fd
+    except BaseException:
+        os.close(dir_fd)
+        raise
+
+
+def _judge_key_file(fd, key_path):
+    """Judge the open file itself, never a name that may lead elsewhere: a
+    regular file owned by this user, readable by the owner only (a wider mode
+    is corrected on this descriptor, or refused)."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise KeyFileError(key_path + " is not a regular file")
+    if st.st_uid != os.getuid():
+        raise KeyFileError(key_path + " is not owned by this user")
+    mode = st.st_mode & 0o777
+    if mode & 0o077:
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError as err:
+            raise KeyFileError(
+                "%s is readable by other users (mode %o) and cannot be corrected: %s" % (key_path, mode, err)
+            ) from None
+        log.warning("%s was mode %o; corrected to 0600", key_path, mode)
+
+
+def _read_key_file(dir_fd, name, key_path):
+    """Open the key file *name* relative to the verified directory, never
+    through a symbolic link, judge that same open file and parse it.
+    FileNotFoundError when there is no such file."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd)
     except OSError as err:
         if err.errno == errno.ELOOP:
-            raise KeyFileError(abs_path + " is a symbolic link; a key file must be a regular file") from None
+            raise KeyFileError(key_path + " is a symbolic link; a key file must be a regular file") from None
         raise
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise KeyFileError(abs_path + " is not a regular file")
-        if os.name == "posix":
-            if st.st_uid != os.getuid():
-                raise KeyFileError(abs_path + " is not owned by this user")
-            mode = st.st_mode & 0o777
-            if mode & 0o077:
-                try:
-                    os.fchmod(fd, 0o600)
-                except OSError as err:
-                    raise KeyFileError(
-                        "%s is readable by other users (mode %o) and cannot be corrected: %s" % (abs_path, mode, err)
-                    ) from None
-                log.warning("%s was mode %o; corrected to 0600", abs_path, mode)
+        _judge_key_file(fd, key_path)
         f = os.fdopen(fd, "r", encoding="utf-8")
     except BaseException:
         os.close(fd)
@@ -276,21 +392,49 @@ def _read_key_file(abs_path):
         try:
             return json.load(f)
         except ValueError:
-            raise KeyFileError(abs_path + " is not a JSON key file") from None
+            raise KeyFileError(key_path + " is not a JSON key file") from None
+
+
+def _create_key_file(dir_fd, name, key_path, public_hex, secret_hex):
+    """Create the key file *name* in the verified directory: 0600 from the
+    first byte, never over an existing name, never through a link. The new
+    descriptor is judged like an existing key file before the secret is
+    written, and a file that fails is removed again with nothing in it."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+    try:
+        _judge_key_file(fd, key_path)
+        f = os.fdopen(fd, "w")
+    except BaseException:
+        os.close(fd)
+        try:
+            os.unlink(name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+    with f:
+        json.dump({"public": public_hex, "secret": secret_hex}, f, indent=2)
 
 
 def load_or_create_keys(path=None):
     """Load existing keys from *path* (default :func:`default_key_path`), or
     create and save new ones there.
 
-    Before anything is read or written, the location must lie outside every
-    source checkout (symlinks resolved, the user's home included) in a
-    directory owned by this user and writable by no one else. An existing file
-    is read through one descriptor opened without following symbolic links.
+    Before anything is read or written, the directory the key file lives in is
+    opened once and judged as that open directory, never by pathname. It, and
+    every directory above it up to the filesystem root (the user's home
+    included), must hold no ``.git`` entry, so the key lies outside every source
+    checkout; and it must be owned by this user and writable by no one else.
+    The key file is then opened or created relative to that same directory,
+    never through a symbolic link. An existing file must be a regular file
+    owned by this user; a new file is created 0600 from the first byte, never
+    over an existing name. Directories that do not exist yet are created 0700.
+    Where the platform cannot do this (no ``dir_fd`` calls, no ``O_DIRECTORY``
+    or ``O_NOFOLLOW``: native Windows), the key is refused.
+
     Loading checks the pair, not just its label: both keys are exactly 64 hex
     characters, the public key derived from the secret must match the stored
-    one, and neither may be on the denylist. A new file is created 0600 from
-    the first byte, never over an existing path.
+    one, and neither may be on the denylist.
 
     Raises
     ------
@@ -300,9 +444,10 @@ def load_or_create_keys(path=None):
         The pair is in :data:`COMPROMISED_PUBLIC_KEYS`; delete the file so a
         new pair is generated.
     KeyFileError
-        The location is inside a checkout, the directory or file is not this
-        user's own, the file is a symbolic link, malformed, or holds a public
-        key that does not belong to its secret.
+        The location is inside a checkout (or cannot be proven to be outside
+        one) or the platform cannot check it, the directory or file is not this
+        user's own, the file is a symbolic link, or it is malformed or holds a
+        public key that does not belong to its secret.
 
     Returns
     -------
@@ -310,42 +455,41 @@ def load_or_create_keys(path=None):
         (public_key_hex, secret_key_hex)
     """
     _require_nacl("load or create the node's key pair")
+    _require_descriptor_support()
     abs_path = os.path.abspath(path if path is not None else default_key_path())
-    _refuse_checkout(abs_path)
-    parent = os.path.dirname(abs_path)
+    parent, name = os.path.split(abs_path)
+    if not name:
+        raise KeyFileError(abs_path + " does not name a file")
 
-    if os.path.lexists(abs_path):
-        _check_directory(os.path.realpath(parent))
-        data = _read_key_file(abs_path)
-        public_hex = data.get("public") if isinstance(data, dict) else None
-        secret_hex = data.get("secret") if isinstance(data, dict) else None
+    dir_fd = _open_key_directory(parent, abs_path)
+    try:
         try:
-            public = _strict_hex(public_hex, 32)
-            secret = _strict_hex(secret_hex, 32)
-        except ValueError:
-            raise KeyFileError(
-                abs_path + " does not hold a key pair of two 64-hex-character keys"
-            ) from None
-        derived = bytes(nacl.signing.SigningKey(secret).verify_key)
-        if _is_compromised(public) or _is_compromised(derived):
-            raise CompromisedKeyError(
-                abs_path + " holds a key pair whose secret was published in a public "
-                "repository; delete the file and restart to generate a new key pair"
-            )
-        if derived != public:
-            raise KeyFileError(
-                abs_path + " holds a public key that does not belong to its secret key; "
-                "delete it to generate a new pair"
-            )
-        return public_hex, secret_hex
+            data = _read_key_file(dir_fd, name, abs_path)
+        except FileNotFoundError:
+            public_hex, secret_hex = generate_node_keys()
+            _create_key_file(dir_fd, name, abs_path, public_hex, secret_hex)
+            return public_hex, secret_hex
+    finally:
+        os.close(dir_fd)
 
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-    _check_directory(os.path.realpath(parent))
-    public_hex, secret_hex = generate_node_keys()
-    # 0600 from the first byte, never over an existing path, never through a link.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(abs_path, flags, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump({"public": public_hex, "secret": secret_hex}, f, indent=2)
-
+    public_hex = data.get("public") if isinstance(data, dict) else None
+    secret_hex = data.get("secret") if isinstance(data, dict) else None
+    try:
+        public = _strict_hex(public_hex, 32)
+        secret = _strict_hex(secret_hex, 32)
+    except ValueError:
+        raise KeyFileError(
+            abs_path + " does not hold a key pair of two 64-hex-character keys"
+        ) from None
+    derived = bytes(nacl.signing.SigningKey(secret).verify_key)
+    if _is_compromised(public) or _is_compromised(derived):
+        raise CompromisedKeyError(
+            abs_path + " holds a key pair whose secret was published in a public "
+            "repository; delete the file and restart to generate a new key pair"
+        )
+    if derived != public:
+        raise KeyFileError(
+            abs_path + " holds a public key that does not belong to its secret key; "
+            "delete it to generate a new pair"
+        )
     return public_hex, secret_hex
