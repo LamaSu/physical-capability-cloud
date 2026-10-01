@@ -21,11 +21,14 @@ import {
   type IntakeFieldDef,
   type IntakeMilestone,
 } from "./fields.js";
+import type { CsdRegistry } from "../../csd/registry.js";
+import { intakeValueHash, isConfirmationRequired } from "./confirmation.js";
 import { joinPath, pathSegment, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
 
 export * from "./fields.js";
 export * from "./json-schema.js";
 export * from "./form-html.js";
+export { CONFIRMATION_REQUIRED_FIELDS, intakeValueHash } from "./confirmation.js";
 export {
   INTAKE_SECRET_KINDS,
   redactIntakeSecrets,
@@ -36,6 +39,12 @@ export {
 
 // ── Answer + record shapes ──────────────────────────────────────────────
 
+/**
+ * Descriptive metadata, NOT authority: whoever builds the record writes the
+ * provenance, so "human" or "confirmed" proves nothing by itself. What
+ * authenticates a human is the confirmation store behind `IntakeAuthority`
+ * (see `validateIntake`).
+ */
 export const IntakeProvenanceSchema = z.enum(INTAKE_PROVENANCE_VALUES);
 
 export const IntakeSourceSchema = z
@@ -47,15 +56,25 @@ export const IntakeSourceSchema = z
   .strict();
 export type IntakeSource = z.infer<typeof IntakeSourceSchema>;
 
+/** A pointer to the authenticated confirmation event that backs an answer. The
+ *  reference is only a pointer; `validateIntake` resolves it through
+ *  `IntakeAuthority` and checks what the store holds. */
+export const IntakeConfirmationRefSchema = z.object({ eventId: z.string().min(1).max(256) }).strict();
+export type IntakeConfirmationRef = z.infer<typeof IntakeConfirmationRefSchema>;
+
 /**
  * R2 rule 6: every answer records its provenance. `research`/`confirmed`
  * provenance requires a `source` (a document id or URL the agent cites).
+ * `confirmation`, when present, points at the confirmation event that backs the
+ * answer; for fields in CONFIRMATION_REQUIRED_FIELDS it is required for the
+ * answer to satisfy a milestone (the provenance label alone never is).
  */
 export const IntakeAnswerSchema = z
   .object({
     value: z.unknown(),
     provenance: IntakeProvenanceSchema,
     source: IntakeSourceSchema.optional(),
+    confirmation: IntakeConfirmationRefSchema.optional(),
   })
   .strict()
   .superRefine((answer, ctx) => {
@@ -79,6 +98,73 @@ export const IntakeRecordSchema = z
   .strict();
 export type IntakeRecord = z.infer<typeof IntakeRecordSchema>;
 
+// ── Authority: confirmation events, payout store, CSD lookup ────────────
+
+/**
+ * One authenticated human confirmation, as the confirmation store (e.g. the
+ * ADK trace store) holds it. The store — not the record — is what
+ * authenticates the human: `confirmedBy` is the identity the store verified
+ * (`authMethod` says how), and the event binds the field id, the canonical
+ * hash of the confirmed value (`intakeValueHash(answer.value)`) and of its
+ * source (`intakeValueHash(answer.source)`), the device/project it is about,
+ * a sequence and timestamp, the session challenge, and its own supersession
+ * and revocation state.
+ */
+export interface IntakeConfirmationEvent {
+  schema: "pcc.intake-confirmation.v1";
+  eventId: string;
+  fieldId: string;
+  /** sha256:<hex> of canonicalize(answer.value) */
+  valueHash: string;
+  /** sha256:<hex> of canonicalize(answer.source), when the answer has one */
+  sourceHash?: string;
+  confirmedBy: { principal: string; authMethod: "siwe" | "api-key" | "session" };
+  subject: { deviceRef: string; projectRef?: string };
+  sequence: number;
+  confirmedAt: string;
+  challenge: string;
+  supersededBy: string | null;
+  revoked: boolean;
+}
+
+/** What `validateIntake` requires of an event the authority returns. Parsed
+ *  before use, so a malformed event never confirms anything. */
+export const IntakeConfirmationEventSchema = z.object({
+  schema: z.literal("pcc.intake-confirmation.v1"),
+  eventId: z.string().min(1),
+  fieldId: z.string().min(1),
+  valueHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  sourceHash: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+  confirmedBy: z.object({
+    principal: z.string().min(1),
+    authMethod: z.enum(["siwe", "api-key", "session"]),
+  }),
+  subject: z.object({ deviceRef: z.string().min(1), projectRef: z.string().min(1).optional() }),
+  sequence: z.number().int().nonnegative(),
+  confirmedAt: z.string().datetime({ offset: true }),
+  challenge: z.string().min(1),
+  supersededBy: z.string().min(1).nullable(),
+  revoked: z.boolean(),
+}) satisfies z.ZodType<IntakeConfirmationEvent>;
+
+/**
+ * The authenticated sources `validateIntake` re-reads instead of trusting the
+ * record. The caller supplies it; the record cannot. Subject binding is the
+ * authority's job: `resolveConfirmation` must only return events for the
+ * device/project being validated, and `payoutDestinationExists` must answer for
+ * that same operator. An authority method that throws is treated as "not
+ * confirmed" / "no payout destination" (fail-closed).
+ */
+export interface IntakeAuthority {
+  /** The authenticated confirmation store (e.g. the ADK trace store). Returns null when unknown. */
+  resolveConfirmation(eventId: string): IntakeConfirmationEvent | null;
+  /** Re-reads the authoritative payout store (N21); never the record's {set:true}. */
+  payoutDestinationExists(): boolean;
+  /** CSD lookup for limit binding (section 4); defaults to loadBuiltinCsds(). */
+  csdRegistry?: CsdRegistry;
+}
+
+
 // ── validateIntake — the runtime boundary ───────────────────────────────
 
 export interface IntakeValidationReport {
@@ -86,10 +172,12 @@ export interface IntakeValidationReport {
   ok: boolean;
   /** Field ids required for `milestone` that lack a satisfying answer. */
   missing: string[];
-  /** Field ids where a `neverDefault` field has an answer whose provenance is
-   *  "probe" or "research" (unconfirmed) — a global invariant, checked over
-   *  every answer present regardless of milestone (R2 rule 4: "never filled
-   *  with a guess"). */
+  /** Field ids in CONFIRMATION_REQUIRED_FIELDS (every `neverDefault` field and
+   *  every field a `humanConfirmRequired` research entry fills — despite the
+   *  name, not only the neverDefault ones) whose answer has provenance
+   *  "probe" or "research" — a global invariant, checked over every answer
+   *  present regardless of milestone (R2 rule 4: "never filled with a
+   *  guess"). */
   neverDefaultViolations: string[];
   /** `fieldId` (or `fieldId.key`) pairs where an INTAKE_FORBIDDEN_KEYS key was
    *  found anywhere in an answer's value/source, or used as a field id itself. */
@@ -113,6 +201,17 @@ export interface IntakeValidationReport {
   /** Field ids that are present (whether or not `milestone` requires them) and
    *  whose value does not satisfy the field's own `valueSchema`. */
   invalidFields: string[];
+  /** Field ids required for `milestone` that are in CONFIRMATION_REQUIRED_FIELDS
+   *  and whose answer is present but not backed by an authenticated
+   *  confirmation: provenance is not "human"/"confirmed", or there is no
+   *  `confirmation` reference, or no `authority` was supplied, or the event
+   *  the authority resolves does not match (unknown, wrong field id, value or
+   *  source hash mismatch, revoked, superseded, or malformed). */
+  unconfirmed: string[];
+  /** `"payout.destination"` when `milestone` is (or implies) "get-paid" and
+   *  `authority.payoutDestinationExists()` is not exactly true (or no authority
+   *  was supplied): the record's `{set: true}` is never trusted for that. */
+  unverified: string[];
 }
 
 /** Every list-valued member of the report: `ok` is true iff all are empty. The
@@ -131,6 +230,8 @@ const REPORT_LISTS = Object.keys({
   secretsInText: true,
   structuralErrors: true,
   invalidFields: true,
+  unconfirmed: true,
+  unverified: true,
 } satisfies Record<IntakeReportList, true>) as IntakeReportList[];
 
 function emptyReport(): IntakeValidationReport {
@@ -144,6 +245,8 @@ function emptyReport(): IntakeValidationReport {
     secretsInText: [],
     structuralErrors: [],
     invalidFields: [],
+    unconfirmed: [],
+    unverified: [],
   };
 }
 
@@ -233,8 +336,48 @@ function scanRawInput(input: unknown, report: IntakeValidationReport): void {
   report.unknownFields.push(...unknownFields);
 }
 
+/** Is `answer` (for `fieldId`) backed by a confirmation event that `authority`
+ *  resolves and that matches it? Every failure — including an authority that
+ *  throws or returns something malformed — is "no". */
+function confirmationHolds(fieldId: string, answer: IntakeAnswer, authority: IntakeAuthority | undefined): boolean {
+  if (answer.provenance !== "human" && answer.provenance !== "confirmed") return false;
+  if (!answer.confirmation || !authority) return false;
+
+  let resolved: unknown;
+  try {
+    resolved = authority.resolveConfirmation(answer.confirmation.eventId);
+  } catch {
+    return false;
+  }
+  const parsed = IntakeConfirmationEventSchema.safeParse(resolved);
+  if (!parsed.success) return false;
+
+  const event = parsed.data;
+  if (event.eventId !== answer.confirmation.eventId) return false;
+  if (event.fieldId !== fieldId) return false;
+  if (event.valueHash !== intakeValueHash(answer.value)) return false;
+  // The source is bound too: an event that carries a source hash confirms THAT
+  // source, so an answer that dropped or changed it is not the confirmed one.
+  const expectedSourceHash = answer.source === undefined ? undefined : intakeValueHash(answer.source);
+  if (event.sourceHash !== expectedSourceHash) return false;
+  return event.revoked === false && event.supersededBy === null;
+}
+
+function payoutDestinationExists(authority: IntakeAuthority | undefined): boolean {
+  try {
+    return authority?.payoutDestinationExists() === true;
+  } catch {
+    return false;
+  }
+}
+
 /** The milestone checks, over a record that already parsed. */
-function checkParsedRecord(record: IntakeRecord, milestone: IntakeMilestone, report: IntakeValidationReport): void {
+function checkParsedRecord(
+  record: IntakeRecord,
+  milestone: IntakeMilestone,
+  authority: IntakeAuthority | undefined,
+  report: IntakeValidationReport,
+): void {
   const impliedMilestones: ReadonlySet<IntakeMilestone> = new Set(MILESTONE_IMPLIES[milestone]);
   const neverDefaultViolations = new Set<string>();
   const sensitiveViolations = new Set<string>();
@@ -250,13 +393,14 @@ function checkParsedRecord(record: IntakeRecord, milestone: IntakeMilestone, rep
     const valid = field.valueSchema.safeParse(answer.value).success;
     valueValid.set(fieldId, valid);
     if (!valid) invalidFields.add(fieldId);
-    if (field.neverDefault && (answer.provenance === "probe" || answer.provenance === "research")) {
+    if (isConfirmationRequired(fieldId) && (answer.provenance === "probe" || answer.provenance === "research")) {
       neverDefaultViolations.add(fieldId);
     }
     if (field.sensitive && !valid) sensitiveViolations.add(fieldId);
   }
 
   const missing: string[] = [];
+  const unconfirmed: string[] = [];
   for (const field of INTAKE_FIELDS) {
     if (!field.requiredFor.some((rf) => impliedMilestones.has(rf))) continue;
     const answer = record.answers[field.id];
@@ -264,17 +408,27 @@ function checkParsedRecord(record: IntakeRecord, milestone: IntakeMilestone, rep
       missing.push(field.id);
       continue;
     }
-    if (field.neverDefault && answer.provenance !== "human" && answer.provenance !== "confirmed") {
+    const needsConfirmation = isConfirmationRequired(field.id);
+    if (needsConfirmation && answer.provenance !== "human" && answer.provenance !== "confirmed") {
       missing.push(field.id);
+      unconfirmed.push(field.id);
       continue;
     }
     if (valueValid.get(field.id) !== true) {
       missing.push(field.id);
       continue;
     }
+    if (needsConfirmation && !confirmationHolds(field.id, answer, authority)) unconfirmed.push(field.id);
+  }
+
+  // The record's {set: true} for the payout destination is a claim; get-paid
+  // (and nothing else) re-reads the authoritative payout store instead.
+  if (impliedMilestones.has("get-paid") && !payoutDestinationExists(authority)) {
+    report.unverified.push("payout.destination");
   }
 
   report.missing.push(...missing);
+  report.unconfirmed.push(...unconfirmed);
   report.neverDefaultViolations.push(...neverDefaultViolations);
   report.sensitiveViolations.push(...sensitiveViolations);
   report.invalidFields.push(...invalidFields);
@@ -300,10 +454,24 @@ function checkParsedRecord(record: IntakeRecord, milestone: IntakeMilestone, rep
  *      sensitive values (`scanIntakeStrings`; see secret-scan.ts), reported in
  *      `secretsInText`. Forbidden keys and unknown field ids are read from the
  *      raw input as well, so they are reported even when the parse fails.
- *   4. Milestone readiness (rule 4: a `neverDefault` field only satisfies a
- *      milestone with provenance "human" or "confirmed"; an unconfirmed
- *      probe/research answer on a neverDefault field is ALWAYS flagged
- *      independent of milestone via `neverDefaultViolations`).
+ *   4. Milestone readiness. A field in CONFIRMATION_REQUIRED_FIELDS (every
+ *      `neverDefault` field, plus every field a `humanConfirmRequired`
+ *      research entry fills, e.g. capability.parameters) satisfies a milestone
+ *      ONLY when ALL of these hold: its provenance is "human" or "confirmed";
+ *      the answer carries a `confirmation: {eventId}`; an `authority` was
+ *      supplied; and `authority.resolveConfirmation(eventId)` returns an
+ *      event with the same field id, a `valueHash` equal to
+ *      `intakeValueHash(answer.value)`, a `sourceHash` equal to
+ *      `intakeValueHash(answer.source)` (and none when the answer has no
+ *      source), `revoked === false` and `supersededBy === null`. Otherwise it
+ *      is listed in `unconfirmed` and the milestone is not ok. The provenance
+ *      label alone is descriptive metadata, never authority; the authority's
+ *      store is what authenticates the human. A confirmation-required answer
+ *      with probe/research provenance is ALWAYS flagged, independent of
+ *      milestone, via `neverDefaultViolations`.
+ *      "get-paid" (and nothing that does not imply it) also needs
+ *      `authority.payoutDestinationExists() === true`; otherwise
+ *      "payout.destination" is listed in `unverified`.
  * Milestone matching is CUMULATIVE (review fix): a field is required for
  * `milestone` if its own `requiredFor` contains `milestone` OR any milestone
  * that `milestone` implies (MILESTONE_IMPLIES in fields.ts — e.g. accept-jobs
@@ -315,7 +483,11 @@ function checkParsedRecord(record: IntakeRecord, milestone: IntakeMilestone, rep
  * Producers: call this before logging or persisting a record, and again before
  * any public projection; a record that is not ok is rejected, not stored.
  */
-export function validateIntake(input: unknown, milestone: IntakeMilestone): IntakeValidationReport {
+export function validateIntake(
+  input: unknown,
+  milestone: IntakeMilestone,
+  authority?: IntakeAuthority,
+): IntakeValidationReport {
   const report = emptyReport();
   try {
     const milestoneKnown = (INTAKE_MILESTONES as readonly string[]).includes(milestone);
@@ -327,7 +499,7 @@ export function validateIntake(input: unknown, milestone: IntakeMilestone): Inta
     if (!parsed.success) {
       report.structuralErrors.push(...parsed.error.issues.map(describeIssue));
     } else if (milestoneKnown) {
-      checkParsedRecord(parsed.data, milestone, report);
+      checkParsedRecord(parsed.data, milestone, authority, report);
     }
   } catch {
     // An input that cannot be read (a throwing getter, a hostile proxy) fails

@@ -152,7 +152,10 @@ export const MILESTONE_IMPLIES: Readonly<Record<IntakeMilestone, readonly Intake
 );
 
 /** R2 rule 6: every answer records its provenance. `research`/`confirmed`
- *  require a `source` (enforced by IntakeAnswerSchema in index.ts). */
+ *  require a `source` (enforced by IntakeAnswerSchema in index.ts). The value
+ *  is descriptive metadata written by whoever builds the record, not authority:
+ *  what authenticates a human is the confirmation store behind IntakeAuthority
+ *  (index.ts). */
 export const INTAKE_PROVENANCE_VALUES = ["human", "probe", "research", "confirmed"] as const;
 export type IntakeProvenance = (typeof INTAKE_PROVENANCE_VALUES)[number];
 

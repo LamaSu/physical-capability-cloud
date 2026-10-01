@@ -23,12 +23,17 @@ import {
   scanIntakeStrings,
   redactIntakeSecrets,
   INTAKE_SECRET_KINDS,
+  CONFIRMATION_REQUIRED_FIELDS,
+  intakeValueHash,
   type IntakeAnswer,
+  type IntakeAuthority,
+  type IntakeConfirmationEvent,
   type IntakeRecord,
   type IntakeSecretKind,
 } from "../onboarding/intake/index.js";
 import { BIP39_ENGLISH_WORDLIST } from "../onboarding/intake/bip39-english.js";
 import { getPrimitive } from "../evidence/primitives.js";
+import { canonicalize } from "../util/canonical.js";
 import { RESEARCH_LIBRARY } from "../onboarding/research/index.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -348,11 +353,63 @@ function buildFullValidRecord(): IntakeRecord {
     "sla.acceptanceWindowSec": human(3600),
     "sla.completionDeadlineSec": human(86400),
   };
+  // Every confirmation-required answer carries a pointer to its confirmation event.
+  for (const fieldId of CONFIRMATION_REQUIRED_FIELDS) {
+    answers[fieldId] = { ...answers[fieldId]!, confirmation: { eventId: `evt-${fieldId}` } };
+  }
   return { schema: "pcc.device-intake.v1", answers };
 }
 
 function cloneRecord(record: IntakeRecord): IntakeRecord {
   return { schema: record.schema, answers: { ...record.answers } };
+}
+
+/** The authenticated confirmation event a store would hold for `answer`. */
+function confirmationEvent(
+  fieldId: string,
+  answer: IntakeAnswer,
+  overrides: Partial<IntakeConfirmationEvent> = {},
+): IntakeConfirmationEvent {
+  return {
+    schema: "pcc.intake-confirmation.v1",
+    eventId: answer.confirmation!.eventId,
+    fieldId,
+    valueHash: intakeValueHash(answer.value),
+    ...(answer.source ? { sourceHash: intakeValueHash(answer.source) } : {}),
+    confirmedBy: { principal: "operator:acme", authMethod: "siwe" },
+    subject: { deviceRef: "dev-1", projectRef: "proj-1" },
+    sequence: 1,
+    confirmedAt: "2026-09-30T12:00:00Z",
+    challenge: "challenge-1",
+    supersededBy: null,
+    revoked: false,
+    ...overrides,
+  };
+}
+
+interface StubAuthorityOptions {
+  /** What the payout store says (default: a destination exists). */
+  payout?: boolean;
+  /** Edit the events after they are derived from the record. */
+  events?: (events: Map<string, IntakeConfirmationEvent>) => void;
+}
+
+/** A Map-backed authority holding exactly the events the record's confirmation refs name. */
+function makeAuthority(record: IntakeRecord, options: StubAuthorityOptions = {}): IntakeAuthority {
+  const events = new Map<string, IntakeConfirmationEvent>();
+  for (const [fieldId, answer] of Object.entries(record.answers)) {
+    if (answer.confirmation) events.set(answer.confirmation.eventId, confirmationEvent(fieldId, answer));
+  }
+  options.events?.(events);
+  return {
+    resolveConfirmation: (eventId) => events.get(eventId) ?? null,
+    payoutDestinationExists: () => options.payout ?? true,
+  };
+}
+
+/** validateIntake with a stub authority built from the record itself. */
+function ready(record: IntakeRecord, milestone: (typeof INTAKE_MILESTONES)[number], options?: StubAuthorityOptions) {
+  return validateIntake(record, milestone, makeAuthority(record, options));
 }
 
 describe("validateIntake — a fully and correctly answered record", () => {
@@ -370,9 +427,9 @@ describe("validateIntake — a fully and correctly answered record", () => {
     expect(IntakeRecordSchema.safeParse(full).success).toBe(true);
   });
 
-  it("is `ok` for every milestone", () => {
+  it("is `ok` for every milestone when its confirmation events resolve and a payout destination exists", () => {
     for (const milestone of INTAKE_MILESTONES) {
-      const report = validateIntake(full, milestone);
+      const report = ready(full, milestone);
       expect(report, `${milestone}: ${JSON.stringify(report)}`).toMatchObject({
         ok: true,
         missing: [],
@@ -380,6 +437,11 @@ describe("validateIntake — a fully and correctly answered record", () => {
         forbiddenKeys: [],
         sensitiveViolations: [],
         unknownFields: [],
+        secretsInText: [],
+        structuralErrors: [],
+        invalidFields: [],
+        unconfirmed: [],
+        unverified: [],
       });
     }
   });
@@ -1214,16 +1276,23 @@ describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () =
 
   it("refuses an answers map that holds a non-object answer or an array", () => {
     const base = { schema: "pcc.device-intake.v1" };
-    expect(validateIntake({ ...base, answers: [] }, "register").ok).toBe(false);
-    expect(validateIntake({ ...base, answers: { "device.model": "Prusa" } }, "register").ok).toBe(false);
-    expect(validateIntake({ ...base, answers: { "device.model": null } }, "register").ok).toBe(false);
+    for (const answers of [[], { "device.model": "Prusa" }, { "device.model": null }]) {
+      const report = validateIntake({ ...base, answers }, "register");
+      expect(report.ok).toBe(false);
+      expect(report.structuralErrors, JSON.stringify(answers)).not.toEqual([]);
+    }
   });
 
   it("refuses unknown top-level and answer-level keys (strict)", () => {
     const record = buildFullValidRecord();
-    expect(validateIntake({ ...record, extra: 1 }, "register").ok).toBe(false);
+    const topLevel = ready({ ...record, extra: 1 } as unknown as IntakeRecord, "register");
+    expect(topLevel.ok).toBe(false);
+    expect(topLevel.structuralErrors).toEqual(["(root): unrecognized_keys"]);
+
     const answers = { ...record.answers, "device.model": { ...probed("MK4S"), extra: 1 } };
-    expect(validateIntake({ ...record, answers }, "register").structuralErrors).not.toEqual([]);
+    const nested = ready({ ...record, answers } as unknown as IntakeRecord, "register");
+    expect(nested.ok).toBe(false);
+    expect(nested.structuralErrors).toEqual(["answers/device.model: unrecognized_keys"]);
   });
 
   it("structuralErrors carry paths and messages, never the offending values", () => {
@@ -1366,42 +1435,431 @@ describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () =
   });
 });
 
+describe("validateIntake — confirmation and payout resolve from authority (astra 120b, finding 3)", () => {
+  const full = buildFullValidRecord();
+
+  it("CONFIRMATION_REQUIRED_FIELDS is derived from neverDefault + humanConfirmRequired fills, and pinned", () => {
+    const fromNeverDefault = INTAKE_FIELDS.filter((f) => f.neverDefault).map((f) => f.id);
+    const fromResearch = RESEARCH_LIBRARY.filter((e) => e.humanConfirmRequired).flatMap((e) => e.fills);
+    expect(new Set(CONFIRMATION_REQUIRED_FIELDS)).toEqual(new Set([...fromNeverDefault, ...fromResearch]));
+    expect([...CONFIRMATION_REQUIRED_FIELDS]).toEqual([
+      "capability.parameters",
+      "operator.authority",
+      "payout.destination",
+      "pricing.currency",
+      "pricing.minimum",
+      "pricing.unitPrice",
+      "safety.commandRate",
+      "safety.estop",
+      "safety.hazards",
+      "safety.limits",
+      "safety.supervision",
+    ]);
+    expect(CONFIRMATION_REQUIRED_FIELDS).toContain("capability.parameters");
+    expect(Object.isFrozen(CONFIRMATION_REQUIRED_FIELDS)).toBe(true);
+    expect(() => (CONFIRMATION_REQUIRED_FIELDS as string[]).push("device.model")).toThrow();
+    // every id is a real field
+    for (const id of CONFIRMATION_REQUIRED_FIELDS) expect(INTAKE_FIELD_IDS).toContain(id);
+  });
+
+  it("IntakeAnswerSchema accepts an optional strict confirmation {eventId}", () => {
+    const answer = { value: "x", provenance: "human" as const };
+    expect(IntakeAnswerSchema.safeParse({ ...answer, confirmation: { eventId: "evt-1" } }).success).toBe(true);
+    expect(IntakeAnswerSchema.safeParse(answer).success).toBe(true);
+    for (const bad of [{}, { eventId: "" }, { eventId: "x".repeat(257) }, { eventId: "e", extra: 1 }, { eventId: 7 }]) {
+      expect(IntakeAnswerSchema.safeParse({ ...answer, confirmation: bad }).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("without an authority, publish, accept-jobs and get-paid are not ready", () => {
+    for (const milestone of ["publish", "accept-jobs", "get-paid"] as const) {
+      const report = validateIntake(full, milestone);
+      expect(report.ok, milestone).toBe(false);
+      expect(report.unconfirmed.length, milestone).toBeGreaterThan(0);
+    }
+  });
+
+  it("without an authority every milestone that needs a confirmation-required field lists it in unconfirmed", () => {
+    const expectedFor = (milestone: (typeof INTAKE_MILESTONES)[number]): string[] =>
+      INTAKE_FIELDS.filter(
+        (f) => f.requiredFor.some((rf) => MILESTONE_IMPLIES[milestone].includes(rf)) && CONFIRMATION_REQUIRED_FIELDS.includes(f.id),
+      ).map((f) => f.id);
+    expect(expectedFor("publish")).toEqual([
+      "operator.authority",
+      "safety.supervision",
+      "safety.estop",
+      "capability.parameters",
+      "pricing.unitPrice",
+      "pricing.minimum",
+      "pricing.currency",
+    ]);
+    for (const milestone of INTAKE_MILESTONES) {
+      expect(validateIntake(full, milestone).unconfirmed, milestone).toEqual(expectedFor(milestone));
+    }
+    // accept-jobs adds the rest of the safety envelope; get-paid adds the payout destination.
+    expect(validateIntake(full, "accept-jobs").unconfirmed).toEqual(
+      expect.arrayContaining(["safety.hazards", "safety.limits", "safety.commandRate"]),
+    );
+    expect(validateIntake(full, "get-paid").unconfirmed).toContain("payout.destination");
+    expect(validateIntake(full, "get-paid").unverified).toEqual(["payout.destination"]);
+  });
+
+  it("with a full authority nothing is unconfirmed or unverified", () => {
+    for (const milestone of INTAKE_MILESTONES) {
+      const report = ready(full, milestone);
+      expect(report.unconfirmed, milestone).toEqual([]);
+      expect(report.unverified, milestone).toEqual([]);
+    }
+  });
+
+  describe("an event that does not match the answer confirms nothing", () => {
+    const field = "safety.supervision"; // human provenance, no source; required for publish
+    const sourcedField = "safety.limits"; // confirmed provenance, with a source; required for accept-jobs
+
+    const cases: [string, string, (events: Map<string, IntakeConfirmationEvent>) => void][] = [
+      ["a revoked event", field, (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, revoked: true })],
+      ["a superseded event", field, (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, supersededBy: "evt-newer" })],
+      ["a value-hash mismatch", field, (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, valueHash: intakeValueHash("unattended") })],
+      ["a fieldId mismatch", field, (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, fieldId: "safety.hazards" })],
+      ["an unknown event id (the store returns null)", field, (e) => e.delete(`evt-${field}`)],
+      [
+        "an event whose own eventId differs from the one asked for",
+        field,
+        (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, eventId: "evt-other" }),
+      ],
+      [
+        "a source-hash mismatch on a sourced answer",
+        sourcedField,
+        (e) => e.set(`evt-${sourcedField}`, { ...e.get(`evt-${sourcedField}`)!, sourceHash: intakeValueHash({ doc: "other" }) }),
+      ],
+      [
+        "a missing source hash on a sourced answer",
+        sourcedField,
+        (e) => {
+          const { sourceHash: _dropped, ...rest } = e.get(`evt-${sourcedField}`)!;
+          e.set(`evt-${sourcedField}`, rest);
+        },
+      ],
+      [
+        "a source hash on an answer that has no source",
+        field,
+        (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, sourceHash: intakeValueHash({ doc: "manual" }) }),
+      ],
+      [
+        "a malformed event (no challenge)",
+        field,
+        (e) => {
+          const { challenge: _dropped, ...rest } = e.get(`evt-${field}`)!;
+          e.set(`evt-${field}`, rest as IntakeConfirmationEvent);
+        },
+      ],
+      [
+        "a malformed event (revoked is not a boolean)",
+        field,
+        (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, revoked: undefined as unknown as boolean }),
+      ],
+      [
+        "a malformed event (superseded state missing)",
+        field,
+        (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, supersededBy: undefined as unknown as null }),
+      ],
+      [
+        "an event of another schema version",
+        field,
+        (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, schema: "pcc.intake-confirmation.v2" as never }),
+      ],
+      [
+        "an event with an unrecognized auth method",
+        field,
+        (e) =>
+          e.set(`evt-${field}`, {
+            ...e.get(`evt-${field}`)!,
+            confirmedBy: { principal: "operator:acme", authMethod: "trust-me" as never },
+          }),
+      ],
+    ];
+
+    it.each(cases)("%s", (_name, target, edit) => {
+      const milestone = target === sourcedField ? "accept-jobs" : "publish";
+      const report = ready(full, milestone, { events: edit });
+      expect(report.ok).toBe(false);
+      expect(report.unconfirmed).toEqual([target]);
+      expect(report.missing).toEqual([]);
+    });
+
+    it("a missing confirmation reference", () => {
+      const record = cloneRecord(full);
+      const { confirmation: _dropped, ...withoutRef } = record.answers[field]!;
+      record.answers[field] = withoutRef;
+      const report = ready(record, "publish");
+      expect(report.ok).toBe(false);
+      expect(report.unconfirmed).toEqual([field]);
+    });
+
+    it("an authority whose resolver throws is treated as not confirmed, never as an exception", () => {
+      const throwing: IntakeAuthority = {
+        resolveConfirmation: () => {
+          throw new Error("store offline");
+        },
+        payoutDestinationExists: () => true,
+      };
+      const report = validateIntake(full, "publish", throwing);
+      expect(report.ok).toBe(false);
+      expect(report.unconfirmed).toEqual(validateIntake(full, "publish").unconfirmed);
+    });
+
+    it("an async resolver (a Promise instead of an event) confirms nothing", () => {
+      const asyncAuthority: IntakeAuthority = {
+        resolveConfirmation: () => Promise.resolve(null) as never,
+        payoutDestinationExists: () => true,
+      };
+      expect(validateIntake(full, "publish", asyncAuthority).unconfirmed.length).toBeGreaterThan(0);
+    });
+
+    it("tampering with the answer after confirmation breaks the value hash", () => {
+      const record = cloneRecord(full);
+      const authority = makeAuthority(record); // events hold the ORIGINAL value
+      record.answers[field] = { ...record.answers[field]!, value: "unattended" };
+      const report = validateIntake(record, "publish", authority);
+      expect(report.ok).toBe(false);
+      expect(report.unconfirmed).toEqual([field]);
+    });
+
+    it("tampering with the source after confirmation breaks the source hash", () => {
+      const record = cloneRecord(full);
+      const authority = makeAuthority(record);
+      record.answers[sourcedField] = {
+        ...record.answers[sourcedField]!,
+        source: { doc: "a different manual", section: "specs" },
+      };
+      const report = validateIntake(record, "accept-jobs", authority);
+      expect(report.unconfirmed).toEqual([sourcedField]);
+    });
+
+    it("an event cannot be replayed for another field, even when the value hash is equal", () => {
+      const record = cloneRecord(full);
+      record.answers["pricing.unitPrice"] = {
+        ...record.answers["pricing.unitPrice"]!,
+        value: "2.00", // same value as pricing.minimum
+        confirmation: { eventId: "evt-pricing.minimum" },
+      };
+      const authority = makeAuthority(record);
+      expect(authority.resolveConfirmation("evt-pricing.minimum")!.valueHash).toBe(intakeValueHash("2.00"));
+      const report = validateIntake(record, "publish", authority);
+      expect(report.unconfirmed).toEqual(["pricing.unitPrice"]);
+    });
+
+    it("an event for the same value in another record is not enough without the right field id", () => {
+      // two fields, same value, two events: each answer only matches its own.
+      const record = cloneRecord(full);
+      record.answers["pricing.unitPrice"] = { ...record.answers["pricing.unitPrice"]!, value: "2.00" };
+      const report = ready(record, "publish");
+      expect(report.ok).toBe(true); // its own event was derived from the new value
+      const stale = makeAuthority(full); // events for the ORIGINAL 5.00
+      expect(validateIntake(record, "publish", stale).unconfirmed).toEqual(["pricing.unitPrice"]);
+    });
+  });
+
+  describe("provenance without confirmation is never authority", () => {
+    it("research provenance on capability.parameters (humanConfirmRequired) does not make publish ready", () => {
+      const record = withAnswer("capability.parameters", {
+        value: [{ key: "infill", min: 0, max: 100, unit: "%" }],
+        provenance: "research",
+        source: { doc: "manual", section: "specs" },
+        confirmation: { eventId: "evt-capability.parameters" },
+      });
+      const report = ready(record, "publish");
+      expect(report.ok).toBe(false);
+      expect(report.missing).toEqual(["capability.parameters"]);
+      expect(report.unconfirmed).toEqual(["capability.parameters"]);
+      expect(report.neverDefaultViolations).toEqual(["capability.parameters"]);
+    });
+
+    it("probe provenance on a confirmation-required field is flagged even when the milestone does not need it", () => {
+      const record = withAnswer("capability.parameters", probed([{ key: "infill", min: 0, max: 100, unit: "%" }]));
+      const report = ready(record, "register");
+      expect(report.neverDefaultViolations).toEqual(["capability.parameters"]);
+      expect(report.ok).toBe(false);
+    });
+
+    it("a human-provenance answer with a valid event is the only thing that satisfies it", () => {
+      const record = withAnswer("capability.parameters", {
+        value: [{ key: "infill", min: 0, max: 100, unit: "%" }],
+        provenance: "human",
+        confirmation: { eventId: "evt-capability.parameters" },
+      });
+      expect(ready(record, "publish").ok).toBe(true);
+    });
+
+    it("a confirmation reference on a field that does not need one is ignored", () => {
+      const record = withAnswer("device.model", {
+        ...probed("MK4S"),
+        confirmation: { eventId: "evt-nonexistent" },
+      });
+      expect(ready(record, "register-device").ok).toBe(true);
+    });
+
+    it("a confirmation-required answer whose value is invalid is missing, not merely unconfirmed", () => {
+      const record = withAnswer("safety.supervision", {
+        value: "sometimes",
+        provenance: "human",
+        confirmation: { eventId: "evt-safety.supervision" },
+      });
+      const report = ready(record, "publish");
+      expect(report.missing).toEqual(["safety.supervision"]);
+      expect(report.unconfirmed).toEqual([]);
+      expect(report.invalidFields).toEqual(["safety.supervision"]);
+    });
+  });
+
+  describe("get-paid re-reads the payout store, never the record's {set:true}", () => {
+    it("is ready when the payout store has a destination", () => {
+      expect(ready(full, "get-paid", { payout: true }).ok).toBe(true);
+    });
+
+    it("is not ready when the payout store says there is none", () => {
+      const report = ready(full, "get-paid", { payout: false });
+      expect(report.ok).toBe(false);
+      expect(report.unverified).toEqual(["payout.destination"]);
+      expect(report.missing).toEqual([]);
+      expect(report.unconfirmed).toEqual([]);
+    });
+
+    it("is not ready with no authority, and an authority that throws or answers loosely counts as no", () => {
+      expect(validateIntake(full, "get-paid").unverified).toEqual(["payout.destination"]);
+      const events = makeAuthority(full);
+      const throwing: IntakeAuthority = {
+        ...events,
+        payoutDestinationExists: () => {
+          throw new Error("payout store offline");
+        },
+      };
+      expect(validateIntake(full, "get-paid", throwing).unverified).toEqual(["payout.destination"]);
+      const loose: IntakeAuthority = { ...events, payoutDestinationExists: () => "yes" as never };
+      expect(validateIntake(full, "get-paid", loose).unverified).toEqual(["payout.destination"]);
+    });
+
+    it("only get-paid asks the payout store", () => {
+      let calls = 0;
+      const base = makeAuthority(full);
+      const counting: IntakeAuthority = {
+        ...base,
+        payoutDestinationExists: () => {
+          calls += 1;
+          return true;
+        },
+      };
+      for (const milestone of INTAKE_MILESTONES) {
+        if (milestone !== "get-paid") expect(validateIntake(full, milestone, counting).unverified, milestone).toEqual([]);
+      }
+      expect(calls).toBe(0);
+      validateIntake(full, "get-paid", counting);
+      expect(calls).toBe(1);
+    });
+  });
+});
+
+describe("intakeValueHash", () => {
+  it("is sha256: + hex of sha256 over the canonical JSON, independent of key order", () => {
+    const value = { b: [1, { d: 4, c: 3 }], a: "x" };
+    const expected = `sha256:${createHash("sha256").update(canonicalize(value)).digest("hex")}`;
+    expect(intakeValueHash(value)).toBe(expected);
+    expect(intakeValueHash(value)).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(intakeValueHash({ a: "x", b: [1, { c: 3, d: 4 }] })).toBe(expected);
+  });
+
+  it("distinguishes values, including types that print alike", () => {
+    const hashes = [1, "1", true, null, [1], { a: 1 }, "", [], {}].map(intakeValueHash);
+    expect(new Set(hashes).size).toBe(hashes.length);
+  });
+
+  it("matches a published sha256 vector for a plain string value", () => {
+    // canonicalize("abc") is the JSON text "abc" including the quotes (5 bytes).
+    expect(intakeValueHash("abc")).toBe(`sha256:${createHash("sha256").update('"abc"').digest("hex")}`);
+  });
+});
+
 describe("astra pack 120b", () => {
   it("baseline: the full fixture is ok for identify (else the cases below prove nothing)", () => {
-    expect(validateIntake(buildFullValidRecord(), "identify").ok).toBe(true);
+    expect(ready(buildFullValidRecord(), "identify").ok).toBe(true);
   });
 
   it("CRITICAL 1a: a PEM private key in device.description is refused", () => {
-    expect(validateIntake(withAnswer("device.description", human(FAKE.pem)), "identify").ok).toBe(false);
+    const report = ready(withAnswer("device.description", human(FAKE.pem)), "identify");
+    expect(report.ok).toBe(false);
+    expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind: "pem" }]);
   });
   it("CRITICAL 1b: a 64-hex secret candidate in device.description is refused", () => {
-    expect(validateIntake(withAnswer("device.description", human("key 0x" + "ab".repeat(32))), "identify").ok).toBe(false);
+    const report = ready(withAnswer("device.description", human("key 0x" + "ab".repeat(32))), "identify");
+    expect(report.ok).toBe(false);
+    expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind: "hex-secret" }]);
   });
   it("CRITICAL 1c: a payout address in device.description is refused", () => {
-    expect(validateIntake(withAnswer("device.description", human("pay " + FAKE.address)), "identify").ok).toBe(false);
+    const report = ready(withAnswer("device.description", human("pay " + FAKE.address)), "identify");
+    expect(report.ok).toBe(false);
+    expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind: "payout-address" }]);
   });
   it("CRITICAL 1d: a street address in device.description is refused", () => {
-    expect(
-      validateIntake(withAnswer("device.description", human("Printer lives at 1600 Pennsylvania Avenue")), "identify").ok,
-    ).toBe(false);
+    const report = ready(withAnswer("device.description", human("Printer lives at 1600 Pennsylvania Avenue")), "identify");
+    expect(report.ok).toBe(false);
+    expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind: "street-address" }]);
   });
 
   it("HIGH 2a: a confirmed safety.limits answer with no source fails through validateIntake", () => {
-    const answer = { value: [{ quantity: "bed temperature", unit: "C", min: 0, max: 120 }], provenance: "confirmed" };
-    expect(validateIntake(withAnswer("safety.limits", answer), "accept-jobs").ok).toBe(false);
+    const answer = {
+      value: [{ quantity: "bed temperature", unit: "C", min: 0, max: 120 }],
+      provenance: "confirmed",
+      confirmation: { eventId: "evt-safety.limits" },
+    };
+    const report = ready(withAnswer("safety.limits", answer), "accept-jobs");
+    expect(report.ok).toBe(false);
+    expect(report.structuralErrors).toEqual(['answers/safety.limits/source: provenance "confirmed" requires a source']);
   });
   it("HIGH 2b: an invalid provenance on a required field fails", () => {
-    expect(
-      validateIntake(withAnswer("device.description", { value: "A printer.", provenance: "garbage" }), "identify").ok,
-    ).toBe(false);
+    const report = ready(withAnswer("device.description", { value: "A printer.", provenance: "garbage" }), "identify");
+    expect(report.ok).toBe(false);
+    expect(report.structuralErrors).toEqual(["answers/device.description/provenance: invalid_enum_value"]);
   });
   it("HIGH 2c: a malformed answered field outside the milestone still fails", () => {
     const answer = {
       value: [{ quantity: "bed temperature", unit: "C", min: 10, max: 1 }],
       provenance: "confirmed",
       source: { doc: "m", section: "s" },
+      confirmation: { eventId: "evt-safety.limits" },
     };
-    expect(validateIntake(withAnswer("safety.limits", answer), "register").ok).toBe(false);
+    const report = ready(withAnswer("safety.limits", answer), "register");
+    expect(report.ok).toBe(false);
+    expect(report.invalidFields).toEqual(["safety.limits"]);
+  });
+
+  it("HIGH 3a: research-provenance capability.parameters (humanConfirmRequired) does not make publish ready", () => {
+    const answer = {
+      value: [{ key: "infill", min: 0, max: 100, unit: "%" }],
+      provenance: "research",
+      source: { doc: "manual", section: "specs" },
+    };
+    const report = ready(withAnswer("capability.parameters", answer), "publish");
+    expect(report.ok).toBe(false);
+    expect(report.neverDefaultViolations).toEqual(["capability.parameters"]);
+    expect(report.unconfirmed).toEqual(["capability.parameters"]);
+  });
+  it("HIGH 3b: a caller-written 'confirmed' label alone (no authenticated confirmation) does not make publish ready", () => {
+    const report = validateIntake(buildFullValidRecord(), "publish");
+    expect(report.ok).toBe(false);
+    expect(report.unconfirmed).toContain("capability.parameters");
+    // ... and stripping the references leaves nothing for a full authority to resolve either
+    const stripped = cloneRecord(buildFullValidRecord());
+    for (const id of CONFIRMATION_REQUIRED_FIELDS) {
+      const { confirmation: _dropped, ...rest } = stripped.answers[id]!;
+      stripped.answers[id] = rest;
+    }
+    expect(validateIntake(stripped, "publish", makeAuthority(buildFullValidRecord())).ok).toBe(false);
+  });
+  it("HIGH 3c: payout.destination {set:true} alone (no payout-store read) does not make get-paid ready", () => {
+    expect(validateIntake(buildFullValidRecord(), "get-paid").ok).toBe(false);
+    const report = ready(buildFullValidRecord(), "get-paid", { payout: false });
+    expect(report.ok).toBe(false);
+    expect(report.unverified).toEqual(["payout.destination"]);
   });
 
   it("HIGH 5c: a malformed execution mode caps at 0, not the no-cap 3", () => {
