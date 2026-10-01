@@ -32,6 +32,7 @@ import { keccak256, toBytes } from "viem";
 import {
   canonicalize,
   devicePrincipalMatchesSigner,
+  isValidKernelId,
   operatorPrincipalMatchesSigner,
   principalFromRegistry,
 } from "@pcc/spec";
@@ -130,6 +131,24 @@ function nonEmpty(v: unknown, path: string): string {
   return s;
 }
 /**
+ * A kernel id, by #399's rule (`isValidKernelId`, pcc.evidence.principal-id.v1):
+ * 1-128 printable ASCII characters, no space, not starting `eip155:` or `ed25519:`
+ * in any ASCII case. It is the same rule `principalTupleWord("kernel", id)` hashes
+ * a funded `authorizedTuples` triple under, so every kernel id a package names is
+ * one the funded deal can name.
+ */
+function kernelIdField(v: unknown, path: string): string {
+  const s = nonEmpty(v, path);
+  if (!isValidKernelId(s)) {
+    throw new PackageBodyValidationError(
+      path,
+      "must be a kernel id: 1-128 printable ASCII characters, no space, not starting " +
+        "eip155: or ed25519: (pcc.evidence.principal-id.v1)",
+    );
+  }
+  return s;
+}
+/**
  * An evidenceTimeBounds end: a decimal string of Unix seconds, kept exactly as
  * given (the canonical settlement-vector golden: "1699999500" / "1700000000").
  * The same grammar as spec `parseEvidenceTimeBound` (#438; bus #3567).
@@ -180,7 +199,19 @@ function obj(v: unknown, path: string, keys: readonly string[]): Record<string, 
  * Validate a body against evidence's pinned schema and return it typed.
  *
  * FAILS CLOSED on every deviation. A body that is wrong in a way we tolerate
- * here becomes a digest the oracle cannot reproduce, discovered at mint.
+ * here becomes a digest the oracle cannot reproduce, discovered at mint. An
+ * unknown key is refused, not dropped (the digest would cover a different object
+ * than the caller holds), and the kernel id is pinned to #399's rule.
+ *
+ * NOT checked here, because the published golden forbids it: that
+ * `producer.operatorPrincipalId` and `producer.devicePrincipalId` are the pinned
+ * `eip155:<chainId>:0x<address>` and `ed25519:0x<key>` forms
+ * (`parseOperatorPrincipalId` / `parseDevicePrincipalId`). The golden's body is
+ * evidence's SAMPLE vector and carries the free-text ids "op-golden" and
+ * "dev-golden", and its hashes must stay byte-identical, so they are only
+ * required to be non-empty here. `assertMintablePackage` enforces the pinned forms
+ * and binds them to the D1 and D2 signatures and the kernel registry, so a package
+ * with free-text principals can be hashed but never minted.
  */
 export function validatePackageBody(input: unknown): FinalMilestonePackageV2Body {
   const b = obj(input, "$", [
@@ -243,7 +274,7 @@ export function validatePackageBody(input: unknown): FinalMilestonePackageV2Body
     },
     producer: {
       operatorPrincipalId: nonEmpty(pr.operatorPrincipalId, "$.producer.operatorPrincipalId"),
-      kernelId: nonEmpty(pr.kernelId, "$.producer.kernelId"),
+      kernelId: kernelIdField(pr.kernelId, "$.producer.kernelId"),
       devicePrincipalId: nonEmpty(pr.devicePrincipalId, "$.producer.devicePrincipalId"),
     },
     challengeBinding: {
@@ -315,7 +346,11 @@ export function packageBodyJcs(body: unknown): string {
  *
  * This predicate exists so that fact is queryable in code rather than living
  * only in a doc — a launch checklist that cannot be evaluated programmatically
- * is a launch checklist that gets skipped.
+ * is a launch checklist that gets skipped. It is more than a flag:
+ * `assertMintablePackage` refuses a package whose challenge nonce is interim, so
+ * nothing is minted on the placeholder, and that fails closed until the durable
+ * challenge exists. (The interim value is the all-zero nonce; the check runs on
+ * the validated body, so no other spelling of it can get past.)
  */
 export const INTERIM_NONCE: Hex = `0x${"00".repeat(32)}` as Hex;
 export function isInterimNonce(body: FinalMilestonePackageV2Body): boolean {

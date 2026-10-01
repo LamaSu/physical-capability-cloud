@@ -378,6 +378,47 @@ describe("validatePackageBody — pinned forms", () => {
     }
   });
 
+  it("every hashing function refuses empty principal ids too, instead of hashing them (F7)", () => {
+    const sigs = [
+      { signer: SIGNER_OP, scheme: "secp256k1-eip712", sig: "0xop" },
+      { signer: SIGNER_KERNEL, scheme: "ed25519-raw32", sig: "0xkernel" },
+    ];
+    for (const key of ["operatorPrincipalId", "kernelId", "devicePrincipalId"] as const) {
+      const b = clone(BODY);
+      b.producer[key] = "";
+      expect(() => computePackageBodyHash(b), key).toThrow(/must not be empty/);
+      expect(() => packageBodyJcs(b), key).toThrow(/must not be empty/);
+      expect(() => packageDigestV2(b, sigs), key).toThrow(/must not be empty/);
+    }
+  });
+
+  it("pins the kernel id to #399's rule: 1-128 printable ASCII, no space, not eip155:/ed25519: in any case (F7)", () => {
+    const bad: Array<[string, string]> = [
+      ["non-ASCII", "ääää"],
+      ["a space", "kernel 1"],
+      ["a tab", "kernel\t1"],
+      ["a control character", "kernel\u0001"],
+      ["DEL", "kernel\u007f"],
+      ["129 characters", "k".repeat(129)],
+      ["the reserved operator prefix", "eip155:8453:0xabc"],
+      ["the reserved operator prefix in upper case", "EIP155:1"],
+      ["the reserved device prefix", "ed25519:0xabc"],
+      ["the reserved device prefix in mixed case", "Ed25519:x"],
+      ["a lone surrogate", "kernel-\ud800"],
+    ];
+    for (const [name, id] of bad) {
+      const b = clone(BODY);
+      b.producer.kernelId = id;
+      expect(() => validatePackageBody(b), name).toThrow(/\$\.producer\.kernelId/);
+      expect(() => computePackageBodyHash(b), name).toThrow(PackageBodyValidationError);
+    }
+    for (const id of ["kernel-1", "k".repeat(128), "a:b", "eip155", "ed25519-key", "!~"]) {
+      const b = clone(BODY);
+      b.producer.kernelId = id;
+      expect(validatePackageBody(b).producer.kernelId, id).toBe(id);
+    }
+  });
+
   it("time bounds are decimal Unix-second strings, start <= end, kept byte-for-byte (bus #3567)", () => {
     for (const [start, end] of [
       ["2026-08-20T00:00:00Z", "2026-08-20T00:05:00Z"],
@@ -419,10 +460,16 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
     expect(packageDigestV2(minted.body, minted.signatures)).toBe(packageDigestV2(MINTABLE, [D1, D2]));
   });
 
-  it("refuses the interim challenge nonce", () => {
+  it("fails closed on the interim challenge nonce: nothing is minted until the durable challenge exists (F7)", () => {
+    // Everything else about this package is valid (it mints with a real nonce),
+    // so the refusal below is the interim check and nothing else.
+    expect(() => assertMintablePackage(MINTABLE, [D1, D2], REGISTRY)).not.toThrow();
     const b = clone(MINTABLE);
     b.challengeBinding.nonce = INTERIM_NONCE;
+    expect(b).toEqual({ ...MINTABLE, challengeBinding: { ...MINTABLE.challengeBinding, nonce: INTERIM_NONCE } });
+    expect(isInterimNonce(b)).toBe(true);
     expect(() => assertMintablePackage(b, [D1, D2], REGISTRY)).toThrow(PackageNotMintableError);
+    expect(() => assertMintablePackage(b, [D1, D2], REGISTRY)).toThrow(/\$\.challengeBinding\.nonce: is the interim placeholder/);
   });
 
   it("refuses anything but exactly one D1 and one D2", () => {
@@ -490,4 +537,12 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
     const d2 = { ...D2, signer: leaked };
     expect(() => assertMintablePackage(b, [D1, d2], { algorithm: "ed25519", publicKey: leaked })).toThrow(PackageNotMintableError);
   });
+});
+
+describe("rules the published golden blocks (STOPPED, not applied)", () => {
+  // The golden's body is evidence's SAMPLE vector and carries the free-text
+  // principal ids "op-golden" / "dev-golden"; its packageBodyHash 0x94a48c16... and
+  // packageDigestV2 0xf78103a1... must stay byte-identical, so validatePackageBody
+  // can only require them to be non-empty. The mint guard above pins them.
+  it.todo("validatePackageBody pins operatorPrincipalId and devicePrincipalId to the #399 forms (parseOperatorPrincipalId, parseDevicePrincipalId)");
 });
