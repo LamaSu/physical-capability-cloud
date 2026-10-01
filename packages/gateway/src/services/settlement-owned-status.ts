@@ -11,28 +11,42 @@
  *     settlement, since /complete then refuses, or releases the escrow early;
  *   - write at all once the job is terminal or inside the settlement pipeline.
  *     That would re-open it and let /complete settle it a second time.
- * The statuses only the system itself sets (executing, completing,
- * evidence_submitted, settled; none is in the vocabulary a generic writer may
- * set) belong to it on EVERY job, paid or not: a job can be settled without a
- * session or escrow link, through a configured escrow contract (astra, round 1
- * of #475). A generic writer never writes over them.
+ * The CLOSED statuses belong to the gateway on EVERY job, paid or not, and a
+ * generic writer never moves any job out of them: the statuses only its own
+ * writers set (executing, completing, evidence_stored, evidence_submitted,
+ * settled; none is in the vocabulary a generic writer may set), and completed,
+ * which the local kernel writes before its settlement pipeline runs. A job can
+ * be settled without a session or escrow link, through a configured escrow
+ * contract (astra, rounds 1 and 2 of #475), so the link cannot decide. The
+ * guard reads the CURRENT status, not the target: a node still finishes its
+ * own job (in_progress to completed). A paid job is also closed in failed and
+ * cancelled.
  * Every write is ONE conditional UPDATE, as /complete's claim is, so a status
  * the system sets in between is never overwritten.
  *
- * A job without a settlement record is unchanged: its node finishes it (adk
- * #452). The system's own writers (the kernel service, the settlement path)
- * write through the repository and are not guarded here. WHO may write a job's
- * status is N85(b), gateway's owner checks in WP-C.
+ * A job without a settlement record is otherwise unchanged: its node finishes
+ * it (adk #452), and its failed or cancelled job can still be re-opened. The
+ * system's own writers (the kernel service, the settlement path) write through
+ * the repository and are not guarded here. WHO may write a job's status is
+ * N85(b), gateway's owner checks in WP-C.
  */
 import { schema, eq, and, sql } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
 
 /** Terminal statuses only the settlement path may set on a paid job. */
 const TERMINAL = ["completed", "failed", "cancelled"] as const;
-/** Statuses only the system's own writers set: the kernel service and the settlement paths. */
-const SYSTEM_OWNED = ["executing", "completing", "evidence_submitted", "settled"] as const;
-/** On a paid job, a generic writer also never moves it out of a terminal status. */
-const PAID_OWNED = [...SYSTEM_OWNED, ...TERMINAL] as const;
+/**
+ * Statuses a generic writer never moves ANY job out of:
+ *  - those only the gateway's own writers set: executing (the local kernel), and
+ *    completing, evidence_stored, evidence_submitted and settled (the settlement paths);
+ *  - completed, which the local kernel writes before its settlement pipeline
+ *    runs (kernel-service.ts, routes/setup.ts).
+ * The guard reads the CURRENT status, not the target, so a node can still
+ * finish its own job (in_progress to completed).
+ */
+const CLOSED = ["executing", "completing", "evidence_stored", "evidence_submitted", "settled", "completed"] as const;
+/** A paid job is also never moved out of failed or cancelled; on an unlinked job they stay re-openable. */
+const PAID_CLOSED = [...CLOSED, "failed", "cancelled"] as const;
 
 type JobRow = NonNullable<ReturnType<ReturnType<typeof getRepos>["jobs"]["findById"]>>;
 
@@ -63,7 +77,7 @@ export function writeJobStatusGuarded(jobId: string, status: string, progress?: 
   if (!job) return { kind: "not_found" };
   const paid = hasSettlementRecord(job);
   if (paid && (TERMINAL as readonly string[]).includes(status)) return { kind: "refused", currentStatus: job.status };
-  const owned: readonly string[] = paid ? PAID_OWNED : SYSTEM_OWNED;
+  const owned: readonly string[] = paid ? PAID_CLOSED : CLOSED;
   const { db } = getStore();
   // The same fields the repository's updateStatus writes.
   const data: { status: string; progress?: number; completedAt?: string } = { status };

@@ -273,6 +273,38 @@ describe("astra, round 1 of #475: jobs settled without a session or escrow link,
     },
   );
 
+  it.each([false, true])("F3 (round 2): a job in evidence_stored (paid: %s) takes no generic write", async (paid) => {
+    const jobId = paid ? await paidJob() : "job-bio-42";
+    // As the settlement pipeline's processEvidence does (settlement-service.ts).
+    getRepos().jobs.updateStatus(jobId, "evidence_stored", 100);
+    for (const [write, target] of [[relay, "in_progress"], [relay, "completed"], [patch, "queued"], [patch, "failed"]] as const) {
+      expect((await write(jobId, target)).statusCode, `${target} from evidence_stored`).toBe(409);
+    }
+    const job = getRepos().jobs.findById(jobId)!;
+    expect(job.status).toBe("evidence_stored");
+    expect(job.progress).toBe(100);
+  });
+
+  it("F4 (round 2): an unlinked job the local kernel completed is not re-opened, and its completedAt is kept", async () => {
+    // As the local kernel writes before its settlement pipeline runs (kernel-service.ts).
+    getRepos().jobs.update("job-bio-42", { status: "completed", progress: 100, completedAt: "2026-09-29T00:00:00.000Z" });
+    // A repeated completion would restamp completedAt, so it is refused as well.
+    for (const [write, target] of [[patch, "queued"], [relay, "in_progress"], [patch, "failed"], [relay, "cancelled"], [patch, "completed"]] as const) {
+      expect((await write("job-bio-42", target)).statusCode, `${target} from completed`).toBe(409);
+    }
+    const job = getRepos().jobs.findById("job-bio-42")!;
+    expect(job.status).toBe("completed");
+    expect(job.completedAt).toBe("2026-09-29T00:00:00.000Z");
+  });
+
+  it("an unlinked job in failed or cancelled can still be re-queued by a generic write (only a paid job is closed in them)", async () => {
+    for (const state of ["failed", "cancelled"]) {
+      getRepos().jobs.updateStatus("job-bio-42", state);
+      expect((await patch("job-bio-42", "queued")).statusCode, `queued from ${state}`).toBe(200);
+      expect(statusOf("job-bio-42"), `status after queued from ${state}`).toBe("queued");
+    }
+  });
+
   it.each(["completing", "evidence_submitted", "settled", "completed", "failed", "cancelled"])(
     "F2: a paid job in %s takes no progress write, and its status and progress are unchanged",
     async (state) => {
