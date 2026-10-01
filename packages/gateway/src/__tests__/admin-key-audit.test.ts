@@ -28,6 +28,9 @@ import { initStore, closeStore, getRepos } from "../db.js";
 
 const ADMIN_SECRET = "test-admin-secret-0123456789abcdef";
 const WALLET_SECRET = "0xdeadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcdef";
+// N1: since custodial keys are sealed at rest, a real row carries this instead of (or after
+// migration, rather than) the plaintext. It must not leave through the report either.
+const SEALED_SECRET = `pcc-seal:v1:k1:${"A".repeat(16)}:${"B".repeat(22)}:${"C".repeat(88)}`;
 
 /**
  * Seed a LEGACY wildcard key straight into the table, the way pre-#1099
@@ -54,6 +57,7 @@ function seedLegacyWildcardKey(operatorId: string): { rawKey: string; keyHash: s
     publicKey: null,
     operatorWalletAddress: "0x1111111111111111111111111111111111111111",
     operatorWalletPrivateKey: WALLET_SECRET,
+    operatorWalletKeySealed: SEALED_SECRET,
   } as never);
   return { rawKey, keyHash };
 }
@@ -193,6 +197,8 @@ describe("GET /api/admin/keys/wildcard-audit — gated by the admin secret (A8)"
     expect(raw).not.toContain(legacy.keyHash);
     expect(raw).not.toContain(narrow.rawKey);
     expect(raw).not.toContain(WALLET_SECRET);
+    expect(raw).not.toContain(SEALED_SECRET);
+    expect(raw).not.toMatch(/pcc-seal|key_sealed/i);
     expect(raw).not.toMatch(/key_hash|raw_key|api_key|private_key/i);
   });
 

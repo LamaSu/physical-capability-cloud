@@ -21,12 +21,28 @@ import {
   NOTHING_TO_DELEGATE_RESPONSE,
 } from "../auth/reserved-identities.js";
 import {
+  custodyKekConfigured,
+  CUSTODIAL_WALLET_UNAVAILABLE,
+} from "../services/custody-guard.js";
+import {
   registerAgentOnChain,
   isIdentityWriteEnabled,
   getIdentityRegistryAddress,
   generateOperatorWallet,
   setAgentWalletOnChain,
 } from "../services/erc8004-identity-write.js";
+
+/**
+ * Strip a private key (0x-prefixed or bare hex, any casing) out of free text.
+ * Used on error messages that are logged, persisted and returned (N1): a
+ * library that echoes its inputs must not carry the custodial key into a log
+ * line, the agent_wallet_onchain_error column or the response.
+ */
+function withoutKey(text: string, privateKey: string): string {
+  const bare = privateKey.replace(/^0x/i, "");
+  if (!/^[0-9a-fA-F]+$/.test(bare)) return text;
+  return text.replace(new RegExp(bare, "gi"), "[redacted]");
+}
 
 /**
  * Operators manually approved to receive the money-moving `settlement` scope
@@ -348,6 +364,9 @@ export async function provisionRoutes(app: FastifyInstance) {
             onchain_error?: string;
           }
         | undefined;
+      // N1: set when a custodial wallet was NOT created because no valid custody KEK is
+      // configured (fail closed). Surfaced in the response, never silent.
+      let custodialWalletUnavailable: string | undefined;
       if (isIdentityWriteEnabled()) {
         onchainAttempted = true;
         const gatewayUrl =
@@ -391,76 +410,95 @@ export async function provisionRoutes(app: FastifyInstance) {
           // (viem import, EIP-712 domain mismatch vs deployed Daydreams
           // contract, RPC blip) NEVER leaks into the outer catch and reverts
           // the sponsored-mint success record.
-          try {
-            const opWallet = await generateOperatorWallet();
-            operatorWalletResponse = {
-              address: opWallet.address,
-              private_key: opWallet.privateKey,
-              source: "server-minted",
-              custody: "gateway",
-              warning:
-                "Store the private_key now — it will not be shown again. This wallet " +
-                "controls your ERC-8004 agentWallet; anyone holding it can sign as this agent.",
-            };
+          // N1 (Gate A): a custodial key is only created when it can be SEALED at rest
+          // (PCC_CUSTODY_KEK + PCC_CUSTODY_KEK_ID; see services/custody-guard.ts). With no
+          // valid KEK we FAIL CLOSED in every environment: no wallet is minted (so no
+          // on-chain agentWallet is assigned to an address whose key we would then have to
+          // discard), nothing is stored, a one-time alert is raised, and the response says
+          // why. The API key and the sponsored mint above are unaffected.
+          if (!custodyKekConfigured()) {
+            custodialWalletUnavailable = CUSTODIAL_WALLET_UNAVAILABLE;
+            req.log?.warn(
+              { keyId: record.id },
+              "custodial wallet not created: custody KEK not configured — sponsored mint still succeeded",
+            );
+          } else {
             try {
-              const walletResult = await setAgentWalletOnChain({
-                agentId: onchain.agentId,
-                newWallet: opWallet.address,
-                newWalletPrivateKey: opWallet.privateKey,
-              });
-              getRepos().apiKeys.recordOperatorWallet(record.id, {
+              const opWallet = await generateOperatorWallet();
+              operatorWalletResponse = {
                 address: opWallet.address,
-                privateKey: opWallet.privateKey,
-                onchainStatus: "written",
-                onchainTxHash: walletResult.txHash,
-                onchainError: null,
-              });
-              operatorWalletResponse.onchain_status = "written";
-              operatorWalletResponse.onchain_tx_hash = walletResult.txHash;
-              auditService.log({
-                eventType: "auth.agent_wallet_written",
-                actor: operatorId,
-                resourceType: "api_key",
-                resourceId: record.id,
-                action: "update",
-                metadata: {
-                  agent_wallet: opWallet.address,
-                  tx_hash: walletResult.txHash,
-                  agent_id: String(onchain.agentId),
-                },
-                ip: req.ip,
-                userAgent: req.headers["user-agent"],
-              });
-            } catch (walletErr) {
-              const walletErrMsg =
-                walletErr instanceof Error ? walletErr.message : String(walletErr);
+                private_key: opWallet.privateKey,
+                source: "server-minted",
+                custody: "gateway",
+                warning:
+                  "Store the private_key now — it will not be shown again. This wallet " +
+                  "controls your ERC-8004 agentWallet; anyone holding it can sign as this agent.",
+              };
               try {
+                const walletResult = await setAgentWalletOnChain({
+                  agentId: onchain.agentId,
+                  newWallet: opWallet.address,
+                  newWalletPrivateKey: opWallet.privateKey,
+                });
                 getRepos().apiKeys.recordOperatorWallet(record.id, {
                   address: opWallet.address,
                   privateKey: opWallet.privateKey,
-                  onchainStatus: "failed",
-                  onchainTxHash: null,
-                  onchainError: walletErrMsg.slice(0, 1024),
+                  onchainStatus: "written",
+                  onchainTxHash: walletResult.txHash,
+                  onchainError: null,
                 });
-              } catch {
-                // Non-fatal.
+                operatorWalletResponse.onchain_status = "written";
+                operatorWalletResponse.onchain_tx_hash = walletResult.txHash;
+                auditService.log({
+                  eventType: "auth.agent_wallet_written",
+                  actor: operatorId,
+                  resourceType: "api_key",
+                  resourceId: record.id,
+                  action: "update",
+                  metadata: {
+                    agent_wallet: opWallet.address,
+                    tx_hash: walletResult.txHash,
+                    agent_id: String(onchain.agentId),
+                  },
+                  ip: req.ip,
+                  userAgent: req.headers["user-agent"],
+                });
+              } catch (walletErr) {
+                // N1: the error text goes to a log line, the agent_wallet_onchain_error
+                // column and the response. Never let a library that echoes its inputs
+                // carry the custodial key into any of them.
+                const walletErrMsg = withoutKey(
+                  walletErr instanceof Error ? walletErr.message : String(walletErr),
+                  opWallet.privateKey,
+                );
+                try {
+                  getRepos().apiKeys.recordOperatorWallet(record.id, {
+                    address: opWallet.address,
+                    privateKey: opWallet.privateKey,
+                    onchainStatus: "failed",
+                    onchainTxHash: null,
+                    onchainError: walletErrMsg.slice(0, 1024),
+                  });
+                } catch {
+                  // Non-fatal.
+                }
+                operatorWalletResponse.onchain_status = "failed";
+                operatorWalletResponse.onchain_error = walletErrMsg.slice(0, 256);
+                req.log?.warn(
+                  { keyId: record.id, error: walletErrMsg },
+                  "setAgentWallet best-effort failed — off-chain wallet preserved",
+                );
               }
-              operatorWalletResponse.onchain_status = "failed";
-              operatorWalletResponse.onchain_error = walletErrMsg.slice(0, 256);
+            } catch (opWalletErr) {
+              // generateOperatorWallet failed (e.g. viem import glitch in a
+              // test env). Do NOT let this leak into the outer catch and
+              // revert the sponsored-mint success record. Off-chain identity
+              // continues to work; operator wallet is a future retry.
               req.log?.warn(
-                { keyId: record.id, error: walletErrMsg },
-                "setAgentWallet best-effort failed — off-chain wallet preserved",
+                { keyId: record.id, err: opWalletErr instanceof Error ? opWalletErr.message : String(opWalletErr) },
+                "operator wallet generation failed — sponsored mint still succeeded",
               );
             }
-          } catch (opWalletErr) {
-            // generateOperatorWallet failed (e.g. viem import glitch in a
-            // test env). Do NOT let this leak into the outer catch and
-            // revert the sponsored-mint success record. Off-chain identity
-            // continues to work; operator wallet is a future retry.
-            req.log?.warn(
-              { keyId: record.id, err: opWalletErr instanceof Error ? opWalletErr.message : String(opWalletErr) },
-              "operator wallet generation failed — sponsored mint still succeeded",
-            );
           }
         } catch (onchainErr) {
           const errMsg =
@@ -504,7 +542,11 @@ export async function provisionRoutes(app: FastifyInstance) {
         // on-chain assignment fails, the off-chain wallet is still yours.
         // See coord bulletin 235 for the migration path to full smart-wallet
         // ownership (B).
-        operator_wallet: operatorWalletResponse ?? { source: "none" },
+        operator_wallet:
+          operatorWalletResponse ??
+          (custodialWalletUnavailable
+            ? { source: "none", custodialWallet: custodialWalletUnavailable }
+            : { source: "none" }),
         usage: {
           header: `Authorization: Bearer ${rawKey}`,
           trace_header: `x-pcc-trace-id: ${trace_id ?? "<trace_id>"}`,
