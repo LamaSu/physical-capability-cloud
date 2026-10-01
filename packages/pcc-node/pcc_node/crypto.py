@@ -478,12 +478,26 @@ def load_or_create_keys(path=None):
 
     dir_fd = _open_key_directory(parent, abs_path)
     try:
+        created = None
         try:
             data = _read_key_file(dir_fd, name, abs_path)
         except FileNotFoundError:
-            public_hex, secret_hex = generate_node_keys()
-            _create_key_file(dir_fd, name, abs_path, public_hex, secret_hex)
-            return public_hex, secret_hex
+            created = generate_node_keys()
+            _create_key_file(dir_fd, name, abs_path, *created)
+        # Judged again on the same open directory before the key is used: a directory
+        # moved into a checkout, or a .git made above it, since the first check is
+        # refused, and a key just created there is removed (cross-family review A02b, F1).
+        try:
+            _refuse_checkout(dir_fd, abs_path)
+        except KeyFileError:
+            if created is not None:
+                try:
+                    os.unlink(name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+            raise
+        if created is not None:
+            return created
     finally:
         os.close(dir_fd)
 

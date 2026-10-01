@@ -750,3 +750,33 @@ class TestTheLocationIsCheckedWhenTheKeyIsLoaded:
         assert still_verifies
         with pytest.raises(crypto_module.KeyFileError, match="inside a source checkout"):
             load_or_create_keys(path)
+
+
+@needs_nacl
+class TestTheLocationIsCheckedAgainBeforeTheKeyIsUsed:
+    """A02b F1, its last sentence: the checkout check is repeated on the open directory
+    after the key file is read or created, before the key is returned."""
+
+    @staticmethod
+    def _git_appears_above(monkeypatch, top, attr):
+        real = getattr(crypto_module, attr)
+
+        def wrapped(*args, **kwargs):
+            (top / ".git").mkdir()
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(crypto_module, attr, wrapped)
+
+    def test_a_checkout_that_appears_before_the_load_returns_is_refused(self, monkeypatch, tmp_path):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        _new_key_pair_file(keys / "keys.json")
+        self._git_appears_above(monkeypatch, tmp_path / "home", "_read_key_file")
+        with pytest.raises(crypto_module.KeyFileError):
+            load_or_create_keys(str(keys / "keys.json"))
+
+    def test_a_key_created_as_a_checkout_appears_is_refused_and_removed(self, monkeypatch, tmp_path):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        self._git_appears_above(monkeypatch, tmp_path / "home", "_create_key_file")
+        with pytest.raises(crypto_module.KeyFileError):
+            load_or_create_keys(str(keys / "keys.json"))
+        assert os.listdir(keys) == [], "a new secret was left inside the checkout"
