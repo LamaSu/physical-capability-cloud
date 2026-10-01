@@ -93,9 +93,18 @@ export {
 // Coinbase CDP (funded-key on-ramp: embedded wallet + onramp + scoped spend-permissions)
 export {
   CdpWalletClient,
+  CDP_MOCK_ADDRESS_PREFIX,
+  isCdpMockAddress,
   CdpOnrampClient,
   type CreateOnrampParams,
   CdpSpendPermissionService,
+  CdpSpendPermissionInputError,
+  CdpSpendPermissionListIncompleteError,
+  CdpSpendPermissionNotFoundError,
+  CdpSpendPermissionRevokeUnconfirmedError,
+  CdpUserOperationFailedError,
+  CdpSpendPermissionUnconfirmedError,
+  cdpCredentialsComplete,
   type IssueSpendPermissionParams,
   type CdpConfig,
   type CdpNetwork,

@@ -6,7 +6,7 @@
  * ALL external calls (IPFS, blockchain) are mocked. No real network traffic.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
@@ -14,6 +14,21 @@ import { ot2RelayRoutes } from "../routes/ot2-relay.js";
 import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
+
+// N46 authority (WP-A): completing a job or resuming its settlement is the job's
+// operator's or the admin's. These fixtures act as the admin, presenting the
+// admin secret on those calls.
+const RELEASE_ADMIN_SECRET = "release-fixture-admin-secret";
+const RELEASE_ADMIN_HEADERS = { "x-admin-key": RELEASE_ADMIN_SECRET };
+const savedReleaseAdminKey = process.env.PCC_ADMIN_KEY;
+beforeAll(() => {
+  process.env.PCC_ADMIN_KEY = RELEASE_ADMIN_SECRET;
+});
+afterAll(() => {
+  if (savedReleaseAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = savedReleaseAdminKey;
+});
+
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -314,6 +329,7 @@ describe("Paid Job Flow", () => {
       const completeRes = await app.inject({
         method: "PUT",
         url: `/api/jobs/${jobId}/complete`,
+        headers: RELEASE_ADMIN_HEADERS,
         payload: {
           evidenceEvents: [
             { type: "photo_captured", payload: { frameId: "frame-001" } },
@@ -337,6 +353,7 @@ describe("Paid Job Flow", () => {
       const res = await app.inject({
         method: "PUT",
         url: "/api/jobs/nonexistent-job/complete",
+        headers: RELEASE_ADMIN_HEADERS,
         payload: {},
       });
 
@@ -360,6 +377,7 @@ describe("Paid Job Flow", () => {
       await app.inject({
         method: "PUT",
         url: `/api/jobs/${jobId}/complete`,
+        headers: RELEASE_ADMIN_HEADERS,
         payload: {},
       });
 
@@ -367,6 +385,7 @@ describe("Paid Job Flow", () => {
       const res = await app.inject({
         method: "PUT",
         url: `/api/jobs/${jobId}/complete`,
+        headers: RELEASE_ADMIN_HEADERS,
         payload: {},
       });
 
@@ -391,6 +410,7 @@ describe("Paid Job Flow", () => {
       await app.inject({
         method: "PUT",
         url: `/api/jobs/${jobId}/complete`,
+        headers: RELEASE_ADMIN_HEADERS,
         payload: {},
       });
 
@@ -459,6 +479,7 @@ describe("Paid Job Flow", () => {
       await app.inject({
         method: "PUT",
         url: `/api/jobs/${jobId}/complete`,
+        headers: RELEASE_ADMIN_HEADERS,
         payload: {},
       });
 
@@ -597,6 +618,7 @@ describe("Paid Job Flow", () => {
       const completeRes = await app.inject({
         method: "PUT",
         url: `/api/jobs/${jobId}/complete`,
+        headers: RELEASE_ADMIN_HEADERS,
         payload: {
           evidenceEvents: [
             { type: "photo_captured", payload: { note: "post-dispense photo" } },

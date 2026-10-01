@@ -43,6 +43,7 @@ import {
 } from "../routes/operator-channels.js";
 import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
 import { initStore, closeStore } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
 
 // ── Helper tests (no Fastify needed) ─────────────────────────────────────────
 
@@ -175,14 +176,33 @@ describe("dispatchToChannels", () => {
 
 // ── HTTP route tests ─────────────────────────────────────────────────────────
 
+// N84: a channel belongs to the identity that attached it, so every channel route needs a caller. These
+// tests run as the shop's OWNER, the principal apiGate attaches to a request (API key or SIWE session).
+const OWNER = "shop-owner@channels.test";
+
+/** A bare app whose requests carry `principal`, as apiGate would attach it (none = an unauthenticated request). */
+async function buildChannelsApp(principal: string | null): Promise<FastifyInstance> {
+  const app = Fastify({ logger: false });
+  app.decorateRequest("operatorId", null);
+  app.decorateRequest("userId", null);
+  if (principal !== null) {
+    app.addHook("onRequest", async (req) => {
+      const r = req as unknown as { operatorId: string | null; userId: string | null };
+      r.operatorId = principal;
+      r.userId = principal;
+    });
+  }
+  await app.register(operatorChannelsRoutes);
+  await app.ready();
+  return app;
+}
+
 describe("operator-channels HTTP routes", () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
     _clearOperatorChannelsForTests();
-    app = Fastify({ logger: false });
-    await app.register(operatorChannelsRoutes);
-    await app.ready();
+    app = await buildChannelsApp(OWNER);
   });
 
   afterAll(async () => {
@@ -225,7 +245,7 @@ describe("operator-channels HTTP routes", () => {
       transport: "sms",
       describe: "Text the owner E.164 on every new order",
       endpoint: { phoneE164: "+14155551234" },
-    });
+    }, OWNER);
     const res = await app.inject({
       method: "GET",
       url: "/api/operators/shop-beta/channels",
@@ -240,7 +260,7 @@ describe("operator-channels HTTP routes", () => {
       label: "Old label",
       transport: "manual",
       describe: "Dashboard only for now",
-    });
+    }, OWNER);
     const res = await app.inject({
       method: "PATCH",
       url: `/api/operators/channels/${ch.id}`,
@@ -257,7 +277,7 @@ describe("operator-channels HTTP routes", () => {
       label: "Temp",
       transport: "manual",
       describe: "Dashboard only, temporary entry for the demo",
-    });
+    }, OWNER);
     const res = await app.inject({
       method: "DELETE",
       url: `/api/operators/channels/${ch.id}`,
@@ -273,7 +293,7 @@ describe("operator-channels HTTP routes", () => {
       label: "Dashboard",
       transport: "manual",
       describe: "Watching the operator screen during dinner rush",
-    });
+    }, OWNER);
     const res = await app.inject({
       method: "POST",
       url: "/api/operators/shop-epsilon/channels/test",
@@ -291,11 +311,17 @@ describe("operator-channels HTTP routes", () => {
 
 describe("A2A skills: pcc-attach-channel + author-integration extension", () => {
   let app: FastifyInstance;
+  // WP-C R6: pcc-author-integration registers a kernel owned by the
+  // AUTHENTICATED caller, so those calls carry this key even with
+  // PCC_A2A_AUTH_DISABLED. (Old: sent anonymously; the kernel was owned by
+  // the body's operatorAddress or "a2a-operator".)
+  let operatorKey: string;
 
   beforeAll(async () => {
     process.env.PCC_DB_PATH = ":memory:";
     process.env.PCC_A2A_AUTH_DISABLED = "true";
     initStore({ seed: true });
+    operatorKey = provisionApiKey({ operatorId: "a2a-channels-operator", scopes: ["operator"] }).rawKey;
     app = Fastify({ logger: false });
     await app.register(a2aTasksRoutes);
     await app.ready();
@@ -331,7 +357,7 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
           },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorKey}` },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -369,7 +395,7 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
           },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorKey}` },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -391,7 +417,7 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
           params: { label: "x", transport: "manual", describe: "abcd" },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorKey}` },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -440,7 +466,7 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
           },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorKey}` },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -473,11 +499,229 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
           },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorKey}` },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.result.state).toBe("COMPLETED");
     expect(body.result.artifacts[0].data.operatorSlug).toBe("my-opentrons-ot-2");
+  });
+
+  // N84: a channel belongs to the identity that attaches it, so the skill needs a caller. Here
+  // PCC_A2A_AUTH_DISABLED turns the route's own bearer gate off, so an anonymous call reaches the skill itself.
+  it("pcc-attach-channel with no credentials is refused (-32600) and attaches nothing", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/a2a/tasks/send",
+      payload: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tasks/send",
+        params: {
+          skill: "pcc-attach-channel",
+          params: {
+            operatorSlug: "anon-shop",
+            label: "Anonymous",
+            transport: "manual",
+            describe: "Dashboard only, from nobody",
+          },
+        },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.error?.code).toBe(-32600);
+    expect(body.result).toBeUndefined();
+    expect(getChannelsByOperator("anon-shop")).toHaveLength(0);
+  });
+
+  it("pcc-attach-channel records the caller as the creator, and its reply counts only the caller's channels", async () => {
+    attachChannel(
+      "shared-shop",
+      { label: "Theirs", transport: "manual", describe: "Dashboard only, theirs" },
+      "someone-else@a2a.test",
+    );
+    const res = await app.inject({
+      method: "POST",
+      url: "/a2a/tasks/send",
+      payload: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tasks/send",
+        params: {
+          skill: "pcc-attach-channel",
+          params: {
+            operatorSlug: "shared-shop",
+            label: "Mine",
+            transport: "manual",
+            describe: "Dashboard only, mine",
+          },
+        },
+      }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorKey}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.result.state).toBe("COMPLETED");
+    expect(body.result.artifacts[0].data.totalChannelsNow).toBe(1); // "Theirs" is not this caller's to count
+    const mine = getChannelsByOperator("shared-shop").find((c) => c.label === "Mine");
+    expect(mine?.creatorId).toBe("a2a-channels-operator");
+    expect(JSON.stringify(body)).not.toContain("Theirs");
+  });
+});
+
+// ── N84: the handlers' own guard (a bare app: no apiGate in front) ───────────
+// The same bindings are proven on the real server in n84-channel-owner.test.ts; these run the handlers
+// alone, so a guard that apiGate would mask cannot be missed.
+
+describe("N84: the channel routes bind a channel to its caller", () => {
+  const ADMIN = "channels-test-admin-secret-0123456789";
+  const SLUG = "n84-unit-shop";
+  const OTHER = "someone-else@channels.test";
+  const unit = { label: "Mine", transport: "manual", describe: "Dashboard only, for the unit test" };
+  const savedAdmin = process.env.PCC_ADMIN_KEY;
+
+  beforeAll(() => {
+    process.env.PCC_ADMIN_KEY = ADMIN;
+  });
+  afterAll(() => {
+    if (savedAdmin === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdmin;
+  });
+  beforeEach(() => _clearOperatorChannelsForTests());
+
+  const everyRoute = (id: string) =>
+    [
+      ["POST", `/api/operators/${SLUG}/channels`, unit],
+      ["GET", `/api/operators/${SLUG}/channels`, undefined],
+      ["PATCH", `/api/operators/channels/${id}`, { label: "Changed" }],
+      ["DELETE", `/api/operators/channels/${id}`, undefined],
+      ["POST", `/api/operators/${SLUG}/channels/test`, {}],
+    ] as const;
+
+  it("no identity is 401 on every route, and nothing is written", async () => {
+    const mine = attachChannel(SLUG, unit, OWNER);
+    const app = await buildChannelsApp(null);
+    for (const [method, url, body] of everyRoute(mine.id)) {
+      const res = await app.inject({ method, url, payload: body as object | undefined });
+      expect(res.statusCode, `${method} ${url}`).toBe(401);
+    }
+    // Authentication comes before validation: an empty body is still 401, not 400.
+    const empty = await app.inject({ method: "POST", url: `/api/operators/${SLUG}/channels`, payload: {} });
+    expect(empty.statusCode).toBe(401);
+    expect(getChannelsByOperator(SLUG).map((c) => c.label)).toEqual(["Mine"]);
+    await app.close();
+  });
+
+  it("a WRONG admin secret is 403 on every route, even with the creator's own identity, and nothing is written", async () => {
+    const mine = attachChannel(SLUG, unit, OWNER);
+    const app = await buildChannelsApp(OWNER);
+    for (const [method, url, body] of everyRoute(mine.id)) {
+      const res = await app.inject({ method, url, payload: body as object | undefined, headers: { "x-admin-key": "not-the-secret" } });
+      expect(res.statusCode, `${method} ${url}`).toBe(403);
+    }
+    // ... and before validation: an empty body with a wrong secret is 403, not 400.
+    const empty = await app.inject({
+      method: "POST",
+      url: `/api/operators/${SLUG}/channels`,
+      payload: {},
+      headers: { "x-admin-key": "not-the-secret" },
+    });
+    expect(empty.statusCode).toBe(403);
+    expect(getChannelsByOperator(SLUG).map((c) => c.label)).toEqual(["Mine"]);
+    await app.close();
+  });
+
+  it("attach records the CALLER (normalized), never a creatorId in the body", async () => {
+    const app = await buildChannelsApp(" Shop-Owner@Channels.TEST ");
+    const res = await app.inject({ method: "POST", url: `/api/operators/${SLUG}/channels`, payload: { ...unit, creatorId: OTHER } });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().channel.creatorId).toBe(OWNER);
+    expect(getChannelsByOperator(SLUG)[0]!.creatorId).toBe(OWNER);
+    await app.close();
+  });
+
+  it("another identity's channels are omitted from the list and answered as unknown by id", async () => {
+    const theirs = attachChannel(SLUG, { ...unit, label: "Theirs" }, OTHER);
+    const mine = attachChannel(SLUG, unit, OWNER);
+    const app = await buildChannelsApp(OWNER);
+    const list = await app.inject({ method: "GET", url: `/api/operators/${SLUG}/channels` });
+    expect((list.json().channels as Array<{ id: string }>).map((c) => c.id)).toEqual([mine.id]);
+    expect(list.body).not.toContain("Theirs");
+    expect(list.body).not.toContain(theirs.id);
+    const patch = await app.inject({ method: "PATCH", url: `/api/operators/channels/${theirs.id}`, payload: { label: "Changed" } });
+    const del = await app.inject({ method: "DELETE", url: `/api/operators/channels/${theirs.id}` });
+    const unknown = await app.inject({ method: "DELETE", url: "/api/operators/channels/ch_does_not_exist" });
+    expect(patch.statusCode).toBe(404);
+    expect(del.statusCode).toBe(404);
+    expect(del.body).toBe(unknown.body); // the same answer as for an id that does not exist
+    expect(getChannelsByOperator(SLUG).find((c) => c.id === theirs.id)?.label).toBe("Theirs");
+    await app.close();
+  });
+
+  it("PATCH pins the creator: a creatorId in the body changes nothing, and a legacy channel stays creatorless", async () => {
+    const mine = attachChannel(SLUG, unit, OWNER);
+    const legacy = attachChannel(SLUG, { ...unit, label: "Legacy" }, null);
+    const app = await buildChannelsApp(OWNER);
+    const own = await app.inject({
+      method: "PATCH",
+      url: `/api/operators/channels/${mine.id}`,
+      payload: { creatorId: OTHER, label: "Renamed" },
+    });
+    expect(own.statusCode, own.body).toBe(200);
+    expect(getChannelsByOperator(SLUG).find((c) => c.id === mine.id)).toMatchObject({ label: "Renamed", creatorId: OWNER });
+    const byAdmin = await app.inject({
+      method: "PATCH",
+      url: `/api/operators/channels/${legacy.id}`,
+      headers: { "x-admin-key": ADMIN },
+      payload: { creatorId: OWNER },
+    });
+    expect(byAdmin.statusCode, byAdmin.body).toBe(200);
+    expect(getChannelsByOperator(SLUG).find((c) => c.id === legacy.id)?.creatorId).toBeUndefined();
+    await app.close();
+  });
+
+  it("a channel with no creator (legacy) is the admin's alone", async () => {
+    const legacy = attachChannel(SLUG, { ...unit, label: "Legacy" }, null);
+    const owner = await buildChannelsApp(OWNER);
+    const list = await owner.inject({ method: "GET", url: `/api/operators/${SLUG}/channels` });
+    expect(list.json().channels).toEqual([]);
+    const patch = await owner.inject({ method: "PATCH", url: `/api/operators/channels/${legacy.id}`, payload: { label: "Changed" } });
+    const test = await owner.inject({ method: "POST", url: `/api/operators/${SLUG}/channels/test`, payload: {} });
+    const del = await owner.inject({ method: "DELETE", url: `/api/operators/channels/${legacy.id}` });
+    expect([patch.statusCode, test.statusCode, del.statusCode]).toEqual([404, 404, 404]);
+    expect(getChannelsByOperator(SLUG).map((c) => c.label)).toEqual(["Legacy"]);
+    const admin = await owner.inject({ method: "GET", url: `/api/operators/${SLUG}/channels`, headers: { "x-admin-key": ADMIN } });
+    expect((admin.json().channels as Array<{ id: string }>).map((c) => c.id)).toEqual([legacy.id]);
+    await owner.close();
+  });
+
+  it("dispatchToChannels with onlyFor reaches only the channels that caller may access", async () => {
+    const mine = attachChannel(SLUG, unit, OWNER);
+    const theirs = attachChannel(SLUG, { ...unit, label: "Theirs" }, OTHER);
+    const legacy = attachChannel(SLUG, { ...unit, label: "Legacy" }, null);
+    const p = { jobId: "j_n84", contextRef: "ctx", summary: "s" };
+    const ids = (rs: Array<{ channelId: string }>) => rs.map((r) => r.channelId).sort();
+    expect(ids(await dispatchToChannels(SLUG, p, { admin: false, caller: OWNER }))).toEqual([mine.id]);
+    expect(await dispatchToChannels(SLUG, p, { admin: false, caller: "nobody@channels.test" })).toEqual([]);
+    expect(ids(await dispatchToChannels(SLUG, p, { admin: true }))).toEqual([mine.id, theirs.id, legacy.id].sort());
+    // Unfiltered delivers to everyone's channels: why it must not be wired to job notifications yet.
+    expect(ids(await dispatchToChannels(SLUG, p))).toEqual([mine.id, theirs.id, legacy.id].sort());
+    // A slug with no channels: a held caller is told nothing; the admin gets the existing marker.
+    expect(await dispatchToChannels("n84-empty-slug", p, { admin: false, caller: OWNER })).toEqual([]);
+    expect((await dispatchToChannels("n84-empty-slug", p, { admin: true }))[0]!.ref).toBe("no-channels-attached");
+  });
+
+  it("a test send by a caller with no channel of its own is 404; the owner's reaches only its own", async () => {
+    attachChannel(SLUG, { ...unit, label: "Theirs" }, OTHER);
+    const stranger = await buildChannelsApp(OWNER);
+    const none = await stranger.inject({ method: "POST", url: `/api/operators/${SLUG}/channels/test`, payload: {} });
+    expect(none.statusCode).toBe(404);
+    const mine = attachChannel(SLUG, unit, OWNER);
+    const some = await stranger.inject({ method: "POST", url: `/api/operators/${SLUG}/channels/test`, payload: {} });
+    expect(some.statusCode).toBe(200);
+    expect((some.json().results as Array<{ channelId: string }>).map((r) => r.channelId)).toEqual([mine.id]);
+    await stranger.close();
   });
 });

@@ -61,7 +61,15 @@ export const apiKeys = sqliteTable("api_keys", {
   // to `operatorWalletCustody = "operator"`; a future v2 replaces this
   // with an ERC-4337 smart wallet + passkey (see coord bulletin 235).
   operatorWalletAddress: text("operator_wallet_address"),
-  operatorWalletPrivateKey: text("operator_wallet_private_key"), // hex, custodial at bootstrap
+  // LEGACY plaintext custodial key (hex). N1: never written again; new rows keep
+  // it NULL. Rows provisioned before N1 are sealed and nulled by the operator-run
+  // packages/gateway/scripts/seal-custodial-keys.mjs. The column is retained,
+  // not dropped or altered.
+  operatorWalletPrivateKey: text("operator_wallet_private_key"),
+  // N1: the custodial key sealed at rest, "pcc-seal:v1:<kekId>:<iv>:<tag>:<ct>"
+  // (AES-256-GCM under PCC_CUSTODY_KEK; AAD binds it to this row and address).
+  // See custody-seal.ts. Added through migrate.ts safeAddColumn.
+  operatorWalletKeySealed: text("operator_wallet_key_sealed"),
   operatorWalletCustody: text("operator_wallet_custody").default("gateway"), // gateway | operator
   agentWalletOnchainStatus: text("agent_wallet_onchain_status").default("pending"), // pending | written | failed
   agentWalletOnchainTxHash: text("agent_wallet_onchain_tx_hash"),

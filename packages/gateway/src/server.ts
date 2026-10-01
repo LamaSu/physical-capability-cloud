@@ -1,4 +1,5 @@
 import { initSentry, Sentry } from "./sentry.js";
+import { decodedRequestPath } from "./middleware/route-path.js";
 import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
@@ -161,6 +162,7 @@ import { traceIdPlugin } from "./middleware/trace-id.js";
 import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
 import { funnelTrackerPlugin } from "./services/funnel-tracker.js";
 import { adminObservabilityRoutes } from "./routes/admin-observability.js";
+import { adminKeyAuditRoutes } from "./routes/admin-key-audit.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
 import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
@@ -736,6 +738,8 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+  // Retire-the-wildcard #1099 piece 4 — read-only audit of keys still on "*".
+  await app.register(adminKeyAuditRoutes);
   // Generic /api/job-offers/* surface — every PCC adapter shares this.
   await app.register(jobOffersRoutes);
   // Legacy /api/courier-jobs/* shim — kept for backward compat through the
@@ -973,7 +977,11 @@ export async function createGateway(port = 3200) {
     const resolvedDashboardRoot = resolvePath(dashboardPath);
 
     app.setNotFoundHandler(async (req, reply) => {
-      if (req.url.startsWith("/api/") || req.url.startsWith("/sse/")) {
+      // Classified by the SAME decoded path apiGate authorized (route-path.ts), so an
+      // encoded /api/ or /sse/ prefix (/%61pi/...) is a bare 404 too, never the SPA
+      // (astra, pack 59, AZ-6).
+      const classifiedPath = decodedRequestPath(req.url);
+      if (classifiedPath.startsWith("/api/") || classifiedPath.startsWith("/sse/")) {
         return reply.status(404).send({ error: "not_found" });
       }
       // Check if a real static file exists (strip query string)

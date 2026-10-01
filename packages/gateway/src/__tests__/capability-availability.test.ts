@@ -261,14 +261,23 @@ describe("pack 111 HIGH 1: a key minted by public provisioning for the owner's i
         [{ walletAddress: "0x1111111111111111111111111111111111111111" }, "cap-imp-wallet"],
       ] as const) {
         const prov = await app.inject({ method: "POST", url: "/api/auth/provision", payload: who });
-        expect(prov.statusCode, JSON.stringify(who)).toBeLessThan(300);
-        const key = prov.json().api_key as string;
-        const res = await app.inject({
-          method: "PUT", url: `/api/capabilities/${capId}/availability`,
-          headers: { authorization: `Bearer ${key}` }, payload: { mode: "always" },
-        });
-        expect(res.statusCode, capId).toBe(403);
-        expect(res.json().error).toBe("proven_identity_required");
+        if (prov.statusCode < 300) {
+          // A key WAS minted for the owner's identity: it still cannot write.
+          const key = prov.json().api_key as string;
+          const res = await app.inject({
+            method: "PUT", url: `/api/capabilities/${capId}/availability`,
+            headers: { authorization: `Bearer ${key}` }, payload: { mode: "always" },
+          });
+          expect(res.statusCode, capId).toBe(403);
+          expect(res.json().error).toBe("proven_identity_required");
+        } else {
+          // WP-A (#326, F3 reserved identities): public provisioning refuses to mint a key
+          // for an identity that already owns a kernel (409 identity_claimed), or for a
+          // wallet without proof of control. That is stronger than minting a key that then
+          // cannot write: no impersonating key exists at all.
+          expect([401, 403, 409], JSON.stringify(who)).toContain(prov.statusCode);
+          expect(prov.json().api_key, JSON.stringify(who)).toBeUndefined();
+        }
         expect(stored(capId)).toEqual({});
       }
     } finally {

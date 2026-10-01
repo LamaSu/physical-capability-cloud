@@ -25,6 +25,11 @@ export interface IApiKeyRepository {
   ): ApiKeyRow | undefined;
   recordOnchainFailure(id: string, error: string): ApiKeyRow | undefined;
   listPendingOnchain(limit?: number): ApiKeyRow[];
+  /**
+   * Stores the wallet address and the custodial key SEALED (N1), never as
+   * plaintext. Throws CustodyKekUnavailableError, before any write, when no
+   * valid PCC_CUSTODY_KEK is configured.
+   */
   recordOperatorWallet(
     id: string,
     wallet: {

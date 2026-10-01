@@ -50,24 +50,9 @@ import {
   type ToolSource,
 } from "@pcc/tool-index";
 import { isHybridActive, isHybridServed, readRankerMode } from "../ranker-config.js";
+import { requireAdminSecret } from "../auth/admin-secret-gate.js";
 
 // ── Allowlist for /reload ────────────────────────────────────────────────
-
-/**
- * Comma-separated operatorIds/wallet addresses (lower-cased). If empty,
- * NO operator may call /reload. Production must opt-in explicitly.
- */
-function isToolIndexAdmin(operatorId: string | undefined | null): boolean {
-  if (!operatorId) return false;
-  const raw = process.env.PCC_TOOL_INDEX_ADMINS ?? "";
-  const set = new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean),
-  );
-  return set.has(operatorId.toLowerCase());
-}
 
 function requireToolIndexAdmin(
   req: FastifyRequest,
@@ -80,14 +65,9 @@ function requireToolIndexAdmin(
     void reply.status(401).send({ error: "authentication_required" });
     return null;
   }
-  if (!isToolIndexAdmin(callerId)) {
-    void reply.status(403).send({
-      error: "forbidden",
-      message:
-        "Tool-index reload requires operator on PCC_TOOL_INDEX_ADMINS allowlist.",
-    });
-    return null;
-  }
+  // WP-A round 5 (coord-watch #2883): the admin SECRET grants this, not an
+  // asserted operatorId on PCC_TOOL_INDEX_ADMINS (the allowlist only reserves those names now).
+  if (!requireAdminSecret(req, reply)) return null;
   return callerId;
 }
 
@@ -390,14 +370,15 @@ export async function toolSearchRoutes(app: FastifyInstance) {
         profiles: presetNames(),
       },
       lastReload: st.lastReload,
-      loadedFromPath: st.loadedFromPath,
+      // The filesystem path the index loaded from is not published (#2883).
+      loadedFrom: st.loadedFromPath ? "file" : "built-in",
     });
   });
 
   // ── POST /api/tools/reload ─────────────────────────────────────────────
   // Auth-gated: only operators on PCC_TOOL_INDEX_ADMINS may rebuild.
   app.post("/api/tools/reload", async (req, reply) => {
-    if (!requireToolIndexAdmin(req, reply)) return;
+    if (!requireToolIndexAdmin(req, reply)) return reply;
     const built = buildIndex({
       info: (m) => app.log.info(m),
       warn: (m) => app.log.warn(m),

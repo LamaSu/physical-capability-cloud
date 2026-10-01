@@ -17,6 +17,7 @@ import {
   normalizePublicKeyHex,
   type Ed25519Keypair,
 } from "./ed25519.js";
+import { scopeColumnFits, MAX_SCOPES, MAX_SCOPE_CHARS, MAX_SCOPE_COLUMN_BYTES } from "./scope-limits.js";
 
 // Note: FastifyRequest augmentation for apiKeyId/operatorId lives in
 // require-auth.ts alongside the userId declaration.
@@ -76,6 +77,35 @@ export function resolveApiKeyFromToken(token: string | undefined | null) {
 }
 
 /**
+ * The wallet an API key PROVES, or null (economics N8 ask, #2888; seam with #385).
+ *
+ * A key's operatorId is only as good as the path that minted it: the email path
+ * asserts an identity, while the SIWE path of /api/auth/provision proves the
+ * wallet with an EIP-4361 signature. That path records the proof in the key's
+ * server-written metadata ({ siweVerified: true, provenAddress }), and only it
+ * does: no route writes caller-supplied metadata onto a key. This accepts the
+ * proof only when it is exactly that shape AND names the key's own operatorId,
+ * so a custodial-quickstart walletAddress, a legacy row, malformed JSON or a
+ * proof for a different identity all give null (fail closed).
+ */
+export function provenWalletOfKey(
+  record: { operatorId?: unknown; metadata?: unknown } | null | undefined,
+): string | null {
+  if (!record || typeof record.operatorId !== "string" || typeof record.metadata !== "string") return null;
+  let meta: unknown;
+  try {
+    meta = JSON.parse(record.metadata);
+  } catch {
+    return null;
+  }
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const { siweVerified, provenAddress } = meta as { siweVerified?: unknown; provenAddress?: unknown };
+  if (siweVerified !== true || typeof provenAddress !== "string") return null;
+  if (!/^0x[0-9a-f]{40}$/.test(provenAddress)) return null;
+  return provenAddress === record.operatorId.toLowerCase() ? provenAddress : null;
+}
+
+/**
  * Resolve an API key from the Authorization header.
  * Returns the key record or null.
  *
@@ -115,13 +145,98 @@ export interface ProvisionResult {
   ed25519?: Ed25519Keypair;
 }
 
+/**
+ * Refuse any scope set that is not an explicit, narrow list (MUST-CLOSE 6).
+ *
+ * `provisionApiKey` used to default an omitted `scopes` to `["*"]`, so ANY
+ * caller that forgot the field minted a key that — at the time — bypassed the
+ * whole scope layer, money path included. Scopes are now REQUIRED, and a
+ * wildcard is refused outright: no code path can mint `"*"` any more. Any scope
+ * containing `*` is refused (a family wildcard like `operator.*` is advertised
+ * as satisfying a whole family by agent introspection), as is anything that is
+ * not a non-empty, trimmed string. An explicit EMPTY array is allowed — it is
+ * narrow by definition (it holds no scope).
+ *
+ * Throws an Error carrying a `code` (`scopes_required` | `invalid_scopes` |
+ * `wildcard_scope_refused`); nothing is persisted.
+ */
+export function assertMintableScopes(scopes: unknown): asserts scopes is string[] {
+  if (!Array.isArray(scopes)) {
+    throw Object.assign(
+      new Error("provisionApiKey: `scopes` is required — pass an explicit array of narrow scopes"),
+      { code: "scopes_required" },
+    );
+  }
+  for (const scope of scopes) {
+    if (typeof scope !== "string" || scope.length === 0 || scope.trim() !== scope) {
+      throw Object.assign(
+        new Error("provisionApiKey: every scope must be a non-empty string without surrounding whitespace"),
+        { code: "invalid_scopes" },
+      );
+    }
+    if (scope.includes("*")) {
+      throw Object.assign(
+        new Error("provisionApiKey: wildcard scopes are never minted — grant explicit narrow scopes"),
+        { code: "wildcard_scope_refused" },
+      );
+    }
+  }
+  // A key must be readable by the scope parser it will be checked with: at most 64
+  // scopes of at most 64 characters, no duplicates, and the stored column (exactly
+  // JSON.stringify(scopes), as provisionApiKey writes it) within the parser's
+  // UTF-8 byte limit (WP-A rounds 5 and 8; auth/scope-limits.ts). parseScopeColumn
+  // refuses anything else, so such a key would silently hold nothing.
+  if (scopes.length > MAX_SCOPES || scopes.some((s) => s.length > MAX_SCOPE_CHARS) || new Set(scopes).size !== scopes.length) {
+    throw Object.assign(
+      new Error(`provisionApiKey: at most ${MAX_SCOPES} distinct scopes of at most ${MAX_SCOPE_CHARS} characters`),
+      { code: "invalid_scopes" },
+    );
+  }
+  if (!scopeColumnFits(JSON.stringify(scopes))) {
+    throw Object.assign(
+      new Error(`provisionApiKey: the serialized scope list must fit ${MAX_SCOPE_COLUMN_BYTES} UTF-8 bytes`),
+      { code: "invalid_scopes" },
+    );
+  }
+}
+
+/**
+ * Parse provisionApiKey's `notAfter` bound. null/undefined = no bound. Anything
+ * else must parse to a real instant: an unreadable bound throws
+ * (`invalid_expiry`) rather than silently becoming "never expires".
+ */
+function expiryBoundMs(notAfter: string | null | undefined): number | null {
+  if (notAfter === undefined || notAfter === null) return null;
+  const ms = typeof notAfter === "string" ? new Date(notAfter).getTime() : Number.NaN;
+  if (!Number.isFinite(ms)) {
+    throw Object.assign(
+      new Error("provisionApiKey: `notAfter` is not a valid timestamp"),
+      { code: "invalid_expiry" },
+    );
+  }
+  return ms;
+}
+
 export function provisionApiKey(opts: {
   operatorId: string;
   name?: string;
   description?: string;
-  scopes?: string[];
+  /**
+   * REQUIRED, explicit and narrow. `"*"` (or any scope containing `*`) throws —
+   * see assertMintableScopes. There is no default.
+   */
+  scopes: string[];
   rateLimit?: string;
   expiresInDays?: number;
+  /**
+   * Absolute upper bound on the new key's expiry (an ISO-8601 timestamp). The
+   * key expires at the EARLIER of this and `expiresInDays`, never later than
+   * `notAfter`. A key minted on another key's authority (the F3 same-identity
+   * path) passes that key's own `expiresAt` here, so a short-lived key cannot
+   * mint a longer-lived one (WP-A repair R4). null/undefined = no bound. An
+   * unparseable value throws (`invalid_expiry`); nothing is persisted.
+   */
+  notAfter?: string | null;
   metadata?: Record<string, unknown>;
   /**
    * Optional caller-provided Ed25519 public key (hex, 64 chars, no 0x).
@@ -137,7 +252,25 @@ export function provisionApiKey(opts: {
    * that to HTTP 400.
    */
   publicKey?: string;
+  /**
+   * `admin` is minted ONLY when this is true (WP-A round 7, admingates AG-10). It
+   * is for the operator's out-of-band procedure in
+   * docs/security/WILDCARD_KEY_ROTATION.md. No request path passes it; a test pins
+   * that. Without it, a scope set containing `admin` throws `admin_scope_refused`.
+   */
+  allowAdmin?: boolean;
 }): ProvisionResult {
+  // Validate BEFORE taking the lock or touching the DB: a refused scope set
+  // (or an unreadable expiry bound) must leave no trace.
+  assertMintableScopes(opts.scopes);
+  if (opts.scopes.includes("admin") && opts.allowAdmin !== true) {
+    throw Object.assign(
+      new Error("provisionApiKey: `admin` is never minted by a request path; use the out-of-band procedure"),
+      { code: "admin_scope_refused" },
+    );
+  }
+  const boundMs = expiryBoundMs(opts.notAfter);
+
   // Serialize provisioning per operator to prevent race condition (VULN-05 fix)
   if (provisioningLocks.has(opts.operatorId)) {
     throw new Error("Key provisioning in progress — try again in a moment");
@@ -173,6 +306,14 @@ export function provisionApiKey(opts: {
     const { rawKey, keyHash, keyPrefix } = generateApiKey();
     const now = new Date();
 
+    // The EARLIER of the relative lifetime and the absolute bound (R4).
+    let expiresMs: number | null = opts.expiresInDays
+      ? now.getTime() + opts.expiresInDays * 86400000
+      : null;
+    if (boundMs !== null && (expiresMs === null || boundMs < expiresMs)) {
+      expiresMs = boundMs;
+    }
+
     const record = repo.insert({
       id: randomUUID(),
       keyHash,
@@ -180,13 +321,11 @@ export function provisionApiKey(opts: {
       operatorId: opts.operatorId,
       name: opts.name ?? null,
       description: opts.description ?? null,
-      scopes: JSON.stringify(opts.scopes ?? ["*"]),
+      scopes: JSON.stringify(opts.scopes),
       rateLimit: opts.rateLimit ?? "1000/hour",
       usageCount: "0",
       createdAt: now.toISOString(),
-      expiresAt: opts.expiresInDays
-        ? new Date(now.getTime() + opts.expiresInDays * 86400000).toISOString()
-        : null,
+      expiresAt: expiresMs === null ? null : new Date(expiresMs).toISOString(),
       metadata: opts.metadata ? JSON.stringify(opts.metadata) : null,
       publicKey: storedPublicKeyHex,
     });

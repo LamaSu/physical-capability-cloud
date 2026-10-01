@@ -29,6 +29,7 @@ import {
 } from "@pcc/aggregator";
 import type { IndexedTool } from "@pcc/spec";
 import { getAggregatorRegistry } from "./index.js";
+import { requireAdminSecret } from "../../auth/admin-secret-gate.js";
 
 // ── Bridge state (process-local; Phase 2 moves to DB) ─────────────────────
 
@@ -56,18 +57,6 @@ export function resetAgntcyBridgeState(): void {
 
 // ── Admin allowlist (mirror of routes/aggregator/ingest.ts) ───────────────
 
-function isAggregatorAdmin(operatorId: string | undefined | null): boolean {
-  if (!operatorId) return false;
-  const raw = process.env.PCC_AGGREGATOR_ADMINS ?? "";
-  const set = new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean),
-  );
-  return set.has(operatorId.toLowerCase());
-}
-
 function requireAggregatorAdmin(
   req: FastifyRequest,
   reply: FastifyReply,
@@ -79,14 +68,9 @@ function requireAggregatorAdmin(
     void reply.status(401).send({ error: "authentication_required" });
     return null;
   }
-  if (!isAggregatorAdmin(callerId)) {
-    void reply.status(403).send({
-      error: "forbidden",
-      message:
-        "AGNTCY bridge endpoints require operator on PCC_AGGREGATOR_ADMINS allowlist.",
-    });
-    return null;
-  }
+  // WP-A round 5 (coord-watch #2883): the admin SECRET grants this, not an
+  // asserted operatorId on PCC_AGGREGATOR_ADMINS (the allowlist only reserves those names now).
+  if (!requireAdminSecret(req, reply)) return null;
   return callerId;
 }
 
@@ -120,8 +104,13 @@ interface AgntcyPublishBody {
 // ── Routes ────────────────────────────────────────────────────────────────
 
 export async function agntcyAdminRoutes(app: FastifyInstance): Promise<void> {
-  /** Bridge status — counters + last error + env configuration. */
-  app.get("/api/aggregator/agntcy/status", async () => {
+  /**
+   * Bridge status — counters + last error + env configuration. Operator-only
+   * (WP-A round 5, #2883): it had NO handler check and returned configuration
+   * and the last upstream error to any caller.
+   */
+  app.get("/api/aggregator/agntcy/status", async (req, reply) => {
+    if (!requireAdminSecret(req, reply)) return reply;
     return {
       bridge: "agntcy-ads",
       endpoint:
