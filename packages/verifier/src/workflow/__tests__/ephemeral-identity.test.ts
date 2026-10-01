@@ -125,9 +125,12 @@ describe("SessionKeyService", () => {
         scope: customScope,
       });
 
+      // The emitted scope is canonical (de-duplicated, sorted by UTF-16 code
+      // unit), so the deliberately unsorted input above comes back sorted.
+      // See ephemeral-identity-canonical-scope.test.ts.
       expect(sessionKey.scope.allowedActions).toEqual([
-        "touchstone_response",
         "attestation_sign",
+        "touchstone_response",
       ]);
       expect(sessionKey.scope.contractIds).toEqual([
         "contract-alpha",

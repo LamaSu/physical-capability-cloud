@@ -177,6 +177,15 @@ describe("issueSessionKey emits a canonical scope", () => {
     expect(sessionKey.scope.contractIds).toEqual(["A", "B", "a", "b", "z", "é"]);
   });
 
+  it("(a) orders by code UNIT, so a surrogate pair sorts before U+FF5E (code-point order would not)", () => {
+    // U+1F600 is the pair D83D DE00, and 0xD83D < 0xFF5E, so code-unit order puts
+    // it first. Its code point (0x1F600) is larger, so code-point and UTF-8 byte
+    // order put it last. Any verifier recomputing the digest must match this.
+    const { sessionKey } = issue({ contractIds: ["～", "😀"] });
+
+    expect(sessionKey.scope.contractIds).toEqual(["😀", "～"]);
+  });
+
   it("(a) neither aliases nor reorders the caller's arrays", () => {
     const allowedActions = [...MESSY.allowedActions];
     const contractIds = [...MESSY.contractIds];
@@ -264,6 +273,91 @@ describe("issueSessionKey emits a canonical scope", () => {
     expect(result.failures).toEqual([]);
     expect(result.valid).toBe(true);
     expect(result.principalAgentId).toBe(principal.agentId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A malformed scope is refused, and before anything is signed
+// ---------------------------------------------------------------------------
+
+describe("a malformed scope is refused before anything is signed", () => {
+  const parentSeed = Uint8Array.from({ length: 32 }, (_, i) => i + 1);
+
+  // Every row is something an untyped JSON request body can carry past the types.
+  const malformed: Array<[label: string, scope: unknown, message: RegExp]> = [
+    [
+      "a number in allowedActions",
+      { allowedActions: ["evidence_submit", 5] },
+      /^scope\.allowedActions\[1\] must be a string, got number$/,
+    ],
+    [
+      "null in contractIds",
+      { contractIds: ["c1", null] },
+      /^scope\.contractIds\[1\] must be a string, got null$/,
+    ],
+    [
+      "undefined in contractIds",
+      { contractIds: ["c1", undefined] },
+      /^scope\.contractIds\[1\] must be a string, got undefined$/,
+    ],
+    [
+      "a hole in a sparse contractIds",
+      { contractIds: ["c1", , "c3"] },
+      /^scope\.contractIds\[1\] must be a string, got undefined$/,
+    ],
+    [
+      "an object in contractIds",
+      { contractIds: [{ id: "c1" }] },
+      /^scope\.contractIds\[0\] must be a string, got object$/,
+    ],
+    [
+      "a nested array in allowedActions",
+      { allowedActions: [["evidence_submit"]] },
+      /^scope\.allowedActions\[0\] must be a string, got array$/,
+    ],
+    [
+      "a bare string where allowedActions belongs",
+      { allowedActions: "evidence_submit" },
+      /^scope\.allowedActions must be an array of strings, got string$/,
+    ],
+    [
+      "a plain object where contractIds belongs",
+      { contractIds: { 0: "c1" } },
+      /^scope\.contractIds must be an array of strings, got object$/,
+    ],
+  ];
+
+  it.each(malformed)("issueSessionKey rejects %s", (_label, scope, message) => {
+    expect(() => issue(scope as Partial<SessionScope>)).toThrow(message);
+  });
+
+  it.each(malformed)("deriveSessionKey rejects %s", (_label, scope, message) => {
+    expect(() =>
+      service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/1'/0'",
+        principal,
+        principalPrivateKey: principalKeypair.secretKey,
+        scope: scope as Partial<SessionScope>,
+      }),
+    ).toThrow(message);
+  });
+
+  it("never reaches the signer", () => {
+    const detached = vi.spyOn(nacl.sign, "detached");
+    try {
+      expect(() => issue({ contractIds: [42] } as unknown as Partial<SessionScope>)).toThrow();
+      expect(detached).not.toHaveBeenCalled();
+    } finally {
+      detached.mockRestore();
+    }
+  });
+
+  it("still accepts empty lists and returns them empty", () => {
+    const { sessionKey } = issue({ allowedActions: [], contractIds: [] });
+
+    expect(sessionKey.scope.allowedActions).toEqual([]);
+    expect(sessionKey.scope.contractIds).toEqual([]);
   });
 });
 

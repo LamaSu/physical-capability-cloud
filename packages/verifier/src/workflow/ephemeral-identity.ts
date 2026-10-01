@@ -46,6 +46,69 @@ function toHex(bytes: Uint8Array): string {
 }
 
 /**
+ * Name a value's type for an error message, telling "null" and "array" apart
+ * from the generic "object".
+ */
+function describeType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+/**
+ * Canonical form of one scope list (allowedActions or contractIds): every
+ * element must be a string, duplicates are dropped, and the rest is sorted in
+ * UTF-16 code-unit order. That is Array.prototype.sort() with NO comparator;
+ * never localeCompare, whose order depends on the host's locale and ICU data.
+ *
+ * Returns a fresh array, so the emitted scope never aliases the caller's.
+ *
+ * @throws If `value` is not an array or any element is not a string. A bare
+ *   string is refused too: spreading it would quietly turn "abc" into
+ *   ["a", "b", "c"].
+ */
+function canonicalScopeList(field: string, value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be an array of strings, got ${describeType(value)}`);
+  }
+  // Index loop, not forEach: a sparse array's holes must be seen as undefined.
+  for (let i = 0; i < value.length; i++) {
+    if (typeof value[i] !== "string") {
+      throw new Error(`${field}[${i}] must be a string, got ${describeType(value[i])}`);
+    }
+  }
+  return [...new Set(value as string[])].sort();
+}
+
+/**
+ * Resolve the caller's scope overrides against the config defaults and return
+ * the CANONICAL scope: allowedActions and contractIds de-duplicated and sorted.
+ *
+ * issueSessionKey and deriveSessionKey call this BEFORE the SessionKey struct
+ * is signed, so one scope has one spelling everywhere: the emitted object, the
+ * bytes the parent signs, and any digest taken over the emitted authorization.
+ * Left verbatim, [a,b], [b,a] and [a,a,b] are three spellings (three digests)
+ * of a single authorization.
+ *
+ * canonicalSessionKeyBytes below still only sorts; it does not de-duplicate.
+ * Keys issued before this existed were signed over sorted-but-duplicated
+ * arrays, and de-duplicating there would change the bytes they verify against.
+ */
+function buildCanonicalScope(
+  overrides: Partial<SessionScope> | undefined,
+  config: SessionKeyConfig,
+): SessionScope {
+  return {
+    allowedActions: canonicalScopeList(
+      "scope.allowedActions",
+      overrides?.allowedActions ?? config.defaultAllowedActions,
+    ) as SessionAction[],
+    contractIds: canonicalScopeList("scope.contractIds", overrides?.contractIds ?? []),
+    maxSignatures: overrides?.maxSignatures ?? config.defaultMaxSignatures,
+  };
+}
+
+/**
  * Produce the canonical byte representation of a SessionKey struct
  * for signing/verification.
  *
@@ -54,6 +117,10 @@ function toHex(bytes: Uint8Array): string {
  *
  * Deterministic JSON: sorted keys, no whitespace, binary fields as hex.
  * This format is stable across JS engines because we control key order explicitly.
+ *
+ * The scope lists are sorted here as defense in depth, but NOT de-duplicated:
+ * a key signed over sorted-with-duplicates arrays (issued before the issuers
+ * canonicalized their scope) must keep verifying. See buildCanonicalScope.
  *
  * `derivationPath` is INCLUDED in the canonical form ONLY when present.
  * This keeps backward compatibility: a legacy sessionKey (no derivationPath)
@@ -113,7 +180,9 @@ export class SessionKeyService {
    *
    * @param params.principal - The principalKey (registered agent identity)
    * @param params.principalPrivateKey - Ed25519 private key (64 bytes in tweetnacl format)
-   * @param params.scope - Optional scope overrides (merged with defaults)
+   * @param params.scope - Optional scope overrides (merged with defaults). The
+   *   emitted scope is canonical: allowedActions and contractIds come back
+   *   de-duplicated and sorted (UTF-16 code-unit order), in new arrays.
    * @param params.ttlSeconds - Optional TTL override
    * @param params.config - Optional config override
    *
@@ -121,6 +190,7 @@ export class SessionKeyService {
    *
    * @throws If TTL exceeds maxTTLSeconds
    * @throws If principalPrivateKey length is invalid
+   * @throws If scope.allowedActions or scope.contractIds is not an array of strings
    */
   issueSessionKey(params: {
     principal: PrincipalKey;
@@ -152,12 +222,10 @@ export class SessionKeyService {
     // Generate a fresh Ed25519 keypair for the session
     const sessionKeypair = nacl.sign.keyPair();
 
-    // Build scope with defaults
-    const scope: SessionScope = {
-      allowedActions: (params.scope?.allowedActions ?? config.defaultAllowedActions) as SessionAction[],
-      contractIds: params.scope?.contractIds ?? [],
-      maxSignatures: params.scope?.maxSignatures ?? config.defaultMaxSignatures,
-    };
+    // Build the CANONICAL scope (defaults applied, lists de-duplicated and
+    // sorted) BEFORE anything is signed, so the emitted scope and the
+    // signature describe the same bytes.
+    const scope = buildCanonicalScope(params.scope, config);
 
     const now = Math.floor(Date.now() / 1000);
 
@@ -216,7 +284,9 @@ export class SessionKeyService {
    *   Used to populate parentAgentId on the SessionKey struct.
    * @param params.principalPrivateKey - The principalKey's 64-byte tweetnacl
    *   secretKey. Used to sign the SessionKey struct (authorization).
-   * @param params.scope - Optional scope overrides (merged with defaults)
+   * @param params.scope - Optional scope overrides (merged with defaults). The
+   *   emitted scope is canonical, exactly as for issueSessionKey: allowedActions
+   *   and contractIds de-duplicated and sorted (UTF-16 code-unit order).
    * @param params.ttlSeconds - Optional TTL override
    * @param params.config - Optional config override
    *
@@ -226,6 +296,7 @@ export class SessionKeyService {
    *
    * @throws If the path is non-hardened or malformed (via derivePath)
    * @throws If TTL exceeds maxTTLSeconds, TTL <= 0, or principalPrivateKey length is wrong
+   * @throws If scope.allowedActions or scope.contractIds is not an array of strings
    */
   deriveSessionKey(params: {
     parentSeed: Uint8Array;
@@ -270,14 +341,9 @@ export class SessionKeyService {
     // returns (keeps the signEvent/verify API identical for both modes).
     const sessionKeypair = nacl.sign.keyPair.fromSeed(derived.privateKey);
 
-    // Build scope with defaults (identical logic to issueSessionKey)
-    const scope: SessionScope = {
-      allowedActions: (params.scope?.allowedActions ??
-        config.defaultAllowedActions) as SessionAction[],
-      contractIds: params.scope?.contractIds ?? [],
-      maxSignatures:
-        params.scope?.maxSignatures ?? config.defaultMaxSignatures,
-    };
+    // Build the CANONICAL scope (same helper as issueSessionKey) BEFORE the
+    // struct is signed, so derived keys get the same single spelling.
+    const scope = buildCanonicalScope(params.scope, config);
 
     const now = Math.floor(Date.now() / 1000);
 
