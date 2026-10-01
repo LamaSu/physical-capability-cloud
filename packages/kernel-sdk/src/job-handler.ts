@@ -24,7 +24,7 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { canonicalize, ids, sha256 } from "@pcc/spec";
+import { canonicalize, canonicalSnapshot, ids, sha256 } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Hex helpers (serialising bytes over JSON)
@@ -174,6 +174,16 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       }
     }
 
+    // ── Snapshot the input ──────────────────────────────────────────────
+    // Canonicalize FIRST and parse the canonical text ONCE; from here on only
+    // that snapshot is used. The builder executes on it and the input commitment
+    // hashes the very same text, so the evidence covers exactly what ran. The
+    // request object is caller-controlled and mutable (a Proxy can answer the
+    // builder differently from what canonicalize read), so it is never handed
+    // to the builder. An input with no JSON form is refused here, before any
+    // builder code runs.
+    const inputSnapshot = canonicalSnapshot<Record<string, unknown>>(request.input);
+
     // ── Mint a session key for this job ─────────────────────────────────
     // The kernel signs the bundle with a fresh Ed25519 keypair; the session
     // key struct is authorised by the kernel's principal private key. This
@@ -221,7 +231,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     // ── Execute the builder's code ──────────────────────────────────────
     const executionStart = new Date().toISOString();
-    const output = await execute(request.input);
+    const output = await execute(inputSnapshot.value);
     const executionEnd = new Date().toISOString();
 
     // ── Assemble evidence events ────────────────────────────────────────
@@ -233,8 +243,8 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     const events: EvidenceEvent[] = [];
 
-    // Input commitment
-    const inputHash = await sha256(canonicalize(request.input));
+    // Input commitment: the hash of the snapshot the builder received
+    const inputHash = await sha256(inputSnapshot.text);
     const inputEvent: EvidenceEvent = {
       id: ids.evidence(),
       type: "gcode_hash_verified",
