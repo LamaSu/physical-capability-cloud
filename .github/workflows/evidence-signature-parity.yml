@@ -13,6 +13,10 @@
 # plugins or hooks (its selftest proves that). Hostile conftest.py, sitecustomize.py
 # and usercustomize.py files are planted first: if any run loads one, the job fails
 # (cross-family reviews A01d, A01e).
+# THE AUTHORITATIVE CHECK is `signature_manifest_check.py verify` (review A01f): it never
+# imports or runs the test module; the module under test computes every golden preimage in
+# a separate isolated process, and a process importing only PyNaCl checks the bytes and
+# every signature fact. Without PyNaCl it must fail on the PyNaCl requirement.
 name: evidence-signature-parity
 
 on:
@@ -66,6 +70,16 @@ jobs:
             echo "invalid control: PyNaCl is importable in the venv without it"
             exit 1
           fi
+          # The authoritative check must fail on the PyNaCl requirement itself.
+          set +e
+          out=$("$RUNNER_TEMP/no-nacl/bin/python" -I -B tests/signature_manifest_check.py verify 2>&1)
+          rc=$?
+          set -e
+          echo "$out" | tail -2
+          if [ "$rc" -eq 0 ] || ! echo "$out" | grep -q "PCC_REQUIRE_PYNACL=1 but PyNaCl is not importable"; then
+            echo "verify did not fail on the PyNaCl requirement without PyNaCl"
+            exit 1
+          fi
           # Every manifest test must be collected and fail on the PyNaCl requirement.
           "$RUNNER_TEMP/no-nacl/bin/python" -I -B tests/signature_manifest_check.py negative
           for marker in conftest-was-loaded startup-hook-ran; do
@@ -82,6 +96,8 @@ jobs:
           python -m pip install --quiet "pynacl==1.5.0" "pytest==8.3.5"
           # The hook guard must refuse every hostile shape, then every manifest test
           # must be collected and pass (JUnit XML, not the text summary).
+          # The authoritative check: independent of the test module.
+          python -I -B tests/signature_manifest_check.py verify
           python -I -B tests/signature_manifest_check.py selftest
           python -I -B tests/signature_manifest_check.py positive
           # The whole parity file, with external options neutralized: nothing may be
