@@ -116,6 +116,9 @@ export function signCredential(
  * parsed once) and all three checks run on that snapshot, never on the object
  * that was passed in: a Proxy or any mutable object could otherwise show the
  * expiry check a future date and the signature check the signed, expired one.
+ * The snapshot's objects have no prototype, so a proof, a proofValue or an
+ * expirationDate that exists only on a polluted Object.prototype reads as
+ * undefined: only what the credential owns, and so what was signed, is judged.
  * A credential that is not a plain JSON tree fails closed.
  */
 export function verifyCredential(
@@ -131,9 +134,11 @@ export function verifyCredential(
       return false;
     }
 
-    // Check expiration
-    if (credentialBody.expirationDate) {
-      const expiry = new Date(credentialBody.expirationDate);
+    // Check expiration. Read from the snapshot, not from the rest copy above: the copy is an
+    // ordinary object that inherits Object.prototype, the snapshot does not.
+    const expirationDate = snapshot.expirationDate;
+    if (expirationDate) {
+      const expiry = new Date(expirationDate);
       if (expiry < new Date()) {
         return false;
       }

@@ -21,9 +21,21 @@
  *   - an inherited (polluted) property is readable but never hashed.
  * So a consumer that must evaluate what it hashed takes a canonicalSnapshot:
  * canonicalize FIRST, parse the canonical text back ONCE, and validate and
- * execute that parsed snapshot with own-property reads, as LO-EV-9's
- * verifyEvidenceSubjectBinding does. It never re-reads the object it was handed,
- * and it hashes the snapshot's own text, so what ran is exactly what was hashed.
+ * execute that parsed snapshot, as LO-EV-9's verifyEvidenceSubjectBinding does.
+ * It never re-reads the object it was handed, and it hashes the snapshot's own
+ * text, so what ran is exactly what was hashed.
+ *
+ * SNAPSHOT OBJECTS HAVE NO PROTOTYPE. Every plain object in a snapshot, at every
+ * depth, is created with a null prototype and holds only own enumerable data
+ * properties (an own "__proto__" key stays an ordinary own key). A key the input
+ * did not own therefore reads as undefined, never as a value inherited from a
+ * polluted Object.prototype that was never hashed, and `in` and for...in see only
+ * the own keys. The price is that a consumer must not call Object.prototype
+ * methods on a snapshot object (obj.hasOwnProperty(k), obj.toString(), String(obj)
+ * and `${obj}` are not there or throw): use Object.keys, Object.entries, `in` or
+ * Object.hasOwn, and JSON.stringify. Arrays stay ordinary arrays: every index below
+ * their length is an own element, but an index past the end and every Array method
+ * still resolve through Array.prototype, so read arrays within their length.
  */
 
 import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
@@ -53,6 +65,9 @@ const toNumber = Number;
 const toText = String;
 const quote = JSON.stringify; // string escaping, byte-for-byte what JSON transport writes
 const parseJson = JSON.parse;
+// canonicalSnapshot builds its prototype-less tree with these two (and nothing looked up at call time).
+const createObject = Object.create;
+const defineProperty = Reflect.defineProperty;
 const OBJECT_PROTOTYPE = Object.prototype;
 const ARRAY_PROTOTYPE = Array.prototype;
 const WeakSetConstructor = WeakSet;
@@ -167,8 +182,47 @@ export function canonicalize(value: unknown): string {
 export interface CanonicalSnapshot<T = unknown> {
   /** The canonical JSON text: hash this. */
   readonly text: string;
-  /** Parsed once from `text`: validate, read and execute this, never the object that was handed in. */
+  /**
+   * Parsed once from `text`: validate, read and execute this, never the object that was handed in.
+   *
+   * Every plain object in it, at every depth, has NO prototype and only own enumerable data
+   * properties: a key the input did not own reads as undefined, never as a value inherited from a
+   * polluted Object.prototype. Do not call Object.prototype methods on it (obj.hasOwnProperty(k),
+   * obj.toString(), String(obj)): use Object.keys, `in`, Object.hasOwn or JSON.stringify. Arrays
+   * are ordinary arrays; read them within their length.
+   */
   readonly value: T;
+}
+
+/**
+ * A data-property descriptor that is itself prototype-less. An ordinary { value, ... } literal
+ * inherits Object.prototype, and a polluted `get` or `set` there turns it into an invalid
+ * accessor-and-value descriptor: this one answers only its own four fields.
+ */
+function dataDescriptor(value: unknown): PropertyDescriptor {
+  return { __proto__: null, value, writable: true, enumerable: true, configurable: true } as PropertyDescriptor;
+}
+
+/**
+ * The JSON.parse reviver canonicalSnapshot uses: rebuild every plain object as a prototype-less
+ * object holding the same own members in the same order, and leave primitives and arrays alone.
+ * JSON.parse revives children before their parent, so an array's elements and an object's members
+ * have already been replaced by the time this sees them. Members are DEFINED (never assigned) as
+ * own enumerable, writable, configurable data properties, so an own "__proto__" key stays a plain
+ * own key. `value` is a fresh JSON.parse product: every property of it is an own data property.
+ */
+function toPrototypeLess(_key: string, value: unknown): unknown {
+  if (value === null || typeof value !== "object" || isArray(value)) return value;
+  const copy: object = createObject(null);
+  const keys = ownKeys(value);
+  const count = keys.length;
+  for (let i = 0; i < count; i++) {
+    const key = keys[i];
+    const own = getOwnPropertyDescriptor(value, key) as PropertyDescriptor;
+    // Unreachable (`copy` is fresh and extensible): a member that failed to land must never be dropped silently.
+    if (!defineProperty(copy, key, dataDescriptor(own.value))) throw new NonCanonicalValueError("$", "a member that could not be copied");
+  }
+  return copy;
 }
 
 /**
@@ -177,19 +231,26 @@ export interface CanonicalSnapshot<T = unknown> {
  * it hashes does so on `value` and hashes `text`: unlike the object it was handed
  * (a Proxy may answer a later [[Get]] differently from the descriptors that were
  * hashed; any caller may mutate it between the hash and the use), the snapshot is
- * a fresh plain JSON tree that nothing but the consumer holds.
+ * a fresh JSON tree that nothing but the consumer holds.
  *
- * Refuses exactly what canonicalize refuses, with the same NonCanonicalValueError,
- * so a caller refuses a non-JSON input BEFORE it runs anything on it. `T` is the
- * caller's claim about the shape; nothing here checks it.
+ * The tree has no prototypes: every plain object in it is prototype-less (see the
+ * header), so evaluating it can never read a member that was not hashed, whatever
+ * Object.prototype has been polluted with. Arrays stay ordinary arrays.
+ *
+ * Refuses what canonicalize refuses, with the same NonCanonicalValueError, so a
+ * caller refuses a non-JSON input BEFORE it runs anything on it; it also refuses a
+ * value nested so deeply that the engine cannot revive it (about 2,500 levels on a
+ * default stack, which canonicalize alone may accept in a warmed-up process). `T` is
+ * the caller's claim about the shape; nothing here checks it.
  */
 export function canonicalSnapshot<T = unknown>(value: unknown): CanonicalSnapshot<T> {
   const text = canonicalize(value);
   let parsed: unknown;
   try {
-    parsed = parseJson(text);
+    parsed = parseJson(text, toPrototypeLess);
   } catch {
-    // Unreachable for text this module wrote (it is valid JSON); keeps the boundary typed regardless.
+    // Unreachable for ordinary values (the text is valid JSON that this module wrote); a value nested
+    // beyond the engine's recursion limit lands here. Either way the boundary stays typed.
     throw new NonCanonicalValueError("$", "canonical text that could not be parsed back");
   }
   return { text, value: parsed as T };

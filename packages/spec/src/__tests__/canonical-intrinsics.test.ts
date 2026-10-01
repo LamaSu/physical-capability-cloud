@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { NonCanonicalValueError, canonicalize } from "../util/canonical.js";
+import { NonCanonicalValueError, canonicalSnapshot, canonicalize } from "../util/canonical.js";
 
 /**
  * N15 round 4 (cross-family review A05b, finding 1): the encoder assembled its
@@ -423,6 +423,57 @@ describe("canonicalize — round 4 (cross-family A05b #1): no mutable array or i
       });
       expect(out.failure).toBeUndefined();
       for (let i = 0; i < count; i++) expect(results[i], `tree ${i}`).toBe(reference[i]);
+    });
+  });
+
+  describe("canonicalSnapshot (N15 round 5, A05c F1): the prototype-less tree is built from captured intrinsics only", () => {
+    /** True when every plain object under `v` has a null prototype and every array is an ordinary array. Run it after the window closes. */
+    function prototypeLessThroughout(v: unknown): boolean {
+      if (v === null || typeof v !== "object") return true;
+      if (Array.isArray(v)) return Object.getPrototypeOf(v) === ARRAY_PROTOTYPE && v.every(prototypeLessThroughout);
+      return Object.getPrototypeOf(v) === null && Object.keys(v).every((k) => prototypeLessThroughout((v as Record<string, unknown>)[k]));
+    }
+
+    it("A05c F1: everything replaced at once, with indexed accessors on both prototypes: same text, same data, no prototypes", () => {
+      const input = sample();
+      const clean = canonicalSnapshot(input);
+      expect(clean.text).toBe(EXPECTED);
+      let snapshot: { text: string; value: unknown } | undefined;
+      const out = polluted(installEverything, () => {
+        snapshot = canonicalSnapshot(input);
+        return snapshot.text;
+      });
+      expect(out.failure).toBeUndefined();
+      expect(out.result).toBe(EXPECTED);
+      expect(snapshot?.value).toEqual(clean.value);
+      expect(JSON.stringify(snapshot?.value)).toBe(JSON.stringify(clean.value));
+      expect(prototypeLessThroughout(snapshot?.value)).toBe(true);
+    });
+
+    it("A05c F1: every function an intrinsic holder carries, replaced one holder at a time", () => {
+      const holders: Array<[string, object]> = [
+        ["Object", Object],
+        ["Object.prototype", Object.prototype],
+        ["Reflect", Reflect],
+        ["JSON", JSON],
+        ["Array", Array],
+        ["Array.prototype", ARRAY_PROTOTYPE],
+        ["Function.prototype", Function.prototype],
+      ];
+      for (const [label, holder] of holders) {
+        const input = sample();
+        const slots: Slot[] = [];
+        functionSlots(label, holder, slots);
+        expect(slots.length, label).toBeGreaterThan(0);
+        let snapshot: { text: string; value: unknown } | undefined;
+        const out = polluted(() => replaceWithThrowers(slots), () => {
+          snapshot = canonicalSnapshot(input);
+          return snapshot.text;
+        });
+        expect(out.failure, label).toBeUndefined();
+        expect(out.result, label).toBe(EXPECTED);
+        expect(prototypeLessThroughout(snapshot?.value), label).toBe(true);
+      }
     });
   });
 
