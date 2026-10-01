@@ -288,7 +288,15 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** GET /api/operator/approvals — List pending approvals */
   app.get("/api/operator/approvals", async (req, reply) => {
-    const { kernelId, status } = req.query as { kernelId?: string; status?: string };
+    const query = req.query as { kernelId?: unknown; status?: unknown };
+    // A repeated parameter arrives as a list: a client error (400), not a failed read (503).
+    for (const [name, value] of [["kernelId", query.kernelId], ["status", query.status]] as const) {
+      if (value !== undefined && typeof value !== "string") {
+        return reply.code(400).send({ error: "invalid_query", message: `${name} must be given once, as a single value.` });
+      }
+    }
+    const kernelId = query.kernelId as string | undefined;
+    const status = query.status as string | undefined;
 
     try {
       const { db } = getStore();
@@ -340,7 +348,7 @@ export async function operatorRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) {
-          return reply.status(404).send({ error: "Approval not found or already decided" });
+          return reply.status(404).send({ error: "Approval not found" });
         }
         if (changes === 0) {
           return reply.status(409).send(alreadyDecided(row.status));
@@ -374,7 +382,7 @@ export async function operatorRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) {
-          return reply.status(404).send({ error: "Approval not found or already decided" });
+          return reply.status(404).send({ error: "Approval not found" });
         }
         if (changes === 0) {
           return reply.status(409).send(alreadyDecided(row.status));

@@ -152,7 +152,15 @@ describe("operator approvals: no silent substitution", () => {
       }
     });
 
-    it("NEGATIVE: M1 a throwing .all() is 503 for every filter combination", async () => {
+    it("NEGATIVE: a repeated query parameter is a 400 client error, never a failed read", async () => {
+    for (const url of ["/api/operator/approvals?status=pending&status=approved", "/api/operator/approvals?kernelId=a&kernelId=b"]) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.statusCode, url).toBe(400);
+      expect(res.json().error, url).toBe("invalid_query");
+    }
+  });
+
+  it("NEGATIVE: M1 a throwing .all() is 503 for every filter combination", async () => {
       const { db } = getStore();
       const boom = () => {
         throw new Error("SQLITE_IOERR: disk I/O error");
@@ -291,7 +299,7 @@ describe("operator approvals: no silent substitution", () => {
       for (const action of ["approve", "reject"] as const) {
         const res = await decide("approval-does-not-exist", action);
         expect(res.statusCode, action).toBe(404);
-        expect(res.json(), action).toEqual({ error: "Approval not found or already decided" });
+        expect(res.json(), action).toEqual({ error: "Approval not found" });
       }
     });
   });
