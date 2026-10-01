@@ -137,8 +137,13 @@ When a tool call fails within a scope:
 
 ### Level 4: Emergency Stop
 - **Trigger**: Safety concern, or operator hits E-stop
-- **Action**: Immediate halt, scope revoked, all pending calls rejected
-- **Recovery**: Operator must create a new scope to resume
+- **Action**: The kernel's emergency stop is engaged (see Emergency Stop
+  Integration). The relay queues no call and mints no scope, and the calls still
+  queued are rejected. Scopes are not revoked, and a call the node already
+  claimed is not recalled.
+- **Recovery**: The operator resumes (`POST /api/operator/emergency-resume`).
+  The calls the stop rejected are not replayed; submit them again. A scope still
+  inside its expiry works again after the resume; revoke it to end it sooner.
 
 ## Who may call the relay
 
@@ -175,7 +180,9 @@ only on its own kernel.
   - then, at the dispatch site, the **physical-safety governor and circuit
     breaker** are re-run (`validateOnly`) and the **emergency stop** is checked.
     A command admitted while the breaker was closed does not reach the device
-    after failures open it, and an engaged emergency stop blocks every dispatch.
+    after failures open it, and an engaged emergency stop blocks every dispatch:
+    the poll is withheld outright, and the stop is read again for each call
+    just before it is claimed (see Emergency Stop Integration).
 
   A refused call is closed as `rejected` with its reason, so no later poll can
   claim it and it does not hold back the calls behind it. The reasons are
@@ -183,11 +190,13 @@ only on its own kernel.
   `scope_not_active`, `scope_expired`, `tool_not_allowed`, `max_commands_reached`,
   `escrow_not_funded`, `emergency_stopped` and the governor/breaker's
   `safety_denied`/`circuit_open`. A call whose escrow lookup fails, or which
-  cannot be cleared because the safety gateway is unavailable, stays queued; a
-  claim that times out is re-checked the same way. So a call recorded on one
-  kernel under another kernel's scope (rows the retired writer could leave)
-  never reaches a device and grants that scope's holder nothing, and a revoke
-  or audit of the scope never reaches it.
+  cannot be cleared because the safety gateway is unavailable, stays queued, as
+  does every call from the point where the kernel's emergency-stop policy cannot
+  be read (see Emergency Stop Integration); a claim that times out is
+  re-checked the same way. So a
+  call recorded on one kernel under another kernel's scope (rows the retired
+  writer could leave) never reaches a device and grants that scope's holder
+  nothing, and a revoke or audit of the scope never reaches it.
 - **Camera stream.** Before every frame and every 15-second heartbeat the
   stream checks two things again:
   - its credential still stands: the API key is neither revoked nor expired,
@@ -222,6 +231,9 @@ Brain posts tool call
     ▼
 PCC receives POST /api/relay/:kernelId/tool-call
     │
+    ├── not the operator or an active scope holder → 401/403; no toolName → 400
+    ├── emergency stop engaged → 409 (policy unreadable → 503); nothing is queued
+    │
     ├── Is tool Class 1 (READ)? → ALLOW (no scope needed)
     ├── Is tool Class 2 (SAFE)? → ALLOW (no scope needed)
     ├── Is tool Class 4 (PRIVILEGED)? → REJECT (requires operator)
@@ -236,16 +248,27 @@ Check scope:
     ├── commandCount >= maxCommands? → REJECT ("command limit reached")
     │
     ▼
-ALLOW → increment commandCount → queue for the executor
+ALLOW → increment commandCount → safety governor admission check
+    → emergency stop read once more, right before the insert (engaged → 409,
+      unreadable → 503; the read and the insert share one synchronous step)
+    → queue for the executor
 
 Executor polls GET /api/relay/:kernelId/tool-call/pending (operator only)
+    │
+    ├── emergency stop engaged → every queued call REJECTED (emergency_stopped);
+    │      200 with calls [] and emergencyStop true
+    ├── emergency-stop policy unreadable → 503; nothing claimed, nothing changed
+    │
     │  each queued call, oldest first, until 5 are handed out:
     ├── names a scope that is missing or on another kernel? → REJECTED
     ├── no scope, and not a safe tool? → REJECTED
     ├── a SCOPED call (safe or not) whose scope is not active/has expired? → REJECTED
     ├── a write not in allowed tools, over the row-derived budget, or unfunded? → REJECTED
-    ├── emergency stop engaged, or the safety governor/breaker denies? → REJECTED
+    ├── the safety governor/breaker denies? → REJECTED
     │      (the safety gateway being unavailable → stays queued)
+    ├── emergency stop engaged since the poll began (read after the safety check,
+    │      right before the claim)? → this call and every one behind it REJECTED
+    │      (policy turned unreadable → this call and the rest stay queued)
     │
     ▼
 CLAIMED → handed to the executor
@@ -295,21 +318,59 @@ Query via: `GET /api/relay/:kernelId/scope/:scopeId/audit`
 
 ## Emergency Stop Integration
 
-What `POST /api/operator/emergency-stop` does today (`routes/operator.ts`):
+What `POST /api/operator/emergency-stop` does (`routes/operator.ts`):
 1. Sets `operatorPolicies.policy.emergencyStop = true` for the kernel.
 2. Rejects that kernel's pending job **approvals**.
+3. Rejects that kernel's queued relay calls: every `tool_call_relay` row still
+   `pending` becomes `rejected` with the error `emergency_stopped`. A reset must
+   not restart motion (ISO 13850), so a call still queued at the stop never runs
+   after the resume, even if the node did not poll during the stop.
 
-What that flag then enforces:
-- **The relay refuses to dispatch.** While `emergencyStop` is set, `GET
-  /tool-call/pending` rejects every queued call (`emergency_stopped`) instead
-  of handing it to the device (see Dispatch, above). So no queued relay command
-  reaches the device under an engaged stop.
+What the relay then enforces (`routes/device-relay.ts`). Each request reads the
+kernel's stop as one of three states, and fails closed:
 
-Not yet done by the endpoint (planned; do not rely on it): it does not revoke
-active execution scopes, does not send a "stop" to an in-flight run, and does
-not change the kernel's status. Resume is by clearing the flag; scopes that were
-active remain active. Stopping an in-flight run and revoking scopes on e-stop is
-tracked follow-up.
+| State | When |
+|-------|------|
+| `clear` | The kernel has no `operator_policies` row, or the policy's `emergencyStop` is falsy (`false`, `0`, `null`, `""` or absent) |
+| `stopped` | The policy's `emergencyStop` is truthy. Not only `true`: `1`, a non-empty string such as `"false"`, `{}` and `[]` all engage the stop, as in the kernel's policy engine |
+| `unavailable` | The stop cannot be told: the read throws, the stored JSON does not parse, or the policy is not a JSON object (`null`, an array, a string, a number or a boolean). The relay refuses rather than guess |
+
+- **Submit (`POST /tool-call`).** `stopped` answers 409
+  `{"error": "kernel_emergency_stopped"}`; `unavailable` answers 503
+  `{"error": "policy_unavailable"}`. Nothing is queued and no scope budget is
+  spent. Authentication, authorization and body validation (401, 403, 400)
+  answer first. The stop is read again immediately before the row is inserted,
+  in the same synchronous step (no `await` between the read and the insert), so
+  a stop that lands while the safety governor is consulted still refuses the
+  call, and no stop request can fall between the check and the insert.
+- **Pending (`GET /tool-call/pending`).** `stopped` withholds the poll: 200
+  `{"calls": [], "count": 0, "emergencyStop": true}`, and every call still
+  `pending` for the kernel is rejected (`emergency_stopped`). A poller that
+  predates the flag reads this as "nothing to do". `unavailable` answers 503
+  `{"error": "policy_unavailable"}` and nothing is claimed, reclaimed or
+  changed. Within a poll the stop is read again for each queued call, after the
+  call's safety check and immediately before its claim: a stop that lands during
+  the poll rejects the call being checked and every call behind it, and a policy
+  that turns unreadable mid-poll claims no further call (the rest stay queued).
+  Calls claimed earlier in the same poll are returned.
+- **Scope mint (`POST /scope`).** `stopped` answers 409
+  `kernel_emergency_stopped`, `unavailable` answers 503 `policy_unavailable`,
+  and no scope is written. A scope minted before the stop cannot queue a call
+  while the stop is engaged (submit answers 409), so it does not keep working
+  through a stop for the rest of its lifetime.
+- **Not blocked:** scope revoke (a safety action), scope reads and the audit,
+  tool results (the device reports what an in-flight call did), the camera and
+  chat.
+
+Not done by the stop (planned; do not rely on it): it does not revoke active
+execution scopes, does not send a "stop" to an in-flight run, and does not
+change the kernel's status. Resume is by clearing the flag
+(`POST /api/operator/emergency-resume`); a scope that was active stays active
+and works again once the stop clears, until it expires or is revoked. A call the
+node had already claimed is not recalled by the stop, and a claim the node never
+reports is requeued by the 120-second claim timeout, which can fall after a
+resume; the operator node is the authority there (below). Stopping an in-flight
+run and revoking scopes on e-stop is tracked follow-up.
 
 ### The authoritative physical-safety boundary is the operator node
 

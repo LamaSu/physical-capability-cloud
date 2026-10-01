@@ -3,6 +3,7 @@ import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { deviceRelayRoutes, RELAY_ROUTE_ACCESS } from "../routes/device-relay.js";
+import { operatorRoutes } from "../routes/operator.js";
 import { getSafetyGateway } from "@pcc/kernel";
 import { schema, sql, eq } from "@pcc/store";
 
@@ -60,6 +61,9 @@ beforeAll(async () => {
   });
 
   await app.register(deviceRelayRoutes);
+  // The real stop and resume routes, for the N4b-gw r6 tests below. The relay
+  // guard is encapsulated in deviceRelayRoutes, so it does not run on these.
+  await app.register(operatorRoutes);
   await app.ready();
 
   // Seed the kernels + an OT-2 device
@@ -1705,5 +1709,439 @@ describe("N4b-gw r4: dispatch re-checks safety, e-stop, live scope and budget", 
     gw.recordDeviceFailure("kernel-test-1");
     expect((await poll()).count).toBe(0);
     expect(rowOf("tc-reason").error).toBe("circuit_open");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// N4b-gw round 6 (P0, physical safety): the kernel's emergency stop reaches the
+// relay. Until now only the pending poll looked at the stop, row by row and
+// fail-open (`=== true`: a thrown read became a 500, and a policy that was not
+// an object read as "not stopped"), so a call submitted, or a scope minted,
+// around a stop kept working for up to an hour. The stop is now read fail-closed
+// as stopped / clear / unavailable on submit, on the pending poll and on scope
+// mint, and the stop route itself rejects the calls still queued so that a
+// resume cannot restart them (a reset must not restart motion, ISO 13850).
+// ═══════════════════════════════════════════════════════════════════════════
+describe("N4b-gw r6: the emergency stop reaches the relay", () => {
+  const KERNEL = "kernel-test-1";
+  const OTHER_KERNEL = "kernel-test-2";
+  const HOLDER = "agent-r6";
+
+  const submit = (payload: Record<string, unknown>, headers: Record<string, string> = op) =>
+    app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers, payload });
+  const poll = () =>
+    app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: op });
+  const mint = (payload: Record<string, unknown> = { createdBy: HOLDER, allowedTools: ["run_create"] }) =>
+    app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: op, payload });
+  const stopRoute = (path: "emergency-stop" | "emergency-resume") =>
+    app.inject({ method: "POST", url: `/api/operator/${path}`, payload: { kernelId: KERNEL, reason: "r6 test" } });
+
+  const relayRows = () => getStore().db.select().from(toolCallRelay).all();
+  const scopeRows = () => getStore().db.select().from(executionScopes).all();
+  const rowOf = (id: string) =>
+    getStore().db.select().from(toolCallRelay).where(eq(toolCallRelay.id, id)).get()!;
+  const idsOf = (res: { json: () => { calls: Array<{ id: string }> } }) => res.json().calls.map((c) => c.id);
+
+  let seq = 0;
+  /** Insert a relay row directly. createdAt ascends, so the poll order is fixed. */
+  function seedCall(
+    id: string,
+    opts: { status?: string; kernelId?: string; claimedAt?: string | null; toolName?: string } = {},
+  ) {
+    getStore().db.insert(toolCallRelay).values({
+      id,
+      scopeId: null,
+      kernelId: opts.kernelId ?? KERNEL,
+      toolName: opts.toolName ?? "home",
+      toolArgs: {},
+      status: opts.status ?? "pending",
+      claimedAt: opts.claimedAt ?? null,
+      createdAt: new Date(Date.now() - 60_000 + seq++ * 1000).toISOString(),
+    }).run();
+  }
+
+  /**
+   * Write the kernel's policy row as raw TEXT, bypassing drizzle's JSON mapping,
+   * so a test can store what a hand edit, a bad migration or an old writer could
+   * leave behind: text that is not JSON, or JSON that is not an object.
+   */
+  function setPolicyText(text: string, kernelId = KERNEL) {
+    getStore().db.run(sql`INSERT OR REPLACE INTO operator_policies (kernel_id, policy, updated_at, updated_by)
+      VALUES (${kernelId}, ${text}, ${new Date().toISOString()}, ${"test"})`);
+  }
+  const setPolicy = (policy: unknown, kernelId = KERNEL) => setPolicyText(JSON.stringify(policy), kernelId);
+  const engageStop = () => setPolicy({ version: 1, emergencyStop: true });
+
+  /**
+   * A slow safety governor: `during(n)` runs on its nth consultation, while the
+   * request under test is awaiting it, which is where a concurrent stop lands.
+   */
+  function governorThatRuns(during: (n: number) => void) {
+    let n = 0;
+    return vi.spyOn(getSafetyGateway(), "validateOnly").mockImplementation(async () => {
+      during(++n);
+      return { allowed: true, executed: false } as never;
+    });
+  }
+
+  beforeEach(() => {
+    seq = 0;
+  });
+
+  afterEach(() => {
+    getSafetyGateway().resetCircuit(KERNEL);
+    getStore().db.run(sql`DELETE FROM operator_policies`);
+  });
+
+  // ── submit ────────────────────────────────────────────────────────────────
+  describe("submit: POST /tool-call", () => {
+    it("while stopped answers 409 kernel_emergency_stopped and queues nothing", async () => {
+      engageStop();
+      const res = await submit({ toolName: "health" });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({ error: "kernel_emergency_stopped" });
+      expect(relayRows()).toHaveLength(0);
+    });
+
+    it("while stopped refuses a scoped write before it spends the scope's budget", async () => {
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      engageStop();
+      const res = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("kernel_emergency_stopped");
+      expect(relayRows()).toHaveLength(0);
+      expect(scopeRows()[0].commandCount).toBe(0);
+    });
+
+    it("answers 401, 403 and 400 ahead of the stop: authentication, authorization and validation come first", async () => {
+      await mintScope(HOLDER, ["run_create"]);
+      engageStop();
+      const unauthenticated = await app.inject({
+        method: "POST",
+        url: `/api/relay/${KERNEL}/tool-call`,
+        payload: { toolName: "health" },
+      });
+      expect(unauthenticated.statusCode).toBe(401);
+      expect((await submit({ toolName: "health" }, asKey("mallory"))).statusCode).toBe(403);
+      expect((await submit({})).statusCode).toBe(400);
+      // A holder that names no scope is refused for that, not told about the stop.
+      const noScope = await submit({ toolName: "run_create" }, asKey(HOLDER));
+      expect(noScope.statusCode).toBe(403);
+      expect(noScope.json().error).toBe("scope_required");
+      expect(relayRows()).toHaveLength(0);
+    });
+
+    it("a stop that lands while the safety governor is consulted still refuses the call (the read and the insert are one synchronous section)", async () => {
+      const spy = governorThatRuns(() => engageStop());
+      try {
+        const res = await submit({ toolName: "health" });
+        expect(res.statusCode).toBe(409);
+        expect(res.json().error).toBe("kernel_emergency_stopped");
+        expect(relayRows()).toHaveLength(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a policy that turns unreadable while the safety governor is consulted refuses the call 503", async () => {
+      const spy = governorThatRuns(() => setPolicyText("{not json"));
+      try {
+        const res = await submit({ toolName: "health" });
+        expect(res.statusCode).toBe(503);
+        expect(res.json()).toEqual({ error: "policy_unavailable" });
+        expect(relayRows()).toHaveLength(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("control: with no policy row for the kernel, submit queues the call and pending dispatches it", async () => {
+      const queued = await submit({ toolName: "health" });
+      expect(queued.statusCode).toBe(201);
+      expect(rowOf(queued.json().id).status).toBe("pending");
+
+      const res = await poll();
+      expect(res.statusCode).toBe(200);
+      expect(idsOf(res)).toEqual([queued.json().id]);
+      expect(res.json().emergencyStop).toBeUndefined();
+    });
+
+    it.each([
+      ["false", false],
+      ["0", 0],
+      ["null", null],
+      ['""', ""],
+    ])("control: emergencyStop %s is not a stop", async (_label, value) => {
+      setPolicy({ version: 1, emergencyStop: value });
+      expect((await submit({ toolName: "health" })).statusCode).toBe(201);
+    });
+
+    it("control: a policy without an emergencyStop key is not a stop", async () => {
+      setPolicy({ version: 1 });
+      expect((await submit({ toolName: "health" })).statusCode).toBe(201);
+    });
+  });
+
+  // ── pending ───────────────────────────────────────────────────────────────
+  describe("pending: GET /tool-call/pending", () => {
+    it("while stopped withholds: 200 with calls [] and emergencyStop true, and the calls queued before the stop end rejected", async () => {
+      const safe = (await submit({ toolName: "health" })).json().id as string;
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      const scoped = (await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER))).json().id as string;
+      engageStop();
+
+      const res = await poll();
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ calls: [], count: 0, emergencyStop: true });
+      for (const id of [safe, scoped]) {
+        expect(rowOf(id)).toMatchObject({ status: "rejected", error: "emergency_stopped", claimedAt: null });
+        expect(rowOf(id).completedAt).toEqual(expect.any(String));
+      }
+    });
+
+    it("while stopped rejects only this kernel's pending rows: a claimed row and another kernel's row are untouched", async () => {
+      seedCall("tc-pending");
+      seedCall("tc-claimed", { status: "claimed", claimedAt: new Date().toISOString() });
+      seedCall("tc-elsewhere", { kernelId: OTHER_KERNEL });
+      engageStop();
+
+      expect((await poll()).json().emergencyStop).toBe(true);
+      expect(rowOf("tc-pending").status).toBe("rejected");
+      expect(rowOf("tc-claimed").status).toBe("claimed");
+      expect(rowOf("tc-elsewhere").status).toBe("pending");
+    });
+
+    it("a stop that lands while the poll awaits the safety governor rejects the row being checked instead of claiming it", async () => {
+      seedCall("tc-a");
+      const spy = governorThatRuns(() => engageStop());
+      try {
+        const res = await poll();
+        expect(res.statusCode).toBe(200);
+        expect(res.json().calls).toEqual([]);
+        expect(rowOf("tc-a")).toMatchObject({ status: "rejected", error: "emergency_stopped" });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a stop that lands mid-poll rejects that row and every row behind it; a row claimed before the stop is returned", async () => {
+      seedCall("tc-1");
+      seedCall("tc-2");
+      seedCall("tc-3");
+      const spy = governorThatRuns((n) => {
+        if (n === 2) engageStop();
+      });
+      try {
+        const res = await poll();
+        expect(res.statusCode).toBe(200);
+        expect(idsOf(res)).toEqual(["tc-1"]);
+        expect(rowOf("tc-1").status).toBe("claimed");
+        expect(rowOf("tc-2")).toMatchObject({ status: "rejected", error: "emergency_stopped" });
+        expect(rowOf("tc-3")).toMatchObject({ status: "rejected", error: "emergency_stopped" });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a policy that turns unreadable mid-poll leaves that row and every later row queued, even if it reads again; a row claimed before it is returned", async () => {
+      seedCall("tc-1");
+      seedCall("tc-2");
+      seedCall("tc-3");
+      const spy = governorThatRuns((n) => {
+        if (n === 2) setPolicyText("{not json");
+        // Were the poll to go on past tc-2, the policy reads clear again here.
+        if (n === 3) getStore().db.run(sql`DELETE FROM operator_policies`);
+      });
+      try {
+        const res = await poll();
+        expect(res.statusCode).toBe(200);
+        expect(idsOf(res)).toEqual(["tc-1"]);
+        expect(rowOf("tc-1").status).toBe("claimed");
+        for (const id of ["tc-2", "tc-3"]) {
+          expect(rowOf(id)).toMatchObject({ status: "pending", error: null, claimedAt: null, completedAt: null });
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  // ── scope mint ────────────────────────────────────────────────────────────
+  describe("scope mint: POST /scope", () => {
+    it("while stopped answers 409 kernel_emergency_stopped and writes no scope row", async () => {
+      engageStop();
+      const res = await mint();
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({ error: "kernel_emergency_stopped" });
+      expect(scopeRows()).toHaveLength(0);
+    });
+
+    it("answers a bad body 400 ahead of the stop state", async () => {
+      engageStop();
+      expect((await mint({})).statusCode).toBe(400);
+      expect((await mint({ createdBy: HOLDER, allowedTools: [] })).statusCode).toBe(400);
+      expect(scopeRows()).toHaveLength(0);
+    });
+
+    it("control: with no policy row for the kernel, a scope is minted", async () => {
+      const res = await mint();
+      expect(res.statusCode).toBe(201);
+      expect(scopeRows()).toHaveLength(1);
+    });
+
+    it("does not block the safety and reporting routes: revoke, scope reads, audit, tool results and the camera still answer", async () => {
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      seedCall("tc-inflight", { status: "claimed", claimedAt: new Date().toISOString() });
+      engageStop();
+
+      const revoke = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: op });
+      expect(revoke.statusCode).toBe(200);
+      expect(revoke.json().status).toBe("revoked");
+
+      const read = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/scope/${scopeId}`, headers: op });
+      expect(read.statusCode).toBe(200);
+      const audit = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/scope/${scopeId}/audit`, headers: op });
+      expect(audit.statusCode).toBe(200);
+
+      // The device still reports what an in-flight call did.
+      const result = await app.inject({
+        method: "POST",
+        url: `/api/relay/${KERNEL}/tool-result`,
+        headers: op,
+        payload: { callId: "tc-inflight", result: { ok: true } },
+      });
+      expect(result.statusCode).toBe(200);
+      expect(result.json().status).toBe("completed");
+
+      // No frame was ever pushed, so the camera answers 404: not 409 or 503.
+      const camera = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/camera/snapshot`, headers: op });
+      expect(camera.statusCode).toBe(404);
+    });
+  });
+
+  // ── fail closed: a truthy stop that is not the boolean true ───────────────
+  describe.each([
+    ["1", 1],
+    ['"yes"', "yes"],
+    ['"false" (a non-empty string)', "false"],
+    ["{}", {}],
+    ["[1]", [1]],
+  ])("emergencyStop is %s: truthy, so the stop is engaged", (_label, value) => {
+    beforeEach(() => setPolicy({ version: 1, emergencyStop: value }));
+
+    it("submit answers 409", async () => {
+      const res = await submit({ toolName: "health" });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("kernel_emergency_stopped");
+      expect(relayRows()).toHaveLength(0);
+    });
+
+    it("pending withholds and rejects the queued call", async () => {
+      seedCall("tc-q");
+      const res = await poll();
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ calls: [], count: 0, emergencyStop: true });
+      expect(rowOf("tc-q")).toMatchObject({ status: "rejected", error: "emergency_stopped" });
+    });
+
+    it("scope mint answers 409", async () => {
+      expect((await mint()).statusCode).toBe(409);
+      expect(scopeRows()).toHaveLength(0);
+    });
+  });
+
+  // ── fail closed: a policy row that cannot be read as an object ────────────
+  describe.each([
+    ["a JSON array", "[]"],
+    ["an array that mentions a stop", '[{"emergencyStop":true}]'],
+    ["a JSON string", '"emergency"'],
+    ["a JSON number", "1"],
+    ["a JSON boolean", "true"],
+    ["JSON null", "null"],
+    ["text that is not JSON", "{not json"],
+    ["truncated JSON", '{"emergencyStop":tr'],
+    ["an empty string", ""],
+  ])("a policy row that is %s is unavailable, so the relay fails closed", (_label, text) => {
+    beforeEach(() => setPolicyText(text));
+
+    it("submit answers 503 policy_unavailable and queues nothing", async () => {
+      const res = await submit({ toolName: "health" });
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toEqual({ error: "policy_unavailable" });
+      expect(relayRows()).toHaveLength(0);
+    });
+
+    it("pending answers 503 policy_unavailable, claims nothing and leaves every row as it was", async () => {
+      seedCall("tc-q1");
+      seedCall("tc-q2", { toolName: "health" });
+      // A claim well past the 120 s timeout: reclaiming it would be a write.
+      const stale = new Date(Date.now() - 10 * 60_000).toISOString();
+      seedCall("tc-stale", { status: "claimed", claimedAt: stale });
+
+      const res = await poll();
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toEqual({ error: "policy_unavailable" });
+      for (const id of ["tc-q1", "tc-q2"]) {
+        expect(rowOf(id)).toMatchObject({ status: "pending", error: null, claimedAt: null, completedAt: null });
+      }
+      expect(rowOf("tc-stale")).toMatchObject({ status: "claimed", claimedAt: stale });
+    });
+
+    it("scope mint answers 503 policy_unavailable and writes no scope row", async () => {
+      const res = await mint();
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toEqual({ error: "policy_unavailable" });
+      expect(scopeRows()).toHaveLength(0);
+    });
+  });
+
+  // ── the stop route, and a resume ──────────────────────────────────────────
+  describe("the stop route and a resume", () => {
+    it("rejects the calls still queued, so a resume cannot restart them even though the node never polled during the stop", async () => {
+      const queuedSafe = (await submit({ toolName: "health" })).json().id as string;
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      const queuedScoped = (await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER))).json().id as string;
+      seedCall("tc-inflight", { status: "claimed", claimedAt: new Date().toISOString() });
+      seedCall("tc-elsewhere", { kernelId: OTHER_KERNEL });
+
+      const stop = await stopRoute("emergency-stop");
+      expect(stop.statusCode).toBe(200);
+      expect(stop.json()).toMatchObject({ stopped: true, kernelId: KERNEL });
+
+      // Rejected by the stop itself, before any poll.
+      for (const id of [queuedSafe, queuedScoped]) {
+        expect(rowOf(id)).toMatchObject({ status: "rejected", error: "emergency_stopped", claimedAt: null });
+        expect(rowOf(id).completedAt).toEqual(expect.any(String));
+      }
+      // The node already holds the claimed call, and another kernel's queue is not this stop's.
+      expect(rowOf("tc-inflight").status).toBe("claimed");
+      expect(rowOf("tc-elsewhere").status).toBe("pending");
+
+      expect((await stopRoute("emergency-resume")).statusCode).toBe(200);
+
+      // The node's first poll comes after the resume: nothing queued before the stop is dispatched.
+      const afterResume = await poll();
+      expect(afterResume.statusCode).toBe(200);
+      expect(afterResume.json().calls).toEqual([]);
+      expect(afterResume.json().emergencyStop).toBeUndefined();
+      for (const id of [queuedSafe, queuedScoped]) {
+        expect(rowOf(id)).toMatchObject({ status: "rejected", error: "emergency_stopped", claimedAt: null });
+      }
+    });
+
+    it("refuses submit and mint while stopped, and after the resume a new call and the scope minted before the stop work again", async () => {
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      expect((await stopRoute("emergency-stop")).statusCode).toBe(200);
+      expect((await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER))).statusCode).toBe(409);
+      expect((await mint()).statusCode).toBe(409);
+      expect(relayRows()).toHaveLength(0);
+
+      expect((await stopRoute("emergency-resume")).statusCode).toBe(200);
+
+      const scoped = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+      expect(scoped.statusCode).toBe(201);
+      expect((await mint()).statusCode).toBe(201);
+      expect(idsOf(await poll())).toEqual([scoped.json().id]);
+    });
   });
 });

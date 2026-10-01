@@ -51,6 +51,19 @@
  *     to the device (dispatchRefusal), and closes a refused call as rejected.
  *   - A camera stream re-checks its caller before every frame and heartbeat,
  *     and a revoke ends the streams the scope was holding open.
+ *
+ * The kernel's emergency stop (N4b-gw r6) is read fail-closed on every route
+ * that queues or hands out device work, as stopped / clear / unavailable
+ * (emergencyStopState):
+ *   - POST /tool-call and POST /scope answer 409 kernel_emergency_stopped while
+ *     stopped, and 503 policy_unavailable when the policy cannot be read.
+ *   - GET /tool-call/pending withholds while stopped (200, calls [], emergencyStop
+ *     true) and rejects what is still queued; 503 policy_unavailable, claiming
+ *     and changing nothing, when the policy cannot be read.
+ *   - Scope revoke and reads, the audit, results and the camera stay open: a
+ *     revoke is a safety action and a result is a device's report of what ran.
+ * POST /api/operator/emergency-stop (routes/operator.ts) also rejects the calls
+ * still queued at the stop, so a resume cannot restart them.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -295,11 +308,41 @@ function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | nul
 }
 
 /**
-/** True when this kernel's operator has engaged the emergency stop. */
-function emergencyStopEngaged(kernelId: string): boolean {
-  const { db } = getStore();
-  const row = db.select().from(operatorPolicies).where(eq(operatorPolicies.kernelId, kernelId)).get();
-  return (row?.policy as Record<string, unknown> | undefined)?.emergencyStop === true;
+ * Where a kernel's emergency stop stands (N4b-gw r6). Callers must handle all
+ * three answers:
+ *   - "clear": the kernel has no operator_policies row, or its policy object's
+ *     emergencyStop is falsy.
+ *   - "stopped": its policy object's emergencyStop is truthy. Truthy, not
+ *     `=== true`, the way the kernel's policy engine reads it, so that any
+ *     value but a falsy one engages the stop.
+ *   - "unavailable": the stop cannot be told, and the relay refuses rather than
+ *     guess, because a policy it cannot read may hold a stop it cannot see. The
+ *     read throws, the stored JSON does not parse (the column is a drizzle json
+ *     column, which parses on read and throws), or the policy is not a plain
+ *     object (null, an array, a string, a number, a boolean).
+ * Synchronous (better-sqlite3), so a caller can read the state and act on it
+ * with no await in between.
+ */
+type EmergencyStopState = "stopped" | "clear" | "unavailable";
+
+function emergencyStopState(kernelId: string): EmergencyStopState {
+  try {
+    const { db } = getStore();
+    const row = db.select().from(operatorPolicies).where(eq(operatorPolicies.kernelId, kernelId)).get();
+    if (!row) return "clear";
+    const policy: unknown = row.policy;
+    if (typeof policy !== "object" || policy === null || Array.isArray(policy)) return "unavailable";
+    return (policy as Record<string, unknown>).emergencyStop ? "stopped" : "clear";
+  } catch {
+    return "unavailable";
+  }
+}
+
+/** The refusal for a kernel whose emergency stop is not "clear". */
+function stopRefusal(reply: FastifyReply, state: Exclude<EmergencyStopState, "clear">): FastifyReply {
+  return state === "stopped"
+    ? reply.status(409).send({ error: "kernel_emergency_stopped" })
+    : reply.status(503).send({ error: "policy_unavailable" });
 }
 
 /**
@@ -532,6 +575,14 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       });
     }
 
+    // The kernel's emergency stop (N4b-gw r6). Authentication, authorization
+    // and validation have answered above; a stopped, or unreadable, kernel
+    // takes nothing from here on: no row and no scope budget spent. This early
+    // read only spares those side effects. The authoritative read is the one
+    // just before the insert, below.
+    const stopAtEntry = emergencyStopState(kernelId);
+    if (stopAtEntry !== "clear") return stopRefusal(reply, stopAtEntry);
+
     // Validate scope if provided
     if (scopeId) {
       const scope = db
@@ -671,6 +722,15 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     }
     // ────────────────────────────────────────────────────────────────────────
 
+    // The authoritative emergency-stop read (N4b-gw r6). The governor above was
+    // awaited, so a stop may have landed since the read at entry. Read it again
+    // and queue the call in the same synchronous section, with no await between
+    // the two: better-sqlite3 is synchronous and Node is single-threaded, so no
+    // stop request can run between this check and the insert. A stop after the
+    // insert finds the row pending, and the stop route rejects it.
+    const stop = emergencyStopState(kernelId);
+    if (stop !== "clear") return stopRefusal(reply, stop);
+
     const id = generateId("tc");
     const now = new Date().toISOString();
 
@@ -697,10 +757,28 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   // GET /api/relay/:kernelId/tool-call/pending
   app.get<{
     Params: { kernelId: string };
-  }>("/api/relay/:kernelId/tool-call/pending", async (req) => {
+  }>("/api/relay/:kernelId/tool-call/pending", async (req, reply) => {
     const { kernelId } = req.params;
 
     const { db } = getStore();
+
+    // The kernel's emergency stop (N4b-gw r6), read before anything below
+    // changes a row, so an unreadable policy leaves the queue exactly as it was.
+    //   - unavailable: refuse. Nothing is reclaimed, claimed or rejected.
+    //   - stopped: withhold. Every call still pending for this kernel is
+    //     rejected (a compare-and-set on `pending`, so a row a concurrent poll
+    //     claimed is left alone), and the executor is answered with no calls and
+    //     `emergencyStop: true`. The list key and count stay as they were, so a
+    //     poller that predates the flag reads it as "nothing to do".
+    const stopAtEntry = emergencyStopState(kernelId);
+    if (stopAtEntry === "unavailable") return stopRefusal(reply, stopAtEntry);
+    if (stopAtEntry === "stopped") {
+      db.update(toolCallRelay)
+        .set({ status: "rejected", error: "emergency_stopped", completedAt: new Date().toISOString() })
+        .where(and(eq(toolCallRelay.kernelId, kernelId), eq(toolCallRelay.status, "pending")))
+        .run();
+      return { calls: [], count: 0, emergencyStop: true };
+    }
 
     // Reclaim stale claimed calls (claimed >120s ago without completion).
     // This prevents calls from being stuck forever if the executor crashes.
@@ -761,17 +839,11 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       }
       // F1: re-establish the physical-safety boundary at the dispatch site. A
       // call admitted while the breaker was closed must not reach the device
-      // after failures opened it, and an engaged emergency stop blocks every
-      // dispatch. Fail closed: an e-stop, an open breaker or a governor denial
-      // rejects the row; if the safety gateway can't be consulted, the call is
-      // left queued (like an escrow-lookup failure) rather than dispatched.
-      if (emergencyStopEngaged(kernelId)) {
-        db.update(toolCallRelay)
-          .set({ status: "rejected", error: "emergency_stopped", completedAt: now })
-          .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
-          .run();
-        continue;
-      }
+      // after failures opened it. Fail closed: an open breaker or a governor
+      // denial rejects the row; if the safety gateway can't be consulted, the
+      // call is left queued (like an escrow-lookup failure) rather than
+      // dispatched. A stop engaged before this poll was answered above the
+      // loop; the read after this block covers one that lands during the await.
       try {
         const gateway = getSafetyGateway();
         const verdict = await gateway.validateOnly({
@@ -801,6 +873,23 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         // we cannot clear. Leave the call queued for the next poll.
         continue;
       }
+      // The emergency stop, read again AFTER this row's last await and
+      // immediately before its claim, with no await between: a stop that landed
+      // while the governor was consulted is seen here, and no stop request can
+      // run between this read and the claim below.
+      //   - stopped: reject the row, as the entry check and the stop route do.
+      //   - unavailable: claim nothing more in this request. This row and every
+      //     later one stay pending; rows claimed earlier in the request are
+      //     returned as usual.
+      const stop = emergencyStopState(kernelId);
+      if (stop === "stopped") {
+        db.update(toolCallRelay)
+          .set({ status: "rejected", error: "emergency_stopped", completedAt: now })
+          .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
+          .run();
+        continue;
+      }
+      if (stop === "unavailable") break;
       // Atomic, EXCLUSIVE claim (findings F1/F2): claim the row only if it is
       // still `pending`. This is a compare-and-set — SQLite runs it as one
       // statement — so (a) two concurrent polls cannot both take the same row
@@ -1069,6 +1158,13 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         });
       }
     }
+
+    // The kernel's emergency stop (N4b-gw r6): no scope is minted while the stop
+    // is engaged, or while it cannot be read. Nothing below awaits, so this read
+    // and the insert are one synchronous section and no stop request can run
+    // between them. Revoking a scope is a safety action and stays open.
+    const stop = emergencyStopState(kernelId);
+    if (stop !== "clear") return stopRefusal(reply, stop);
 
     const id = generateId("scope");
     const now = new Date().toISOString();
