@@ -23,7 +23,8 @@ import {
 } from "../contracts/escrow-client.js";
 import { getRepos } from "../db.js";
 import {
-  claimEscrowByAddressForSettlement,
+  beginSettlement,
+  endSettlement,
   NON_RELEASABLE_ESCROW_STATUSES,
   recordMilestoneReleased,
   releaseEscrowFromSettlement,
@@ -56,21 +57,36 @@ function findEscrowRow(contractAddress: string) {
 }
 
 /**
+ * Record a release that went through. It happened on-chain, so a failed bookkeeping write is never raised and never
+ * reported as a failed release; but it is not hidden either (astra round 3, F5): it is logged as an error and the caller
+ * is told (`false`), so the response can say `recorded: false, reconcile: "required"`. The claim is NOT handed back
+ * after a confirmed release: the escrow stays owned, so no refund can land on funds that moved. Nothing here heals a V1
+ * or V3 escrow left that way; the keeper reconciles V2 only. Returns whether the release was recorded.
+ */
+function recordRelease(milestoneIndex: number, claim: SettlementClaim | undefined, result: unknown): boolean {
+  if (!claim) return true; // an escrow the gateway does not know has no row to record on
+  try {
+    recordMilestoneReleased(milestoneIndex, claim);
+    return true;
+  } catch (err) {
+    const tx = (result ?? {}) as { transactionHash?: string; txHash?: string };
+    console.error("[escrow] settlement_record_failed", {
+      escrowId: claim.escrowId,
+      milestoneIndex,
+      txHash: tx.transactionHash ?? tx.txHash,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+/**
  * N79: an escrow the gateway has given back (its job failed or was cancelled: `refund_pending` on a chain escrow,
  * `refunded` once the refund is done) is never moved toward a release. The evidence, attestation and release routes
  * call this first, on every path (V1, V2, V3). A dispute stays open: V2 refunds only through resolveDispute.
  * Replies 409 and returns true when it refuses. Fails closed: when the escrow registry cannot be read, replies 503
  * and sends nothing.
  */
-/** Record a release that went through. It happened on-chain, so a failed bookkeeping write is logged, never raised. */
-function recordRelease(milestoneIndex: number, claim: SettlementClaim): void {
-  try {
-    recordMilestoneReleased(milestoneIndex, claim);
-  } catch (err) {
-    console.warn("[escrow] Released on-chain, but recording it failed:", err instanceof Error ? err.message : err);
-  }
-}
-
 function refuseGivenBackEscrow(reply: FastifyReply, contractAddress: string): boolean {
   let row: ReturnType<typeof findEscrowRow>;
   try {
@@ -405,9 +421,27 @@ export async function escrowRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
       if (refuseGivenBackEscrow(reply, address)) return reply; // N79: given back, never released
-      // N79: this release owns the escrow while the chain call is out, so no refund lands underneath it. Any exit that
-      // did not release hands it back (and reconciles a refund if the escrow's job ended meanwhile).
-      const settlement = claimEscrowByAddressForSettlement(address);
+      // N79: this release owns the escrow while the chain call is out (a lease, taken synchronously, before any await),
+      // so no refund lands underneath it and no second settlement acts on it. An escrow another settlement holds, or
+      // one that is not releasable, is refused before anything is sent. An address the gateway does not know has
+      // nothing to protect. Any exit that did not release hands the escrow back (and reconciles a refund if the
+      // escrow's job ended meanwhile); the lease always ends with the request.
+      const begun = beginSettlement({ contractAddress: address });
+      if (begun.disposition === "busy") {
+        return reply.status(409).send({
+          error: "settlement_in_progress",
+          message: "Another settlement is acting on this escrow; try again once it finishes.",
+          escrowStatus: begun.escrowStatus,
+        });
+      }
+      if (begun.disposition === "blocked") {
+        return reply.status(409).send({
+          error: "escrow_not_releasable",
+          message: "This escrow is not in a state it can be released from.",
+          escrowStatus: begun.escrowStatus,
+        });
+      }
+      const claim = "claim" in begun ? begun.claim : undefined;
       let released = false;
       try {
         // V2 (EAS) path: release takes ONLY the milestone index — the binding
@@ -425,13 +459,14 @@ export async function escrowRoutes(app: FastifyInstance) {
                 ? await releaseMilestoneV3(idx, address as Address)
                 : await releaseMilestoneV2(idx, address as Address);
             released = true;
-            recordRelease(idx, settlement.claim);
+            const recorded = recordRelease(idx, claim, result);
             return {
               ...result,
               action: "release",
               escrow: address,
               milestoneIndex: idx,
               path: version === "v3" ? "eas-v3-mode-b" : "eas-v2",
+              ...(recorded ? {} : { recorded: false, reconcile: "required" }),
             };
           } catch (err) {
             return reply.status(502).send({ error: "chain_write_failed", message: err instanceof Error ? err.message : String(err) });
@@ -466,16 +501,21 @@ export async function escrowRoutes(app: FastifyInstance) {
           return sendActivityError(reply, activityResult.error);
         }
         released = true;
-        recordRelease(idx, settlement.claim);
-        return activityResult.value;
+        if (recordRelease(idx, claim, activityResult.value)) return activityResult.value;
+        return {
+          ...(typeof activityResult.value === "object" && activityResult.value !== null ? activityResult.value : { result: activityResult.value }),
+          recorded: false,
+          reconcile: "required",
+        };
       } finally {
-        if (!released) {
+        if (claim && !released) {
           try {
-            releaseEscrowFromSettlement(settlement.jobId, settlement.claim);
+            releaseEscrowFromSettlement(claim, claim.jobId);
           } catch {
             // best-effort
           }
         }
+        endSettlement(claim);
       }
     },
   );

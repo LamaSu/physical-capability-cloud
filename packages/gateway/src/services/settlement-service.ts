@@ -17,7 +17,8 @@ import type { Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos } from "../db.js";
 import {
-  claimEscrowForSettlement,
+  beginSettlement,
+  endSettlement,
   givenBackEscrow,
   recordMilestoneReleased,
   releaseEscrowFromSettlement,
@@ -51,6 +52,13 @@ export interface ReleaseResult {
   txHash: string;
   status: "released" | "failed";
   error?: string;
+  /**
+   * Set (to `false`) only when the release is CONFIRMED on-chain but recording it in the database failed (N79 round 3,
+   * F5). The escrow stays owned (`completing`), `reconcile: "required"` says it needs reconciling, and the failure is
+   * logged. Absent on a normal release.
+   */
+  recorded?: false;
+  reconcile?: "required";
 }
 
 export interface ProcessEvidenceOptions {
@@ -470,10 +478,21 @@ export class SettlementService {
       contractAddress = defaultAddr;
     }
 
-    // N79: this release owns the job's escrow from here, synchronously after the checks above and before any await, so
-    // no refund lands while the chain call is out (astra round 2, F3).
-    const claim = claimEscrowForSettlement(jobId);
+    // N79: this release owns the job's escrow from here, synchronously after the checks above and before any await (a
+    // lease: no refund lands while the chain call is out, and no second settlement acts on the escrow meanwhile; astra
+    // rounds 2 and 3). The job's own escrow, else the one named by contractAddress; neither is a release with nothing to
+    // protect. An escrow another settlement holds, or one that is not releasable, is refused before the chain is touched.
+    let begun = beginSettlement({ jobId });
+    if (begun.disposition === "no_escrow") begun = beginSettlement({ contractAddress });
+    if (begun.disposition === "busy") {
+      return { jobId, txHash: "", status: "failed", error: "settlement_in_progress" };
+    }
+    if (begun.disposition === "blocked") {
+      return { jobId, txHash: "", status: "failed", error: `escrow_not_releasable:${begun.escrowStatus}` };
+    }
+    const claim = "claim" in begun ? begun.claim : undefined;
     let released = false;
+    let recordFailed = false;
 
     try {
       const writeResult = await onChainReleaseMilestone(
@@ -483,11 +502,20 @@ export class SettlementService {
       );
       released = true;
 
-      try {
-        recordMilestoneReleased(milestoneIndex, claim);
-      } catch (recordErr) {
-        // The release happened on-chain; a failed bookkeeping write must not report it as failed.
-        console.warn("[settlement] Released on-chain, but recording it failed:", recordErr instanceof Error ? recordErr.message : recordErr);
+      if (claim) {
+        try {
+          recordMilestoneReleased(milestoneIndex, claim);
+        } catch (recordErr) {
+          // The release happened on-chain, so it is not reported as failed, and the claim is NOT handed back (the escrow
+          // stays owned: no refund can land on funds that moved). But the caller is told it was not recorded (F5).
+          recordFailed = true;
+          console.error("[escrow] settlement_record_failed", {
+            escrowId: claim.escrowId,
+            milestoneIndex,
+            txHash: writeResult.transactionHash,
+            error: recordErr instanceof Error ? recordErr.message : String(recordErr),
+          });
+        }
       }
 
       try {
@@ -527,6 +555,7 @@ export class SettlementService {
         jobId,
         txHash: writeResult.transactionHash,
         status: "released",
+        ...(recordFailed ? { recorded: false as const, reconcile: "required" as const } : {}),
       };
     } catch (err) {
       return {
@@ -536,14 +565,16 @@ export class SettlementService {
         error: err instanceof Error ? err.message : "release_failed",
       };
     } finally {
-      // Nothing was released: hand the escrow back, and give it to the payer if the job ended meanwhile.
-      if (!released) {
+      // Nothing was released: hand the escrow back, and give it to the payer if the job ended meanwhile. The lease
+      // always ends with the call.
+      if (claim && !released) {
         try {
-          releaseEscrowFromSettlement(jobId, claim);
+          releaseEscrowFromSettlement(claim, claim.jobId);
         } catch {
           // best-effort
         }
       }
+      endSettlement(claim);
     }
   }
 }

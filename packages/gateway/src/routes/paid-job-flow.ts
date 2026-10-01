@@ -41,10 +41,13 @@ import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
 import {
-  claimEscrowForSettlement,
+  beginSettlement,
+  endSettlement,
   escrowForJob,
   NON_RELEASABLE_ESCROW_STATUSES,
+  recordEscrowReleased,
   releaseEscrowFromSettlement,
+  TERMINAL_FAILURE_JOB_STATUSES,
   type SettlementClaim,
 } from "../services/escrow-refund.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
@@ -94,6 +97,28 @@ const resolver = new TemplateResolver();
  *  uses to pick the mock-vs-real escrow branch — the two must never disagree. */
 export function isMockSettlement(): boolean {
   return process.env.MOCK_SETTLEMENT !== "false";
+}
+
+/**
+ * Complete the escrow a settlement holds: every milestone row `released` and the escrow `completed`, as a compare-and-set
+ * under the claim's lease (N79 round 3; these four sites used to write `completed` bare). A row that no longer reads what
+ * the claim holds it as is left alone, never overwritten, and logged. `escrowId` is set only when the job's escrow was found
+ * by the same job -> session -> cwm lookup the claim was taken with, so a claim is in scope at every site; one that is not
+ * is logged rather than written around.
+ */
+function completeClaimedEscrow(claim: SettlementClaim | undefined, escrowId: string | null, jobId: string): void {
+  if (!escrowId) return;
+  if (!claim) {
+    console.error("[escrow] settlement_record_failed", { escrowId, jobId, error: "settled without a claim on the escrow" });
+    return;
+  }
+  if (!recordEscrowReleased(claim)) {
+    console.error("[escrow] settlement_record_failed", {
+      escrowId: claim.escrowId,
+      jobId,
+      error: "the escrow row no longer reads what this settlement holds it as",
+    });
+  }
 }
 
 /** Coerce a possibly-loose value to a valid on-chain AssuranceTier (0-3).
@@ -911,7 +936,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
     // Set once we've won the completion claim below, so a failure before
     // evidence is durably recorded can release the claim (see the catch).
     let claimedOriginalStatus: string | undefined;
-    // N79: the escrow this completion took for its settlement, and whether evidence is recorded yet.
+    // N79: the claim this completion holds on its escrow's settlement (its lease; undefined when no escrow is known),
+    // and whether evidence is recorded yet.
     let escrowClaim: SettlementClaim | undefined;
     let evidenceRecorded = false;
 
@@ -966,9 +992,29 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         });
       }
       claimedOriginalStatus = job.status;
-      // N79: the settlement now owns the escrow, durably, in the same synchronous stretch as the claim. No refund lands
-      // underneath it, however often the job's status is rewritten meanwhile.
-      escrowClaim = claimEscrowForSettlement(jobId);
+      // N79: the settlement now owns the escrow, in the same synchronous stretch as the claim: durably (the row reads
+      // `completing`) and in flight (an exclusive lease). No refund lands underneath it, however often the job's status
+      // is rewritten meanwhile, and no second settlement acts on the escrow at the same time. An escrow another
+      // operation holds, or one that is not releasable, is not this completion's to settle: give the job back its
+      // status and refuse.
+      const begun = beginSettlement({ jobId });
+      if (begun.disposition === "busy" || begun.disposition === "blocked") {
+        getStore()
+          .db.update(schema.jobs)
+          .set({ status: claimedOriginalStatus })
+          .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "completing")))
+          .run();
+        claimedOriginalStatus = undefined; // already given back; the catch below must not restore it a second time
+        const busy = begun.disposition === "busy";
+        return reply.status(409).send({
+          error: busy ? "settlement_in_progress" : "escrow_not_releasable",
+          message: busy
+            ? "Another settlement is acting on this job's escrow."
+            : "This job's escrow is not in a state it can be released from.",
+          escrowStatus: begun.escrowStatus,
+        });
+      }
+      if (begun.disposition !== "no_escrow") escrowClaim = begun.claim;
 
       // #3 — the REAL assurance tier this job was negotiated at. N3 now writes
       // this tier on-chain as the milestone's requiredTier, so the evidence
@@ -1468,13 +1514,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         settledAt = now;
         settlementStatus = "settled";
 
-        if (escrowId) {
-          repos.escrows.updateStatus(escrowId, "completed");
-          const milestones = repos.escrows.findMilestonesByEscrow(escrowId);
-          for (const ms of milestones) {
-            repos.escrows.updateMilestoneStatus(ms.id, "released");
-          }
-        }
+        completeClaimedEscrow(escrowClaim, escrowId, jobId);
       } else {
         // Real settlement: update status to evidence_submitted and wait for challenge window
         repos.jobs.updateStatus(jobId, "evidence_submitted");
@@ -1535,10 +1575,12 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       }
       // N79: a completion that gives up before recording evidence hands the escrow back. If the job ended without
       // completing meanwhile (a failure write landed while this settlement owned the escrow), the escrow goes back to
-      // the payer now. After evidence is recorded, the settlement still owns the escrow: resume-settlement continues it.
+      // the payer now. After evidence is recorded, the settlement still owns the escrow (durably: it keeps reading
+      // `completing` once the lease ends below): resume-settlement continues it, even if the job is rewritten to
+      // `failed` meanwhile.
       if (escrowClaim && !evidenceRecorded) {
         try {
-          releaseEscrowFromSettlement(jobId, escrowClaim);
+          releaseEscrowFromSettlement(escrowClaim, jobId);
         } catch {
           // best-effort, like the job rollback above
         }
@@ -1547,6 +1589,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         error: "completion_failed",
         details: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      // The in-flight lease ends with this request on every path. The durable `completing` mark, if it is still set,
+      // is what keeps the escrow owned from here.
+      endSettlement(escrowClaim);
     }
   });
 
@@ -1568,12 +1614,18 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
   // on-chain write. Single-winner is preserved by the same atomic CAS pattern:
   // it reclaims ONLY an 'evidence_submitted' job into 'completing' (the status
   // /complete already excludes), so a concurrent /complete can't also grab it and
-  // two concurrent resumes collapse to [200, 409].
+  // two concurrent resumes collapse to [200, 409]. (N79 round 3, F3: also a job
+  // another writer rewrote to a terminal failure status, when it has an escrow
+  // and an evidence bundle.) The escrow is claimed too, with the same lease as
+  // /complete: a second settlement acting on it gets 409.
   app.post<{ Params: { jobId: string } }>("/api/jobs/:jobId/resume-settlement", async (req, reply) => {
     const { jobId } = req.params;
-    // Set true once we hold the 'completing' claim, so a later failure can release
-    // it back to 'evidence_submitted' (keeping the job recoverable, never trapped).
-    let reclaimed = false;
+    // Set once we hold the 'completing' claim, to the status the job had when we took it, so a later failure can put
+    // THAT status back (keeping the job recoverable, never trapped). Normally 'evidence_submitted'; a job rewritten to
+    // a terminal failure status after its evidence was recorded is put back as that status (F3 below).
+    let resumedFrom: string | undefined;
+    // N79: the claim this resume holds on its escrow's settlement (its lease; undefined when no escrow is claimed).
+    let escrowClaim: SettlementClaim | undefined;
 
     try {
       const repos = getRepos();
@@ -1584,8 +1636,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "Job not found" });
       }
 
-      // Single-winner reclaim: flip ONLY an 'evidence_submitted' job into
-      // 'completing'. Excludes settled/completed/failed/cancelled/completing, so a
+      // Single-winner reclaim: flip ONLY an 'evidence_submitted' job (or a recoverable failed one, below) into
+      // 'completing'. Excludes settled/completed/completing and any other failure, so a
       // settled job or an in-flight /complete is never disturbed, and two
       // concurrent resumes can't both win.
       // N79: an escrow that was given back (refunded, or refund pending on-chain) can never be released. Checked
@@ -1599,33 +1651,86 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         });
       }
 
-      const claimed = db
-        .update(schema.jobs)
-        .set({ status: "completing" })
-        .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "evidence_submitted")))
-        .returning()
-        .all();
+      // N79 (astra round 3, F3): after its evidence is recorded, a settlement keeps the job recoverable: a failed or retried
+      // request can be resumed. But the job's status is mutable by other writers: one that rewrites it to a terminal
+      // failure status used to cut the recovery route, since only 'evidence_submitted' was accepted. So a job in a terminal
+      // failure status is resumed too, when it has an escrow (one that was given back already got its 409 above) AND the
+      // evidence ITS OWN /complete recorded: `jobs.evidenceBundleId`, which only /complete writes and no status rewrite
+      // clears. Any evidence row would not do: the operator relay (no owner check, N85) and other paths insert rows for
+      // any job, so a bare row does not prove that settlement began. The escrow's own status is not asked: a V1/V2 chain
+      // escrow reads `created` its whole life, and a legacy row `funded`; beginSettlement decides the rest below
+      // (acquired, adopted, leased or blocked). Read here, synchronously, right before the claim, with no await between.
+      // The claim is on the status just read, and a give-up puts that status back.
+      const priorStatus = job.status;
+      const recordedBundleId = job.evidenceBundleId ?? null;
+      const recoverableFailure =
+        TERMINAL_FAILURE_JOB_STATUSES.has(priorStatus) &&
+        refundGuardEscrow !== undefined &&
+        recordedBundleId !== null &&
+        repos.evidence.findByJob(jobId).some((b) => b.id === recordedBundleId);
+      const claimed =
+        priorStatus === "evidence_submitted" || recoverableFailure
+          ? db
+              .update(schema.jobs)
+              .set({ status: "completing" })
+              .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, priorStatus)))
+              .returning()
+              .all()
+          : [];
       if (claimed.length !== 1) {
         return reply.status(409).send({
           error: "Job is not in a resumable state (must be 'evidence_submitted' and not already settling/settled)",
           status: job.status,
         });
       }
-      reclaimed = true;
+      resumedFrom = priorStatus;
       // N79: the settlement owns the escrow (normally since /complete; this takes it for an escrow claimed before that
-      // existed). Evidence exists here, so the claim is never handed back: the settlement is not abandoned.
-      claimEscrowForSettlement(jobId);
+      // existed, or adopts the `completing` one a restart or a failed request left). An escrow another operation holds,
+      // or one that is not releasable, is not this resume's to settle. One that is already `completed` is the
+      // settled-already case: it is reconciled below, before anything touches the chain, and needs no claim.
+      const begun = beginSettlement({ jobId });
+      const escrowCompleted = begun.disposition === "blocked" && begun.escrowStatus === "completed";
+      if (begun.disposition === "busy" || (begun.disposition === "blocked" && !escrowCompleted)) {
+        db.update(schema.jobs)
+          .set({ status: priorStatus })
+          .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "completing")))
+          .run();
+        resumedFrom = undefined;
+        const busy = begun.disposition === "busy";
+        return reply.status(409).send({
+          error: busy ? "settlement_in_progress" : "escrow_not_releasable",
+          message: busy
+            ? "Another settlement is acting on this job's escrow."
+            : "This job's escrow is not in a state it can be released from.",
+          escrowStatus: begun.escrowStatus,
+        });
+      }
+      if ("claim" in begun) escrowClaim = begun.claim;
 
       // Reuse the existing evidence bundle — never rebuild. Its absence means an
       // inconsistent row; release the claim and refuse rather than settle blind.
+      // N79 round 3: the bundle THIS job's /complete recorded (`jobs.evidenceBundleId`), not merely the latest row for
+      // the job. Other paths append rows for any job (the operator relay has no owner check, N85), and a resume must
+      // never settle on one of those. Only a job with no recorded bundle id (a row from before /complete wrote it) falls
+      // back to the latest row.
       const bundles = repos.evidence.findByJob(jobId);
-      const latestBundle = bundles[bundles.length - 1] ?? null;
+      const latestBundle =
+        (recordedBundleId !== null ? bundles.find((b) => b.id === recordedBundleId) : bundles[bundles.length - 1]) ?? null;
       if (!latestBundle) {
-        repos.jobs.updateStatus(jobId, "evidence_submitted");
-        reclaimed = false;
+        repos.jobs.updateStatus(jobId, priorStatus);
+        resumedFrom = undefined;
+        // N79 (round 3, F4): no evidence means no settlement began, so the escrow this resume just took goes back to
+        // the status it had (and to the payer, if the job ended meanwhile).
+        if (escrowClaim) {
+          try {
+            releaseEscrowFromSettlement(escrowClaim, jobId);
+          } catch {
+            // best-effort, like the job rollback above
+          }
+        }
         return reply.status(409).send({
           error: "No evidence bundle found to resume; cannot settle without evidence",
-          status: "evidence_submitted",
+          status: priorStatus,
         });
       }
       const bundleId = latestBundle.id;
@@ -1659,7 +1764,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             escrow.status === "completed" || milestones.some((m) => m.status === "released");
           if (alreadyReleased) {
             repos.jobs.updateStatus(jobId, "settled");
-            reclaimed = false;
+            resumedFrom = undefined;
             return {
               jobId,
               status: "settled",
@@ -1673,6 +1778,17 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             };
           }
         }
+      }
+      // N79: an escrow that read `completed` was not claimed, and the branch above reconciles it and returns before
+      // anything touches the chain. Made explicit here: a resume with no claim on a closed escrow never goes on.
+      if (escrowCompleted) {
+        repos.jobs.updateStatus(jobId, priorStatus);
+        resumedFrom = undefined;
+        return reply.status(409).send({
+          error: "escrow_not_releasable",
+          message: "This job's escrow is not in a state it can be released from.",
+          escrowStatus: "completed",
+        });
       }
 
       // Whether to re-drive the CHAIN (not just the DB) for this recovery. The old
@@ -1717,13 +1833,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       if (v2ChainDrive && chainSettled) {
         const nowIso = new Date().toISOString();
         repos.jobs.updateStatus(jobId, "settled");
-        if (escrowId) {
-          repos.escrows.updateStatus(escrowId, "completed");
-          for (const ms of repos.escrows.findMilestonesByEscrow(escrowId)) {
-            repos.escrows.updateMilestoneStatus(ms.id, "released");
-          }
-        }
-        reclaimed = false;
+        completeClaimedEscrow(escrowClaim, escrowId, jobId);
+        resumedFrom = undefined;
         pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
           metadata: {
             path: "resume-settlement-chain-preconfirmed",
@@ -1775,10 +1886,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           : {}),
       });
       if (!oracleResponse.result.verified) {
-        // Not verified: release the claim back to 'evidence_submitted' so a future
+        // Not verified: release the claim back to the status it had so a future
         // resume (e.g. after a transient oracle outage) can try again.
-        repos.jobs.updateStatus(jobId, "evidence_submitted");
-        reclaimed = false;
+        repos.jobs.updateStatus(jobId, priorStatus);
+        resumedFrom = undefined;
         return reply.status(422).send({
           error: "oracle_verification_failed",
           reason: oracleResponse.result.reason,
@@ -1812,33 +1923,23 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       // resume; otherwise it stays 'evidence_submitted' (still awaiting the window),
       // resumable again once the window closes.
       const nowIso = new Date().toISOString();
-      let settlementStatus = "evidence_submitted";
+      let settlementStatus = priorStatus;
       let settledAt: string | null = null;
       if (isMockSettlement()) {
         repos.jobs.updateStatus(jobId, "settled");
         settledAt = nowIso;
         settlementStatus = "settled";
-        if (escrowId) {
-          repos.escrows.updateStatus(escrowId, "completed");
-          for (const ms of repos.escrows.findMilestonesByEscrow(escrowId)) {
-            repos.escrows.updateMilestoneStatus(ms.id, "released");
-          }
-        }
+        completeClaimedEscrow(escrowClaim, escrowId, jobId);
       } else if (chainSettled) {
         repos.jobs.updateStatus(jobId, "settled");
         settledAt = nowIso;
         settlementStatus = "settled";
-        if (escrowId) {
-          repos.escrows.updateStatus(escrowId, "completed");
-          for (const ms of repos.escrows.findMilestonesByEscrow(escrowId)) {
-            repos.escrows.updateMilestoneStatus(ms.id, "released");
-          }
-        }
+        completeClaimedEscrow(escrowClaim, escrowId, jobId);
       } else {
-        repos.jobs.updateStatus(jobId, "evidence_submitted");
-        settlementStatus = "evidence_submitted";
+        repos.jobs.updateStatus(jobId, priorStatus);
+        settlementStatus = priorStatus;
       }
-      reclaimed = false;
+      resumedFrom = undefined;
 
       pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
         metadata: {
@@ -1877,11 +1978,13 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
     } catch (err) {
       // Release the reclaim so the job stays recoverable (never trapped at
       // 'completing'). Guarded on the status we set, matching /complete's catch.
-      if (reclaimed) {
+      // The escrow is NOT handed back here: evidence exists, so the settlement is not abandoned (it keeps reading
+      // `completing` once the lease ends below, and a later resume adopts it).
+      if (resumedFrom !== undefined) {
         try {
           getStore().db
             .update(schema.jobs)
-            .set({ status: "evidence_submitted" })
+            .set({ status: resumedFrom })
             .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "completing")))
             .run();
         } catch {
@@ -1892,6 +1995,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         error: "resume_settlement_failed",
         details: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      // The in-flight lease ends with this request on every path.
+      endSettlement(escrowClaim);
     }
   });
 
