@@ -175,7 +175,7 @@ describe("N71: stored device configuration never leaves the /api/devices routes"
   it("[neg] GET /api/devices/:kernelId shows another key no adapterConfig and no credential", async () => {
     const res = await inj("GET", `/api/devices/${kernelId}`, keyB);
     expect(res.statusCode).toBe(200);
-    expect(deviceIdsOf(res)).toContain(deviceId);
+    expect(deviceIdsOf(res)).toEqual([deviceId]);
     expect(res.body).not.toContain(SECRET);
     expect(res.body).not.toContain("adapterConfig");
   });
@@ -185,7 +185,7 @@ describe("N71: stored device configuration never leaves the /api/devices routes"
     // come first: without them this test would also pass on a 403/500 (astra, MEDIUM 4).
     const res = await inj("GET", `/api/devices/${kernelId}`, keyA);
     expect(res.statusCode).toBe(200);
-    expect(deviceIdsOf(res)).toContain(deviceId);
+    expect(deviceIdsOf(res)).toEqual([deviceId]);
     expect(res.body).not.toContain(SECRET);
     expect(res.body).not.toContain("adapterConfig");
   });
@@ -214,6 +214,10 @@ describe("N71: stored device configuration never leaves the /api/devices routes"
   it("[neg] a column added to the device row later is not published by POST /api/devices/register", async () => {
     // The repository is made to return a row with a column that does not exist today.
     // A rest-spread response would publish it; an explicit view cannot.
+    // (A kernel of its own, so the other tests on `kernelId` keep seeing exactly one device.)
+    const ownKernel = `${kernelId}-future`;
+    const made = await inj("POST", "/api/kernels", keyA, { id: ownKernel, name: "A's second workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
     const kernels = getRepos().kernels;
     const realInsert = kernels.insertDevice.bind(kernels);
     const spy = vi
@@ -221,8 +225,8 @@ describe("N71: stored device configuration never leaves the /api/devices routes"
       .mockImplementation((d) => ({ ...realInsert(d), futureColumn: FUTURE }) as never);
     try {
       const res = await inj("POST", "/api/devices/register", keyA, {
-        kernelId,
-        id: `dev-future-${kernelId}`,
+        kernelId: ownKernel,
+        id: `dev-future-${ownKernel}`,
         type: "printer",
         model: "Model Y",
         adapterType: "http",
@@ -230,7 +234,7 @@ describe("N71: stored device configuration never leaves the /api/devices routes"
       });
       expect(res.statusCode, res.body).toBe(200);
       const { device } = bodyOf(res);
-      expect(device.id).toBe(`dev-future-${kernelId}`);
+      expect(device.id).toBe(`dev-future-${ownKernel}`);
       expect(Object.keys(device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
       expect(res.body).not.toContain(FUTURE);
       expect(res.body).not.toContain(SECRET);
@@ -243,14 +247,14 @@ describe("N71: stored device configuration never leaves the /api/devices routes"
   it("control: the public view keeps what callers use (the same shape as GET /api/kernels/:kernelId/devices)", async () => {
     const mine = (await inj("GET", `/api/devices/${kernelId}`, keyB)).json() as { devices: Array<Record<string, unknown>> };
     const pub = (await inj("GET", `/api/kernels/${kernelId}/devices`, keyB)).json() as { devices: Array<Record<string, unknown>> };
-    expect(mine.devices.length).toBeGreaterThanOrEqual(1);
+    expect(mine.devices.length).toBe(1);
     expect(mine.devices).toEqual(pub.devices);
-    expect(mine.devices.find((d) => d.id === deviceId)).toMatchObject({ id: deviceId, type: "printer", model: "Model X", adapterType: "http" });
+    expect(mine.devices[0]).toMatchObject({ id: deviceId, type: "printer", model: "Model X", adapterType: "http" });
   });
 
   it("control: the stored row still holds the config, for dispatch", () => {
-    const rows = getRepos().kernels.findDevicesByKernel(kernelId) as Array<{ id: string; adapterConfig?: string | null }>;
-    expect(String(rows.find((r) => r.id === deviceId)?.adapterConfig ?? "")).toContain(SECRET);
+    const rows = getRepos().kernels.findDevicesByKernel(kernelId) as Array<{ adapterConfig?: string | null }>;
+    expect(String(rows[0]?.adapterConfig ?? "")).toContain(SECRET);
   });
 });
 
@@ -489,11 +493,12 @@ describe("N71: POST /api/setup/validate does not echo connection values", () => 
 describe("N71: POST /api/setup/register-device returns a credential-free device view", () => {
   const SETUP_SECRET = `${SENTINEL}-setup-adapter-config`;
   const REPLACED_SECRET = `${SENTINEL}-setup-adapter-config-replaced`;
+  let setupKernel: string; // A's kernel for these tests
   let setupDeviceId: string;
   let createBody: Record<string, any>;
 
   const setupBody = (extra: Record<string, unknown> = {}) => ({
-    kernelId,
+    kernelId: setupKernel,
     deviceId: setupDeviceId,
     type: "sensor",
     adapterType: "mock",
@@ -503,8 +508,11 @@ describe("N71: POST /api/setup/register-device returns a credential-free device 
     String(getRepos().kernels.findDeviceById(setupDeviceId)?.adapterConfig ?? "");
 
   beforeAll(async () => {
-    setupDeviceId = `dev-setup-${kernelId}`;
-    // A registers device D with a credential.
+    setupKernel = `${kernelId}-setup`;
+    setupDeviceId = `dev-setup-${setupKernel}`;
+    const made = await inj("POST", "/api/kernels", keyA, { id: setupKernel, name: "A's setup workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
+    // A registers device D on it with a credential.
     const res = await inj("POST", "/api/setup/register-device", keyA, {
       ...setupBody({ model: "Setup Sensor", adapterConfig: { apiKey: SETUP_SECRET } }),
     });
@@ -514,7 +522,7 @@ describe("N71: POST /api/setup/register-device returns a credential-free device 
 
   it("[neg] the create response (201) names the device and carries no adapterConfig", () => {
     expect(createBody).toMatchObject({ registered: true, action: "created" });
-    expect(createBody.device).toMatchObject({ id: setupDeviceId, kernelId, type: "sensor", model: "Setup Sensor", adapterType: "mock" });
+    expect(createBody.device).toMatchObject({ id: setupDeviceId, kernelId: setupKernel, type: "sensor", model: "Setup Sensor", adapterType: "mock" });
     expect(Object.keys(createBody.device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
     expect(JSON.stringify(createBody)).not.toContain(SETUP_SECRET);
     expect(JSON.stringify(createBody)).not.toContain("adapterConfig");
@@ -531,7 +539,7 @@ describe("N71: POST /api/setup/register-device returns a credential-free device 
     if (res.statusCode === 200) {
       const body = bodyOf(res);
       expect(body).toMatchObject({ registered: true, action: "updated" });
-      expect(body.device).toMatchObject({ id: setupDeviceId, kernelId, adapterType: "mock", model: "Setup Sensor" });
+      expect(body.device).toMatchObject({ id: setupDeviceId, kernelId: setupKernel, adapterType: "mock", model: "Setup Sensor" });
       expect(Object.keys(body.device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
       // The update really took the "preserve the stored config" path; it is only the response that is redacted.
       expect(storedConfig()).toContain(SETUP_SECRET);
@@ -543,7 +551,7 @@ describe("N71: POST /api/setup/register-device returns a credential-free device 
     expect(res.statusCode, res.body).toBe(200);
     const body = bodyOf(res);
     expect(body).toMatchObject({ registered: true, action: "updated" });
-    expect(body.device).toMatchObject({ id: setupDeviceId, kernelId, model: "Setup Sensor v2" });
+    expect(body.device).toMatchObject({ id: setupDeviceId, kernelId: setupKernel, model: "Setup Sensor v2" });
     expect(Object.keys(body.device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
     expect(res.body).not.toContain(SETUP_SECRET);
     expect(res.body).not.toContain(REPLACED_SECRET);
@@ -559,7 +567,7 @@ describe("N71: POST /api/setup/register-device returns a credential-free device 
     const insertSpy = vi.spyOn(kernels, "insertDevice").mockImplementation((d) => ({ ...realInsert(d), futureColumn: FUTURE }) as never);
     const updateSpy = vi.spyOn(kernels, "updateDevice").mockImplementation((id, d) => ({ ...realUpdate(id, d), futureColumn: FUTURE }) as never);
     try {
-      const futureId = `dev-setup-future-${kernelId}`;
+      const futureId = `dev-setup-future-${setupKernel}`;
       const created = await inj("POST", "/api/setup/register-device", keyA, setupBody({ deviceId: futureId, adapterConfig: { apiKey: SETUP_SECRET } }));
       expect(created.statusCode, created.body).toBe(201);
       expect(bodyOf(created).device.id).toBe(futureId);
