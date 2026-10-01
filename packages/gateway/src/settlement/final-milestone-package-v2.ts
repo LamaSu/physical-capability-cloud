@@ -318,12 +318,20 @@ export function isInterimNonce(body: FinalMilestonePackageV2Body): boolean {
  * The signer SET is {operator, kernel} per evidence's frozen profile —
  * D1 = operator secp256k1-EIP712, D2 = kernel ed25519-raw32.
  *
- * `signer` is the dedup key AND the sort key AND is LOWERCASED in the canonical
- * form. Oracle #1395, verbatim: "Do NOT depend on case; changing a signer id's
- * case MUST be a no-op." Signer ids are EIP-55-checksummed addresses in some
- * paths and lowercase in others, so the same address in two spellings is ONE
- * signer; binding the spelling would make identical evidence produce two package
- * identities and fail the packageHash bind at first mint.
+ * `signer` is the dedup key and the sort key, and it is `0x` + lowercase hex
+ * (SIGNER_FORM): any other spelling is REFUSED, never lowercased. Oracle #1395:
+ * "Do NOT depend on case; changing a signer id's case MUST be a no-op." Signer
+ * ids are EIP-55-checksummed addresses in some paths and lowercase in others, so
+ * binding a spelling would make identical evidence produce two package identities
+ * and fail the packageHash bind at first mint. The oracle gets its no-op by
+ * lowercasing on its own side. The producer gets the same result by accepting ONE
+ * spelling and emitting it exactly as given, so the digest it produces is the one
+ * the oracle computes.
+ *
+ * Evidence's mirror (`settlement-vector-golden-mirror.cjs`) dedups on the
+ * lowercased signer but keeps each entry's own case. On lowercase input, which is
+ * the only input the producer accepts, that is the same string, so producer,
+ * oracle and mirror agree on every input the producer accepts.
  */
 export interface PackageSignature {
   signer: string;
@@ -356,7 +364,8 @@ const SIGNER_FORM = /^0x(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /**
  * The malleability closure: dedup by signer (FIRST occurrence wins), then sort
- * by lowercased signerId.
+ * by signer. The signer is already pinned to its one spelling (SIGNER_FORM), so
+ * it is dedup'd, sorted and emitted exactly as given; nothing here changes case.
  *
  * Pure — never mutates the caller's array. Returns a new array.
  */
@@ -380,18 +389,15 @@ export function canonicalSignatures(
           "any other spelling is refused, never normalized",
       );
     }
-    const key = s.signer.toLowerCase();
-    if (seen.has(key)) continue; // FIRST wins — later duplicates are dropped
-    seen.add(key);
-    // NORMALIZE the emitted signer to the same lowercased form used for dedup
-    // and sorting. Without this the digest would depend on the SPELLING of an
-    // address, so the identical package assembled by two services could hash
-    // differently — the case-insensitivity the oracle requires (#1395).
-    kept.push({ ...s, signer: key });
+    if (seen.has(s.signer)) continue; // FIRST wins — later duplicates are dropped
+    seen.add(s.signer);
+    // Emitted exactly as given: SIGNER_FORM already admits one spelling only, so
+    // there is nothing to normalize and nothing for the digest to depend on.
+    kept.push({ ...s });
   }
 
-  // Sort by the SAME lowercased key used for dedup and emission, so no two of
-  // the three operations can disagree about signer identity.
+  // Sort by the SAME signer used for dedup and emission, so no two of the three
+  // operations can disagree about signer identity.
   return kept.sort((a, b) =>
     a.signer < b.signer ? -1 : a.signer > b.signer ? 1 : 0,
   );

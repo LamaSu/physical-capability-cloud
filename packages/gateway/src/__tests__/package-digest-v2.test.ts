@@ -27,6 +27,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { canonicalize } from "@pcc/spec";
 import GOLDEN from "./fixtures/g2-settlement-vector-golden.json";
 import {
   packageDigestV2,
@@ -119,6 +120,57 @@ describe("canonicalSignatures — the malleability closure", () => {
     expect(() =>
       canonicalSignatures([null as unknown as PackageSignature]),
     ).toThrow(InvalidSignatureEntryError);
+  });
+});
+
+/**
+ * Replica of `canonicalSigs` in evidence's `settlement-vector-golden-mirror.cjs`
+ * (read from the evidence worktree; the mirror itself is not touched): dedup by
+ * the LOWERCASED signer keeping the entry exactly as given, then sort by the
+ * lowercased signer.
+ */
+function mirrorCanonicalSigs(sigs: readonly PackageSignature[]): PackageSignature[] {
+  const kept = new Map<string, PackageSignature>();
+  for (const s of sigs) {
+    const id = s.signer.toLowerCase();
+    if (!kept.has(id)) kept.set(id, s);
+  }
+  const lower = (s: PackageSignature) => s.signer.toLowerCase();
+  return [...kept.values()].sort((a, b) => (lower(a) < lower(b) ? -1 : lower(a) > lower(b) ? 1 : 0));
+}
+
+describe("producer vs evidence's mirror — signer case (F6)", () => {
+  it("agrees with the mirror, byte for byte, on every input it accepts", () => {
+    const accepted: Array<[string, PackageSignature[]]> = [
+      ["A,B", [SIG_A, SIG_B]],
+      ["B,A", [SIG_B, SIG_A]],
+      ["another signature value", [{ ...SIG_A, sig: "0xother" }, SIG_B]],
+      ["another kernel key", [SIG_A, { ...SIG_B, signer: `0x${"d4".repeat(32)}` }]],
+    ];
+    for (const [name, input] of accepted) {
+      expect(canonicalSignatures(input), name).toEqual(mirrorCanonicalSigs(input));
+      expect(packageDigestV2PreImage(BODY, input), name).toBe(
+        canonicalize({ body: BODY, [SIGNATURES_KEY]: mirrorCanonicalSigs(input) }),
+      );
+    }
+  });
+
+  it("refuses exactly where a lowercasing producer would have differed: a signer whose case the mirror keeps", () => {
+    for (const signer of [SIGNER_A.toUpperCase().replace("0X", "0x"), `0x${"Aa".repeat(20)}`]) {
+      const input = [{ ...SIG_A, signer }, SIG_B];
+      // The mirror keeps the case it is given, so lowercasing here would diverge from it...
+      expect(mirrorCanonicalSigs(input).some((s) => s.signer === signer)).toBe(true);
+      // ...so the producer refuses the input instead of repairing it.
+      expect(() => canonicalSignatures(input), signer).toThrow(InvalidSignatureEntryError);
+      expect(() => packageDigestV2PreImage(BODY, input), signer).toThrow(InvalidSignatureEntryError);
+    }
+  });
+
+  it("emits each accepted signer exactly as given", () => {
+    const out = canonicalSignatures([SIG_B, SIG_A]);
+    expect(out.map((s) => s.signer)).toEqual([SIGNER_A, SIGNER_B]);
+    expect(out[0]).toEqual(SIG_A);
+    expect(out[1]).toEqual(SIG_B);
   });
 });
 

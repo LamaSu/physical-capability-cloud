@@ -11,12 +11,21 @@
  * The contract (oracle #1368):
  *
  *   packageDigestV2 = SHA-256( JCS( { body, <sigsKey>: canonicalSignatures(sigs) } ) )
- *   canonicalSignatures = dedup-by-signer (FIRST wins) + sort by lowercased signerId
+ *   canonicalSignatures = dedup-by-signer (FIRST wins) + sort by signer
  *
  * The dedup+sort is the malleability closure: without it, a relayer could
  * reorder or duplicate signatures and move the digest without changing a single
  * semantic fact, which would let the same evidence produce two different
  * package identities.
+ *
+ * SIGNER CASE IS REFUSED, NOT REPAIRED. The oracle's ingestion treats a signer's
+ * case as a no-op (#1395) by lowercasing before it hashes, and evidence's mirror
+ * (`settlement-vector-golden-mirror.cjs`) dedups on the lowercased signer but
+ * keeps the entry's own case. The producer accepts only the lowercase spelling
+ * (0x + lowercase hex) and emits it exactly as given, so on every input the
+ * producer accepts all three agree: lowercasing is the identity, and the case the
+ * mirror keeps is that same lowercase. A re-cased signer is an error here, never a
+ * second digest and never a silent repair.
  *
  * WHY THE CANONICALIZER IS IMPORTED, NOT HAND-ROLLED: `packages/spec`'s
  * `canonicalize` is already the repo's serializer for evidence events and
