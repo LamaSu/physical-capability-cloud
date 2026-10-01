@@ -509,3 +509,98 @@ describe("LLMAgent.chat — continuing a conversation (history)", () => {
     expect(create).not.toHaveBeenCalled();
   });
 });
+
+describe("LLMAgent.chat: the history's tool-use pairing is validated (Q7-A)", () => {
+  type Content = Anthropic.MessageParam["content"];
+  const user = (content: Content): Anthropic.MessageParam => ({ role: "user", content });
+  const assistant = (content: Content): Anthropic.MessageParam => ({ role: "assistant", content });
+  const toolUse = (id: string) => ({ type: "tool_use" as const, id, name: "echo", input: { text: "x" } });
+  const toolResult = (id: string) => ({ type: "tool_result" as const, tool_use_id: id, content: "{}" });
+  const text = (t: string) => ({ type: "text" as const, text: t });
+  const answer = msg({ stop_reason: "end_turn", content: [{ type: "text", text: "ok", citations: null } as Anthropic.TextBlock] });
+
+  async function refused(history: Anthropic.MessageParam[]): Promise<void> {
+    const { client, create } = makeFakeClient([answer]);
+    const agent = new LLMAgent([echoTool], { echo: async () => ({}) }, { client });
+    await expect(agent.chat("next", { history })).rejects.toThrow(/history/);
+    expect(create).not.toHaveBeenCalled();
+  }
+  async function accepted(history: Anthropic.MessageParam[]): Promise<void> {
+    const { client, create } = makeFakeClient([answer]);
+    const agent = new LLMAgent([echoTool], { echo: async () => ({}) }, { client });
+    await expect(agent.chat("next", { history })).resolves.toMatchObject({ text: "ok" });
+    expect(create).toHaveBeenCalledTimes(1);
+  }
+
+  it("Q7-A: a history that ends on an unanswered tool_use is refused, and the model is never called", async () => {
+    await refused([user("first"), assistant([toolUse("t1")])]);
+  });
+
+  it("Q7-A: a tool_use id that appears twice is refused", async () => {
+    await refused([
+      user("a"),
+      assistant([toolUse("t1")]),
+      user([toolResult("t1")]),
+      assistant([toolUse("t1")]),
+      user([toolResult("t1")]),
+      assistant([text("done")]),
+    ]);
+    await refused([user("a"), assistant([toolUse("t1"), toolUse("t1")]), user([toolResult("t1")]), assistant([text("done")])]);
+  });
+
+  it("Q7-A: a tool_result that names no tool_use is refused", async () => {
+    await refused([user("a"), assistant([text("hi")]), user([toolResult("ghost")]), assistant([text("done")])]);
+    await refused([user("a"), assistant([toolUse("t1")]), user([toolResult("t1"), toolResult("ghost")]), assistant([text("done")])]);
+  });
+
+  it("Q7-A: a tool_result placed after text is refused", async () => {
+    await refused([user("a"), assistant([toolUse("t1")]), user([text("note"), toolResult("t1")]), assistant([text("done")])]);
+  });
+
+  it("Q7-A: a tool_use is answered by the IMMEDIATELY following user message, nowhere else", async () => {
+    // a plain-text user message does not answer it
+    await refused([user("a"), assistant([toolUse("t1")]), user("no result"), assistant([text("done")])]);
+    // an answer two messages later does not count, and is a stray result too
+    await refused([
+      user("a"),
+      assistant([toolUse("t1")]),
+      user("no result"),
+      assistant([text("hm")]),
+      user([toolResult("t1")]),
+      assistant([text("done")]),
+    ]);
+    // another assistant message directly after it does not answer it
+    await refused([user("a"), assistant([toolUse("t1")]), assistant([text("again")]), user("b"), assistant([text("done")])]);
+  });
+
+  it("Q7-A: a tool_use without an id cannot be paired, and is refused", async () => {
+    const noId = { type: "tool_use" as const, id: "", name: "echo", input: {} };
+    await refused([user("a"), assistant([noId]), user([toolResult("")]), assistant([text("done")])]);
+  });
+
+  it("Q7-A: every parallel tool_use needs its result, and each result answers exactly one", async () => {
+    await refused([user("a"), assistant([toolUse("t1"), toolUse("t2")]), user([toolResult("t1")]), assistant([text("done")])]);
+    await refused([user("a"), assistant([toolUse("t1")]), user([toolResult("t1"), toolResult("t1")]), assistant([text("done")])]);
+  });
+
+  it("Q7-A: well-formed tool-use histories continue (parallel calls, results in any order, text after the results)", async () => {
+    await accepted([
+      user("a"),
+      assistant([text("looking"), toolUse("t1"), toolUse("t2")]),
+      user([toolResult("t2"), toolResult("t1"), text("and one more thing")]),
+      assistant([text("done")]),
+    ]);
+    await accepted([user("a"), assistant([text("no tools here")])]);
+    await accepted([]);
+  });
+
+  it("Q7-A: a transcript this loop produced is a valid history for the next chat", async () => {
+    const first = makeFakeClient([
+      msg({ stop_reason: "tool_use", content: [{ type: "tool_use", id: "tu_1", name: "echo", input: { text: "hi" } } as Anthropic.ToolUseBlock] }),
+      msg({ stop_reason: "end_turn", content: [{ type: "text", text: "you said hi", citations: null } as Anthropic.TextBlock] }),
+    ]);
+    const agent = new LLMAgent([echoTool], { echo: async () => ({ ok: true }) }, { client: first.client });
+    const result = await agent.chat("say hi");
+    await accepted(result.messages);
+  });
+});
