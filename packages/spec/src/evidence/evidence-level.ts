@@ -76,6 +76,9 @@
  *    malformed. Only pass and fail prove a level (none and malformed prove NO
  *    level, not even device_reported). In contradictions a fail or a malformed
  *    verdict counts as a failed inspection (fail closed) and none does not.
+ *    Keys are matched after an ASCII trim and ASCII lowercase (`Passed`,
+ *    ` passed`, `PASS`, `Status` all count as present); a spelling of the pinned
+ *    field that is not the exact key is malformed, not a pass.
  *    Pinned: instrument_result `pass` (boolean), cv_inspection_result
  *    `passed` (boolean) and batch_sample_result `status` ("PASS" or "FAIL").
  *    photo_comparison_result has no producer, so no pinned field. A cv
@@ -299,19 +302,30 @@ function isAsciiSpace(code: number): boolean {
   return code === 0x20 || (code >= 0x09 && code <= 0x0d);
 }
 
-/** ASCII trim + ASCII lowercase compare, with no locale or Unicode case APIs. */
-function isGatewayStamp(deviceId: string): boolean {
+/**
+ * ASCII trim + ASCII lowercase of `text`, or null when the trimmed text is
+ * longer than `maxLength` (so it cannot be a name we look for, and no folded
+ * copy of an arbitrarily long string is built). No locale or Unicode case APIs:
+ * only A-Z are lowered and only ASCII whitespace is trimmed, so any other
+ * character, whatever Unicode lowercasing would make of it, is left alone and
+ * never matches an ASCII name.
+ */
+function asciiFold(text: string, maxLength: number): string | null {
   let start = 0;
-  let end = deviceId.length;
-  while (start < end && isAsciiSpace(deviceId.charCodeAt(start))) start += 1;
-  while (end > start && isAsciiSpace(deviceId.charCodeAt(end - 1))) end -= 1;
-  if (end - start !== GATEWAY_STAMPED_DEVICE_ID.length) return false;
-  for (let i = 0; i < GATEWAY_STAMPED_DEVICE_ID.length; i += 1) {
-    let code = deviceId.charCodeAt(start + i);
-    if (code >= 0x41 && code <= 0x5a) code += 0x20;
-    if (code !== GATEWAY_STAMPED_DEVICE_ID.charCodeAt(i)) return false;
+  let end = text.length;
+  while (start < end && isAsciiSpace(text.charCodeAt(start))) start += 1;
+  while (end > start && isAsciiSpace(text.charCodeAt(end - 1))) end -= 1;
+  if (end - start > maxLength) return null;
+  let folded = "";
+  for (let i = start; i < end; i += 1) {
+    const code = text.charCodeAt(i);
+    folded += code >= 0x41 && code <= 0x5a ? String.fromCharCode(code + 0x20) : text.charAt(i);
   }
-  return true;
+  return folded;
+}
+
+function isGatewayStamp(deviceId: string): boolean {
+  return asciiFold(deviceId, GATEWAY_STAMPED_DEVICE_ID.length) === GATEWAY_STAMPED_DEVICE_ID;
 }
 
 // ---------------------------------------------------------------------------
@@ -369,12 +383,21 @@ const PINNED_VERDICTS: ReadonlyMap<string, PinnedVerdict> = new Map<string, Pinn
 ]);
 
 /**
- * Keys that look like a verdict. When an inspection's pinned field is absent
- * (or the type has none) and the payload still carries one of these, it is
- * claiming something this module cannot read, so the verdict is `malformed`.
+ * Names that look like a verdict. A payload key is matched against them (and
+ * against the pinned field's name) after an ASCII trim and ASCII lowercase, so
+ * `Passed`, ` passed`, `PASS` and `Status` all count as present. When an
+ * inspection's pinned field is absent (or the type has none) and the payload
+ * still carries one of these, it is claiming something this module cannot read,
+ * so the verdict is `malformed`.
  */
 const VERDICT_LOOKING_KEYS = ["pass", "passed", "status", "result", "verdict", "ok", "success"] as const;
 const VERDICT_LOOKING = new Set<string>(VERDICT_LOOKING_KEYS);
+
+/** No folded key longer than this can be a verdict-looking name or a pinned field. */
+const LONGEST_VERDICT_NAME = Math.max(
+  ...VERDICT_LOOKING_KEYS.map((name) => name.length),
+  ...[...PINNED_VERDICTS.values()].map((pinned) => pinned.field.length),
+);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -386,23 +409,41 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * The verdict of an inspection payload that has ALREADY been read. It touches
  * the payload three times, each once: its prototype, a snapshot of its own key
  * names, and the descriptor of the pinned field. Nothing is invoked: an accessor
- * is malformed, never called.
+ * is malformed, never called. Own key names are compared after an ASCII trim
+ * and ASCII lowercase (`asciiFold`), whether or not the key is enumerable.
  *   - not a plain, non-null, non-array object: `malformed`;
- *   - the pinned field is an own key: a valid value gives `pass` or `fail`, any
- *     other value gives `malformed`;
- *   - the pinned field is absent: any own key of {pass, passed, status, result,
- *     verdict, ok, success} gives `malformed`, otherwise `none`.
+ *   - some own key folds to the pinned field's name but is not that exact key
+ *     (`Passed`, ` passed`, `PASSED`): `malformed`, even when the exact key is
+ *     present too, because the payload then carries two readings;
+ *   - the exact pinned field is an own key: a valid value gives `pass` or
+ *     `fail`, any other value gives `malformed`;
+ *   - the pinned field is absent: any own key that folds to one of {pass, passed,
+ *     status, result, verdict, ok, success} gives `malformed`, otherwise `none`.
+ * Another verdict-looking key beside a valid pinned field is ignored: the pinned
+ * field decides.
  */
 function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
   if (!isPlainObject(payload)) return "malformed";
   const pinned = PINNED_VERDICTS.get(type);
-  const keys = Object.getOwnPropertyNames(payload);
-  if (pinned !== undefined && keys.includes(pinned.field)) {
+  let exactPinned = false;
+  let pinnedSpelling = false;
+  let verdictLooking = false;
+  for (const key of Object.getOwnPropertyNames(payload)) {
+    const folded = asciiFold(key, LONGEST_VERDICT_NAME);
+    if (folded === null) continue;
+    if (VERDICT_LOOKING.has(folded)) verdictLooking = true;
+    if (pinned !== undefined && folded === pinned.field) {
+      if (key === pinned.field) exactPinned = true;
+      else pinnedSpelling = true;
+    }
+  }
+  if (pinnedSpelling) return "malformed";
+  if (pinned !== undefined && exactPinned) {
     const descriptor = Object.getOwnPropertyDescriptor(payload, pinned.field);
     if (descriptor === undefined || !("value" in descriptor)) return "malformed";
     return pinned.read(descriptor.value);
   }
-  return keys.some((key) => VERDICT_LOOKING.has(key)) ? "malformed" : "none";
+  return verdictLooking ? "malformed" : "none";
 }
 
 /**

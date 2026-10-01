@@ -1117,6 +1117,156 @@ describe("inspectionVerdict — one closed verdict per inspection type", () => {
   });
 });
 
+describe("inspectionVerdict — verdict keys are matched after an ASCII trim and lowercase (D4)", () => {
+  type Row = [label: string, payload: unknown, expected: InspectionVerdict];
+  const check = (type: EvidenceEventType, rows: Row[]) => {
+    for (const [label, payload, expected] of rows) {
+      expect(inspectionVerdict(ev(type, READER, payload)), type + " " + label).toBe(expected);
+    }
+  };
+  /** Spellings of a name that an ASCII trim and ASCII lowercase fold back to it. */
+  const spellings = (name: string): string[] => [
+    name.toUpperCase(),
+    name.charAt(0).toUpperCase() + name.slice(1),
+    name.charAt(0) + name.slice(1).toUpperCase(),
+    " " + name,
+    name + " ",
+    "\t" + name + "\n",
+    "\u000b" + name + "\u000c",
+    "\r\n " + name + " \t",
+  ];
+  const VERDICT_NAMES = ["pass", "passed", "status", "result", "verdict", "ok", "success"];
+
+  it("a spelling of the pinned field that is not the exact key is malformed, never a pass", () => {
+    const pins: Array<[EvidenceEventType, string, unknown]> = [
+      ["instrument_result", "pass", true],
+      ["cv_inspection_result", "passed", true],
+      ["batch_sample_result", "status", "PASS"],
+    ];
+    for (const [type, field, value] of pins) {
+      for (const spelling of spellings(field)) {
+        check(type, [[JSON.stringify(spelling), { [spelling]: value }, "malformed"]]);
+        // Even with the exact key beside it: the payload carries two readings.
+        check(type, [[JSON.stringify(spelling) + " beside " + field, { [field]: value, [spelling]: value }, "malformed"]]);
+      }
+      check(type, [["the exact key alone", { [field]: value }, "pass"]]);
+    }
+  });
+
+  it("every verdict-looking name counts as present in any ASCII spelling, when the pinned field is absent", () => {
+    for (const type of INSPECTION_EVENT_TYPES) {
+      for (const name of VERDICT_NAMES) {
+        for (const spelling of spellings(name)) {
+          check(type, [[JSON.stringify(spelling), { [spelling]: true }, "malformed"]]);
+        }
+      }
+    }
+  });
+
+  it("instrument_result: pass, Pass, PASS and a padded pass are all the pinned field's names, so only the exact key reads", () => {
+    check("instrument_result", [
+      ["Pass", { Pass: true }, "malformed"],
+      ["PASS", { PASS: false }, "malformed"],
+      ["mixed case", { pAsS: true }, "malformed"],
+      ["Passed (a different verdict-looking name)", { Passed: true }, "malformed"],
+      ["conflicting spellings", { pass: true, Pass: false }, "malformed"],
+      ["conflicting spellings, padded", { pass: false, " pass": true }, "malformed"],
+      ["a valid pass beside another verdict-looking key: the pinned field decides", { pass: true, Status: "FAIL" }, "pass"],
+      ["a valid fail beside another verdict-looking key", { pass: false, RESULT: "ok" }, "fail"],
+    ]);
+  });
+
+  it("cv_inspection_result: {Passed:true} is malformed, not a pass", () => {
+    check("cv_inspection_result", [
+      ["Passed", { Passed: true }, "malformed"],
+      [" passed", { " passed": true }, "malformed"],
+      ["PASSED:false", { PASSED: false }, "malformed"],
+      ["PASS (a different verdict-looking name)", { PASS: true }, "malformed"],
+      ["passed beside Passed", { passed: true, Passed: false }, "malformed"],
+      ["a valid passed beside PASS: the pinned field decides", { passed: true, PASS: false }, "pass"],
+    ]);
+    // It proves no level and counts as a failed inspection.
+    const independentCv = (payload: unknown) =>
+      level([executorBundle(), bundle([ev("cv_inspection_result", CAMERA, payload)], OP_B)], ASSIGNED_A);
+    expect(independentCv({ passed: true })).toBe("inspected_output");
+    expect(independentCv({ Passed: true })).toBe("device_reported"); // the completion alone
+    expect(deriveContradictions([bundle([done(), ev("cv_inspection_result", CAMERA, { Passed: true })], OP_A)])).toEqual([
+      "completion-and-failed-inspection",
+    ]);
+  });
+
+  it("batch_sample_result: Status is not status", () => {
+    check("batch_sample_result", [
+      ["Status", { Status: "PASS" }, "malformed"],
+      ["STATUS", { STATUS: "FAIL" }, "malformed"],
+      [" status", { " status": "PASS" }, "malformed"],
+      ["status beside Status", { status: "PASS", Status: "FAIL" }, "malformed"],
+      ["Pass instead of status", { Pass: true }, "malformed"],
+      ["a valid status beside Result: the pinned field decides", { status: "PASS", Result: "x" }, "pass"],
+    ]);
+  });
+
+  it("photo_comparison_result has no pinned field: any spelling of a verdict name is malformed", () => {
+    check("photo_comparison_result", [
+      ["Pass", { Pass: true }, "malformed"],
+      ["STATUS", { STATUS: 1 }, "malformed"],
+      ["Verdict", { Verdict: "match" }, "malformed"],
+      ["OK", { OK: true }, "malformed"],
+      ["Success", { Success: false }, "malformed"],
+      ["a measurement named Match", { Match: true, Score: 0.97 }, "none"],
+    ]);
+  });
+
+  it("the fold is ASCII only: Unicode lookalikes and non-ASCII whitespace never match", () => {
+    const lookalikes = [
+      "pass ", // NBSP is not ASCII whitespace
+      " pass",
+      "pass ",
+      "pass﻿",
+      "pa​ss", // zero-width space inside
+      "ｐａｓｓ", // full-width "pass"
+      "oK", // KELVIN SIGN: Unicode lowercasing would turn it into "ok"
+      "OK",
+      "success\u0000",
+    ];
+    for (const type of INSPECTION_EVENT_TYPES) {
+      for (const key of lookalikes) check(type, [[JSON.stringify(key), { [key]: true }, "none"]]);
+    }
+  });
+
+  it("only own string keys count: symbols are ignored, non-enumerable own keys are not", () => {
+    check("instrument_result", [["symbol key", { [Symbol("pass")]: true }, "none"]]);
+    const hidden = Object.defineProperty({}, "Pass", { value: true, enumerable: false });
+    check("instrument_result", [["non-enumerable Pass", hidden, "malformed"]]);
+    const hiddenExact = Object.defineProperty({}, "pass", { value: true, enumerable: false });
+    check("instrument_result", [["non-enumerable exact pass", hiddenExact, "pass"]]);
+  });
+
+  it("a key longer than any verdict name cannot match, however padded, and the fold is linear", () => {
+    check("instrument_result", [
+      ["padded too long to be a name", { "passed  x": true }, "none"],
+      ["a long key", { ["x".repeat(1_000_000)]: true }, "none"],
+      ["pass plus filler", { passxxxxx: true }, "none"],
+      ["200k leading spaces then pass", { [" ".repeat(200_000) + "pass"]: true }, "malformed"],
+      ["pass then 200k tabs", { ["pass" + "\t".repeat(200_000)]: true }, "malformed"],
+    ]);
+  });
+
+  it("a folded spelling proves no level and counts as a failed inspection, a lookalike does neither", () => {
+    const independent = (payload: unknown) =>
+      level([executorBundle(), bundle([ev("instrument_result", READER, payload)], OP_B)], ASSIGNED_A);
+    expect(independent({ pass: true })).toBe("inspected_output");
+    expect(independent({ PASS: true })).toBe("device_reported"); // the completion alone
+    expect(independent({ "pass ": true })).toBe("device_reported"); // none: also no level
+    expect(deriveContradictions([bundle([done(), ev("instrument_result", READER, { PASS: true })], OP_A)])).toEqual([
+      "completion-and-failed-inspection",
+    ]);
+    expect(deriveContradictions([bundle([done(), ev("instrument_result", READER, { "pass ": true })], OP_A)])).toEqual([]);
+    expect(inspectionFailed(ev("instrument_result", READER, { Pass: true }))).toBe(true);
+    expect(inspectionFailed(ev("instrument_result", READER, { "oK": true }))).toBe(false);
+  });
+});
+
 describe("deriveContradictions — the public contradiction rule the oracle signs rejects on (J4)", () => {
   const unit = (...events: EvidenceEvent[]) => [bundle(events, OP_A)];
 
