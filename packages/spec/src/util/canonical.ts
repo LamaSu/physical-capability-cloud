@@ -89,6 +89,15 @@ function isEnumerable(descriptor: object): boolean {
 }
 
 /**
+ * Every NonCanonicalValueError is registered here as it is constructed, and the
+ * boundary in canonicalize recognises its own errors ONLY by membership. A thrown
+ * value is never inspected: `instanceof` would run a hostile Proxy's
+ * getPrototypeOf trap and any property read its get trap, and a trap that throws
+ * from inside the check would let a plain Error out past the typed boundary.
+ */
+const CANONICAL_ERRORS = new WeakSetConstructor<object>();
+
+/**
  * Raised when a value has no JSON form. Its canonical text could not survive
  * JSON transport or be reproduced by a non-JavaScript consumer, so a hash over
  * it could never be verified anywhere else.
@@ -99,6 +108,7 @@ export class NonCanonicalValueError extends Error {
     super(`canonicalize: ${what} at ${path} has no JSON form; refusing to hash it`);
     this.name = "NonCanonicalValueError";
     this.path = path;
+    weakSetAdd(CANONICAL_ERRORS, this);
   }
 }
 
@@ -142,8 +152,8 @@ export function canonicalize(value: unknown): string {
     }
     return canonicalizeAt(value, "$", new WeakSetConstructor());
   } catch (err) {
-    if (err instanceof NonCanonicalValueError) throw err;
-    // A Proxy trap threw, or the value nests too deeply to walk: not a plain JSON tree.
+    if (weakSetHas(CANONICAL_ERRORS, err)) throw err; // ours: classified by identity, never inspected
+    // A Proxy trap threw (whatever it threw), or the value nests too deeply to walk: not a plain JSON tree.
     throw new NonCanonicalValueError("$", "a value that could not be read as a plain JSON tree");
   }
 }
