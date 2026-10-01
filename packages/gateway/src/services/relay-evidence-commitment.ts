@@ -14,11 +14,16 @@
  *
  *   event_bundle_hash     `events` is present: it must be a non-empty list of LO-EV events
  *                         (each with a string `type` and `timestamp` and a `source` and
- *                         `payload` object), or the body is refused. Every event hash is
- *                         recomputed (`hashEvent`), and the bundle hash over them
- *                         (`hashBundle`). A supplied event `hash`, or a supplied or
- *                         device-signed `bundleHash`, must equal the recomputation, or the
- *                         body is refused. The events are stored.
+ *                         `payload` object), or the body is refused. Every event is hashed
+ *                         from ONE canonical snapshot (the `hashEvent` bytes), and the bundle
+ *                         hash over them (`hashBundle`). A supplied event `hash`, or a
+ *                         supplied or device-signed `bundleHash`, must equal the
+ *                         recomputation, or the body is refused. Every event must commit THIS
+ *                         job and its kernel in the hashed content, checked on that snapshot
+ *                         (LO-EV-9 rules 5 and 6: `payload.jobId` is the job, `source.kernelId`
+ *                         and any `payload.kernelId` are the job's kernel), or the body is
+ *                         refused (409): a bundle signed for job A cannot be filed under job B
+ *                         (cross-family review E4b). The snapshots are stored.
  *   device_signed_document  no `events`, but a device-signed DOCUMENT was captured
  *                         (`extractNodeSignedBundle`), in the form pcc-node's job port signs
  *                         (#471): the digest is `sha256(canonicalize(the envelope minus
@@ -36,7 +41,7 @@
  *     without a `source`: the gateway has nowhere to keep such a document, so it stores
  *     nothing rather than a hash nobody can reproduce.
  */
-import { canonicalize, hashBundle, hashEvent, sha256, type EvidenceEvent } from "@pcc/spec";
+import { canonicalize, hashBundle, sha256, type EvidenceEvent } from "@pcc/spec";
 import type { CapturedDeviceBundle } from "./device-evidence-settlement.js";
 
 export type RelayHashModel = "event_bundle_hash" | "device_signed_document";
@@ -68,8 +73,8 @@ export type RelayEvidenceRefusal =
   | { error: "evidence_not_lo_ev" }
   | { error: "evidence_not_canonical" }
   | { error: "evidence_not_bound" }
-  | { error: "job_mismatch" }
-  | { error: "kernel_mismatch" };
+  | { error: "job_mismatch"; eventIndex?: number }
+  | { error: "kernel_mismatch"; eventIndex?: number };
 
 /** The job the evidence is filed under, from the job row: never from the evidence. */
 export interface RelayJobContext {
@@ -90,6 +95,11 @@ const COMMITMENT_FIELDS = ["events", "bundleHash", "kernelSignature", "signature
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/** An own property of a parsed snapshot, never one inherited. */
+function own(o: Record<string, unknown>, k: string): unknown {
+  return Object.getOwnPropertyDescriptor(o, k)?.value;
 }
 
 function isLoEvEvent(e: unknown): e is Record<string, unknown> & RelayStoredEvent {
@@ -122,15 +132,27 @@ export async function commitRelayEvidence(
     if (bad !== -1) return { ok: false, refusal: { error: "events_malformed", eventIndex: bad } };
     const events: RelayStoredEvent[] = [];
     for (let i = 0; i < raw.length; i++) {
-      const e = raw[i] as Record<string, unknown> & RelayStoredEvent;
+      const e = raw[i] as Record<string, unknown>;
+      // ONE canonical snapshot per event: the bytes hashEvent hashes, parsed back. The hash, the
+      // job and kernel checks and the stored row all come from it, never from the caller's object.
+      let snap: unknown;
       let hash: string;
       try {
-        hash = await hashEvent({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload } as unknown as Omit<EvidenceEvent, "hash" | "id">);
+        const canonical = canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload });
+        snap = JSON.parse(canonical);
+        hash = await sha256(canonical);
       } catch {
         return { ok: false, refusal: { error: "evidence_not_canonical" } };
       }
-      if (e.hash !== undefined && e.hash !== hash) return { ok: false, refusal: { error: "event_hash_mismatch", eventIndex: i } };
-      events.push({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload, hash });
+      if (!isLoEvEvent(snap)) return { ok: false, refusal: { error: "events_malformed", eventIndex: i } };
+      const supplied = e.hash;
+      if (supplied !== undefined && supplied !== hash) return { ok: false, refusal: { error: "event_hash_mismatch", eventIndex: i } };
+      if (own(snap.payload, "jobId") !== job.jobId) return { ok: false, refusal: { error: "job_mismatch", eventIndex: i } };
+      const payloadKernel = own(snap.payload, "kernelId");
+      if (job.kernelId === null || own(snap.source, "kernelId") !== job.kernelId || (payloadKernel !== undefined && payloadKernel !== job.kernelId)) {
+        return { ok: false, refusal: { error: "kernel_mismatch", eventIndex: i } };
+      }
+      events.push({ type: snap.type, timestamp: snap.timestamp, source: snap.source, payload: snap.payload, hash });
     }
     const bundleHash = await hashBundle(events as unknown as EvidenceEvent[]);
     const claimed = captured?.bundleHash ?? (typeof b.bundleHash === "string" ? b.bundleHash : undefined);

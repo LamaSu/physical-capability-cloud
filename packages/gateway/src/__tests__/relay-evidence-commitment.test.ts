@@ -12,7 +12,7 @@ const TAGGED = /^sha256:[0-9a-f]{64}$/;
 /** The job the evidence is filed under (from the job row). */
 const J = { jobId: "job-1", kernelId: "kernel-1" };
 const source = { deviceId: "reader-1", deviceType: "plate_reader", kernelId: "kernel-1" };
-const loEv = (type: string, n: number) => ({ type, timestamp: `2026-09-29T22:35:0${n}.000Z`, source, payload: { n } });
+const loEv = (type: string, n: number) => ({ type, timestamp: `2026-09-29T22:35:0${n}.000Z`, source, payload: { n, jobId: "job-1" } });
 
 /** The body the rehearsal's operator daemon pushed: a device document, no LO-EV events. */
 const rehearsalBody = {
@@ -158,5 +158,45 @@ describe("commitRelayEvidence refuses what it cannot store reproducibly (cross-f
       const r = await commitRelayEvidence({ bundle, events: [loEv("execution_completed", 1)] }, null, J);
       expect(r, JSON.stringify(bundle)).toEqual({ ok: false, refusal: { error: "malformed_envelope" } });
     }
+  });
+});
+
+describe("an event bundle is bound to the job and kernel in its hashed content (cross-family review E4b)", () => {
+  /** LO-EV events naming `jobId` in their payload and `kernelId` in their source (LO-EV-9 rules 5 and 6). */
+  const bound = (jobId: string, kernelId: string) => [
+    { type: "execution_started", timestamp: "2026-09-29T22:35:01.000Z", source: { deviceId: "reader-1", deviceType: "plate_reader", kernelId }, payload: { jobId, kernelId } },
+    { type: "execution_completed", timestamp: "2026-09-29T22:35:02.000Z", source: { deviceId: "reader-1", deviceType: "plate_reader", kernelId }, payload: { jobId } },
+  ];
+
+  it("NEGATIVE (the reviewer's repro): job A's signed event bundle cannot be filed under job B", async () => {
+    const eventsForJobA = bound("job-A", "kernel-1");
+    const hash = await hashBundle(await Promise.all(eventsForJobA.map(async (e) => ({ ...e, hash: await hashEvent(e as Omit<EvidenceEvent, "hash" | "id">) }))) as unknown as EvidenceEvent[]);
+    const result = await commitRelayEvidence({ jobId: "job-A", events: eventsForJobA, bundleHash: hash }, captured(hash), { jobId: "job-B", kernelId: "kernel-1" });
+    expect(result).toMatchObject({ ok: false, refusal: { error: "job_mismatch" } });
+  });
+
+  it("NEGATIVE: an event naming another kernel, or none, is refused", async () => {
+    const J1 = { jobId: "job-1", kernelId: "kernel-1" };
+    expect(await commitRelayEvidence({ events: bound("job-1", "kernel-2") }, null, J1)).toMatchObject({ ok: false, refusal: { error: "kernel_mismatch" } });
+    const noSourceKernel = bound("job-1", "kernel-1").map((e) => ({ ...e, source: { deviceId: "reader-1", deviceType: "plate_reader" } }));
+    expect(await commitRelayEvidence({ events: noSourceKernel }, null, J1)).toMatchObject({ ok: false, refusal: { error: "kernel_mismatch" } });
+    const otherPayloadKernel = bound("job-1", "kernel-1").map((e, i) => (i === 0 ? { ...e, payload: { jobId: "job-1", kernelId: "kernel-2" } } : e));
+    expect(await commitRelayEvidence({ events: otherPayloadKernel }, null, J1)).toMatchObject({ ok: false, refusal: { error: "kernel_mismatch" } });
+    expect(await commitRelayEvidence({ events: bound("job-1", "kernel-1") }, null, { jobId: "job-1", kernelId: null })).toMatchObject({ ok: false, refusal: { error: "kernel_mismatch" } });
+    // A job without a kernel binds nothing, even when the events' kernel is null too.
+    const nullKernel = bound("job-1", "kernel-1").map((e) => ({ ...e, source: { deviceId: "reader-1", deviceType: "plate_reader", kernelId: null }, payload: { jobId: "job-1" } }));
+    expect(await commitRelayEvidence({ events: nullKernel }, null, { jobId: "job-1", kernelId: null })).toMatchObject({ ok: false, refusal: { error: "kernel_mismatch" } });
+  });
+
+  it("NEGATIVE: an event that commits no job, or another job, is refused", async () => {
+    const J1 = { jobId: "job-1", kernelId: "kernel-1" };
+    const noJob = bound("job-1", "kernel-1").map((e) => ({ ...e, payload: {} }));
+    expect(await commitRelayEvidence({ events: noJob }, null, J1)).toMatchObject({ ok: false, refusal: { error: "job_mismatch" } });
+    expect(await commitRelayEvidence({ events: bound("job-2", "kernel-1") }, null, J1)).toMatchObject({ ok: false, refusal: { error: "job_mismatch" } });
+  });
+
+  it("an event bundle whose every event names this job and kernel is committed", async () => {
+    const r = await commitRelayEvidence({ events: bound("job-1", "kernel-1") }, null, { jobId: "job-1", kernelId: "kernel-1" });
+    expect(r).toMatchObject({ ok: true, commitment: { hashModel: "event_bundle_hash" } });
   });
 });

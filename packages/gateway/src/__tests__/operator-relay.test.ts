@@ -22,7 +22,7 @@ async function realDeviceBundle(jobId: string, kernelId: string) {
   const kp = nacl.sign.keyPair();
   const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
   const raw = [
-    { type: "execution_completed", timestamp: new Date().toISOString(), source: { deviceId: "printer-1", deviceType: "fdm", kernelId }, payload: { ok: true } },
+    { type: "execution_completed", timestamp: new Date().toISOString(), source: { deviceId: "printer-1", deviceType: "fdm", kernelId }, payload: { ok: true, jobId } },
   ];
   const events = await Promise.all(raw.map(async (e) => ({ ...e, hash: await hashEvent(e as Omit<EvidenceEvent, "hash" | "id">) })));
   const bundleHash = await hashBundle(events as unknown as EvidenceEvent[]);
@@ -280,7 +280,7 @@ describe("Operator Relay Routes", () => {
       const job = seededJob();
       const before = bundlesFor(job.id);
       const src = { deviceId: "reader-1", deviceType: "plate_reader", kernelId: job.kernelId };
-      const events = [{ type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: { ok: true } }];
+      const events = [{ type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: { ok: true, jobId: job.id } }];
       const spy = vi.spyOn(getRepos().evidence, "insertEvents").mockImplementationOnce(() => {
         throw new Error("injected insertEvents failure");
       });
@@ -312,8 +312,8 @@ describe("Operator Relay Routes", () => {
       const job = seededJob();
       const src = { deviceId: "reader-1", deviceType: "plate_reader", kernelId: job.kernelId };
       const events = [
-        { type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: { ok: true } },
-        { type: "cv_inspection_result", timestamp: "2026-09-29T22:35:02.000Z", source: src, payload: { passed: true } },
+        { type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: { ok: true, jobId: job.id } },
+        { type: "cv_inspection_result", timestamp: "2026-09-29T22:35:02.000Z", source: src, payload: { passed: true, jobId: job.id } },
       ];
       const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
       expect(res.statusCode).toBe(200);
@@ -416,6 +416,18 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ stored: true, hashModel: "device_signed_document", contentHash: bundle.bundleHash, deviceSigned: true, signatureVerified: false });
+    });
+  });
+
+  describe("POST /api/operator/evidence binds an event bundle to its job and kernel (cross-family review E4b)", () => {
+    it("NEGATIVE: a device-signed event bundle for another job is refused (409), and nothing is stored", async () => {
+      const job = seededJob();
+      const before = bundlesFor(job.id);
+      const bundle = await realDeviceBundle(`${job.id}-another-job`, job.kernelId!);
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle: { ...bundle, jobId: job.id } } } });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "job_mismatch", stored: false });
+      expect(bundlesFor(job.id)).toBe(before);
     });
   });
 
