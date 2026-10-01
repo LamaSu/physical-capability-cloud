@@ -384,8 +384,10 @@ export function gatewayPaymentsGate(): GatewaySpendDecision {
  * counted even if the signer path later fails, because a failure can follow a
  * write that moved funds; the guard never under-counts.
  *
- * The only function that changes the ledger (rule 1): validate the day, then
- * prune, then check and record, all on the ONE day read at the top (rule 3).
+ * The only function that changes the daily spend ledger (`entries`; rule 1):
+ * validate the day, then prune, then check and record, all on the ONE day read
+ * at the top (rule 3). admitFaucetDrip and admitRelay follow the same order on
+ * their own ledgers.
  */
 export function admitGatewaySpend(input: GatewaySpendInput): GatewaySpendDecision {
   const day = utcDay(now()); // the ONE clock read of this admission (rule 3)
