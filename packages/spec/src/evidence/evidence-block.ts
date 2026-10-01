@@ -67,30 +67,46 @@
  * refusing it would take a second read of the input, and would make this step stricter than
  * the `verifyEventHash` that accepts the same event.
  *
- * INPUT THAT CAN RUN CODE IS REFUSED BEFORE IT IS READ (E7c). A Proxy runs its traps on every
- * reflection operation and an accessor runs its getter on every [[Get]]. Code that runs while the
- * snapshot is being made can replace `Object.freeze` (or `Reflect.*`) for one microtask, so that the
- * freezes become no-ops and the returned events stay mutable, or can answer a later read
- * differently: the events a consumer evaluates could then differ from the events that were
- * committed. So `computeKernelSignedEventsRoot` refuses, before it reads a value from it:
- *   - a bundle that is a Proxy, and a bundle whose `events` or `bundleHash` is not an OWN DATA
- *     property (a getter on the bundle, a getter inherited from a class, a missing property). Each
- *     is read from its own descriptor, never with a [[Get]];
- *   - an events array that is a Proxy, and an element that is a hole or an accessor;
- *   - a Proxy anywhere inside an event, and an accessor anywhere inside an event
- *     (`assertNoCodeRunningInput`: an iterative walk that touches only what cannot run code), and
- *     an object that `canonicalize` would refuse as non-plain, whose members are never enumerated.
- * What is left is `canonicalSnapshot` over a graph proven free of Proxies and accessors, so no code
- * of the input runs during the call. What this module uses to inspect and freeze caller-supplied
- * objects is a reference captured when it loads (`Object.freeze`, `Array.isArray`,
- * `Reflect.ownKeys`, `Reflect.getOwnPropertyDescriptor`, `Reflect.getPrototypeOf`,
- * `Number.isSafeInteger`, `util.types.isProxy`), as #359's canonical.ts does for the encoder, so a
- * global replaced after load cannot turn the freeze of the snapshot into a no-op. A caller that
- * replaces globals itself is outside the threat model: it already runs arbitrary code in this
- * process.
+ * INPUT THAT CAN RUN CODE IS REFUSED BEFORE IT IS READ, AT EVERY PUBLIC ENTRY POINT (E7c). A Proxy
+ * runs its traps on every reflection operation and an accessor runs its getter on every [[Get]].
+ * Code that runs while a snapshot is being made or a digest is being computed can replace
+ * `Object.freeze`, `Buffer.from`, `Array.prototype.sort` or any other global for one microtask, so
+ * that the freezes become no-ops and the returned events stay mutable, or a digest differs from the
+ * one the producer thinks it computed, or a later read answers differently: the events a consumer
+ * evaluates could differ from the events that were committed. A prototype polluted with an accessor
+ * can do the same to a field the caller never supplied. So every exported function that takes an
+ * object or an array (`computeSettlementUnitId`, `computeUnitContextDigest`,
+ * `computeAttestationRoleDigest`, `computeAttestationSetRoot`, `computeEvidenceBlockHash`,
+ * `sessionKeyAuthSnapshot` and `computeSessionKeyAuthDigest`, and `computeKernelSignedEventsRoot` for
+ * the events) first runs ONE guard over the whole input, `assertNoCodeRunningInput`, an iterative walk
+ * that touches only what cannot run code, and refuses, before any value is read:
+ *   - a Proxy at any depth (live or revoked), and an accessor anywhere, in a member that is read or
+ *     not;
+ *   - an object that is not plain: its prototype must be null or a prototype-less object that is no
+ *     Proxy (the Object.prototype of any realm), so a class instance, a Date, a Map, a typed array, a
+ *     Buffer, an Error and an object whose prototype is a Proxy are refused, before their members
+ *     are enumerated.
+ * Then each field is read exactly once from its OWN data descriptor, never with a [[Get]] (so no
+ * getter runs and nothing is inherited: a field the object does not own is missing, whatever
+ * Object.prototype says). For the bundle that means `events` and `bundleHash` (a getter on the bundle,
+ * one inherited from a class, a missing property are refused), the events array (a hole or an accessor
+ * element is refused) and, for each event, `canonicalSnapshot` over a graph proven free of Proxies and
+ * accessors.
+ * What is used after that is captured or pure: `Object.freeze`, `Array.isArray`, `Reflect.ownKeys`,
+ * `Reflect.getOwnPropertyDescriptor`, `Reflect.getPrototypeOf`, `Number.isSafeInteger`,
+ * `util.types.isProxy`, `Number`, `BigInt`, the `Uint8Array` constructor, the `node:crypto` Hash
+ * `update` and `digest`, `Set` and `String.prototype.charCodeAt` and `slice` are references captured
+ * when the module loads (as #359's canonical.ts does for the encoder), and hex, bytes, ABI words,
+ * the field checks, the sorts and the array building are loops over char codes and bytes with no
+ * Buffer, regular expression, `Uint8Array.from`, `Array.prototype` method or `Object.is`. So no
+ * global or prototype method that was replaced after load changes a freeze, a check, a word or a
+ * digest. What cannot be captured is what `@noble/hashes` (keccak) and `node:crypto` do inside the
+ * two hash calls. A caller that replaces globals itself is outside the threat model: it already runs
+ * arbitrary code in this process.
  *
- * The session authorization is snapshotted before it is hashed (E7 F3, F4): a frozen
- * plain copy of exactly the declared fields, read once, with `publicKey` pinned to 64
+ * The session authorization is snapshotted before it is hashed (E7 F3, F4): admitted first with the
+ * same guard as every other entry point, then a frozen plain copy of exactly the declared fields,
+ * read once from their own descriptors, with `publicKey` pinned to 64
  * and `parentSignature` to 128 lowercase hex characters with NO 0x prefix, the form the
  * golden uses and every in-repo producer emits. Other spellings of the same key are
  * refused rather than normalized, so one authorization has one digest and neither the
@@ -130,33 +146,47 @@ import { keccak_256 } from "@noble/hashes/sha3";
 import { NonCanonicalValueError, canonicalSnapshot, canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
 import type { EvidenceBundle, EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
 
-// What this module uses to inspect and freeze caller-supplied objects is captured here, when the
-// module loads, and the code below calls only these references (#359's canonical.ts does the same
-// for the encoder). A global replaced AFTER this point (Object.freeze, Reflect.ownKeys,
-// util.types.isProxy ...) cannot change what the freezes, the key enumeration, the array and Proxy
-// tests below do: in particular the snapshot's freeze cannot be made a no-op. The traversal of the
-// two walks below (`assertNoCodeRunningInput` and `deepFreeze`) looks nothing up at call time:
-// `set.has(v)` and `arr.push(v)` would find a method on the object, so they use the bound captures
-// and linked frames instead. (Only the text of a refusal is built with ordinary calls.)
+// What this module uses to inspect and freeze caller-supplied objects, and to encode and hash what
+// it read from them, is captured here, when the module loads, and the code below calls only these
+// references (#359's canonical.ts does the same for the encoder). A global or a prototype method
+// replaced AFTER this point (Object.freeze, Reflect.ownKeys, util.types.isProxy, Buffer.from,
+// Number, BigInt, Array.prototype.sort, RegExp.prototype.exec, Hash.prototype.update ...) cannot
+// change what the freezes, the key enumeration, the array and Proxy tests, the field checks, the ABI
+// words and the digests below do: in particular the snapshot's freeze cannot be made a no-op and no
+// digest can be changed. The traversal of the two walks below (`assertNoCodeRunningInput` and
+// `deepFreeze`) and the encoding below look nothing up at call time: `set.has(v)`, `arr.push(v)`,
+// `text.charCodeAt(i)` and a regular expression's `test` would find a method on the object, so they
+// use the bound captures, linked frames, char-code loops and `appendTo` instead. (Only the text of a
+// refusal is built with ordinary calls; so is what `@noble/hashes` and `node:crypto` do inside the
+// two hash calls, which this module cannot capture.)
 const freeze = Object.freeze;
 const isArray = Array.isArray;
 const ownKeys = Reflect.ownKeys;
 const getOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
 const getPrototypeOf = Reflect.getPrototypeOf;
+const defineProperty = Reflect.defineProperty;
 const isSafeInteger = Number.isSafeInteger;
+const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const isProxy = utilTypes.isProxy;
-const OBJECT_PROTOTYPE = Object.prototype;
-const ARRAY_PROTOTYPE = Array.prototype;
+const toBigInt = BigInt;
+const toNumber = Number;
+const Uint8ArrayConstructor = Uint8Array;
+const createHashFunction = createHash;
 const WeakSetConstructor = WeakSet;
+const SetConstructor = Set;
 const call = Function.prototype.call;
 const weakSetAdd = call.bind(WeakSet.prototype.add) as unknown as (set: WeakSet<object>, value: object) => void;
 const weakSetHas = call.bind(WeakSet.prototype.has) as unknown as (set: WeakSet<object>, value: unknown) => boolean;
+const setAdd = call.bind(Set.prototype.add) as unknown as (set: Set<string>, value: string) => void;
+const setHas = call.bind(Set.prototype.has) as unknown as (set: Set<string>, value: string) => boolean;
+const charCodeAt = call.bind(String.prototype.charCodeAt) as unknown as (text: string, index: number) => number;
+const stringSlice = call.bind(String.prototype.slice) as unknown as (text: string, from: number, to?: number) => string;
+// node:crypto looks `update` and `digest` up on Hash.prototype at call time: take them from a sample hash.
+const hashPrototype = getPrototypeOf(createHashFunction("sha256")) as object;
+const hashUpdate = call.bind(getOwnPropertyDescriptor(hashPrototype, "update")!.value) as unknown as (hash: unknown, data: string) => unknown;
+const hashDigest = call.bind(getOwnPropertyDescriptor(hashPrototype, "digest")!.value) as unknown as (hash: unknown, encoding: string) => string;
 
 export type Bytes32Hex = `0x${string}`;
-
-const BYTES32 = /^0x[0-9a-f]{64}$/;
-const ADDRESS = /^0x[0-9a-f]{40}$/;
-const DECIMAL = /^(0|[1-9][0-9]*)$/;
 
 /** Raised for an input that is not in its pinned form. */
 export class EvidenceBlockInputError extends Error {
@@ -168,12 +198,88 @@ export class EvidenceBlockInputError extends Error {
   }
 }
 
-function toHex(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("hex");
+// ── Pure encoding: hex, bytes and ABI words (round 2) ───────────────────────
+// Everything between a validated primitive and a digest is a loop over char codes and bytes and
+// BigInt operators: no Buffer, no regular expression, no Uint8Array.from or .set, no Array.prototype
+// method, so nothing here depends on a global or a prototype method that could be replaced. Text is
+// judged by `isPrefixedLowerHex`, `isBareLowerHex`, `isDecimal` and `isToken`, which read characters
+// with the captured `charCodeAt`; they accept exactly what the regular expressions they replace did.
+
+const HEX_DIGITS = "0123456789abcdef";
+
+/** The value of one lowercase hex digit by its char code, or -1. */
+function hexDigitValue(code: number): number {
+  if (code >= 48 && code <= 57) return code - 48;
+  if (code >= 97 && code <= 102) return code - 87;
+  return -1;
+}
+
+/** Whether text[from .. to) is nothing but lowercase hex digits. */
+function isLowerHex(text: string, from: number, to: number): boolean {
+  for (let i = from; i < to; i++) if (hexDigitValue(charCodeAt(text, i)) < 0) return false;
+  return true;
+}
+
+/** `0x` followed by exactly `hexLength` lowercase hex digits (what /^0x[0-9a-f]{n}$/ matched). */
+function isPrefixedLowerHex(value: unknown, hexLength: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length === hexLength + 2 &&
+    charCodeAt(value, 0) === 48 &&
+    charCodeAt(value, 1) === 120 &&
+    isLowerHex(value, 2, hexLength + 2)
+  );
+}
+
+/** Exactly `hexLength` lowercase hex digits and nothing else (what /^[0-9a-f]{n}$/ matched). */
+function isBareLowerHex(value: unknown, hexLength: number): value is string {
+  return typeof value === "string" && value.length === hexLength && isLowerHex(value, 0, hexLength);
+}
+
+/** A non-negative decimal integer with no leading zero (what /^(0|[1-9][0-9]*)$/ matched). */
+function isDecimal(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const length = value.length;
+  if (length === 0) return false;
+  if (charCodeAt(value, 0) === 48) return length === 1;
+  for (let i = 0; i < length; i++) {
+    const code = charCodeAt(value, i);
+    if (code < 48 || code > 57) return false;
+  }
+  return true;
+}
+
+/** 1-128 printable ASCII characters, no whitespace (what /^[\x21-\x7E]{1,128}$/ matched). */
+function isToken(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const length = value.length;
+  if (length < 1 || length > 128) return false;
+  for (let i = 0; i < length; i++) {
+    const code = charCodeAt(value, i);
+    if (code < 0x21 || code > 0x7e) return false;
+  }
+  return true;
+}
+
+/** The bytes that `byteCount` hex pairs of `text`, from index `from`, spell, written into `into` at `at`. `text` must already be validated hex. */
+function hexIntoBytes(text: string, from: number, byteCount: number, into: Uint8Array, at: number): void {
+  for (let i = 0; i < byteCount; i++) {
+    into[at + i] = hexDigitValue(charCodeAt(text, from + 2 * i)) * 16 + hexDigitValue(charCodeAt(text, from + 2 * i + 1));
+  }
+}
+
+/** The lowercase hex of bytes[0 .. length). */
+function bytesToHex(bytes: Uint8Array, length: number): string {
+  let out = "";
+  for (let i = 0; i < length; i++) {
+    const byte = bytes[i]!;
+    out += HEX_DIGITS[byte >> 4]! + HEX_DIGITS[byte & 15]!;
+  }
+  return out;
 }
 
 function keccakUtf8(s: string): Bytes32Hex {
-  return `0x${toHex(keccak_256(new TextEncoder().encode(s)))}`;
+  return `0x${bytesToHex(keccak_256(new TextEncoder().encode(s)), 32)}`;
 }
 
 export const EVIDENCE_BLOCK_DOMAIN_V2: Bytes32Hex = keccakUtf8("PCC:vnext:evidence-block:v2");
@@ -184,18 +290,20 @@ export const SETTLEMENT_UNIT_DOMAIN_V1: Bytes32Hex = keccakUtf8("PCC:vnext:settl
 // ── Static ABI words (every field here is a 32-byte head word) ──────────────
 
 function bytes32Word(field: string, value: unknown): Uint8Array {
-  if (typeof value !== "string" || !BYTES32.test(value)) {
+  if (!isPrefixedLowerHex(value, 64)) {
     throw new EvidenceBlockInputError(field, "expected 0x + 64 lowercase hex");
   }
-  return Uint8Array.from(Buffer.from(value.slice(2), "hex"));
+  const word = new Uint8ArrayConstructor(32);
+  hexIntoBytes(value, 2, 32, word, 0);
+  return word;
 }
 
 function addressWord(field: string, value: unknown): Uint8Array {
-  if (typeof value !== "string" || !ADDRESS.test(value)) {
+  if (!isPrefixedLowerHex(value, 40)) {
     throw new EvidenceBlockInputError(field, "expected 0x + 40 lowercase hex");
   }
-  const word = new Uint8Array(32);
-  word.set(Buffer.from(value.slice(2), "hex"), 12);
+  const word = new Uint8ArrayConstructor(32);
+  hexIntoBytes(value, 2, 20, word, 12);
   return word;
 }
 
@@ -204,32 +312,39 @@ function uintWord(field: string, value: unknown, bits: number): Uint8Array {
   if (typeof value === "bigint") n = value;
   else if (typeof value === "number" && isSafeInteger(value)) {
     // Number.isSafeInteger(-0) is true and BigInt(-0) is 0n, so -0 would reach the same word
-    // as 0. It is not the pinned spelling of zero: refuse it.
-    if (Object.is(value, -0)) {
+    // as 0. It is not the pinned spelling of zero: refuse it. (1 / -0 is -Infinity: the test that
+    // Object.is(value, -0) was, without looking Object.is up.)
+    if (value === 0 && 1 / value < 0) {
       throw new EvidenceBlockInputError(field, "negative zero is not a pinned input form; pass 0");
     }
-    n = BigInt(value);
-  } else if (typeof value === "string" && DECIMAL.test(value)) n = BigInt(value);
+    n = toBigInt(value);
+  } else if (isDecimal(value)) n = toBigInt(value);
   else throw new EvidenceBlockInputError(field, "expected a non-negative integer");
-  if (n < 0n || n >= 1n << BigInt(bits)) {
+  if (n < 0n || n >= 1n << toBigInt(bits)) {
     throw new EvidenceBlockInputError(field, `out of range for uint${bits}`);
   }
-  const word = new Uint8Array(32);
+  const word = new Uint8ArrayConstructor(32);
   for (let i = 31; i >= 0 && n > 0n; i--) {
-    word[i] = Number(n & 0xffn);
+    word[i] = toNumber(n & 0xffn);
     n >>= 8n;
   }
   return word;
 }
 
 function keccakWords(words: Uint8Array[]): Bytes32Hex {
-  const buf = new Uint8Array(words.length * 32);
-  words.forEach((w, i) => buf.set(w, i * 32));
-  return `0x${toHex(keccak_256(buf))}`;
+  const count = words.length;
+  const buf = new Uint8ArrayConstructor(count * 32);
+  for (let w = 0; w < count; w++) {
+    const word = words[w]!;
+    for (let j = 0; j < 32; j++) buf[w * 32 + j] = word[j]!;
+  }
+  return `0x${bytesToHex(keccak_256(buf), 32)}`;
 }
 
 function sha256Canonical(value: unknown): Bytes32Hex {
-  return `0x${createHash("sha256").update(canonicalize(value)).digest("hex")}`;
+  const hash = createHashFunction("sha256");
+  hashUpdate(hash, canonicalize(value));
+  return `0x${hashDigest(hash, "hex")}`;
 }
 
 // ── Unit identity ────────────────────────────────────────────────────────────
@@ -242,16 +357,36 @@ export interface SettlementUnitRef {
   stepId: string;
 }
 
-/** The escrow's frozen settlement-unit id derivation. */
-export function computeSettlementUnitId(unit: SettlementUnitRef): Bytes32Hex {
+/** The escrow's settlement-unit id over five already-read values, each validated as it is encoded. */
+function settlementUnitIdOf(chainId: unknown, escrow: unknown, jobIdHash: unknown, milestoneIndex: unknown, stepId: unknown): Bytes32Hex {
   return keccakWords([
     bytes32Word("SETTLEMENT_UNIT_DOMAIN_V1", SETTLEMENT_UNIT_DOMAIN_V1),
-    uintWord("chainId", unit.chainId, 256),
-    addressWord("escrow", unit.escrow),
-    bytes32Word("jobIdHash", unit.jobIdHash),
-    uintWord("milestoneIndex", unit.milestoneIndex, 256),
-    bytes32Word("stepId", unit.stepId),
+    uintWord("chainId", chainId, 256),
+    addressWord("escrow", escrow),
+    bytes32Word("jobIdHash", jobIdHash),
+    uintWord("milestoneIndex", milestoneIndex, 256),
+    bytes32Word("stepId", stepId),
   ]);
+}
+
+/**
+ * The escrow's frozen settlement-unit id derivation. The unit is admitted first (no Proxy at any
+ * depth, no accessor anywhere, a plain prototype: `assertNoCodeRunningInput`), then each field is
+ * read from its own data descriptor, never with a [[Get]], so no code of the caller runs while the
+ * id is derived and nothing is inherited from a prototype.
+ */
+export function computeSettlementUnitId(unit: SettlementUnitRef): Bytes32Hex {
+  if (unit === null || typeof unit !== "object") {
+    throw new EvidenceBlockInputError("unit", "expected a settlement unit object");
+  }
+  admit(unit, "unit");
+  return settlementUnitIdOf(
+    fieldOf(unit, "chainId"),
+    fieldOf(unit, "escrow"),
+    fieldOf(unit, "jobIdHash"),
+    fieldOf(unit, "milestoneIndex"),
+    fieldOf(unit, "stepId"),
+  );
 }
 
 export interface UnitContext extends SettlementUnitRef {
@@ -262,22 +397,23 @@ export interface UnitContext extends SettlementUnitRef {
 /**
  * The unit + challenge context bound inside the block. Refuses a context whose
  * settlementUnitId does not derive from its own chainId, escrow, jobIdHash,
- * milestoneIndex and stepId. Every field is read exactly once and the derivation
- * check and the hash both use those copies, so a getter that answers differently
- * on a second read cannot make the committed context differ from the checked one.
+ * milestoneIndex and stepId. The context is admitted first, as for `computeSettlementUnitId`:
+ * a getter, a Proxy or a non-plain prototype is refused unread. Then every field is read exactly
+ * once from its own data descriptor and the derivation check and the hash both use those copies.
  */
 export function computeUnitContextDigest(ctx: UnitContext): Bytes32Hex {
   if (ctx === null || typeof ctx !== "object") {
     throw new EvidenceBlockInputError("unitContext", "expected a unit context object");
   }
-  const chainId = ctx.chainId;
-  const escrow = ctx.escrow;
-  const settlementUnitId = ctx.settlementUnitId;
-  const jobIdHash = ctx.jobIdHash;
-  const milestoneIndex = ctx.milestoneIndex;
-  const stepId = ctx.stepId;
-  const challengeNonce = ctx.challengeNonce;
-  if (computeSettlementUnitId({ chainId, escrow, jobIdHash, milestoneIndex, stepId }) !== settlementUnitId) {
+  admit(ctx, "unitContext");
+  const chainId = fieldOf(ctx, "chainId");
+  const escrow = fieldOf(ctx, "escrow");
+  const settlementUnitId = fieldOf(ctx, "settlementUnitId");
+  const jobIdHash = fieldOf(ctx, "jobIdHash");
+  const milestoneIndex = fieldOf(ctx, "milestoneIndex");
+  const stepId = fieldOf(ctx, "stepId");
+  const challengeNonce = fieldOf(ctx, "challengeNonce");
+  if (settlementUnitIdOf(chainId, escrow, jobIdHash, milestoneIndex, stepId) !== settlementUnitId) {
     throw new EvidenceBlockInputError(
       "settlementUnitId",
       "does not derive from the context's chainId, escrow, jobIdHash, milestoneIndex and stepId",
@@ -299,10 +435,10 @@ export function computeUnitContextDigest(ctx: UnitContext): Bytes32Hex {
 
 /** A tagged evidence digest (`sha256:<hex>`, e.g. a bundleHash) as a bytes32 root. */
 export function taggedDigestToBytes32(digest: string): Bytes32Hex {
-  if (typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+  if (typeof digest !== "string" || digest.length !== 71 || stringSlice(digest, 0, 7) !== "sha256:" || !isLowerHex(digest, 7, 71)) {
     throw new EvidenceBlockInputError("kernelSignedEventsRoot", "expected sha256: + 64 lowercase hex");
   }
-  return `0x${digest.slice("sha256:".length)}`;
+  return `0x${stringSlice(digest, 7)}`;
 }
 
 /**
@@ -393,20 +529,35 @@ function walkField(rootField: string, frame: WalkFrame): string {
 }
 
 /**
+ * Whether an object that is no Proxy and no array is PLAIN: its prototype is null, or is itself a
+ * prototype-less object that is no Proxy (the Object.prototype of this realm or of another one).
+ * A class instance, Date, Map, typed array, Buffer or Error has a prototype that has a prototype,
+ * so it is not plain; neither is an object whose prototype is a Proxy, which is never asked for ITS
+ * prototype (that would run its `getPrototypeOf` trap). `node` must not be a Proxy.
+ */
+function hasPlainPrototype(node: object): boolean {
+  const proto = getPrototypeOf(node);
+  return proto === null || (!isProxy(proto) && getPrototypeOf(proto) === null);
+}
+
+/**
  * Refuse, before anything of it is read, every part of `root` that can run code: a Proxy at any
- * depth (its traps run on the first reflection call) and an accessor anywhere (its getter runs on a
- * [[Get]]). Code that runs during the snapshot can replace `Object.freeze` for one microtask and so
- * leave the returned events mutable (E7c), so it must never run at all.
+ * depth (its traps run on the first reflection call), an accessor anywhere (its getter runs on a
+ * [[Get]]) and an object that is not plain (see `hasPlainPrototype`). Code that runs during a
+ * snapshot or a digest can replace `Object.freeze`, `Buffer.from` or `Array.prototype.sort` for one
+ * microtask and so leave the returned events mutable or change a digest (E7c), so it must never run
+ * at all.
  *
  * The walk is iterative (depth cannot overflow the stack), uses only the captured functions, and
  * touches an object only after proving it is no Proxy: the own keys and descriptors of a non-Proxy
- * run no code. A node is enumerated only when `canonicalize` would descend into it too, a plain
- * object or an ordinary array: any other object (a Buffer, a typed array, a class instance, an Error)
- * is refused here, before its members are touched, which is exactly what `canonicalize` does with it
- * and is O(1) where enumerating a large typed array is not. Everything else JSON cannot carry (NaN, a
- * bigint, an undefined element, a cycle ...) is left to `canonicalSnapshot`, which runs next on a
- * graph this walk has proven free of Proxies and accessors. `seen` skips a node that was already
- * walked, so a cycle ends the walk and a shared node is walked once.
+ * run no code. A node is enumerated only when it is an array or a plain object: any other object (a
+ * Buffer, a typed array, a class instance, an Error) is refused here, before its members are
+ * touched, which is O(1) where enumerating a large typed array is not and never reads an Error's
+ * `stack`. An array is not asked for its prototype at all. Everything else JSON cannot carry (NaN, a
+ * bigint, an undefined element, a cycle, a foreign-realm object ...) is left to the caller's own
+ * checks, for events `canonicalSnapshot`, which runs next on a graph this walk has proven free of
+ * Proxies and accessors. `seen` skips a node that was already walked, so a cycle ends the walk and
+ * a shared node is walked once.
  */
 function assertNoCodeRunningInput(root: unknown, rootField: string, seen: WeakSet<object>): void {
   let top: WalkFrame | null = { value: root, parent: null, key: null, below: null };
@@ -421,15 +572,12 @@ function assertNoCodeRunningInput(root: unknown, rootField: string, seen: WeakSe
         "is a Proxy: its traps run code, so it is refused before it is read",
       );
     }
-    if (typeof node === "function" || weakSetHas(seen, node)) continue; // a function is no JSON data: canonicalSnapshot refuses it
+    if (typeof node === "function" || weakSetHas(seen, node)) continue; // a function is no data: the caller's own checks refuse it
     weakSetAdd(seen, node);
-    const proto = getPrototypeOf(node);
-    if (isArray(node) ? proto !== ARRAY_PROTOTYPE : proto !== OBJECT_PROTOTYPE && proto !== null) {
+    if (!isArray(node) && !hasPlainPrototype(node)) {
       throw new EvidenceBlockInputError(
         printable(walkField(rootField, frame), 200),
-        isArray(node)
-          ? "is not plain JSON evidence data (an array with a substituted prototype or an Array subclass)"
-          : "is not plain JSON evidence data (a non-plain object: its prototype is not Object.prototype or null)",
+        "is not plain data (a non-plain object: its prototype is not Object.prototype or null)",
       );
     }
     const keys = ownKeys(node);
@@ -448,6 +596,79 @@ function assertNoCodeRunningInput(root: unknown, rootField: string, seen: WeakSe
         top = { value: member, parent: frame, key, below: top };
       }
     }
+  }
+}
+
+/**
+ * The guard that every public entry point taking an object or an array runs FIRST on it (E7c, round
+ * 2): nothing is read before the whole input is known to run no code. After it, fields are read
+ * with `fieldOf` or `ownDataValue` only.
+ */
+function admit(root: unknown, rootField: string): void {
+  assertNoCodeRunningInput(root, rootField, new WeakSetConstructor<object>());
+}
+
+/**
+ * One own data field of an object that `admit` has passed: its value, or undefined when the object
+ * has no such OWN property (the field's validator then refuses it by name; a property inherited from
+ * a prototype, which a polluted Object.prototype could supply, never counts). Never a [[Get]]. An
+ * accessor cannot be here after `admit`; if one were, it is refused, not read.
+ */
+function fieldOf(owner: object, key: string): unknown {
+  const value = ownDataValue(owner, key);
+  if (value === ACCESSOR) {
+    throw new EvidenceBlockInputError(key, "is an accessor property: its getter runs code, so it is refused before it is read");
+  }
+  return value === ABSENT ? undefined : value;
+}
+
+/** Whether `owner` has an own property `key` whose descriptor owns `enumerable: true` (as #359's isEnumerable judges it). */
+function isOwnEnumerable(owner: object, key: PropertyKey): boolean {
+  const descriptor = getOwnPropertyDescriptor(owner, key);
+  if (descriptor === undefined) return false;
+  const enumerable = getOwnPropertyDescriptor(descriptor, "enumerable");
+  return enumerable !== undefined && enumerable.value === true;
+}
+
+/**
+ * `list.push(value)` without looking `push` up on Array.prototype: the value becomes an own data
+ * property at index `list.length`, DEFINED, never assigned, so no setter or read-only index on a
+ * prototype is consulted. Only for arrays this module has just made.
+ */
+function appendTo<T>(list: T[], value: T): void {
+  defineProperty(list, list.length, { __proto__: null, value, writable: true, enumerable: true, configurable: true } as PropertyDescriptor);
+}
+
+/**
+ * A copy of `list` sorted ascending by UTF-16 code unit (the order `<` gives, which is the default
+ * sort's). Heapsort in place over indices that already exist, as #359's canonicalize sorts keys: no
+ * Array.prototype method is looked up, and it is O(n log n) however the input is ordered.
+ */
+function sortedCopy(list: readonly string[]): string[] {
+  const copy: string[] = [];
+  const count = list.length;
+  for (let i = 0; i < count; i++) appendTo(copy, list[i]!);
+  for (let root = (count - (count % 2)) / 2 - 1; root >= 0; root--) siftDown(copy, root, count);
+  for (let end = count - 1; end > 0; end--) {
+    const largest = copy[0]!;
+    copy[0] = copy[end]!;
+    copy[end] = largest;
+    siftDown(copy, 0, end);
+  }
+  return copy;
+}
+
+function siftDown(list: string[], start: number, end: number): void {
+  let root = start;
+  for (;;) {
+    let child = 2 * root + 1;
+    if (child >= end) return;
+    if (child + 1 < end && list[child]! < list[child + 1]!) child++;
+    if (!(list[root]! < list[child]!)) return;
+    const moved = list[root]!;
+    list[root] = list[child]!;
+    list[child] = moved;
+    root = child;
   }
 }
 
@@ -565,7 +786,7 @@ export async function computeKernelSignedEventsRoot(
       );
     }
     assertNoCodeRunningInput(element, field, seen);
-    events.push(snapshotEvent(field, element));
+    appendTo(events, snapshotEvent(field, element));
   }
   // The array is frozen before any other code is handed it (hashBundle receives it below).
   freeze(events);
@@ -653,46 +874,52 @@ export interface SessionKeyAuthSnapshot {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   // The Proxy test comes first: Array.isArray throws on a revoked Proxy, and a Proxy answers with its own code.
-  if (value === null || typeof value !== "object" || isProxy(value) || isArray(value)) {
-    return false;
-  }
-  // The Object.prototype of any realm has a null prototype itself; class instances, Map and Date do not.
-  // A prototype that is a Proxy is refused unasked: asking it for ITS prototype would run its trap.
-  const proto = getPrototypeOf(value);
-  return proto === null || (!isProxy(proto) && getPrototypeOf(proto) === null);
+  return value !== null && typeof value === "object" && !isProxy(value) && !isArray(value) && hasPlainPrototype(value);
+}
+
+/** Whether `key` is one of `allowed` (a loop, so no Array.prototype method is looked up). */
+function isListedKey(allowed: readonly string[], key: string): boolean {
+  for (let i = 0; i < allowed.length; i++) if (allowed[i] === key) return true;
+  return false;
 }
 
 /**
- * The own properties of a plain object, each read once through its descriptor so an accessor
- * is never invoked. Refuses a Proxy, a non-plain object, a symbol or unlisted key, an accessor
- * and a non-enumerable property.
+ * The pre-pass over an object that `admit` has already passed: it must be a plain object whose own
+ * keys are all listed, string-keyed, enumerable DATA properties, each judged from its own
+ * descriptor so an accessor is never invoked (after `admit` none can be here; one is still refused,
+ * never read). Returns the object; its fields are then read with `requiredField` and `fieldOf`.
  */
-function readPlainFields(path: string, input: unknown, allowed: readonly string[]): Map<string, unknown> {
+function checkListedFields(path: string, input: unknown, allowed: readonly string[]): object {
   if (!isPlainObject(input)) {
     throw new EvidenceBlockInputError(path, "expected a plain object (not null, an array, a Proxy or a class instance)");
   }
-  const fields = new Map<string, unknown>();
-  for (const key of ownKeys(input)) {
-    if (typeof key === "symbol" || !allowed.includes(key)) {
+  const keys = ownKeys(input);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i]!;
+    if (typeof key === "symbol" || !isListedKey(allowed, key)) {
       throw new EvidenceBlockInputError(path, `unknown own key ${JSON.stringify(String(key).slice(0, 64))}`);
     }
-    const descriptor = getOwnPropertyDescriptor(input, key);
-    if (descriptor === undefined || !("value" in descriptor)) {
+    const value = ownDataValue(input, key);
+    if (value === ACCESSOR || value === ABSENT) {
       throw new EvidenceBlockInputError(`${path}.${key}`, "accessor properties are not accepted; pass plain data");
     }
-    if (descriptor.enumerable !== true) {
+    if (!isOwnEnumerable(input, key)) {
       throw new EvidenceBlockInputError(`${path}.${key}`, "expected an enumerable data property");
     }
-    fields.set(key, descriptor.value);
   }
-  return fields;
+  return input;
 }
 
-function requiredField(path: string, fields: Map<string, unknown>, key: string): unknown {
-  if (!fields.has(key)) {
+/** A required own data field of an object `checkListedFields` has passed. */
+function requiredField(path: string, owner: object, key: string): unknown {
+  const value = ownDataValue(owner, key);
+  if (value === ABSENT) {
     throw new EvidenceBlockInputError(`${path}.${key}`, "is required");
   }
-  return fields.get(key);
+  if (value === ACCESSOR) {
+    throw new EvidenceBlockInputError(`${path}.${key}`, "accessor properties are not accepted; pass plain data");
+  }
+  return value;
 }
 
 function requireNonEmptyString(field: string, value: unknown): string {
@@ -710,11 +937,11 @@ function requireNonEmptyString(field: string, value: unknown): string {
  * and the gateway intake accepts uppercase, but those spellings of one key would give one
  * authorization several digests, so they are refused here, never normalized.
  */
-const SESSION_PUBLIC_KEY = /^[0-9a-f]{64}$/;
-const SESSION_PARENT_SIGNATURE = /^[0-9a-f]{128}$/;
+const SESSION_PUBLIC_KEY_HEX_LENGTH = 64;
+const SESSION_PARENT_SIGNATURE_HEX_LENGTH = 128;
 
-function requirePinnedHex(field: string, value: unknown, pattern: RegExp, expected: string): string {
-  if (typeof value !== "string" || !pattern.test(value)) {
+function requirePinnedHex(field: string, value: unknown, hexLength: number, expected: string): string {
+  if (!isBareLowerHex(value, hexLength)) {
     throw new EvidenceBlockInputError(field, expected);
   }
   return value;
@@ -723,8 +950,8 @@ function requirePinnedHex(field: string, value: unknown, pattern: RegExp, expect
 /**
  * A frozen copy of a dense, plain array of strings in the one canonical order: strictly ascending
  * by UTF-16 code unit (plain JS `<`, which is what the default Array.prototype.sort produces), so
- * a duplicate is out of order too. An empty array is allowed. Each element is read once, through
- * its descriptor, and the order is judged on that copy, so what is checked is what is committed.
+ * a duplicate is out of order too. An empty array is allowed. Each element is read once, from its
+ * own descriptor, and the order is judged on that copy, so what is checked is what is committed.
  * An array that is not in canonical order is refused at the first element that breaks it, never
  * sorted or de-duplicated: one authorization has one digest.
  */
@@ -732,20 +959,20 @@ function readCanonicalStringSet(path: string, input: unknown): readonly string[]
   if (isProxy(input) || !isArray(input)) {
     throw new EvidenceBlockInputError(path, "expected a plain array of strings");
   }
-  const length = input.length;
-  if (ownKeys(input).length !== length + 1) {
+  const length = ownDataValue(input, "length");
+  if (typeof length !== "number" || ownKeys(input).length !== length + 1) {
     throw new EvidenceBlockInputError(path, "expected a dense array with no extra properties");
   }
   const out: string[] = [];
   for (let i = 0; i < length; i++) {
-    const descriptor = getOwnPropertyDescriptor(input, i);
-    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+    const element = ownDataValue(input, i);
+    if (element === ABSENT || element === ACCESSOR || !isOwnEnumerable(input, i)) {
       throw new EvidenceBlockInputError(`${path}[${i}]`, "expected an enumerable data element");
     }
-    if (typeof descriptor.value !== "string") {
+    if (typeof element !== "string") {
       throw new EvidenceBlockInputError(`${path}[${i}]`, "expected a string");
     }
-    out.push(descriptor.value);
+    appendTo(out, element);
   }
   for (let i = 1; i < out.length; i++) {
     if (!(out[i - 1] < out[i])) {
@@ -761,47 +988,44 @@ function readCanonicalStringSet(path: string, input: unknown): readonly string[]
 
 /**
  * Snapshot a session-key authorization: validate it and copy it into a deep-frozen plain
- * value, reading every property exactly once. An unknown own key, an accessor property, a
- * non-plain object or a Proxy is refused, so validation and the digest cannot observe
- * different values. The scope arrays must already be in canonical order (strictly ascending,
- * see the module header): an array that is not is refused, never reordered. `digest` is
- * computed over the frozen copy. Consumers must evaluate `value`, never the original object:
- * it is the exact value that was hashed.
+ * value, reading every property exactly once. The authorization is admitted first (E7c, round 2:
+ * `assertNoCodeRunningInput`, the same guard as every other entry point), so a Proxy at any depth,
+ * an accessor anywhere and a non-plain object are refused before anything is read. An unknown own
+ * key is refused too, so validation and the digest cannot observe different values. The scope
+ * arrays must already be in canonical order (strictly ascending, see the module header): an array
+ * that is not is refused, never reordered. `digest` is computed over the frozen copy. Consumers must
+ * evaluate `value`, never the original object: it is the exact value that was hashed.
  */
 export function sessionKeyAuthSnapshot(auth: SessionKeyAuthorization): SessionKeyAuthSnapshot {
   const path = "sessionKeyAuthorization";
-  const top = readPlainFields(path, auth, SESSION_KEY_AUTH_FIELDS);
+  admit(auth, path);
+  const top = checkListedFields(path, auth, SESSION_KEY_AUTH_FIELDS);
   const sessionId = requireNonEmptyString(`${path}.sessionId`, requiredField(path, top, "sessionId"));
   const parentAgentId = requireNonEmptyString(`${path}.parentAgentId`, requiredField(path, top, "parentAgentId"));
   const publicKey = requirePinnedHex(
     `${path}.publicKey`,
     requiredField(path, top, "publicKey"),
-    SESSION_PUBLIC_KEY,
+    SESSION_PUBLIC_KEY_HEX_LENGTH,
     "expected 64 lowercase hex characters with no 0x prefix (the raw 32-byte Ed25519 key)",
   );
-  const issuedAt = boundedInt(`${path}.issuedAt`, requiredField(path, top, "issuedAt"), 0, Number.MAX_SAFE_INTEGER);
-  const expiresAt = boundedInt(`${path}.expiresAt`, requiredField(path, top, "expiresAt"), 0, Number.MAX_SAFE_INTEGER);
+  const issuedAt = boundedInt(`${path}.issuedAt`, requiredField(path, top, "issuedAt"), 0, MAX_SAFE_INTEGER);
+  const expiresAt = boundedInt(`${path}.expiresAt`, requiredField(path, top, "expiresAt"), 0, MAX_SAFE_INTEGER);
   const parentSignature = requirePinnedHex(
     `${path}.parentSignature`,
     requiredField(path, top, "parentSignature"),
-    SESSION_PARENT_SIGNATURE,
+    SESSION_PARENT_SIGNATURE_HEX_LENGTH,
     "expected 128 lowercase hex characters with no 0x prefix (the 64-byte parent signature)",
   );
   // An optional field that is absent or undefined is the same value: canonicalize omits undefined.
-  const derivationRaw = top.get("derivationPath");
+  const derivationRaw = fieldOf(top, "derivationPath");
   const derivationPath =
     derivationRaw === undefined ? undefined : requireNonEmptyString(`${path}.derivationPath`, derivationRaw);
 
   const scopePath = `${path}.scope`;
-  const scopeFields = readPlainFields(scopePath, requiredField(path, top, "scope"), SESSION_SCOPE_FIELDS);
-  const allowedActions = readCanonicalStringSet(`${scopePath}.allowedActions`, requiredField(scopePath, scopeFields, "allowedActions"));
-  const contractIds = readCanonicalStringSet(`${scopePath}.contractIds`, requiredField(scopePath, scopeFields, "contractIds"));
-  const maxSignatures = boundedInt(
-    `${scopePath}.maxSignatures`,
-    requiredField(scopePath, scopeFields, "maxSignatures"),
-    0,
-    Number.MAX_SAFE_INTEGER,
-  );
+  const scope = checkListedFields(scopePath, requiredField(path, top, "scope"), SESSION_SCOPE_FIELDS);
+  const allowedActions = readCanonicalStringSet(`${scopePath}.allowedActions`, requiredField(scopePath, scope, "allowedActions"));
+  const contractIds = readCanonicalStringSet(`${scopePath}.contractIds`, requiredField(scopePath, scope, "contractIds"));
+  const maxSignatures = boundedInt(`${scopePath}.maxSignatures`, requiredField(scopePath, scope, "maxSignatures"), 0, MAX_SAFE_INTEGER);
 
   const value: FrozenSessionKeyAuthorization = freeze({
     sessionId,
@@ -830,11 +1054,9 @@ export interface AttestationQuorumRole {
   attestationHashes: string[];
 }
 
-/** 1-128 printable ASCII characters, no whitespace: the pinned form of a roleId and of the attestation job id. */
-const TOKEN = /^[\x21-\x7E]{1,128}$/;
-
+/** 1-128 printable ASCII characters, no whitespace (`isToken`): the pinned form of a roleId and of the attestation job id. */
 function requireToken(field: string, value: unknown): string {
-  if (typeof value !== "string" || !TOKEN.test(value)) {
+  if (!isToken(value)) {
     throw new EvidenceBlockInputError(field, "expected 1-128 printable ASCII characters with no whitespace");
   }
   return value;
@@ -842,7 +1064,7 @@ function requireToken(field: string, value: unknown): string {
 
 /** A safe integer in [min, max]. Negative zero is refused: it is not the pinned spelling of 0. */
 function boundedInt(field: string, value: unknown, min: number, max: number): number {
-  if (typeof value !== "number" || !isSafeInteger(value) || Object.is(value, -0) || value < min || value > max) {
+  if (typeof value !== "number" || !isSafeInteger(value) || (value === 0 && 1 / value < 0) || value < min || value > max) {
     throw new EvidenceBlockInputError(field, `expected a safe integer in [${min}, ${max}]`);
   }
   return value;
@@ -858,35 +1080,34 @@ interface AttestationRoleSnapshot {
 }
 
 /**
- * Validate one role and copy it into frozen plain data. Every field and every array
- * element is read exactly once, and only the copy is validated and hashed, so a getter
- * or Proxy that changes its answer cannot make the validated value differ from the
- * committed one.
+ * Validate one role and copy it into frozen plain data. The role has already been admitted by
+ * the entry point (`admit`: no Proxy, no accessor, a plain prototype, at any depth), so every field
+ * and every array element is read exactly once from its own data descriptor, never with a [[Get]],
+ * and nothing is inherited from a prototype: only the copy is validated and hashed.
  */
 function snapshotAttestationRole(path: string, input: unknown): AttestationRoleSnapshot {
   if (input === null || typeof input !== "object") {
     throw new EvidenceBlockInputError(path, "expected a role object");
   }
-  const raw = input as Record<string, unknown>;
-  const roleIdRaw = raw.roleId;
-  const minPositiveRaw = raw.minPositive;
-  const totalRaw = raw.total;
-  const minScoreRaw = raw.minScore;
-  const hashesRaw = raw.attestationHashes;
+  const roleIdRaw = fieldOf(input, "roleId");
+  const minPositiveRaw = fieldOf(input, "minPositive");
+  const totalRaw = fieldOf(input, "total");
+  const minScoreRaw = fieldOf(input, "minScore");
+  const hashesRaw = fieldOf(input, "attestationHashes");
 
   const roleId = requireToken(`${path}.roleId`, roleIdRaw);
-  const total = boundedInt(`${path}.total`, totalRaw, 1, Number.MAX_SAFE_INTEGER);
-  const minPositive = boundedInt(`${path}.minPositive`, minPositiveRaw, 1, Number.MAX_SAFE_INTEGER);
+  const total = boundedInt(`${path}.total`, totalRaw, 1, MAX_SAFE_INTEGER);
+  const minPositive = boundedInt(`${path}.minPositive`, minPositiveRaw, 1, MAX_SAFE_INTEGER);
   if (minPositive > total) {
     throw new EvidenceBlockInputError(`${path}.minPositive`, "must not exceed total");
   }
   const minScore = boundedInt(`${path}.minScore`, minScoreRaw, 0, 100);
 
-  if (!isArray(hashesRaw)) {
+  if (isProxy(hashesRaw) || !isArray(hashesRaw)) {
     throw new EvidenceBlockInputError(`${path}.attestationHashes`, "expected an array of attestation hashes");
   }
-  const count = hashesRaw.length;
-  if (!isSafeInteger(count) || count < 1) {
+  const count = ownDataValue(hashesRaw, "length");
+  if (typeof count !== "number" || !isSafeInteger(count) || count < 1) {
     throw new EvidenceBlockInputError(`${path}.attestationHashes`, "expected at least one attestation hash");
   }
   if (count > total) {
@@ -894,34 +1115,44 @@ function snapshotAttestationRole(path: string, input: unknown): AttestationRoleS
   }
   const attestationHashes: string[] = [];
   for (let i = 0; i < count; i++) {
-    const hash = hashesRaw[i];
-    bytes32Word(`${path}.attestationHashes[${i}]`, hash);
-    attestationHashes.push(hash as string);
+    const hash = ownDataValue(hashesRaw, i);
+    if (!isPrefixedLowerHex(hash, 64)) {
+      // A hole, an accessor (none can be here after `admit`) and a malformed hash are all this refusal.
+      throw new EvidenceBlockInputError(`${path}.attestationHashes[${i}]`, "expected 0x + 64 lowercase hex");
+    }
+    appendTo(attestationHashes, hash);
   }
-  if (new Set(attestationHashes).size !== attestationHashes.length) {
-    throw new EvidenceBlockInputError(`${path}.attestationHashes`, "attestation hashes must be distinct");
+  const distinct = new SetConstructor<string>();
+  for (let i = 0; i < count; i++) {
+    const hash = attestationHashes[i]!;
+    if (setHas(distinct, hash)) {
+      throw new EvidenceBlockInputError(`${path}.attestationHashes`, "attestation hashes must be distinct");
+    }
+    setAdd(distinct, hash);
   }
   return freeze({ roleId, minPositive, total, minScore, attestationHashes: freeze(attestationHashes) });
 }
 
-/** Validate and snapshot a whole role set: at least one role, distinct roleIds. */
+/** Validate and snapshot a whole role set, already admitted by the entry point: at least one role, distinct roleIds. */
 function snapshotAttestationRoles(input: unknown): readonly AttestationRoleSnapshot[] {
-  if (!isArray(input)) {
+  if (isProxy(input) || !isArray(input)) {
     throw new EvidenceBlockInputError("roles", "expected an array of roles");
   }
-  const count = input.length;
-  if (!isSafeInteger(count) || count < 1) {
+  const count = ownDataValue(input, "length");
+  if (typeof count !== "number" || !isSafeInteger(count) || count < 1) {
     throw new EvidenceBlockInputError("roles", "expected at least one role (the mirror defines no empty attestation set)");
   }
   const roles: AttestationRoleSnapshot[] = [];
-  const seen = new Set<string>();
+  const seen = new SetConstructor<string>();
   for (let i = 0; i < count; i++) {
-    const role = snapshotAttestationRole(`roles[${i}]`, input[i]);
-    if (seen.has(role.roleId)) {
+    const element = ownDataValue(input, i);
+    // A hole (and an accessor, which `admit` has already refused) is no role.
+    const role = snapshotAttestationRole(`roles[${i}]`, element === ABSENT || element === ACCESSOR ? undefined : element);
+    if (setHas(seen, role.roleId)) {
       throw new EvidenceBlockInputError(`roles[${i}].roleId`, `duplicate roleId ${JSON.stringify(role.roleId)}`);
     }
-    seen.add(role.roleId);
-    roles.push(role);
+    setAdd(seen, role.roleId);
+    appendTo(roles, role);
   }
   return freeze(roles);
 }
@@ -933,28 +1164,35 @@ function roleDigestOf(job: string, role: AttestationRoleSnapshot): Bytes32Hex {
     total: role.total,
     minScore: role.minScore,
     job,
-    hashes: [...role.attestationHashes].sort(),
+    hashes: sortedCopy(role.attestationHashes),
   });
 }
 
 /**
  * One role's digest: binds roleId, its quorum config, the job and its sorted attestations.
- * The role is validated and snapshotted first; only the snapshot is hashed.
+ * The role is admitted first (`assertNoCodeRunningInput`: no Proxy at any depth, no accessor
+ * anywhere, a plain prototype), then validated and snapshotted from its own data descriptors; only
+ * the snapshot is hashed.
  */
 export function computeAttestationRoleDigest(job: string, role: AttestationQuorumRole): Bytes32Hex {
-  return roleDigestOf(requireToken("job", job), snapshotAttestationRole("role", role));
+  const checkedJob = requireToken("job", job);
+  admit(role, "role");
+  return roleDigestOf(checkedJob, snapshotAttestationRole("role", role));
 }
 
 /**
- * The attestation set root: sha256 of the sorted role digests. The whole set is validated
- * and snapshotted before anything is hashed: duplicate roleIds, duplicate attestation
- * hashes, an empty set, an empty role and an invalid quorum are refused, never silently
- * de-duplicated.
+ * The attestation set root: sha256 of the sorted role digests. The whole set is admitted first (as
+ * for `computeAttestationRoleDigest`), then validated and snapshotted before anything is hashed:
+ * duplicate roleIds, duplicate attestation hashes, an empty set, an empty role and an invalid
+ * quorum are refused, never silently de-duplicated.
  */
 export function computeAttestationSetRoot(job: string, roles: readonly AttestationQuorumRole[]): Bytes32Hex {
   const checkedJob = requireToken("job", job);
+  admit(roles, "roles");
   const snapshot = snapshotAttestationRoles(roles);
-  return sha256Canonical(snapshot.map((r) => roleDigestOf(checkedJob, r)).sort());
+  const digests: string[] = [];
+  for (let i = 0; i < snapshot.length; i++) appendTo(digests, roleDigestOf(checkedJob, snapshot[i]!));
+  return sha256Canonical(sortedCopy(digests));
 }
 
 // ── The block ────────────────────────────────────────────────────────────────
@@ -974,17 +1212,23 @@ export interface EvidenceBlockRoots {
  * verified root from an arbitrary one. The roots must come only from the verified
  * derivations in this module (`computeUnitContextDigest`, `computeKernelSignedEventsRoot`,
  * `computeSessionKeyAuthDigest`, `computeAttestationSetRoot`, ...) or from the oracle's
- * own. See BOUNDARY in the module header.
+ * own. See BOUNDARY in the module header. The object is admitted first (a getter, a Proxy or a
+ * non-plain prototype is refused unread) and each root is read from its own data descriptor, so no
+ * code of the caller runs while the block hash is computed.
  */
 export function computeEvidenceBlockHash(roots: EvidenceBlockRoots): Bytes32Hex {
+  if (roots === null || typeof roots !== "object") {
+    throw new EvidenceBlockInputError("roots", "expected an object holding the six roots");
+  }
+  admit(roots, "roots");
   return keccakWords([
     bytes32Word("EVIDENCE_BLOCK_DOMAIN_V2", EVIDENCE_BLOCK_DOMAIN_V2),
     uintWord("version", EVIDENCE_BLOCK_VERSION, 16),
-    bytes32Word("unitContextDigest", roots.unitContextDigest),
-    bytes32Word("kernelSignedEventsRoot", roots.kernelSignedEventsRoot),
-    bytes32Word("sessionKeyAuthDigest", roots.sessionKeyAuthDigest),
-    bytes32Word("attestationSetRoot", roots.attestationSetRoot),
-    bytes32Word("workProductRoot", roots.workProductRoot),
-    bytes32Word("programHash", roots.programHash),
+    bytes32Word("unitContextDigest", fieldOf(roots, "unitContextDigest")),
+    bytes32Word("kernelSignedEventsRoot", fieldOf(roots, "kernelSignedEventsRoot")),
+    bytes32Word("sessionKeyAuthDigest", fieldOf(roots, "sessionKeyAuthDigest")),
+    bytes32Word("attestationSetRoot", fieldOf(roots, "attestationSetRoot")),
+    bytes32Word("workProductRoot", fieldOf(roots, "workProductRoot")),
+    bytes32Word("programHash", fieldOf(roots, "programHash")),
   ]);
 }

@@ -409,6 +409,49 @@ function recordingHandler<T extends object = object>(log: string[], onTrap?: (na
   return handler as ProxyHandler<T>;
 }
 
+/**
+ * The reviewer's attack, widened to every global an entry point could have looked up (round 2): code that
+ * zeroes Buffer.from's hex words, sorts Array.prototype.sort descending and makes Object.freeze the identity,
+ * restored by a microtask. `run()` is what a hostile getter or Proxy trap would call.
+ */
+function globalsSaboteur() {
+  const realFrom = Buffer.from;
+  const realSort = Array.prototype.sort;
+  const realFreeze = Object.freeze;
+  const state = { runs: 0 };
+  const restore = () => {
+    (Buffer as unknown as { from: unknown }).from = realFrom;
+    (Array.prototype as unknown as { sort: unknown }).sort = realSort;
+    (Object as unknown as { freeze: unknown }).freeze = realFreeze;
+  };
+  return {
+    state,
+    realFrom,
+    realSort,
+    realFreeze,
+    restore,
+    run() {
+      state.runs++;
+      (Buffer as unknown as { from: unknown }).from = (value: unknown, encoding?: string) =>
+        (realFrom as (...args: unknown[]) => unknown)(typeof value === "string" && encoding === "hex" ? value.replace(/[0-9a-f]/g, "0") : value, encoding);
+      (Array.prototype as unknown as { sort: unknown }).sort = function (this: string[]) {
+        return realSort.call(this, (a, b) => (a < b ? 1 : a > b ? -1 : 0));
+      };
+      (Object as unknown as { freeze: unknown }).freeze = (o: unknown) => o;
+      queueMicrotask(restore);
+    },
+  };
+}
+
+/** Run `fn` and report what happened, without a single call that a polluted prototype could intercept (no expect, no array method). */
+function settle(fn: () => unknown): { error?: unknown; value?: unknown } {
+  try {
+    return { value: fn() };
+  } catch (error) {
+    return { error };
+  }
+}
+
 // ── F1 (HIGH): the events root is recomputed, not trusted ────────────────────
 describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead of trusting carried hashes", () => {
   const raw: Array<Omit<EvidenceEvent, "id" | "hash">> = [
@@ -1409,6 +1452,450 @@ describe("E7c — input that can run code is refused before it is read, and the 
   });
 });
 
+// ── E7c round 2 (HIGH): every public entry point ────────────────────────────────────────────────────
+// Round 1 closed the bundle. A role, a unit context, a unit ref, the six roots and the session authorization
+// were still read with a [[Get]] (a getter or a Proxy ran caller code, and a polluted Object.prototype could
+// supply a missing field), and the digests were computed with Buffer.from, Number, BigInt, regular expressions,
+// Array.prototype.sort and Hash.prototype.update looked up at call time: code that ran while an entry point was
+// reading could swap one of them and change a digest the producer thinks it computed. Every entry point that
+// takes an object or an array now admits it first with the SAME guard as the events (assertNoCodeRunningInput),
+// reads its fields from own data descriptors, and encodes and hashes with references captured at load and
+// pure loops.
+describe("E7c round 2 — every public entry point refuses code-running input and reads from its own descriptors", () => {
+  type Holder = Record<string | number, unknown>;
+  type Member = { path: string; holder: (input: any) => Holder; key: string | number };
+  type Entry = {
+    name: string;
+    root: string;
+    make: () => any;
+    call: (input: any) => unknown;
+    members: Member[];
+    /** A member whose absence is refused: the field a polluted Object.prototype would be asked for. */
+    missing: Member;
+    /** Whether an unrelated own member of the object is ignored (as it always was): not for arrays, not for the session. */
+    extras: boolean;
+  };
+  const settlementUnitId = computeSettlementUnitId(unit);
+  const hashA = sha("round2-a");
+  const hashB = sha("round2-b");
+  const roleOf = (over: Record<string, unknown> = {}) => ({
+    roleId: "inspector",
+    minPositive: 1,
+    total: 2,
+    minScore: 50,
+    attestationHashes: [hashA, hashB],
+    ...over,
+  });
+  const rootsOf = () => ({
+    unitContextDigest: sha("round2-unit-context"),
+    kernelSignedEventsRoot: sha("round2-events"),
+    sessionKeyAuthDigest: sha("round2-session"),
+    attestationSetRoot: sha("round2-attestations"),
+    workProductRoot: sha("round2-work-product"),
+    programHash: sha("round2-program"),
+  });
+  const authOf = () => structuredClone(sessionKeyAuth) as unknown as Holder;
+  const ctxOf = () => ({ ...unit, settlementUnitId, challengeNonce });
+  const members = (root: string, keys: readonly string[]): Member[] => keys.map((key) => ({ path: `${root}.${key}`, holder: (input) => input, key }));
+  const S = "sessionKeyAuthorization";
+  const sessionMembers: Member[] = [
+    ...members(S, ["sessionId", "parentAgentId", "publicKey", "issuedAt", "expiresAt", "parentSignature", "scope"]),
+    { path: `${S}.scope.maxSignatures`, holder: (i) => i.scope, key: "maxSignatures" },
+    { path: `${S}.scope.allowedActions`, holder: (i) => i.scope, key: "allowedActions" },
+    { path: `${S}.scope.allowedActions[0]`, holder: (i) => i.scope.allowedActions, key: 0 },
+    { path: `${S}.scope.contractIds[0]`, holder: (i) => i.scope.contractIds, key: 0 },
+  ];
+  const entries: Entry[] = [
+    {
+      name: "computeSettlementUnitId",
+      root: "unit",
+      make: () => ({ ...unit }),
+      call: (input) => computeSettlementUnitId(input),
+      members: members("unit", ["chainId", "escrow", "jobIdHash", "milestoneIndex", "stepId"]),
+      missing: { path: "unit.chainId", holder: (i) => i, key: "chainId" },
+      extras: true,
+    },
+    {
+      name: "computeUnitContextDigest",
+      root: "unitContext",
+      make: ctxOf,
+      call: (input) => computeUnitContextDigest(input),
+      members: members("unitContext", ["chainId", "escrow", "settlementUnitId", "jobIdHash", "milestoneIndex", "stepId", "challengeNonce"]),
+      missing: { path: "unitContext.challengeNonce", holder: (i) => i, key: "challengeNonce" },
+      extras: true,
+    },
+    {
+      name: "computeAttestationRoleDigest",
+      root: "role",
+      make: () => roleOf(),
+      call: (input) => computeAttestationRoleDigest(attJob, input),
+      members: [
+        ...members("role", ["roleId", "minPositive", "total", "minScore", "attestationHashes"]),
+        { path: "role.attestationHashes[1]", holder: (i) => i.attestationHashes, key: 1 },
+      ],
+      missing: { path: "role.roleId", holder: (i) => i, key: "roleId" },
+      extras: true,
+    },
+    {
+      name: "computeAttestationSetRoot",
+      root: "roles",
+      make: () => [roleOf(), roleOf({ roleId: "buyer" })],
+      call: (input) => computeAttestationSetRoot(attJob, input),
+      members: [
+        { path: "roles[1]", holder: (i) => i, key: 1 },
+        { path: "roles[0].roleId", holder: (i) => i[0], key: "roleId" },
+        { path: "roles[1].minScore", holder: (i) => i[1], key: "minScore" },
+        { path: "roles[0].attestationHashes", holder: (i) => i[0], key: "attestationHashes" },
+        { path: "roles[1].attestationHashes[0]", holder: (i) => i[1].attestationHashes, key: 0 },
+      ],
+      missing: { path: "roles[1].minScore", holder: (i) => i[1], key: "minScore" },
+      extras: false,
+    },
+    {
+      name: "computeEvidenceBlockHash",
+      root: "roots",
+      make: rootsOf,
+      call: (input) => computeEvidenceBlockHash(input),
+      members: members("roots", ["unitContextDigest", "kernelSignedEventsRoot", "sessionKeyAuthDigest", "attestationSetRoot", "workProductRoot", "programHash"]),
+      missing: { path: "roots.programHash", holder: (i) => i, key: "programHash" },
+      extras: true,
+    },
+    {
+      name: "sessionKeyAuthSnapshot",
+      root: S,
+      make: authOf,
+      call: (input) => sessionKeyAuthSnapshot(input),
+      members: sessionMembers,
+      missing: { path: `${S}.sessionId`, holder: (i) => i, key: "sessionId" },
+      extras: false,
+    },
+    {
+      name: "computeSessionKeyAuthDigest",
+      root: S,
+      make: authOf,
+      call: (input) => computeSessionKeyAuthDigest(input),
+      members: sessionMembers,
+      missing: { path: `${S}.sessionId`, holder: (i) => i, key: "sessionId" },
+      extras: false,
+    },
+  ];
+
+  for (const entry of entries) {
+    describe(entry.name, () => {
+      it("accepts an honest input, plain or without a prototype", () => {
+        const honest = entry.call(entry.make());
+        const input = entry.make();
+        const bare = Array.isArray(input) ? input : Object.assign(Object.create(null), input);
+        if (!Array.isArray(input) && entry.root === S) bare.scope = Object.assign(Object.create(null), bare.scope);
+        expect(entry.call(bare)).toEqual(honest);
+      });
+
+      it("refuses a Proxy as the whole input, live or revoked, without running a trap", () => {
+        const traps: string[] = [];
+        const err = refusalOf(() => entry.call(new Proxy(entry.make(), recordingHandler(traps))));
+        expect(err.field).toBe(entry.root);
+        expect(err.message).toMatch(/is a Proxy/);
+        const revoked = Proxy.revocable(entry.make(), {});
+        revoked.revoke();
+        expect(refusalOf(() => entry.call(revoked.proxy)).field).toBe(entry.root);
+        expect(traps, "no trap may run").toEqual([]);
+      });
+
+      it("refuses a Proxy at every member, naming it, and runs no trap", () => {
+        const traps: string[] = [];
+        for (const member of entry.members) {
+          const input = entry.make();
+          const holder = member.holder(input);
+          const value = holder[member.key];
+          holder[member.key] = new Proxy(typeof value === "object" && value !== null ? value : {}, recordingHandler(traps));
+          const err = refusalOf(() => entry.call(input));
+          expect(err.field, member.path).toBe(member.path);
+          expect(err.message, member.path).toMatch(/is a Proxy/);
+        }
+        expect(traps, "no trap may run").toEqual([]);
+      });
+
+      it("refuses a getter at every member, naming it, and never runs it", () => {
+        let runs = 0;
+        for (const member of entry.members) {
+          const input = entry.make();
+          const holder = member.holder(input);
+          const value = holder[member.key];
+          Object.defineProperty(holder, member.key, {
+            enumerable: true,
+            configurable: true,
+            get: () => {
+              runs++;
+              return value;
+            },
+          });
+          const err = refusalOf(() => entry.call(input));
+          expect(err.field, member.path).toBe(member.path);
+          expect(err.message, member.path).toMatch(/accessor property: its getter runs code/);
+        }
+        expect(runs, "no getter may run").toBe(0);
+      });
+
+      it("refuses a getter that swaps Buffer.from, Array.prototype.sort and Object.freeze: none of them is touched", () => {
+        const sab = globalsSaboteur();
+        try {
+          for (const member of entry.members) {
+            const input = entry.make();
+            const holder = member.holder(input);
+            const value = holder[member.key];
+            Object.defineProperty(holder, member.key, {
+              enumerable: true,
+              configurable: true,
+              get: () => {
+                sab.run();
+                return value;
+              },
+            });
+            refusalOf(() => entry.call(input));
+          }
+          expect(sab.state.runs, "no getter may run").toBe(0);
+          expect(Buffer.from).toBe(sab.realFrom);
+          expect(Array.prototype.sort).toBe(sab.realSort);
+          expect(Object.freeze).toBe(sab.realFreeze);
+        } finally {
+          sab.restore();
+        }
+      });
+
+      it("never supplies a missing field from Object.prototype, as an accessor or as data", () => {
+        // `chainId` and friends are found by a [[Get]] on the prototype chain: a polluted Object.prototype
+        // could run a getter there, or supply a value the caller never gave. Own descriptors only.
+        const input = entry.make();
+        const holder = entry.missing.holder(input);
+        const key = String(entry.missing.key);
+        const value = holder[key];
+        delete holder[key];
+        let runs = 0;
+        const polluter = Object.prototype as unknown as Record<string, unknown>;
+        let viaAccessor: ReturnType<typeof settle>;
+        let viaData: ReturnType<typeof settle>;
+        try {
+          Object.defineProperty(Object.prototype, key, {
+            configurable: true,
+            get: () => {
+              runs++;
+              return value;
+            },
+          });
+          viaAccessor = settle(() => entry.call(input));
+        } finally {
+          delete polluter[key];
+        }
+        try {
+          Object.defineProperty(Object.prototype, key, { configurable: true, writable: true, value });
+          viaData = settle(() => entry.call(input));
+        } finally {
+          delete polluter[key];
+        }
+        expect(viaAccessor.error, "an inherited accessor").toBeInstanceOf(EvidenceBlockInputError);
+        expect(viaData.error, "an inherited value").toBeInstanceOf(EvidenceBlockInputError);
+        expect(runs, "an inherited getter must not run").toBe(0);
+      });
+
+      if (!entry.extras) return;
+
+      it("ignores an unrelated own member as it always did, but refuses a Proxy or a getter there too", () => {
+        const base = entry.call(entry.make());
+        expect(entry.call({ ...entry.make(), extra: { anything: [1, 2, 3] } })).toEqual(base);
+        const traps: string[] = [];
+        const viaProxy = refusalOf(() => entry.call({ ...entry.make(), extra: new Proxy({}, recordingHandler(traps)) }));
+        expect(viaProxy.field).toBe(`${entry.root}.extra`);
+        let runs = 0;
+        const withGetter = Object.defineProperty(entry.make(), "extra", {
+          enumerable: true,
+          get: () => {
+            runs++;
+            return 1;
+          },
+        });
+        expect(refusalOf(() => entry.call(withGetter)).field).toBe(`${entry.root}.extra`);
+        expect(traps, "no trap may run").toEqual([]);
+        expect(runs, "no getter may run").toBe(0);
+      });
+    });
+  }
+
+  it("refuses an object that is not plain, before reading any of it: a class instance, a Map, a Proxy prototype", () => {
+    class Klass {}
+    for (const entry of entries) {
+      const input = entry.make();
+      const traps: string[] = [];
+      if (Array.isArray(input)) {
+        // The roles array is plain; a role in it is not.
+        const err = refusalOf(() => entry.call([Object.assign(new Klass(), input[0]), input[1]]));
+        expect(err.field, entry.name).toBe("roles[0]");
+        expect(err.message, entry.name).toMatch(/non-plain object/);
+        continue;
+      }
+      const err = refusalOf(() => entry.call(Object.assign(new Klass(), input)));
+      expect(err.field, entry.name).toBe(entry.root);
+      expect(err.message, entry.name).toMatch(/non-plain object/);
+      expect(refusalOf(() => entry.call(Object.assign(new Map(), input))).field, entry.name).toBe(entry.root);
+      const hostile = Object.setPrototypeOf(entry.make(), new Proxy({}, recordingHandler(traps)));
+      expect(refusalOf(() => entry.call(hostile)).field, entry.name).toBe(entry.root);
+      expect(traps, `${entry.name}: no trap may run`).toEqual([]);
+    }
+  });
+
+  it("refuses an input that is not an object with a typed error, naming the entry point's input", () => {
+    for (const bad of [null, undefined, 7, "x"]) {
+      expect(refusalOf(() => computeSettlementUnitId(bad as never)).field, String(bad)).toBe("unit");
+      expect(refusalOf(() => computeUnitContextDigest(bad as never)).field, String(bad)).toBe("unitContext");
+      expect(refusalOf(() => computeEvidenceBlockHash(bad as never)).field, String(bad)).toBe("roots");
+      expect(refusalOf(() => computeAttestationRoleDigest(attJob, bad as never)).field, String(bad)).toBe("role");
+      expect(refusalOf(() => computeAttestationSetRoot(attJob, bad as never)).field, String(bad)).toBe("roles");
+      expect(refusalOf(() => sessionKeyAuthSnapshot(bad as never)).field, String(bad)).toBe(S);
+    }
+  });
+
+  it("derives every digest without a global or a prototype method the caller can replace", () => {
+    // Everything between a validated value and a digest is a pure loop, a captured function or an operator.
+    // While Buffer, Array, Set, Map, RegExp, String, Object, Reflect, JSON, Function.prototype and Hash
+    // methods all THROW when called, and Number and BigInt cannot be called, every digest is unchanged.
+    // (@noble/hashes calls Number.isSafeInteger and typed-array methods itself, inside keccak: not replaced.)
+    const unitInput = { ...unit };
+    const ctxInput = ctxOf();
+    const roleInput = roleOf();
+    const rolesInput = [roleOf(), roleOf({ roleId: "buyer" })];
+    const rootsInput = rootsOf();
+    const authA = authOf();
+    const authB = authOf();
+    const taggedInput = `sha256:${"ab".repeat(32)}`; // built here: String.prototype.repeat is replaced inside the window
+    const computeAll = () => ({
+      unitId: computeSettlementUnitId(unitInput),
+      context: computeUnitContextDigest(ctxInput),
+      role: computeAttestationRoleDigest(attJob, roleInput),
+      set: computeAttestationSetRoot(attJob, rolesInput),
+      block: computeEvidenceBlockHash(rootsInput),
+      sessionDigest: computeSessionKeyAuthDigest(authA as never),
+      sessionSnapshot: sessionKeyAuthSnapshot(authB as never).digest,
+      tagged: taggedDigestToBytes32(taggedInput),
+    });
+    const honest = computeAll();
+    const hashPrototype = Object.getPrototypeOf(createHash("sha256")) as object;
+    const named = (label: string, object: object, keys: readonly PropertyKey[]): Array<[string, object, PropertyKey]> =>
+      keys.map((key) => [`${label}.${String(key)}`, object, key]);
+    const targets: Array<[string, object, PropertyKey]> = [
+      ...named("Buffer", Buffer, ["from", "alloc", "concat"]),
+      ...named("Buffer.prototype", Buffer.prototype, ["toString", "slice", "write"]),
+      ...named("Uint8Array", Uint8Array, ["from", "of"]),
+      ...named("Array.prototype", Array.prototype, [
+        "sort", "map", "forEach", "push", "pop", "shift", "unshift", "slice", "splice", "concat", "includes", "indexOf",
+        "join", "filter", "reduce", "every", "some", "fill", "reverse", "flat", "at", "keys", "entries", "values", Symbol.iterator,
+      ]),
+      ...named("Set.prototype", Set.prototype, ["has", "add", "delete", "forEach", "values", "keys", "entries"]),
+      ...named("Map.prototype", Map.prototype, ["get", "set", "has", "delete", "forEach"]),
+      ...named("RegExp.prototype", RegExp.prototype, ["exec", "test"]),
+      ...named("String.prototype", String.prototype, [
+        "slice", "charCodeAt", "charAt", "codePointAt", "substring", "substr", "indexOf", "lastIndexOf", "startsWith", "endsWith",
+        "includes", "split", "replace", "replaceAll", "match", "padStart", "padEnd", "toLowerCase", "toUpperCase", "trim", "concat",
+        "repeat", "at", "localeCompare", "normalize",
+      ]),
+      ...named("Object", Object, ["is", "keys", "values", "entries", "assign", "fromEntries", "getOwnPropertyNames", "getOwnPropertyDescriptor", "getPrototypeOf", "defineProperty", "freeze", "create"]),
+      ...named("Reflect", Reflect, ["ownKeys", "getOwnPropertyDescriptor", "getPrototypeOf", "defineProperty", "get", "has", "apply"]),
+      ...named("JSON", JSON, ["stringify", "parse"]),
+      ...named("Function.prototype", Function.prototype, ["call", "apply", "bind"]),
+      ...named("Hash.prototype", hashPrototype, ["update", "digest", "copy"]),
+      ...named("TextEncoder.prototype", TextEncoder.prototype, ["encode"]),
+    ];
+    const reals = targets.map(([, object, key]) => (object as Record<PropertyKey, unknown>)[key]);
+    const globalHolder = globalThis as unknown as Record<string, unknown>;
+    const realNumber = globalHolder.Number;
+    const realBigInt = globalHolder.BigInt;
+    const refuseCall = (label: string) => ({
+      apply() {
+        throw new Error(`${label} was called`);
+      },
+    });
+    let hostile: ReturnType<typeof computeAll> | undefined;
+    let failure: unknown;
+    try {
+      // Plain indexed loops only: while Array.prototype is replaced, even destructuring and push would throw.
+      for (let i = 0; i < targets.length; i++) {
+        const label = targets[i]![0];
+        (targets[i]![1] as Record<PropertyKey, unknown>)[targets[i]![2]] = () => {
+          throw new Error(`${label} was called`);
+        };
+      }
+      globalHolder.Number = new Proxy(realNumber as object, refuseCall("Number"));
+      globalHolder.BigInt = new Proxy(realBigInt as object, refuseCall("BigInt"));
+      hostile = computeAll();
+    } catch (error) {
+      failure = error;
+    } finally {
+      for (let i = 0; i < targets.length; i++) (targets[i]![1] as Record<PropertyKey, unknown>)[targets[i]![2]] = reals[i];
+      globalHolder.Number = realNumber;
+      globalHolder.BigInt = realBigInt;
+    }
+    expect(failure, "an entry point looked something up at call time").toBeUndefined();
+    expect(hostile).toEqual(honest);
+  });
+
+  it("judges every spelling exactly as the regular expressions it replaced did", () => {
+    // The checks are char-code loops now, not regular expressions (a RegExp.prototype.exec that was replaced
+    // would change what they accept). Compared against the original expressions over strings that differ
+    // from a valid one in one position, in length, or in character class.
+    const originals = {
+      bytes32: /^0x[0-9a-f]{64}$/,
+      address: /^0x[0-9a-f]{40}$/,
+      decimal: /^(0|[1-9][0-9]*)$/,
+      token: /^[\x21-\x7E]{1,128}$/,
+      sessionKey: /^[0-9a-f]{64}$/,
+      tagged: /^sha256:[0-9a-f]{64}$/,
+    };
+    const alphabet = ["0", "1", "9", "a", "f", "A", "F", "g", "G", "x", "X", " ", "\n", "\t", "\0", "\x7f", "!", "~", "-", "+", ".", "é", "٣", "０", "z", "\u{1F600}"];
+    let state = 987654321;
+    const next = (n: number) => (state = (state * 1103515245 + 12345) & 0x7fffffff) % n;
+    const mutate = (valid: string): string => {
+      const chars = Array.from(valid);
+      const kind = next(4);
+      if (kind === 0 && chars.length > 0) chars.splice(next(chars.length), 1);
+      else if (kind === 1) chars.splice(next(chars.length + 1), 0, alphabet[next(alphabet.length)]!);
+      else if (kind >= 2 && chars.length > 0) chars[next(chars.length)] = alphabet[next(alphabet.length)]!;
+      return chars.join("");
+    };
+    const accepts = (call: () => unknown, field: string): boolean => {
+      const outcome = settle(call);
+      if (outcome.error === undefined) return true;
+      expect(outcome.error).toBeInstanceOf(EvidenceBlockInputError);
+      expect((outcome.error as EvidenceBlockInputError).field).toBe(field);
+      return false;
+    };
+    const cases: Array<{ name: string; valid: string; regex: RegExp; check: (text: string) => boolean }> = [
+      { name: "bytes32", valid: `0x${"ab".repeat(32)}`, regex: originals.bytes32, check: (t) => accepts(() => computeEvidenceBlockHash({ ...rootsOf(), programHash: t }), "programHash") },
+      { name: "address", valid: `0x${"cd".repeat(20)}`, regex: originals.address, check: (t) => accepts(() => computeSettlementUnitId({ ...unit, escrow: t }), "escrow") },
+      { name: "decimal", valid: "12345", regex: originals.decimal, check: (t) => accepts(() => computeSettlementUnitId({ ...unit, chainId: t }), "chainId") },
+      { name: "token", valid: "role-1", regex: originals.token, check: (t) => accepts(() => computeAttestationRoleDigest(attJob, roleOf({ roleId: t })), "role.roleId") },
+      { name: "job token", valid: "job-1", regex: originals.token, check: (t) => accepts(() => computeAttestationRoleDigest(t, roleOf()), "job") },
+      { name: "session public key", valid: "ab".repeat(32), regex: originals.sessionKey, check: (t) => accepts(() => computeSessionKeyAuthDigest({ ...authOf(), publicKey: t } as never), `${S}.publicKey`) },
+      { name: "tagged digest", valid: `sha256:${"ef".repeat(32)}`, regex: originals.tagged, check: (t) => accepts(() => taggedDigestToBytes32(t), "kernelSignedEventsRoot") },
+    ];
+    for (const { name, valid, regex, check } of cases) {
+      expect(check(valid), `${name}: the valid spelling`).toBe(true);
+      for (let i = 0; i < 400; i++) {
+        const text = mutate(valid);
+        expect(check(text), `${name}: ${JSON.stringify(text)}`).toBe(regex.test(text));
+      }
+    }
+    // The edges a regular expression gets from `$` and from the code unit it reads.
+    expect(check_(`0x${"ab".repeat(32)}\n`)).toBe(false);
+    function check_(text: string): boolean {
+      return accepts(() => computeEvidenceBlockHash({ ...rootsOf(), programHash: text }), "programHash");
+    }
+    for (const decimal of ["0", "7", "18446744073709551615"]) {
+      expect(accepts(() => computeSettlementUnitId({ ...unit, chainId: decimal }), "chainId"), decimal).toBe(true);
+    }
+    for (const decimal of ["", "00", "01", "-1", "+1", "1.0", "1e3", " 1", "1 ", "0x10", "1_0", "٣"]) {
+      expect(accepts(() => computeSettlementUnitId({ ...unit, chainId: decimal }), "chainId"), JSON.stringify(decimal)).toBe(false);
+    }
+  });
+});
+
 // ── F2 (HIGH): invalid and duplicate quorums are refused ─────────────────────
 describe("E7 F2 — the attestation set is validated before it is hashed", () => {
   const H1 = sha("f2-attestation-1");
@@ -1446,11 +1933,15 @@ describe("E7 F2 — the attestation set is validated before it is hashed", () =>
     const empty = refuseSet([okRole({ attestationHashes: [] })]);
     expect(empty.field).toBe("roles[0].attestationHashes");
     expect(empty.message).toMatch(/at least one attestation hash/);
-    for (const bad of [undefined, null, H1, new Set([H1])]) {
+    for (const bad of [undefined, null, H1]) {
       const err = refuseSet([okRole({ attestationHashes: bad })]);
       expect(err.field, String(bad)).toBe("roles[0].attestationHashes");
       expect(err.message, String(bad)).toMatch(/expected an array/);
     }
+    // Round 2 (E7c): a Set is not plain data, so the guard every entry point runs first refuses it, before the type check.
+    const asSet = refuseSet([okRole({ attestationHashes: new Set([H1]) })]);
+    expect(asSet.field).toBe("roles[0].attestationHashes");
+    expect(asSet.message).toMatch(/non-plain object/);
   });
 
   it("refuses two roles with the same roleId, and names the second one", () => {
@@ -1535,7 +2026,12 @@ describe("E7 F2 — the attestation set is validated before it is hashed", () =>
 });
 
 // ── F3 (HIGH): live-object reads ─────────────────────────────────────────────
-describe("E7 F3 — roles are read once and the session authorization is a frozen snapshot", () => {
+// Round 2 (E7c): a role used to be read once through a [[Get]], so a getter or a Proxy ran caller code
+// and its FIRST answer was committed. That code runs before anything is digested and can swap
+// Buffer.from, Array.prototype.sort or Object.freeze, so what was digested was no longer what the producer
+// supplied. Every entry point now admits its input first (assertNoCodeRunningInput) and reads fields from
+// own data descriptors: the tests that pinned "read exactly once, first answer committed" expect REFUSAL.
+describe("E7 F3 — roles are admitted and read from their own descriptors, and the session authorization is a frozen snapshot", () => {
   const H1 = sha("f3-attestation-1");
   const H2 = sha("f3-attestation-2");
   const plainRole = (over: Record<string, unknown> = {}) =>
@@ -1543,83 +2039,76 @@ describe("E7 F3 — roles are read once and the session authorization is a froze
   const digestOf = (role: AttestationQuorumRole) => computeAttestationRoleDigest(attJob, role);
 
   describe("attestation roles", () => {
-    it("a role whose attestationHashes getter changes its answer commits to the first, validated, answer", () => {
-      let reads = 0;
-      const role = {
-        roleId: "inspector",
-        minPositive: 1,
-        total: 2,
-        minScore: 50,
-        get attestationHashes() {
-          reads++;
-          return reads === 1 ? [H1] : ["not-a-hash"];
-        },
-      } as unknown as AttestationQuorumRole;
-      expect(digestOf(role)).toBe(digestOf(plainRole()));
-      expect(reads).toBe(1);
+    it("refuses a getter on any field of a role, alone or in a set, and never runs it", () => {
+      let runs = 0;
+      const fields: Array<[string, unknown]> = [
+        ["roleId", "inspector"],
+        ["minPositive", 1],
+        ["total", 2],
+        ["minScore", 50],
+        ["attestationHashes", [H1]],
+      ];
+      for (const [name, value] of fields) {
+        // The getter answers differently on a second read: the first answer used to be the one committed.
+        let answers = 0;
+        const role = Object.defineProperty({ ...plainRole() }, name, {
+          enumerable: true,
+          get() {
+            runs++;
+            return ++answers === 1 ? value : H2;
+          },
+        });
+        const alone = refusalOf(() => digestOf(role as AttestationQuorumRole));
+        expect(alone.field, name).toBe(`role.${name}`);
+        expect(alone.message, name).toMatch(/accessor property: its getter runs code/);
+        const inSet = refusalOf(() => computeAttestationSetRoot(attJob, [role as AttestationQuorumRole]));
+        expect(inSet.field, name).toBe(`roles[0].${name}`);
+      }
+      expect(runs, "no getter may run").toBe(0);
     });
 
-    it("a second answer that is itself valid is not committed either", () => {
-      let reads = 0;
-      const role = {
-        roleId: "inspector",
-        minPositive: 1,
-        total: 2,
-        minScore: 50,
-        get attestationHashes() {
-          reads++;
-          return reads === 1 ? [H1] : [H2];
-        },
-      } as unknown as AttestationQuorumRole;
-      const committed = digestOf(role);
-      expect(committed).toBe(digestOf(plainRole({ attestationHashes: [H1] })));
-      expect(committed).not.toBe(digestOf(plainRole({ attestationHashes: [H2] })));
-    });
-
-    it("each element of attestationHashes is read once", () => {
-      let reads = 0;
-      const hashes: string[] = [];
+    it("refuses an accessor element of attestationHashes without running it", () => {
+      let runs = 0;
+      const hashes: string[] = [H1];
       Object.defineProperty(hashes, 0, {
         enumerable: true,
         get() {
-          return ++reads === 1 ? H1 : "not-a-hash";
+          runs++;
+          return H1;
         },
       });
-      expect(digestOf(plainRole({ attestationHashes: hashes }))).toBe(digestOf(plainRole()));
-      expect(reads).toBe(1);
+      const err = refusalOf(() => digestOf(plainRole({ attestationHashes: hashes })));
+      expect(err.field).toBe("role.attestationHashes[0]");
+      expect(err.message).toMatch(/accessor property: its getter runs code/);
+      expect(runs, "the element getter must not run").toBe(0);
     });
 
-    it("every scalar field of a role is read once, so a later invalid answer is never seen", () => {
-      const reads = { roleId: 0, minPositive: 0, total: 0, minScore: 0 };
-      const role = {
-        get roleId() {
-          return ++reads.roleId === 1 ? "inspector" : "";
-        },
-        get minPositive() {
-          return ++reads.minPositive === 1 ? 1 : 0;
-        },
-        get total() {
-          return ++reads.total === 1 ? 2 : 0;
-        },
-        get minScore() {
-          return ++reads.minScore === 1 ? 50 : 999;
-        },
-        attestationHashes: [H1],
-      } as unknown as AttestationQuorumRole;
-      expect(digestOf(role)).toBe(digestOf(plainRole()));
-      expect(reads).toEqual({ roleId: 1, minPositive: 1, total: 1, minScore: 1 });
+    it("refuses a Proxy as the roles array, as a role and as attestationHashes, without running a trap", () => {
+      const traps: string[] = [];
+      const proxied = <T extends object>(target: T): T => new Proxy(target, recordingHandler(traps));
+      expect(refusalOf(() => computeAttestationSetRoot(attJob, proxied([plainRole(), plainRole({ roleId: "buyer" })]))).field).toBe("roles");
+      expect(refusalOf(() => computeAttestationSetRoot(attJob, [plainRole(), proxied(plainRole({ roleId: "buyer" }))])).field).toBe("roles[1]");
+      expect(refusalOf(() => digestOf(proxied(plainRole()))).field).toBe("role");
+      const hashes = refusalOf(() => digestOf(plainRole({ attestationHashes: proxied([H1]) })));
+      expect(hashes.field).toBe("role.attestationHashes");
+      expect(hashes.message).toMatch(/is a Proxy/);
+      expect(traps, "no trap may run").toEqual([]);
     });
 
-    it("the roles array and every role in it are read once", () => {
-      const reads: Record<string, number> = {};
-      const counted = new Proxy([plainRole(), plainRole({ roleId: "buyer" })], {
-        get(target, key, receiver) {
-          if (typeof key === "string" && /^\d+$/.test(key)) reads[key] = (reads[key] ?? 0) + 1;
-          return Reflect.get(target, key, receiver);
-        },
-      });
-      computeAttestationSetRoot(attJob, counted as AttestationQuorumRole[]);
-      expect(reads).toEqual({ "0": 1, "1": 1 });
+    it("sorts the attestation hashes itself, in UTF-16 code-unit order, whatever order they are given in", () => {
+      // No Array.prototype.sort is looked up any more: a heapsort over the copy. Compared against the engine's sort.
+      const hashes = Array.from({ length: 17 }, (_, i) => sha(`f3-sort-${i}`));
+      const expected = (list: string[]) => sha(canonicalize({ roleId: "inspector", minPositive: 1, total: 17, minScore: 50, job: attJob, hashes: [...list].sort() }));
+      let state = 12345;
+      const next = () => (state = (state * 1103515245 + 12345) & 0x7fffffff);
+      for (let round = 0; round < 25; round++) {
+        const shuffled = [...hashes];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+          const j = next() % (i + 1);
+          [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
+        }
+        expect(digestOf(plainRole({ total: 17, attestationHashes: shuffled })), `round ${round}`).toBe(expected(hashes));
+      }
     });
   });
 
@@ -1681,7 +2170,8 @@ describe("E7 F3 — roles are read once and the session authorization is a froze
             return "x";
           },
         });
-      const accessor = /accessor properties are not accepted/;
+      // Round 2 (E7c): the shared guard (assertNoCodeRunningInput) refuses these before the session code reads anything.
+      const accessor = /accessor property: its getter runs code/;
       const topErr = refuseAuth(withGetter(freshAuth(), "sessionId"));
       expect(topErr.field).toBe(`${P}.sessionId`);
       expect(topErr.message).toMatch(accessor);
@@ -1701,7 +2191,7 @@ describe("E7 F3 — roles are read once and the session authorization is a froze
       withGetter(element.scope.contractIds, "0");
       const elementErr = refuseAuth(element);
       expect(elementErr.field).toBe(`${P}.scope.contractIds[0]`);
-      expect(elementErr.message).toMatch(/enumerable data element/);
+      expect(elementErr.message).toMatch(accessor);
 
       const scopeGetter = freshAuth();
       const realScope = scopeGetter.scope;
@@ -2062,37 +2552,32 @@ describe("E7 F5 — negative zero is not the pinned spelling of zero", () => {
   });
 });
 
-// ── F3 extension, NOT in the verdict: the unit context is read once too ─────
+// ── F3 extension, NOT in the verdict: the unit context ──────────────────────
 // computeUnitContextDigest read each field to check the settlementUnitId derivation and
-// again to hash it, so a getter could pass the check and be committed with other values.
-describe("E7 F3 extension — the unit context is read once", () => {
+// again to hash it, so a getter could pass the check and be committed with other values. It then read
+// each field once and committed the first answer. Round 2 (E7c): a getter is caller code, so it is refused
+// unread, like every code-running input at every entry point.
+describe("E7 F3 extension — the unit context is admitted and read from its own descriptors", () => {
   const FIELDS = ["chainId", "escrow", "settlementUnitId", "jobIdHash", "milestoneIndex", "stepId", "challengeNonce"] as const;
 
-  it("every field is read once, so a later answer is never committed", () => {
+  it("refuses a getter on any field, even one that answers consistently, and never runs it", () => {
     const settlementUnitId = computeSettlementUnitId(unit);
     const plain: Record<string, unknown> = { ...unit, settlementUnitId, challengeNonce };
-    const later: Record<string, unknown> = {
-      chainId: 1n,
-      escrow: `0x${"11".repeat(20)}`,
-      settlementUnitId: K("other-unit"),
-      jobIdHash: K("other-job"),
-      milestoneIndex: 99n,
-      stepId: K("other-step"),
-      challengeNonce: K("other-nonce"),
-    };
-    const reads: Record<string, number> = {};
-    const shifty: Record<string, unknown> = {};
+    let runs = 0;
     for (const field of FIELDS) {
-      Object.defineProperty(shifty, field, {
+      const ctx = Object.defineProperty({ ...plain }, field, {
         enumerable: true,
         get() {
-          reads[field] = (reads[field] ?? 0) + 1;
-          return reads[field] === 1 ? plain[field] : later[field];
+          runs++;
+          return plain[field];
         },
       });
+      const err = refusalOf(() => computeUnitContextDigest(ctx as never));
+      expect(err.field, field).toBe(`unitContext.${field}`);
+      expect(err.message, field).toMatch(/accessor property: its getter runs code/);
     }
-    expect(computeUnitContextDigest(shifty as never)).toBe(computeUnitContextDigest(plain as never));
-    expect(reads).toEqual(Object.fromEntries(FIELDS.map((f) => [f, 1])));
+    expect(runs, "no getter may run").toBe(0);
+    expect(computeUnitContextDigest(plain as never)).toBe(computeUnitContextDigest({ ...plain } as never));
   });
 
   it("still refuses an incoherent context and a non-object", () => {
@@ -2110,9 +2595,9 @@ describe("E7 F3 extension — the unit context is read once", () => {
 // A Proxy over an array passes Array.isArray, and `NaN < 1` is false, so a `count < 1`
 // check alone would treat such an array as non-empty, loop zero times and accept an
 // EMPTY bundle, role set or hash list. The explicit safe-integer check closes that.
-// (E7c: the bundle's events array is now refused as a Proxy before its length is asked, so the
-// "bundle events" case below holds by that refusal; the length check stays as a second line. The
-// role set and the attestation hashes still accept a Proxy, so they still need the check.)
+// (E7c: the bundle's events array, and since round 2 the role set and the attestation hashes, are
+// refused as a Proxy before their length is asked, so the three cases below hold by that refusal;
+// the length checks stay as a second line.)
 describe("E7 — an array with a non-integer length is refused, never treated as empty", () => {
   const lying = <T>(items: T[], length: unknown) =>
     new Proxy(items, { get: (target, key, receiver) => (key === "length" ? length : Reflect.get(target, key, receiver)) });
