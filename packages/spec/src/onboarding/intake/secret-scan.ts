@@ -19,7 +19,10 @@
  * only; it is not a way to keep a record that has a hit.
  *
  * These are heuristic detectors, not proof of absence: a string that matches
- * none of them is not thereby known to be safe.
+ * none of them is not thereby known to be safe. Each string is matched as
+ * written, one string at a time: a copy that is obfuscated (split by invisible
+ * characters, spelled in full-width forms) or spread across several strings is
+ * not detected.
  *
  * Detectors (see each constant for the exact pattern):
  *   - pem             a PEM header `-----BEGIN <LABEL>-----`.

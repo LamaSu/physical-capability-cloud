@@ -2684,16 +2684,19 @@ describe("astra pack 120b", () => {
     expect(report.ok).toBe(false);
     expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind: "pem" }]);
   });
+
   it("CRITICAL 1b: a 64-hex secret candidate in device.description is refused", () => {
     const report = ready(withAnswer("device.description", human("key 0x" + "ab".repeat(32))), "identify");
     expect(report.ok).toBe(false);
     expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind: "hex-secret" }]);
   });
+
   it("CRITICAL 1c: a payout address in device.description is refused", () => {
     const report = ready(withAnswer("device.description", human("pay " + FAKE.address)), "identify");
     expect(report.ok).toBe(false);
     expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind: "payout-address" }]);
   });
+
   it("CRITICAL 1d: a street address in device.description is refused", () => {
     const report = ready(withAnswer("device.description", human("Printer lives at 1600 Pennsylvania Avenue")), "identify");
     expect(report.ok).toBe(false);
@@ -2710,11 +2713,13 @@ describe("astra pack 120b", () => {
     expect(report.ok).toBe(false);
     expect(report.structuralErrors).toEqual(['answers/safety.limits/source: provenance "confirmed" requires a source']);
   });
+
   it("HIGH 2b: an invalid provenance on a required field fails", () => {
     const report = ready(withAnswer("device.description", { value: "A printer.", provenance: "garbage" }), "identify");
     expect(report.ok).toBe(false);
     expect(report.structuralErrors).toEqual(["answers/device.description/provenance: invalid_enum_value"]);
   });
+
   it("HIGH 2c: a malformed answered field outside the milestone still fails", () => {
     const answer = {
       value: [{ quantity: "bed temperature", unit: "C", min: 10, max: 1 }],
@@ -2738,6 +2743,7 @@ describe("astra pack 120b", () => {
     expect(report.neverDefaultViolations).toEqual(["capability.parameters"]);
     expect(report.unconfirmed).toEqual(["capability.parameters"]);
   });
+
   it("HIGH 3b: a caller-written 'confirmed' label alone (no authenticated confirmation) does not make publish ready", () => {
     const report = validateIntake(buildFullValidRecord(), "publish");
     expect(report.ok).toBe(false);
@@ -2750,6 +2756,7 @@ describe("astra pack 120b", () => {
     }
     expect(validateIntake(stripped, "publish", makeAuthority(buildFullValidRecord())).ok).toBe(false);
   });
+
   it("HIGH 3c: payout.destination {set:true} alone (no payout-store read) does not make get-paid ready", () => {
     expect(validateIntake(buildFullValidRecord(), "get-paid").ok).toBe(false);
     const report = ready(buildFullValidRecord(), "get-paid", { payout: false });
@@ -2766,6 +2773,7 @@ describe("astra pack 120b", () => {
     expect(report.ok).toBe(false);
     expect(report.limitErrors).toContain("safety.limits[1]: duplicate quantity (first at safety.limits[0])");
   });
+
   it("HIGH 4b: estop mechanism none does not make accept-jobs ready", () => {
     const answer = { ...human({ mechanism: "none" }), confirmation: { eventId: "evt-safety.estop" } };
     const report = ready(withAnswer("safety.estop", answer), "accept-jobs");
@@ -2773,9 +2781,36 @@ describe("astra pack 120b", () => {
     expect(report.safetyBlocks).toEqual(['safety.estop: mechanism "none" is not approved for this capability']);
   });
 
+  it("HIGH 5a: tier2 is not ready while its required primitives are stub", () => {
+    const report = ready(buildFullValidRecord(), "tier2");
+    expect(report.ok).toBe(false);
+    expect(report.stubPrimitives).toEqual([
+      "approval.expert",
+      "capture.photo_nonced",
+      "ident.registered_key",
+      "machine.execution_log",
+      "measure.io_test_pair",
+    ]);
+  });
+
+  it("HIGH 5b: a camera that sees neither work area nor output does not count for tier2", () => {
+    const answer = human({ seesWorkArea: false, seesOutput: false, mount: "fixed", captureDeviceId: "cam-1" });
+    const record = withAnswer("evidence.camera", answer);
+    expect(ready(record, "tier2").ok).toBe(false);
+    // ... and it is the camera, not just the stubs, that fails once the primitives are live
+    const live = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, "tier2"));
+    expect(live.ok).toBe(false);
+    expect(live.insubstantial).toEqual(["evidence.camera"]);
+  });
+
+  it("HIGH 5c: a malformed execution mode caps at 0, not the no-cap 3", () => {
+    expect(executionModeTierCap(withAnswer("evidence.executionMode", probed("MOCK")))).toBe(0);
+  });
+
   it("MEDIUM 6a: the generated JSON Schema says it is documentation only", () => {
     expect(JSON.stringify(buildIntakeJsonSchema())).toMatch(/Documentation\/projection only/);
   });
+
   it("MEDIUM 6b: the generated safety.limits items schema is not the accept-anything {}", () => {
     const text = JSON.stringify(buildIntakeJsonSchema());
     expect(text.includes('"items":{}')).toBe(false);
@@ -2799,38 +2834,17 @@ describe("astra pack 120b", () => {
     };
     expect(ResearchFindingSchema.safeParse(finding).success).toBe(false);
   });
+
   it("MEDIUM 8b: 'Run the downloaded driver.' instructs execution", () => {
     expect(entryInstructsExecution({ ...RESEARCH_LIBRARY[0]!, prompt: "Run the downloaded driver." })).toBe(true);
   });
+
   it("MEDIUM 8c: a negation elsewhere does not excuse a later instruction", () => {
     expect(entryInstructsExecution({ ...RESEARCH_LIBRARY[0]!, prompt: "Do not install A. Execute B." })).toBe(true);
   });
+
   it("MEDIUM 8d: an instruction in searches is caught too", () => {
     const entry = RESEARCH_LIBRARY[0]!;
     expect(entryInstructsExecution({ ...entry, searches: [...entry.searches, "then flash firmware to the device"] })).toBe(true);
-  });
-
-  it("HIGH 5a: tier2 is not ready while its required primitives are stub", () => {
-    const report = ready(buildFullValidRecord(), "tier2");
-    expect(report.ok).toBe(false);
-    expect(report.stubPrimitives).toEqual([
-      "approval.expert",
-      "capture.photo_nonced",
-      "ident.registered_key",
-      "machine.execution_log",
-      "measure.io_test_pair",
-    ]);
-  });
-  it("HIGH 5b: a camera that sees neither work area nor output does not count for tier2", () => {
-    const answer = human({ seesWorkArea: false, seesOutput: false, mount: "fixed", captureDeviceId: "cam-1" });
-    const record = withAnswer("evidence.camera", answer);
-    expect(ready(record, "tier2").ok).toBe(false);
-    // ... and it is the camera, not just the stubs, that fails once the primitives are live
-    const live = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, "tier2"));
-    expect(live.ok).toBe(false);
-    expect(live.insubstantial).toEqual(["evidence.camera"]);
-  });
-  it("HIGH 5c: a malformed execution mode caps at 0, not the no-cap 3", () => {
-    expect(executionModeTierCap(withAnswer("evidence.executionMode", probed("MOCK")))).toBe(0);
   });
 });
