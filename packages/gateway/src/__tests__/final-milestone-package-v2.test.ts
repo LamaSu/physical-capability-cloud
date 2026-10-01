@@ -27,7 +27,7 @@ import {
   assertMintablePackage,
   type FinalMilestonePackageV2Body,
 } from "../settlement/final-milestone-package-v2.js";
-import { packageDigestV2, type PackageSignature } from "../settlement/package-digest-v2.js";
+import { packageDigestV2, canonicalSignatures, type PackageSignature } from "../settlement/package-digest-v2.js";
 import { COMPROMISED_DEVICE_PUBLIC_KEYS } from "@pcc/spec";
 
 const H = (n: string) => `0x${n.repeat(64).slice(0, 64)}`;
@@ -536,6 +536,195 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
     b.producer.devicePrincipalId = `ed25519:${leaked}`;
     const d2 = { ...D2, signer: leaked };
     expect(() => assertMintablePackage(b, [D1, d2], { algorithm: "ed25519", publicKey: leaked })).toThrow(PackageNotMintableError);
+  });
+});
+
+// ── read-once ────────────────────────────────────────────────────────────────
+// validatePackageBody, packageDigestV2 and assertMintablePackage must read every
+// input field exactly ONCE into a local copy and validate and hash only the
+// copies, so no getter's second answer, and no change the caller makes after a
+// check, can make what was checked differ from what was hashed.
+
+type Counts = Record<string, number>;
+
+/** A copy of a plain object whose every field is a getter that counts how often it is read. */
+function counting(
+  value: unknown,
+  counts: Counts,
+  path: string,
+  answer?: (p: string, n: number, v: unknown) => unknown,
+): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    const p = `${path}.${k}`;
+    const inner = counting(v, counts, p, answer);
+    Object.defineProperty(out, k, {
+      enumerable: true,
+      get() {
+        counts[p] = (counts[p] ?? 0) + 1;
+        return answer ? answer(p, counts[p]!, inner) : inner;
+      },
+    });
+  }
+  return out;
+}
+
+/** The counts a function that reads every field of `value` exactly once leaves behind. */
+function eachOnce(value: unknown, path: string): Counts {
+  const out: Counts = {};
+  const walk = (v: unknown, p: string) => {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return;
+    for (const [k, x] of Object.entries(v)) {
+      out[`${p}.${k}`] = 1;
+      walk(x, `${p}.${k}`);
+    }
+  };
+  walk(value, path);
+  return out;
+}
+
+/** Answers the first read truthfully and every later read with a different, still well-formed, value. */
+const flipLast = (s: string) => s.slice(0, -1) + (s.endsWith("0") ? "1" : "0");
+const flipLaterReads =
+  (suffixes: readonly string[]) =>
+  (p: string, n: number, v: unknown): unknown =>
+    n >= 2 && typeof v === "string" && suffixes.some((s) => p.endsWith(s)) ? flipLast(v) : v;
+const BODY_FLIPS = [".unitBinding.escrow", ".unitBinding.chainId", ".producer.kernelId", ".nonce", ".evidenceBlockHash"];
+
+/** An array that counts reads of its length and of each index. */
+function countingArray<T>(arr: T[], reads: Counts): T[] {
+  return new Proxy(arr, {
+    get(target, key, receiver) {
+      const k = String(key);
+      if (k === "length" || /^[0-9]+$/.test(k)) reads[k] = (reads[k] ?? 0) + 1;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+}
+
+describe("read-once: every input field is read exactly once and only the copies are validated and hashed", () => {
+  const D1r = { signer: `0x${"ab".repeat(20)}`, scheme: "secp256k1-eip712", sig: `0x${"11".repeat(65)}` };
+  const D2r = { signer: `0x${"cd".repeat(32)}`, scheme: "ed25519-raw32", sig: `0x${"22".repeat(64)}` };
+  const MINT_BODY = clone(BODY);
+  MINT_BODY.producer.operatorPrincipalId = `eip155:${BODY.unitBinding.chainId}:${D1r.signer}`;
+  MINT_BODY.producer.devicePrincipalId = `ed25519:${D2r.signer}`;
+  const REGISTRY_ED = { algorithm: "ed25519", publicKey: D2r.signer };
+
+  it("validatePackageBody reads each of the body's fields exactly once and returns a copy the caller cannot reach", () => {
+    const counts: Counts = {};
+    const src = clone(BODY);
+    const out = validatePackageBody(counting(src, counts, "$"));
+    expect(counts).toEqual(eachOnce(BODY, "$"));
+    // the result is a fresh object: changing the caller's input afterwards does not reach it
+    src.unitBinding.chainId = "999";
+    src.producer.kernelId = "changed";
+    expect(out.unitBinding.chainId).toBe(BODY.unitBinding.chainId);
+    expect(out.producer.kernelId).toBe(BODY.producer.kernelId);
+  });
+
+  it("validatePackageBody over fields that answer differently after the first read equals validatePackageBody over the first answers", () => {
+    const flipping = counting(BODY, {}, "$", flipLaterReads(BODY_FLIPS));
+    expect(validatePackageBody(flipping)).toEqual(validatePackageBody(BODY));
+  });
+
+  it("computePackageBodyHash and packageBodyJcs read each body field once and hash the first answers", () => {
+    for (const [name, run] of [
+      ["computePackageBodyHash", (b: unknown) => computePackageBodyHash(b)],
+      ["packageBodyJcs", (b: unknown) => packageBodyJcs(b)],
+    ] as Array<[string, (b: unknown) => unknown]>) {
+      const counts: Counts = {};
+      run(counting(BODY, counts, "$"));
+      expect(counts, name).toEqual(eachOnce(BODY, "$"));
+      expect(run(counting(BODY, {}, "$", flipLaterReads(BODY_FLIPS))), name).toEqual(run(BODY));
+    }
+  });
+
+  it("packageDigestV2 reads each body field and each signature field once, and hashes the first answers", () => {
+    const sigs = [D1r, D2r];
+    const bodyCounts: Counts = {};
+    const sigCounts: Counts = {};
+    const arrayReads: Counts = {};
+    const digest = packageDigestV2(
+      counting(BODY, bodyCounts, "$"),
+      countingArray([counting(D1r, sigCounts, "$d1"), counting(D2r, sigCounts, "$d2")], arrayReads),
+    );
+    expect(bodyCounts).toEqual(eachOnce(BODY, "$"));
+    expect(sigCounts).toEqual({ ...eachOnce(D1r, "$d1"), ...eachOnce(D2r, "$d2") });
+    expect(arrayReads).toEqual({ length: 1, "0": 1, "1": 1 });
+    expect(digest).toBe(packageDigestV2(BODY, sigs));
+
+    // a getter that answers differently the second time cannot move the digest off the first answers
+    const flipSig = flipLaterReads([".signer"]);
+    const flipped = packageDigestV2(
+      counting(BODY, {}, "$", flipLaterReads(BODY_FLIPS)),
+      [counting(D1r, {}, "$d1", flipSig), counting(D2r, {}, "$d2", flipSig)],
+    );
+    expect(flipped).toBe(digest);
+  });
+
+  it("canonicalSignatures reads the list's length and each index once, each entry's fields once, and returns copies", () => {
+    const counts: Counts = {};
+    const arrayReads: Counts = {};
+    const live = [clone(D1r), clone(D2r)];
+    const out = canonicalSignatures(countingArray([counting(live[0], counts, "$d1"), counting(live[1], counts, "$d2")], arrayReads));
+    expect(counts).toEqual({ ...eachOnce(D1r, "$d1"), ...eachOnce(D2r, "$d2") });
+    expect(arrayReads).toEqual({ length: 1, "0": 1, "1": 1 });
+    // the returned entries are not the caller's objects: a later change to them does not reach the result
+    live[0]!.signer = `0x${"ee".repeat(20)}`;
+    expect(out).toEqual([D1r, D2r]);
+  });
+
+  it("assertMintablePackage reads each body field, signature field, list slot and registry field once", () => {
+    for (const registry of [REGISTRY_ED, { algorithm: "secp256k1", address: D1r.signer }]) {
+      const body: Counts = {};
+      const sigCounts: Counts = {};
+      const arrayReads: Counts = {};
+      const regCounts: Counts = {};
+      try {
+        assertMintablePackage(
+          counting(MINT_BODY, body, "$"),
+          countingArray([counting(D1r, sigCounts, "$d1"), counting(D2r, sigCounts, "$d2")], arrayReads),
+          counting(registry, regCounts, "$reg"),
+        );
+      } catch {
+        // the secp256k1 registry is refused (it is not the device key); the reads still must be single
+      }
+      expect(body, registry.algorithm).toEqual(eachOnce(MINT_BODY, "$"));
+      expect(sigCounts, registry.algorithm).toEqual({ ...eachOnce(D1r, "$d1"), ...eachOnce(D2r, "$d2") });
+      expect(arrayReads, registry.algorithm).toEqual({ length: 1, "0": 1, "1": 1 });
+      expect(regCounts, registry.algorithm).toEqual(eachOnce(registry, "$reg"));
+    }
+  });
+
+  it("assertMintablePackage over fields that answer differently after the first read returns exactly what it returns over the first answers", () => {
+    const first = assertMintablePackage(MINT_BODY, [D1r, D2r], REGISTRY_ED);
+    const flipSig = flipLaterReads([".signer", ".sig"]);
+    const flipped = assertMintablePackage(
+      counting(MINT_BODY, {}, "$", flipLaterReads([".unitBinding.escrow", ".producer.kernelId", ".nonce"])),
+      [counting(D1r, {}, "$d1", flipSig), counting(D2r, {}, "$d2", flipSig)],
+      counting(REGISTRY_ED, {}, "$reg", flipLaterReads([".publicKey"])),
+    );
+    expect(flipped).toEqual(first);
+  });
+
+  it("assertMintablePackage returns copies: changing the caller's inputs after the call does not reach the result", () => {
+    const body = clone(MINT_BODY);
+    const sigs = [clone(D1r), clone(D2r)];
+    const out = assertMintablePackage(body, sigs, REGISTRY_ED);
+    const snapshot = JSON.stringify(out);
+    body.unitBinding.chainId = "1";
+    body.producer.kernelId = "changed";
+    sigs[0]!.sig = `0x${"ff".repeat(65)}`;
+    sigs[1]!.signer = `0x${"ee".repeat(32)}`;
+    expect(JSON.stringify(out)).toBe(snapshot);
+  });
+
+  it("a scheme named like an Object.prototype key is a typed refusal, not a crash", () => {
+    for (const scheme of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+      expect(() => assertMintablePackage(MINT_BODY, [{ ...D1r, scheme }, D2r], REGISTRY_ED), scheme).toThrow(PackageNotMintableError);
+      expect(() => assertMintablePackage(MINT_BODY, [{ ...D1r, scheme }, D2r], REGISTRY_ED), scheme).toThrow(/\.scheme: must be/);
+    }
   });
 });
 

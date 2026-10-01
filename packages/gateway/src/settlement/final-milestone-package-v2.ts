@@ -420,6 +420,50 @@ const SIGNATURE_ENTRY_KEYS = "scheme,sig,signer";
 /** One signature per role of the frozen signer set (D1 operator, D2 kernel). */
 const SIGNATURE_COUNT = 2;
 
+/** Builds the error a refusal raises: the digest path and the mint guard each raise their own type. */
+type Refuse = (path: string, detail: string) => Error;
+
+/**
+ * Read the caller's signature list ONCE into plain local copies, so that whatever
+ * is checked afterwards is exactly what is hashed afterwards. The list's length is
+ * read once, each index once, and for each entry its three fields once (the keys
+ * are enumerated once to prove there are exactly those three). Nothing downstream
+ * touches the caller's objects again, so a getter that answers differently the
+ * second time, or a caller that mutates an entry between a check and the hash,
+ * cannot make validation and hashing disagree.
+ *
+ * Enforces the shape only: an array of exactly `expected` entries, each an object
+ * with exactly the keys signer, scheme, sig. The values come back unchecked.
+ */
+function copySignatureEntries(
+  sigs: unknown,
+  expected: number,
+  refuse: Refuse,
+): Array<{ signer: unknown; scheme: unknown; sig: unknown }> {
+  if (!Array.isArray(sigs)) throw refuse("$signatures", "must be an array");
+  const count: number = sigs.length;
+  if (count !== expected) {
+    throw refuse(
+      "$signatures",
+      `expected exactly ${expected} signatures (one per role: D1 operator, D2 kernel), got ${count}`,
+    );
+  }
+  const copies: Array<{ signer: unknown; scheme: unknown; sig: unknown }> = [];
+  for (let i = 0; i < count; i++) {
+    const path = `$signatures[${i}]`;
+    const entry: unknown = sigs[i];
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      throw refuse(path, "is not an object");
+    }
+    if (Object.keys(entry).sort().join(",") !== SIGNATURE_ENTRY_KEYS) {
+      throw refuse(path, "must have exactly the keys signer, scheme, sig");
+    }
+    const { signer, scheme, sig } = entry as Record<string, unknown>;
+    copies.push({ signer, scheme, sig });
+  }
+  return copies;
+}
+
 /**
  * The malleability closure, as REFUSALS. It does not repair what it is given: it
  * accepts exactly one shape, and sorts.
@@ -437,44 +481,30 @@ const SIGNATURE_COUNT = 2;
  * "secp256k1" and "ed25519" (the latter with a 40-digit signer) and its digest
  * must stay byte-identical. `assertMintablePackage` enforces both.
  *
- * Pure: never mutates the caller's array, returns a new one of new entries.
+ * Pure: never mutates the caller's array, returns a new one of new entries. Every
+ * input field is read once (`copySignatureEntries`), and only the copies are
+ * checked, sorted and returned.
  */
 export function canonicalSignatures(sigs: unknown): PackageSignature[] {
-  if (!Array.isArray(sigs)) {
-    throw new InvalidSignatureEntryError("signatures must be an array");
-  }
-  const count: number = sigs.length;
-  if (count !== SIGNATURE_COUNT) {
-    throw new InvalidSignatureEntryError(
-      `expected exactly ${SIGNATURE_COUNT} signatures (one per role: D1 operator, D2 kernel), got ${count}`,
-    );
-  }
-
+  const refuse: Refuse = (path, detail) => new InvalidSignatureEntryError(`${path} ${detail}`);
   const entries: PackageSignature[] = [];
-  for (let i = 0; i < count; i++) {
+  copySignatureEntries(sigs, SIGNATURE_COUNT, refuse).forEach(({ signer, scheme, sig }, i) => {
     const path = `$signatures[${i}]`;
-    const entry: unknown = sigs[i];
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new InvalidSignatureEntryError(`${path} is not an object`);
-    }
-    if (Object.keys(entry).sort().join(",") !== SIGNATURE_ENTRY_KEYS) {
-      throw new InvalidSignatureEntryError(`${path} must have exactly the keys signer, scheme, sig`);
-    }
-    const { signer, scheme, sig } = entry as Record<string, unknown>;
     if (typeof signer !== "string" || !SIGNER_FORM.test(signer)) {
-      throw new InvalidSignatureEntryError(
-        `${path}.signer must be 0x + 40 or 64 lowercase hex digits (an address or an ed25519 key); ` +
+      throw refuse(
+        `${path}.signer`,
+        "must be 0x + 40 or 64 lowercase hex digits (an address or an ed25519 key); " +
           "any other spelling is refused, never normalized",
       );
     }
     if (typeof scheme !== "string" || scheme.length === 0) {
-      throw new InvalidSignatureEntryError(`${path}.scheme must be a non-empty string`);
+      throw refuse(`${path}.scheme`, "must be a non-empty string");
     }
     if (typeof sig !== "string" || sig.length === 0) {
-      throw new InvalidSignatureEntryError(`${path}.sig must be a non-empty string`);
+      throw refuse(`${path}.sig`, "must be a non-empty string");
     }
     entries.push({ signer, scheme, sig });
-  }
+  });
 
   const signers = new Set<string>();
   const roles = new Set<string>();
@@ -522,21 +552,42 @@ const MINT_SIGNER_PROFILE: Readonly<Record<string, { signer: RegExp; sig: RegExp
 };
 
 /**
- * Refuse anything a real mint must never produce, before any digest exists.
- * `canonicalSignatures` stays the oracle's canonicalization contract (#1368,
- * #1395: signer case is a no-op, first occurrence wins); this guard makes sure
- * a minted package never depends on those rules:
- *  - the body passes `validatePackageBody` (exact keys, lowercase hex, non-empty ids);
- *  - the challenge nonce is not the interim placeholder;
+ * One read of the registry's signer into a plain copy: a string stays a string,
+ * an object becomes `{algorithm, publicKey, address}` read once each, anything
+ * else is passed through (the registry reader refuses it).
+ */
+function copyRegisteredSigner(v: unknown): unknown {
+  if (v === null || typeof v !== "object") return v;
+  const { algorithm, publicKey, address } = v as Record<string, unknown>;
+  return { algorithm, publicKey, address };
+}
+
+/**
+ * Refuse anything a real mint must never produce, before any digest exists. The
+ * digest path (`canonicalSignatures`) already refuses what the oracle's ingestion
+ * would repair (duplicates, case, extra keys); this is the stricter gate for a
+ * real mint:
+ *  - the body passes `validatePackageBody` (exact keys, lowercase hex, kernel id);
+ *  - the challenge nonce is not the interim placeholder, so nothing is minted
+ *    until the durable challenge exists (fails closed);
  *  - exactly one D1 and one D2 signature, each with exactly the keys
- *    {signer, scheme, sig} and the profile's signer and signature forms, so no
- *    duplicate, extra, relabelled or foreign-scheme entry can reach the digest;
+ *    {signer, scheme, sig}, the profile's exact scheme name and its signer and
+ *    signature forms, so no duplicate, extra, relabelled or foreign-scheme entry
+ *    can reach the digest;
  *  - the principal ids are the pinned forms (`pcc.evidence.principal-id.v1`)
  *    and bound to those signatures: operatorPrincipalId is
  *    eip155:<unit chainId>:<the D1 signer>, and devicePrincipalId is
  *    ed25519:<the D2 signer>, which must be the key the kernel registry holds
  *    for producer.kernelId (`registeredDeviceSigner`) and never a key whose
  *    secret is public.
+ *
+ * READ ONCE. Every input is read exactly once into a local copy (the body through
+ * `validatePackageBody`'s returned copy, each signature entry's fields and the
+ * list's length and indices through `copySignatureEntries`, the registry signer's
+ * fields through `copyRegisteredSigner`), and only the copies are checked and
+ * hashed. No getter's second answer, and no change the caller makes after a
+ * check, can make what was validated differ from what is returned.
+ *
  * Returns the validated body and the canonical signatures to hash.
  */
 export function assertMintablePackage(
@@ -552,35 +603,30 @@ export function assertMintablePackage(
       "is the interim placeholder; the durable challenge is not built",
     );
   }
-  if (!Array.isArray(sigs) || sigs.length !== 2) {
-    throw new PackageNotMintableError("$signatures", "expected exactly two signatures (D1 operator, D2 kernel)");
-  }
+  const refuse: Refuse = (path, detail) => new PackageNotMintableError(path, detail);
   const schemes = new Set<string>();
-  sigs.forEach((s: unknown, i: number) => {
+  const entries: PackageSignature[] = copySignatureEntries(sigs, SIGNATURE_COUNT, refuse).map((c, i) => {
     const path = `$signatures[${i}]`;
-    if (s === null || typeof s !== "object" || Array.isArray(s)) {
-      throw new PackageNotMintableError(path, "expected an object");
+    // Own keys only: a scheme named "constructor" or "__proto__" must be a typed refusal, not a crash.
+    const profile =
+      typeof c.scheme === "string" && Object.hasOwn(MINT_SIGNER_PROFILE, c.scheme)
+        ? MINT_SIGNER_PROFILE[c.scheme]
+        : undefined;
+    if (!profile || typeof c.scheme !== "string") {
+      throw refuse(`${path}.scheme`, `must be "${D1_SCHEME}" (D1) or "${D2_SCHEME}" (D2)`);
     }
-    const entry = s as Record<string, unknown>;
-    if (Object.keys(entry).sort().join(",") !== "scheme,sig,signer") {
-      throw new PackageNotMintableError(path, "keys must be exactly signer, scheme, sig");
+    if (schemes.has(c.scheme)) {
+      throw refuse(`${path}.scheme`, `a second ${profile.role} signature`);
     }
-    const profile = typeof entry.scheme === "string" ? MINT_SIGNER_PROFILE[entry.scheme] : undefined;
-    if (!profile) {
-      throw new PackageNotMintableError(`${path}.scheme`, `must be "${D1_SCHEME}" (D1) or "${D2_SCHEME}" (D2)`);
+    schemes.add(c.scheme);
+    if (typeof c.signer !== "string" || !profile.signer.test(c.signer)) {
+      throw refuse(`${path}.signer`, `not a ${profile.role} signer in its lowercase form`);
     }
-    if (schemes.has(entry.scheme as string)) {
-      throw new PackageNotMintableError(`${path}.scheme`, `a second ${profile.role} signature`);
+    if (typeof c.sig !== "string" || !profile.sig.test(c.sig)) {
+      throw refuse(`${path}.sig`, `not a ${profile.role} signature`);
     }
-    schemes.add(entry.scheme as string);
-    if (typeof entry.signer !== "string" || !profile.signer.test(entry.signer)) {
-      throw new PackageNotMintableError(`${path}.signer`, `not a ${profile.role} signer in its lowercase form`);
-    }
-    if (typeof entry.sig !== "string" || !profile.sig.test(entry.sig)) {
-      throw new PackageNotMintableError(`${path}.sig`, `not a ${profile.role} signature`);
-    }
+    return { signer: c.signer, scheme: c.scheme, sig: c.sig };
   });
-  const entries = sigs as PackageSignature[];
   const d1 = entries.find((e) => e.scheme === D1_SCHEME)!;
   const d2 = entries.find((e) => e.scheme === D2_SCHEME)!;
   const chainId = Number(valid.unitBinding.chainId);
@@ -596,7 +642,7 @@ export function assertMintablePackage(
       "must be ed25519:<the D2 signer's key>, never a key whose secret is public (pcc.evidence.principal-id.v1)",
     );
   }
-  if (principalFromRegistry(registeredDeviceSigner, chainId) !== valid.producer.devicePrincipalId) {
+  if (principalFromRegistry(copyRegisteredSigner(registeredDeviceSigner), chainId) !== valid.producer.devicePrincipalId) {
     throw new PackageNotMintableError(
       "$.producer.devicePrincipalId",
       "is not the key the kernel registry holds for producer.kernelId",
