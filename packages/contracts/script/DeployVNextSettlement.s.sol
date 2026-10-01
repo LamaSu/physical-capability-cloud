@@ -1122,6 +1122,7 @@ contract DeployVNextSettlement is Script {
     }
 
     function _guardAgainstRivalDeployment(Inputs memory i, address predictedFactory) internal view {
+        _assertRecordRootContained(_recordRoot());
         string memory path = _artifactPath(i);
         if (!vm.exists(path)) return;
         address recorded = vm.parseJsonAddress(vm.readFile(path), ".factory");
@@ -1139,7 +1140,7 @@ contract DeployVNextSettlement is Script {
     ///      dry-run tuple is still written, because producing a reviewable tuple before anything is spent
     ///      is the point of the dry run; it is just kept where it cannot be mistaken for the real record.
     function _artifactPath(Inputs memory i) internal view returns (string memory) {
-        string memory dir = string.concat("deployments/vnext/", VNextDeploySpec.networkSlug(block.chainid), "/");
+        string memory dir = string.concat(_recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid), "/");
         string memory prefix = _isBroadcasting() ? "" : "DRYRUN-";
         if (keccak256(bytes(i.mode)) == keccak256(bytes(VNextDeploySpec.MODE_PROVISIONAL))) {
             return string.concat(dir, prefix, "PROVISIONAL-", i.label, ".json");
@@ -1152,6 +1153,9 @@ contract DeployVNextSettlement is Script {
     }
 
     function _writeArtifact(Inputs memory i, Tuple memory t) internal {
+        // FIRST, before anything else here runs: no record is written unless the record root is contained (no
+        // symlink at, above or below it). `VNextDeployRecordTest`'s writer wiring tests rely on this order.
+        _assertRecordRootContained(_recordRoot());
         bool canonical = keccak256(bytes(i.mode)) == keccak256(bytes(VNextDeploySpec.MODE_CANONICAL));
 
         // ── GATE 3 + GATE 4, third and last enforcement point: the DEPLOYMENT ARTIFACT. ───────────────
@@ -1229,9 +1233,14 @@ contract DeployVNextSettlement is Script {
         );
         string memory finalJson = vm.serializeBytes32(j, "digest", _digest(t));
         string memory path = _artifactPath(i);
+        // Checked again right here, next to the write: the check at the top guarantees nothing runs against an
+        // uncontained root, and this one keeps the unavoidable check-to-write window as short as it was before the
+        // top check moved (astra round 2 on #339).
+        _assertRecordRootContained(_recordRoot());
         // `vm.writeJson` does not create intermediate directories, and a deploy that succeeded on-chain
-        // but failed to record its tuple is the worst outcome available here.
-        vm.createDir(string.concat("deployments/vnext/", VNextDeploySpec.networkSlug(block.chainid)), true);
+        // but failed to record its tuple is the worst outcome available here. The root itself exists (checked
+        // above), so this creates at most the network directory, in a root with no symlink at, above or below it.
+        vm.createDir(string.concat(_recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid)), true);
         vm.writeJson(finalJson, path);
         console2.log("wrote artifact:", path);
     }
@@ -1278,6 +1287,142 @@ contract DeployVNextSettlement is Script {
     //                                          INPUT / OUTPUT
     // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+    /// @dev The only directory the deploy record ever lives in. `foundry.toml` grants exactly this path, and the
+    ///      directory is COMMITTED (`deployments/vnext/README.md`), so it exists before any run and a run never
+    ///      has to create it (see {_assertRecordRootIsReal}). `virtual` only so the record test can point the
+    ///      checks at committed fixtures.
+    function _recordRoot() internal view virtual returns (string memory) {
+        return "deployments/vnext";
+    }
+
+    /// @dev A child of the record root that must never exist. {_assertRecordRootIsReal} asks forge about it.
+    string internal constant ROOT_PROBE = "/.record-root-probe-must-not-exist";
+    uint256 internal constant MAX_LABEL_BYTES = 64;
+
+    /// @dev `VNEXT_LABEL` goes into the record's FILENAME (`PROVISIONAL-<label>.json`) and into every CREATE2
+    ///      salt, so it is held to a short ASCII slug: `[A-Za-z0-9_-]{1,64}`. That excludes `/`, `\`, `.`,
+    ///      whitespace and control characters, so a label can never traverse out of its filename, reach a
+    ///      tracked record (`/../../../base-sepolia/...`), or land on another mode's or network's record
+    ///      (`/../CANONICAL`). Before this check the label was only required to be non-empty (sol review of
+    ///      #339). Canonical runs carry no label at all: `run()` passes "", and a stray `VNEXT_LABEL` in
+    ///      `predict()` would otherwise predict canonical addresses that `run()` never deploys.
+    function _requireValidLabel(string memory mode, string memory label) internal pure {
+        bytes memory b = bytes(label);
+        if (keccak256(bytes(mode)) == keccak256(bytes(VNextDeploySpec.MODE_CANONICAL))) {
+            require(b.length == 0, "VNEXT_LABEL must be empty for a canonical deployment");
+            return;
+        }
+        require(b.length > 0 && b.length <= MAX_LABEL_BYTES, "VNEXT_LABEL must be 1-64 characters");
+        for (uint256 k; k < b.length; ++k) {
+            bytes1 c = b[k];
+            require(
+                (c >= "0" && c <= "9") || (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c == "-" || c == "_",
+                "VNEXT_LABEL may contain only A-Z a-z 0-9 - _"
+            );
+        }
+    }
+
+    /// @dev Runs before the record is read ({_guardAgainstRivalDeployment}) and before it is written
+    ///      ({_writeArtifact}): the record root, every directory above it, and the whole tree below it must be
+    ///      reachable without a symlink, or the run stops (sol and astra reviews of #339).
+    ///
+    ///      Why a check is needed at all: `fs_permissions` is NOT a containment boundary against symlinks, and how
+    ///      far it leaks depends on the forge version. Both versions probed follow links on the way to a path that
+    ///      exists. Forge 1.7.1 checks a path that does not exist yet by its lexical form, so it wrote through a
+    ///      symlinked directory and a dangling link under the root, and created `deployments/vnext/<network>` inside
+    ///      a link's target when `deployments` was a symlink to a directory without `vnext`. Forge 1.8.0 (the
+    ///      version CI pins) resolves the links in every path, so a symlinked root or ancestor redirects every
+    ///      record write, with no error at all. `vm.exists`, `vm.isDir`, `vm.fsMetadata` and `vm.readLink` all
+    ///      resolve the link before they look, so none of them can see one.
+    ///
+    ///      Three limits remain; no cheatcode closes any of them. A link swapped in between these checks and the
+    ///      write (a TOCTOU window). A filesystem mounted inside the tree, which `vm.readDir` does not enter. And a
+    ///      HARD link from a record file to a file elsewhere: it is a plain file to every cheatcode (none reports a
+    ///      link count). Git cannot commit one, so placing it needs local write access to the checkout.
+    function _assertRecordRootContained(string memory root) internal view {
+        _assertRecordRootIsReal(root);
+        _assertNoSymlinksBelow(root);
+    }
+
+    /// @dev The root itself, and every directory above it.
+    ///      1. The root must EXIST as a directory. It is committed, so a missing root means the checkout is not the
+    ///         reviewed one, and creating it here would follow a symlinked ancestor (the escape above). A dangling
+    ///         root fails here too, since `isDir` follows it to nothing.
+    ///      2. No symlink AT or ABOVE it. Forge is asked to list a child that must not exist. Where no link is in
+    ///         the way, both versions answer with one error entry at exactly the lexical path
+    ///         `projectRoot/root/<probe>`, and `vm.projectRoot()` is canonical even when forge is started through
+    ///         a symlinked checkout path. With the root or an ancestor a symlink, 1.7.1 refuses to look (its
+    ///         resolved grant no longer prefixes the lexical path), and 1.8.0 answers at the RESOLVED path. Both
+    ///         are refused. An entry that exists at the probe path is refused too. `VNextDeployRecordTest` pins
+    ///         this against committed fixtures on the forge CI pins. A forge change that altered these answers
+    ///         fails the root tests, and one that stopped reporting the fixture links fails the tests outright
+    ///         instead of skipping them (`_requireLinks`). `ts/__tests__/deployments-no-symlinks.test.ts` checks the
+    ///         same links with lstat, independently of forge.
+    function _assertRecordRootIsReal(string memory root) internal view {
+        require(
+            vm.isDir(root),
+            string.concat(
+                "the deployment record root is missing or not a directory (it is committed; a dangling link fails here too): ",
+                root
+            )
+        );
+        string memory probe = string.concat(root, ROOT_PROBE);
+        try vm.readDir(probe, 1) returns (VmSafe.DirEntry[] memory found) {
+            require(
+                found.length == 1 && bytes(found[0].errorMessage).length != 0,
+                string.concat("an entry exists at the deployment record root's probe path, refusing: ", root)
+            );
+            require(
+                keccak256(bytes(found[0].path)) == keccak256(bytes(string.concat(vm.projectRoot(), "/", probe))),
+                string.concat(
+                    "the deployment record root, or a directory above it, is a symlink: forge resolved ",
+                    probe,
+                    " to ",
+                    found[0].path
+                )
+            );
+        } catch {
+            revert(
+                string.concat(
+                    "the deployment record root, or a directory above it, is a symlink (forge refused to look below it): ",
+                    root
+                )
+            );
+        }
+    }
+
+    /// @dev The whole tree below the root, at every depth, without following links. Any symlink refuses. So does
+    ///      ANY entry forge reports it could not inspect (an error is never taken to mean the entry vanished), and
+    ///      any entry forge lists somewhere other than under the root's lexical path.
+    function _assertNoSymlinksBelow(string memory root) internal view {
+        bytes memory prefix = bytes(string.concat(vm.projectRoot(), "/", root, "/"));
+        VmSafe.DirEntry[] memory entries = vm.readDir(root, type(uint64).max);
+        for (uint256 k; k < entries.length; ++k) {
+            require(
+                bytes(entries[k].errorMessage).length == 0,
+                string.concat(
+                    "cannot inspect the deployment record root, refusing: ", entries[k].path, ": ", entries[k].errorMessage
+                )
+            );
+            require(
+                !entries[k].isSymlink,
+                string.concat("symlink under the deployment record root, refusing to read or write through it: ", entries[k].path)
+            );
+            require(
+                _hasPrefix(bytes(entries[k].path), prefix),
+                string.concat("forge listed an entry outside the deployment record root's path, refusing: ", entries[k].path)
+            );
+        }
+    }
+
+    function _hasPrefix(bytes memory s, bytes memory prefix) private pure returns (bool) {
+        if (s.length < prefix.length) return false;
+        for (uint256 i; i < prefix.length; ++i) {
+            if (s[i] != prefix[i]) return false;
+        }
+        return true;
+    }
+
     function _readInputs(string memory mode, string memory label) internal view returns (Inputs memory i) {
         bytes32 h = keccak256(bytes(mode));
         require(
@@ -1285,6 +1430,7 @@ contract DeployVNextSettlement is Script {
                 || h == keccak256(bytes(VNextDeploySpec.MODE_PROVISIONAL)),
             "mode must be CANONICAL or PROVISIONAL"
         );
+        _requireValidLabel(mode, label);
         i.mode = mode;
         i.label = label;
         i.eas = vm.envAddress("VNEXT_EAS");
