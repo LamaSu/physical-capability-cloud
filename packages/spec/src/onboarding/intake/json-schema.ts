@@ -200,9 +200,10 @@ export function buildIntakeJsonSchema(): Record<string, unknown> {
         source: {
           type: "object",
           properties: {
-            doc: { type: "string", minLength: 1 },
-            section: { type: "string" },
-            url: { type: "string", format: "uri" },
+            doc: { type: "string", minLength: 1, pattern: "\\S" },
+            section: { type: "string", pattern: "\\S" },
+            // IntakeSourceSchema also requires https and no credentials; not represented here.
+            url: { type: "string", format: "uri", $comment: "refinements not represented" },
           },
           required: ["doc"],
           additionalProperties: false,

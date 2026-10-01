@@ -22,6 +22,7 @@ import {
   type IntakeMilestone,
 } from "./fields.js";
 import type { CsdRegistry } from "../../csd/registry.js";
+import { httpsUrl, nonBlankText } from "../citation-rules.js";
 import { intakeValueHash, isConfirmationRequired } from "./confirmation.js";
 import { joinPath, pathSegment, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
 import {
@@ -56,11 +57,17 @@ export {
  */
 export const IntakeProvenanceSchema = z.enum(INTAKE_PROVENANCE_VALUES);
 
+/**
+ * Where an answer's value was found: a document id or URL (`doc`), a `section`
+ * of it, and a `url`. Same rules as a research finding's citation: `doc` and
+ * `section` (when present) must be non-blank after trim, never transformed, and
+ * `url` (when present) must be `https:` without embedded credentials.
+ */
 export const IntakeSourceSchema = z
   .object({
-    doc: z.string().min(1),
-    section: z.string().optional(),
-    url: z.string().url().optional(),
+    doc: nonBlankText,
+    section: nonBlankText.optional(),
+    url: httpsUrl.optional(),
   })
   .strict();
 export type IntakeSource = z.infer<typeof IntakeSourceSchema>;

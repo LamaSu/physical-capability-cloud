@@ -14,6 +14,7 @@
 
 import { z } from "zod";
 import { INTAKE_FIELD_IDS } from "../intake/fields.js";
+import { httpsUrl, nonBlankText } from "../citation-rules.js";
 
 // ── Closed placeholder set ───────────────────────────────────────────────
 
@@ -282,19 +283,29 @@ export const RESEARCH_LIBRARY: readonly ResearchLibraryEntry[] = [
 
 // ── Findings shape (addendum: sensors, adk) ─────────────────────────────
 
+/**
+ * Where a finding's value comes from. `doc` and `section` must each be
+ * non-blank after trim (a blank one is refused; the value is never trimmed or
+ * transformed), and `url`, when present, must be an `https:` URL without
+ * embedded credentials.
+ *
+ * `contentHash` (`sha256:` + 64 lowercase hex, of the cited text) is optional,
+ * but findings should carry it so the citation can be checked against the cited
+ * text later; without it a citation is only as good as its doc/section/url.
+ */
 export const ResearchCitationSchema = z
   .object({
-    doc: z.string().min(1),
-    section: z.string().min(1),
-    url: z.string().url().optional(),
+    doc: nonBlankText,
+    section: nonBlankText,
+    url: httpsUrl.optional(),
+    contentHash: z
+      .string()
+      .regex(/^sha256:[0-9a-f]{64}$/, "contentHash is sha256: followed by 64 lowercase hex digits")
+      .optional(),
   })
   .strict();
 export type ResearchCitation = z.infer<typeof ResearchCitationSchema>;
 
-/**
- * Every R5 finding's shape. `citation` is required (not optional) — a value
- * without a citation can never become a limit, per the spec addendum.
- */
 /** A one- or two-sided bound. R8 turns it into a limit only when both sides are known. */
 export const ResearchRangeSchema = z
   .object({ min: z.number().finite().optional(), max: z.number().finite().optional() })
@@ -304,6 +315,12 @@ export const ResearchRangeSchema = z
     message: "a range's min must not exceed its max",
   });
 
+/**
+ * Every R5 finding's shape. `citation` is required (not optional) — a value
+ * without a citation can never become a limit, per the spec addendum. A
+ * finding should carry `citation.contentHash` so the citation can be checked
+ * later (see ResearchCitationSchema).
+ */
 export const ResearchFindingSchema = z
   .object({
     /** The template quantity the finding is about (R8 keys limits by it); needed for limits and I/O ranges. */
@@ -331,13 +348,75 @@ function touchesSafetyIoOrMoney(entry: ResearchLibraryEntry): boolean {
   return SAFETY_IO_MONEY_PATTERN.test(haystack);
 }
 
-/** True when `prompt` tells the agent to install or execute found code (an
- *  imperative "install"/"execute"/"run ... code", not a negation of one). */
-const EXECUTE_VERB_PATTERN = /\b(install|execute)\b/i;
-const NEGATION_PATTERN = /\b(do not|does not|don't|doesn't|never|avoid|without)\b/i;
+// ── The no-execution policy ──────────────────────────────────────────────
+//
+// The library is PASSIVE: an entry may tell the agent to search, read and quote,
+// never to run, install, contact or actuate anything. `entryInstructsExecution`
+// enforces that as a closed policy over ALL of an entry's instruction-bearing
+// text, not just its `prompt`.
 
+/** The closed set of execution verbs, word-boundaried and case-insensitive. Base
+ *  forms only: "installing" or "executed" are not matched, so wording that
+ *  merely describes a prohibition (e.g. "none installed or executed") is not an
+ *  instruction. */
+const EXECUTION_VERB_PATTERN = new RegExp(
+  String.raw`\b(?:install|execute|run|launch|start\s+the|flash|upload|download\s+and\s+run|` +
+    String.raw`send\s+(?:(?:a|the|this)\s+)?command|connect\s+to\s+the\s+device|ssh|telnet|sudo|` +
+    String.raw`pip\s+install|npm\s+install|apt\s+install|curl|wget|power[- ]cycle|actuate)\b`,
+  "gi",
+);
+
+/** A negation that excuses a verb coming LATER in the same clause. */
+const NEGATION_PATTERN = /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|without)\b/i;
+
+/** Clause boundaries: sentence punctuation, a line break, and " then ". */
+const CLAUSE_BOUNDARY = /[.;!?\n]|\s+then\s+/i;
+
+function clauseInstructsExecution(clause: string): boolean {
+  const negation = NEGATION_PATTERN.exec(clause);
+  const negatedFrom = negation ? negation.index : Number.POSITIVE_INFINITY;
+  for (const verb of clause.matchAll(EXECUTION_VERB_PATTERN)) {
+    // excused only by a negation EARLIER in the SAME clause
+    if (!(negatedFrom < (verb.index ?? 0))) return true;
+  }
+  return false;
+}
+
+/** Every string anywhere inside `value` (a string, or arrays/objects of them). */
+function collectStrings(value: unknown, out: string[]): void {
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) for (const item of value) collectStrings(item, out);
+  else if (value !== null && typeof value === "object") for (const item of Object.values(value)) collectStrings(item, out);
+}
+
+/** All instruction-bearing text of an entry: goal, prompt, every search,
+ *  coaching (every string in it), mustReturn and acceptance. Missing or
+ *  non-string members are skipped (the entry schema reports those). */
+function instructionBearingText(entry: ResearchLibraryEntry): string[] {
+  const texts: string[] = [];
+  collectStrings(
+    [entry.goal, entry.prompt, entry.searches, entry.coaching, entry.mustReturn, entry.acceptance],
+    texts,
+  );
+  return texts;
+}
+
+/**
+ * True when ANY instruction-bearing text of `entry` tells the agent to run,
+ * install, contact or actuate something. Each text is split into clauses (on
+ * `.`, `;`, `!`, `?`, a line break, and " then "); a clause instructs
+ * execution when it contains a verb from the closed set — install, execute,
+ * run, launch, start the, flash, upload, download and run, send (a|the|this)
+ * command, connect to the device, ssh, telnet, sudo, pip/npm/apt install, curl,
+ * wget, power-cycle, actuate — unless a negation (do not, don't, never, must
+ * not, should not, avoid, without) appears EARLIER in the SAME clause. A
+ * negation in another clause excuses nothing: "Do not install A. Execute B."
+ * instructs execution.
+ */
 export function entryInstructsExecution(entry: ResearchLibraryEntry): boolean {
-  return EXECUTE_VERB_PATTERN.test(entry.prompt) && !NEGATION_PATTERN.test(entry.prompt);
+  return instructionBearingText(entry).some((text) =>
+    text.split(CLAUSE_BOUNDARY).some((clause) => clauseInstructsExecution(clause)),
+  );
 }
 
 export interface ResearchLibraryValidationReport {

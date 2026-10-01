@@ -42,7 +42,11 @@ import { canonicalize } from "../util/canonical.js";
 import { CsdRegistry, loadBuiltinCsds } from "../csd/registry.js";
 import { CsdSchema, type CSD } from "../csd/schema.js";
 import printAndMailCsd from "../csds/document-print-and-mail.csd.json" with { type: "json" };
-import { RESEARCH_LIBRARY } from "../onboarding/research/index.js";
+import {
+  RESEARCH_LIBRARY,
+  ResearchFindingSchema,
+  entryInstructsExecution,
+} from "../onboarding/research/index.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const SPEC_ROOT = join(TEST_DIR, "..", "..");
@@ -300,6 +304,36 @@ describe("IntakeAnswerSchema — rule 6 (provenance + source)", () => {
         source: { doc: "manual", url: "https://example.com/manual.pdf" },
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("IntakeSourceSchema — the same source rules as a research citation", () => {
+  const accepts = (source: unknown) =>
+    IntakeAnswerSchema.safeParse({ value: "x", provenance: "confirmed", source }).success;
+
+  it("refuses a blank doc or section and an http, credentialed or non-URL url", () => {
+    expect(accepts({ doc: "manual", section: "5.2", url: "https://example.com/m.pdf" })).toBe(true);
+    expect(accepts({ doc: "  manual  " })).toBe(true); // not trimmed, not refused
+    for (const bad of [
+      { doc: " " },
+      { doc: "" },
+      { doc: "manual", section: "\t" },
+      { doc: "manual", url: "http://example.com/m.pdf" },
+      { doc: "manual", url: "javascript:alert(1)" },
+      { doc: "manual", url: "https://u:p@example.com/m.pdf" },
+      { doc: "manual", url: "not a url" },
+    ]) {
+      expect(accepts(bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("does not change the source it accepts", () => {
+    const parsed = IntakeAnswerSchema.parse({
+      value: "x",
+      provenance: "research",
+      source: { doc: "  manual  ", section: " 5.2 " },
+    });
+    expect(parsed.source).toEqual({ doc: "  manual  ", section: " 5.2 " });
   });
 });
 
@@ -1348,8 +1382,8 @@ describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () =
     expect(report.structuralErrors).toEqual(
       expect.arrayContaining([
         'answers/device.model/source: provenance "research" requires a source',
-        "answers/device.vendor/source/doc: too_small",
-        "answers/device.vendor/source/url: invalid_string (url)",
+        "answers/device.vendor/source/doc: must not be blank",
+        "answers/device.vendor/source/url: must be an https URL without credentials",
       ]),
     );
     expect(JSON.stringify(report)).not.toContain("not a url");
@@ -2745,6 +2779,27 @@ describe("astra pack 120b", () => {
     const report = ready(withAnswer("evidence.camera", answer), "register");
     expect(report.ok).toBe(false);
     expect(report.nonAsciiKeys).toHaveLength(1);
+  });
+
+  it("MEDIUM 8a: a whitespace-only citation is refused", () => {
+    const finding = {
+      claim: "max bed temp",
+      value: 120,
+      unit: "C",
+      citation: { doc: " ", section: " " },
+      retrievedAt: "2026-09-01T00:00:00Z",
+    };
+    expect(ResearchFindingSchema.safeParse(finding).success).toBe(false);
+  });
+  it("MEDIUM 8b: 'Run the downloaded driver.' instructs execution", () => {
+    expect(entryInstructsExecution({ ...RESEARCH_LIBRARY[0]!, prompt: "Run the downloaded driver." })).toBe(true);
+  });
+  it("MEDIUM 8c: a negation elsewhere does not excuse a later instruction", () => {
+    expect(entryInstructsExecution({ ...RESEARCH_LIBRARY[0]!, prompt: "Do not install A. Execute B." })).toBe(true);
+  });
+  it("MEDIUM 8d: an instruction in searches is caught too", () => {
+    const entry = RESEARCH_LIBRARY[0]!;
+    expect(entryInstructsExecution({ ...entry, searches: [...entry.searches, "then flash firmware to the device"] })).toBe(true);
   });
 
   it("HIGH 5a: tier2 is not ready while its required primitives are stub", () => {

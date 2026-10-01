@@ -4,6 +4,7 @@ import {
   RESEARCH_LIBRARY,
   RESEARCH_PLACEHOLDERS,
   ResearchLibraryEntrySchema,
+  ResearchCitationSchema,
   ResearchFindingSchema,
   extractPlaceholders,
   entryInstructsExecution,
@@ -273,5 +274,188 @@ describe("research findings may carry a range value for R8 (#4254)", () => {
     expect(ResearchFindingSchema.safeParse({ ...base, value: {} }).success).toBe(false);
     expect(ResearchFindingSchema.safeParse({ ...base, value: { min: 10, max: 1 } }).success).toBe(false);
     expect(ResearchFindingSchema.safeParse({ ...base, value: { min: 1, max: 2, extra: 3 } }).success).toBe(false);
+  });
+});
+
+// ── 9. Citations must be meaningful (astra 120b, finding 8) ──────────────
+
+describe("ResearchCitationSchema — a citation must say something checkable", () => {
+  const base = { doc: "Prusa MK4S manual", section: "5.2" };
+
+  it("refuses a blank doc or section, however the blankness is spelled, and never transforms the value", () => {
+    const blanks = ["", " ", "   ", "\t", "\n", " \t\r\n ", String.fromCharCode(0xa0), String.fromCharCode(0x2003, 0xfeff)];
+    for (const blank of blanks) {
+      expect(ResearchCitationSchema.safeParse({ ...base, doc: blank }).success, JSON.stringify(blank)).toBe(false);
+      expect(ResearchCitationSchema.safeParse({ ...base, section: blank }).success, JSON.stringify(blank)).toBe(false);
+    }
+    // refused, not trimmed: a non-blank value comes back exactly as given
+    const padded = ResearchCitationSchema.parse({ doc: "  Prusa manual  ", section: " 5.2 " });
+    expect(padded).toEqual({ doc: "  Prusa manual  ", section: " 5.2 " });
+  });
+
+  it("url, when present, must be https without credentials", () => {
+    for (const ok of ["https://example.com/manual.pdf", "HTTPS://Example.com/x", "https://example.com:8443/a?b=c#d"]) {
+      expect(ResearchCitationSchema.safeParse({ ...base, url: ok }).success, ok).toBe(true);
+    }
+    for (const bad of [
+      "http://example.com/manual.pdf",
+      "ftp://example.com/manual.pdf",
+      "javascript:alert(1)",
+      "data:text/plain;base64,AAAA",
+      "file:///etc/passwd",
+      "blob:https://example.com/x",
+      "//example.com/manual.pdf",
+      "example.com/manual.pdf",
+      "not a url",
+      "",
+      "https://",
+      "https://user:secret@example.com/manual.pdf",
+      "https://user@example.com/manual.pdf",
+    ]) {
+      expect(ResearchCitationSchema.safeParse({ ...base, url: bad }).success, bad).toBe(false);
+    }
+    expect(ResearchCitationSchema.safeParse(base).success).toBe(true); // url stays optional
+  });
+
+  it("contentHash is optional and, when present, sha256: followed by 64 lowercase hex digits", () => {
+    const hash = `sha256:${"ab12".repeat(16)}`;
+    expect(ResearchCitationSchema.safeParse({ ...base, contentHash: hash }).success).toBe(true);
+    for (const bad of [
+      "",
+      "ab12".repeat(16),
+      `sha256:${"ab12".repeat(15)}ab1`,
+      `sha256:${"ab12".repeat(16)}0`,
+      `sha256:${"AB12".repeat(16)}`,
+      `sha1:${"ab12".repeat(16)}`,
+      `sha256: ${"ab12".repeat(16)}`,
+      `sha256:${"zz".repeat(32)}`,
+    ]) {
+      expect(ResearchCitationSchema.safeParse({ ...base, contentHash: bad }).success, bad).toBe(false);
+    }
+  });
+
+  it("is still strict", () => {
+    expect(ResearchCitationSchema.safeParse({ ...base, hash: "x" }).success).toBe(false);
+  });
+
+  it("a whole finding carries the hash through, and a blank citation still sinks the finding", () => {
+    const finding = {
+      claim: "max bed temperature",
+      value: 120,
+      unit: "C",
+      citation: { ...base, url: "https://example.com/manual.pdf", contentHash: `sha256:${"cd34".repeat(16)}` },
+      retrievedAt: "2026-09-29T16:40:00Z",
+    };
+    expect(ResearchFindingSchema.parse(finding).citation.contentHash).toBe(`sha256:${"cd34".repeat(16)}`);
+    expect(ResearchFindingSchema.safeParse({ ...finding, citation: { doc: " ", section: " " } }).success).toBe(false);
+  });
+});
+
+// ── 10. The no-execution policy (astra 120b, finding 8) ──────────────────
+
+describe("entryInstructsExecution — a closed policy over all instruction-bearing text", () => {
+  const base = RESEARCH_LIBRARY[0]!;
+  const withPrompt = (prompt: string): ResearchLibraryEntry => ({ ...base, prompt });
+
+  it("no shipped entry trips it, in any of its text", () => {
+    for (const entry of RESEARCH_LIBRARY) expect(entryInstructsExecution(entry), entry.id).toBe(false);
+    expect(validateResearchLibrary().installOrExecuteInstructions).toEqual([]);
+  });
+
+  it("flags each verb of the closed set, case-insensitively", () => {
+    const instructions = [
+      "Install the vendor driver",
+      "Execute the vendor tool",
+      "Run the downloaded driver",
+      "Launch the configuration utility",
+      "Start the service on the device",
+      "Flash the new firmware",
+      "Upload the program to the controller",
+      "Download and run the installer",
+      "Send a command to the printer",
+      "Send the command M115",
+      "Send this command twice",
+      "Send command M503",
+      "Connect to the device over serial",
+      "SSH into the controller",
+      "Open a telnet session",
+      "Prefix it with sudo",
+      "pip install pylabrobot",
+      "npm install serialport",
+      "apt install libusb",
+      "curl the status endpoint",
+      "wget the firmware",
+      "Power-cycle the printer",
+      "Power cycle the printer",
+      "Actuate the valve",
+    ];
+    for (const text of instructions) {
+      expect(entryInstructsExecution(withPrompt(text)), text).toBe(true);
+      expect(entryInstructsExecution(withPrompt(text.toUpperCase())), text.toUpperCase()).toBe(true);
+    }
+  });
+
+  it("is word-boundaried: it does not match inside other words", () => {
+    for (const text of [
+      "Find the runtime options",
+      "Quote the sshd documentation",
+      "Find the Prusa curler",
+      "Quote the launchpad guide",
+      "Quote the overrun limit from the datasheet",
+      "Find the preinstall checklist",
+    ]) {
+      expect(entryInstructsExecution(withPrompt(text)), text).toBe(false);
+    }
+  });
+
+  it("is excused only by a negation EARLIER in the SAME clause", () => {
+    for (const ok of [
+      "Do not install or run any code.",
+      "Don't run anything.",
+      "Do not install anything and never execute it.",
+      "You must not flash anything.",
+      "You should not connect to the device.",
+      "Avoid install or run steps; just read the manual.",
+      "Find the driver without install or run steps.",
+      "Never upload anything.",
+      "Don’t actuate the valve.",
+    ]) {
+      expect(entryInstructsExecution(withPrompt(ok)), ok).toBe(false);
+    }
+    for (const bad of [
+      "Run it, but do not install it.", // the verb comes BEFORE the negation
+      "Do not install A. Execute B.", // the negation is in another clause
+      "Do not install anything; run the tool.",
+      "Do not install, then run it.", // " then " starts a new clause
+      "Never mind. Run the tool!",
+      "Do not install\nRun the tool",
+    ]) {
+      expect(entryInstructsExecution(withPrompt(bad)), bad).toBe(true);
+    }
+  });
+
+  it("looks at every instruction-bearing member, not just the prompt", () => {
+    const run = "Run the downloaded driver.";
+    const cases: [string, ResearchLibraryEntry][] = [
+      ["goal", { ...base, goal: run }],
+      ["prompt", { ...base, prompt: run }],
+      ["a search", { ...base, searches: [...base.searches, "then flash firmware to the device"] }],
+      ["coaching.ask", { ...base, coaching: { ...base.coaching, ask: run } }],
+      ["coaching.why", { ...base, coaching: { ...base.coaching, why: run } }],
+      ["mustReturn", { ...base, mustReturn: [...base.mustReturn, "sudo apt install driver"] }],
+      ["acceptance", { ...base, acceptance: run }],
+    ];
+    for (const [where, entry] of cases) expect(entryInstructsExecution(entry), where).toBe(true);
+    for (const [where, entry] of cases) {
+      const report = validateResearchLibrary([{ ...entry, id: `mutant-${where.toLowerCase().replace(/\W+/g, "-")}` }]);
+      expect(report.installOrExecuteInstructions, where).toHaveLength(1);
+      expect(report.ok, where).toBe(false);
+    }
+  });
+
+  it("tolerates a partial entry (only some members present) without throwing", () => {
+    expect(entryInstructsExecution({ prompt: "Run it." } as ResearchLibraryEntry)).toBe(true);
+    expect(entryInstructsExecution({} as ResearchLibraryEntry)).toBe(false);
+    expect(entryInstructsExecution({ prompt: 5, searches: [null, 7] } as unknown as ResearchLibraryEntry)).toBe(false);
   });
 });

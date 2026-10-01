@@ -35,14 +35,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -123,14 +126,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -210,14 +216,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -301,14 +310,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -393,14 +405,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -485,14 +500,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -577,14 +595,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -668,14 +689,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -765,14 +789,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -869,14 +896,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -964,14 +994,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1063,14 +1096,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1153,14 +1189,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1242,14 +1281,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1336,14 +1378,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1445,14 +1490,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1545,14 +1593,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1664,14 +1715,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1756,14 +1810,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1849,14 +1906,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -1939,14 +1999,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2029,14 +2092,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2119,14 +2185,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2214,14 +2283,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2309,14 +2381,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2402,14 +2477,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2496,14 +2574,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2612,14 +2693,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2711,14 +2795,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2814,14 +2901,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -2925,14 +3015,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3019,14 +3112,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3126,14 +3222,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3221,14 +3320,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3333,14 +3435,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3423,14 +3528,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3513,14 +3621,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3604,14 +3715,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3702,14 +3816,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3833,14 +3950,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -3920,14 +4040,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
@@ -4007,14 +4130,17 @@
               "properties": {
                 "doc": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "\\S"
                 },
                 "section": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "\\S"
                 },
                 "url": {
                   "type": "string",
-                  "format": "uri"
+                  "format": "uri",
+                  "$comment": "refinements not represented"
                 }
               },
               "required": [
