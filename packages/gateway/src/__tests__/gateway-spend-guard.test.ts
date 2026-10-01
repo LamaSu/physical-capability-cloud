@@ -33,7 +33,15 @@ const ENV_KEYS = [
 const saved: Record<string, string | undefined> = {};
 
 let t = Date.UTC(2026, 8, 29, 12, 0, 0);
-const clock = () => t;
+// The guard reads its clock ONCE per call (rule 3 on its ledger). Every read is
+// counted, and a test may queue readings that are served BEFORE `t`, so that a
+// single call straddles a UTC midnight.
+let clockReads = 0;
+let queuedReads: number[] = [];
+const clock = () => {
+  clockReads += 1;
+  return queuedReads.length > 0 ? queuedReads.shift()! : t;
+};
 const usd = (n: number) => BigInt(Math.round(n * 1_000_000));
 const spend = (principal: string, amount: number, apiKeyId?: string) =>
   admitGatewaySpend({ spender: { action: "commit", principal, apiKeyId }, amountMicro: usd(amount) });
@@ -45,6 +53,8 @@ beforeEach(() => {
     delete process.env[k];
   }
   t = Date.UTC(2026, 8, 29, 12, 0, 0);
+  clockReads = 0;
+  queuedReads = [];
   __resetGatewaySpendGuardForTests(clock);
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -260,6 +270,22 @@ describe("pack 103 fail-closed fixes", () => {
     expect(admitFaucetDrip({ wallet: "0xw6", amount: 1, spender: { principal: "victim", apiKeyId: "k6" } })).toMatchObject({ status: 429, error: "faucet_rate_limited" });
   });
 
+  // astra pack 103b Q4: the relay's counterpart of the faucet test above. The relay
+  // has the same two-bucket rule, but only the faucet's was ever tested with one
+  // principal and many keys (every relay test gives each key its own principal, so
+  // either bucket alone refuses them and the principal bucket is never isolated).
+  it("[neg] F3: one principal cannot multiply the relay hourly count by rotating keys", () => {
+    process.env.PCC_NETWORK = "base-sepolia";
+    process.env.PCC_RELAY_MAX_PER_KEY_HOUR = "5";
+    for (let i = 0; i < 5; i += 1) {
+      expect(admitRelay({ principal: "victim", apiKeyId: `k${i}` }).ok, `relay ${i}`).toBe(true);
+    }
+    // A sixth relay, same principal, a SIXTH key: refused on the principal bucket.
+    expect(admitRelay({ principal: "victim", apiKeyId: "k6" })).toMatchObject({ status: 429, error: "relay_rate_limited" });
+    // The bucket is the principal's own: another principal is not throttled by it.
+    expect(admitRelay({ principal: "bystander", apiKeyId: "k7" }).ok).toBe(true);
+  });
+
   it("gatewayPaymentsGate: ok on an enabled testnet, refuses when disabled/misconfigured/regressed, and counts nothing", () => {
     process.env.PCC_NETWORK = "base-sepolia";
     expect(gatewayPaymentsGate().ok).toBe(true);
@@ -272,6 +298,18 @@ describe("pack 103 fail-closed fixes", () => {
     expect(gatewayPaymentsGate()).toMatchObject({ status: 503, error: "gateway_pays_disabled" });
     process.env.PCC_GATEWAY_PAYS_ENABLED = " ";
     expect(gatewayPaymentsGate()).toMatchObject({ status: 503, error: "gateway_pays_misconfigured" });
+    delete process.env.PCC_GATEWAY_PAYS_ENABLED;
+
+    // astra pack 103b Q4: the clock really goes backward. An ADMISSION on the next
+    // day moves the clock's high-water mark to D+1 (the gate itself never does);
+    // the clock then returns to D, and the gate must refuse while enabled and valid.
+    t += 86_400_000;
+    expect(admitGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(1) }).ok).toBe(true);
+    t -= 86_400_000;
+    expect(gatewayPaymentsGate()).toMatchObject({ status: 503, error: "gateway_pays_clock_regressed" });
+    // It recovers once the clock has caught up with the furthest day seen.
+    t += 86_400_000;
+    expect(gatewayPaymentsGate().ok).toBe(true);
   });
 
   it("[neg] F4: a backward clock step across a UTC day is refused (no allowance replenish)", () => {
@@ -328,5 +366,150 @@ describe("pack 103b F4: a preflight must not erase counted spending", () => {
     t += 86_400_000;
     // Refused for the right reason: D's $50 is still counted (the breaker), not a poisoned clock mark.
     expect(spend("p", 1)).toMatchObject({ status: 503, error: "gateway_pays_daily_breaker" });
+  });
+});
+
+/**
+ * astra pack 103b, F4: the three rules the fix rests on (the comment on maxDaySeen
+ * in the guard states them). One test per rule and per path, so a regression names
+ * the rule it broke:
+ *   1. only an ADMISSION changes the ledger or the clock's high-water mark, and it
+ *      validates its day BEFORE it prunes;
+ *   2. a PREFLIGHT (checkGatewaySpend, gatewayPaymentsGate) is read-only;
+ *   3. every entry point reads the clock ONCE and uses that one instant throughout.
+ */
+describe("pack 103b F4: the rules behind the fix", () => {
+  const DAY = 86_400_000;
+  const lateD = Date.UTC(2026, 8, 29, 23, 59, 59, 999); // the last millisecond of the harness's day D
+  const earlyNext = Date.UTC(2026, 8, 30, 0, 0, 0, 0); // the first millisecond of day D+1
+  const check = (principal = "p", amount = 1) =>
+    checkGatewaySpend({ spender: { action: "commit", principal }, amountMicro: usd(amount) });
+  /** How many times the guard read its clock while `fn` ran. */
+  const clockReadsDuring = (fn: () => unknown): number => {
+    const before = clockReads;
+    fn();
+    return clockReads - before;
+  };
+
+  it("[neg] rule 1: an admission refused for a regressed clock must not have pruned first (validate, then prune)", () => {
+    process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD = "50";
+    expect(spend("p", 25).ok).toBe(true);
+    expect(spend("p", 25).ok).toBe(true);
+    t -= DAY; // a regressed clock: day D-1 after day D
+    expect(spend("p", 1)).toMatchObject({ status: 503, error: "gateway_pays_clock_regressed" });
+    t += DAY; // back on D: the $50 counted there must still be counted
+    expect(spend("p", 1)).toMatchObject({ status: 503, error: "gateway_pays_daily_breaker" });
+  });
+
+  it("[neg] rule 2: a preflight at another day does not move the clock's high-water mark", () => {
+    for (let i = 0; i < 3; i += 1) expect(spend("p", 25).ok).toBe(true); // day D: $75 counted
+    t += DAY;
+    expect(check("p", 25).ok).toBe(true); // a forward preflight, on day D+1
+    t -= DAY;
+    // No ADMISSION has seen D+1, so D has not regressed: this is admitted, not refused as a regressed clock...
+    expect(spend("p", 25).ok).toBe(true); // $100, the principal's whole day
+    // ...and D's earlier $75 is still counted.
+    expect(spend("p", 1)).toMatchObject({ status: 429, error: "gateway_pay_principal_daily_cap" });
+  });
+
+  it("[neg] rule 2: the gate does not move the clock's high-water mark either", () => {
+    for (let i = 0; i < 3; i += 1) expect(spend("p", 25).ok).toBe(true); // day D: $75 counted
+    t += DAY;
+    expect(gatewayPaymentsGate().ok).toBe(true); // the gate, on day D+1
+    t -= DAY;
+    expect(gatewayPaymentsGate().ok).toBe(true); // no admission saw D+1: D has not regressed
+    expect(spend("p", 25).ok).toBe(true); // admitted, not refused as a regressed clock
+    expect(spend("p", 1)).toMatchObject({ status: 429, error: "gateway_pay_principal_daily_cap" });
+  });
+
+  it("[neg] rule 3: every admission and preflight reads the clock exactly once, whatever it decides", () => {
+    process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD = "50";
+    process.env.PCC_RELAY_MAX_GLOBAL_DAY = "1";
+    const calls: Array<[string, () => unknown]> = [
+      ["spend: admitted", () => spend("p", 25)],
+      ["spend: admitted again", () => spend("p", 25)],
+      ["spend: refused over the per-action cap", () => spend("p", 26)],
+      ["spend: refused by the global breaker (raises its alert)", () => spend("p", 1)],
+      ["preflight", () => check()],
+      ["gate", () => gatewayPaymentsGate()],
+      ["faucet: admitted", () => admitFaucetDrip({ wallet: "0xw", amount: 1, spender: { principal: "pf", apiKeyId: "kf" } })],
+      ["faucet: refused, amount out of range", () => admitFaucetDrip({ wallet: "0xw", amount: 0, spender: { principal: "pf", apiKeyId: "kf" } })],
+      ["relay: admitted", () => admitRelay({ principal: "pr", apiKeyId: "kr" })],
+      ["relay: refused by the global breaker (raises its alert)", () => admitRelay({ principal: "pr", apiKeyId: "kr" })],
+    ];
+    for (const [label, call] of calls) expect(clockReadsDuring(call), label).toBe(1);
+  });
+
+  it("[neg] rule 3: a misconfiguration alert does not read the clock again", () => {
+    process.env.PCC_GATEWAY_PAYS_ENABLED = "maybe";
+    const calls: Array<[string, () => unknown]> = [
+      ["spend", () => spend("p", 1)],
+      ["preflight", () => check()],
+      ["gate", () => gatewayPaymentsGate()],
+      ["faucet", () => admitFaucetDrip({ wallet: "0xw", amount: 1, spender: { apiKeyId: "k" } })],
+      ["relay", () => admitRelay({ principal: "p", apiKeyId: "k" })],
+    ];
+    for (const [label, call] of calls) {
+      expect(clockReadsDuring(call), label).toBe(1);
+      expect(call(), label).toMatchObject({ status: 503, error: "gateway_pays_misconfigured" });
+    }
+  });
+
+  it("[neg] rule 3: a UTC midnight crossed inside an admission cannot split its check from its record", () => {
+    process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD = "50";
+    // The next call's FIRST clock read is the last millisecond of day D; every later
+    // read in that call is the first millisecond of day D+1.
+    const straddle = () => {
+      t = earlyNext;
+      queuedReads = [lateD];
+    };
+    t = lateD;
+    expect(spend("p", 25).ok).toBe(true);
+    // Checked on D ($25 + $25 fits $50) and recorded under D. A second read would
+    // check it on D+1 or record it under D+1.
+    straddle();
+    expect(spend("p", 25).ok).toBe(true);
+    // D is full. A straddling call is still judged on D, not admitted on D+1's empty ledger...
+    straddle();
+    expect(spend("p", 1)).toMatchObject({ status: 503, error: "gateway_pays_daily_breaker" });
+    // ...and neither pruned D nor moved the mark past it: D's $50 still count.
+    t = lateD;
+    expect(spend("p", 1)).toMatchObject({ status: 503, error: "gateway_pays_daily_breaker" });
+  });
+
+  it("[neg] rule 3: a UTC midnight crossed inside a faucet drip cannot split its check from its record", () => {
+    t = earlyNext;
+    queuedReads = [lateD];
+    // Checked and recorded on day D (wallet 0xw: 100 of its 500).
+    expect(admitFaucetDrip({ wallet: "0xw", amount: 100, spender: { principal: "p0", apiKeyId: "k0" } }).ok).toBe(true);
+    t = lateD;
+    for (let i = 1; i < 5; i += 1) {
+      expect(admitFaucetDrip({ wallet: "0xw", amount: 100, spender: { principal: `p${i}`, apiKeyId: `k${i}` } }).ok, `drip ${i}`).toBe(true);
+    }
+    // Day D's wallet total is 500, the straddling drip included: one more is refused.
+    expect(admitFaucetDrip({ wallet: "0xw", amount: 1, spender: { principal: "p9", apiKeyId: "k9" } })).toMatchObject({
+      status: 429,
+      error: "faucet_wallet_daily_cap",
+    });
+  });
+
+  it("[neg] rule 1: the faucet and the relay refuse a regressed day, as the spend admission does", () => {
+    process.env.PCC_RELAY_MAX_GLOBAL_DAY = "1";
+    // Day D: wallet 0xw takes its whole 500, and the relay's one daily slot is used.
+    for (let i = 0; i < 5; i += 1) {
+      expect(admitFaucetDrip({ wallet: "0xw", amount: 100, spender: { principal: `p${i}`, apiKeyId: `k${i}` } }).ok).toBe(true);
+    }
+    expect(admitRelay({ principal: "pr", apiKeyId: "kr" }).ok).toBe(true);
+    // Day D+1: both admit, which moves the clock's high-water mark to D+1.
+    t += DAY;
+    expect(admitFaucetDrip({ wallet: "0xz", amount: 1, spender: { principal: "pz", apiKeyId: "kz" } }).ok).toBe(true);
+    expect(admitRelay({ principal: "pr2", apiKeyId: "kr2" }).ok).toBe(true);
+    // Back on D: refused as a regressed clock, not merely by D's caps (still full).
+    t -= DAY;
+    expect(admitFaucetDrip({ wallet: "0xw", amount: 1, spender: { principal: "pq", apiKeyId: "kq" } })).toMatchObject({
+      status: 503,
+      error: "gateway_pays_clock_regressed",
+    });
+    expect(admitRelay({ principal: "pr3", apiKeyId: "kr3" })).toMatchObject({ status: 503, error: "gateway_pays_clock_regressed" });
   });
 });
