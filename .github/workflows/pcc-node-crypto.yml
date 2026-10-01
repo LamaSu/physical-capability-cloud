@@ -6,6 +6,9 @@
 #      must FAIL on the PyNaCl requirement.
 #   3. With pinned PyNaCl and PCC_REQUIRE_PYNACL=1, the whole suite passes
 #      with nothing skipped.
+#   4. The daemon stops when its key is refused, instead of running on
+#      unsigned (A02b F4). That test lives in tests/test_daemon_loop.py, so
+#      steps 1 and 3 run it by node id.
 name: pcc-node-crypto
 
 on:
@@ -42,10 +45,12 @@ jobs:
             echo "invalid run: PyNaCl is importable in the venv without it"
             exit 1
           fi
-          out=$(PYTHONPATH=. "$RUNNER_TEMP/no-nacl/bin/python" -m pytest -q -p no:cacheprovider -rA tests/test_crypto.py 2>&1)
+          out=$(PYTHONPATH=. "$RUNNER_TEMP/no-nacl/bin/python" -m pytest -q -p no:cacheprovider -rA tests/test_crypto.py "tests/test_daemon_loop.py::TestDaemonRefusesToRunWithoutItsKey::test_a_refused_key_stops_the_daemon_and_leaves_no_pid_file" 2>&1)
           echo "$out" | tail -8
           echo "$out" | grep -q "PASSED tests/test_crypto.py::TestWithoutPyNaClNoKeyIsUsed::test_no_key_is_created_loaded_or_used" \
             || { echo "the no-PyNaCl refusal test did not run and pass"; exit 1; }
+          echo "$out" | grep -q "PASSED tests/test_daemon_loop.py::TestDaemonRefusesToRunWithoutItsKey::test_a_refused_key_stops_the_daemon_and_leaves_no_pid_file" \
+            || { echo "the daemon refusal test did not run and pass"; exit 1; }
 
       - name: Negative control - PCC_REQUIRE_PYNACL=1 without PyNaCl must fail on the PyNaCl check
         run: |
@@ -68,7 +73,7 @@ jobs:
         run: |
           python -m pip install --quiet "pynacl==1.5.0" "pytest==8.3.5"
           set +e
-          out=$(PYTHONPATH=. python -m pytest -q -p no:cacheprovider -rs tests/test_crypto.py 2>&1)
+          out=$(PYTHONPATH=. python -m pytest -q -p no:cacheprovider -rs tests/test_crypto.py "tests/test_daemon_loop.py::TestDaemonRefusesToRunWithoutItsKey::test_a_refused_key_stops_the_daemon_and_leaves_no_pid_file" 2>&1)
           rc=$?
           set -e
           echo "$out"
