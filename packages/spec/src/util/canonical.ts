@@ -19,10 +19,11 @@
  * JavaScript object answer a LATER read the same way:
  *   - a Proxy can answer [[Get]] differently from its descriptors;
  *   - an inherited (polluted) property is readable but never hashed.
- * So a consumer that must evaluate what it hashed parses the canonical text
- * back (JSON.parse) and reads that snapshot with own-property reads, as
- * LO-EV-9's verifyEvidenceSubjectBinding does. It never re-reads the object it
- * was handed.
+ * So a consumer that must evaluate what it hashed takes a canonicalSnapshot:
+ * canonicalize FIRST, parse the canonical text back ONCE, and validate and
+ * execute that parsed snapshot with own-property reads, as LO-EV-9's
+ * verifyEvidenceSubjectBinding does. It never re-reads the object it was handed,
+ * and it hashes the snapshot's own text, so what ran is exactly what was hashed.
  */
 
 import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
@@ -51,6 +52,7 @@ const isSafeIntegerNumber = Number.isSafeInteger;
 const toNumber = Number;
 const toText = String;
 const quote = JSON.stringify; // string escaping, byte-for-byte what JSON transport writes
+const parseJson = JSON.parse;
 const OBJECT_PROTOTYPE = Object.prototype;
 const ARRAY_PROTOTYPE = Array.prototype;
 const WeakSetConstructor = WeakSet;
@@ -156,6 +158,38 @@ export function canonicalize(value: unknown): string {
     // A Proxy trap threw (whatever it threw), or the value nests too deeply to walk: not a plain JSON tree.
     throw new NonCanonicalValueError("$", "a value that could not be read as a plain JSON tree");
   }
+}
+
+/** The canonical text of a value together with the value parsed back from that very text. */
+export interface CanonicalSnapshot<T = unknown> {
+  /** The canonical JSON text: hash this. */
+  readonly text: string;
+  /** Parsed once from `text`: validate, read and execute this, never the object that was handed in. */
+  readonly value: T;
+}
+
+/**
+ * Canonicalize `value`, then parse the canonical text once (with the JSON.parse
+ * captured at load), and return both. A consumer that validates or executes what
+ * it hashes does so on `value` and hashes `text`: unlike the object it was handed
+ * (a Proxy may answer a later [[Get]] differently from the descriptors that were
+ * hashed; any caller may mutate it between the hash and the use), the snapshot is
+ * a fresh plain JSON tree that nothing but the consumer holds.
+ *
+ * Refuses exactly what canonicalize refuses, with the same NonCanonicalValueError,
+ * so a caller refuses a non-JSON input BEFORE it runs anything on it. `T` is the
+ * caller's claim about the shape; nothing here checks it.
+ */
+export function canonicalSnapshot<T = unknown>(value: unknown): CanonicalSnapshot<T> {
+  const text = canonicalize(value);
+  let parsed: unknown;
+  try {
+    parsed = parseJson(text);
+  } catch {
+    // Unreachable for text this module wrote (it is valid JSON); keeps the boundary typed regardless.
+    throw new NonCanonicalValueError("$", "canonical text that could not be parsed back");
+  }
+  return { text, value: parsed as T };
 }
 
 function canonicalizeAt(value: unknown, path: string, ancestors: WeakSet<object>): string {
