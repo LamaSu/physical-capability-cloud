@@ -77,6 +77,11 @@
  *     caller exactly once, in that reply's `revealedSecrets`. They are never
  *     persisted, never sent to the model and never replayed by GET (D2). A
  *     secret-looking value anywhere else is redacted and never revealed;
+ *   - a held call's TARGET (path and query) that a person reads, and that is stored,
+ *     is built from the call's REDACTED arguments before any URL encoding, never by
+ *     scrubbing the encoded text (`password=%40Tricky%21Pwd` is a reversible form that
+ *     no text scan sees). The executable target lives only in memory, for the dispatch
+ *     (astra pack 91b, F1);
  *   - conversation ids carry 128 bits of crypto randomness and ids in the old
  *     guessable format are refused (404) (D3). A signed-in caller's
  *     conversation is bound to that principal: GET and resume from anyone
@@ -90,7 +95,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { getStore } from "../db.js";
 import { sql } from "@pcc/store";
-import { redactSecretsDeep, isTokenChar, REDACTED_VALUE } from "../redaction.js";
+import { redactSecretsDeep, isTokenChar, REDACTED_VALUE, type RedactOptions } from "../redaction.js";
 import { isPublicRoute } from "../middleware/api-gate.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
@@ -168,7 +173,10 @@ interface PendingActionRecord {
   method: string;
   /** The endpoint template the action was planned against; a confirm re-checks it. */
   endpoint: string;
-  /** The resolved path and query, redacted, for the human to read. */
+  /**
+   * The path and query for the human to read, built from the REDACTED arguments
+   * before any URL encoding (astra 91b F1). The executable target is never stored.
+   */
   target: string;
   /** The arguments, redacted. */
   args: Record<string, unknown>;
@@ -697,12 +705,91 @@ const refusal = (status: number, error: string, message: string): Refusal => ({ 
 
 // ── Tool execution (self-injection) ─────────────────────────────────
 
-/** A tool call, checked and resolved, ready to dispatch. */
+/**
+ * A tool call, checked and resolved, ready to dispatch. `target` is the EXECUTABLE
+ * path and query, URL-encoded, and may carry a secret (a password argument): it is
+ * used to dispatch and nowhere else. It is never stored, and never shown to anyone;
+ * what a person reads and what is persisted is displayTarget() (astra 91b F1).
+ */
 interface ToolPlan {
   method: string;
   /** Path and query, as the router will see them. */
   target: string;
   payload?: Record<string, unknown>;
+}
+
+/** A tool's request built from one set of arguments (see buildRequest). */
+interface BuiltRequest {
+  /** The first path parameter that is missing, empty or a dot segment, or null. */
+  badParam: string | null;
+  /** Path and query, URL-encoded, as the router will see them. */
+  url: string;
+  /** The JSON body, for the methods that take one. */
+  payload?: Record<string, unknown>;
+}
+
+/**
+ * Build a tool's request from `input`: `{param}`s of the endpoint template filled in
+ * (percent-encoded), the remaining arguments as the query string (GET, DELETE) or the
+ * JSON body (the rest). ONE function builds both the request that runs and the text a
+ * person reads, so the two cannot drift: the display is this function applied to the
+ * REDACTED arguments (displayTarget), never a scrub of the encoded result.
+ */
+function buildRequest(templatePath: string, method: string, input: Record<string, unknown>): BuiltRequest {
+  // Interpolate {param} -> input[param] and remember which keys went into the path
+  const pathParams = new Set<string>();
+  let badParam: string | null = null;
+  const path = templatePath.replace(/\{([^}]+)\}/g, (_, key: string) => {
+    pathParams.add(key);
+    const v = input[key];
+    const s = v == null ? "" : String(v);
+    if (s === "" || s === "." || s === "..") {
+      badParam ??= key;
+      return "_";
+    }
+    return encodeURIComponent(s);
+  });
+
+  let url = path;
+  let payload: Record<string, unknown> | undefined;
+  if (method === "GET" || method === "DELETE") {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(input)) {
+      if (pathParams.has(key)) continue;
+      if (value === undefined || value === null) continue;
+      params.set(key, typeof value === "string" ? value : JSON.stringify(value));
+    }
+    const qs = params.toString();
+    if (qs) url = `${path}?${qs}`;
+  } else {
+    payload = {};
+    for (const [key, value] of Object.entries(input)) {
+      if (pathParams.has(key)) continue;
+      payload[key] = value;
+    }
+  }
+  return { badParam, url, payload };
+}
+
+/** What a redacted argument becomes once it is percent-encoded into a URL. */
+const ENCODED_REDACTED_VALUE = encodeURIComponent(REDACTED_VALUE);
+
+/**
+ * The target a PERSON reads, and the only form of it that is ever stored (astra 91b
+ * F1). It is built from the arguments AFTER redaction and BEFORE any URL encoding:
+ * a secret-named argument (password, token, api_key, ...) or a secret-shaped value
+ * becomes [REDACTED] as structured data, then the same buildRequest() as the real call
+ * encodes what is left. Redacting the ENCODED text instead cannot work: `%40Tricky%21Pwd`
+ * is a reversible form of a password that no text scan recognises, and a secret-named
+ * PATH parameter has no `name=` label for a scan to find at all.
+ */
+function displayTarget(tool: AgentPackageTool, method: string, input: Record<string, unknown>, opts?: RedactOptions): string {
+  const safe = redactSecretsDeep(input, undefined, opts);
+  const { url } = buildRequest(tool.endpoint?.path ?? "", method, safe);
+  // The marker reads better as itself than percent-encoded; it carries nothing to hide.
+  const readable = url.split(ENCODED_REDACTED_VALUE).join(REDACTED_VALUE);
+  // A last scan of the finished text, as defense in depth only: nothing relies on it.
+  return redactSecretsDeep(readable, undefined, opts);
 }
 
 /**
@@ -734,44 +821,11 @@ function planToolCall(
   if (refused) return { refusal: refusal(403, "tool_not_callable_from_chat", refused) };
 
   const method = tool.endpoint.method.toUpperCase();
-  let path = tool.endpoint.path;
-
-  // Interpolate {param} -> input[param] and remember which keys went into the path
-  const pathParams = new Set<string>();
-  let badParam: string | null = null;
-  path = path.replace(/\{([^}]+)\}/g, (_, key: string) => {
-    pathParams.add(key);
-    const v = input[key];
-    const s = v == null ? "" : String(v);
-    if (s === "" || s === "." || s === "..") {
-      badParam ??= key;
-      return "_";
-    }
-    return encodeURIComponent(s);
-  });
+  const { badParam, url, payload } = buildRequest(tool.endpoint.path, method, input);
   if (badParam !== null) {
     return {
       refusal: refusal(400, "invalid_path_param", `Path parameter "${badParam}" must be a non-empty value other than "." or "..".`),
     };
-  }
-
-  let url = path;
-  let payload: Record<string, unknown> | undefined;
-  if (method === "GET" || method === "DELETE") {
-    const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(input)) {
-      if (pathParams.has(key)) continue;
-      if (value === undefined || value === null) continue;
-      params.set(key, typeof value === "string" ? value : JSON.stringify(value));
-    }
-    const qs = params.toString();
-    if (qs) url = `${path}?${qs}`;
-  } else {
-    payload = {};
-    for (const [key, value] of Object.entries(input)) {
-      if (pathParams.has(key)) continue;
-      payload[key] = value;
-    }
   }
 
   // Decide on the URL the router will see: inject resolves dot segments the same way.
@@ -1053,11 +1107,12 @@ export function _forgetHeldActionsForTests(): void {
   heldArgs.clear();
 }
 
-function describeAction(tool: AgentPackageTool, plan: ToolPlan): string {
+/** One line for a person: the method, the DISPLAY target (never the executable one) and the tool's first sentence. */
+function describeAction(tool: AgentPackageTool, method: string, shownTarget: string): string {
   const description = tool.description ?? "";
   const end = description.search(/[.!?](?:\s|$)/);
   const first = (end >= 0 ? description.slice(0, end + 1) : description).slice(0, 160);
-  return `${plan.method} ${plan.target}${first ? ` (${first})` : ""}`;
+  return `${method} ${shownTarget}${first ? ` (${first})` : ""}`;
 }
 
 function viewAction(a: PendingActionRecord): PendingActionView {
@@ -1102,20 +1157,24 @@ function holdAction(
   const args = JSON.parse(JSON.stringify(input ?? {})) as Record<string, unknown>;
   const bindsTo = credentialBinding(tool, args);
   const bindLine = bindsTo !== undefined ? `Creates a new PCC credential bound to ${bindsTo}. ` : "";
+  // Both readable targets are built from the redacted ARGUMENTS (astra 91b F1); the
+  // executable plan.target is not shown, stored or described anywhere.
+  const ownerTarget = displayTarget(tool, plan.method, args, OWNER_VIEW);
+  const storedTarget = displayTarget(tool, plan.method, args);
   const view = {
-    target: redactSecretsDeep(plan.target, undefined, OWNER_VIEW),
+    target: ownerTarget,
     args: redactSecretsDeep(args, undefined, OWNER_VIEW),
-    summary: bindLine + redactSecretsDeep(describeAction(tool, plan), undefined, OWNER_VIEW),
+    summary: bindLine + redactSecretsDeep(describeAction(tool, plan.method, ownerTarget), undefined, OWNER_VIEW),
   };
   const outcome = holdArgs(id, { conversationId: record.id, owner, address, args, expiresAtMs, view });
   if (outcome !== "held") return outcome;
-  const summary = redactSecretsDeep(describeAction(tool, plan));
+  const summary = redactSecretsDeep(describeAction(tool, plan.method, storedTarget));
   const action: PendingActionRecord = {
     id,
     tool: tool.name,
     method: plan.method,
     endpoint: tool.endpoint?.path ?? "",
-    target: redactSecretsDeep(plan.target),
+    target: storedTarget,
     args: redactSecretsDeep(args),
     summary: bindLine + summary,
     ...(bindsTo !== undefined ? { bindsTo } : {}),

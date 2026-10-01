@@ -502,8 +502,9 @@ describe("onboard-chat held actions (WP-D R2)", () => {
       expect(body.pendingActions).toHaveLength(1);
       const { conversationId } = body;
       const actionId = body.pendingActions[0].actionId as string;
-      // The person can still tell which key is aimed at.
-      expect(body.pendingActions[0].target).toContain(`/api/auth/keys/${victim.keyId}`);
+      // The person can still tell which key is aimed at, and that a password was sent; not what it was.
+      expect(body.pendingActions[0].target).toBe(`/api/auth/keys/${victim.keyId}?password=[REDACTED]`);
+      expect(body.pendingActions[0].summary).toContain(`DELETE /api/auth/keys/${victim.keyId}?password=[REDACTED]`);
 
       const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: caller.headers });
       expect(get.statusCode).toBe(200);
@@ -532,7 +533,9 @@ describe("onboard-chat held actions (WP-D R2)", () => {
       };
       for (const [where, text] of Object.entries(confirmed)) expect(leaksOf(text, secret), `confirmed: ${where}`).toEqual([]);
       // The model is told which call ran (the target is in its history), not what the secret was.
-      expect(JSON.stringify(llm.requests.at(-1))).toContain("The user confirmed the held call revoke_api_key");
+      const lastRequest = JSON.stringify(llm.requests.at(-1));
+      expect(lastRequest).toContain("The user confirmed the held call revoke_api_key");
+      expect(lastRequest).toContain(`DELETE /api/auth/keys/${victim.keyId}?password=[REDACTED])`);
     },
   );
 
@@ -545,6 +548,7 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     expect(body.pendingActions).toHaveLength(1);
     const { conversationId } = body;
     const actionId = body.pendingActions[0].actionId as string;
+    expect(body.pendingActions[0].target).toBe("/api/test/sessions/[REDACTED]");
     const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: alice.headers });
     for (const [where, text] of Object.entries({
       "POST reply": post.body,
@@ -574,7 +578,8 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     llm.responses.push(calls(["revoke_api_key", { keyId: victim.keyId, note: `Bearer ${BODY}` }]), endTurn);
     const post = await chat({ message: "revoke that key" }, victim.headers);
     expect(post.statusCode).toBe(200);
-    const { conversationId } = post.json();
+    const { conversationId, pendingActions } = post.json();
+    expect(pendingActions[0].target).toBe(`/api/auth/keys/${victim.keyId}?note=Bearer+[REDACTED]`);
     const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: victim.headers });
     for (const [where, text] of Object.entries({
       "POST reply": post.body,
@@ -584,6 +589,24 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     })) {
       expect(leaksOf(text, BODY), `held: ${where}`).toEqual([]);
     }
+  });
+
+  it("[neg] the owner's view of a held target keeps a digest (L3) and never a secret; the stored envelope keeps neither (astra 91b F1)", async () => {
+    const caller = signedIn("alice-l3-target@example.com");
+    const HASH = "ab".repeat(32);
+    llm.responses.push(calls(["revoke_api_key", { keyId: "key-1", checksum: HASH, password: TRICKY }]), endTurn);
+    const post = await chat({ message: "revoke key-1" }, caller.headers);
+    expect(post.statusCode).toBe(200);
+    const { conversationId, pendingActions } = post.json();
+    // Same as args (L3): visible to the owner, so a substituted hash shows before they confirm.
+    expect(pendingActions[0].target).toBe(`/api/auth/keys/key-1?checksum=${HASH}&password=[REDACTED]`);
+    const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: caller.headers });
+    expect(get.json().pendingActions[0].target).toBe(`/api/auth/keys/key-1?checksum=${HASH}&password=[REDACTED]`);
+    expect(leaksOf(post.body + get.body, TRICKY)).toEqual([]);
+    // What is persisted keeps the full redaction.
+    expect(persisted(conversationId)).not.toContain(HASH);
+    expect(leaksOf(persisted(conversationId), TRICKY)).toEqual([]);
+    expect(JSON.stringify(llm.requests)).not.toContain(HASH);
   });
 
   it("control: parameters that are not secrets stay readable in the held target, so the person can check what they confirm (astra 91b F1)", async () => {
