@@ -445,6 +445,8 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
       [null, "events[0]"],
       [42, "events[0]"],
       ["event", "events[0]"],
+      [[], "events[0]"],
+      [[1, 2], "events[0]"],
       [() => 1, "events[0]"],
     ];
     for (const [bad, field] of cases) {
