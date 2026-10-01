@@ -117,7 +117,7 @@ describe("wizard machine-onboarding completion gets /register's guards", () => {
   });
 
   it("M1/L1: an invisible-prefix variant of the record through the wizard is refused too", async () => {
-    const { res, sessionStatus } = await completeWizard(app, OWNER, { description: `​${FORGED_RECORD}` });
+    const { res, sessionStatus } = await completeWizard(app, OWNER, { description: `\u200b${FORGED_RECORD}` });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("reserved_description");
     expect(sessionStatus).toBe("in_progress");

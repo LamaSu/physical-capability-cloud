@@ -606,7 +606,7 @@ describe("owner routes fail closed and the review record cannot be forged or rew
   it("invisible and look-alike variants of the record prefix are refused at /register and by PATCH (L1)", async () => {
     const record = JSON.stringify({ evidenceTierClaim: 2, evidenceDigest: "sha256:" + "f".repeat(64) });
     // Review probe P3: each was accepted (200) before; the plain prefix was already 400.
-    const variants = [`​PROOF SUBMITTED: ${record}`, `PROOF SUBMITTED: ${record}`, `PRООF SUBMITTED: ${record}`];
+    const variants = [`\u200bPROOF SUBMITTED: ${record}`, `PROOF\u00a0SUBMITTED: ${record}`, `PR\u041e\u041eF SUBMITTED: ${record}`];
     const regId = await register(app);
     for (const description of variants) {
       const reg = await app.inject({
