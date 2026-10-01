@@ -32,3 +32,8 @@ export type {
   AgentToolName,
   ToolRequest,
 } from "./agent-package.js";
+
+// Digital-kernel scaffold (D3, ledger R4): generates a project outside the
+// monorepo that depends only on the public @pcc/kernel-sdk + @pcc/spec.
+export { ScaffoldRefused, scaffoldDigitalKernel } from "./scaffold/digital-kernel.js";
+export type { DigitalKernelScaffoldOptions, RecordedSearch } from "./scaffold/digital-kernel.js";
