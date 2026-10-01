@@ -96,6 +96,7 @@ describe("onboard-chat credential binding (astra pack 91b F2)", () => {
   let app: FastifyInstance;
   /** Every request the chat dispatched (the chat's own endpoints excluded). */
   let dispatched: Array<{ method: string; url: string }>;
+  const spies: Array<{ mockRestore: () => void }> = [];
   const savedKey = process.env.ANTHROPIC_API_KEY;
 
   beforeEach(async () => {
@@ -123,7 +124,7 @@ describe("onboard-chat credential binding (astra pack 91b F2)", () => {
   });
 
   afterEach(async () => {
-    vi.restoreAllMocks();
+    for (const spy of spies.splice(0)) spy.mockRestore(); // only this file's own spies: the module mocks above stay as they are
     await app.close();
     closeStore();
     _resetAgentPackageCache();
@@ -282,12 +283,13 @@ describe("onboard-chat credential binding (astra pack 91b F2)", () => {
 
     // State moved between the hold and the confirmation (or the rules drifted): the same
     // request now resolves to another wallet. The call must not run.
-    vi.spyOn(provisionIdentity, "selectProvisionIdentity").mockReturnValue({
+    const drift = vi.spyOn(provisionIdentity, "selectProvisionIdentity").mockReturnValue({
       ok: true,
       source: "session",
       operatorId: OTHER_WALLET,
       siweVerified: true,
     });
+    spies.push(drift);
     llm.responses.push(endTurn);
     const confirm = await chat({ conversationId: held.conversationId, confirmActionId: held.pendingActions[0].actionId }, session.bearer);
     expect(confirm.statusCode).toBe(200);
@@ -302,7 +304,7 @@ describe("onboard-chat credential binding (astra pack 91b F2)", () => {
     expect(getRepos().apiKeys.countByOperator(OTHER_WALLET)).toBe(0);
 
     // The hold is spent either way: a replay does not run it.
-    vi.restoreAllMocks();
+    drift.mockRestore();
     const replay = await chat({ conversationId: held.conversationId, confirmActionId: held.pendingActions[0].actionId }, session.bearer);
     expect(replay.statusCode).toBe(409);
     expect(provisionCalls()).toEqual([]);
@@ -325,11 +327,13 @@ describe("onboard-chat credential binding (astra pack 91b F2)", () => {
     const session = siwe(WALLET);
     llm.responses.push(calls(["provision_api_key", {}]), endTurn);
     const held = (await chat({ message: "sign me up" }, session.bearer)).json();
-    vi.spyOn(provisionIdentity, "selectProvisionIdentity").mockReturnValue({
-      ok: false,
-      status: 400,
-      body: { error: "identifier_required", message: "nobody is named" },
-    });
+    spies.push(
+      vi.spyOn(provisionIdentity, "selectProvisionIdentity").mockReturnValue({
+        ok: false,
+        status: 400,
+        body: { error: "identifier_required", message: "nobody is named" },
+      }),
+    );
     llm.responses.push(endTurn);
     const body = (await chat({ conversationId: held.conversationId, confirmActionId: held.pendingActions[0].actionId }, session.bearer)).json();
     expect(body.confirmedAction).toMatchObject({ status: 400 });
