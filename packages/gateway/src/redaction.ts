@@ -968,14 +968,12 @@ function addSecretLabelSpans(s: string, spans: Span[], jsonStringsOnly = false):
     const value = labelValueOf(s, m, jsonStringsOnly);
     if (value === null) continue;
     if (value.quoted !== true) {
-      // The value must not hide the NAME of a secret label whose own value goes on past it:
-      // take that value too, and look again from where the extended value ends.
-      let from = value.start;
-      for (let inner = embeddedValue(s, from, value.end, jsonStringsOnly); inner !== null; ) {
-        from = value.end;
+      // The value must not hide the NAME of a secret label whose own value goes on past it: take that value
+      // too. The scan resumes where the extended value ends, so a label after it is read as usual.
+      const inner = embeddedValue(s, value.start, value.end, jsonStringsOnly);
+      if (inner !== null) {
         value.end = inner.end;
         if (value.resume < inner.end) value.resume = inner.end;
-        inner = embeddedValue(s, from, value.end, jsonStringsOnly);
       }
     }
     const size = value.end - value.start;

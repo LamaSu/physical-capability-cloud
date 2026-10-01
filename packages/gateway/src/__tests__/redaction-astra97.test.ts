@@ -431,7 +431,8 @@ describe("the label scanner's other delimiters and budgets", () => {
     ["a value on the next line, with CRLF line ends", "password:\r\n  v1\r\nnext", `password:\r\n  ${R}\r\nnext`],
     ["a quote followed by ) closes a URL value", 'see ("https://h.test/?token=abc") now', `see ("https://h.test/?token=${R}") now`],
     ["a quote followed by > closes a URL value", '<a href="https://h.test/?token=abc">x</a>', `<a href="https://h.test/?token=${R}">x</a>`],
-    ["a quote followed by ] closes a URL value", '["https://h.test/?token=abc"]', `["https://h.test/?token=${R}"]`],
+    ["a quote followed by ] closes a URL value", 'x ["https://h.test/?token=abc"] y', `x ["https://h.test/?token=${R}"] y`],
+    ["a quote followed by } closes a URL value", 'x {"u":"https://h.test/?token=abc"} y', `x {"u":"https://h.test/?token=${R}"} y`],
     ["a quote followed by ; closes a URL value", 'u = "https://h.test/?token=abc";', `u = "https://h.test/?token=${R}";`],
     ["a header glued on after a comma", "password=abc,Authorization: Bearer xyz", `password=${R},Authorization: Bearer ${R}`],
     ["a header glued on after &: it is not a URL parameter", "password=a&Authorization: Bearer b c", `password=${R}&Authorization: Bearer ${R}`],
@@ -480,6 +481,11 @@ describe("the label scanner's other delimiters and budgets", () => {
   it("a value on the next line needs a deeper indent; tabs count as one", () => {
     expect(sanitize("a:\n\tpassword:\n\t\tv1\n\tother: x")).toBe(`a:\n\tpassword:\n\t\t${R}\n\tother: x`);
     expect(sanitize("\tpassword:\n\tv1")).toBe("\tpassword:\n\tv1");
+  });
+
+  it("the look inside a value starts at that value, not at the start of the text", () => {
+    const earlier = "token=x\n".repeat(9); // more than the 8 labels one value follows
+    expect(sanitize(`${earlier}password=pa$sw0rd!rest|Authorization: Bearer ab$cd!ef`)).toBe(`${`token=${R}\n`.repeat(9)}password=${R}`);
   });
 
   it("a line less deep than the label's own line is not its value", () => {
@@ -590,6 +596,12 @@ describe("F4 (continued): JWT payload edges, Bearer edges, and the limits of a w
 
   it("blanks after the first line's hex do not stop the join", () => {
     expect(sanitize(`${hex.slice(0, 32)}  \n${hex.slice(32)}`)).toBe(R);
+  });
+
+  it("a third run on the same line as the second is not a wrapped key, however its digits add up", () => {
+    const long = "ab12cd34".repeat(9);
+    const text = `${long.slice(0, 22)}\n${long.slice(22, 43)} ${long.slice(43, 65)}`; // 22 + 21 + 22: dropping one digit would make 64
+    expect(redactSecretsDeep(text)).toBe(text);
   });
 
   it("a middle run that does not end its line, and 62 digits, are not a key", () => {
