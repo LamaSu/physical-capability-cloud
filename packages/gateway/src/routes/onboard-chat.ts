@@ -828,9 +828,10 @@ function displayTarget(tool: AgentPackageTool, method: string, input: Record<str
   const safe = redactSecretsDeep(input, undefined, opts);
   const { url } = buildRequest(tool.endpoint?.path ?? "", method, safe);
   // The marker reads better as itself than percent-encoded; it carries nothing to hide.
-  const readable = url.split(ENCODED_REDACTED_VALUE).join(REDACTED_VALUE);
-  // A last scan of the finished text, as defense in depth only: nothing relies on it.
-  return redactSecretsDeep(readable, undefined, opts);
+  // Nothing is scrubbed after encoding: a scan of the encoded text can only be weaker than
+  // the scan of the structured values above (it cannot even see a `Bearer ` scheme once the
+  // space is a `+`), and the envelope is scanned again when it is saved.
+  return url.split(ENCODED_REDACTED_VALUE).join(REDACTED_VALUE);
 }
 
 /**
