@@ -282,11 +282,22 @@ describe("dispatchToChannels — unwired transports are honest (B5)", () => {
 
 // ── HTTP route: POST /api/operators/:slug/channels/test ──────────────────────
 
+// N84: a channel belongs to the identity that attached it, and a test send reaches only the caller's own
+// channels. So these route tests run as the shop's owner, the principal apiGate attaches to a request.
+const ROUTE_OWNER = "route-owner@shop.test";
+
 describe("POST /api/operators/:slug/channels/test — email through the route", () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
     app = Fastify({ logger: false });
+    app.decorateRequest("operatorId", null);
+    app.decorateRequest("userId", null);
+    app.addHook("onRequest", async (req) => {
+      const r = req as unknown as { operatorId: string | null; userId: string | null };
+      r.operatorId = ROUTE_OWNER;
+      r.userId = ROUTE_OWNER;
+    });
     await app.register(operatorChannelsRoutes);
     await app.ready();
   });
@@ -302,7 +313,7 @@ describe("POST /api/operators/:slug/channels/test — email through the route", 
       transport: "email",
       describe: "Email the owner when a new order lands",
       endpoint: { address: "thespacekyd@gmail.com" },
-    });
+    }, ROUTE_OWNER);
     const res = await app.inject({
       method: "POST",
       url: "/api/operators/route-shop/channels/test",
@@ -322,7 +333,7 @@ describe("POST /api/operators/:slug/channels/test — email through the route", 
       transport: "email",
       describe: "Email the owner when a new order lands",
       endpoint: { address: "thespacekyd@gmail.com" },
-    });
+    }, ROUTE_OWNER);
     const res = await app.inject({
       method: "POST",
       url: "/api/operators/route-shop-2/channels/test",
