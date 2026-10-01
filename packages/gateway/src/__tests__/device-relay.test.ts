@@ -1746,11 +1746,17 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
   /** Insert a relay row directly. createdAt ascends, so the poll order is fixed. */
   function seedCall(
     id: string,
-    opts: { status?: string; kernelId?: string; claimedAt?: string | null; toolName?: string } = {},
+    opts: {
+      status?: string;
+      kernelId?: string;
+      claimedAt?: string | null;
+      toolName?: string;
+      scopeId?: string | null;
+    } = {},
   ) {
     getStore().db.insert(toolCallRelay).values({
       id,
-      scopeId: null,
+      scopeId: opts.scopeId ?? null,
       kernelId: opts.kernelId ?? KERNEL,
       toolName: opts.toolName ?? "home",
       toolArgs: {},
@@ -1962,6 +1968,128 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
         }
       } finally {
         spy.mockRestore();
+      }
+    });
+  });
+
+  // ── F1: the use-time checks share one synchronous section with the claim ──
+  describe("pending: what changes while the governor is held is re-checked before the claim (F1)", () => {
+    const setScope = (id: string, fields: Partial<typeof executionScopes.$inferInsert>) =>
+      getStore().db.update(executionScopes).set(fields).where(eq(executionScopes.id, id)).run();
+    // An async wrapper starts the request at once; a bare app.inject() chain does not.
+    const startPoll = async () =>
+      await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: op });
+
+    /**
+     * Start a poll and hold it at the safety governor, run `change`, then release
+     * an ALLOWED verdict. This is the window between the governor's answer and
+     * the claim: whatever `change` altered must be re-read before the row is
+     * claimed, or a command the world no longer allows is handed to the device.
+     */
+    async function pollWhileGovernorIsHeld(change: () => void | Promise<unknown>) {
+      let reached!: () => void;
+      const consulted = new Promise<void>((resolve) => (reached = resolve));
+      let release!: (verdict: unknown) => void;
+      const verdict = new Promise<unknown>((resolve) => (release = resolve));
+      const spy = vi.spyOn(getSafetyGateway(), "validateOnly").mockImplementation(async () => {
+        reached();
+        return (await verdict) as never;
+      });
+      try {
+        const polling = startPoll();
+        await Promise.race([
+          consulted,
+          new Promise((_, reject) => setTimeout(() => reject(new Error("the poll never reached the governor")), 2000)),
+        ]);
+        await change();
+        release({ allowed: true, executed: false });
+        return await polling;
+      } finally {
+        spy.mockRestore();
+      }
+    }
+
+    it("control: with nothing changed while the governor is held, the call is claimed and returned", async () => {
+      seedCall("tc-a");
+      const res = await pollWhileGovernorIsHeld(() => {});
+      expect(idsOf(res)).toEqual(["tc-a"]);
+      expect(rowOf("tc-a").status).toBe("claimed");
+    });
+
+    it("an emergency stop that lands while the governor is held is seen before the claim", async () => {
+      seedCall("tc-a");
+      const res = await pollWhileGovernorIsHeld(engageStop);
+      expect(res.statusCode).toBe(200);
+      expect(res.json().calls).toEqual([]);
+      expect(rowOf("tc-a")).toMatchObject({ status: "rejected", error: "emergency_stopped", claimedAt: null });
+    });
+
+    it("a scope that expires while the governor is held does not dispatch its call", async () => {
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      seedCall("tc-a", { toolName: "run_create", scopeId });
+      const res = await pollWhileGovernorIsHeld(() =>
+        setScope(scopeId, { expiresAt: new Date(Date.now() - 1000).toISOString() }),
+      );
+      expect(res.json().calls).toEqual([]);
+      expect(rowOf("tc-a")).toMatchObject({ status: "rejected", error: "scope_expired", claimedAt: null });
+    });
+
+    it("a scope whose status is revoked while the governor is held does not dispatch its call", async () => {
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      seedCall("tc-a", { toolName: "run_create", scopeId });
+      const res = await pollWhileGovernorIsHeld(() => setScope(scopeId, { status: "revoked" }));
+      expect(res.json().calls).toEqual([]);
+      expect(rowOf("tc-a")).toMatchObject({ status: "rejected", error: "scope_not_active", claimedAt: null });
+    });
+
+    it("control: a scope revoked through the route while the governor is held keeps the route's own rejection", async () => {
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      seedCall("tc-a", { toolName: "run_create", scopeId });
+      const res = await pollWhileGovernorIsHeld(async () => {
+        const revoke = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: op });
+        expect(revoke.statusCode).toBe(200);
+      });
+      expect(res.json().calls).toEqual([]);
+      expect(rowOf("tc-a")).toMatchObject({ status: "rejected", error: "scope_revoked", claimedAt: null });
+    });
+
+    it("a circuit breaker that opens while the governor is held does not dispatch its call", async () => {
+      seedCall("tc-a");
+      const gateway = getSafetyGateway();
+      gateway.resetCircuit(KERNEL);
+      const res = await pollWhileGovernorIsHeld(() => {
+        for (let failure = 0; failure < 3; failure++) gateway.recordDeviceFailure(KERNEL); // threshold 3 -> open
+      });
+      expect(res.json().calls).toEqual([]);
+      expect(rowOf("tc-a")).toMatchObject({ status: "rejected", error: "circuit_open", claimedAt: null });
+    });
+
+    it("a command budget used up while the governor is held rejects the call", async () => {
+      const scope = await mint({ createdBy: HOLDER, allowedTools: ["run_create"], maxCommands: 1 });
+      const scopeId = scope.json().id as string;
+      seedCall("tc-a", { toolName: "run_create", scopeId });
+      const res = await pollWhileGovernorIsHeld(() =>
+        // Another poll claimed this scope's only command while ours was held.
+        seedCall("tc-taken", { toolName: "run_create", scopeId, status: "claimed", claimedAt: new Date().toISOString() }),
+      );
+      expect(res.json().calls).toEqual([]);
+      expect(rowOf("tc-a")).toMatchObject({ status: "rejected", error: "max_commands_reached", claimedAt: null });
+    });
+
+    it("control: a breaker whose cooldown elapsed lets its test command through (half-open is not open)", async () => {
+      seedCall("tc-a");
+      const gateway = getSafetyGateway();
+      gateway.resetCircuit(KERNEL);
+      for (let failure = 0; failure < 3; failure++) gateway.recordDeviceFailure(KERNEL);
+      // The cooldown is 60 s. Only the breaker's clock reads Date.now() here.
+      const realNow = Date.now.bind(Date);
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 61_000);
+      try {
+        const res = await poll();
+        expect(idsOf(res)).toEqual(["tc-a"]);
+        expect(rowOf("tc-a").status).toBe("claimed");
+      } finally {
+        clock.mockRestore();
       }
     });
   });

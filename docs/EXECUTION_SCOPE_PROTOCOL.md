@@ -178,11 +178,17 @@ only on its own kernel.
     command budget re-derived from the rows (so a legacy row admission never
     counted cannot exceed `maxCommands`), and pass the funding parity check;
   - then, at the dispatch site, the **physical-safety governor and circuit
-    breaker** are re-run (`validateOnly`) and the **emergency stop** is checked.
+    breaker** are re-run (`validateOnly`). The governor is async, and everything
+    above can change while it is awaited: a scope expires or is revoked, the
+    operator hits the emergency stop, a reported failure opens the breaker, a
+    concurrent poll takes the scope's last command. So once the governor has
+    answered, the checks above are run **again**, together with the
+    **emergency stop** and the breaker's state (a read that moves nothing), in
+    one synchronous step with no `await` before the claim. The call is claimed
+    only if every one still passes, and is otherwise rejected with the reason.
     A command admitted while the breaker was closed does not reach the device
-    after failures open it, and an engaged emergency stop blocks every dispatch:
-    the poll is withheld outright, and the stop is read again for each call
-    just before it is claimed (see Emergency Stop Integration).
+    after failures open it, and an engaged emergency stop blocks every dispatch
+    (see Emergency Stop Integration).
 
   A refused call is closed as `rejected` with its reason, so no later poll can
   claim it and it does not hold back the calls behind it. The reasons are
@@ -266,9 +272,14 @@ Executor polls GET /api/relay/:kernelId/tool-call/pending (operator only)
     ├── a write not in allowed tools, over the row-derived budget, or unfunded? → REJECTED
     ├── the safety governor/breaker denies? → REJECTED
     │      (the safety gateway being unavailable → stays queued)
-    ├── emergency stop engaged since the poll began (read after the safety check,
-    │      right before the claim)? → this call and every one behind it REJECTED
-    │      (policy turned unreadable → this call and the rest stay queued)
+    │
+    │  then, in ONE synchronous step with the claim (no await between), what can
+    │  have changed during the governor's await is checked again:
+    ├── emergency stop engaged now? → this call and every one behind it REJECTED
+    │      (policy unreadable now → this call and the rest stay queued)
+    ├── scope no longer active or expired, tool or budget no longer allowed,
+    │      escrow no longer funded? → REJECTED
+    ├── circuit breaker open now (a read that moves nothing)? → REJECTED
     │
     ▼
 CLAIMED → handed to the executor
@@ -349,10 +360,11 @@ kernel's stop as one of three states, and fails closed:
   predates the flag reads this as "nothing to do". `unavailable` answers 503
   `{"error": "policy_unavailable"}` and nothing is claimed, reclaimed or
   changed. Within a poll the stop is read again for each queued call, after the
-  call's safety check and immediately before its claim: a stop that lands during
-  the poll rejects the call being checked and every call behind it, and a policy
-  that turns unreadable mid-poll claims no further call (the rest stay queued).
-  Calls claimed earlier in the same poll are returned.
+  call's safety check and in the same synchronous step as its claim (see
+  Dispatch): a stop that lands during the poll rejects the call being checked
+  and every call behind it, and a policy that turns unreadable mid-poll claims
+  no further call (the rest stay queued). Calls claimed earlier in the same
+  poll are returned.
 - **Scope mint (`POST /scope`).** `stopped` answers 409
   `kernel_emergency_stopped`, `unavailable` answers 503 `policy_unavailable`,
   and no scope is written. A scope minted before the stop cannot queue a call

@@ -218,6 +218,21 @@ export class SafetyGateway {
   }
 
   /**
+   * Whether the device's breaker is OPEN right now. A look, not a gate: it moves
+   * nothing, unlike canExecute(), which takes an open breaker whose cooldown has
+   * elapsed to half_open. A half-open breaker is not open (its test command may
+   * run), and a device the breaker has never seen is not open.
+   *
+   * For a caller that validateOnly() has already admitted and that is about to
+   * act on the admission: validateOnly is async, device failures can be reported
+   * while it awaits, and this tells the caller, with no await, whether the
+   * breaker has opened since.
+   */
+  isCircuitOpen(deviceId: string): boolean {
+    return this.breaker.getDeviceState(deviceId) === "open";
+  }
+
+  /**
    * Record the REAL outcome of a device execution that ran OUTSIDE the gateway
    * (a fire-and-forget in-process runner, or a remote executor reporting via
    * the relay's POST /tool-result). Pair with validateOnly(): validateOnly

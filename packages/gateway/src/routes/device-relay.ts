@@ -361,9 +361,11 @@ function stopRefusal(reply: FastifyReply, state: Exclude<EmergencyStopState, "cl
  *     command budget re-derived from the rows (finding F3, so a legacy row
  *     admission never counted can't exceed maxCommands), and pass escrow parity.
  * Throws when the escrow lookup fails; the caller then leaves the call queued.
- * The physical-safety governor/breaker and the emergency stop are re-checked
- * separately, at the dispatch site (finding F1), because they are async and
- * time-varying.
+ * The poll runs this twice per call: before the safety governor is consulted,
+ * and again, in the same synchronous section as the claim, after the governor
+ * has answered, because the governor is async and everything here moves while
+ * it is awaited. The governor/breaker and the emergency stop are checked
+ * separately, at the dispatch site (finding F1).
  */
 function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: string): string | null {
   const safe = isToolSafe(deviceType, call.toolName);
@@ -842,8 +844,9 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       // after failures opened it. Fail closed: an open breaker or a governor
       // denial rejects the row; if the safety gateway can't be consulted, the
       // call is left queued (like an escrow-lookup failure) rather than
-      // dispatched. A stop engaged before this poll was answered above the
-      // loop; the read after this block covers one that lands during the await.
+      // dispatched. The governor is async, so what it was asked is stale by the
+      // time it answers: the use-time section after this block re-reads the
+      // time-varying checks before the claim.
       try {
         const gateway = getSafetyGateway();
         const verdict = await gateway.validateOnly({
@@ -873,23 +876,46 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         // we cannot clear. Leave the call queued for the next poll.
         continue;
       }
-      // The emergency stop, read again AFTER this row's last await and
-      // immediately before its claim, with no await between: a stop that landed
-      // while the governor was consulted is seen here, and no stop request can
-      // run between this read and the claim below.
-      //   - stopped: reject the row, as the entry check and the stop route do.
-      //   - unavailable: claim nothing more in this request. This row and every
-      //     later one stay pending; rows claimed earlier in the request are
-      //     returned as usual.
+      // ── Use time (N4b-gw r6, F1) ─────────────────────────────────────────
+      // Everything checked above was checked before, or while we awaited, the
+      // governor, and all of it moves in that window: a scope expires or is
+      // revoked, the operator hits the emergency stop, the breaker opens on a
+      // failure reported meanwhile, a concurrent poll claims the scope's last
+      // command. So what can change is read again here, in ONE synchronous
+      // section with no await between these reads and the claim below, and the
+      // row is claimed only if every one still passes. Nothing can run between
+      // the reads and the claim (better-sqlite3 is synchronous, Node is
+      // single-threaded), so a command the world no longer allows is never
+      // handed to the device.
+      //   - the emergency stop: stopped rejects the row. Unavailable claims
+      //     nothing more in this request: this row and every later one stay
+      //     pending, and rows claimed earlier in the request are returned.
+      //   - dispatchRefusal again: the scope's status, expiry and kernel, the
+      //     allowed tool, the row-derived command budget and funding. If its
+      //     escrow lookup throws, the row stays queued, as above.
+      //   - the circuit breaker, by a look that moves nothing (isCircuitOpen,
+      //     not canExecute): validateOnly consulted it before its await.
+      // A refusal closes the row as rejected with its reason, guarded on
+      // `pending` so a row some other path already closed keeps its own reason.
       const stop = emergencyStopState(kernelId);
-      if (stop === "stopped") {
+      if (stop === "unavailable") break;
+      let useRefusal: string | null;
+      try {
+        useRefusal =
+          stop === "stopped"
+            ? "emergency_stopped"
+            : (dispatchRefusal(call, deviceType) ??
+              (getSafetyGateway().isCircuitOpen(kernelId) ? "circuit_open" : null));
+      } catch {
+        continue;
+      }
+      if (useRefusal) {
         db.update(toolCallRelay)
-          .set({ status: "rejected", error: "emergency_stopped", completedAt: now })
+          .set({ status: "rejected", error: useRefusal, completedAt: now })
           .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
           .run();
         continue;
       }
-      if (stop === "unavailable") break;
       // Atomic, EXCLUSIVE claim (findings F1/F2): claim the row only if it is
       // still `pending`. This is a compare-and-set — SQLite runs it as one
       // statement — so (a) two concurrent polls cannot both take the same row
