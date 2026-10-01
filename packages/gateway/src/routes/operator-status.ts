@@ -230,7 +230,7 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
       return reply
         .status(200)
         // N84: the channels in the body are the caller's own, so no shared cache may keep or serve it.
-        .header("cache-control", "private, max-age=15")
+        .header("cache-control", "private, no-store") // per-caller body (own channels; admin sees all): never stored, so a session switch in one browser cannot reuse it (astra pack 146)
         .send(body);
     },
   );
