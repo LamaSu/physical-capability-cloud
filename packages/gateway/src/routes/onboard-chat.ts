@@ -988,8 +988,13 @@ async function dispatchToolCall(
  * of a field name matches every field with that prefix. Anything else that looks
  * like a secret (a key planted in a listing, a hash, a token address) is redacted
  * and never revealed.
+ *
+ * Exported for one reader: the purge runbook's test (docs/security/ONBOARD_CHAT_SECRET_PURGE.md).
+ * Every field named here is a credential the chat can mint, so a legacy transcript
+ * holding it must be reported by the runbook's inventory; a new entry that the
+ * inventory does not know fails that test (astra pack 91b F4).
  */
-const REVEAL_RULES: Array<{ tool: string; method: string; path: string; fields: string[][] }> = [
+export const REVEAL_RULES: ReadonlyArray<{ tool: string; method: string; path: string; fields: string[][] }> = [
   {
     tool: "provision_api_key",
     method: "POST",
