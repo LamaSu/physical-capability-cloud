@@ -358,7 +358,7 @@ export function isInterimNonce(body: FinalMilestonePackageV2Body): boolean {
 }
 
 // ── Signature entries ───────────────────────────────────────────────────────
-// Moved here unchanged from package-digest-v2.ts, which re-exports them, so that
+// These live here, and package-digest-v2.ts re-exports them, so that
 // packageDigestV2 can call validatePackageBody without an import cycle.
 
 /**
@@ -534,9 +534,12 @@ export class PackageNotMintableError extends Error {
 
 /**
  * The frozen signer profile, under the self-describing scheme labels that the
- * evidence schema §3 and the packageDigestV2 golden use. The label is inside
- * the hashed signature entries, so producer and verifiers need one string, and
- * a bare "secp256k1" would not say raw, EIP-191 or EIP-712:
+ * evidence schema §3 uses. The label is inside the hashed signature entries, so
+ * producer and verifiers need one string, and a bare "secp256k1" would not say
+ * raw, EIP-191 or EIP-712. (The published golden's SAMPLE signature set still
+ * carries the bare labels "secp256k1" and "ed25519", with a 40-digit "ed25519"
+ * signer: it is a digest vector, never a mintable set, which is why this profile
+ * is enforced here and not by `packageDigestV2`.)
  *   D1 "secp256k1-eip712" = the operator's EIP-712 signature (signer = 0x +
  *      40-hex address, 65-byte signature);
  *   D2 "ed25519-raw32" = the kernel's ed25519 signature over the raw 32 bytes

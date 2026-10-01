@@ -51,9 +51,11 @@
  * KNOWN DIVERGENCE FROM RFC 8785 (documented, not silently accepted): the
  * shared canonicalizer serializes numbers with `String(value)`, which is not
  * RFC 8785's number serialization. For integer and string payloads the two
- * agree. If a package body ever carries a non-integer number, this must be
- * re-confirmed against the oracle before it is trusted. `assertNoFloats` below
- * makes that failure loud instead of silent.
+ * agree. A validated package body is all strings (`validatePackageBody` refuses a
+ * JS number in any scalar slot), so the divergence cannot be reached today. If the
+ * schema ever carries a non-integer number, this must be re-confirmed against the
+ * oracle before it is trusted, and `assertCanonicalizable` below, which runs on the
+ * object about to be hashed, makes that failure loud instead of silent.
  */
 
 import { createHash } from "node:crypto";
