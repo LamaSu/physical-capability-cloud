@@ -29,6 +29,7 @@ import { composeRoutes, _clearComposeForTests, _registerCandidateForTests } from
 import { graphSearchRoutes, _clearGraphSearchForTests, _seedGraphSearchForTests } from "../routes/graph-search.js";
 import { nlQueryRoutes } from "../routes/nl-query.js";
 import { operatorStatusRoutes } from "../routes/operator-status.js";
+import { requestRoutes, _setLLMClientForTests } from "../routes/requests.js";
 import {
   kernelMarketplaceRoutes,
   _clearKernelRegistry,
@@ -65,6 +66,8 @@ interface Fx {
   claim: number;
   /** min(normalizeClaim(claim), authorized ceiling): what contracting accepts. */
   expected: Tier;
+  /** The capability type. A distinctive word: the request matcher matches tokens on a shared 4-character prefix. */
+  word: string;
   kernelId: string;
   capType: string;
   capId: string;
@@ -73,13 +76,13 @@ interface Fx {
 }
 
 const FIXTURE_SPECS: Array<Omit<Fx, "kernelId" | "capType" | "capId" | "graphType" | "candidateType">> = [
-  { label: "proven (ceiling 3), claims 1 (astra's case)", fields: TRUSTED_KERNEL_FIELDS, claim: 1, expected: 1 },
-  { label: "proven (ceiling 3), claims 2", fields: TRUSTED_KERNEL_FIELDS, claim: 2, expected: 2 },
-  { label: "proven (ceiling 3), claims 3 (control: the claim column is read)", fields: TRUSTED_KERNEL_FIELDS, claim: 3, expected: 3 },
-  { label: "proven (ceiling 3), claims 0", fields: TRUSTED_KERNEL_FIELDS, claim: 0, expected: 0 },
-  { label: "proven (ceiling 3), malformed claim 7", fields: TRUSTED_KERNEL_FIELDS, claim: 7, expected: 0 },
-  { label: "signed but fresh (ceiling 1), claims 3 (the ceiling binds)", fields: SIGNED_FRESH_KERNEL_FIELDS, claim: 3, expected: 1 },
-  { label: "unsigned (ceiling 0), claims 3", fields: UNSIGNED_KERNEL_FIELDS, claim: 3, expected: 0 },
+  { label: "proven (ceiling 3), claims 1 (astra's case)", fields: TRUSTED_KERNEL_FIELDS, claim: 1, expected: 1, word: "alphaq" },
+  { label: "proven (ceiling 3), claims 2", fields: TRUSTED_KERNEL_FIELDS, claim: 2, expected: 2, word: "bravoq" },
+  { label: "proven (ceiling 3), claims 3 (control: the claim column is read)", fields: TRUSTED_KERNEL_FIELDS, claim: 3, expected: 3, word: "charlq" },
+  { label: "proven (ceiling 3), claims 0", fields: TRUSTED_KERNEL_FIELDS, claim: 0, expected: 0, word: "deltaq" },
+  { label: "proven (ceiling 3), malformed claim 7", fields: TRUSTED_KERNEL_FIELDS, claim: 7, expected: 0, word: "echoqq" },
+  { label: "signed but fresh (ceiling 1), claims 3 (the ceiling binds)", fields: SIGNED_FRESH_KERNEL_FIELDS, claim: 3, expected: 1, word: "foxtrq" },
+  { label: "unsigned (ceiling 0), claims 3", fields: UNSIGNED_KERNEL_FIELDS, claim: 3, expected: 0, word: "golfqq" },
 ];
 
 let fixtures: Fx[] = [];
@@ -91,7 +94,7 @@ function pricing() {
 /** Seed one kernel with its listing on every surface (all claiming tier 3). */
 function seedFixture(spec: (typeof FIXTURE_SPECS)[number]): Fx {
   const kernelId = uid("kernel-f1");
-  const capType = uid("f1-cap");
+  const capType = spec.word;
   const fx: Fx = {
     ...spec,
     kernelId,
@@ -106,7 +109,10 @@ function seedFixture(spec: (typeof FIXTURE_SPECS)[number]): Fx {
     id: fx.capId,
     kernelId,
     type: capType,
-    name: `F1 ${capType}`,
+    // "cnc" puts the listing in the fabrication domain of the request decomposer,
+    // whose evidence depth is tier-dependent: completion_event from tier 1,
+    // inspection_report from tier 2, multi_verifier_attestation at tier 3.
+    name: `F1 cnc ${capType}`,
     description: "",
     materials: [],
     assuranceTiers: [0, 1, 2, 3],
@@ -243,6 +249,34 @@ async function operatorStatusMax(fx: Fx): Promise<number> {
   return maxOf(cap?.assuranceTiers);
 }
 
+/**
+ * The request matcher (POST /api/requests, agentic decomposition with a stub
+ * planner): the matched node's evidence depth is derived from the SERVED max
+ * tier of the matched listing, so it reveals the tier the matcher saw.
+ */
+async function requestsMax(fx: Fx): Promise<number> {
+  _setLLMClientForTests({
+    planSteps: async () => [
+      { name: "Make it", description: "make it", searchQuery: fx.capType, capabilityTypeHint: fx.capType, kind: "make" as const },
+    ],
+  });
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/requests",
+      headers: asOwner(),
+      payload: { title: `f1 request ${fx.capType}`, description: `f1 ${fx.capType}` },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    const node = res.json().decomposition.nodes[0] as { matchedCapabilityId?: string; evidenceRequirements: string[] };
+    expect(node.matchedCapabilityId, JSON.stringify(node)).toBe(fx.capId);
+    const ev = node.evidenceRequirements;
+    return ev.includes("multi_verifier_attestation") ? 3 : ev.includes("inspection_report") ? 2 : ev.includes("completion_event") ? 1 : 0;
+  } finally {
+    _setLLMClientForTests(undefined);
+  }
+}
+
 /** Register and verify a digital-kernel manifest claiming tier 3 for the fixture's kernel, then read its served tier. */
 async function marketplaceMax(fx: Fx): Promise<number> {
   const manifest = {
@@ -289,6 +323,7 @@ beforeAll(async () => {
   await app.register(graphSearchRoutes);
   await app.register(nlQueryRoutes);
   await app.register(operatorStatusRoutes);
+  await app.register(requestRoutes);
   await app.register(kernelMarketplaceRoutes);
   await app.ready();
 });
@@ -391,6 +426,7 @@ describe("every discovery and selection surface serves min(claim, authorized cei
     { name: "the graph fallback of /api/compose", measure: (fx) => composeMax(fx.graphType, true) },
     { name: "the natural-language query (find_capability)", measure: nlMax },
     { name: "operator status (GET /api/operators/:slug/status)", measure: operatorStatusMax },
+    { name: "the request matcher (POST /api/requests, evidence depth)", measure: requestsMax },
     { name: "the kernel marketplace manifest", measure: marketplaceMax },
   ];
 
