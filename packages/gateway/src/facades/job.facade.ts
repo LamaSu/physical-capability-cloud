@@ -26,6 +26,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { redactDiagnostic } from "../redaction.js";
 import {
   populateDeviceRegistrationDTO,
   type DeviceRegistrationDTO,
@@ -461,7 +462,11 @@ export class JobFacade extends BaseFacade {
         // non-fatal
       }
 
-      return { healthy: result.healthy, details: result.details ?? null };
+      // Scrubbed here as well as in the service: this is what leaves the API (N71).
+      return {
+        healthy: result.healthy,
+        details: typeof result.details === "string" ? redactDiagnostic(result.details) : (result.details ?? null),
+      };
     });
   }
 
