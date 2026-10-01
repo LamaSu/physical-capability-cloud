@@ -20,10 +20,18 @@ import {
   type IntakeFieldDef,
   type IntakeMilestone,
 } from "./fields.js";
+import { scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
 
 export * from "./fields.js";
 export * from "./json-schema.js";
 export * from "./form-html.js";
+export {
+  INTAKE_SECRET_KINDS,
+  redactIntakeSecrets,
+  scanIntakeStrings,
+  type IntakeSecretHit,
+  type IntakeSecretKind,
+} from "./secret-scan.js";
 
 // ── Answer + record shapes ──────────────────────────────────────────────
 
@@ -90,6 +98,10 @@ export interface IntakeValidationReport {
   sensitiveViolations: string[];
   /** Keys in `record.answers` that are not a known INTAKE_FIELD_IDS entry. */
   unknownFields: string[];
+  /** Where a string anywhere in the record matches a secret/sensitive-value
+   *  detector (`scanIntakeStrings`): `{path, kind}` only, never the text. A
+   *  record with a hit is not ok — reject it, do not store or log it. */
+  secretsInText: IntakeSecretHit[];
 }
 
 const FIELD_INDEX: ReadonlyMap<string, IntakeFieldDef> = new Map(
@@ -161,6 +173,7 @@ export function validateIntake(
   const forbiddenKeyHits = new Set<string>();
   const sensitiveViolations = new Set<string>();
   const unknownFields = new Set<string>();
+  const secretsInText = scanIntakeStrings(record);
 
   for (const [fieldId, answer] of Object.entries(record.answers)) {
     const field = FIELD_INDEX.get(fieldId);
@@ -211,12 +224,14 @@ export function validateIntake(
       neverDefaultList.length === 0 &&
       forbiddenKeys.length === 0 &&
       sensitiveList.length === 0 &&
-      unknownList.length === 0,
+      unknownList.length === 0 &&
+      secretsInText.length === 0,
     missing,
     neverDefaultViolations: neverDefaultList,
     forbiddenKeys,
     sensitiveViolations: sensitiveList,
     unknownFields: unknownList,
+    secretsInText,
   };
 }
 

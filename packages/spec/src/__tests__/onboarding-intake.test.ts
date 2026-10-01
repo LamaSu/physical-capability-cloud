@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,9 +19,14 @@ import {
   validateIntake,
   executionModeTierCap,
   intakeFieldArtifactMap,
+  scanIntakeStrings,
+  redactIntakeSecrets,
+  INTAKE_SECRET_KINDS,
   type IntakeAnswer,
   type IntakeRecord,
+  type IntakeSecretKind,
 } from "../onboarding/intake/index.js";
+import { BIP39_ENGLISH_WORDLIST } from "../onboarding/intake/bip39-english.js";
 import { getPrimitive } from "../evidence/primitives.js";
 import { RESEARCH_LIBRARY } from "../onboarding/research/index.js";
 
@@ -817,5 +823,373 @@ describe("safety.commandRate (sensors #4254)", () => {
     expect(f.requiredFor).toContain("accept-jobs");
     expect(f.valueSchema.safeParse(60).success).toBe(true);
     for (const bad of [0, -1, 2.5, "60", null]) expect(f.valueSchema.safeParse(bad).success, String(bad)).toBe(false);
+  });
+});
+
+// ── 11. Secret and sensitive-value scan (astra 120b, finding 1) ──────────
+// Fake secrets are assembled at runtime from pieces, so no literal in this file
+// is itself a secret-shaped string.
+
+const FAKE = {
+  pem: "-----BEGIN " + "PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END " + "PRIVATE KEY-----",
+  stripeLive: "sk_" + "live_" + "A1b2C3d4E5f6G7h8I9",
+  stripeRestricted: "rk_" + "live_" + "A1b2C3d4E5f6G7h8I9",
+  anthropic: "sk-" + "ant-" + "api03-" + "x".repeat(24),
+  openaiStyle: "sk" + "-" + "Ab12".repeat(10),
+  awsAccessKeyId: "AK" + "IA" + "ABCDEFGHIJKLMNOP",
+  googleApiKey: "AI" + "za" + "x".repeat(35),
+  slack: "xo" + "xb-" + "1234567890-abcdefghij",
+  githubClassic: "gh" + "p_" + "a".repeat(36),
+  githubFineGrained: "github" + "_pat_" + "A1".repeat(20),
+  pccLive: "pcc_" + "live_" + "A1b2C3d4E5f6G7h8I9",
+  pccOracle: "pcc_" + "oracle_" + "A1b2C3d4E5f6G7h8I9",
+  pccTest: "pcc_" + "test_" + "A1b2C3d4E5f6G7h8I9",
+  jwt: ["ey" + "JhbGciOiJIUzI1NiJ9", "ey" + "JzdWIiOiJ4eHh4eHgifQ", "sig" + "nature12345"].join("."),
+  hex64: "ab".repeat(32),
+  hex64Prefixed: "0x" + "AB".repeat(32),
+  address: "0x" + "282Fa9C122b433864f8C8a8F2EfE411b52067539",
+  mnemonic12: BIP39_ENGLISH_WORDLIST.slice(100, 112).join(" "),
+  street: "1600 Pennsylvania Avenue",
+};
+
+function withAnswer(id: string, answer: unknown): IntakeRecord {
+  const record = buildFullValidRecord();
+  return { schema: record.schema, answers: { ...record.answers, [id]: answer as IntakeAnswer } };
+}
+
+/** `scanIntakeStrings` over one description answer, reduced to its kinds. */
+function kindsIn(text: string): IntakeSecretKind[] {
+  return scanIntakeStrings({ answers: { "device.description": { value: text } } }).map((h) => h.kind);
+}
+
+describe("BIP-39 English wordlist data", () => {
+  it("has 2048 words and matches the published english.txt sha256", () => {
+    expect(BIP39_ENGLISH_WORDLIST).toHaveLength(2048);
+    expect(Object.isFrozen(BIP39_ENGLISH_WORDLIST)).toBe(true);
+    const digest = createHash("sha256")
+      .update(BIP39_ENGLISH_WORDLIST.join("\n") + "\n")
+      .digest("hex");
+    expect(digest).toBe("2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda");
+  });
+});
+
+describe("scanIntakeStrings — one detector per kind", () => {
+  it.each([
+    ["pem", FAKE.pem],
+    ["vendor-key", FAKE.stripeLive],
+    ["vendor-key", FAKE.stripeRestricted],
+    ["vendor-key", FAKE.anthropic],
+    ["vendor-key", FAKE.openaiStyle],
+    ["vendor-key", FAKE.awsAccessKeyId],
+    ["vendor-key", FAKE.googleApiKey],
+    ["vendor-key", FAKE.slack],
+    ["vendor-key", FAKE.githubClassic],
+    ["vendor-key", FAKE.githubFineGrained],
+    ["vendor-key", FAKE.pccLive],
+    ["vendor-key", FAKE.pccOracle],
+    ["vendor-key", FAKE.pccTest],
+    ["vendor-key", FAKE.jwt],
+    ["hex-secret", FAKE.hex64],
+    ["hex-secret", FAKE.hex64Prefixed],
+    ["payout-address", FAKE.address],
+    ["mnemonic", FAKE.mnemonic12],
+    ["street-address", FAKE.street],
+  ] as const)("flags %s", (kind, secret) => {
+    expect(kindsIn(`note: ${secret} end`)).toEqual([kind]);
+  });
+
+  it("covers exactly the six kinds, each exercised above", () => {
+    expect([...INTAKE_SECRET_KINDS]).toEqual([
+      "pem",
+      "vendor-key",
+      "hex-secret",
+      "payout-address",
+      "mnemonic",
+      "street-address",
+    ]);
+  });
+
+  it("near misses are not flagged (boundaries are real)", () => {
+    const nearMisses = [
+      "-----BEGIN-----", // no label
+      "sk_" + "live_" + "short", // below the minimum length
+      "AK" + "IA" + "ABCDEFGHIJKLMNO", // 15 chars after the prefix
+      "ab".repeat(31) + "a", // 63 hex
+      "ab".repeat(33), // 66 hex: not a whole 64-hex token
+      "0x" + "ab".repeat(19) + "a", // 39 hex digits
+      "0x" + "ab".repeat(21), // 42 hex digits
+      BIP39_ENGLISH_WORDLIST.slice(100, 111).join(" "), // 11 words
+      "3 drive bays",
+      "4 way valve",
+      "A desktop FDM 3D printer for PLA/PETG prototypes.",
+      "Prusa bed-leveling procedure v2",
+    ];
+    for (const text of nearMisses) expect(kindsIn(text), text).toEqual([]);
+  });
+
+  it("a 64-hex token does not also report its first 40 digits as a payout address", () => {
+    expect(kindsIn(`0x${"ab".repeat(32)}`)).toEqual(["hex-secret"]);
+  });
+
+  it("one string can carry several kinds, reported once each", () => {
+    expect(kindsIn(`${FAKE.pem} ${FAKE.hex64} ${FAKE.address} ${FAKE.hex64}`)).toEqual([
+      "pem",
+      "hex-secret",
+      "payout-address",
+    ]);
+  });
+});
+
+describe("scanIntakeStrings — mnemonic runs", () => {
+  const words = (from: number, count: number): string[] => BIP39_ENGLISH_WORDLIST.slice(from, from + count);
+
+  it("is deliberately broader than checksum-valid: any 12 listed words are flagged", () => {
+    // The first twelve words of the list in order are not a valid BIP-39 phrase.
+    expect(kindsIn(words(0, 12).join(" "))).toEqual(["mnemonic"]);
+  });
+
+  it("is case-insensitive and ignores digits, punctuation and line breaks between words", () => {
+    expect(kindsIn(words(200, 12).join(" ").toUpperCase())).toEqual(["mnemonic"]);
+    expect(kindsIn(words(200, 12).join(", "))).toEqual(["mnemonic"]);
+    expect(kindsIn(words(200, 12).map((w, i) => `${i + 1}. ${w}`).join("\n"))).toEqual(["mnemonic"]);
+  });
+
+  it("needs 12 CONSECUTIVE listed words: a non-listed word splits the run", () => {
+    const split = [...words(300, 6), "printer", ...words(306, 6)].join(" ");
+    expect(kindsIn(split)).toEqual([]);
+    expect(kindsIn([...words(300, 12), "printer", ...words(312, 11)].join(" "))).toEqual(["mnemonic"]);
+  });
+
+  it("flags a longer run once", () => {
+    expect(kindsIn(words(400, 24).join(" "))).toEqual(["mnemonic"]);
+  });
+});
+
+describe("scanIntakeStrings — street-address heuristic", () => {
+  it.each([
+    "1600 Pennsylvania Avenue",
+    "221B Baker Street",
+    "350 5th Avenue",
+    "12-14 Main St.",
+    "123 N. Main St",
+    "123 MAIN STREET",
+    "10 Downing Street",
+    "9 Old Mill Road",
+  ])("flags %s", (address) => {
+    expect(kindsIn(`ships to ${address}, thanks`)).toEqual(["street-address"]);
+  });
+
+  it("is case-sensitive on the capitals and needs a street type", () => {
+    for (const text of ["3 drive bays", "4 way valve", "12 steps to the Court", "100 Mile House", "2 Print Shops"]) {
+      expect(kindsIn(text), text).toEqual([]);
+    }
+  });
+
+  it("cannot trip on a city and country (location.cityCountry is applied the same way)", () => {
+    const places = [
+      ["Austin", "US"],
+      ["Sao Paulo", "BR"],
+      ["St. Louis", "US"],
+      ["Port St Lucie", "US"],
+      ["100 Mile House", "CA"],
+      ["Winston-Salem", "US"],
+      ["Ho Chi Minh City", "VN"],
+      ["29 Palms", "US"],
+      ["Washington, D.C.", "US"],
+      ["Kuala Lumpur", "MY"],
+    ] as const;
+    for (const [city, country] of places) {
+      const hits = scanIntakeStrings({ answers: { "location.cityCountry": { value: { city, country } } } });
+      expect(hits, `${city}, ${country}`).toEqual([]);
+    }
+  });
+
+  it("does catch a street address written into the public city field", () => {
+    expect(
+      scanIntakeStrings({ answers: { "location.cityCountry": { value: { city: FAKE.street, country: "US" } } } }),
+    ).toEqual([{ path: "answers/location.cityCountry/value/city", kind: "street-address" }]);
+  });
+});
+
+describe("scanIntakeStrings — walking and paths", () => {
+  it("walks nested objects, arrays and sources and reports JSON-pointer-like paths", () => {
+    const hits = scanIntakeStrings({
+      schema: "pcc.device-intake.v1",
+      answers: {
+        "evidence.referenceSample": { value: { available: true, expectedResultRef: FAKE.hex64 }, provenance: "human" },
+        "consumables.items": { value: ["PLA filament", FAKE.address], provenance: "human" },
+        "calibration.procedureRef": {
+          value: "ok",
+          provenance: "confirmed",
+          source: { doc: FAKE.pccLive, section: "specs" },
+        },
+      },
+    });
+    expect(hits).toEqual([
+      { path: "answers/evidence.referenceSample/value/expectedResultRef", kind: "hex-secret" },
+      { path: "answers/consumables.items/value/1", kind: "payout-address" },
+      { path: "answers/calibration.procedureRef/source/doc", kind: "vendor-key" },
+    ]);
+  });
+
+  it("returns nothing for clean input, non-string leaves and non-objects", () => {
+    expect(scanIntakeStrings(buildFullValidRecord())).toEqual([]);
+    expect(scanIntakeStrings(null)).toEqual([]);
+    expect(scanIntakeStrings(undefined)).toEqual([]);
+    expect(scanIntakeStrings(42)).toEqual([]);
+    expect(scanIntakeStrings({ n: 1, b: true, z: null, u: undefined })).toEqual([]);
+  });
+
+  it("scans a bare string at the root, with an empty path", () => {
+    expect(scanIntakeStrings(FAKE.hex64)).toEqual([{ path: "", kind: "hex-secret" }]);
+  });
+
+  it("does not scan object KEYS", () => {
+    expect(scanIntakeStrings({ [FAKE.stripeLive]: "harmless" })).toEqual([]);
+  });
+
+  it("never returns the matched text, not even through a key in the path", () => {
+    const tree = { answers: { [FAKE.stripeLive]: { value: FAKE.pem, other: FAKE.address } } };
+    const hits = scanIntakeStrings(tree);
+    expect(hits.map((h) => h.kind)).toEqual(["pem", "payout-address"]);
+    const out = JSON.stringify(hits);
+    for (const secret of Object.values(FAKE)) expect(out).not.toContain(secret);
+    expect(hits[0]!.path).toBe("answers/[redacted:vendor-key]/value");
+  });
+
+  it("escapes pointer characters and writes non-ASCII key characters as \\u{hex}", () => {
+    const lookalike = "priv" + String.fromCodePoint(0x430) + "te";
+    const hits = scanIntakeStrings({ "a/b~c": { [lookalike]: FAKE.hex64 } });
+    expect(hits).toEqual([{ path: "a~1b~0c/priv\\u{430}te", kind: "hex-secret" }]);
+  });
+
+  it("terminates on a cyclic structure and on very deep nesting", () => {
+    const cyclic: Record<string, unknown> = { text: FAKE.hex64 };
+    cyclic.self = cyclic;
+    expect(scanIntakeStrings(cyclic)).toEqual([{ path: "text", kind: "hex-secret" }]);
+
+    let deep: unknown = FAKE.address;
+    for (let i = 0; i < 100000; i++) deep = [deep];
+    expect(scanIntakeStrings(deep)).toHaveLength(1);
+  });
+});
+
+describe("redactIntakeSecrets — for logs only", () => {
+  const record = (): IntakeRecord =>
+    withAnswer("device.description", human(`key ${FAKE.pem} and ${FAKE.hex64} at ${FAKE.street}`));
+
+  it("replaces every hit with [redacted:<kind>] in a deep copy and leaves the input alone", () => {
+    const input = record();
+    const before = JSON.stringify(input);
+    const out = redactIntakeSecrets(input);
+    expect(JSON.stringify(input)).toBe(before);
+    expect(out).not.toBe(input);
+    expect(out.answers["device.description"]!.value).toBe(
+      "key [redacted:pem] and [redacted:hex-secret] at [redacted:street-address]",
+    );
+    expect(scanIntakeStrings(out)).toEqual([]);
+    for (const secret of Object.values(FAKE)) expect(JSON.stringify(out)).not.toContain(secret);
+  });
+
+  it("keeps the shape, copies clean fields unchanged, and is idempotent", () => {
+    const out = redactIntakeSecrets(record());
+    expect(Object.keys(out.answers).sort()).toEqual([...INTAKE_FIELD_IDS]);
+    expect(out.answers["operator.displayName"]).toEqual(buildFullValidRecord().answers["operator.displayName"]);
+    expect(redactIntakeSecrets(out)).toEqual(out);
+  });
+
+  it("removes a whole PEM block through its footer, not only the header", () => {
+    const out = redactIntakeSecrets({ v: `before ${FAKE.pem} after` });
+    expect(out.v).toBe("before [redacted:pem] after");
+  });
+
+  it("redacts a PEM block with no footer through the end of the string", () => {
+    const header = "-----BEGIN " + "PRIVATE KEY-----";
+    expect(redactIntakeSecrets({ v: `${header}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC` }).v).toBe("[redacted:pem]");
+  });
+
+  it("renames a key that is itself a secret, keeping keys distinct, and keeps __proto__ as data", () => {
+    const hostile = JSON.parse(`{"__proto__": {"polluted": "yes"}, "ok": "fine"}`) as Record<string, unknown>;
+    const out = redactIntakeSecrets({ [FAKE.stripeLive]: 1, [FAKE.stripeRestricted]: 2, hostile }) as Record<string, unknown>;
+    expect(Object.keys(out)).toEqual(["[redacted:vendor-key]", "[redacted:vendor-key]-2", "hostile"]);
+    const copy = out.hostile as Record<string, unknown>;
+    expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
+    expect(Object.keys(copy)).toEqual(["__proto__", "ok"]);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("copies primitives, null and shared/cyclic references without looping", () => {
+    expect(redactIntakeSecrets(5)).toBe(5);
+    expect(redactIntakeSecrets(null)).toBeNull();
+    const cyclic: Record<string, unknown> = { text: FAKE.hex64 };
+    cyclic.self = cyclic;
+    const out = redactIntakeSecrets(cyclic);
+    expect(out.text).toBe("[redacted:hex-secret]");
+    expect(out.self).toBe(out);
+  });
+});
+
+describe("validateIntake — secrets in any string (astra 120b, finding 1)", () => {
+  it("a clean record has no secretsInText", () => {
+    expect(validateIntake(buildFullValidRecord(), "identify").secretsInText).toEqual([]);
+  });
+
+  it.each([
+    ["pem", FAKE.pem],
+    ["vendor-key", FAKE.anthropic],
+    ["hex-secret", FAKE.hex64Prefixed],
+    ["payout-address", FAKE.address],
+    ["mnemonic", FAKE.mnemonic12],
+    ["street-address", FAKE.street],
+  ] as const)("a %s in device.description makes the report not ok and is listed by path and kind only", (kind, secret) => {
+    const report = validateIntake(withAnswer("device.description", human(`A printer. ${secret}`)), "identify");
+    expect(report.ok).toBe(false);
+    expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind }]);
+    expect(JSON.stringify(report)).not.toContain(secret);
+  });
+
+  it("also catches a secret in a nested value, in a source, and in a field with no free-text schema", () => {
+    const nested = withAnswer(
+      "evidence.referenceSample",
+      human({ available: true, expectedResultRef: FAKE.hex64 }),
+    );
+    expect(validateIntake(nested, "register").secretsInText).toEqual([
+      { path: "answers/evidence.referenceSample/value/expectedResultRef", kind: "hex-secret" },
+    ]);
+
+    const sourced = withAnswer("calibration.procedureRef", {
+      value: "Prusa bed-leveling procedure v2",
+      provenance: "confirmed",
+      source: { doc: "manual", section: FAKE.pccLive },
+    });
+    expect(validateIntake(sourced, "register").secretsInText).toEqual([
+      { path: "answers/calibration.procedureRef/source/section", kind: "vendor-key" },
+    ]);
+
+    const city = withAnswer("location.cityCountry", human({ city: FAKE.street, country: "US" }));
+    const report = validateIntake(city, "register");
+    expect(report.ok).toBe(false);
+    expect(report.secretsInText).toEqual([{ path: "answers/location.cityCountry/value/city", kind: "street-address" }]);
+  });
+});
+
+describe("astra pack 120b", () => {
+  it("baseline: the full fixture is ok for identify (else the cases below prove nothing)", () => {
+    expect(validateIntake(buildFullValidRecord(), "identify").ok).toBe(true);
+  });
+
+  it("CRITICAL 1a: a PEM private key in device.description is refused", () => {
+    expect(validateIntake(withAnswer("device.description", human(FAKE.pem)), "identify").ok).toBe(false);
+  });
+  it("CRITICAL 1b: a 64-hex secret candidate in device.description is refused", () => {
+    expect(validateIntake(withAnswer("device.description", human("key 0x" + "ab".repeat(32))), "identify").ok).toBe(false);
+  });
+  it("CRITICAL 1c: a payout address in device.description is refused", () => {
+    expect(validateIntake(withAnswer("device.description", human("pay " + FAKE.address)), "identify").ok).toBe(false);
+  });
+  it("CRITICAL 1d: a street address in device.description is refused", () => {
+    expect(
+      validateIntake(withAnswer("device.description", human("Printer lives at 1600 Pennsylvania Avenue")), "identify").ok,
+    ).toBe(false);
   });
 });
