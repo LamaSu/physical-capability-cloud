@@ -737,7 +737,8 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
   //   - the authenticated actor must own `kernelId` (requireKernelOwner:
   //     401 / 404 / 403 not_kernel_owner), checked before anything is written;
   //   - the stored `operatorAddress` is that actor, never a body value.
-  // The claimed tier is stored as given; searches serve it clamped.
+  // The claimed tier is stored as given; searches serve it clamped, and so does
+  // the response (`assuranceTier` served, `claimedAssuranceTier` the raw claim).
   app.post("/api/capabilities/graph/_dev/register-node", async (req, reply) => {
     if (!requireDevOrAdmin(req, reply)) return reply;
     // Steward rule 7: a PRESENT actor before body validation or any lookup.
@@ -753,7 +754,16 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
     }
     if (!(await requireOwnerOf(actor, reply, parsed.data.kernelId))) return reply;
     const node = upsertNode({ ...parsed.data, operatorAddress: actor });
-    return reply.status(201).send({ ok: true, node });
+    // The response serves the node the way every search will (astra pack 90
+    // F2): `assuranceTier` is the claim capped at the kernel's served ceiling,
+    // from the same helper searches use, and the raw claim stays visible under
+    // its own name. The STORED node keeps the raw claim; only what is served
+    // is capped.
+    const [served] = withServedTiers([node]);
+    return reply.status(201).send({
+      ok: true,
+      node: { ...served, claimedAssuranceTier: node.assuranceTier },
+    });
   });
 
   // ── POST /api/capabilities/graph/_dev/register-edge ──────────────────────
