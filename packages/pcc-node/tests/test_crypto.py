@@ -889,7 +889,7 @@ class TestA02dMountsAndScrubbing:
             m = real_mount_of(fd)
             st = real_fstat(fd)
             if (st.st_dev, st.st_ino) == alias_id:
-                return {"id": "alias-of-root", "root": "/", "fstype": "ext4", "super": "rw"}
+                return {"id": "alias-of-root", "devno": "0:999", "root": "/", "mountpoint": str(alias), "fstype": "ext4", "source": "/dev/alias", "super": "rw"}
             return m
 
         monkeypatch.setattr(crypto_module.os, "fstat", fstat)
@@ -907,7 +907,7 @@ class TestA02dMountsAndScrubbing:
             m = real(fd)
             st = os.fstat(fd)
             if (st.st_dev, st.st_ino) == keys_id:
-                return {"id": "bind-1", "root": "/home/dev/repo/keys", "fstype": "ext4", "super": "rw"}
+                return {"id": "bind-1", "devno": "8:1", "root": "/home/dev/repo/keys", "mountpoint": str(keys), "fstype": "ext4", "source": "/dev/sda1", "super": "rw"}
             return m
 
         monkeypatch.setattr(crypto_module, "_mount_of", mount_of)
@@ -964,3 +964,77 @@ class TestA02dMountsAndScrubbing:
         else:
             assert left.strip(b"\0") == b"", "the secret was not overwritten"
             assert "emptied first" in str(refused.value)
+
+
+@needs_nacl
+class TestA02eAliasesUnionsAndCleanup:
+    """A02e: other mount-visible names are walked too, union filesystems are refused, mountinfo is strict, cleanup always ends."""
+
+    @staticmethod
+    def _record(mid, devno, root, mountpoint, fstype="ext4", source="/dev/sda1", sup="rw"):
+        return {"id": mid, "devno": devno, "root": root, "mountpoint": mountpoint, "fstype": fstype, "source": source, "super": sup}
+
+    def test_every_other_mount_of_the_same_filesystem_is_an_alias(self):
+        r = self._record
+        # a tmpfs mounted at /repo/storage and its whole root bound onto /outside (the reviewer's case)
+        mine = r("2", "0:50", "/", "/outside", "tmpfs", "tmpfs")
+        mounts = [r("1", "8:1", "/", "/"), mine, r("3", "0:50", "/", "/repo/storage", "tmpfs", "tmpfs")]
+        assert crypto_module._alias_paths("/keys", mine, mounts) == ["/repo/storage/keys"]
+        # the same ext4 filesystem mounted whole twice
+        mine = r("5", "8:2", "/", "/data")
+        assert crypto_module._alias_paths("/node/keys", mine, [mine, r("6", "8:2", "/", "/srv/repo/data")]) == ["/srv/repo/data/node/keys"]
+        # a btrfs subvolume, also visible through the top level mounted inside a checkout
+        mine = r("7", "0:31", "/@home", "/home", "btrfs", "/dev/nvme0n1p3", "rw,subvol=/@home")
+        top = r("8", "0:32", "/", "/repo/btrfs-top", "btrfs", "/dev/nvme0n1p3", "rw,subvol=/")
+        assert crypto_module._alias_paths("/@home/dev/keys", mine, [mine, top]) == ["/repo/btrfs-top/@home/dev/keys"]
+        # a subtree mount that does not contain the directory, and another filesystem: no alias
+        assert crypto_module._alias_paths("/node/keys", r("9", "8:2", "/", "/data"), [r("10", "8:2", "/other", "/x"), r("11", "8:3", "/", "/y")]) == []
+
+    def test_a_malformed_mountinfo_record_refuses(self, monkeypatch, tmp_path):
+        if not crypto_module._LINUX:
+            pytest.fail("Linux-only, and CI runs it on Linux")
+        fake = tmp_path / "mountinfo"
+        fake.write_text("36 35 98:0 / /mnt/x rw,relatime - tmpfs\n")  # no super-options field
+        real_open = open
+
+        def guarded_open(path, *args, **kwargs):
+            return real_open(fake if str(path) == "/proc/self/mountinfo" else path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", guarded_open)
+        with pytest.raises(crypto_module.KeyFileError, match="cannot read this process's mounts"):
+            crypto_module._mountinfo()
+
+    def test_a_key_on_a_union_filesystem_is_refused(self, monkeypatch, tmp_path):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        keys_id = (os.stat(keys).st_dev, os.stat(keys).st_ino)
+        real = crypto_module._mount_of
+
+        def mount_of(fd):
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) == keys_id:
+                return self._record("77", "0:77", "/", str(keys), "overlay", "overlay", "rw,upperdir=/repo/upper")
+            return real(fd)
+
+        monkeypatch.setattr(crypto_module, "_mount_of", mount_of)
+        with pytest.raises(crypto_module.KeyFileError, match="union filesystem"):
+            load_or_create_keys(str(keys / "keys.json"))
+        assert os.listdir(keys) == []
+
+    def test_cleanup_ends_and_tells_the_truth_when_pwrite_makes_no_progress(self, monkeypatch, tmp_path):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        real = crypto_module._judge_key_file
+
+        def judge(fd, key_path):
+            real(fd, key_path)
+            if not (tmp_path / "home" / ".git").exists():
+                (tmp_path / "home" / ".git").mkdir()
+
+        def refuse(*args, **kwargs):
+            raise PermissionError("refused for the test")
+
+        monkeypatch.setattr(crypto_module, "_judge_key_file", judge)
+        monkeypatch.setattr(crypto_module.os, "ftruncate", refuse)
+        monkeypatch.setattr(crypto_module.os, "unlink", refuse)
+        monkeypatch.setattr(crypto_module.os, "pwrite", lambda fd, data, offset: 0)
+        with pytest.raises(crypto_module.KeyFileError, match="SECRET MAY REMAIN"):
+            load_or_create_keys(str(keys / "keys.json"))

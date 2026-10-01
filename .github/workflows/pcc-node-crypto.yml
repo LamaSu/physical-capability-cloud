@@ -159,3 +159,44 @@ jobs:
             exit 1
           fi
           exit "$rc"
+
+      - name: Whole-filesystem aliases and union mounts are refused (review A02e)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          # (1) a tmpfs mounted inside a checkout, its whole root bound onto an outside
+          #     directory: the key would also be repo/storage/keys.json;
+          # (2) an overlay mounted outside whose upper directory is inside a checkout.
+          T=$(mktemp -d)
+          mkdir -p "$T/repo/.git" "$T/repo/storage" "$T/outside" "$T/lower" "$T/repo/upper" "$T/repo/work" "$T/merged"
+          sudo -n mount -t tmpfs -o mode=0700,uid=$(id -u),gid=$(id -g) tmpfs "$T/repo/storage"
+          sudo -n mount --bind "$T/repo/storage" "$T/outside"
+          sudo -n mount -t overlay overlay -o "lowerdir=$T/lower,upperdir=$T/repo/upper,workdir=$T/repo/work" "$T/merged"
+          sudo -n chown "$(id -u):$(id -g)" "$T/merged"
+          sudo -n chmod 700 "$T/merged"
+          set +e
+          PYTHONPATH=. python - "$T/outside/keys.json" "$T/merged/keys.json" <<'PY'
+          import sys
+          from pcc_node.crypto import KeyFileError, load_or_create_keys
+          failed = False
+          for path in sys.argv[1:]:
+              try:
+                  load_or_create_keys(path)
+              except KeyFileError as err:
+                  print("ok: refused %s: %s" % (path, err))
+                  continue
+              print("ACCEPTED %s" % path)
+              failed = True
+          sys.exit(1 if failed else 0)
+          PY
+          rc=$?
+          set -e
+          left=$(sudo -n ls -A "$T/repo/storage" "$T/repo/upper" | grep -v ':$' | grep -v '^$' | grep -v '^work$' || true)
+          sudo -n umount "$T/merged"
+          sudo -n umount "$T/outside"
+          sudo -n umount "$T/repo/storage"
+          if [ -n "$left" ]; then
+            echo "a key file was left inside the checkout: $left"
+            exit 1
+          fi
+          exit "$rc"

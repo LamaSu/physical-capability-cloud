@@ -245,38 +245,71 @@ def _unescape_mountinfo(field):
     return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
 
 
-def _mount_of(fd):
-    """The mount an open descriptor lives on, as ``{"id", "root", "fstype", "super"}``
-    (Linux: /proc/self/fdinfo gives its mount id, /proc/self/mountinfo the rest).
-    ``root`` is the path inside the filesystem that the mount shows: ``/`` for
-    a whole filesystem, a subtree for a bind mount of one. None off Linux. On
-    Linux an unreadable /proc refuses: a location that is not proven is not used."""
-    if not _LINUX:
-        return None
+def _mount_id_of(fd):
+    """The mount id of an open descriptor (Linux, /proc/self/fdinfo)."""
     try:
         with open("/proc/self/fdinfo/%d" % fd, encoding="ascii") as f:
-            mnt_id = next(line.split()[1] for line in f if line.startswith("mnt_id:"))
-        with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as f:
-            for line in f:
-                fields = line.split()
-                if fields and fields[0] == mnt_id:
-                    sep = fields.index("-")
-                    return {"id": mnt_id, "root": _unescape_mountinfo(fields[3]), "fstype": fields[sep + 1],
-                            "super": fields[sep + 3] if len(fields) > sep + 3 else ""}
-    except (OSError, StopIteration, ValueError, IndexError):
-        pass
-    raise KeyFileError(
+            return next(line.split()[1] for line in f if line.startswith("mnt_id:"))
+    except (OSError, StopIteration, IndexError):
+        raise _unreadable_mounts() from None
+
+
+def _unreadable_mounts():
+    return KeyFileError(
         "cannot read this process's mounts from /proc, so the key's location cannot be proven to be "
         "outside every source checkout; a location that is not proven is not used"
     )
 
 
+def _mountinfo():
+    """Every mount record this process can see (Linux, /proc/self/mountinfo), each
+    ``{"id", "devno", "root", "mountpoint", "fstype", "source", "super"}``. ``root``
+    is the path inside the filesystem the mount shows. Any unreadable or malformed
+    record refuses: the six fixed fields, the ``-`` separator, and the fstype,
+    source and super-options fields after it are all mandatory (review A02e)."""
+    try:
+        records = []
+        with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as f:
+            for line in f:
+                fields = line.split()
+                sep = fields.index("-")
+                if sep < 6 or len(fields) < sep + 4:
+                    raise ValueError("malformed mountinfo record")
+                records.append({
+                    "id": fields[0], "devno": fields[2], "root": _unescape_mountinfo(fields[3]),
+                    "mountpoint": _unescape_mountinfo(fields[4]), "fstype": fields[sep + 1],
+                    "source": _unescape_mountinfo(fields[sep + 2]), "super": fields[sep + 3],
+                })
+        if not records:
+            raise ValueError("no mounts")
+        return records
+    except (OSError, ValueError, IndexError):
+        raise _unreadable_mounts() from None
+
+
+def _mount_of(fd):
+    """The mount an open descriptor lives on (a :func:`_mountinfo` record), or None off
+    Linux. On Linux an unreadable or malformed /proc refuses."""
+    if not _LINUX:
+        return None
+    mnt_id = _mount_id_of(fd)
+    for record in _mountinfo():
+        if record["id"] == mnt_id:
+            return record
+    raise _unreadable_mounts()
+
+
+# Filesystems whose files live in backing directories elsewhere (an overlay's upper
+# directory receives every new file): the backing paths are not evaluated, so a key
+# on one is refused (review A02e).
+_UNION_FSTYPES = {"overlay", "aufs", "unionfs", "fuse.unionfs", "fuse.unionfs-fuse", "fuse.mergerfs"}
+
+
 def _whole_filesystem(mount):
-    """Does the mount show its whole filesystem, so that it gives its files no
-    other names? A bind mount of a subtree does not: the same files have names
-    under the subtree's own directory, which this process may not be able to
-    see. A btrfs subvolume mounted as such (root equal to its ``subvol=``
-    option) is a whole filesystem in this sense."""
+    """Does the mount show its whole filesystem (mount root ``/``, or a btrfs
+    subvolume mounted as such)? A bind mount of a subtree does not. Other names of
+    a whole filesystem (the same filesystem mounted again, or a btrfs top level
+    showing the subvolume) are checked separately, by :func:`_refuse_aliases`."""
     if mount is None or mount["root"] == "/":
         return True
     return mount["fstype"] == "btrfs" and ("subvol=" + mount["root"]) in mount["super"].split(",")
@@ -284,6 +317,12 @@ def _whole_filesystem(mount):
 
 def _refuse_bind_mounted(fd, key_path, what):
     mount = _mount_of(fd)
+    if mount is not None and mount["fstype"] in _UNION_FSTYPES:
+        raise KeyFileError(
+            "refusing to use a key file on a union filesystem (%s %s is on a %s mount): its files are written "
+            "to backing directories this check does not evaluate, and one may be inside a source checkout. Keep "
+            "the key on an ordinary filesystem." % (key_path, what, mount["fstype"])
+        )
     if not _whole_filesystem(mount):
         raise KeyFileError(
             "refusing to use a key file reached through a bind mount of a subtree (%s %s is on a mount of "
@@ -293,11 +332,66 @@ def _refuse_bind_mounted(fd, key_path, what):
     return mount
 
 
+def _alias_paths(fs_path, mine, mounts):
+    """Every other path, in this process's mounts, that shows the directory whose path
+    inside its filesystem is *fs_path* (it lives on mount *mine*): each other mount of
+    the same filesystem (the same device; for btrfs, the same source device) whose
+    root contains *fs_path*."""
+    same_fs = (lambda r: r["fstype"] == "btrfs" and r["source"] == mine["source"]) if mine["fstype"] == "btrfs" \
+        else (lambda r: r["devno"] == mine["devno"])
+    aliases = []
+    for record in mounts:
+        if record["id"] == mine["id"] or not same_fs(record):
+            continue
+        root = record["root"].rstrip("/")
+        if fs_path != record["root"] and not fs_path.startswith(root + "/"):
+            continue
+        aliases.append(record["mountpoint"].rstrip("/") + fs_path[len(root):] or "/")
+    return aliases
+
+
+def _refuse_aliases(dir_fd, key_path):
+    """Every other mount-visible name of the key's directory must lie outside every
+    checkout too (review A02e): the same filesystem mounted again whole, a tmpfs
+    mounted inside a checkout and bound elsewhere, a btrfs top level showing the
+    subvolume. A name that resolves to another directory, or to nothing, is shadowed
+    in this view and is not a name of this directory here. Linux only."""
+    if not _LINUX:
+        return
+    mine = _mount_of(dir_fd)
+    try:
+        here = os.readlink("/proc/self/fd/%d" % dir_fd)
+    except OSError:
+        raise _unreadable_mounts() from None
+    point = mine["mountpoint"].rstrip("/")
+    if not here.startswith("/") or (here != (point or "/") and not here.startswith(point + "/")):
+        raise _unreadable_mounts()
+    rel = here[len(point):]
+    fs_path = (mine["root"].rstrip("/") + rel) or "/"
+    st = os.fstat(dir_fd)
+    for alias in _alias_paths(fs_path, mine, _mountinfo()):
+        try:
+            alias_fd = os.open(alias, _directory_flags())
+        except FileNotFoundError:
+            continue
+        except OSError as err:
+            raise KeyFileError(
+                "%s has another name, %s, that cannot be checked (%s); a location that is not proven is not "
+                "used" % (key_path, alias, err)
+            ) from None
+        try:
+            alias_st = os.fstat(alias_fd)
+            if (alias_st.st_dev, alias_st.st_ino) == (st.st_dev, st.st_ino):
+                _refuse_checkout(alias_fd, key_path, aliases=False)
+        finally:
+            os.close(alias_fd)
+
+
 def _directory_flags():
     return os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
 
 
-def _refuse_checkout(dir_fd, key_path):
+def _refuse_checkout(dir_fd, key_path, aliases=True):
     """Refuse when the directory open as *dir_fd* lies inside a git work tree.
 
     Decided from the open directory, never from a pathname. From *dir_fd* the
@@ -314,9 +408,18 @@ def _refuse_checkout(dir_fd, key_path):
     is one ``git add`` from being published. A walk that cannot finish (an
     unreadable ancestor) refuses too: a location that is not proven is not used.
 
+    On Linux every other mount-visible name of the directory is walked the same
+    way (:func:`_refuse_aliases`), and no level may be on a union filesystem or a
+    bind mount of a subtree.
+
     Descriptors opened here are closed here; *dir_fd* stays the caller's.
     """
     flags = _directory_flags()
+    if aliases:
+        # The directory's own mount is judged first: a union or subtree mount is refused
+        # outright, before its other names are looked for.
+        _refuse_bind_mounted(dir_fd, key_path, "has a directory that")
+        _refuse_aliases(dir_fd, key_path)
     current = dir_fd
     try:
         root_fd = os.open("/", flags)
@@ -530,7 +633,10 @@ def _scrub_and_remove(dir_fd, name, fd, key_path, cause):
             size = os.fstat(fd).st_size
             written = 0
             while written < size:
-                written += os.pwrite(fd, b"\0" * min(65536, size - written), written)
+                n = os.pwrite(fd, b"\0" * min(65536, size - written), written)
+                if n <= 0:
+                    raise OSError(errno.EIO, "pwrite made no progress")
+                written += n
             os.fsync(fd)
             emptied = True
         except OSError:
