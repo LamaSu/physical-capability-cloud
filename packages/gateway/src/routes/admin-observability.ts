@@ -11,6 +11,7 @@
  *   GET /api/admin/observability/journey/:traceId         — one agent's journey
  *   GET /api/admin/observability/errors?since=ISO          — error-class histogram
  *   GET /api/admin/observability/feedback?since=ISO&limit= — pcc_report stream
+ *   GET /api/admin/observability/attempts?days=&sessions=&format=digest — ADK attempt analysis
  *
  * Gating (HALT-safe + least-privilege):
  *   • Inert unless PCC_FUNNEL_ENABLED==="true"  → 404 not_enabled.
@@ -25,8 +26,11 @@
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { open } from "node:fs/promises";
+import { dirname } from "node:path";
 import { auditService } from "../services/audit-service.js";
 import { requireAdminSecret } from "../auth/admin-secret-gate.js";
+import { analyzeAttempts, weeklyDigest, type AttemptSession } from "../services/attempt-analysis.js";
 import {
   funnelEnabled,
   getCohortFunnel,
@@ -65,6 +69,81 @@ function guard(
   // PCC_OBSERVABILITY_ADMINS. checkAdminKey fails closed in every environment (N2); the
   // old PCC_OBSERVABILITY_DEV_OPEN opt-in is gone with the allowlist.
   return requireAdminSecret(req, reply);
+}
+
+// ── Attempt analysis source (ADK track item 10a) ──────────────────────────────
+// POST /api/feedback stores `kind: "attempt"` reports (contract attempt.v1) in the
+// durable JSONL next to the gateway DB (the same path routes/feedback.ts uses).
+// Only the file's tail is scanned, so a large sink can't make this view slow.
+const DEFAULT_ATTEMPT_SCAN_BYTES = 20 * 1024 * 1024;
+const MAX_ATTEMPT_DAYS = 90;
+const MAX_SESSION_ROWS = 500;
+const MAX_SIGNATURE_ROWS = 100;
+
+function feedbackFilePath(): string {
+  return `${dirname(process.env.PCC_DB_PATH ?? "/app/data/pcc.sqlite")}/feedback.jsonl`;
+}
+
+function attemptScanBytes(): number {
+  const n = Number.parseInt(process.env.PCC_ATTEMPT_SCAN_MAX_BYTES ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_ATTEMPT_SCAN_BYTES;
+}
+
+/** Attempt records created at or after `sinceMs`, read from the sink's tail. */
+async function readAttemptRecords(sinceMs: number): Promise<{ records: unknown[]; truncated: boolean }> {
+  let fh;
+  try {
+    fh = await open(feedbackFilePath(), "r");
+  } catch {
+    return { records: [], truncated: false };
+  }
+  try {
+    const { size } = await fh.stat();
+    const start = Math.max(0, size - attemptScanBytes());
+    const buf = Buffer.alloc(size - start);
+    await fh.read(buf, 0, buf.length, start);
+    let text = buf.toString("utf8");
+    // A tail read can start mid-line: drop that partial first line.
+    if (start > 0) text = text.slice(text.indexOf("\n") + 1);
+    const records: unknown[] = [];
+    for (const line of text.split("\n")) {
+      if (!line.includes("attempt")) continue; // cheap prefilter; JSON.parse decides
+      try {
+        const r = JSON.parse(line) as { kind?: unknown; createdAt?: unknown };
+        const at = typeof r.createdAt === "string" ? Date.parse(r.createdAt) : Number.NaN;
+        if (r.kind === "attempt" && Number.isFinite(at) && at >= sinceMs) records.push(r);
+      } catch {
+        /* skip a malformed line */
+      }
+    }
+    return { records, truncated: start > 0 };
+  } finally {
+    await fh.close();
+  }
+}
+
+function boundedParam(v: string | undefined, dflt: number, max: number): number {
+  const n = Number.parseInt(v ?? "", 10);
+  return Number.isInteger(n) && n > 0 ? Math.min(n, max) : dflt;
+}
+
+/** One row per session: ids, timing, outcome and flags. Report bodies stay in /api/admin/feedback. */
+function sessionRow(s: AttemptSession) {
+  return {
+    session_id: s.sessionId,
+    first_at: new Date(s.firstAt).toISOString(),
+    last_at: new Date(s.lastAt).toISOString(),
+    last_phase: s.lastPhase,
+    final_outcome: s.finalOutcome,
+    total_duration_ms: s.totalDurationMs,
+    harness: s.harnessName,
+    device_class: s.deviceClass,
+    pack_version: s.packVersion,
+    reports: s.reports.length,
+    proposals: s.proposals.length,
+    stalled: s.stalled,
+    budget_stop: s.budgetStop,
+  };
 }
 
 export async function adminObservabilityRoutes(app: FastifyInstance) {
@@ -170,6 +249,41 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
         reports: rows,
         note: "Time-ordering + full detail come from the private-DB sink (piece 5); audit-log mapping omits row timestamp.",
         generated_at: new Date().toISOString(),
+      };
+    },
+  );
+
+  // ── ADK attempt analysis (item 10a) ───────────────────────────────────────
+  // Computed on read from the attempt reports, no new table (the store is an
+  // operator decision). The admin gate alone protects it: attempt reports are
+  // written whatever PCC_FUNNEL_ENABLED says.
+  // `format=digest` returns the Markdown digest (<= 3 KB, counts and redacted
+  // templates only) that a lane run posts to the bus weekly.
+  app.get<{ Querystring: { days?: string; sessions?: string; format?: string } }>(
+    "/api/admin/observability/attempts",
+    async (req, reply) => {
+      if (!guard(req, reply, false)) return;
+      const days = boundedParam(req.query.days, 30, MAX_ATTEMPT_DAYS);
+      const sessionLimit = boundedParam(req.query.sessions, 100, MAX_SESSION_ROWS);
+      const now = Date.now();
+      const { records, truncated } = await readAttemptRecords(now - days * 86_400_000);
+      const analysis = analyzeAttempts(records, { now });
+      if (req.query.format === "digest") {
+        return reply
+          .type("text/markdown; charset=utf-8")
+          .send(weeklyDigest(analysis, { periodLabel: `last ${days} days to ${new Date(now).toISOString().slice(0, 10)}` }));
+      }
+      return {
+        days,
+        records: records.length,
+        scan_truncated: truncated,
+        totals: analysis.totals,
+        funnel: analysis.funnel,
+        signatures: analysis.signatures.slice(0, MAX_SIGNATURE_ROWS),
+        proposals: analysis.proposals,
+        sessions: analysis.sessions.slice(0, sessionLimit).map(sessionRow),
+        generated_at: new Date(now).toISOString(),
+        source: "feedback_jsonl",
       };
     },
   );
