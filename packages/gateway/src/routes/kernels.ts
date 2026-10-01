@@ -166,7 +166,8 @@ export async function kernelRoutes(app: FastifyInstance) {
   /**
    * Per-kernel heartbeat — pcc-node daemons call this path.
    * Updates status + upserts any announced capabilities.
-   * Returns { acknowledged, kernelId, status, capabilitiesReceived, timestamp }.
+   * Returns { acknowledged, kernelId, status, capabilitiesReceived, timestamp }
+   * (plus `acceptingJobs: false` when the heartbeat carried it).
    *
    * Owner-only (WP-C): the authenticated actor (apiGate `operatorId ?? userId`)
    * must be the kernel's recorded owner, meaning the identity that registered it
@@ -174,6 +175,13 @@ export async function kernelRoutes(app: FastifyInstance) {
    * 401 without an actor, 404 for an unknown kernel, 403 `not_kernel_owner`
    * otherwise, and nothing is written on a refusal. Inserted capability tiers
    * are clamped to the kernel's authorized ceiling.
+   *
+   * Optional boolean `acceptingJobs`: `false` marks a node that takes no jobs
+   * (the heartbeat-only pcc-node daemon). Liveness is recorded, but no
+   * capability's validUntil is refreshed, no announced list is applied and
+   * nothing is withdrawn, so the kernel's listings age out. `true` or absent is
+   * the ordinary heartbeat. Any other type is a 400 `invalid_accepting_jobs`,
+   * answered by the facade after the owner check above and before any write.
    */
   app.post<{
     Params: { kernelId: string };

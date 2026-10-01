@@ -108,7 +108,24 @@ export interface HeartbeatInput {
   status?: string;
   capabilities?: Array<Record<string, unknown>>;
   timestamp?: number;
+  /**
+   * Optional. `false` marks a node that takes no jobs (a heartbeat-only
+   * daemon). The heartbeat then records liveness as usual (the kernel's status,
+   * last heartbeat and its own validUntil) but refreshes NO capability's
+   * validUntil or lastHeartbeatAt, applies no announced `capabilities` list, and
+   * withdraws nothing: the kernel's existing listings age out on their own TTL.
+   * `true` or absent is the ordinary heartbeat. Any other type is a 400
+   * (`invalid_accepting_jobs`).
+   */
+  acceptingJobs?: boolean;
 }
+
+/** `acceptingJobs` is optional; when present it must be a boolean (not null, "false", 0 or 1). */
+export function isValidAcceptingJobs(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === "boolean";
+}
+export const INVALID_ACCEPTING_JOBS_CODE = "invalid_accepting_jobs";
+export const INVALID_ACCEPTING_JOBS_MESSAGE = "acceptingJobs must be a boolean when present";
 
 export interface HeartbeatResult {
   acknowledged: true;
@@ -120,6 +137,11 @@ export interface HeartbeatResult {
    * in `capabilitiesSkipped` instead (WP-C R5).
    */
   capabilitiesReceived: number;
+  /**
+   * Present, as `false`, only when the heartbeat carried `acceptingJobs: false`:
+   * liveness was recorded and no listing was refreshed or changed.
+   */
+  acceptingJobs?: false;
   /**
    * Present only when non-empty: announced capabilities that were NOT listed
    * because their derived id `cap-<kernelId>-<type>` already belongs to a
@@ -554,7 +576,12 @@ export class KernelFacade extends BaseFacade {
    *   - a row whose derived id `cap-<kernelId>-<type>` already belongs to a
    *     DIFFERENT kernel is left untouched (a heartbeat for one kernel never
    *     refreshes another kernel's listing), and is reported in
-   *     `capabilitiesSkipped` rather than counted as received (WP-C R5).
+   *     `capabilitiesSkipped` rather than counted as received (WP-C R5);
+   *   - `acceptingJobs`, when present, must be a boolean (400
+   *     `invalid_accepting_jobs`, before anything is written). With `false` the
+   *     kernel's liveness is recorded as usual but no capability is refreshed,
+   *     inserted or withdrawn (see HeartbeatInput): a heartbeat-only node's
+   *     listings age out instead of being kept alive by its heartbeats.
    */
   async heartbeat(
     kernelId: string,
@@ -562,7 +589,7 @@ export class KernelFacade extends BaseFacade {
     actorId: string | undefined,
   ): Promise<Result<HeartbeatResult>> {
     return this.execute("heartbeat", async () => {
-      const { status = "online", capabilities } = body ?? {};
+      const { status = "online", capabilities, acceptingJobs } = body ?? {};
       const nowDate = new Date();
       const now = nowDate.toISOString();
       const validUntil = computeValidUntilIso(nowDate);
@@ -582,6 +609,15 @@ export class KernelFacade extends BaseFacade {
           { name: "ForbiddenError" },
         );
       }
+      // Validated after the caller is known to own the kernel and before the
+      // first write, so a refusal leaves the kernel and its listings untouched.
+      if (!isValidAcceptingJobs(acceptingJobs)) {
+        throw Object.assign(new Error(INVALID_ACCEPTING_JOBS_MESSAGE), {
+          name: "BadRequestError",
+          code: INVALID_ACCEPTING_JOBS_CODE,
+        });
+      }
+      const acceptsJobs = acceptingJobs !== false;
       // The authorized ceiling bounds every tier this heartbeat may insert.
       const ceiling = authorizedAssuranceCeiling(kernel);
 
@@ -624,7 +660,12 @@ export class KernelFacade extends BaseFacade {
       // Upsert capability announcements
       let capabilitiesReceived = 0;
       const capabilitiesSkipped: NonNullable<HeartbeatResult["capabilitiesSkipped"]> = [];
-      if (Array.isArray(capabilities) && capabilities.length > 0) {
+      if (!acceptsJobs) {
+        // acceptingJobs: false. This node takes no jobs, so its heartbeat is a
+        // liveness signal only. The kernel row was updated above; no listing is
+        // refreshed, inserted or withdrawn, and an announced list is not
+        // applied. The existing listings age out on their own validUntil.
+      } else if (Array.isArray(capabilities) && capabilities.length > 0) {
         for (const cap of capabilities) {
           if (!cap || typeof cap !== "object") continue;
           const capType = cap.type ?? cap.capability_type;
@@ -722,6 +763,7 @@ export class KernelFacade extends BaseFacade {
         kernelId,
         status,
         capabilitiesReceived,
+        ...(acceptsJobs ? {} : { acceptingJobs: false as const }),
         ...(capabilitiesSkipped.length > 0 ? { capabilitiesSkipped } : {}),
         timestamp: now,
         validUntil,

@@ -27,6 +27,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
+import {
+  INVALID_ACCEPTING_JOBS_CODE,
+  INVALID_ACCEPTING_JOBS_MESSAGE,
+  isValidAcceptingJobs,
+} from "../facades/kernel.facade.js";
 import { requireActor, requireOwnerOf } from "../auth/kernel-owner-guard.js";
 import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
@@ -58,6 +63,8 @@ interface HeartbeatBody {
   status?: string;
   capabilities?: Array<Record<string, unknown>>;
   timestamp?: number;
+  /** Optional boolean. `false`: a node that takes no jobs (see HeartbeatInput). Anything else but a boolean is a 400. */
+  acceptingJobs?: boolean;
 }
 
 interface JobStatusBody {
@@ -270,21 +277,40 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    * must therefore heartbeat with the key that registered its kernel.
    * Announced capability tiers are clamped to the kernel's authorized ceiling.
    *
-   * Body: { kernelId, status?, capabilities?, timestamp? }
+   * `acceptingJobs` (optional boolean): `false` marks a node that takes no jobs
+   * (the heartbeat-only pcc-node daemon). The heartbeat still records the
+   * kernel's liveness, but refreshes no capability's validUntil, applies no
+   * announced list and withdraws nothing, so the kernel's listings age out
+   * instead of being kept alive by its heartbeats. `true` or absent is the
+   * ordinary heartbeat. Any other type is a 400 `invalid_accepting_jobs`.
+   *
+   * Body: { kernelId, status?, capabilities?, timestamp?, acceptingJobs? }
    */
   app.post<{ Body: HeartbeatBody }>("/api/operator/heartbeat", async (req, reply) => {
     // Steward rule 7: a PRESENT actor first (401), before body validation or
     // any lookup.
     const actor = requireActor(req, reply);
     if (!actor) return reply;
-    const { kernelId, status = "online", capabilities, timestamp } = req.body ?? {};
+    const { kernelId, status = "online", capabilities, timestamp, acceptingJobs } = req.body ?? {};
 
     if (typeof kernelId !== "string" || !kernelId) {
       return reply.code(400).send({ error: "kernelId required" });
     }
+    // The body is validated before the kernel is looked up (401, 400, then 404 /
+    // 403), like kernelId above. The facade checks it again for other callers.
+    if (!isValidAcceptingJobs(acceptingJobs)) {
+      return reply.code(400).send({
+        error: INVALID_ACCEPTING_JOBS_CODE,
+        message: INVALID_ACCEPTING_JOBS_MESSAGE,
+      });
+    }
 
     if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
-    const result = await kernelFacade.heartbeat(kernelId, { status, capabilities, timestamp }, actor);
+    const result = await kernelFacade.heartbeat(
+      kernelId,
+      { status, capabilities, timestamp, acceptingJobs },
+      actor,
+    );
     return sendResult(reply, result);
   });
 

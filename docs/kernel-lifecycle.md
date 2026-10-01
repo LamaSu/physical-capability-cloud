@@ -65,6 +65,20 @@ What it does:
 4. Returns `{ acknowledged, kernelId, status, capabilitiesReceived,
    timestamp, validUntil, resurrected, sinceLastHeartbeatSec }`.
 
+Optional `"acceptingJobs"` (boolean), also accepted by
+`POST /api/operator/heartbeat`:
+
+- `false` marks a node that takes no jobs, such as a heartbeat-only daemon. The
+  heartbeat still sets `shop_kernels.last_heartbeat`, the kernel's `status` and
+  `shop_kernels.valid_until` (step 1), but it does not touch any capability:
+  no `valid_until` / `last_heartbeat_at` refresh (steps 2 and 3), no announced
+  list is applied, and nothing is withdrawn. The kernel's existing listings
+  age out on their own `valid_until`. The response adds `"acceptingJobs": false`
+  and `capabilitiesReceived` is 0.
+- `true` or absent is the ordinary heartbeat described above.
+- Any other type (a string, a number, `null`, an object) is a `400` with
+  `error: "invalid_accepting_jobs"`, and nothing is written.
+
 ### `POST /api/capabilities/:capId/heartbeat`
 
 Single-row refresh for clients that don't want to re-send their whole
