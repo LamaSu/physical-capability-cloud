@@ -23,6 +23,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalize } from "../util/canonical.js";
+import { compareCodeUnits } from "../util/code-unit-order.js";
 import { VerificationProgramSchema } from "./verification-program.js";
 
 const HEX_HASH = /^0x[a-f0-9]{64}$/i;
@@ -131,7 +132,7 @@ export function computeJobSpecHash(
     | JobSpec,
 ): `0x${string}` {
   const sortedCofunded = job.cofundedBy
-    ? [...job.cofundedBy].sort((a, b) => a.buyer.localeCompare(b.buyer))
+    ? [...job.cofundedBy].sort((a, b) => compareCodeUnits(a.buyer, b.buyer)) // code units, never locale collation
     : null;
   const payload = {
     version: job.version,

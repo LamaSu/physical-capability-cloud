@@ -24,6 +24,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalize } from "../util/canonical.js";
+import { compareCodeUnits } from "../util/code-unit-order.js";
 
 const HEX_HASH = /^0x[a-f0-9]{64}$/i;
 const ETH_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
@@ -137,7 +138,8 @@ export function computeMapSnapshotHash(entries: MapEntry[]): `0x${string}` {
     seen.add(key);
     return { key, value: e.value };
   });
-  normalized.sort((a, b) => a.key.localeCompare(b.key));
+  // Code-unit order, never locale collation (util/code-unit-order.ts).
+  normalized.sort((a, b) => compareCodeUnits(a.key, b.key));
   const canonical = canonicalize({ entries: normalized });
   const hex = createHash("sha256").update(canonical).digest("hex");
   return `0x${hex}` as `0x${string}`;
