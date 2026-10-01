@@ -26,14 +26,18 @@ import {
   BUILTIN_PUBLIC_CAPABILITY_URLS,
   OPPORTUNITY_SCHEMA,
   OpportunityDTOSchema,
+  PRIMITIVE_PARAMS_ANNOTATIONS,
+  PRIMITIVE_PARAMS_KEYWORDS,
   approvedSetDigest,
   demandAggregateId,
   demandAggregateTitle,
   demandAggregatesFromRelease,
+  evidenceIsExecutable,
   isPublicCapabilityUrl,
   opportunityDTOSchemaFor,
   primitivesAreExecutable,
   publicCapabilityUrls,
+  validatePrimitiveParams,
   type DemandAggregateDTO,
   type FundedOfferDTO,
   type KitBuildRequestDTO,
@@ -43,6 +47,7 @@ import {
 import type { SHA256 } from "../types/common.js";
 import type { CsdEvidencePrimitiveRef } from "../csd/schema.js";
 import { loadBuiltinCsds } from "../csd/registry.js";
+import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
 
 const H = (c: string) => `sha256:${c.repeat(64)}` as const;
 const T = (c: string) => `0x${c.repeat(64)}`;
@@ -313,11 +318,11 @@ function aggregate(
   };
 }
 
-/** An evidence requirement that states its executability truthfully. */
+/** An evidence requirement that states its executability truthfully (evidenceIsExecutable). */
 const evidence = (tier: 0 | 1 | 2 | 3, requiredPrimitives: CsdEvidencePrimitiveRef[]) => ({
   tier,
   requiredPrimitives,
-  executable: primitivesAreExecutable(requiredPrimitives),
+  executable: evidenceIsExecutable(tier, requiredPrimitives),
 });
 
 const parses = (v: unknown) => OpportunityDTOSchema.safeParse(v).success;
@@ -913,6 +918,243 @@ describe("astra pack 112b", () => {
       refused(release, approved, "2026-08-15T00:00:00Z").toThrow(/aggregate 0 is not a valid demand_aggregate/);
       refused(release, approved, "yesterday").toThrow(/aggregate 0 is not a valid demand_aggregate/);
     });
+  });
+
+  // ── B. HIGH 4: "executable" means tier-eligible with live verifiers ──
+
+  it("HIGH 4a: an empty tier-3 primitive set is not executable", () => {
+    expect(evidenceIsExecutable(3, [])).toBe(false);
+    expect(parses({ ...fundedOffer(), evidence: { tier: 3, requiredPrimitives: [], executable: true } })).toBe(false);
+    // Saying so truthfully does not help a funded offer, which needs executable evidence...
+    expect(parses({ ...fundedOffer(), evidence: { tier: 3, requiredPrimitives: [], executable: false } })).toBe(false);
+    // ...but an unfunded kit request may describe a requirement that cannot be checked yet.
+    expect(parses({ ...kitRequest(), evidence: { tier: 3, requiredPrimitives: [], executable: false } })).toBe(true);
+  });
+
+  it("HIGH 4b: decl.self_attested (tier 0 only) is not an executable tier-3 requirement", () => {
+    const decl = [{ id: "decl.self_attested" }];
+    expect(evidenceIsExecutable(3, decl)).toBe(false);
+    expect(parses({ ...fundedOffer(), evidence: { tier: 3, requiredPrimitives: decl, executable: true } })).toBe(false);
+    expect(parses({ ...kitRequest(), evidence: { tier: 3, requiredPrimitives: decl, executable: false } })).toBe(true);
+  });
+
+  it("HIGH 4c: an unsupported params-schema construct fails closed", () => {
+    expect(validatePrimitiveParams({ oneOf: [{ type: "string" }] }, 42)).toBe(false);
+    expect(validatePrimitiveParams({ type: "string", pattern: "^a$" }, "b")).toBe(false);
+    // Refused even when the value would satisfy the construct: it is never silently skipped.
+    expect(validatePrimitiveParams({ oneOf: [{ type: "string" }] }, "x")).toBe(false);
+    expect(validatePrimitiveParams({ type: "string", pattern: "^a$" }, "a")).toBe(false);
+  });
+
+  it("executable means tier-eligible with live verifiers: the tier 0 floor, a tier 2 and 3 positive case, and the rules behind them", () => {
+    const decl = { id: "decl.self_attested" };
+    const payer = { id: "approval.payer" };
+    // Tier 0 is the permissionless floor, with or without the declaration primitive.
+    expect(evidenceIsExecutable(0, [])).toBe(true);
+    expect(evidenceIsExecutable(0, [decl])).toBe(true);
+    // approval.payer is live, Family G, supports tiers 2 and 3 and has no dependency: a complete set there.
+    expect(evidenceIsExecutable(2, [payer])).toBe(true);
+    expect(evidenceIsExecutable(3, [payer])).toBe(true);
+    expect(evidenceIsExecutable(3, [payer, payer])).toBe(true);
+    // Only at the tiers it supports.
+    expect(evidenceIsExecutable(0, [payer])).toBe(false);
+    expect(evidenceIsExecutable(1, [payer])).toBe(false);
+    // From tier 1 up the set is non-empty, and the declaration primitive alone is a tier 0 floor.
+    for (const tier of [1, 2, 3] as const) {
+      expect(evidenceIsExecutable(tier, []), `empty at tier ${tier}`).toBe(false);
+      expect(evidenceIsExecutable(tier, [decl]), `decl at tier ${tier}`).toBe(false);
+    }
+    // Dependency closure: confirm.execution_mode is live and supports tier 2, but needs receipt.kernel_signed in the set.
+    expect(evidenceIsExecutable(2, [payer, { id: "confirm.execution_mode" }])).toBe(false);
+    // A stub verifier (even a Family-G one), an unknown id and a stub dependency are not executable.
+    expect(evidenceIsExecutable(2, [{ id: "approval.expert" }])).toBe(false);
+    expect(evidenceIsExecutable(2, [payer, { id: "capture.photo_nonced" }])).toBe(false);
+    expect(evidenceIsExecutable(2, [payer, { id: "made.up_primitive" }])).toBe(false);
+    // At the time of writing no tier 1 set is executable: the live tier 1 primitives (receipt.kernel_signed,
+    // confirm.execution_mode) depend on ident.registered_key, whose verifier is a stub.
+  });
+
+  it("the executable flag must equal evidenceIsExecutable, in both directions, and funded kinds need it true", () => {
+    const payer = { id: "approval.payer" };
+    const truthful = "executable must be true exactly when requiredPrimitives is a complete tier-eligible set with live verifiers (evidenceIsExecutable)";
+    // A funded offer with an executable tier 2 requirement (params checked against the primitive) and a tier 0 floor.
+    expect(parses({ ...fundedOffer(), evidence: evidence(2, [payer]) })).toBe(true);
+    expect(parses({ ...fundedOffer(), evidence: evidence(2, [{ id: "approval.payer", params: { approverRole: "payer", claimIds: ["c-1"] } }]) })).toBe(true);
+    expect(parses({ ...fundedOffer(), evidence: evidence(0, []) })).toBe(true);
+    expect(parses({ ...fundedOffer(), evidence: evidence(0, [{ id: "decl.self_attested" }]) })).toBe(true);
+    // Claiming executable for a set that is not, and claiming non-executable for one that is, are both refused.
+    expect(messagesOf({ ...kitRequest(), evidence: { tier: 2, requiredPrimitives: [payer], executable: false } })).toEqual([truthful]);
+    expect(messagesOf({ ...kitRequest(), evidence: { tier: 1, requiredPrimitives: [], executable: true } })).toEqual([truthful]);
+    // A funded kit_build_request is held to the same standard as a funded offer.
+    const funded = { reward: { amount: "1", currency: "USDC", fundingStatus: "funded" }, authority: "authoritative", fundingRef: { kind: "escrow", id: "esc-9" } } as const;
+    expect(parses({ ...kitRequest(), ...funded, evidence: evidence(2, [payer]) })).toBe(true);
+    expect(messagesOf({ ...kitRequest(), ...funded, evidence: evidence(1, []) })).toEqual([
+      "a funded kit_build_request's evidence must be executable (see evidenceIsExecutable)",
+    ]);
+    expect(messagesOf({ ...fundedOffer(), evidence: evidence(1, []) })).toEqual([
+      "a funded_offer's evidence must be executable (see evidenceIsExecutable)",
+    ]);
+  });
+
+  it("primitivesAreExecutable stays exported, as a necessary condition only", () => {
+    expect(primitivesAreExecutable([])).toBe(true); // vacuous, yet evidenceIsExecutable(3, []) is false
+    expect(primitivesAreExecutable([{ id: "decl.self_attested" }])).toBe(true); // live, yet not tier-3 eligible
+    expect(primitivesAreExecutable([{ id: "artifact.hash" }])).toBe(false); // a stub verifier
+    expect(evidenceIsExecutable(3, [])).toBe(false);
+    expect(evidenceIsExecutable(3, [{ id: "decl.self_attested" }])).toBe(false);
+  });
+
+  it("validatePrimitiveParams fails closed: any keyword outside the supported set refuses the params", () => {
+    const ok = (schema: Record<string, unknown>, value: unknown) => validatePrimitiveParams(schema, value);
+    // Every unsupported keyword is refused even where the value satisfies the rest of the schema.
+    const unsupported: Array<[string, unknown]> = [
+      ["oneOf", [{ type: "string" }]],
+      ["anyOf", [{ type: "string" }]],
+      ["allOf", [{ type: "string" }]],
+      ["not", { type: "number" }],
+      ["$ref", "#/definitions/x"],
+      ["pattern", "^x$"],
+      ["format", "email"],
+      ["minimum", 0],
+      ["maximum", 9],
+      ["minLength", 1],
+      ["maxLength", 9],
+      ["const", "x"],
+      ["if", { type: "string" }],
+      ["multipleOf", 1],
+      ["minItems", 0],
+      ["uniqueItems", true],
+      ["patternProperties", {}],
+      ["dependencies", {}],
+    ];
+    for (const [keyword, arg] of unsupported) {
+      expect(ok({ type: "string", [keyword]: arg }, "x"), keyword).toBe(false);
+    }
+    // An unknown or array type, or a missing type with any other keyword, is refused.
+    for (const type of ["null", "any", "String", ["string"], ["string", "null"], 1, null]) {
+      expect(ok({ type }, "x"), JSON.stringify(type)).toBe(false);
+    }
+    expect(ok({ enum: ["x"] }, "x")).toBe(false);
+    expect(ok({ properties: {} }, {})).toBe(false);
+    expect(ok({ required: [] }, {})).toBe(false);
+    // "Any value" (no type, or annotations only) is refused: no active primitive uses one.
+    expect(ok({}, "x")).toBe(false);
+    expect(ok({ description: "anything" }, "x")).toBe(false);
+    expect(ok({ default: 1, examples: [1] }, 1)).toBe(false);
+    // A malformed supported keyword is refused, whatever the node's type.
+    for (const bad of [
+      { type: "object", required: "a" },
+      { type: "object", required: [1] },
+      { type: "object", properties: [] },
+      { type: "object", properties: "x" },
+      { type: "object", additionalProperties: "no" },
+      { type: "object", additionalProperties: null },
+      { type: "object", additionalProperties: [] },
+      { type: "array", items: "x" },
+      { type: "array", items: [{ type: "string" }] }, // the tuple form
+      { type: "string", enum: "abc" },
+      { type: "string", properties: [] },
+    ]) {
+      expect(ok(bad, bad.type === "array" ? [] : bad.type === "string" ? "abc" : {}), JSON.stringify(bad)).toBe(false);
+    }
+    expect(ok("x" as never, "x")).toBe(false);
+    expect(ok(null as never, "x")).toBe(false);
+  });
+
+  it("validatePrimitiveParams still evaluates what it supports, ignores annotations, and checks the nodes a value reaches", () => {
+    const ok = (schema: Record<string, unknown>, value: unknown) => validatePrimitiveParams(schema, value);
+    // Annotations carry no validation.
+    expect(ok({ type: "string", description: "d", title: "t", $comment: "c", examples: ["a"], default: "a" }, "b")).toBe(true);
+    // type and enum.
+    expect(ok({ type: "string" }, "x")).toBe(true);
+    expect(ok({ type: "string" }, 1)).toBe(false);
+    expect(ok({ type: "string", enum: ["a", "b"] }, "b")).toBe(true);
+    expect(ok({ type: "string", enum: ["a", "b"] }, "c")).toBe(false);
+    expect(ok({ type: "number" }, 1.5)).toBe(true);
+    expect(ok({ type: "number" }, Number.NaN)).toBe(false);
+    expect(ok({ type: "number" }, Number.POSITIVE_INFINITY)).toBe(false);
+    expect(ok({ type: "integer" }, 2)).toBe(true);
+    expect(ok({ type: "integer" }, 1.5)).toBe(false);
+    expect(ok({ type: "boolean" }, false)).toBe(true);
+    expect(ok({ type: "boolean" }, "false")).toBe(false);
+    // items: an object schema, checked per element.
+    expect(ok({ type: "array", items: { type: "string" } }, ["a", "b"])).toBe(true);
+    expect(ok({ type: "array", items: { type: "string" } }, ["a", 1])).toBe(false);
+    expect(ok({ type: "array" }, [1, "a"])).toBe(true);
+    expect(ok({ type: "array" }, "a")).toBe(false);
+    // properties, required (own keys only) and additionalProperties.
+    const obj = { type: "object", properties: { a: { type: "string" } }, required: ["a"] };
+    expect(ok(obj, { a: "x" })).toBe(true);
+    expect(ok(obj, {})).toBe(false);
+    expect(ok(obj, { a: 1 })).toBe(false);
+    expect(ok(obj, { a: "x", extra: 1 })).toBe(true); // additionalProperties absent: extras allowed
+    expect(ok({ ...obj, additionalProperties: true }, { a: "x", extra: 1 })).toBe(true);
+    expect(ok({ ...obj, additionalProperties: false }, { a: "x", extra: 1 })).toBe(false);
+    expect(ok({ type: "object", required: ["toString"] }, {})).toBe(false); // an inherited key is not present
+    // A property named like an inherited key is an ordinary extra property, never a schema from the prototype.
+    expect(ok({ type: "object", properties: { a: { type: "string" } }, additionalProperties: false }, JSON.parse('{"constructor":1}'))).toBe(false);
+    expect(ok({ type: "object", properties: { a: { type: "string" } }, additionalProperties: true }, JSON.parse('{"constructor":1,"toString":2}'))).toBe(true);
+    expect(ok({ type: "object", additionalProperties: { type: "number" } }, JSON.parse('{"constructor":1}'))).toBe(true);
+    expect(ok({ type: "object", additionalProperties: { type: "number" } }, JSON.parse('{"constructor":"x"}'))).toBe(false);
+    expect(ok({ type: "object" }, null)).toBe(false);
+    expect(ok({ type: "object" }, [])).toBe(false);
+    // additionalProperties as an object schema validates the extra properties.
+    const typed = { type: "object", properties: { a: { type: "string" } }, additionalProperties: { type: "number" } };
+    expect(ok(typed, { a: "x", b: 1, c: 2 })).toBe(true);
+    expect(ok(typed, { a: "x", b: "y" })).toBe(false);
+    expect(ok({ type: "object", additionalProperties: {} }, { b: 1 })).toBe(false); // {} would mean "any value"
+    // Nodes the value does not reach are not evaluated; one it reaches with unsupported grammar refuses.
+    const lazy = { type: "object", properties: { x: { oneOf: [{ type: "string" }] } }, additionalProperties: true };
+    expect(ok(lazy, {})).toBe(true);
+    expect(ok(lazy, { other: 1 })).toBe(true);
+    expect(ok(lazy, { x: "s" })).toBe(false);
+    expect(ok({ type: "array", items: { oneOf: [] } }, [])).toBe(true);
+    expect(ok({ type: "array", items: { oneOf: [] } }, [1])).toBe(false);
+  });
+
+  it("every ACTIVE primitive's paramsSchema stays inside the grammar validatePrimitiveParams supports", () => {
+    const supported = new Set([...PRIMITIVE_PARAMS_KEYWORDS, ...PRIMITIVE_PARAMS_ANNOTATIONS]);
+    const types = new Set(["string", "number", "integer", "boolean", "array", "object"]);
+    const rec = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+    /** Every way a schema node, or one below it, leaves the supported grammar. */
+    const offences = (node: unknown, path: string): string[] => {
+      if (!rec(node)) return [`${path}: not an object schema`];
+      const unsupportedKeywords = Object.keys(node).filter((k) => !supported.has(k));
+      if (unsupportedKeywords.length > 0) return [`${path}: unsupported keyword ${unsupportedKeywords.join(", ")}`];
+      if (typeof node.type !== "string" || !types.has(node.type)) return [`${path}: no single known type`];
+      const own: string[] = [];
+      if (node.required !== undefined && !(Array.isArray(node.required) && node.required.every((k) => typeof k === "string"))) own.push(`${path}: required is not a list of strings`);
+      if (node.additionalProperties !== undefined && typeof node.additionalProperties !== "boolean" && !rec(node.additionalProperties)) own.push(`${path}: additionalProperties is not a boolean or a schema`);
+      if (node.items !== undefined && !rec(node.items)) own.push(`${path}: items is not an object schema`);
+      if (node.properties !== undefined && !rec(node.properties)) own.push(`${path}: properties is not an object`);
+      return [
+        ...own,
+        ...Object.entries(rec(node.properties) ? node.properties : {}).flatMap(([k, v]) => offences(v, `${path}.properties.${k}`)),
+        ...(rec(node.items) ? offences(node.items, `${path}.items`) : []),
+        ...(rec(node.additionalProperties) ? offences(node.additionalProperties, `${path}.additionalProperties`) : []),
+      ];
+    };
+    // The walker sees what it should (so a clean result below is not vacuous).
+    expect(offences({ type: "object", properties: { a: { oneOf: [] } } }, "s")).toEqual(["s.properties.a: unsupported keyword oneOf"]);
+    expect(offences({ type: "array", items: {} }, "s")).toEqual(["s.items: no single known type"]);
+    expect(offences({ type: "object", required: "a", additionalProperties: 1 }, "s")).toHaveLength(2);
+    expect(offences({ type: "object", properties: { a: { type: "string", enum: ["x"], default: "x" } }, required: ["a"], additionalProperties: false }, "s")).toEqual([]);
+
+    const active = EVIDENCE_PRIMITIVES.filter((d) => d.status === "active");
+    const found = active.flatMap((d) => offences(d.paramsSchema, "paramsSchema").map((o) => `${d.id} @ ${o}`));
+    // Pinned: today exactly one ACTIVE primitive, a stub, uses grammar outside the supported set. A future
+    // primitive that uses oneOf (or anything else) fails here, instead of its params failing open.
+    expect(found).toEqual(["telemetry.envelope_conformance @ paramsSchema.properties.envelope: unsupported keyword oneOf"]);
+    // A primitive may not go live while its params schema is outside the grammar.
+    for (const d of active.filter((x) => x.verifierStatus === "live")) {
+      expect(offences(d.paramsSchema, "paramsSchema"), d.id).toEqual([]);
+    }
+    // The exception fails closed: params that reach the unsupported node are refused; the rest validate as usual.
+    const stub = EVIDENCE_PRIMITIVES.find((d) => d.id === "telemetry.envelope_conformance")!;
+    expect(stub.verifierStatus).toBe("stub");
+    expect(validatePrimitiveParams(stub.paramsSchema, { envelope: "builtin-defaults" })).toBe(false);
+    expect(validatePrimitiveParams(stub.paramsSchema, { source: "stream" })).toBe(true);
+    expect(parses({ ...kitRequest(), evidence: { tier: 1, requiredPrimitives: [{ id: stub.id, params: { envelope: "builtin-defaults" } }], executable: false } })).toBe(false);
   });
 });
 

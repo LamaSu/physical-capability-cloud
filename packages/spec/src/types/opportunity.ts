@@ -7,7 +7,8 @@
  * Three kinds, a strict discriminated union (astra pack 112), never blurred:
  *   - funded_offer: work backed by an AUTHORITATIVE funding record. It must name
  *     that record (`fundingRef`) and pin the exact CSD revision; its evidence
- *     requirements are executable (every primitive has a live verifier).
+ *     requirements are executable: a complete tier-eligible set of primitives
+ *     whose verifiers are all live (evidenceIsExecutable).
  *   - kit_build_request: a request to build a reusable Capability Kit. Unfunded
  *     unless a funding record binds it; its evidence requirements may include
  *     stub primitives and then say so (`executable: false`).
@@ -43,6 +44,7 @@ import { sha256 as sha256Hash } from "@noble/hashes/sha256";
 import type { SHA256, Timestamp } from "./common.js";
 import { loadBuiltinCsds } from "../csd/registry.js";
 import { CsdEvidencePrimitiveRefSchema, type CsdEvidencePrimitiveRef } from "../csd/schema.js";
+import { computeCsdEligibility } from "../evidence/eligibility.js";
 import { EVIDENCE_PRIMITIVES, type EvidencePrimitiveDef } from "../evidence/primitives.js";
 import { canonicalize } from "../util/canonical.js";
 import { CSD_CAPABILITY_URL_PATTERN } from "./capability-kit.js";
@@ -66,13 +68,54 @@ const DemandBandSchema = z.enum(["5-9", "10-24", "25-99", "100+"]);
 
 const PRIMITIVES: ReadonlyMap<string, EvidencePrimitiveDef> = new Map(EVIDENCE_PRIMITIVES.map((p) => [p.id, p]));
 
+/** The JSON-Schema keywords validatePrimitiveParams evaluates. Any other keyword refuses the params. */
+export const PRIMITIVE_PARAMS_KEYWORDS: readonly string[] = Object.freeze([
+  "type",
+  "enum",
+  "items",
+  "properties",
+  "required",
+  "additionalProperties",
+]);
+
+/** Keywords that carry no validation: validatePrimitiveParams ignores them. */
+export const PRIMITIVE_PARAMS_ANNOTATIONS: readonly string[] = Object.freeze([
+  "description",
+  "title",
+  "$comment",
+  "examples",
+  "default",
+]);
+
+const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
 /**
- * Check a primitive's params against its minimal JSON-Schema-shaped descriptor:
- * type, enum, items, properties, required and additionalProperties.
+ * Check a primitive's params against its minimal JSON-Schema-shaped descriptor,
+ * failing CLOSED (astra pack 112b). Supported: `type` as one single string
+ * (string, number, integer, boolean, array or object), `enum`, `items` (an object
+ * schema, never the tuple array), `properties`, `required`, and
+ * `additionalProperties` (false, true or an object schema, which then validates
+ * every property that `properties` does not name). The annotations in
+ * PRIMITIVE_PARAMS_ANNOTATIONS are ignored. It returns false for any other
+ * keyword (oneOf, anyOf, allOf, not, $ref, pattern, format, minimum, const, ...),
+ * for a missing, unknown or array `type`, for a malformed supported keyword, and
+ * for a schema with no `type` at all: `{}` or annotations only would mean "any
+ * value", and no active primitive uses one. It evaluates the schema nodes the
+ * value reaches, as JSON Schema does.
  */
 export function validatePrimitiveParams(schema: Record<string, unknown>, value: unknown): boolean {
-  const type = schema.type;
-  if (Array.isArray(schema.enum) && !schema.enum.some((e) => e === value)) return false;
+  if (!isRecord(schema)) return false;
+  const keywords = Object.keys(schema).filter((k) => !PRIMITIVE_PARAMS_ANNOTATIONS.includes(k));
+  if (keywords.some((k) => !PRIMITIVE_PARAMS_KEYWORDS.includes(k))) return false;
+  const { type, items, properties, required, additionalProperties } = schema;
+  if (items !== undefined && !isRecord(items)) return false;
+  if (properties !== undefined && !isRecord(properties)) return false;
+  if (required !== undefined && (!Array.isArray(required) || required.some((k) => typeof k !== "string"))) return false;
+  if (additionalProperties !== undefined && typeof additionalProperties !== "boolean" && !isRecord(additionalProperties)) {
+    return false;
+  }
+  if (schema.enum !== undefined && (!Array.isArray(schema.enum) || !schema.enum.some((e) => e === value))) return false;
   switch (type) {
     case "string":
       return typeof value === "string";
@@ -82,29 +125,28 @@ export function validatePrimitiveParams(schema: Record<string, unknown>, value: 
       return typeof value === "number" && Number.isInteger(value);
     case "boolean":
       return typeof value === "boolean";
-    case "array": {
-      if (!Array.isArray(value)) return false;
-      const items = schema.items as Record<string, unknown> | undefined;
-      return items === undefined || value.every((v) => validatePrimitiveParams(items, v));
-    }
+    case "array":
+      return (
+        Array.isArray(value) &&
+        (items === undefined || value.every((v) => validatePrimitiveParams(items as Record<string, unknown>, v)))
+      );
     case "object": {
-      if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-      const obj = value as Record<string, unknown>;
-      const props = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
-      const required = Array.isArray(schema.required) ? (schema.required as string[]) : [];
-      if (required.some((k) => !(k in obj))) return false;
-      for (const [k, v] of Object.entries(obj)) {
-        const sub = props[k];
-        if (sub === undefined) {
-          if (schema.additionalProperties === false) return false;
-          continue;
+      if (!isRecord(value)) return false;
+      const props = (properties ?? {}) as Record<string, unknown>;
+      if ((required as string[] | undefined)?.some((k) => !hasOwn(value, k))) return false;
+      for (const [k, v] of Object.entries(value)) {
+        if (hasOwn(props, k)) {
+          if (!validatePrimitiveParams(props[k] as Record<string, unknown>, v)) return false;
+        } else if (additionalProperties === false) {
+          return false;
+        } else if (isRecord(additionalProperties) && !validatePrimitiveParams(additionalProperties, v)) {
+          return false;
         }
-        if (!validatePrimitiveParams(sub, v)) return false;
       }
       return true;
     }
     default:
-      return true;
+      return false;
   }
 }
 
@@ -120,31 +162,64 @@ const PrimitiveRefSchema = CsdEvidencePrimitiveRefSchema.strict().superRefine((r
   }
 });
 
-/** True when every referenced primitive has a live verifier, i.e. the requirement can actually be checked. */
+/**
+ * True when every referenced primitive has a live verifier. NECESSARY, NOT
+ * SUFFICIENT: an empty set passes it, and so does a set that is not tier-eligible
+ * (decl.self_attested is live and passes at any tier). Executability is
+ * evidenceIsExecutable; nothing in the schema calls this any more.
+ */
 export function primitivesAreExecutable(refs: readonly CsdEvidencePrimitiveRef[]): boolean {
   return refs.every((r) => PRIMITIVES.get(r.id)?.verifierStatus === "live");
+}
+
+/** The url computeCsdEligibility echoes back for an opportunity's evidence requirement; it has no other use. */
+const EVIDENCE_REQUIREMENT_URL = "pcc://opportunity/evidence-requirement";
+
+/**
+ * Whether an evidence requirement is EXECUTABLE: a tier-eligible set whose
+ * verifiers are all live. `refs` is the COMPLETE set for that tier, dependencies
+ * included. It runs computeCsdEligibility with requireImplementedVerifier on a CSD
+ * whose only evidence tier is `tier`, so the rule is the evidence lane's: a
+ * non-empty set from tier 1 up, only active primitives whose tierSupport includes
+ * the tier, every dependsOn present in the set, a Family-G (human attestation)
+ * primitive from tier 2 up, a primitive other than decl.self_attested from tier 1
+ * up, and a live verifier for every primitive. Tier 0 with no primitives is the
+ * permissionless floor, and is executable.
+ */
+export function evidenceIsExecutable(tier: 0 | 1 | 2 | 3, refs: readonly CsdEvidencePrimitiveRef[]): boolean {
+  const report = computeCsdEligibility(
+    {
+      url: EVIDENCE_REQUIREMENT_URL,
+      evidence: { [`tier${tier}`]: { description: "opportunity requirement", required: [], primitives: [...refs] } },
+    },
+    { requireImplementedVerifier: true },
+  );
+  return report.perTier.find((p) => p.tier === tier)?.eligible === true;
 }
 
 const EvidenceRequirementSchema = z
   .object({
     tier: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
     requiredPrimitives: z.array(PrimitiveRefSchema).max(50),
-    /** True only when every primitive has a live verifier (checked below). */
+    /** True exactly when evidenceIsExecutable(tier, requiredPrimitives) (checked below). */
     executable: z.boolean(),
   })
   .strict()
   .superRefine((e, ctx) => {
-    if (e.executable !== primitivesAreExecutable(e.requiredPrimitives)) {
+    if (e.executable !== evidenceIsExecutable(e.tier, e.requiredPrimitives)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "executable must be true exactly when every required primitive has a live verifier",
+        message:
+          "executable must be true exactly when requiredPrimitives is a complete tier-eligible set with live verifiers (evidenceIsExecutable)",
       });
     }
   });
 
 export interface OpportunityEvidence {
   tier: 0 | 1 | 2 | 3;
+  /** The COMPLETE set for this tier, dependencies included (see evidenceIsExecutable). */
   requiredPrimitives: CsdEvidencePrimitiveRef[];
+  /** True exactly when evidenceIsExecutable(tier, requiredPrimitives). */
   executable: boolean;
 }
 
@@ -424,7 +499,7 @@ export function opportunityDTOSchemaFor(publicUrls: Iterable<string>) {
       const fail = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
       if (o.kind === "funded_offer") {
         if (o.evidence && !o.evidence.executable) {
-          fail("a funded_offer's evidence requirements must be executable (every primitive live)");
+          fail("a funded_offer's evidence must be executable (see evidenceIsExecutable)");
         }
         return;
       }
@@ -432,7 +507,7 @@ export function opportunityDTOSchemaFor(publicUrls: Iterable<string>) {
         if (o.reward?.fundingStatus === "funded") {
           if (o.authority !== "authoritative") fail("'funded' needs a server-verified (authoritative) source");
           if (!o.fundingRef) fail("a funded kit_build_request must name its funding record");
-          if (o.evidence && !o.evidence.executable) fail("funded evidence requirements must be executable");
+          if (o.evidence && !o.evidence.executable) fail("a funded kit_build_request's evidence must be executable (see evidenceIsExecutable)");
         } else if (o.fundingRef) {
           fail("only a funded opportunity carries a fundingRef");
         }
