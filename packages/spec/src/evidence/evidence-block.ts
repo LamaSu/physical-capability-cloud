@@ -200,10 +200,22 @@ export interface UnitContext extends SettlementUnitRef {
 /**
  * The unit + challenge context bound inside the block. Refuses a context whose
  * settlementUnitId does not derive from its own chainId, escrow, jobIdHash,
- * milestoneIndex and stepId.
+ * milestoneIndex and stepId. Every field is read exactly once and the derivation
+ * check and the hash both use those copies, so a getter that answers differently
+ * on a second read cannot make the committed context differ from the checked one.
  */
 export function computeUnitContextDigest(ctx: UnitContext): Bytes32Hex {
-  if (computeSettlementUnitId(ctx) !== ctx.settlementUnitId) {
+  if (ctx === null || typeof ctx !== "object") {
+    throw new EvidenceBlockInputError("unitContext", "expected a unit context object");
+  }
+  const chainId = ctx.chainId;
+  const escrow = ctx.escrow;
+  const settlementUnitId = ctx.settlementUnitId;
+  const jobIdHash = ctx.jobIdHash;
+  const milestoneIndex = ctx.milestoneIndex;
+  const stepId = ctx.stepId;
+  const challengeNonce = ctx.challengeNonce;
+  if (computeSettlementUnitId({ chainId, escrow, jobIdHash, milestoneIndex, stepId }) !== settlementUnitId) {
     throw new EvidenceBlockInputError(
       "settlementUnitId",
       "does not derive from the context's chainId, escrow, jobIdHash, milestoneIndex and stepId",
@@ -211,13 +223,13 @@ export function computeUnitContextDigest(ctx: UnitContext): Bytes32Hex {
   }
   return keccakWords([
     bytes32Word("UNIT_CONTEXT_DOMAIN_V1", UNIT_CONTEXT_DOMAIN_V1),
-    uintWord("chainId", ctx.chainId, 256),
-    addressWord("escrow", ctx.escrow),
-    bytes32Word("settlementUnitId", ctx.settlementUnitId),
-    bytes32Word("jobIdHash", ctx.jobIdHash),
-    uintWord("milestoneIndex", ctx.milestoneIndex, 256),
-    bytes32Word("stepId", ctx.stepId),
-    bytes32Word("challengeNonce", ctx.challengeNonce),
+    uintWord("chainId", chainId, 256),
+    addressWord("escrow", escrow),
+    bytes32Word("settlementUnitId", settlementUnitId),
+    bytes32Word("jobIdHash", jobIdHash),
+    uintWord("milestoneIndex", milestoneIndex, 256),
+    bytes32Word("stepId", stepId),
+    bytes32Word("challengeNonce", challengeNonce),
   ]);
 }
 

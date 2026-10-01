@@ -1023,3 +1023,47 @@ describe("E7 F5 — negative zero is not the pinned spelling of zero", () => {
     expect(refusalOf(() => computeSettlementUnitId({ ...unit, milestoneIndex: "-0" })).field).toBe("milestoneIndex");
   });
 });
+
+// ── F3 extension, NOT in the verdict: the unit context is read once too ─────
+// computeUnitContextDigest read each field to check the settlementUnitId derivation and
+// again to hash it, so a getter could pass the check and be committed with other values.
+describe("E7 F3 extension — the unit context is read once", () => {
+  const FIELDS = ["chainId", "escrow", "settlementUnitId", "jobIdHash", "milestoneIndex", "stepId", "challengeNonce"] as const;
+
+  it("every field is read once, so a later answer is never committed", () => {
+    const settlementUnitId = computeSettlementUnitId(unit);
+    const plain: Record<string, unknown> = { ...unit, settlementUnitId, challengeNonce };
+    const later: Record<string, unknown> = {
+      chainId: 1n,
+      escrow: `0x${"11".repeat(20)}`,
+      settlementUnitId: K("other-unit"),
+      jobIdHash: K("other-job"),
+      milestoneIndex: 99n,
+      stepId: K("other-step"),
+      challengeNonce: K("other-nonce"),
+    };
+    const reads: Record<string, number> = {};
+    const shifty: Record<string, unknown> = {};
+    for (const field of FIELDS) {
+      Object.defineProperty(shifty, field, {
+        enumerable: true,
+        get() {
+          reads[field] = (reads[field] ?? 0) + 1;
+          return reads[field] === 1 ? plain[field] : later[field];
+        },
+      });
+    }
+    expect(computeUnitContextDigest(shifty as never)).toBe(computeUnitContextDigest(plain as never));
+    expect(reads).toEqual(Object.fromEntries(FIELDS.map((f) => [f, 1])));
+  });
+
+  it("still refuses an incoherent context and a non-object", () => {
+    const settlementUnitId = computeSettlementUnitId(unit);
+    expect(refusalOf(() => computeUnitContextDigest({ ...unit, milestoneIndex: 2n, settlementUnitId, challengeNonce })).field).toBe(
+      "settlementUnitId",
+    );
+    for (const bad of [null, undefined, 7, "ctx"]) {
+      expect(refusalOf(() => computeUnitContextDigest(bad as never)).field, String(bad)).toBe("unitContext");
+    }
+  });
+});
