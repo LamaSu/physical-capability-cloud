@@ -80,7 +80,7 @@
  *    ` passed`, `PASS`, `Status` all count as present); a spelling of the pinned
  *    field that is not the exact key is malformed, not a pass, even beside the
  *    exact key. A DIFFERENT verdict-looking key beside a valid exact pinned
- *    field is ignored: the pinned field decides.
+ *    field is malformed too (two claims; no real producer emits one).
  *    Pinned: instrument_result `pass` (boolean), cv_inspection_result
  *    `passed` (boolean) and batch_sample_result `status` ("PASS" or "FAIL").
  *    photo_comparison_result has no producer, so no pinned field. A cv
@@ -421,8 +421,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *     `fail`, any other value gives `malformed`;
  *   - the pinned field is absent: any own key that folds to one of {pass, passed,
  *     status, result, verdict, ok, success} gives `malformed`, otherwise `none`.
- * Another verdict-looking key beside a valid pinned field is ignored: the pinned
- * field decides.
+ * Any other verdict-looking key beside a valid pinned field gives `malformed`:
+ * the payload carries two claims, and readers of the other key would disagree.
  */
 function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
   if (!isPlainObject(payload)) return "malformed";
@@ -430,10 +430,14 @@ function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
   let exactPinned = false;
   let pinnedSpelling = false;
   let verdictLooking = false;
+  let otherVerdict = false;
   for (const key of Object.getOwnPropertyNames(payload)) {
     const folded = asciiFold(key, LONGEST_VERDICT_NAME);
     if (folded === null) continue;
-    if (VERDICT_LOOKING.has(folded)) verdictLooking = true;
+    if (VERDICT_LOOKING.has(folded)) {
+      verdictLooking = true;
+      if (pinned === undefined || folded !== pinned.field) otherVerdict = true;
+    }
     if (pinned !== undefined && folded === pinned.field) {
       if (key === pinned.field) exactPinned = true;
       else pinnedSpelling = true;
@@ -441,6 +445,9 @@ function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
   }
   if (pinnedSpelling) return "malformed";
   if (pinned !== undefined && exactPinned) {
+    // A second verdict-looking key is a conflicting claim: a reader of that key
+    // (types/dpp.ts reads `pass` for cv) would answer differently. Fail closed.
+    if (otherVerdict) return "malformed";
     const descriptor = Object.getOwnPropertyDescriptor(payload, pinned.field);
     if (descriptor === undefined || !("value" in descriptor)) return "malformed";
     return pinned.read(descriptor.value);

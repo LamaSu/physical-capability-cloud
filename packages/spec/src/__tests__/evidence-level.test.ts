@@ -994,7 +994,7 @@ describe("inspectionVerdict — one closed verdict per inspection type", () => {
       ["verdict", { verdict: "PASS" }, "malformed"],
       ["ok", { ok: true }, "malformed"],
       ["success", { success: true }, "malformed"],
-      ["a valid pass beside a stray verdict key still reads the pinned field", { pass: true, status: "FAIL" }, "pass"],
+      ["a valid pass beside a stray verdict key is two claims: malformed", { pass: true, status: "FAIL" }, "malformed"],
     ]);
   });
 
@@ -1050,7 +1050,7 @@ describe("inspectionVerdict — one closed verdict per inspection type", () => {
       ["pass:true (what types/dpp.ts reads)", { pass: true }, "malformed"],
       ["pass:false", { pass: false }, "malformed"],
       ["status instead of passed", { status: "PASS" }, "malformed"],
-      ["a valid passed beside a stray pass still reads the pinned field", { passed: true, pass: false }, "pass"],
+      ["a valid passed beside a stray pass is two claims (dpp.ts reads pass): malformed", { passed: true, pass: false }, "malformed"],
     ]);
   });
 
@@ -1195,8 +1195,8 @@ describe("inspectionVerdict — verdict keys are matched after an ASCII trim and
       ["Passed (a different verdict-looking name)", { Passed: true }, "malformed"],
       ["conflicting spellings", { pass: true, Pass: false }, "malformed"],
       ["conflicting spellings, padded", { pass: false, " pass": true }, "malformed"],
-      ["a valid pass beside another verdict-looking key: the pinned field decides", { pass: true, Status: "FAIL" }, "pass"],
-      ["a valid fail beside another verdict-looking key", { pass: false, RESULT: "ok" }, "fail"],
+      ["a valid pass beside another verdict-looking key: malformed", { pass: true, Status: "FAIL" }, "malformed"],
+      ["a valid fail beside another verdict-looking key: malformed", { pass: false, RESULT: "ok" }, "malformed"],
     ]);
   });
 
@@ -1207,7 +1207,7 @@ describe("inspectionVerdict — verdict keys are matched after an ASCII trim and
       ["PASSED:false", { PASSED: false }, "malformed"],
       ["PASS (a different verdict-looking name)", { PASS: true }, "malformed"],
       ["passed beside Passed", { passed: true, Passed: false }, "malformed"],
-      ["a valid passed beside PASS: the pinned field decides", { passed: true, PASS: false }, "pass"],
+      ["a valid passed beside PASS: malformed", { passed: true, PASS: false }, "malformed"],
     ]);
     // It proves no level and counts as a failed inspection.
     const independentCv = (payload: unknown) =>
@@ -1226,7 +1226,7 @@ describe("inspectionVerdict — verdict keys are matched after an ASCII trim and
       [" status", { " status": "PASS" }, "malformed"],
       ["status beside Status", { status: "PASS", Status: "FAIL" }, "malformed"],
       ["Pass instead of status", { Pass: true }, "malformed"],
-      ["a valid status beside Result: the pinned field decides", { status: "PASS", Result: "x" }, "pass"],
+      ["a valid status beside Result is two claims: malformed", { status: "PASS", Result: "x" }, "malformed"],
     ]);
   });
 
@@ -1433,5 +1433,18 @@ describe("deriveContradictions — the public contradiction rule the oracle sign
     expect(deriveContradictions([attemptB])).toEqual([]);
     // Pooled across attempts and devices (what the contract forbids): refused, fail-closed. No correlation is attempted.
     expect(deriveContradictions([attemptA, attemptB])).toEqual(["completion-and-failure"]);
+  });
+});
+
+describe("E5 round 2 (lane): a second verdict-looking key beside a valid pinned field fails closed", () => {
+  const completion = { id: "c", type: "execution_completed", timestamp: "2026-10-01T00:00:00Z", source: { deviceId: "printer-1", kernelId: "k" }, payload: {}, hash: "sha256:" + "00".repeat(32) };
+  const cv = (payload: Record<string, unknown>) => ({ ...completion, id: "i", type: "cv_inspection_result", source: { deviceId: "camera-1", kernelId: "k" }, payload });
+  it("real camera payloads (passed plus measurements) still read as their verdict", () => {
+    expect(inspectionVerdict(cv({ passed: true, confidence: 0.9, findings: [], imageHash: "x" }) as never)).toBe("pass");
+    expect(inspectionVerdict(cv({ passed: false, confidence: 0.9, findings: ["scratch"] }) as never)).toBe("fail");
+  });
+  it("a passing cv that also claims pass:false derives completion-and-failed-inspection", () => {
+    const bundles = [{ events: [completion, cv({ passed: true, pass: false })] }] as never;
+    expect(deriveContradictions(bundles)).toEqual(["completion-and-failed-inspection"]);
   });
 });
