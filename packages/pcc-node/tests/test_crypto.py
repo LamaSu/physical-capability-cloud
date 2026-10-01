@@ -881,7 +881,19 @@ class TestA02dMountsAndScrubbing:
             fields = {k: getattr(st, k) for k in ("st_mode", "st_uid", "st_gid", "st_nlink", "st_size")}
             return __import__("types").SimpleNamespace(st_dev=root_st.st_dev, st_ino=root_st.st_ino, **fields)
 
+        real_mount_of = crypto_module._mount_of
+
+        def mount_of(fd):
+            # The alias is its own mount showing a whole filesystem, as a bind of "/" is,
+            # whether or not the test's temporary directory shares a mount with "/".
+            m = real_mount_of(fd)
+            st = real_fstat(fd)
+            if (st.st_dev, st.st_ino) == alias_id:
+                return {"id": "alias-of-root", "root": "/", "fstype": "ext4", "super": "rw"}
+            return m
+
         monkeypatch.setattr(crypto_module.os, "fstat", fstat)
+        monkeypatch.setattr(crypto_module, "_mount_of", mount_of)
         with pytest.raises(crypto_module.KeyFileError):
             load_or_create_keys(str(keys / "keys.json"))
         assert os.listdir(keys) == [], "a new secret was created inside the checkout"
