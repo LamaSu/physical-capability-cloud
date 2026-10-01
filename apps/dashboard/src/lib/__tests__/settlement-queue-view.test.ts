@@ -115,6 +115,27 @@ describe("epochsFromResponse", () => {
     expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, epochId: 2 ** 53 }] }).state).toBe("unavailable");
   });
 
+  it("NEGATIVE (M4): an epoch's times are the bundler's Date.now() stamps: non-negative safe-integer ms, ending no earlier than they start", () => {
+    for (const times of [
+      { startedAt: 1000.5 },
+      { startedAt: -1 },
+      { completedAt: 2 ** 53 },
+      { completedAt: Number.POSITIVE_INFINITY },
+      { startedAt: "1000" },
+      { startedAt: 1500, completedAt: 1000 },
+    ]) {
+      expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, ...times }] }).state, JSON.stringify(times)).toBe("unavailable");
+    }
+    expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, startedAt: 1500, completedAt: 1500 }] }).state).toBe("read");
+  });
+
+  it("NEGATIVE (M4): the queue's oldestAge is an age in ms: a non-negative safe integer", () => {
+    for (const oldestAge of [-5, 1.5, 2 ** 53, Number.NaN]) {
+      expect(statusFromResponse(200, { ...STATUS, oldestAge }).state, String(oldestAge)).toBe("unavailable");
+    }
+    expect(statusFromResponse(200, { ...STATUS, oldestAge: 0 }).state).toBe("read");
+  });
+
   it("an unreachable gateway has its own reason", () => {
     expect(UNREACHABLE).toEqual({ state: "unavailable", reason: "The gateway could not be reached." });
   });

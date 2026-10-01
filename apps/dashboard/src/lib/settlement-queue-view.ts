@@ -51,7 +51,9 @@ const SHAPE = "The gateway's answer did not have the expected shape.";
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 /** A count the page can safely display or sum: a non-negative integer within Number's safe range. */
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
-const isTime = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+/** A time the bundler stamps with Date.now(), or an age measured from one: whole milliseconds,
+ * non-negative, within Number's safe range (the same test as a count). */
+const isTime = (v: unknown): v is number => isCount(v);
 /** A record of per-key counts (byAgent / byOperation): every value is itself a safe count. */
 const isCountRecord = (v: unknown): v is Record<string, number> => isObj(v) && Object.values(v).every(isCount);
 const FLUSH_TRIGGERS: ReadonlySet<string> = new Set(["manual", "size", "age", "value"]);
@@ -107,7 +109,8 @@ function isEpoch(e: unknown): e is EpochSummary {
     isCountRecord(e.byAgent) &&
     isCountRecord(e.byOperation) &&
     isTime(e.startedAt) &&
-    isTime(e.completedAt)
+    isTime(e.completedAt) &&
+    e.completedAt >= e.startedAt
   );
 }
 
