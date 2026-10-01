@@ -116,8 +116,8 @@ function agenticEnabled(): boolean {
  * Returns [] if the repo is unreachable — the caller falls back to templates.
  *
  * WP-C: `assuranceTiers` are the SERVED tiers, meaning each row's claim clamped
- * to its kernel's authorized assurance ceiling (same clamp as the capability
- * DTO). They drive the matched node's evidence depth (`deriveEvidence`) and
+ * to its kernel's served ceiling, min(the kernel's claim, its authorized
+ * assurance ceiling) (same clamp as the capability DTO). They drive the matched node's evidence depth (`deriveEvidence`) and
  * the `matchedCapabilityDigest`, so a raw self-declared tier must never reach
  * them. Kernels are loaded with one batched query. An unknown kernel is ceiling 0.
  */

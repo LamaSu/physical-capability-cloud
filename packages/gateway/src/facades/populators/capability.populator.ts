@@ -6,29 +6,33 @@
  *
  * Assurance ceiling (WP-C): a capability row's `assuranceTiers` is the
  * operator's CLAIM. The DTO serves the claim clamped to the OWNING kernel's
- * authorized ceiling (services/assurance-ceiling.ts), legacy rows included.
- * A capability whose kernel is unknown has a ceiling of 0.
+ * SERVED ceiling, effectiveMaxAssuranceTier = min(the kernel's claimed tier, its
+ * authorized ceiling) (services/assurance-ceiling.ts), legacy rows included.
+ * That is the bound contracting holds a job to, so discovery never offers a
+ * tier a job cannot be contracted at (astra pack 90 F1). A capability whose
+ * kernel is unknown has a ceiling of 0.
  */
 
 import type { AssuranceTier, Capability, ShopKernel } from "@pcc/spec";
 import type { CapabilityDTO, PopulationContext } from "../types.js";
 import { isKernelStale } from "./staleness.js";
 import {
-  authorizedAssuranceCeiling,
   clampAssuranceTiers,
-  type AssuranceCeilingKernel,
+  effectiveMaxAssuranceTier,
+  type AssuranceClaimKernel,
 } from "../../services/assurance-ceiling.js";
 
 /**
  * The tiers a capability may be SERVED at: its claimed tiers clamped to the
- * owning kernel's authorized ceiling (a missing kernel is 0). Exported so
- * selection paths that work on raw rows apply the exact same clamp as the DTO.
+ * owning kernel's served ceiling, effectiveMaxAssuranceTier(kernel) (a missing
+ * kernel is 0). Exported so selection paths that work on raw rows apply the
+ * exact same clamp as the DTO.
  */
 export function servedAssuranceTiers(
   claimedTiers: unknown,
-  kernel: AssuranceCeilingKernel | null | undefined,
+  kernel: AssuranceClaimKernel | null | undefined,
 ): AssuranceTier[] {
-  return clampAssuranceTiers(claimedTiers, authorizedAssuranceCeiling(kernel));
+  return clampAssuranceTiers(claimedTiers, effectiveMaxAssuranceTier(kernel));
 }
 
 /**
@@ -39,9 +43,10 @@ export function populateCapabilityDTO(
   kernel: ShopKernel | undefined,
   ctx: PopulationContext,
   /**
-   * Pre-computed authorized ceiling of `kernel` (batch callers memoize it per
-   * kernel). When omitted it is computed from `kernel`. It must be derived
-   * from the same kernel row; never pass a caller-chosen value.
+   * Pre-computed served ceiling of `kernel`, effectiveMaxAssuranceTier (batch
+   * callers memoize it per kernel). When omitted it is computed from `kernel`.
+   * It must be derived from the same kernel row; never pass a caller-chosen
+   * value.
    */
   kernelCeiling?: AssuranceTier,
 ): CapabilityDTO {
@@ -66,11 +71,11 @@ export function populateCapabilityDTO(
     materials: model.materials,
     tolerances: model.tolerances,
     envelope: model.envelope,
-    // Claim clamped to the owning kernel's authorized ceiling (WP-C).
+    // Claim clamped to the owning kernel's served ceiling (WP-C; pack 90 F1).
     assuranceTiers: clampAssuranceTiers(
       model.assuranceTiers,
       kernelCeiling ??
-        authorizedAssuranceCeiling(kernel as unknown as AssuranceCeilingKernel | undefined),
+        effectiveMaxAssuranceTier(kernel as unknown as AssuranceClaimKernel | undefined),
     ),
     pricing: model.pricing,
     location: model.location,
@@ -100,7 +105,7 @@ export function populateCapabilityList(
     const kernel = kernelMap.get(model.kernelId);
     let ceiling = ceilings.get(model.kernelId);
     if (ceiling === undefined) {
-      ceiling = authorizedAssuranceCeiling(kernel as unknown as AssuranceCeilingKernel | undefined);
+      ceiling = effectiveMaxAssuranceTier(kernel as unknown as AssuranceClaimKernel | undefined);
       ceilings.set(model.kernelId, ceiling);
     }
     return populateCapabilityDTO(model, kernel, ctx, ceiling);

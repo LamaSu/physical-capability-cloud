@@ -197,8 +197,9 @@ function executeIntentQuery(
         capType ? repos.capabilities.findByType(capType) : repos.capabilities.findAll()
       ).slice(0, 20);
       // WP-C: a row's assuranceTiers is the operator's CLAIM. Serve it clamped
-      // to the owning kernel's authorized ceiling, the same as the capability
-      // DTO (one batched kernel load; an unknown kernel is ceiling 0).
+      // to the owning kernel's served ceiling (min(claim, authorized ceiling)),
+      // the same as the capability DTO (one batched kernel load; an unknown
+      // kernel is ceiling 0).
       const ceilings = buildAssuranceCeilingMap(
         repos.kernels.findByIds([...new Set(capabilities.map((c) => c.kernelId))]),
       );

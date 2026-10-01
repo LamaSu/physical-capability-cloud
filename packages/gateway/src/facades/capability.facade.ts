@@ -242,9 +242,10 @@ export class CapabilityFacade extends BaseFacade {
       const kernelMap = this.loadKernelMap([...new Set(candidates.map((c) => c.kernelId))]);
 
       // WP-C: filter on the SERVED tiers, meaning the claim clamped to the owning
-      // kernel's authorized ceiling. A row claiming [0,1,2] on a kernel whose
-      // ceiling is 1 does not match assuranceTier=2. The ceiling is evaluated
-      // once per kernel.
+      // kernel's served ceiling, effectiveMaxAssuranceTier = min(the kernel's
+      // claimed tier, its authorized ceiling), the bound contracting applies. A
+      // row claiming [0,1,2] on a kernel served at 1 does not match
+      // assuranceTier=2. The ceiling is evaluated once per kernel.
       if (criteria.assuranceTier !== undefined) {
         const ceilings = buildAssuranceCeilingMap(kernelMap.values());
         candidates = candidates.filter((c) =>

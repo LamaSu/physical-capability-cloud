@@ -34,10 +34,13 @@
  *
  * Assurance tiers (WP-C R1, MUST-CLOSE 5). A node's `assuranceTier` is a CLAIM
  * made by whoever registered it. Every search serves each node at
- * min(claim, authorizedAssuranceCeiling(its kernel row)), loaded with ONE
- * batched kernel lookup per search; a node whose kernel has no row is served at
- * 0. Filtering, `quality` ranking, the returned steps and the stored proposal
- * all use that served tier, never the raw claim (services/assurance-ceiling.ts).
+ * min(claim, effectiveMaxAssuranceTier(its kernel row)), the kernel's served
+ * ceiling, which is min(the kernel's own claimed tier, its authorized ceiling)
+ * and so the bound contracting holds a job to (astra pack 90 F1). The kernel
+ * rows are loaded with ONE batched lookup per search; a node whose kernel has no
+ * row is served at 0. Filtering, `quality` ranking, the returned steps and the
+ * stored proposal all use that served tier, never the raw claim
+ * (services/assurance-ceiling.ts).
  * compose.ts reaches this search as its multi-step and outcomeChain fallback,
  * so the same clamp covers /api/compose.
  *
@@ -128,7 +131,7 @@ function loadNodes(): CapabilityGraphNode[] {
 
 /**
  * WP-C R1: the same nodes, each at its SERVED tier,
- * min(claimed tier, authorizedAssuranceCeiling(kernel row of node.kernelId)).
+ * min(claimed tier, effectiveMaxAssuranceTier(kernel row of node.kernelId)).
  * One batched kernel lookup for the whole snapshot. A node whose kernel has no
  * row is served at 0.
  */

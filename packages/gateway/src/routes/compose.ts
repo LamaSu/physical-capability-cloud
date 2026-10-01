@@ -195,9 +195,10 @@ export interface CapabilityProvider {
 /**
  * Dev-pool provider. A candidate's `assuranceTier` is a CLAIM made by whoever
  * registered it (WP-C R1). Each candidate is served at
- * min(claim, authorizedAssuranceCeiling(kernel row of candidate.kernelId)),
- * with ONE batched kernel lookup per call; a candidate whose kernel has no row
- * is served at 0. Eligibility, `quality` ranking and the planned step all see
+ * min(claim, effectiveMaxAssuranceTier(kernel row of candidate.kernelId)), the
+ * kernel's served ceiling (its own claim capped at its authorized ceiling, the
+ * bound contracting holds a job to; astra pack 90 F1), with ONE batched kernel
+ * lookup per call; a candidate whose kernel has no row is served at 0. Eligibility, `quality` ranking and the planned step all see
  * that served tier (the returned candidates carry it), never the raw claim.
  */
 const inMemoryProvider: CapabilityProvider = {
@@ -255,8 +256,8 @@ const FACADE_DEFAULT_DURATION_MS = 60 * 60 * 1000; // 1h placeholder
  * Highest assurance tier a capability advertises (0 when none declared).
  *
  * WP-C: on the facade path `tiers` is `CapabilityDTO.assuranceTiers`, which
- * the capability populator already clamped to the owning kernel's authorized
- * ceiling (services/assurance-ceiling.ts). Eligibility (`minAssuranceTier`)
+ * the capability populator already clamped to the owning kernel's served
+ * ceiling, effectiveMaxAssuranceTier (services/assurance-ceiling.ts). Eligibility (`minAssuranceTier`)
  * and `quality` ranking therefore see the SERVED tier, never the raw claim.
  */
 function maxAssuranceTier(tiers: readonly number[] | undefined): AssuranceTier {
