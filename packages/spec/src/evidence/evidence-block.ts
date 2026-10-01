@@ -61,9 +61,11 @@
  * null) instead of the submitted evidence. Every hash is recomputed over the snapshot and
  * `computeKernelSignedEventsRoot` returns the snapshot with the root: consumers evaluate the
  * returned `events`, never the object they passed in. An `undefined` OBJECT member is omitted,
- * exactly as `canonicalize` omits it from every hash in the repo (producers such as the
- * gateway's carrier events leave optional fields undefined), so it is absent from the hashed
- * text and from the returned events alike; it is not refused.
+ * exactly as `canonicalize` (and so `hashEvent` and `verifyEventHash`) omits it from every
+ * hash in the repo and as JSON transport drops it: it is absent from the hashed text and from
+ * the returned events alike, so what is evaluated is what was hashed. It is not refused:
+ * refusing it would take a second read of the input, and would make this step stricter than
+ * the `verifyEventHash` that accepts the same event.
  *
  * The session authorization is snapshotted before it is hashed (E7 F3, F4): a frozen
  * plain copy of exactly the declared fields, read once, with `publicKey` pinned to 64

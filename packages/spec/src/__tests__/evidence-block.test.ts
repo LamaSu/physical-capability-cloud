@@ -18,7 +18,7 @@ import {
   taggedDigestToBytes32,
   type AttestationQuorumRole,
 } from "../evidence/evidence-block.js";
-import { canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
+import { canonicalize, hashBundle, hashEvent, verifyEventHash } from "../util/canonical.js";
 import { computeVerificationProgramHash, type VerificationProgram } from "../types/verification-program.js";
 import { computeWorkProductHash, type WorkProduct } from "../types/work-product.js";
 import type { EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
@@ -678,11 +678,13 @@ describe("E7b — computeKernelSignedEventsRoot verifies, commits and returns on
     const { bundle: arrayCase } = await bundleOf({ list: [null] }, { list: [undefined] });
     expect((await refuse(arrayCase)).field).toBe("events[0].payload.list[0]");
 
-    // canonicalize omits an undefined member everywhere in the repo, and producers rely on it: the
-    // gateway's carrier events leave optional fields (statusDetail, trackingLocation, ...) undefined
-    // and hash them with hashEvent. Refusing the member would reject those honest bundles, so it is
-    // not refused: it is absent from the hashed text and from the events handed back.
+    // canonicalize omits an undefined OBJECT member everywhere in the repo (hashEvent and
+    // verifyEventHash accept the event with and without it) and JSON transport drops it, so it is
+    // absent from the hashed text and from the events handed back. It is not refused: that would
+    // take a second read of the input and make this step stricter than verifyEventHash. Pinned so
+    // that a change of that policy (a strict mode in canonicalSnapshot) is noticed.
     const { bundle } = await bundleOf({ a: 1, c: {} }, { a: 1, b: undefined, c: { d: undefined } });
+    expect(await verifyEventHash(bundle.events[0] as never)).toBe(true);
     expect(Object.keys(bundle.events[0]!.payload)).toEqual(["a", "b", "c"]);
     const result = await computeKernelSignedEventsRoot(bundle as never);
     const payload = result.events[0]!.payload;
