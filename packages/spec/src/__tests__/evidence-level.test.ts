@@ -19,7 +19,7 @@ import {
   type EvidenceLevelContext,
   type InspectionVerdict,
 } from "../evidence/evidence-level.js";
-import { bundleHasFabricatedEvents } from "../evidence/is-fabricated.js";
+import { bundleHasFabricatedEvents, isFabricated } from "../evidence/is-fabricated.js";
 import { EVIDENCE_EVENT_TYPES, type EvidenceEvent, type EvidenceEventType } from "../types/evidence.js";
 
 const KERNEL = "kernel-print-1";
@@ -583,6 +583,223 @@ describe("evidence levels — trust domains and input are validated, never guess
     const context = Object.freeze({ executorTrustDomains: Object.freeze([OP_A]) });
     expect(level(bundles, context)).toBe("inspected_output");
     expect(deriveContradictions(bundles)).toEqual([]);
+  });
+});
+
+describe("single read: one snapshot of the input per call, so no pass can disagree (D2)", () => {
+  /** An own accessor that answers answers[n] on its n-th read (the last answer repeats) and counts its reads. */
+  function flip(target: object, key: string, answers: unknown[]): { reads: () => number } {
+    let reads = 0;
+    Object.defineProperty(target, key, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        const answer = answers[Math.min(reads, answers.length - 1)];
+        reads += 1;
+        return answer;
+      },
+    });
+    return { reads: () => reads };
+  }
+
+  /** A Proxy over an array that logs every property read through it; an override answers the n-th read of a key. */
+  function countingArray<T>(items: T[], overrides: Record<string, (n: number) => unknown> = {}) {
+    const log: string[] = [];
+    const counts: Record<string, number> = {};
+    const proxy = new Proxy(items, {
+      get(target, key, receiver) {
+        const name = String(key);
+        log.push(name);
+        counts[name] = (counts[name] ?? 0) + 1;
+        const override = overrides[name];
+        return override !== undefined ? override(counts[name]!) : Reflect.get(target, key, receiver);
+      },
+    });
+    return { proxy, log };
+  }
+
+  it("an event's type is read once: the contradiction rule and the level see the same event", () => {
+    // The first read says execution_completed; every later read says execution_failed.
+    const flipping = () => {
+      const event = ev("execution_completed", PRINTER);
+      return { event, type: flip(event, "type", ["execution_completed", "execution_failed"]) };
+    };
+    const forContradictions = flipping();
+    expect(deriveContradictions([bundle([forContradictions.event, failed()], OP_A)])).toEqual(["completion-and-failure"]);
+    expect(forContradictions.type.reads()).toBe(1);
+    const forLevel = flipping();
+    expect(level([bundle([forLevel.event], OP_A)])).toBe("device_reported");
+    expect(forLevel.type.reads()).toBe(1);
+    // And the reverse: first a failure, then a completion. No completion was ever read, so no contradiction and no level.
+    const reverse = () => {
+      const event = ev("execution_failed", PRINTER);
+      return { event, type: flip(event, "type", ["execution_failed", "execution_completed"]) };
+    };
+    const reverseContradictions = reverse();
+    expect(deriveContradictions([bundle([reverseContradictions.event], OP_A)])).toEqual([]);
+    expect(reverseContradictions.type.reads()).toBe(1);
+    const reverseLevel = reverse();
+    expect(level([bundle([reverseLevel.event], OP_A)])).toBeNull();
+    expect(reverseLevel.type.reads()).toBe(1);
+  });
+
+  it("source, source.deviceId, source.simulated, payload and payload.mock are each read once", () => {
+    // source: a real device on the first read, a simulated gateway stamp on every later one.
+    const viaSource = ev("execution_completed", PRINTER);
+    const sourceReads = flip(viaSource, "source", [
+      { deviceId: PRINTER, deviceType: "controller", kernelId: KERNEL },
+      { deviceId: GATEWAY_STAMPED_DEVICE_ID, deviceType: "controller", kernelId: KERNEL, simulated: true },
+    ]);
+    expect(level([bundle([viaSource], OP_A)])).toBe("device_reported");
+    expect(sourceReads.reads()).toBe(1);
+
+    // source.deviceId and source.simulated on one source object.
+    const source = { deviceType: "controller", kernelId: KERNEL };
+    const deviceId = flip(source, "deviceId", [PRINTER, ""]);
+    const simulated = flip(source, "simulated", [false, true]);
+    const viaFields = { ...ev("execution_completed", PRINTER), source } as unknown as EvidenceEvent;
+    expect(level([bundle([viaFields], OP_A)])).toBe("device_reported");
+    expect(deviceId.reads()).toBe(1);
+    expect(simulated.reads()).toBe(1);
+
+    // payload.mock: not fabricated on the first read, fabricated on every later one.
+    const payload: Record<string, unknown> = {};
+    const mock = flip(payload, "mock", [false, true]);
+    expect(level([bundle([ev("execution_completed", PRINTER, payload)], OP_A)])).toBe("device_reported");
+    expect(mock.reads()).toBe(1);
+
+    // payload: a passing inspection on the first read, an empty one on every later one.
+    const viaPayload = ev("instrument_result", READER);
+    const payloadReads = flip(viaPayload, "payload", [{ pass: true }, {}]);
+    expect(level([executorBundle(), bundle([viaPayload], OP_B)], ASSIGNED_A)).toBe("inspected_output");
+    expect(payloadReads.reads()).toBe(1);
+  });
+
+  it("a payload read once as a passing verdict is never re-read as a failing one by the contradiction rule", () => {
+    const inspection = ev("instrument_result", READER);
+    const payloadReads = flip(inspection, "payload", [{ pass: true }, { pass: false }]);
+    expect(deriveContradictions([bundle([done(), inspection], OP_A)])).toEqual([]);
+    expect(payloadReads.reads()).toBe(1);
+  });
+
+  it("a Proxy events array is read once: its length once, each index once, nothing else", () => {
+    const events = () => countingArray([done(), inspectPass()]);
+    const forLevel = events();
+    expect(level([{ events: forLevel.proxy, trustDomain: OP_A }])).toBe("device_reported");
+    expect([...forLevel.log].sort()).toEqual(["0", "1", "length"]);
+    const forContradictions = events();
+    expect(deriveContradictions([{ events: forContradictions.proxy, trustDomain: OP_A }])).toEqual([]);
+    expect([...forContradictions.log].sort()).toEqual(["0", "1", "length"]);
+  });
+
+  it("a Proxy bundles array is read once too", () => {
+    const { proxy, log } = countingArray([executorBundle(), bundle([inspectPass()], OP_B)]);
+    expect(level(proxy, ASSIGNED_A)).toBe("inspected_output");
+    expect([...log].sort()).toEqual(["0", "1", "length"]);
+  });
+
+  it("a length that answers differently on each read cannot truncate or extend the walk", () => {
+    // First read 2, every later read 0: a second read of length would stop the walk early.
+    const events = countingArray([done(), failed()], { length: (n) => (n === 1 ? 2 : 0) });
+    expect(deriveContradictions([{ events: events.proxy, trustDomain: OP_A }])).toEqual(["completion-and-failure"]);
+    // First read 1, every later read 5: a second read would walk past the end into undefined elements.
+    const bundles = countingArray([bundle([done(), failed()], OP_A)], { length: (n) => (n === 1 ? 1 : 5) });
+    expect(deriveContradictions(bundles.proxy)).toEqual(["completion-and-failure"]);
+  });
+
+  it("a length that is not a non-negative safe integer is refused", () => {
+    for (const bad of ["2", NaN, -1, 1.5, 2 ** 53, Infinity, null, undefined]) {
+      const events = countingArray([done()], { length: () => bad });
+      expect(() => level([{ events: events.proxy, trustDomain: OP_A }]), String(bad)).toThrow(EvidenceLevelInputError);
+      const bundles = countingArray([executorBundle()], { length: () => bad });
+      expect(() => deriveContradictions(bundles.proxy), String(bad)).toThrow(EvidenceLevelInputError);
+    }
+    const domains = countingArray([OP_A], { length: () => "1" });
+    expect(() => level([], { executorTrustDomains: domains.proxy })).toThrow(EvidenceLevelInputError);
+  });
+
+  it("a bundle's events and trustDomain are each read once", () => {
+    const raw: Record<string, unknown> = {};
+    const eventsReads = flip(raw, "events", [[done()], []]);
+    const domainReads = flip(raw, "trustDomain", [OP_A, "not-a-principal"]);
+    expect(level([raw as unknown as AuthenticatedBundle])).toBe("device_reported");
+    expect(eventsReads.reads()).toBe(1);
+    expect(domainReads.reads()).toBe(1);
+  });
+
+  it("the public inspectionVerdict reads type and payload once each", () => {
+    const event = ev("instrument_result", READER);
+    const typeReads = flip(event, "type", ["instrument_result", "execution_completed"]);
+    const payloadReads = flip(event, "payload", [{ pass: true }, {}]);
+    expect(inspectionVerdict(event)).toBe("pass");
+    expect(typeReads.reads()).toBe(1);
+    expect(payloadReads.reads()).toBe(1);
+  });
+
+  it("the payload's own verdict material is read once: prototype, key names and the pinned field's descriptor", () => {
+    const traps: string[] = [];
+    const payload = new Proxy({ pass: true } as Record<string, unknown>, {
+      getPrototypeOf(target) {
+        traps.push("getPrototypeOf");
+        return Reflect.getPrototypeOf(target);
+      },
+      ownKeys(target) {
+        traps.push("ownKeys");
+        return Reflect.ownKeys(target);
+      },
+      getOwnPropertyDescriptor(target, key) {
+        traps.push("getOwnPropertyDescriptor:" + String(key));
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+      get(target, key, receiver) {
+        traps.push("get:" + String(key));
+        return Reflect.get(target, key, receiver);
+      },
+      has(target, key) {
+        traps.push("has:" + String(key));
+        return Reflect.has(target, key);
+      },
+    });
+    expect(level([executorBundle(), bundle([ev("instrument_result", READER, payload)], OP_B)], ASSIGNED_A)).toBe(
+      "inspected_output",
+    );
+    // get:mock is isFabricated's single read of payload.mock.
+    expect([...traps].sort()).toEqual(["get:mock", "getOwnPropertyDescriptor:pass", "getPrototypeOf", "ownKeys"]);
+  });
+
+  it("a getter that throws refuses the classification; it cannot skew one", () => {
+    const event = ev("execution_completed", PRINTER);
+    Object.defineProperty(event, "type", {
+      enumerable: true,
+      get() {
+        throw new Error("boom");
+      },
+    });
+    expect(() => level([bundle([event], OP_A)])).toThrow("boom");
+    expect(() => deriveContradictions([bundle([event], OP_A)])).toThrow("boom");
+  });
+
+  it("fabrication is exactly isFabricated: the same predicate over the same event", () => {
+    const variants: Array<[string, EvidenceEvent]> = [
+      ["simulated:true", ev("execution_completed", PRINTER, {}, { simulated: true })],
+      ["simulated:false", ev("execution_completed", PRINTER, {}, { simulated: false })],
+      ["simulated:'true'", ev("execution_completed", PRINTER, {}, { simulated: "true" })],
+      ["simulated:1", ev("execution_completed", PRINTER, {}, { simulated: 1 })],
+      ["mock:true", ev("execution_completed", PRINTER, { mock: true })],
+      ["mock:false", ev("execution_completed", PRINTER, { mock: false })],
+      ["mock:'true'", ev("execution_completed", PRINTER, { mock: "true" })],
+      ["mock:1", ev("execution_completed", PRINTER, { mock: 1 })],
+      ["payload null", ev("execution_completed", PRINTER, null)],
+      ["payload undefined", { ...ev("execution_completed", PRINTER), payload: undefined as never }],
+      ["inherited mock:true", ev("execution_completed", PRINTER, Object.create({ mock: true }))],
+      ["both markers", ev("execution_completed", PRINTER, { mock: true }, { simulated: true })],
+    ];
+    for (const [label, variant] of variants) {
+      // An attributed completion proves a level unless it is fabricated.
+      const provesALevel = level([bundle([variant], OP_A)]) !== null;
+      expect(provesALevel, label).toBe(!isFabricated(variant));
+      expect(bundleHasFabricatedEvents({ events: [variant] }), label).toBe(isFabricated(variant));
+    }
   });
 });
 

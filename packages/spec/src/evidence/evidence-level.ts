@@ -79,10 +79,10 @@
  *    reader's spelling, not what any producer emits.
  *
  * 5. Fabrication is bundle-wide. One fabricated event (`isFabricated`) makes the
- *    whole bundle non-authentic (`bundleHasFabricatedEvents`): it proves no
- *    level and `deriveContradictions` ignores it. Its trust domain (or UNKNOWN)
- *    still joins E when it carries an execution event, so independence fails
- *    closed.
+ *    whole bundle non-authentic, as `bundleHasFabricatedEvents` defines it: it
+ *    proves no level and `deriveContradictions` ignores it. Its trust domain (or
+ *    UNKNOWN) still joins E when it carries an execution event, so independence
+ *    fails closed.
  *
  * 6. Attribution. An event with no non-empty string `source.deviceId` proves no
  *    level. The gateway's own stamp (`GATEWAY_STAMPED_DEVICE_ID`, compared after
@@ -91,13 +91,23 @@
  *    their types. A read model that shows levels for recorded, unauthenticated
  *    events gets the same answer.
  *
+ * 7. One read per call. Each call reads its input exactly once, into one frozen
+ *    fact record per event: `bundles.length`, each bundle, its `events`,
+ *    `trustDomain` and `events.length`, each event, and each event's `type`,
+ *    `source`, `payload`, `source.deviceId`, `source.simulated`, `payload.mock`
+ *    and the payload's verdict material. Levels and contradictions are computed
+ *    from those facts only, so a Proxy array or an accessor that answers
+ *    differently on each read cannot make two passes disagree about the same
+ *    event: the one read decides. A getter that throws propagates its error; it
+ *    can refuse a classification, never skew one.
+ *
  * Every member of EVIDENCE_EVENT_TYPES is ruled on below, including the ones
  * that prove no outcome level, so a new event type cannot join the vocabulary
  * without someone deciding its level (a test enforces the partition).
  */
 
 import type { EvidenceEvent, EvidenceEventType } from "../types/evidence.js";
-import { bundleHasFabricatedEvents } from "./is-fabricated.js";
+import { isFabricated } from "./is-fabricated.js";
 
 export const EVIDENCE_LEVELS = ["submitted", "device_reported", "inspected_output"] as const;
 
@@ -256,8 +266,9 @@ export interface EvidenceLevelContext {
 /**
  * Thrown for input this module cannot classify: `bundles` not an array, a
  * bundle or an event that is not an object, a bundle whose `events` is not an
- * array, or a `trustDomain` / `executorTrustDomains` entry that is present but
- * not in the exact operator form. Never swallowed into a level or a verdict.
+ * array, a length that is not a non-negative safe integer, or a `trustDomain` /
+ * `executorTrustDomains` entry that is present but not in the exact operator
+ * form. Never swallowed into a level or a verdict.
  */
 export class EvidenceLevelInputError extends Error {
   constructor(message: string) {
@@ -266,95 +277,8 @@ export class EvidenceLevelInputError extends Error {
   }
 }
 
-// Mirrors #399's OPERATOR_PRINCIPAL_ID_PATTERN (the pcc.evidence.principal-id.v1
-// operator form). Kept local so this branch does not depend on #399. The chain
-// id has no leading zero and is at least 1; the safe-integer bound is checked
-// separately. Lowercase hex only, so equal principals are equal strings.
-const OPERATOR_PRINCIPAL_ID_PATTERN = /^eip155:([1-9][0-9]*):0x[0-9a-f]{40}$/;
-
-function isOperatorPrincipalId(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const match = OPERATOR_PRINCIPAL_ID_PATTERN.exec(value);
-  return match !== null && Number.isSafeInteger(Number(match[1]));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-interface PreparedBundle {
-  readonly events: readonly EvidenceEvent[];
-  readonly trustDomain: string | null;
-  readonly fabricated: boolean;
-  readonly holdsExecutionEvent: boolean;
-}
-
-/** Validate the whole input up front (no early exit), reading each field once. */
-function prepareBundles(bundles: unknown): PreparedBundle[] {
-  if (!Array.isArray(bundles)) {
-    throw new EvidenceLevelInputError("bundles must be an array of AuthenticatedBundle");
-  }
-  const prepared: PreparedBundle[] = [];
-  for (let i = 0; i < bundles.length; i += 1) {
-    const bundle: unknown = bundles[i];
-    if (!isRecord(bundle)) {
-      throw new EvidenceLevelInputError(`bundles[${i}] must be an object`);
-    }
-    const events: unknown = bundle.events;
-    if (!Array.isArray(events)) {
-      throw new EvidenceLevelInputError(`bundles[${i}].events must be an array`);
-    }
-    for (let j = 0; j < events.length; j += 1) {
-      if (!isRecord(events[j])) {
-        throw new EvidenceLevelInputError(`bundles[${i}].events[${j}] must be an object`);
-      }
-    }
-    const declared: unknown = bundle.trustDomain;
-    let trustDomain: string | null = null;
-    if (declared !== undefined) {
-      if (!isOperatorPrincipalId(declared)) {
-        throw new EvidenceLevelInputError(
-          `bundles[${i}].trustDomain is not an operator principal id (eip155:<chainId>:0x<40 lowercase hex>)`,
-        );
-      }
-      trustDomain = declared;
-    }
-    const verified = events as readonly EvidenceEvent[];
-    prepared.push({
-      events: verified,
-      trustDomain,
-      fabricated: bundleHasFabricatedEvents({ events: verified }),
-      holdsExecutionEvent: verified.some((event) => EXECUTION.has(event.type)),
-    });
-  }
-  return prepared;
-}
-
-function assignedExecutorDomains(context: unknown): readonly string[] {
-  if (context === undefined) return [];
-  if (!isRecord(context)) {
-    throw new EvidenceLevelInputError("context must be an object");
-  }
-  const assigned: unknown = context.executorTrustDomains;
-  if (assigned === undefined) return [];
-  if (!Array.isArray(assigned)) {
-    throw new EvidenceLevelInputError("context.executorTrustDomains must be an array of operator principal ids");
-  }
-  const domains: string[] = [];
-  for (let i = 0; i < assigned.length; i += 1) {
-    const domain: unknown = assigned[i];
-    if (!isOperatorPrincipalId(domain)) {
-      throw new EvidenceLevelInputError(
-        `context.executorTrustDomains[${i}] is not an operator principal id (eip155:<chainId>:0x<40 lowercase hex>)`,
-      );
-    }
-    domains.push(domain);
-  }
-  return domains;
-}
-
 // ---------------------------------------------------------------------------
-// Attribution and the gateway stamp
+// The gateway stamp
 // ---------------------------------------------------------------------------
 
 /**
@@ -384,14 +308,6 @@ function isGatewayStamp(deviceId: string): boolean {
     if (code !== GATEWAY_STAMPED_DEVICE_ID.charCodeAt(i)) return false;
   }
   return true;
-}
-
-/** True when the event names a device other than the gateway's own stamp. */
-function isDeviceAttributed(event: EvidenceEvent): boolean {
-  const source: unknown = event.source;
-  if (typeof source !== "object" || source === null) return false;
-  const deviceId = (source as { deviceId?: unknown }).deviceId;
-  return typeof deviceId === "string" && deviceId.length > 0 && !isGatewayStamp(deviceId);
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +370,7 @@ const PINNED_VERDICTS: ReadonlyMap<string, PinnedVerdict> = new Map<string, Pinn
  * claiming something this module cannot read, so the verdict is `malformed`.
  */
 const VERDICT_LOOKING_KEYS = ["pass", "passed", "status", "result", "verdict", "ok", "success"] as const;
+const VERDICT_LOOKING = new Set<string>(VERDICT_LOOKING_KEYS);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -461,37 +378,40 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function hasOwn(target: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(target, key);
+/**
+ * The verdict of an inspection payload that has ALREADY been read. It touches
+ * the payload three times, each once: its prototype, a snapshot of its own key
+ * names, and the descriptor of the pinned field. Nothing is invoked: an accessor
+ * is malformed, never called.
+ *   - not a plain, non-null, non-array object: `malformed`;
+ *   - the pinned field is an own key: a valid value gives `pass` or `fail`, any
+ *     other value gives `malformed`;
+ *   - the pinned field is absent: any own key of {pass, passed, status, result,
+ *     verdict, ok, success} gives `malformed`, otherwise `none`.
+ */
+function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
+  if (!isPlainObject(payload)) return "malformed";
+  const pinned = PINNED_VERDICTS.get(type);
+  const keys = Object.getOwnPropertyNames(payload);
+  if (pinned !== undefined && keys.includes(pinned.field)) {
+    const descriptor = Object.getOwnPropertyDescriptor(payload, pinned.field);
+    if (descriptor === undefined || !("value" in descriptor)) return "malformed";
+    return pinned.read(descriptor.value);
+  }
+  return keys.some((key) => VERDICT_LOOKING.has(key)) ? "malformed" : "none";
 }
 
 /**
  * The verdict an inspection event carries. One closed answer per inspection
- * type, from one shared extractor:
+ * type, from one shared extractor (`verdictOfPayload`):
  *   - not an inspection type: `none`;
- *   - the payload is not a plain, non-null, non-array object: `malformed`;
- *   - the pinned field is an own property: a valid value gives `pass` or `fail`,
- *     any other value (or an accessor, which is never invoked) gives `malformed`;
- *   - the pinned field is absent: any own key of {pass, passed, status, result,
- *     verdict, ok, success} gives `malformed`, otherwise `none`.
- * The pinned field is read once, into a local.
+ *   - otherwise the payload rules above.
+ * It reads `event.type` and `event.payload` once each.
  */
 export function inspectionVerdict(event: EvidenceEvent): InspectionVerdict {
   const type: unknown = event.type;
   if (typeof type !== "string" || !INSPECTION.has(type)) return "none";
-  const payload: unknown = event.payload;
-  if (!isPlainObject(payload)) return "malformed";
-  const pinned = PINNED_VERDICTS.get(type);
-  if (pinned !== undefined) {
-    const descriptor = Object.getOwnPropertyDescriptor(payload, pinned.field);
-    if (descriptor !== undefined) {
-      return "value" in descriptor ? pinned.read(descriptor.value) : "malformed";
-    }
-  }
-  for (const key of VERDICT_LOOKING_KEYS) {
-    if (hasOwn(payload, key)) return "malformed";
-  }
-  return "none";
+  return verdictOfPayload(type, event.payload);
 }
 
 /**
@@ -505,18 +425,168 @@ export function inspectionFailed(event: EvidenceEvent): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// One read of the input
+// ---------------------------------------------------------------------------
+
+// Mirrors #399's OPERATOR_PRINCIPAL_ID_PATTERN (the pcc.evidence.principal-id.v1
+// operator form). Kept local so this branch does not depend on #399. The chain
+// id has no leading zero and is at least 1; the safe-integer bound is checked
+// separately. Lowercase hex only, so equal principals are equal strings.
+const OPERATOR_PRINCIPAL_ID_PATTERN = /^eip155:([1-9][0-9]*):0x[0-9a-f]{40}$/;
+
+function isOperatorPrincipalId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = OPERATOR_PRINCIPAL_ID_PATTERN.exec(value);
+  return match !== null && Number.isSafeInteger(Number(match[1]));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** `list.length`, read once, which must be a non-negative safe integer. */
+function readLength(list: readonly unknown[], what: string): number {
+  const length: unknown = list.length;
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+    throw new EvidenceLevelInputError(`${what} has no valid length`);
+  }
+  return length;
+}
+
+/**
+ * Everything the levels and the contradiction rule need to know about ONE event,
+ * derived from ONE read of it. Nothing downstream looks at the event again.
+ */
+interface EventFacts {
+  /** `event.type` when it is a string, else null. */
+  readonly type: string | null;
+  /** `source.deviceId` is a non-empty string that is not the gateway's own stamp. */
+  readonly deviceAttributed: boolean;
+  /** `isFabricated` over the values read: `source.simulated === true` or `payload.mock === true`. */
+  readonly fabricated: boolean;
+  /** The inspection verdict of the payload read; `none` for a type that is not an inspection. */
+  readonly verdict: InspectionVerdict;
+}
+
+interface PreparedBundle {
+  readonly trustDomain: string | null;
+  /** Any event of the bundle is fabricated. */
+  readonly fabricated: boolean;
+  /** Any event of the bundle has an EXECUTION_EVENT_TYPES type. */
+  readonly holdsExecutionEvent: boolean;
+  readonly events: readonly EventFacts[];
+}
+
+/**
+ * Read one event, once, into its frozen facts: `type`, `source` and `payload`
+ * each once, then `source.deviceId`, `source.simulated`, `payload.mock` and the
+ * payload's verdict material each once, all from those locals.
+ */
+function readEventFacts(event: Record<string, unknown>): EventFacts {
+  const rawType: unknown = event.type;
+  const source: unknown = event.source;
+  const payload: unknown = event.payload;
+  const type = typeof rawType === "string" ? rawType : null;
+  // The canonical predicate, over a snapshot of the values read: it reads
+  // source.simulated and payload.mock once each, so this cannot drift from it.
+  const fabricated = isFabricated({ type, source, payload } as unknown as EvidenceEvent);
+  let deviceAttributed = false;
+  if (typeof source === "object" && source !== null) {
+    const deviceId: unknown = (source as { deviceId?: unknown }).deviceId;
+    deviceAttributed = typeof deviceId === "string" && deviceId.length > 0 && !isGatewayStamp(deviceId);
+  }
+  const verdict: InspectionVerdict = type !== null && INSPECTION.has(type) ? verdictOfPayload(type, payload) : "none";
+  return Object.freeze({ type, deviceAttributed, fabricated, verdict });
+}
+
+/**
+ * Validate the whole input up front (no early exit) and read it ONCE into
+ * frozen facts: `bundles.length` once, each bundle once, its `events`,
+ * `trustDomain` and `events.length` once, each event once. Levels and
+ * contradictions use only what this returns, so an input that answers
+ * differently on each read (a Proxy array, an accessor) cannot make two passes
+ * disagree: the one read decides.
+ */
+function prepareBundles(bundles: unknown): readonly PreparedBundle[] {
+  if (!Array.isArray(bundles)) {
+    throw new EvidenceLevelInputError("bundles must be an array of AuthenticatedBundle");
+  }
+  const bundleCount = readLength(bundles, "bundles");
+  const prepared: PreparedBundle[] = [];
+  for (let i = 0; i < bundleCount; i += 1) {
+    const bundle: unknown = bundles[i];
+    if (!isRecord(bundle)) {
+      throw new EvidenceLevelInputError(`bundles[${i}] must be an object`);
+    }
+    const events: unknown = bundle.events;
+    if (!Array.isArray(events)) {
+      throw new EvidenceLevelInputError(`bundles[${i}].events must be an array`);
+    }
+    const declared: unknown = bundle.trustDomain;
+    const eventCount = readLength(events, `bundles[${i}].events`);
+    const facts: EventFacts[] = [];
+    let fabricated = false;
+    let holdsExecutionEvent = false;
+    for (let j = 0; j < eventCount; j += 1) {
+      const event: unknown = events[j];
+      if (!isRecord(event)) {
+        throw new EvidenceLevelInputError(`bundles[${i}].events[${j}] must be an object`);
+      }
+      const eventFacts = readEventFacts(event);
+      facts.push(eventFacts);
+      if (eventFacts.fabricated) fabricated = true;
+      if (eventFacts.type !== null && EXECUTION.has(eventFacts.type)) holdsExecutionEvent = true;
+    }
+    let trustDomain: string | null = null;
+    if (declared !== undefined) {
+      if (!isOperatorPrincipalId(declared)) {
+        throw new EvidenceLevelInputError(
+          `bundles[${i}].trustDomain is not an operator principal id (eip155:<chainId>:0x<40 lowercase hex>)`,
+        );
+      }
+      trustDomain = declared;
+    }
+    prepared.push(Object.freeze({ trustDomain, fabricated, holdsExecutionEvent, events: Object.freeze(facts) }));
+  }
+  return Object.freeze(prepared);
+}
+
+function assignedExecutorDomains(context: unknown): readonly string[] {
+  if (context === undefined) return [];
+  if (!isRecord(context)) {
+    throw new EvidenceLevelInputError("context must be an object");
+  }
+  const assigned: unknown = context.executorTrustDomains;
+  if (assigned === undefined) return [];
+  if (!Array.isArray(assigned)) {
+    throw new EvidenceLevelInputError("context.executorTrustDomains must be an array of operator principal ids");
+  }
+  const count = readLength(assigned, "context.executorTrustDomains");
+  const domains: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const domain: unknown = assigned[i];
+    if (!isOperatorPrincipalId(domain)) {
+      throw new EvidenceLevelInputError(
+        `context.executorTrustDomains[${i}] is not an operator principal id (eip155:<chainId>:0x<40 lowercase hex>)`,
+      );
+    }
+    domains.push(domain);
+  }
+  return domains;
+}
+
+// ---------------------------------------------------------------------------
 // Levels
 // ---------------------------------------------------------------------------
 
-/** The level one event proves inside a non-fabricated bundle, or null. */
-function eventLevel(event: EvidenceEvent, inspectorIndependent: boolean): EvidenceLevel | null {
-  if (!isDeviceAttributed(event)) return null;
-  const type = event.type;
+/** The level one event proves inside a non-fabricated bundle, from its facts, or null. */
+function eventLevel(facts: EventFacts, inspectorIndependent: boolean): EvidenceLevel | null {
+  if (!facts.deviceAttributed || facts.type === null) return null;
+  const type = facts.type;
   if (SUBMITTED.has(type)) return "submitted";
   if (DEVICE_REPORTED.has(type)) return "device_reported";
   if (INSPECTION.has(type)) {
-    const verdict = inspectionVerdict(event);
-    if (verdict !== "pass" && verdict !== "fail") return null;
+    if (facts.verdict !== "pass" && facts.verdict !== "fail") return null;
     return inspectorIndependent ? "inspected_output" : "device_reported";
   }
   return null;
@@ -554,8 +624,8 @@ export function evidenceLevelOfBundles(
     if (bundle.fabricated) continue;
     const inspectorIndependent =
       independenceProvable && bundle.trustDomain !== null && !executors.has(bundle.trustDomain);
-    for (const event of bundle.events) {
-      const level = eventLevel(event, inspectorIndependent);
+    for (const facts of bundle.events) {
+      const level = eventLevel(facts, inspectorIndependent);
       if (level !== null && (best === null || evidenceLevelRank(level) > evidenceLevelRank(best))) {
         best = level;
       }
@@ -597,15 +667,20 @@ export type ContradictionKind = "completion-and-failure" | "completion-and-faile
  * `EvidenceLevelInputError` for input it cannot classify.
  */
 export function deriveContradictions(bundles: readonly AuthenticatedBundle[]): ContradictionKind[] {
-  const genuine: EvidenceEvent[] = [];
+  let completed = false;
+  let failed = false;
+  let failedInspection = false;
   for (const bundle of prepareBundles(bundles)) {
     if (bundle.fabricated) continue;
-    for (const event of bundle.events) genuine.push(event);
+    for (const facts of bundle.events) {
+      if (facts.type !== null && DEVICE_REPORTED.has(facts.type)) completed = true;
+      if (facts.type === "execution_failed") failed = true;
+      if (facts.verdict === "fail" || facts.verdict === "malformed") failedInspection = true;
+    }
   }
-  const completed = genuine.some((event) => DEVICE_REPORTED.has(event.type));
   if (!completed) return [];
   const kinds: ContradictionKind[] = [];
-  if (genuine.some((event) => event.type === "execution_failed")) kinds.push("completion-and-failure");
-  if (genuine.some(inspectionFailed)) kinds.push("completion-and-failed-inspection");
+  if (failed) kinds.push("completion-and-failure");
+  if (failedInspection) kinds.push("completion-and-failed-inspection");
   return kinds;
 }
