@@ -223,8 +223,16 @@ export class JobFacade extends BaseFacade {
    *     effectiveMaxAssuranceTier(kernel row) = min(claimed tier, authorized
    *     ceiling) (services/assurance-ceiling.ts). Otherwise 400
    *     `assurance_tier_not_authorized`. A kernel with no row is served at 0.
-   *   - tier 0 needs no authorization, so external kernels with no row keep
-   *     working at tier 0.
+   *   - tier 0 needs no AUTHORIZATION, but it is not a compatibility path: N69
+   *     still requires a locally resolvable (kernel, capability) binding before
+   *     anything is written. The named capability must exist in this gateway's
+   *     catalog and sit on this kernel (capability_not_found /
+   *     capability_not_on_kernel); without a named one, the kernel must have a
+   *     cataloged capability (no_capability_found_for_kernel). So an external
+   *     kernel whose capability is not cataloged here is refused even at tier 0;
+   *     federation would need an authenticated catalog import first (astra 92b,
+   *     LOW). A kernel with no row is still SERVED at tier 0 once its capability
+   *     resolves (for example, cataloged by a heartbeat announce).
    */
   async submit(
     body: SubmitJobInput,
