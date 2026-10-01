@@ -291,6 +291,32 @@ describe("spans that touch are one secret", () => {
   });
 });
 
+describe("a second pass changes nothing and reports nothing", () => {
+  const hex = "ab12cd34".repeat(8);
+  it.each<[string, string, string]>([
+    ["a number under a secret name in a JSON fragment", 'x {"secret": 123456} y', `x {"secret": ${R}} y`],
+    [
+      "a line value merged with a wrapped key, with text left after it",
+      `X-Api-Key: opaque 0x${hex.slice(0, 60)}\n${hex.slice(60)}; tail\nnext`,
+      `X-Api-Key: ${R}; tail\nnext`,
+    ],
+    [
+      "a next-line value merged with a wrapped key, with text left after it",
+      `password:\n  opaque 0x${hex.slice(0, 60)}\n${hex.slice(60)}; tail\nnext`,
+      `password:\n  ${R}; tail\nnext`,
+    ],
+    ["a placeholder followed by a separator", "password=[REDACTED], x", "password=[REDACTED], x"],
+    ["a block scalar already replaced", "password: |\n  [REDACTED]; x\n  more", "password: |\n  [REDACTED]; x\n  more"],
+    ["a value extended over a glued-on label", "password=a|token=b|secret: c d", `password=${R}`],
+  ])("%s", (_name, input, expected) => {
+    const once = redactSecretsDeep(input);
+    expect(once).toBe(expected);
+    const seen: unknown[] = [];
+    expect(redactSecretsDeep(once, (r) => seen.push(r))).toBe(once);
+    expect(seen).toEqual([]);
+  });
+});
+
 describe("F5: repeated authorization labels are scanned once", () => {
   const bestOf = (runs: number, text: string): number => {
     let best = Infinity;
@@ -313,7 +339,7 @@ describe("F5: repeated authorization labels are scanned once", () => {
   }, 120_000);
 
   it("is linear on the sibling families too (label=, label:, quoted label)", () => {
-    for (const unit of ["authorization=", "password=", "token:", "api_key=", '"password":"', "proxy-authorization: "]) {
+    for (const unit of ["authorization=", "password=", "token:", "api_key=", '"password":"', "proxy-authorization: ", "password=a|", "token:a|", "x=1;password=a;"]) {
       redactSecretsDeep(unit.repeat(100));
       const small = bestOf(3, unit.repeat(10_000));
       const large = bestOf(3, unit.repeat(20_000));
@@ -407,6 +433,19 @@ describe("the label scanner's other delimiters and budgets", () => {
     ["a quote followed by > closes a URL value", '<a href="https://h.test/?token=abc">x</a>', `<a href="https://h.test/?token=${R}">x</a>`],
     ["a quote followed by ] closes a URL value", '["https://h.test/?token=abc"]', `["https://h.test/?token=${R}"]`],
     ["a quote followed by ; closes a URL value", 'u = "https://h.test/?token=abc";', `u = "https://h.test/?token=${R}";`],
+    ["a header glued on after a comma", "password=abc,Authorization: Bearer xyz", `password=${R},Authorization: Bearer ${R}`],
+    ["a header glued on after &: it is not a URL parameter", "password=a&Authorization: Bearer b c", `password=${R}&Authorization: Bearer ${R}`],
+    ["a field name that ends in a colon after a ;", "x=1;password=abc;Note: see below", `x=1;password=${R};Note: see below`],
+    [
+      "a header glued on by a character no rule cuts at: its credential is taken too",
+      "password=pa$sw0rd!rest|Authorization: Bearer ab$cd!ef",
+      `password=${R}`,
+    ],
+    ["a quoted value glued on by | is taken to its closing quote", 'password=abc|token="long value" tail', `password=${R}" tail`],
+    ["a chain of labels is one value", "password=password=hunter2", `password=${R}`],
+    ["the second of two embedded labels is the one that goes on", "password=a|token=b|secret: c d", `password=${R}`],
+    ["a quoted value is not extended over what it quotes", 'password="abc token: def" tail', `password="${R}" tail`],
+    ["a value that continues a placeholder is still the secret's", "password=[REDACTED]hunter2", `password=${R}`],
   ])("%s", (_name, input, expected) => {
     expect(sanitize(input)).toBe(expected);
   });

@@ -585,6 +585,21 @@ const LABEL_RE = new RegExp(
 );
 /** A value that is already a redaction placeholder: left alone, so a second pass changes nothing. */
 const PLACEHOLDER_VALUE_RE = /^(?:\[REDACTED\]|\[redacted(?:-[a-z]+)?\])$/;
+/** The same placeholder, found where it stands (sticky): what a first pass leaves in place of a value. */
+const PLACEHOLDER_Y = /\[(?:REDACTED|redacted(?:-[a-z]+)?)\]/y;
+
+/**
+ * True when a redaction placeholder stands at `i` and nothing continues it (the text ends,
+ * or a character that is not a token character follows): a value a first pass already
+ * replaced. What follows it is what the first pass chose to leave. Read afresh,
+ * `"secret": [REDACTED]` would open a `[` (a structure) and `label: [REDACTED]; x` would
+ * take `; x`, so a second pass would change the text. Anything that continues the value
+ * (a token character, as in `[REDACTED]hunter2`) is still part of it, and goes.
+ */
+function alreadyRedactedAt(s: string, i: number): boolean {
+  const done = stickyEnd(PLACEHOLDER_Y, s, i);
+  return done > i && (done >= s.length || !isTokenChar(s.charCodeAt(done)));
+}
 /** The header line of a YAML block scalar: `|`, `>`, `|-`, `>+`, `|2`. */
 const BLOCK_SCALAR_RE = /^[|>][+-]?[0-9]?[+-]?$/;
 /** The three JSON literals that are not strings or numbers. */
@@ -698,13 +713,20 @@ function quotedEnd(s: string, from: number, quote: number): number {
   return n;
 }
 
-/** True when a field NAME followed by `=` starts at `j`: a letter, then letters, digits, spaces, `_`, `.` or `-`. */
+/**
+ * True when a field NAME starts at `j` and is followed by `=`, or by `:` and a blank (a
+ * header or YAML field): a letter, then letters, digits, spaces, `_`, `.` or `-`.
+ */
 function fieldNameAt(s: string, j: number): boolean {
   if (!isLetter(s.charCodeAt(j))) return false;
   const stop = Math.min(s.length, j + MAX_FIELD_NAME + 1);
   for (let i = j + 1; i < stop; i += 1) {
     const c = s.charCodeAt(i);
     if (c === 61) return true;
+    if (c === 58) {
+      const next = s.charCodeAt(i + 1);
+      return i + 1 >= s.length || isBlank(next) || next === 10 || next === 13;
+    }
     if (!(isAlnum(c) || c === 32 || c === 95 || c === 46 || c === 45)) return false;
   }
   return false;
@@ -781,6 +803,8 @@ interface LabelValue {
   resume: number;
   /** True where a `pwd` label is a password (a quoted value, a connection string, a URL, a `:` pair), not the shell's PWD. */
   password: boolean;
+  /** True when the value was inside quotes (set by labelValueOf). */
+  quoted?: boolean;
 }
 
 /**
@@ -809,11 +833,12 @@ function scanLabelValue(
   const c0 = k < n ? s.charCodeAt(k) : 10;
   if (c0 === 10 || c0 === 13) {
     const v = indentedValue(s, labelAt, k, false);
-    return v === null ? null : { start: v.start, end: v.end, resume: v.end, password: true };
+    return v === null || alreadyRedactedAt(s, v.start) ? null : { start: v.start, end: v.end, resume: v.end, password: true };
   }
+  if (alreadyRedactedAt(s, k)) return null;
   const prev = labelAt > 0 ? s.charCodeAt(labelAt - 1) : -1;
-  if (prev === 63 || prev === 38 || prev === 35) {
-    // a URL query or fragment parameter: ? & #. A raw quote INSIDE the value is part of it; only a quote that
+  if (sep === 61 && (prev === 63 || prev === 38 || prev === 35)) {
+    // a URL query or fragment parameter, `name=value` after ? & #. A raw quote INSIDE the value is part of it; only a quote that
     // reads as a closing one ends it, so `"url":"https://h/?token=abc","n":1` keeps its structure.
     let i = k;
     while (i < n) {
@@ -847,7 +872,7 @@ function scanLabelValue(
     const end = trimEnd(s, k, i);
     if (end - k <= 4 && BLOCK_SCALAR_RE.test(s.slice(k, end))) {
       const v = indentedValue(s, labelAt, i, true);
-      return v === null ? null : { start: v.start, end: v.end, resume: v.end, password: true };
+      return v === null || alreadyRedactedAt(s, v.start) ? null : { start: v.start, end: v.end, resume: v.end, password: true };
     }
     return { start: k, end, resume: i, password: true };
   }
@@ -878,6 +903,61 @@ function scanLabelValue(
 }
 
 /**
+ * The value of the secret label in match `m` of LABEL_RE, or null when `m` is no secret
+ * label, has no value, or is `pwd` outside a position where it is a password.
+ */
+function labelValueOf(s: string, m: RegExpExecArray, jsonStringsOnly: boolean): LabelValue | null {
+  const quotedName = m[3] === undefined;
+  const raw = m[3] !== undefined ? m[3] : m[1] !== undefined ? m[1] : m[2];
+  const valueQuote = m[5];
+  if (jsonStringsOnly && (m[1] === undefined || valueQuote !== '"')) return null;
+  if (raw.length < 3) return null; // no secret name is shorter than `jwt`, `sid` or `pwd`
+  const name = decodeLabelName(raw, quotedName);
+  if (name === undefined) return null;
+  const norm = normalizeName(name);
+  if (!isSecretFieldName(name) && !SESSION_TOKEN_NAMES.has(norm)) return null;
+  const value = scanLabelValue(
+    s,
+    m.index,
+    m.index + m[0].length,
+    m[4].charCodeAt(0),
+    quotedName,
+    valueQuote === "" ? 0 : valueQuote.charCodeAt(0),
+    norm.endsWith("authorization"),
+  );
+  if (value === null || (norm === "pwd" && !value.password)) return null;
+  value.quoted = valueQuote !== "";
+  return value;
+}
+
+/** A second copy of LABEL_RE, to look INSIDE a value without moving the main scan's position. */
+const INNER_LABEL_RE = new RegExp(LABEL_RE.source, "g");
+
+/** How many secret labels inside one value are followed to the end of THEIR values (see embeddedValue). */
+const MAX_EMBEDDED_LABELS = 8;
+
+/**
+ * The first secret label that STARTS inside s[from, end) and whose own value runs past
+ * `end`; else null. A value is delimited by its format's rules, and those can stop in the
+ * middle of a label a joining character glued on (`password=a|Authorization: Bearer b`):
+ * that label's NAME is inside the first value and its credential is not. Following an
+ * embedded label costs the length of its value, so at most MAX_EMBEDDED_LABELS are
+ * followed per value: the cost stays a small multiple of the text covered, and a run of
+ * `authorization=` is one value, not n.
+ */
+function embeddedValue(s: string, from: number, end: number, jsonStringsOnly: boolean): LabelValue | null {
+  INNER_LABEL_RE.lastIndex = from;
+  let followed = 0;
+  for (let m = INNER_LABEL_RE.exec(s); m !== null && m.index < end && followed < MAX_EMBEDDED_LABELS; m = INNER_LABEL_RE.exec(s)) {
+    const inner = labelValueOf(s, m, jsonStringsOnly);
+    if (inner === null) continue;
+    if (inner.end > end) return inner;
+    followed += 1;
+  }
+  return null;
+}
+
+/**
  * Add the span of the value of every secret-named label in `s`. With `jsonStringsOnly`
  * only `"name": "value"` (a double-quoted name with a double-quoted value) counts, which
  * is all the feedback sink redacts.
@@ -885,26 +965,19 @@ function scanLabelValue(
 function addSecretLabelSpans(s: string, spans: Span[], jsonStringsOnly = false): void {
   LABEL_RE.lastIndex = 0;
   for (let m = LABEL_RE.exec(s); m !== null; m = LABEL_RE.exec(s)) {
-    const quotedName = m[3] === undefined;
-    const raw = m[3] !== undefined ? m[3] : m[1] !== undefined ? m[1] : m[2];
-    const valueQuote = m[5];
-    if (jsonStringsOnly && (m[1] === undefined || valueQuote !== '"')) continue;
-    if (raw.length < 3) continue; // no secret name is shorter than `jwt`, `sid` or `pwd`
-    const name = decodeLabelName(raw, quotedName);
-    if (name === undefined) continue;
-    const norm = normalizeName(name);
-    if (!isSecretFieldName(name) && !SESSION_TOKEN_NAMES.has(norm)) continue;
-    const value = scanLabelValue(
-      s,
-      m.index,
-      m.index + m[0].length,
-      m[4].charCodeAt(0),
-      quotedName,
-      valueQuote === "" ? 0 : valueQuote.charCodeAt(0),
-      norm.endsWith("authorization"),
-    );
+    const value = labelValueOf(s, m, jsonStringsOnly);
     if (value === null) continue;
-    if (norm === "pwd" && !value.password) continue;
+    if (value.quoted !== true) {
+      // The value must not hide the NAME of a secret label whose own value goes on past it:
+      // take that value too, and look again from where the extended value ends.
+      let from = value.start;
+      for (let inner = embeddedValue(s, from, value.end, jsonStringsOnly); inner !== null; ) {
+        from = value.end;
+        value.end = inner.end;
+        if (value.resume < inner.end) value.resume = inner.end;
+        inner = embeddedValue(s, from, value.end, jsonStringsOnly);
+      }
+    }
     const size = value.end - value.start;
     if (size > 0 && !(size <= 32 && PLACEHOLDER_VALUE_RE.test(s.slice(value.start, value.end).trim()))) {
       spans.push({ start: value.start, end: value.end });
