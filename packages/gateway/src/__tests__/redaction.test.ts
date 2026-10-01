@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { redactSecrets, redactOrNull } from "../redaction.js";
 
@@ -100,5 +101,101 @@ describe("redactSecrets", () => {
     const jwt = "eyJhbGciOiJI.eyJzdWIiOiI1NTU.QsWpV7cSignatureHere";
     expect(redactSecrets(`x-${jwt} y_${jwt}`)).toBe("x-[redacted-jwt] y_[redacted-jwt]");
     expect(redactSecrets(`x${jwt}`)).toBe(`x${jwt}`); // an alphanumeric neighbour still shields it
+  });
+});
+
+describe("redactSecrets: private keys in the forms /api/auth/provision returns (N89)", () => {
+  // A real Ed25519 key, generated at test time, so no key literal sits in source.
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const b64 = (privateKey.export({ format: "der", type: "pkcs8" }) as Buffer).toString("base64");
+  const pem = privateKey.export({ format: "pem", type: "pkcs8" }) as string;
+  const pemBody = pem.split("\n")[1]!;
+
+  it("redacts a base64 PKCS#8 key pasted into free text", () => {
+    const out = redactSecrets(`provision gave me ${b64} as the key`);
+    expect(out).not.toContain(b64);
+    expect(out).toBe("provision gave me [redacted-b64] as the key");
+  });
+
+  it("redacts the values of secret-named JSON fields, in any case, and keeps the rest", () => {
+    const out = redactSecrets(
+      JSON.stringify({
+        kernel_id: "k1",
+        private_key_pkcs8_base64: b64,
+        privateKey: "hunter2hunter2",
+        client_secret: "s3cr3t value",
+        "x-api-key": "k",
+        apiKey: "k2",
+        password: 'hun"ter22',
+        mnemonic: "word word word",
+        public_key: "see-the-kernel-record",
+        note: "keep me",
+      }),
+    );
+    for (const name of ["private_key_pkcs8_base64", "privateKey", "client_secret", "x-api-key", "apiKey", "password", "mnemonic"]) {
+      expect(out).toContain(`"${name}":"[redacted]"`);
+    }
+    expect(out).not.toContain(b64);
+    expect(out).not.toContain("hunter2");
+    expect(out).not.toContain("ter22");
+    expect(out).toContain('"kernel_id":"k1"');
+    expect(out).toContain('"public_key":"see-the-kernel-record"');
+    expect(out).toContain('"note":"keep me"');
+  });
+
+  it("redacts a PEM private-key block, whole or cut off", () => {
+    expect(redactSecrets(`key:\n${pem}after`)).toBe("key:\n[redacted-private-key]\nafter");
+    const cut = pem.split("\n").slice(0, 2).join("\n");
+    expect(redactSecrets(`x ${cut}`)).toBe("x [redacted-private-key]");
+  });
+
+  it("leaves no key material in a whole pasted provisioning response", () => {
+    const response = JSON.stringify(
+      {
+        api_key: "pcc_live_" + "z".repeat(24),
+        ed25519: { private_key_pkcs8_base64: b64, private_key_pem: pem },
+        operator_wallet: { address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", private_key: "0x" + "9".repeat(64) },
+      },
+      null,
+      2,
+    );
+    const out = redactSecrets(`here is what provision returned:\n${response}`);
+    expect(out).not.toContain(b64);
+    expect(out).not.toContain(pemBody);
+    expect(out).not.toContain("z".repeat(24));
+    expect(out).not.toContain("9".repeat(64));
+    expect(out).toContain("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+  });
+
+  it("keeps prose, paths, UUIDs, hex ids, checksummed addresses and single-case runs", () => {
+    for (const keep of [
+      "POST /api/build/contract returned 500 with no hint",
+      "/api/capabilities/templates/match?limit=10",
+      "6f1c2a4e-8b7d-4c3f-9a21-0d5e6b7c8f90",
+      "tr_" + "0123456789abcdef".repeat(2),
+      "wallet 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 paid",
+      "a".repeat(60),
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOP",
+      "z9y8x7w6v5u4t3s2r1q0p9o8n7m6l5k4j3i2h1g0", // lower case and digits only
+      "ZYXWVUTSRQPONMLKJIHG0123456789ZYXWVUTSRQ", // upper case and digits only
+      'the reply was {"status": "failed", "reason": "no device"}',
+    ]) {
+      expect(redactSecrets(keep)).toBe(keep);
+    }
+  });
+
+  it("stays linear on hostile input", () => {
+    const hostile = [
+      '"password": "' + '\\"'.repeat(30_000),
+      ('"' + "p".repeat(63) + '"' + " ".repeat(8)).repeat(900),
+      '"x":"'.repeat(12_000),
+      ["-----BEGIN ", "PRIVATE KEY-----"].join("").repeat(2_000),
+      "aB3".repeat(20_000),
+    ];
+    for (const input of hostile) {
+      const t0 = performance.now();
+      redactSecrets(input.slice(0, 64_000));
+      expect(performance.now() - t0).toBeLessThan(250);
+    }
   });
 });
