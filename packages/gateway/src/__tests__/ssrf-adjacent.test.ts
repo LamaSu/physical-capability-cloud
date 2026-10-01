@@ -60,6 +60,8 @@ import {
   _resetAggregatorRegistryForTests,
 } from "../routes/aggregator/index.js";
 import { initStore, closeStore } from "../db.js";
+import { IndexedToolRegistry, type SourceAdapter } from "@pcc/aggregator";
+import { runPipelineVetted } from "../routes/aggregator/upstream-url-guard.js";
 import { dispatchToolCall, loadAgentPackage, type AgentPackageTool } from "../mcp/http-mcp-server.js";
 import { RENDER_DASHBOARD_TOOL_NAME } from "../mcp/mcp-app-view.js";
 import { DigitalCaptureClass, TrustTier, type IndexedTool } from "@pcc/spec";
@@ -217,7 +219,16 @@ beforeEach(() => {
   });
 });
 
-const ENV_KEYS = ["NODE_ENV", "PCC_AGGREGATOR_ADMINS", "PCC_API_BASE_URL", "PCC_X402_ENABLED"] as const;
+const ENV_KEYS = [
+  "NODE_ENV",
+  "PCC_AGGREGATOR_ADMINS",
+  "PCC_API_BASE_URL",
+  "PCC_X402_ENABLED",
+  "PCC_X402_CHAIN",
+  "PCC_X402_FACILITATOR_URL",
+  "PCC_AGGREGATOR_TREASURY",
+  "PCC_X402_HMAC_KEY",
+] as const;
 let savedEnv: Record<string, string | undefined> = {};
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -391,9 +402,23 @@ describe("site 1: job-offers sourceVerifyUrl (default verify, real code path)", 
     expect(victim.hits, "the gateway fetched the caller-chosen loopback URL").toHaveLength(0);
     expect(res.statusCode).toBe(400);
     expect(body.error).toBe("invalid_source_verify_url");
+    expect(body.reason, "the response names the rule that refused the URL").toBe("blocked_address");
     expect(res.body, "the remote response body was reflected to the caller").not.toContain(MARKER);
     expect(body).not.toHaveProperty("sourceBody");
     expect(getJobOffersStore().has("ssrf-1")).toBe(false);
+  });
+
+  it("[neg] an unsafe URL is refused even for an id that already exists: the check runs before the idempotency lookup", async () => {
+    const first = await app.inject({ method: "POST", url: "/api/job-offers", payload: pizzaOffer("idem-1") });
+    expect(first.statusCode).toBe(201);
+    const again = await app.inject({
+      method: "POST",
+      url: "/api/job-offers",
+      payload: pizzaOffer("idem-1", { sourceVerifyUrl: `http://127.0.0.1:${victim.port}/secret` }),
+    });
+    expect(again.statusCode).toBe(400);
+    expect(again.json().error).toBe("invalid_source_verify_url");
+    expect(victim.hits).toHaveLength(0);
   });
 
   it("[neg] every unsafe spelling is refused at creation: 400 invalid_source_verify_url, nothing stored, nothing fetched", async () => {
@@ -467,6 +492,8 @@ describe("site 1: job-offers sourceVerifyUrl (default verify, real code path)", 
     expect(req.url.href).toBe(PUBLIC_URL);
     expect(req.addresses).toEqual([{ address: PUBLIC_V4, family: 4 }]);
     expect(req.headers.accept).toBe("application/json");
+    // global fetch used to send a user-agent and some APIs reject a request without one
+    expect(req.headers["user-agent"]).toBe("pcc-gateway");
     expect(req.body).toBeUndefined();
     expect(req.timeoutMs).toBeLessThanOrEqual(8000);
     expect(req.maxResponseBytes).toBeLessThanOrEqual(1024 * 1024);
@@ -725,9 +752,54 @@ describe("site 2: courier-jobs sourceVerifyUrl (shim over the generic store)", (
     expect(victim.hits, "the gateway fetched the caller-chosen loopback URL").toHaveLength(0);
     expect(res.statusCode).toBe(400);
     expect(body.error).toBe("invalid_source_verify_url");
+    expect(body.reason, "the response names the rule that refused the URL").toBe("blocked_address");
     expect(res.body, "the remote response body was reflected to the caller").not.toContain(MARKER);
     expect(body).not.toHaveProperty("sourceBody");
     expect(getCourierJobsStore().has("c-ssrf-1")).toBe(false);
+  });
+
+  it("[neg] an injected verify function is never handed a refused URL at creation", async () => {
+    _resetCourierJobsStoreForTests();
+    const seen: string[] = [];
+    initCourierJobsStore({
+      verify: async (url) => {
+        seen.push(url);
+        return { ok: true, body: null };
+      },
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/courier-jobs",
+      payload: courierBody("c-stub-refused", { sourceVerifyUrl: `http://127.0.0.1:${victim.port}/secret` }),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_source_verify_url");
+    expect(seen).toEqual([]);
+    expect(getCourierJobsStore().has("c-stub-refused")).toBe(false);
+  });
+
+  it("[neg] the courier sweep hands an injected verify function no refused URL", async () => {
+    _resetCourierJobsStoreForTests();
+    const seen: string[] = [];
+    initCourierJobsStore({
+      sqlite: sqliteWith([
+        storedOffer({
+          id: "legacy-c2",
+          capabilityType: "courier.dispatch",
+          sourceVerifyUrl: "http://169.254.169.254/latest/meta-data/",
+          requirements: { pickup: { name: "S" }, dropoff: { name: "T" } },
+        }),
+      ]),
+      now: sweepNow,
+      verify: async (url) => {
+        seen.push(url);
+        return { ok: true, body: null };
+      },
+    });
+    const result = await getCourierJobsStore().sweep();
+    expect(seen).toEqual([]);
+    expect(result.autoCancelled).toBe(1);
+    expect(getCourierJobsStore().get("legacy-c2")!.verified).toBe(false);
   });
 
   it("[neg] the /jobs alias is the same handler and is covered too", async () => {
@@ -948,7 +1020,8 @@ describe("site 3: aggregator invoke upstreamUrl", () => {
       expect(inv?.body ?? "").not.toContain(MARKER);
       const publish = ing.json().stages.find((s: { stage: string }) => s.stage === "publish");
       expect(Object.keys(publish.errors)).toEqual([id]);
-      expect(publish.errors[id]).toMatch(/upstream_url_not_allowed/);
+      expect(publish.errors[id]).toBe("upstream_url_not_allowed:blocked_address");
+      expect(publish).toMatchObject({ processed: 1, succeeded: 0 });
       expect(ing.json().published).toEqual([]);
     });
 
@@ -1000,6 +1073,8 @@ describe("site 3: aggregator invoke upstreamUrl", () => {
       expect(ing.statusCode).toBe(200);
       expect(ing.json().published.map((t: IndexedTool) => t.upstreamUrl)).toEqual(["https://api.example.com/v1/items"]);
       expect(getAggregatorRegistry().query({}).map((t) => t.upstreamUrl)).toEqual(["https://api.example.com/v1/items"]);
+      const publish = ing.json().stages.find((s: { stage: string }) => s.stage === "publish");
+      expect(publish).toMatchObject({ processed: 1, succeeded: 1, errors: {} });
     });
   });
 
@@ -1040,8 +1115,29 @@ describe("site 3: aggregator invoke upstreamUrl", () => {
       expect(calls[0]!.method).toBe("GET");
       expect(calls[0]!.url.href).toBe("https://api.example.com/echo");
       expect(calls[0]!.addresses).toEqual([{ address: PUBLIC_V4, family: 4 }]);
+      // global fetch used to send a user-agent and some APIs reject a request without one
+      expect(calls[0]!.headers["user-agent"]).toBe("pcc-gateway");
       expect(calls[0]!.maxResponseBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
       expect(calls[0]!.timeoutMs).toBeLessThanOrEqual(30_000);
+    });
+
+    it("[neg] a blocked upstream is refused BEFORE any payment is challenged: 403, not 402", async () => {
+      process.env.PCC_X402_ENABLED = "true";
+      process.env.PCC_X402_CHAIN = "base-sepolia";
+      process.env.PCC_X402_FACILITATOR_URL = "https://fac.test";
+      process.env.PCC_AGGREGATOR_TREASURY = "0x1111111111111111111111111111111111111111";
+      process.env.PCC_X402_HMAC_KEY = "deadbeef".repeat(8);
+      _resetAggregatorRegistryForTests(); // the gate config is built once from the environment
+      const reg = getAggregatorRegistry();
+      reg.upsert(makeTool({ id: "paid-safe", pricing: { perCallUsdc: "0.01" } }));
+      reg.upsert(makeTool({ id: "paid-blocked", upstreamUrl: `http://127.0.0.1:${victim.port}/internal/paid`, pricing: { perCallUsdc: "0.01" } }));
+      const safe = await invoke("paid-safe");
+      expect(safe.statusCode, "control: the gate is on, so a safe paid tool is challenged for payment").toBe(402);
+      const blocked = await invoke("paid-blocked");
+      ev("site3 invoke-paid-blocked", { safeStatus: safe.statusCode, blockedStatus: blocked.statusCode, victimHits: victim.hits.length });
+      expect(blocked.statusCode).toBe(403);
+      expect(blocked.json().error).toBe("tool_upstream_blocked");
+      expect(victim.hits).toHaveLength(0);
     });
 
     it("a write tool POSTs the args as JSON through the guarded transport", async () => {
@@ -1241,6 +1337,84 @@ describe("site 4: MCP proxy URL construction (controls: not reproduced)", () => 
     });
     expect(landed).toBe(proxied.length);
     expect(victim.hits).toHaveLength(0);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// runPipelineVetted: the registration-time half of site 3, as a unit
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("runPipelineVetted: tool upstream URLs are vetted before any registry write", () => {
+  const adapterOf = (tools: IndexedTool[]): SourceAdapter => ({
+    id: "fake",
+    sourceType: "mcp-directory",
+    fetch: async () => tools,
+  });
+  const input = { url: "https://catalog.example.com/x" };
+  const tool = (id: string, upstreamUrl: string) => makeTool({ id, upstreamUrl });
+
+  it("[neg] writes only tools whose upstream passes, and accounts for each refusal under the publish stage", async () => {
+    const registry = new IndexedToolRegistry();
+    const result = await runPipelineVetted(
+      adapterOf([
+        tool("ok", "https://api.example.com/a"),
+        tool("loop", "http://127.0.0.1:9/x"),
+        tool("meta", "http://169.254.169.254/latest/meta-data/"),
+        tool("userinfo", "https://user:pw@api.example.com/a"),
+      ]),
+      input,
+      registry,
+      { runVerify: true },
+    );
+    expect(result.published.map((t) => t.id)).toEqual(["ok"]);
+    expect(registry.all().map((t) => t.id)).toEqual(["ok"]);
+    const publish = result.stages.find((s) => s.stage === "publish")!;
+    expect(publish).toMatchObject({ processed: 4, succeeded: 1 });
+    expect(publish.errors).toEqual({
+      loop: "upstream_url_not_allowed:blocked_address",
+      meta: "upstream_url_not_allowed:blocked_address",
+      userinfo: "upstream_url_not_allowed:userinfo_not_allowed",
+    });
+  });
+
+  it("an error from the registry is reported per tool, never thrown", async () => {
+    const registry = new IndexedToolRegistry();
+    vi.spyOn(registry, "upsert").mockImplementation(() => {
+      throw new Error("store offline");
+    });
+    const result = await runPipelineVetted(adapterOf([tool("ok", "https://api.example.com/a")]), input, registry);
+    expect(result.published).toEqual([]);
+    expect(result.stages.find((s) => s.stage === "publish")!.errors).toEqual({ ok: "store offline" });
+  });
+
+  it("a dry run writes nothing and is vetted like a real run", async () => {
+    const registry = new IndexedToolRegistry();
+    const result = await runPipelineVetted(
+      adapterOf([tool("ok", "https://api.example.com/a"), tool("loop", "http://127.0.0.1:9/x")]),
+      input,
+      registry,
+      { publishToRegistry: false },
+    );
+    expect(registry.count()).toBe(0);
+    expect(result.published.map((t) => t.id)).toEqual(["ok"]);
+    expect(result.stages.find((s) => s.stage === "publish")!.errors).toEqual({
+      loop: "upstream_url_not_allowed:blocked_address",
+    });
+  });
+
+  it("an adapter failure passes through untouched: no tools, no publish stage, nothing written", async () => {
+    const registry = new IndexedToolRegistry();
+    const failing: SourceAdapter = {
+      id: "fake",
+      sourceType: "mcp-directory",
+      fetch: async () => {
+        throw new Error("catalog unreachable");
+      },
+    };
+    const result = await runPipelineVetted(failing, input, registry);
+    expect(result.published).toEqual([]);
+    expect(result.errors.join(" ")).toMatch(/catalog unreachable/);
+    expect(registry.count()).toBe(0);
   });
 });
 
