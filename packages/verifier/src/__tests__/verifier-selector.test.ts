@@ -52,6 +52,32 @@ describe("VerifierSelector", () => {
 
   const request = makeRequest();
 
+  it("the weighted path does not depend on the pool's order (review E1b, finding 1)", () => {
+    const pick = (pool: VerifierNodeInfo[]) => selector.selectVerifiers(request, pool, 3, SEED).map((n) => n.id);
+    const expected = pick(nodes);
+    expect(pick([...nodes].reverse())).toEqual(expected);
+    for (let r = 1; r < nodes.length; r++) {
+      expect(pick([...nodes.slice(r), ...nodes.slice(0, r)]), `rotation ${r}`).toEqual(expected);
+    }
+  });
+
+  it("refuses a pool with duplicate verifier ids, ASCII case folded (review E1b, finding 1)", () => {
+    expect(() => selector.selectVerifiers(request, [...nodes, makeNode("v1", 5, 5000)], 3, SEED)).toThrow(/duplicate verifier id/);
+    expect(() => selector.selectVerifiers(request, [...nodes, makeNode("V1", 5, 5000)], 3, SEED)).toThrow(/duplicate verifier id/);
+  });
+
+  it("exclusions fold ASCII only: a non-ASCII exclusion is refused, never Unicode-folded onto another id (review E1b, finding 2)", () => {
+    const pool = [makeNode("k-1", 1000, 8000), makeNode("v2", 500, 9000)];
+    // U+212A (Kelvin sign) lowercases to ASCII "k" under Unicode casing.
+    expect(() => selector.selectVerifiers(request, pool, 2, SEED, ["\u212A-1"])).toThrow(/printable ASCII/);
+    expect(selector.selectVerifiers(request, pool, 2, SEED, ["K-1"]).map((n) => n.id)).toEqual(["v2"]);
+  });
+
+  it("a node whose id is not printable ASCII is never eligible (review E1b, finding 2)", () => {
+    const pool = [makeNode("\u212A-1", 1000, 8000), makeNode("v2", 500, 9000), makeNode("", 500, 9000)];
+    expect(selector.selectVerifiers(request, pool, 5, SEED).map((n) => n.id)).toEqual(["v2"]);
+  });
+
   it("orders the not-enough-nodes fallback by code units, never the host's collation (review E1)", () => {
     // Under a Danish LANG, localeCompare sorts "aa..." after "ed..." ("aa" collates as "\u00e5").
     const pool = [makeNode("node-6", 100, 5000), makeNode("node-13", 100, 5000)];
