@@ -15,11 +15,23 @@ The manifest is derived, not hand-kept:
     new PyNaCl test cannot run unenforced, and a removed one is noticed);
   - their parameters are the golden vectors in goldens.json.
 
-pytest runs with external options neutralized: PYTEST_ADDOPTS and
-PYTEST_PLUGINS are removed, plugin autoload is off, ini `addopts` is
-overridden, `--noconftest` keeps every conftest.py hook out (one could
-replace the test bodies or rewrite the reports; review A01d), and
-`--runxfail` makes an xfail marker run the test normally.
+pytest runs isolated from everything but the test module and the code it
+tests (reviews A01d, A01e):
+  - `python -I -B`: no PYTHONPATH and no script or working directory on
+    sys.path, so a repository sitecustomize.py or usercustomize.py is never
+    imported; no user site-packages; no bytecode written;
+  - `-c os.devnull --rootdir <package>`: no ini file is read;
+  - `--noconftest`: no conftest.py hook can replace a test body or a report;
+  - PYTEST_ADDOPTS and PYTEST_PLUGINS removed, plugin autoload off;
+  - `--runxfail`: an xfail marker runs the test normally.
+A test module can still name plugins (`pytest_plugins`) or hooks itself, so
+the module is checked first (`refuse_hooks`): it may import only json, os,
+pathlib, pytest, pcc_node and nacl; it may bind no `pytest_*` name; it may not
+call __import__, exec, eval, compile, globals, vars or setattr; and it may not
+assign an attribute of an imported module. `selftest` proves that check
+refuses each of those shapes. What remains is the test module's own code: a
+change to it, or to this script or the workflow, is a code change reviewed
+like any other.
 Results are read from pytest's JUnit XML, never from its text summary.
 Stdlib only.
 """
@@ -52,6 +64,74 @@ def fail(msg):
     sys.exit(1)
 
 
+ALLOWED_IMPORTS = {"json", "os", "pathlib", "pytest", "pcc_node", "nacl"}
+FORBIDDEN_CALLS = {"__import__", "exec", "eval", "compile", "globals", "vars", "setattr"}
+
+
+def hook_problems(source):
+    """Why a test module could install pytest plugins or hooks, or patch an imported module; [] if it cannot."""
+    tree = ast.parse(source)
+    imported = set()
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported.add((alias.asname or alias.name).split(".")[0])
+                if alias.name.split(".")[0] not in ALLOWED_IMPORTS:
+                    problems.append("imports %s" % alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                imported.add(alias.asname or alias.name)
+            if node.level or (node.module or "").split(".")[0] not in ALLOWED_IMPORTS:
+                problems.append("imports from %s%s" % ("." * node.level, node.module or ""))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name.startswith("pytest_"):
+            problems.append("defines %s" % node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id.startswith("pytest_"):
+            problems.append("binds %s" % node.id)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
+            problems.append("calls %s" % node.func.id)
+    for node in ast.walk(tree):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else []
+        for target in targets:
+            base = target
+            while isinstance(base, (ast.Attribute, ast.Subscript)):
+                base = base.value
+            if base is not target and isinstance(base, ast.Name) and base.id in imported:
+                problems.append("assigns into %s" % base.id)
+    return problems
+
+
+def refuse_hooks():
+    with open(os.path.join(PKG, TEST_FILE), encoding="utf-8") as f:
+        problems = hook_problems(f.read())
+    if problems:
+        fail("%s could change how pytest runs it: %s" % (TEST_FILE, "; ".join(sorted(set(problems)))))
+
+
+def selftest():
+    """Each shape that can install a plugin or hook, or patch pytest, must be refused; the real module must pass."""
+    hostile = {
+        "pytest_plugins": 'pytest_plugins = ("signature_bypass_plugin",)\n',
+        "annotated pytest_plugins": 'pytest_plugins: tuple = ("x",)\n',
+        "a hook function": "def pytest_pyfunc_call(pyfuncitem):\n    return True\n",
+        "a hook in a class": "class T:\n    def pytest_runtest_call(self, item):\n        pass\n",
+        "a foreign import": "import importlib\n",
+        "a relative import": "from . import helper\n",
+        "a foreign from-import": "from _pytest import python\n",
+        "__import__": '__import__("signature_bypass_plugin")\n',
+        "exec": 'exec("x = 1")\n',
+        "setattr": 'import pytest\nsetattr(pytest, "x", 1)\n',
+        "patching pytest": "import pytest\npytest.hookimpl = None\n",
+        "patching through an alias": "import nacl.signing as signing\nsigning.VerifyKey.verify = None\n",
+        "globals": 'globals()["pytest_plugins"] = ("x",)\n',
+    }
+    for label, source in hostile.items():
+        if not hook_problems(source):
+            fail("selftest: %s was not refused" % label)
+    refuse_hooks()
+    print("signature manifest: ok, selftest refused all %d hostile shapes and the test module passes" % len(hostile))
+
+
 def _takes_nacl(fn):
     """A test function (pytest collects `test*`) that takes the `nacl` fixture."""
     return isinstance(fn, ast.FunctionDef) and fn.name.startswith("test") and any(a.arg == "nacl" for a in fn.args.args)
@@ -71,6 +151,7 @@ def nacl_consumers():
 
 
 def expected_ids():
+    refuse_hooks()
     consumers = nacl_consumers()
     if set(consumers) != set(MANIFEST):
         fail("the PyNaCl tests in %s are %s, but the manifest names %s" % (
@@ -96,11 +177,10 @@ def run_manifest():
     env = {k: v for k, v in os.environ.items() if k not in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")}
     env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     env["PCC_REQUIRE_PYNACL"] = "1"
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTHONPATH"] = "."
     with tempfile.TemporaryDirectory() as tmp:
         report = os.path.join(tmp, "manifest.xml")
-        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--noconftest", "--runxfail",
+        cmd = [sys.executable, "-I", "-B", "-m", "pytest", "-q", "-c", os.devnull, "--rootdir", PKG,
+               "-p", "no:cacheprovider", "--noconftest", "--runxfail",
                "-o", "addopts=", "-o", "junit_family=xunit2", "--junitxml", report]
         cmd += ["%s::%s" % (TEST_FILE, fn) for fn in sorted(MANIFEST)]
         proc = subprocess.run(cmd, cwd=PKG, env=env, capture_output=True, text=True)
@@ -123,9 +203,12 @@ def run_manifest():
 
 
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in ("positive", "negative"):
-        fail("usage: signature_manifest_check.py positive|negative")
+    if len(sys.argv) != 2 or sys.argv[1] not in ("positive", "negative", "selftest"):
+        fail("usage: signature_manifest_check.py positive|negative|selftest")
     mode = sys.argv[1]
+    if mode == "selftest":
+        selftest()
+        return
     expected = expected_ids()
     rc, results = run_manifest()
     missing = sorted(expected - set(results))

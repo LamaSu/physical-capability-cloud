@@ -7,8 +7,12 @@
 # The negative control runs the SAME manifest without PyNaCl, and every test must
 # fail on the PyNaCl requirement itself. Then the whole parity file runs with the
 # same neutralization, and any skipped, deselected, xfailed, xpassed or errored
-# test fails the job. Every run uses --noconftest, and hostile conftest.py files are
-# planted first: if any run loads one, the job fails (cross-family review A01d).
+# test fails the job. Every Python run is isolated (python -I -B: no PYTHONPATH, no
+# script or working directory on sys.path, no user site; pytest -c /dev/null: no ini;
+# --noconftest), and the checker first refuses a test module that could name pytest
+# plugins or hooks (its selftest proves that). Hostile conftest.py, sitecustomize.py
+# and usercustomize.py files are planted first: if any run loads one, the job fails
+# (cross-family reviews A01d, A01e).
 name: evidence-signature-parity
 
 on:
@@ -37,7 +41,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Plant hostile conftest.py files that no enforcement run may load
+      - name: Plant hostile conftest.py, sitecustomize.py and usercustomize.py files that no run may load
         run: |
           for d in . tests; do
             cat > "$d/conftest.py" <<EOF
@@ -47,6 +51,11 @@ jobs:
               for item in items:
                   item.runtest = lambda: None
           EOF
+          done
+          for d in ../.. . tests; do
+            for m in sitecustomize usercustomize; do
+              printf 'import pathlib\npathlib.Path("%s/startup-hook-ran").touch()\n' "$RUNNER_TEMP" > "$d/$m.py"
+            done
           done
 
       - name: Negative control - without PyNaCl the required run must fail on the PyNaCl check
@@ -58,24 +67,29 @@ jobs:
             exit 1
           fi
           # Every manifest test must be collected and fail on the PyNaCl requirement.
-          "$RUNNER_TEMP/no-nacl/bin/python" tests/signature_manifest_check.py negative
-          if [ -e "$RUNNER_TEMP/conftest-was-loaded" ]; then
-            echo "a conftest.py was loaded by the negative control"
-            exit 1
-          fi
+          "$RUNNER_TEMP/no-nacl/bin/python" -I -B tests/signature_manifest_check.py negative
+          for marker in conftest-was-loaded startup-hook-ran; do
+            if [ -e "$RUNNER_TEMP/$marker" ]; then
+              echo "a planted hook ran in the negative control ($marker)"
+              exit 1
+            fi
+          done
 
       - name: Signature parity (PyNaCl required, nothing may skip)
         env:
           PCC_REQUIRE_PYNACL: "1"
         run: |
           python -m pip install --quiet "pynacl==1.5.0" "pytest==8.3.5"
-          # Every manifest test must be collected and pass (JUnit XML, not the text summary).
-          python tests/signature_manifest_check.py positive
+          # The hook guard must refuse every hostile shape, then every manifest test
+          # must be collected and pass (JUnit XML, not the text summary).
+          python -I -B tests/signature_manifest_check.py selftest
+          python -I -B tests/signature_manifest_check.py positive
           # The whole parity file, with external options neutralized: nothing may be
           # skipped, deselected, xfailed, xpassed or errored.
           set +e
-          out=$(env -u PYTEST_ADDOPTS -u PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=. \
-            python -m pytest -q -p no:cacheprovider --noconftest --runxfail -o addopts= -rs tests/test_signing_preimage_parity.py 2>&1)
+          out=$(env -u PYTEST_ADDOPTS -u PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            python -I -B -m pytest -q -c /dev/null --rootdir . -p no:cacheprovider --noconftest --runxfail \
+            -o addopts= -rs tests/test_signing_preimage_parity.py 2>&1)
           rc=$?
           set -e
           echo "$out"
@@ -84,7 +98,9 @@ jobs:
             echo "a test was skipped, deselected, xfailed, xpassed or errored in the required run"
             exit 1
           fi
-          if [ -e "$RUNNER_TEMP/conftest-was-loaded" ]; then
-            echo "a conftest.py was loaded by the required run"
-            exit 1
-          fi
+          for marker in conftest-was-loaded startup-hook-ran; do
+            if [ -e "$RUNNER_TEMP/$marker" ]; then
+              echo "a planted hook ran in the required run ($marker)"
+              exit 1
+            fi
+          done
