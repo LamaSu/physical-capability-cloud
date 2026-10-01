@@ -257,7 +257,13 @@ export async function operatorRoutes(app: FastifyInstance) {
         kernelId,
         jobId,
         submittedBy: agentId,
-        jobSummary: { capabilityType: capabilityType ?? "liquid-handler", parameters: parameters ?? {} },
+        // capabilityType is unknown unless the caller says so. The spec declares it optional
+        // (PendingApproval.jobSummary.capabilityType?: string), so an absent value is left out;
+        // it used to be stored as "liquid-handler", a type nobody asserted.
+        jobSummary: {
+          ...(capabilityType !== undefined && capabilityType !== null ? { capabilityType } : {}),
+          parameters: parameters ?? {},
+        },
         status: autoApprove ? "approved" : "pending",
         createdAt: now,
         decidedAt: autoApprove ? now : null,

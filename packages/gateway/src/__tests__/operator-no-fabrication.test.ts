@@ -12,6 +12,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { schema, eq } from "@pcc/store";
 import { operatorRoutes } from "../routes/operator.js";
 import { initStore, closeStore, getStore } from "../db.js";
 
@@ -90,6 +91,7 @@ describe("operator read routes: no fabricated data", () => {
  * reported as what they are, never as a plausible answer. From the cross-family review of
  * PR #362 (verdict rm-n32-362-r1-d30de649):
  *   M1  a failed read answers 503, never an empty list that hides recorded approvals
+ *   M2  an omitted capabilityType is stored as unknown, never as an invented type
  */
 describe("operator approvals: no silent substitution", () => {
   let app: FastifyInstance;
@@ -161,6 +163,45 @@ describe("operator approvals: no silent substitution", () => {
         }
       } finally {
         spy.mockRestore();
+      }
+    });
+  });
+
+  describe("M2 POST /api/operator/approvals: capabilityType", () => {
+    function storedRow(id: string) {
+      return getStore().db.select().from(schema.pendingApprovals).where(eq(schema.pendingApprovals.id, id)).get();
+    }
+
+    it("NEGATIVE: M2 an omitted capabilityType is stored as unknown, never as an invented liquid-handler", async () => {
+      // Only kernelId and agentId: the caller asserted no capability type.
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/operator/approvals",
+        payload: { kernelId: KERNEL, agentId: "agent-no-type" },
+      });
+      expect(res.statusCode).toBe(200);
+      const { approval } = res.json();
+
+      // Returned.
+      expect(approval.jobSummary).not.toHaveProperty("capabilityType");
+      expect(JSON.stringify(approval)).not.toContain("liquid-handler");
+
+      // Stored.
+      const stored = storedRow(approval.id);
+      expect(stored?.jobSummary).not.toHaveProperty("capabilityType");
+      expect(JSON.stringify(stored)).not.toContain("liquid-handler");
+
+      // Listed.
+      const listed = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` }))
+        .json()
+        .approvals.find((r: { id: string }) => r.id === approval.id);
+      expect(listed.jobSummary).not.toHaveProperty("capabilityType");
+    });
+
+    it("keeps a capabilityType the caller sent, including an explicit liquid-handler", async () => {
+      for (const capabilityType of ["fdm", "liquid-handler"]) {
+        const a = await submit({ capabilityType });
+        expect(storedRow(a.id)?.jobSummary).toMatchObject({ capabilityType });
       }
     });
   });
