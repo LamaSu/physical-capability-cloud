@@ -582,24 +582,29 @@ describe("N1 seal-custodial-keys script", () => {
       expect(after.s).toBeNull(); // and nothing was sealed over it
     });
 
-    it("one transaction: if the UPDATE aborts, NEITHER the sealed value NOR the NULL plaintext lands", async () => {
-      const k = newKey();
-      secrets.push("rowid-tx", k.address);
-      seed([{ id: "rowid-tx", address: k.address, plaintext: k.key }]);
-      // A trigger that aborts the statement as it finishes: a sealed value written by a
-      // separate statement would have survived; one atomic UPDATE leaves nothing.
-      const { sqlite } = createDatabase(file);
-      sqlite.exec(`CREATE TRIGGER n1_abort AFTER UPDATE OF operator_wallet_key_sealed ON api_keys
-                   BEGIN SELECT RAISE(ABORT, 'synthetic abort'); END;`);
-      sqlite.close();
-      const r = await run(["--apply"]);
-      expect(r.code).toBe(4);
-      expect(r.report!.rows[0]).toMatchObject({ outcome: "failed" });
-      expect(r.report!.rows[0].reason).toContain("write_failed");
-      const after = state()["rowid-tx"];
-      expect(after.p).toBe(k.key);
-      expect(after.s).toBeNull();
-    });
+    it.each(["operator_wallet_key_sealed", "operator_wallet_private_key"])(
+      "one transaction: if the write fails on %s, NEITHER the sealed value NOR the NULL plaintext lands",
+      async (column) => {
+        const k = newKey();
+        secrets.push("rowid-tx", k.address);
+        seed([{ id: "rowid-tx", address: k.address, plaintext: k.key }]);
+        // A trigger that aborts any statement touching ONE of the two columns. Setting the
+        // two columns in separate statements would leave the other half behind (a sealed
+        // value next to a surviving plaintext, or a NULLed plaintext with nothing sealed:
+        // data loss); one atomic UPDATE in one transaction leaves nothing, whichever half fails.
+        const { sqlite } = createDatabase(file);
+        sqlite.exec(`CREATE TRIGGER n1_abort BEFORE UPDATE OF ${column} ON api_keys
+                     BEGIN SELECT RAISE(ABORT, 'synthetic abort'); END;`);
+        sqlite.close();
+        const r = await run(["--apply"]);
+        expect(r.code).toBe(4);
+        expect(r.report!.rows[0]).toMatchObject({ outcome: "failed" });
+        expect(r.report!.rows[0].reason).toContain("write_failed");
+        const after = state()["rowid-tx"];
+        expect(after.p).toBe(k.key);
+        expect(after.s).toBeNull();
+      },
+    );
 
     it("a failure on one row does not stop the others", async () => {
       const bad = newKey();
