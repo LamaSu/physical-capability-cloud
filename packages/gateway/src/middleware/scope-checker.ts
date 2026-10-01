@@ -302,10 +302,26 @@ export function operatorWriteScopes(): string[] {
 }
 
 /**
+ * Scopes reserved for routes that ship LATER, held by explicit grant only.
+ *
+ *   sealed_deal_read — accepted-deal v3's sealed-deal read (ships separately).
+ *     Reserved ahead of that route, with the `svc:` service identities
+ *     (auth/reserved-identities.ts isServiceIdentity) that will hold it.
+ *
+ * No route enforces these yet, so nothing in this hook reads the list: it only
+ * keeps a legacy `"*"` from being turned into them (SCOPES_NOT_CARRIED_BY_WILDCARD).
+ * The route that does serve one must demand it as an explicit scope, ahead of the
+ * legacy-wildcard return in the hook below, as the three classes above do.
+ */
+const RESERVED_EXPLICIT_SCOPES = ["sealed_deal_read"];
+
+/**
  * Scopes whose authority a legacy `"*"` does NOT carry: exactly the explicit
  * scopes this hook demands on the three request classes where `"*"` is refused
  * — money writes (A1), the admin namespace (A1/A3) and operator-control writes
- * (R3). Derived from those lists so it cannot drift from what is enforced.
+ * (R3) — plus the scopes reserved for routes that ship later
+ * (RESERVED_EXPLICIT_SCOPES). The first four are derived from the lists the hook
+ * enforces, so they cannot drift from what is enforced.
  *
  * Used where a key's authority is REPORTED or DELEGATED rather than enforced:
  * a wildcard key must never mint a new key holding one of these for itself
@@ -317,6 +333,7 @@ export const SCOPES_NOT_CARRIED_BY_WILDCARD: ReadonlySet<string> = new Set([
   ...MONEY_DELETE_SCOPES,
   ...ADMIN_SCOPES,
   ...OPERATOR_WRITE_SCOPES,
+  ...RESERVED_EXPLICIT_SCOPES,
 ]);
 
 /** True for a MUTATING method at or under /api/operator (F4). */
