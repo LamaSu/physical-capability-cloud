@@ -164,6 +164,11 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         throw new KernelAuthError(`${field} must be 0x + 64 lowercase hex`, 400);
       }
     }
+    // A unit is bound with its challenge nonce: half a binding settles nothing
+    // (the oracle requires both on every event) and only hides the gap.
+    if ((request.settlementUnitId === undefined) !== (request.challengeNonce === undefined)) {
+      throw new KernelAuthError("settlementUnitId and challengeNonce come together", 400);
+    }
     // Committed only when the caller names a unit, so unit-less jobs keep their bytes.
     const unitFields = {
       ...(request.settlementUnitId !== undefined ? { settlementUnitId: request.settlementUnitId } : {}),

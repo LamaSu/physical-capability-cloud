@@ -69,4 +69,10 @@ describe("kernel-sdk commits the settlement unit and challenge nonce it was give
       await expect(handler()({ jobId: "job-bad", input: { v: 1 }, ...bad })).rejects.toBeInstanceOf(KernelAuthError);
     }
   });
+
+  it("a unit without its nonce, or a nonce without its unit, is refused (half a binding settles nothing)", async () => {
+    for (const half of [{ settlementUnitId: U3 }, { challengeNonce: NONCE }]) {
+      await expect(handler()({ jobId: "job-half", input: { v: 1 }, ...half })).rejects.toThrow(/come together/);
+    }
+  });
 });
