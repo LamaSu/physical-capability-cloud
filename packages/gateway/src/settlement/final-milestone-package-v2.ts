@@ -312,14 +312,17 @@ export function isInterimNonce(body: FinalMilestonePackageV2Body): boolean {
 // packageDigestV2 can call validatePackageBody without an import cycle.
 
 /**
- * One signature over a FinalMilestonePackage body.
+ * One signature over a FinalMilestonePackage body: EXACTLY the keys `signer`,
+ * `scheme` and `sig`, each a string. An entry with any other key is refused, not
+ * ignored: the digest hashes the whole entry, so an extra key would move it
+ * without changing a single fact.
  *
  * Shape is the ORACLE's (#1395, they own ingestion): `{signer, scheme, sig}`.
  * The signer SET is {operator, kernel} per evidence's frozen profile —
- * D1 = operator secp256k1-EIP712, D2 = kernel ed25519-raw32.
+ * D1 = operator secp256k1-EIP712, D2 = kernel ed25519-raw32, one signature each.
  *
- * `signer` is the dedup key and the sort key, and it is `0x` + lowercase hex
- * (SIGNER_FORM): any other spelling is REFUSED, never lowercased. Oracle #1395:
+ * `signer` is the sort key, and it is `0x` + lowercase hex (SIGNER_FORM): any
+ * other spelling is REFUSED, never lowercased. Oracle #1395:
  * "Do NOT depend on case; changing a signer id's case MUST be a no-op." Signer
  * ids are EIP-55-checksummed addresses in some paths and lowercase in others, so
  * binding a spelling would make identical evidence produce two package identities
@@ -337,7 +340,6 @@ export interface PackageSignature {
   signer: string;
   scheme: string;
   sig: string;
-  [k: string]: unknown;
 }
 
 /** Raised when a signature entry cannot participate in the canonical order. */
@@ -362,45 +364,82 @@ export class InvalidSignatureEntryError extends Error {
  */
 const SIGNER_FORM = /^0x(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
+/** The keys of a signature entry, sorted and joined: an entry has EXACTLY these. */
+const SIGNATURE_ENTRY_KEYS = "scheme,sig,signer";
+
+/** One signature per role of the frozen signer set (D1 operator, D2 kernel). */
+const SIGNATURE_COUNT = 2;
+
 /**
- * The malleability closure: dedup by signer (FIRST occurrence wins), then sort
- * by signer. The signer is already pinned to its one spelling (SIGNER_FORM), so
- * it is dedup'd, sorted and emitted exactly as given; nothing here changes case.
+ * The malleability closure, as REFUSALS. It does not repair what it is given: it
+ * accepts exactly one shape, and sorts.
+ *  - An array of exactly two entries: the signer set is one signature per role.
+ *  - Each entry has EXACTLY the keys signer, scheme, sig, all strings, with the
+ *    signer pinned to SIGNER_FORM. An unknown key would move the digest without
+ *    changing a fact.
+ *  - No two entries share a signer, and no two share a scheme (the role). A
+ *    duplicate is REFUSED, never deduplicated: under "first wins" a forged
+ *    duplicate placed ahead of the real entry would be the one that wins.
+ * The only normalization left is the sort by signer, so reordering is a no-op.
  *
- * Pure — never mutates the caller's array. Returns a new array.
+ * NOT checked here: that the two schemes are exactly the D1 and D2 names, and the
+ * signer width per scheme. The published golden's sample set labels its entries
+ * "secp256k1" and "ed25519" (the latter with a 40-digit signer) and its digest
+ * must stay byte-identical. `assertMintablePackage` enforces both.
+ *
+ * Pure: never mutates the caller's array, returns a new one of new entries.
  */
-export function canonicalSignatures(
-  sigs: readonly PackageSignature[],
-): PackageSignature[] {
+export function canonicalSignatures(sigs: unknown): PackageSignature[] {
   if (!Array.isArray(sigs)) {
     throw new InvalidSignatureEntryError("signatures must be an array");
   }
+  const count: number = sigs.length;
+  if (count !== SIGNATURE_COUNT) {
+    throw new InvalidSignatureEntryError(
+      `expected exactly ${SIGNATURE_COUNT} signatures (one per role: D1 operator, D2 kernel), got ${count}`,
+    );
+  }
 
-  const seen = new Set<string>();
-  const kept: PackageSignature[] = [];
-
-  for (const s of sigs) {
-    if (s === null || typeof s !== "object") {
-      throw new InvalidSignatureEntryError("entry is not an object");
+  const entries: PackageSignature[] = [];
+  for (let i = 0; i < count; i++) {
+    const path = `$signatures[${i}]`;
+    const entry: unknown = sigs[i];
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new InvalidSignatureEntryError(`${path} is not an object`);
     }
-    if (typeof s.signer !== "string" || !SIGNER_FORM.test(s.signer)) {
+    if (Object.keys(entry).sort().join(",") !== SIGNATURE_ENTRY_KEYS) {
+      throw new InvalidSignatureEntryError(`${path} must have exactly the keys signer, scheme, sig`);
+    }
+    const { signer, scheme, sig } = entry as Record<string, unknown>;
+    if (typeof signer !== "string" || !SIGNER_FORM.test(signer)) {
       throw new InvalidSignatureEntryError(
-        "signer must be 0x + 40 or 64 lowercase hex digits (an address or an ed25519 key); " +
+        `${path}.signer must be 0x + 40 or 64 lowercase hex digits (an address or an ed25519 key); ` +
           "any other spelling is refused, never normalized",
       );
     }
-    if (seen.has(s.signer)) continue; // FIRST wins — later duplicates are dropped
-    seen.add(s.signer);
-    // Emitted exactly as given: SIGNER_FORM already admits one spelling only, so
-    // there is nothing to normalize and nothing for the digest to depend on.
-    kept.push({ ...s });
+    if (typeof scheme !== "string" || scheme.length === 0) {
+      throw new InvalidSignatureEntryError(`${path}.scheme must be a non-empty string`);
+    }
+    if (typeof sig !== "string" || sig.length === 0) {
+      throw new InvalidSignatureEntryError(`${path}.sig must be a non-empty string`);
+    }
+    entries.push({ signer, scheme, sig });
   }
 
-  // Sort by the SAME signer used for dedup and emission, so no two of the three
-  // operations can disagree about signer identity.
-  return kept.sort((a, b) =>
-    a.signer < b.signer ? -1 : a.signer > b.signer ? 1 : 0,
-  );
+  const signers = new Set<string>();
+  const roles = new Set<string>();
+  for (const e of entries) {
+    if (signers.has(e.signer)) {
+      throw new InvalidSignatureEntryError("a signer appears twice; duplicates are refused, never deduplicated");
+    }
+    signers.add(e.signer);
+    if (roles.has(e.scheme)) {
+      throw new InvalidSignatureEntryError("two signatures in the same role (same scheme); duplicates are refused, never deduplicated");
+    }
+    roles.add(e.scheme);
+  }
+
+  return entries.sort((a, b) => (a.signer < b.signer ? -1 : a.signer > b.signer ? 1 : 0));
 }
 
 // ── The mint-time guard ─────────────────────────────────────────────────────

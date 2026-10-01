@@ -79,16 +79,71 @@ const BAD_SIGNERS: Array<[string, unknown]> = [
 ];
 
 describe("canonicalSignatures — the malleability closure", () => {
-  it("sorts by signer", () => {
-    const out = canonicalSignatures([SIG_C, SIG_A, SIG_B]);
-    expect(out.map((s) => s.signer)).toEqual([SIGNER_A, SIGNER_B, SIGNER_C]);
+  it("sorts by signer, so reordering is a no-op", () => {
+    expect(canonicalSignatures([SIG_B, SIG_A]).map((s) => s.signer)).toEqual([SIGNER_A, SIGNER_B]);
+    expect(canonicalSignatures([SIG_A, SIG_B]).map((s) => s.signer)).toEqual([SIGNER_A, SIGNER_B]);
+    expect(canonicalSignatures([SIG_C, SIG_B]).map((s) => s.signer)).toEqual([SIGNER_B, SIGNER_C]);
   });
 
-  it("dedups by signer with FIRST occurrence winning", () => {
-    const dup: PackageSignature = { signer: SIGNER_A, scheme: "x", sig: "0xLATER" };
-    const out = canonicalSignatures([SIG_A, dup]);
-    expect(out).toHaveLength(1);
-    expect(out[0].sig).toBe("0xsig-a");
+  it("REFUSES a duplicate signer wherever it sits; it never deduplicates (F4)", () => {
+    // Under "first wins" a forged duplicate placed ahead of the real entry was the
+    // one that won, and it moved the digest silently. It is an error now.
+    const forged: PackageSignature = { ...SIG_A, sig: "0xFORGED" };
+    const cases: Array<[string, PackageSignature[]]> = [
+      ["forged ahead of the real entry", [forged, SIG_A]],
+      ["forged after the real entry", [SIG_A, forged]],
+      ["the same entry twice", [SIG_A, SIG_A]],
+      ["the same signer under another scheme", [SIG_A, { ...SIG_A, scheme: "ed25519-raw32" }]],
+    ];
+    for (const [name, input] of cases) {
+      expect(() => canonicalSignatures(input), name).toThrow(/signer appears twice/);
+    }
+  });
+
+  it("REFUSES two signatures in the same role (same scheme, different signer) (F4)", () => {
+    expect(() => canonicalSignatures([SIG_A, SIG_C])).toThrow(/same role/);
+  });
+
+  it("REFUSES a set that is not exactly two entries, and a value that is not an array (F4)", () => {
+    const sets: Array<[string, PackageSignature[]]> = [
+      ["none", []],
+      ["one", [SIG_A]],
+      ["three", [SIG_A, SIG_B, SIG_C]],
+      ["a forged duplicate ahead of the real pair", [{ ...SIG_A, sig: "0xFORGED" }, SIG_A, SIG_B]],
+    ];
+    for (const [name, input] of sets) {
+      expect(() => canonicalSignatures(input), name).toThrow(/exactly 2 signatures/);
+    }
+    for (const notAnArray of [undefined, null, "A,B", { 0: SIG_A, 1: SIG_B, length: 2 }, new Set([SIG_A, SIG_B])]) {
+      expect(() => canonicalSignatures(notAnArray), String(notAnArray)).toThrow(/must be an array/);
+    }
+  });
+
+  it("REFUSES an entry with a key other than signer, scheme, sig (F4)", () => {
+    // The digest hashes the whole entry, so an extra key moved it without changing a fact.
+    const cases: Array<[string, unknown]> = [
+      ["an extra key", { ...SIG_A, note: "x" }],
+      ["an extra empty key", { ...SIG_A, "": "x" }],
+      ["a missing sig", { signer: SIG_A.signer, scheme: SIG_A.scheme }],
+      ["a missing scheme", { signer: SIG_A.signer, sig: SIG_A.sig }],
+      ["a missing signer", { scheme: SIG_A.scheme, sig: SIG_A.sig }],
+      ["a renamed key", { signer: SIG_A.signer, scheme: SIG_A.scheme, signature: SIG_A.sig }],
+      ["a key in another case", { Signer: SIG_A.signer, scheme: SIG_A.scheme, sig: SIG_A.sig }],
+      ["an empty object", {}],
+    ];
+    for (const [name, entry] of cases) {
+      expect(() => canonicalSignatures([entry, SIG_B]), name).toThrow(/exactly the keys/);
+    }
+  });
+
+  it("REFUSES an entry that is not an object, and a scheme or signature that is not a non-empty string (F4)", () => {
+    for (const entry of [null, undefined, "x", 7, true, [SIG_A.signer, SIG_A.scheme, SIG_A.sig]]) {
+      expect(() => canonicalSignatures([entry, SIG_B]), String(entry)).toThrow(/is not an object/);
+    }
+    for (const bad of [1, null, undefined, "", {}, []]) {
+      expect(() => canonicalSignatures([{ ...SIG_A, scheme: bad }, SIG_B]), `scheme ${String(bad)}`).toThrow(/scheme must be a non-empty string/);
+      expect(() => canonicalSignatures([{ ...SIG_A, sig: bad }, SIG_B]), `sig ${String(bad)}`).toThrow(/sig must be a non-empty string/);
+    }
   });
 
   it("REFUSES a signer that is not 0x + 40 or 64 lowercase hex digits, and never normalizes it (F5)", () => {
@@ -104,22 +159,25 @@ describe("canonicalSignatures — the malleability closure", () => {
   });
 
   it("does not mutate the caller's array or its entries", () => {
-    const input = [SIG_C, SIG_A];
+    const input = [SIG_B, SIG_A];
     const snapshot = JSON.stringify(input);
-    canonicalSignatures(input);
+    const out = canonicalSignatures(input);
     expect(JSON.stringify(input)).toBe(snapshot);
-    // In particular the caller's entries survive: the sorted copy is a new array.
-    expect(input[0]).toBe(SIG_C);
-    expect(SIG_A.signer).toBe(SIGNER_A);
+    // The sorted result is a new array of new entries: the caller's objects are
+    // never reordered in place and never aliased.
+    expect(input[0]).toBe(SIG_B);
+    expect(out).toEqual([SIG_A, SIG_B]);
+    expect(out[0]).not.toBe(SIG_A);
+    expect(out[1]).not.toBe(SIG_B);
   });
 
   it("rejects a malformed entry rather than silently skipping it", () => {
-    expect(() =>
-      canonicalSignatures([{ sig: "x" } as unknown as PackageSignature]),
-    ).toThrow(InvalidSignatureEntryError);
-    expect(() =>
-      canonicalSignatures([null as unknown as PackageSignature]),
-    ).toThrow(InvalidSignatureEntryError);
+    expect(() => canonicalSignatures([{ sig: "x" } as unknown as PackageSignature, SIG_B])).toThrow(
+      InvalidSignatureEntryError,
+    );
+    expect(() => canonicalSignatures([null as unknown as PackageSignature, SIG_B])).toThrow(
+      InvalidSignatureEntryError,
+    );
   });
 });
 
@@ -174,17 +232,30 @@ describe("producer vs evidence's mirror — signer case (F6)", () => {
   });
 });
 
-describe("packageDigestV2 — signature malleability must be a NO-OP", () => {
-  const base = packageDigestV2(BODY, [SIG_A, SIG_B, SIG_C]);
+describe("packageDigestV2 — signature malleability closes by REFUSAL, reordering is a NO-OP", () => {
+  const base = packageDigestV2(BODY, [SIG_A, SIG_B]);
 
   it("is stable under signature REORDERING", () => {
-    expect(packageDigestV2(BODY, [SIG_C, SIG_B, SIG_A])).toBe(base);
-    expect(packageDigestV2(BODY, [SIG_B, SIG_A, SIG_C])).toBe(base);
+    expect(packageDigestV2(BODY, [SIG_B, SIG_A])).toBe(base);
   });
 
-  it("is stable when a signer is DUPLICATED", () => {
-    const withDup = [SIG_A, SIG_B, SIG_C, { ...SIG_A, sig: "0xreplay" }];
-    expect(packageDigestV2(BODY, withDup)).toBe(base);
+  it("REFUSES a duplicated signer instead of deduplicating it, wherever the duplicate sits (F4)", () => {
+    // Before: the first occurrence won, so a forged duplicate placed ahead of the
+    // real entry changed the digest silently while looking like a no-op.
+    const forged = { ...SIG_A, sig: "0xforged" };
+    for (const sigs of [
+      [forged, SIG_A, SIG_B],
+      [SIG_A, SIG_B, { ...SIG_A, sig: "0xreplay" }],
+      [forged, SIG_A],
+      [SIG_A, forged],
+    ]) {
+      expect(() => packageDigestV2(BODY, sigs)).toThrow(InvalidSignatureEntryError);
+    }
+  });
+
+  it("REFUSES an extra key on a signature entry: it would move the digest without changing a fact (F4)", () => {
+    const withNote = { ...SIG_A, note: "x" } as PackageSignature;
+    expect(() => packageDigestV2(BODY, [withNote, SIG_B])).toThrow(/exactly the keys/);
   });
 
   /**
@@ -202,10 +273,10 @@ describe("packageDigestV2 — signature malleability must be a NO-OP", () => {
    * the oracle or the evidence mirror would treat differently.
    */
   it("REFUSES a re-cased signer: a case change is never a second digest (F5)", () => {
-    for (const signer of [SIGNER_A, SIGNER_B, SIGNER_C]) {
+    for (const signer of [SIGNER_A, SIGNER_B]) {
       const recased = signer.toUpperCase().replace("0X", "0x");
-      const sigs = [SIG_A, SIG_B, SIG_C].map((s) => (s.signer === signer ? { ...s, signer: recased } : s));
-      expect(() => packageDigestV2(BODY, sigs), recased).toThrow(InvalidSignatureEntryError);
+      const sigs = [SIG_A, SIG_B].map((s) => (s.signer === signer ? { ...s, signer: recased } : s));
+      expect(() => packageDigestV2(BODY, sigs), recased).toThrow(/lowercase hex/);
     }
   });
 
@@ -216,7 +287,7 @@ describe("packageDigestV2 — signature malleability must be a NO-OP", () => {
       milestoneIndex: BODY.milestoneIndex,
       settlementUnitId: BODY.settlementUnitId,
     };
-    expect(packageDigestV2(reordered, [SIG_A, SIG_B, SIG_C])).toBe(base);
+    expect(packageDigestV2(reordered, [SIG_A, SIG_B])).toBe(base);
   });
 });
 
@@ -240,14 +311,12 @@ describe("packageDigestV2 — negative parity, every fact must be bound", () => 
 
   it("moves when the SCHEME changes", () => {
     // scheme selects the verification algorithm; swapping it must not be free.
-    expect(
-      packageDigestV2(BODY, [{ ...SIG_A, scheme: "ed25519-raw32" }, SIG_B]),
-    ).not.toBe(base);
+    expect(packageDigestV2(BODY, [{ ...SIG_A, scheme: "secp256k1" }, SIG_B])).not.toBe(base);
   });
 
-  it("moves when a DISTINCT signer is added or removed", () => {
-    expect(packageDigestV2(BODY, [SIG_A, SIG_B, SIG_C])).not.toBe(base);
-    expect(packageDigestV2(BODY, [SIG_A])).not.toBe(base);
+  it("moves when a SIGNER changes", () => {
+    expect(packageDigestV2(BODY, [SIG_A, { ...SIG_B, signer: `0x${"d4".repeat(32)}` }])).not.toBe(base);
+    expect(packageDigestV2(BODY, [SIG_C, SIG_B])).not.toBe(base);
   });
 });
 
@@ -256,7 +325,7 @@ describe("packageDigestV2 — framing", () => {
     // @pcc/spec's sha256() returns "sha256:<hex>" — the evidence-bundle framing.
     // This digest is bound on-chain as bytes32; mixing the two looks right in a
     // log and fails every bind.
-    const d = packageDigestV2(BODY, [SIG_A]);
+    const d = packageDigestV2(BODY, [SIG_A, SIG_B]);
     expect(d).toMatch(/^0x[0-9a-f]{64}$/);
     expect(d.startsWith("sha256:")).toBe(false);
   });
@@ -277,13 +346,13 @@ describe("packageDigestV2 — fails closed on values the canonicalizer is unsafe
     // The shared canonicalizer serializes numbers with String(), which is not
     // RFC 8785. Rather than silently produce a digest the oracle may not
     // reproduce, refuse it loudly.
-    expect(() => packageDigestV2({ amount: 1.5 }, [SIG_A])).toThrow(
+    expect(() => packageDigestV2({ amount: 1.5 }, [SIG_A, SIG_B])).toThrow(
       NonCanonicalizableBodyError,
     );
   });
 
   it("refuses a bigint", () => {
-    expect(() => packageDigestV2({ amount: 10n }, [SIG_A])).toThrow(
+    expect(() => packageDigestV2({ amount: 10n }, [SIG_A, SIG_B])).toThrow(
       NonCanonicalizableBodyError,
     );
   });
@@ -292,7 +361,7 @@ describe("packageDigestV2 — fails closed on values the canonicalizer is unsafe
     expect(() =>
       packageDigestV2(
         { a: 1, b: "x", c: true, d: null, e: { f: [1, "y", false] } },
-        [SIG_A],
+        [SIG_A, SIG_B],
       ),
     ).not.toThrow();
   });
@@ -307,9 +376,28 @@ describe("packageDigestV2 — evidence's published golden (#1202, 974b3ff1)", ()
     expect(packageDigestV2(body, GOLDEN.rawSigs)).toBe(GOLDEN.packageDigestV2);
   });
 
-  it("stays on the golden when the published signatures are reordered and duplicated", () => {
+  it("stays on the golden when the published signatures are reordered", () => {
     const [a, b] = GOLDEN.rawSigs as PackageSignature[];
     const body: unknown = JSON.parse(GOLDEN.jcsBody);
-    expect(packageDigestV2(body, [b!, a!, b!])).toBe(GOLDEN.packageDigestV2);
+    expect(packageDigestV2(body, [b!, a!])).toBe(GOLDEN.packageDigestV2);
   });
+
+  it("REFUSES the published signatures with one duplicated: the mirror deduplicates, the producer refuses (F4)", () => {
+    // The mirror's own check collapses reorder + duplicate onto the golden. The
+    // producer accepts a subset of what the mirror accepts, and where it accepts
+    // they agree: it refuses the duplicate instead of repairing it.
+    const [a, b] = GOLDEN.rawSigs as PackageSignature[];
+    const body: unknown = JSON.parse(GOLDEN.jcsBody);
+    expect(() => packageDigestV2(body, [b!, a!, b!])).toThrow(InvalidSignatureEntryError);
+  });
+});
+
+describe("packageDigestV2 — rules the published golden blocks (STOPPED, not applied)", () => {
+  // The golden's sample signature set labels its entries "secp256k1" / "ed25519"
+  // and gives the "ed25519" entry a 40-digit signer, and its digest 0xf78103a1...
+  // must stay byte-identical. Until evidence re-issues the sample set in the
+  // frozen D1/D2 forms (or the owners agree the digest path stays lenient and the
+  // mint guard is the only gate), these cannot be enforced on the digest path.
+  it.todo("pins the scheme names to exactly secp256k1-eip712 (D1) and ed25519-raw32 (D2), which fixes the roles of the two entries");
+  it.todo("pins the signer width per scheme: D1 = 0x + 40 digits, D2 = 0x + 64 digits");
 });

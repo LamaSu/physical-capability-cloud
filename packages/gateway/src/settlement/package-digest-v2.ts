@@ -11,21 +11,36 @@
  * The contract (oracle #1368):
  *
  *   packageDigestV2 = SHA-256( JCS( { body, <sigsKey>: canonicalSignatures(sigs) } ) )
- *   canonicalSignatures = dedup-by-signer (FIRST wins) + sort by signer
+ *   canonicalSignatures = refuse a malformed or duplicated set, then sort by signer
  *
- * The dedup+sort is the malleability closure: without it, a relayer could
- * reorder or duplicate signatures and move the digest without changing a single
- * semantic fact, which would let the same evidence produce two different
- * package identities.
+ * The malleability closure matters because without it a relayer could reorder,
+ * duplicate or re-case signatures and move the digest without changing a single
+ * semantic fact, which would let the same evidence produce two different package
+ * identities.
  *
- * SIGNER CASE IS REFUSED, NOT REPAIRED. The oracle's ingestion treats a signer's
- * case as a no-op (#1395) by lowercasing before it hashes, and evidence's mirror
- * (`settlement-vector-golden-mirror.cjs`) dedups on the lowercased signer but
- * keeps the entry's own case. The producer accepts only the lowercase spelling
- * (0x + lowercase hex) and emits it exactly as given, so on every input the
- * producer accepts all three agree: lowercasing is the identity, and the case the
- * mirror keeps is that same lowercase. A re-cased signer is an error here, never a
- * second digest and never a silent repair.
+ * THE PRODUCER REFUSES; IT DOES NOT REPAIR. The oracle's ingestion canonicalizes
+ * the set by dedup-by-signer (first wins) and a lowercased sort (#1368, #1395),
+ * and evidence's mirror (`settlement-vector-golden-mirror.cjs`) dedups the same
+ * way but keeps each entry's own case. Those repairs close malleability on the
+ * CONSUMING side. The producer refuses every input they would repair, so what it
+ * emits has exactly one spelling:
+ *   - a signer that is not 0x + lowercase hex: no lowercasing (F5, F6);
+ *   - a duplicate signer, or a second signature in the same role: no dedup, so a
+ *     forged duplicate placed ahead of the real entry cannot win "first wins";
+ *   - an entry with any key but signer, scheme, sig, which would move the digest
+ *     without changing a fact;
+ *   - anything but exactly two entries.
+ * The only repair left is the sort, so reordering is a no-op. On every input the
+ * producer accepts, the oracle's dedup and lowercasing and the mirror's kept case
+ * are no-ops, so producer, oracle and mirror agree.
+ *
+ * NOT ENFORCED HERE, because the published golden forbids it: the scheme NAMES
+ * (secp256k1-eip712 for D1, ed25519-raw32 for D2) and the signer width per scheme.
+ * `g2-settlement-vector-golden.json` is the mirror's SAMPLE vector, whose entries
+ * are labelled "secp256k1" and "ed25519" (the latter with a 40-digit signer), and
+ * its digest must stay byte-identical, so `packageDigestV2` has to accept it.
+ * `assertMintablePackage` enforces both, and a package that is not mintable never
+ * becomes a digest bound to money.
  *
  * WHY THE CANONICALIZER IS IMPORTED, NOT HAND-ROLLED: `packages/spec`'s
  * `canonicalize` is already the repo's serializer for evidence events and
