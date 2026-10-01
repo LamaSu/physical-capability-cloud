@@ -54,6 +54,7 @@
  * tests only and is deliberately absent from `evidence/index.ts`.
  */
 
+import { DIGEST_PATTERN } from "../csd/composition-commitment.js";
 import type { CsdEvidenceTier } from "../csd/schema.js";
 import { EVIDENCE_EVENT_TYPES } from "../types/evidence.js";
 import {
@@ -389,7 +390,9 @@ export interface AcceptedProgramGateInput {
  * Pre-funding gate for one (CSD, tier) selection. `evidence` is the funded
  * CSD's whole evidence map (tiers 0..3), and `committedProgramHash` is what the
  * plan or composition commitment carries (null when none). A non-zero tier
- * passes only when that hash equals the resolved program's hash exactly, the
+ * passes only when that hash equals the resolved program's hash exactly (read
+ * in the accepted deal's digest grammar: a literal lowercase "0x", then 64 hex
+ * digits whose case is not meaningful), the
  * CSD's tiers 0..T are eligible with implemented verifiers, and the program
  * passes `checkCommittedProgramForTier` for the CSD's own tier. On success it
  * returns the registry pins the accepted deal must seal (`requiredRegistryPins`),
@@ -444,8 +447,7 @@ export function assertAcceptedProgramForTierWith(
   if (computeCommittedProgramHash(resolved.program) !== resolved.programHash) {
     return { ok: false, code: "registry-hash-mismatch" };
   }
-  // Hex case carries no meaning in a 0x digest; any other difference does.
-  if (typeof committedProgramHash !== "string" || committedProgramHash.toLowerCase() !== resolved.programHash) {
+  if (!commitsToProgramHash(committedProgramHash, resolved.programHash)) {
     return { ok: false, code: "program-hash-mismatch" };
   }
   const k = tierNumber(tierKey);
@@ -482,6 +484,22 @@ export function assertAcceptedProgramForTierWith(
     return { ok: false, code: "program-fails-tier-check", violations: check.violations };
   }
   return pinsResult(evidence, k);
+}
+
+/**
+ * Whether `committed` is the resolved program's hash as the accepted deal reads a
+ * digest. The deal's own grammar (`DIGEST_PATTERN`: a literal lowercase "0x" and
+ * 64 hex digits) comes first, and only then does case stop mattering, in the
+ * digits alone. Lowercasing the whole string would accept "0X...", which the deal
+ * refuses at compile (E8 F5), so the gate and the deal would disagree before
+ * funding about what was committed.
+ */
+function commitsToProgramHash(committed: unknown, programHash: string): boolean {
+  return (
+    typeof committed === "string" &&
+    DIGEST_PATTERN.test(committed) &&
+    "0x" + committed.slice(2).toLowerCase() === programHash
+  );
 }
 
 /** The gate's input after one read of each field. `evidence` is plain JSON data no caller object can change. */

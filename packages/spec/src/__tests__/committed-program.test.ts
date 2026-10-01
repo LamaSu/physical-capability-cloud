@@ -20,6 +20,7 @@ import {
 import * as committedProgramModule from "../evidence/committed-program.js";
 import * as evidenceIndex from "../evidence/index.js";
 import * as packageRoot from "../index.js";
+import { DIGEST_PATTERN, deriveCapabilityContractRoot, validatePlan, type MatchedDAG } from "../csd/composition-commitment.js";
 import { computeCsdEligibility } from "../evidence/eligibility.js";
 import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
 import type { CsdEvidenceTier } from "../csd/schema.js";
@@ -776,5 +777,70 @@ describe("assertAcceptedProgramForTier — tiers 0..k must all be declared (E8 F
     const noTier0 = fixedTiers();
     delete noTier0.tier0;
     expect(gate("tier0", null, noTier0)).toEqual({ ok: true, registryPins: [] });
+  });
+});
+
+describe("assertAcceptedProgramForTier — the committed hash is read in the accepted deal's digest grammar (E8 F5)", () => {
+  const HASH = PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH;
+  const gate = (committedProgramHash: unknown) =>
+    assertAcceptedProgramForTierWith(
+      { csd: CSD, tierKey: "tier2", evidence: fixedTiers(), committedProgramHash } as AcceptedProgramGateInput,
+      COMMITTED_PROGRAM_REGISTRY,
+      { primitiveIndex: LIVE },
+    );
+  /** A minimal plan that carries `verificationProgramHash`: the accepted deal's own validation and derivation read it. */
+  const dealPlan = (verificationProgramHash: string): MatchedDAG => ({
+    requestId: "req-1",
+    nodes: [{ nodeId: "print", capabilityType: "document-printing", matchStatus: "none" }],
+    edges: [],
+    verificationProgramHash,
+  });
+  const dealAccepts = (hash: string) => validatePlan(dealPlan(hash), { bindings: false }).length === 0;
+  const digits = HASH.slice(2);
+  const OTHER_DIGEST = "0x" + "ab".repeat(32);
+
+  const table: Array<[string, string]> = [
+    ["the pinned hash", HASH],
+    ["uppercase hex digits under a lowercase 0x", "0x" + digits.toUpperCase()],
+    ["mixed-case hex digits", "0x" + digits.slice(0, 20).toUpperCase() + digits.slice(20)],
+    ["0X prefix, lowercase digits", "0X" + digits],
+    ["0X prefix, uppercase digits (HASH.toUpperCase(), the reviewer's repro)", HASH.toUpperCase()],
+    ["no prefix", digits],
+    ["63 hex digits", HASH.slice(0, -1)],
+    ["65 hex digits", HASH + "0"],
+    ["a non-hex digit", HASH.slice(0, -1) + "g"],
+    ["a fullwidth letter in the digits", "0x" + digits.replace("d", "\uff44")],
+    ["a leading space", " " + HASH],
+    ["a trailing space", HASH + " "],
+    ["a trailing newline", HASH + "\n"],
+    ["an embedded NUL", HASH.slice(0, 10) + "\u0000" + HASH.slice(11)],
+    ["the empty string", ""],
+    ["another valid digest", OTHER_DIGEST],
+  ];
+
+  it("the gate accepts exactly what the accepted deal accepts and canonicalizes to the pinned hash", () => {
+    const pinnedRoot = deriveCapabilityContractRoot(dealPlan(HASH), { version: 3 });
+    for (const [name, input] of table) {
+      const dealCommitsToTheProgram = dealAccepts(input) && deriveCapabilityContractRoot(dealPlan(input), { version: 3 }) === pinnedRoot;
+      expect(gate(input).ok, name).toBe(dealCommitsToTheProgram);
+      // And the grammar the gate applied is the deal's, not a copy that could drift.
+      if (!DIGEST_PATTERN.test(input)) expect(dealAccepts(input), name).toBe(false);
+    }
+  });
+
+  it("the rows that matter: 0X is refused, and hex case is still not meaningful in the digits", () => {
+    expect(gate(HASH.toUpperCase())).toEqual({ ok: false, code: "program-hash-mismatch" });
+    expect(gate("0X" + digits)).toEqual({ ok: false, code: "program-hash-mismatch" });
+    expect(gate("0x" + digits.toUpperCase())).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+    expect(gate(HASH)).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+    // The deal reads them the same way.
+    expect(dealAccepts(HASH.toUpperCase())).toBe(false);
+    expect(dealAccepts("0x" + digits.toUpperCase())).toBe(true);
+  });
+
+  it("a committed hash that is not a string is a mismatch, whatever it coerces to", () => {
+    for (const bad of [undefined, null, 7, { toString: () => HASH }, [HASH], new String(HASH)]) {
+      expect(gate(bad), String(bad)).toEqual({ ok: false, code: "program-hash-mismatch" });
+    }
   });
 });
