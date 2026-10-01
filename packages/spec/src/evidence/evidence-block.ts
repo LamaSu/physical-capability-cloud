@@ -70,11 +70,13 @@
  * and `parentSignature` to 128 lowercase hex characters with NO 0x prefix, the form the
  * golden uses and every in-repo producer emits. Other spellings of the same key are
  * refused rather than normalized, so one authorization has one digest and neither the
- * oracle mirror nor the goldens change. The scope arrays are committed in the order
- * given: the same permissions in another order, or with a duplicate, have another digest.
- * They are not pinned here because `SessionKeyService.issueSessionKey` passes the
- * caller's order and duplicates through verbatim (the parent signature covers a sorted
- * copy), so a producer exists that would not comply; that needs a producer-side decision.
+ * oracle mirror nor the goldens change. The scope arrays `allowedActions` and `contractIds`
+ * are pinned by rejection to one canonical form, strictly ascending in UTF-16 code-unit
+ * order (which also excludes a duplicate; an empty array is allowed). An unsorted or
+ * duplicated array is refused, never sorted or de-duplicated, so the same permissions
+ * cannot have two digests. Producers emit that form: `SessionKeyService.issueSessionKey`
+ * builds `[...new Set(xs)].sort()` before it signs (gateway #4670), so a conforming
+ * authorization is accepted unchanged.
  *
  * The block is evaluator-ready, not a money authority by itself: the oracle
  * reconstructs the unit context independently and pins programHash to the
@@ -495,8 +497,15 @@ function requirePinnedHex(field: string, value: unknown, pattern: RegExp, expect
   return value;
 }
 
-/** A frozen copy of a dense, plain array of strings; elements are read through descriptors. */
-function readStringArray(path: string, input: unknown): readonly string[] {
+/**
+ * A frozen copy of a dense, plain array of strings in the one canonical order: strictly ascending
+ * by UTF-16 code unit (plain JS `<`, which is what the default Array.prototype.sort produces), so
+ * a duplicate is out of order too. An empty array is allowed. Each element is read once, through
+ * its descriptor, and the order is judged on that copy, so what is checked is what is committed.
+ * An array that is not in canonical order is refused at the first element that breaks it, never
+ * sorted or de-duplicated: one authorization has one digest.
+ */
+function readCanonicalStringSet(path: string, input: unknown): readonly string[] {
   if (!Array.isArray(input) || utilTypes.isProxy(input)) {
     throw new EvidenceBlockInputError(path, "expected a plain array of strings");
   }
@@ -515,6 +524,15 @@ function readStringArray(path: string, input: unknown): readonly string[] {
     }
     out.push(descriptor.value);
   }
+  for (let i = 1; i < out.length; i++) {
+    if (!(out[i - 1] < out[i])) {
+      const canonical = "expected strictly ascending UTF-16 code-unit order, the canonical form [...new Set(xs)].sort()";
+      throw new EvidenceBlockInputError(
+        `${path}[${i}]`,
+        out[i - 1] === out[i] ? `duplicate of the previous element: ${canonical}` : `out of order: ${canonical}`,
+      );
+    }
+  }
   return Object.freeze(out);
 }
 
@@ -522,8 +540,10 @@ function readStringArray(path: string, input: unknown): readonly string[] {
  * Snapshot a session-key authorization: validate it and copy it into a deep-frozen plain
  * value, reading every property exactly once. An unknown own key, an accessor property, a
  * non-plain object or a Proxy is refused, so validation and the digest cannot observe
- * different values. `digest` is computed over the frozen copy. Consumers must evaluate
- * `value`, never the original object: it is the exact value that was hashed.
+ * different values. The scope arrays must already be in canonical order (strictly ascending,
+ * see the module header): an array that is not is refused, never reordered. `digest` is
+ * computed over the frozen copy. Consumers must evaluate `value`, never the original object:
+ * it is the exact value that was hashed.
  */
 export function sessionKeyAuthSnapshot(auth: SessionKeyAuthorization): SessionKeyAuthSnapshot {
   const path = "sessionKeyAuthorization";
@@ -551,8 +571,8 @@ export function sessionKeyAuthSnapshot(auth: SessionKeyAuthorization): SessionKe
 
   const scopePath = `${path}.scope`;
   const scopeFields = readPlainFields(scopePath, requiredField(path, top, "scope"), SESSION_SCOPE_FIELDS);
-  const allowedActions = readStringArray(`${scopePath}.allowedActions`, requiredField(scopePath, scopeFields, "allowedActions"));
-  const contractIds = readStringArray(`${scopePath}.contractIds`, requiredField(scopePath, scopeFields, "contractIds"));
+  const allowedActions = readCanonicalStringSet(`${scopePath}.allowedActions`, requiredField(scopePath, scopeFields, "allowedActions"));
+  const contractIds = readCanonicalStringSet(`${scopePath}.contractIds`, requiredField(scopePath, scopeFields, "contractIds"));
   const maxSignatures = boundedInt(
     `${scopePath}.maxSignatures`,
     requiredField(scopePath, scopeFields, "maxSignatures"),

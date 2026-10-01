@@ -1081,7 +1081,7 @@ describe("E7 F3 — roles are read once and the session authorization is a froze
       const snap = sessionKeyAuthSnapshot(auth);
       expect(sha(canonicalize(snap.value))).toBe(snap.digest);
       auth.sessionId = "changed-after-hashing";
-      auth.scope.contractIds.push("added-after-hashing");
+      auth.scope.contractIds.push("zz-added-after-hashing"); // sorts after "unit-golden": still canonical order
       expect(snap.value.sessionId).toBe("sess-golden");
       expect(snap.value.scope.contractIds).toEqual(["unit-golden"]);
       expect(sha(canonicalize(snap.value))).toBe(snap.digest);
@@ -1331,12 +1331,100 @@ describe("E7 F4 — one session authorization has exactly one accepted spelling 
     expect(computeSessionKeyAuthDigest(auth)).toBe(sha(canonicalize(auth)));
   });
 
-  // E7 F4 scope arrays: STOPPED, not implemented. The design asks for strictly ascending,
-  // duplicate-free allowedActions and contractIds "IF every producer already complies".
-  // gateway/src/routes/identity-session.ts:99-124 does not: it returns the caller's arrays
-  // verbatim via SessionKeyService.issueSessionKey (verifier/src/workflow/ephemeral-identity.ts:156-160),
-  // and that is covered by verifier/src/workflow/__tests__/ephemeral-identity.test.ts:1184-1232.
-  it.todo("scope arrays strictly ascending and duplicate-free: blocked on a producer decision (E7 r2 triage, F4)");
+  // E7 F4 scope arrays, unblocked by gateway #4670: SessionKeyService.issueSessionKey now builds
+  // [...new Set(xs)].sort() before it signs, so every producer emits the canonical form and the
+  // arrays are pinned by REJECTION to strictly ascending UTF-16 code-unit order. Nothing is sorted
+  // or de-duplicated here: a second spelling of the same permissions would be a second digest.
+  describe("scope arrays: strictly ascending in UTF-16 code-unit order, one digest per set of permissions", () => {
+    const KEYS = ["allowedActions", "contractIds"] as const;
+    const withScope = (key: (typeof KEYS)[number], value: string[]): SessionKeyAuthorization => {
+      const auth = freshAuth();
+      (auth.scope as unknown as Record<string, unknown>)[key] = value;
+      return auth;
+    };
+    const accepts = (key: (typeof KEYS)[number], value: string[]) => {
+      try {
+        computeSessionKeyAuthDigest(withScope(key, value));
+        return true;
+      } catch (e) {
+        expect(e).toBeInstanceOf(EvidenceBlockInputError);
+        return false;
+      }
+    };
+
+    it("refuses an unsorted array, naming the first element that breaks the order", () => {
+      for (const key of KEYS) {
+        const err = refuseAuth(withScope(key, ["b", "a"]));
+        expect(err.field, key).toBe(`${P}.scope.${key}[1]`);
+        expect(err.message, key).toMatch(/out of order/);
+        expect(err.message, key).toMatch(/strictly ascending UTF-16 code-unit order/);
+        expect(refuseAuth(withScope(key, ["a", "c", "b"])).field, key).toBe(`${P}.scope.${key}[2]`);
+        expect(refuseAuth(withScope(key, ["c", "b", "a"])).field, key).toBe(`${P}.scope.${key}[1]`);
+      }
+    });
+
+    it("refuses a duplicated array, adjacent or not", () => {
+      for (const key of KEYS) {
+        const adjacent = refuseAuth(withScope(key, ["a", "a", "b"]));
+        expect(adjacent.field, key).toBe(`${P}.scope.${key}[1]`);
+        expect(adjacent.message, key).toMatch(/duplicate/);
+        expect(refuseAuth(withScope(key, ["a", "a"])).message, key).toMatch(/duplicate/);
+        // A duplicate that is not adjacent is out of order as well.
+        expect(refuseAuth(withScope(key, ["a", "b", "a"])).field, key).toBe(`${P}.scope.${key}[2]`);
+      }
+    });
+
+    it("accepts sorted, de-duplicated arrays and commits them exactly as given", () => {
+      for (const key of KEYS) {
+        const sorted = ["alpha", "beta", "gamma-3"];
+        const auth = withScope(key, sorted);
+        expect(computeSessionKeyAuthDigest(auth), key).toBe(sha(canonicalize(auth)));
+        expect(sessionKeyAuthSnapshot(auth).value.scope[key], key).toEqual(sorted);
+      }
+      const both = freshAuth();
+      both.scope.allowedActions = ["a", "b"];
+      both.scope.contractIds = ["x", "y", "z"];
+      expect(computeSessionKeyAuthDigest(both)).toBe(sha(canonicalize(both)));
+    });
+
+    it("accepts an empty array, for contractIds and for allowedActions", () => {
+      for (const key of KEYS) {
+        const auth = withScope(key, []);
+        expect(computeSessionKeyAuthDigest(auth), key).toBe(sha(canonicalize(auth)));
+        expect(sessionKeyAuthSnapshot(auth).value.scope[key], key).toEqual([]);
+      }
+    });
+
+    it("judges the order by UTF-16 code unit, as the default sort does: not by locale, not by code point", () => {
+      for (const key of KEYS) {
+        // "Z" (0x5A) sorts before "a" (0x61) by code unit; a locale collation would put "a" first.
+        expect(accepts(key, ["Z", "a"]), key).toBe(true);
+        expect(accepts(key, ["a", "Z"]), key).toBe(false);
+        // A prefix sorts before its extensions, the empty string first, '-' (0x2D) before letters.
+        expect(accepts(key, ["", "a", "a-b", "ab"]), key).toBe(true);
+        expect(accepts(key, ["ab", "a-b"]), key).toBe(false);
+        // An astral character is a surrogate pair (0xD83D 0xDE00): by code unit it sorts BEFORE U+FF5E,
+        // by code point it would sort after. The premise is checked, then the pin.
+        const astral = String.fromCodePoint(0x1f600);
+        const fullwidth = String.fromCharCode(0xff5e);
+        expect(astral < fullwidth).toBe(true);
+        expect(accepts(key, [astral, fullwidth]), key).toBe(true);
+        expect(accepts(key, [fullwidth, astral]), key).toBe(false);
+      }
+    });
+
+    it("two inputs that differ only in order or in duplicates can no longer both produce a digest", () => {
+      // Every array of length 3 to 5 over {a, b, c} that holds all three permissions: the same set in
+      // every order and with every repetition. Exactly one is accepted: the canonical form.
+      const build = (prefix: string[], length: number): string[][] =>
+        prefix.length === length ? [prefix] : ["a", "b", "c"].flatMap((s) => build([...prefix, s], length));
+      const candidates = [3, 4, 5].flatMap((length) => build([], length)).filter((c) => new Set(c).size === 3);
+      expect(candidates).toHaveLength(6 + 36 + 150);
+      for (const key of KEYS) {
+        expect(candidates.filter((c) => accepts(key, c)), key).toEqual([["a", "b", "c"]]);
+      }
+    });
+  });
 });
 
 // ── F5 (LOW): negative zero ──────────────────────────────────────────────────
