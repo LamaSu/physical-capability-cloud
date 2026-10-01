@@ -299,6 +299,11 @@ const KIND_RANK: Record<PlanConstraint["kind"], number> = {
  * Pure and total: never throws, never mutates `presentation` or `edits`, and never produces a plan, a
  * submission, a price, a payer, or an operator/tier ASSIGNMENT. Constraints are exclusions and bounds
  * only; layout is never a constraint.
+ *
+ * Order. The constraints and the layout depend on WHAT was edited, not on the order of the edits, with
+ * exactly two exceptions: distinct notes keep their input order (an exact duplicate keeps the first),
+ * and layout edits for the same node and kind are last-write-wins. `refused` carries each edit's input
+ * index, so it follows the input order too.
  */
 export function planEditsToIntent(presentation: PlanPresentation, edits: unknown): PlanEditIntent {
   // The presentation is read once, here, before the untrusted `edits` are touched (see `Facts`).

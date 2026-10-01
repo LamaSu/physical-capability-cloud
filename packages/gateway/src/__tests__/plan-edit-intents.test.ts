@@ -611,7 +611,7 @@ describe("sealed and invalid presentations: every semantic edit refused, layout 
   });
 });
 
-// ── Normalization: dedup, stricter-wins, order independence (rule 7) ────────────────────────────
+// ── Normalization: dedup, stricter-wins, and order independence where it is promised (rule 7; F4 pins the exceptions) ──
 
 describe("normalization", () => {
   it("stricter wins: min of several max-node-price, min of several max-total, max of several min-tier", () => {
@@ -670,7 +670,7 @@ describe("normalization", () => {
     expect(noteTexts).toEqual(["first note", "second note", "third note"]);
   });
 
-  it("constraints are sorted by kind (the PlanConstraint union order), then nodeId, then value — independent of edit order", () => {
+  it("constraints are sorted by kind (the PlanConstraint union order), then nodeId, then value: exclusions come out in the same order whatever order they went in", () => {
     const p = compiledPresentation();
     const edits = [
       { op: "exclude-capability", nodeId: "print", capabilityId: "cap-b" },
@@ -685,7 +685,7 @@ describe("normalization", () => {
     ]);
   });
 
-  it("shuffling a fully-valid, non-conflicting edit list produces byte-identical constraints and layout", () => {
+  it("shuffling a list with at most one note and no two layout edits for one node and kind gives identical constraints and layout (the exceptions are pinned under F4)", () => {
     const p = compiledPresentation();
     const edits = [
       { op: "exclude-capability", nodeId: "print", capabilityId: "cap-a" },
@@ -957,6 +957,65 @@ describe("F3: the validators refuse a trailing line break (JS `$` without the m 
         refusedAs({ op: "exclude-operator", operator: `${lead}${OP_MAIL}${trail}` }, "exclude-operator");
         refusedAs({ op: "exclude-capability", nodeId: "mail", capabilityId: `${lead}cap-mail${trail}` }, "exclude-capability");
       }
+    }
+  });
+});
+
+describe("F4: order independence is promised only where it holds", () => {
+  const note = (text: string) => ({ op: "note", text });
+  const textsOf = (out: ReturnType<typeof planEditsToIntent>) => out.constraints.filter((c) => c.kind === "note").map((c) => (c as Extract<PlanConstraint, { kind: "note" }>).text);
+
+  it("the two exceptions are real: distinct notes keep their input order, and conflicting layout edits are last-write-wins", () => {
+    const p = compiledPresentation();
+    expect(textsOf(planEditsToIntent(p, [note("a"), note("b")]))).toEqual(["a", "b"]);
+    expect(textsOf(planEditsToIntent(p, [note("b"), note("a")]))).toEqual(["b", "a"]);
+    const move = (x: number) => ({ op: "move-node", nodeId: "print", x, y: 0 });
+    expect(planEditsToIntent(p, [move(1), move(2)]).layout).toEqual([{ kind: "position", nodeId: "print", x: 2, y: 0 }]);
+    expect(planEditsToIntent(p, [move(2), move(1)]).layout).toEqual([{ kind: "position", nodeId: "print", x: 1, y: 0 }]);
+  });
+
+  it("everywhere else every permutation gives identical constraints and layout (the refusal list carries input indices, so it is not part of the promise)", () => {
+    const p = compiledPresentation();
+    const edits = [
+      { op: "exclude-capability", nodeId: "print", capabilityId: "cap-a" },
+      { op: "exclude-capability", nodeId: "mail", capabilityId: "cap-b" },
+      { op: "exclude-operator", operator: OP_MAIL },
+      { op: "max-node-price", nodeId: "print", maxBaseUnits: "900" },
+      { op: "max-node-price", nodeId: "print", maxBaseUnits: "500" },
+      { op: "max-total", maxBaseUnits: "1000" },
+      { op: "min-tier", nodeId: "mail", tier: 0 },
+      { op: "min-tier", nodeId: "mail", tier: 2 },
+      { op: "remove-node", nodeId: "mail" },
+      note("only note"),
+      { op: "move-node", nodeId: "print", x: 3, y: 4 },
+      { op: "collapse", nodeId: "print", collapsed: true },
+      { op: "move-node", nodeId: "mail", x: 5, y: 6 },
+    ];
+    // Reversed, every rotation, and 200 seeded shuffles of the WHOLE list (a fixed generator: reproducible).
+    const permutations: unknown[][] = [[...edits].reverse()];
+    for (let r = 1; r < edits.length; r++) permutations.push([...edits.slice(r), ...edits.slice(0, r)]);
+    let seed = 0x2545f491;
+    const next = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 2 ** 32;
+    };
+    for (let k = 0; k < 200; k++) {
+      const shuffled = [...edits];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(next() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
+      }
+      permutations.push(shuffled);
+    }
+    const base = planEditsToIntent(p, edits);
+    expect(base.refused).toEqual([]);
+    expect(base.layout).toHaveLength(3);
+    expect(base.constraints).toHaveLength(8);
+    for (const perm of permutations) {
+      expect(perm).toHaveLength(edits.length);
+      const out = planEditsToIntent(p, perm);
+      expect(out.constraints).toEqual(base.constraints);
+      expect(out.layout).toEqual(base.layout);
     }
   });
 });
