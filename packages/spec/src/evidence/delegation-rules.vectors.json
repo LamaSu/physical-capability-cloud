@@ -259,6 +259,24 @@
       "result": "scope-signatures-exhausted"
     },
     {
+      "name": "zero_event_count",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab",
+        "sessionSignedEventCount": 0
+      },
+      "result": "ok"
+    },
+    {
       "name": "parent_checksummed_not_pinned_form",
       "delegation": {
         "parentAgentId": "eip155:8453:0xABABABABABABABABABABABABABABABABABABABAB",

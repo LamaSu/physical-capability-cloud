@@ -153,3 +153,154 @@ describe("the rules read only own data, as they promise (cross-family review E3,
     });
   });
 });
+
+describe("checkDelegationScope reads own data only, and never throws (cross-family review E3b, finding M1)", () => {
+  const JOB = "job-1";
+  const OPERATOR = "eip155:8453:0xabababababababababababababababababababab";
+  const expected: DelegationScopeExpectation = { settlingJobId: JOB, operatorPrincipalId: OPERATOR, sessionSignedEventCount: 1 };
+  const validScope = () => ({ contractIds: [JOB], maxSignatures: 1 });
+  const valid = () => ({ parentAgentId: OPERATOR, scope: validScope() });
+  /** An own accessor: reading it throws, and a getter that was called would show in `calls`. */
+  const throwing = (calls: { n: number }) => ({
+    enumerable: true,
+    configurable: true,
+    get(): never {
+      calls.n += 1;
+      throw new Error("boom: a getter ran");
+    },
+  });
+
+  it("the well-formed delegation is accepted (positive control)", () => {
+    expect(checkDelegationScope(valid(), expected)).toEqual({ ok: true });
+  });
+
+  it("NEGATIVE: scope and parentAgentId that a prototype supplies are not the delegation's (the review's example)", () => {
+    const scope = Object.create({ contractIds: [JOB], maxSignatures: 1 }) as object;
+    const delegation = Object.create({ parentAgentId: OPERATOR, scope }) as object;
+    expect(checkDelegationScope(delegation, expected)).toEqual({ ok: false, reason: "malformed-delegation" });
+  });
+
+  it("NEGATIVE: each of scope, contractIds, maxSignatures and parentAgentId is refused when only inherited", () => {
+    // scope inherited, the rest own
+    expect(checkDelegationScope(Object.create({ scope: validScope() }, { parentAgentId: { value: OPERATOR, enumerable: true } }), expected)).toEqual({
+      ok: false,
+      reason: "malformed-delegation",
+    });
+    // contractIds inherited
+    expect(
+      checkDelegationScope({ parentAgentId: OPERATOR, scope: Object.create({ contractIds: [JOB] }, { maxSignatures: { value: 1, enumerable: true } }) }, expected),
+    ).toEqual({ ok: false, reason: "malformed-delegation" });
+    // maxSignatures inherited
+    expect(
+      checkDelegationScope({ parentAgentId: OPERATOR, scope: Object.create({ maxSignatures: 1 }, { contractIds: { value: [JOB], enumerable: true } }) }, expected),
+    ).toEqual({ ok: false, reason: "max-signatures-invalid" });
+    // parentAgentId inherited
+    expect(checkDelegationScope(Object.create({ parentAgentId: OPERATOR }, { scope: { value: validScope(), enumerable: true } }), expected)).toEqual({
+      ok: false,
+      reason: "parent-not-operator",
+    });
+  });
+
+  it("NEGATIVE: a getter on any of the four fields is a refusal, not a throw, and no getter runs", () => {
+    const cases: Array<[string, (calls: { n: number }) => unknown, string]> = [
+      ["scope", (c) => Object.defineProperty({ parentAgentId: OPERATOR }, "scope", throwing(c)), "malformed-delegation"],
+      ["contractIds", (c) => ({ parentAgentId: OPERATOR, scope: Object.defineProperty({ maxSignatures: 1 }, "contractIds", throwing(c)) }), "malformed-delegation"],
+      ["maxSignatures", (c) => ({ parentAgentId: OPERATOR, scope: Object.defineProperty({ contractIds: [JOB] }, "maxSignatures", throwing(c)) }), "max-signatures-invalid"],
+      ["parentAgentId", (c) => Object.defineProperty({ scope: validScope() }, "parentAgentId", throwing(c)), "parent-not-operator"],
+    ];
+    for (const [field, build, reason] of cases) {
+      const calls = { n: 0 };
+      let result: unknown;
+      expect(() => (result = checkDelegationScope(build(calls), expected)), field).not.toThrow();
+      expect(result, field).toEqual({ ok: false, reason });
+      expect(calls.n, `${field}: the getter must not run`).toBe(0);
+    }
+  });
+
+  it("NEGATIVE: an accessor as a contractIds element, or a trap that throws, is a refusal, not a throw", () => {
+    const calls = { n: 0 };
+    const ids = [JOB, "job-2"];
+    Object.defineProperty(ids, 1, throwing(calls));
+    expect(() => checkDelegationScope({ parentAgentId: OPERATOR, scope: { contractIds: ids, maxSignatures: 1 } }, expected)).not.toThrow();
+    expect(checkDelegationScope({ parentAgentId: OPERATOR, scope: { contractIds: ids, maxSignatures: 1 } }, expected)).toEqual({
+      ok: false,
+      reason: "malformed-delegation",
+    });
+    expect(calls.n).toBe(0);
+
+    const hostile = new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error("boom: a trap ran");
+        },
+        get() {
+          throw new Error("boom: a trap ran");
+        },
+      },
+    );
+    expect(() => checkDelegationScope(hostile, expected)).not.toThrow();
+    expect(checkDelegationScope(hostile, expected)).toEqual({ ok: false, reason: "malformed-delegation" });
+  });
+
+  it("reads each field of the delegation exactly once, as stored data: a proxy's [[Get]] is never consulted", () => {
+    const log: string[] = [];
+    const watch = <T extends object>(label: string, target: T): T =>
+      new Proxy(target, {
+        get(t, k, r) {
+          log.push(`get ${label}.${String(k)}`);
+          return Reflect.get(t, k, r);
+        },
+        getOwnPropertyDescriptor(t, k) {
+          log.push(`descriptor ${label}.${String(k)}`);
+          return Reflect.getOwnPropertyDescriptor(t, k);
+        },
+        has(t, k) {
+          log.push(`has ${label}.${String(k)}`);
+          return Reflect.has(t, k);
+        },
+      });
+    const delegation = watch("delegation", {
+      parentAgentId: OPERATOR,
+      scope: watch("scope", { contractIds: watch("ids", [JOB, "job-2"]), maxSignatures: 1 }),
+    });
+    expect(checkDelegationScope(delegation, expected)).toEqual({ ok: true });
+    expect([...log].sort()).toEqual([
+      "descriptor delegation.parentAgentId",
+      "descriptor delegation.scope",
+      "descriptor ids.0",
+      "descriptor ids.1",
+      "descriptor ids.length",
+      "descriptor scope.contractIds",
+      "descriptor scope.maxSignatures",
+    ]);
+  });
+
+  it("a value that a proxy answers differently on each read is judged on the one answer it gave", () => {
+    // The first descriptor read of maxSignatures says 1 (enough), every later one 0: read once, it is 1.
+    let reads = 0;
+    const scope = new Proxy(
+      { contractIds: [JOB], maxSignatures: 1 },
+      {
+        getOwnPropertyDescriptor(t, k) {
+          const d = Reflect.getOwnPropertyDescriptor(t, k)!;
+          return k === "maxSignatures" ? { ...d, value: ++reads === 1 ? 1 : 0 } : d;
+        },
+      },
+    );
+    expect(checkDelegationScope({ parentAgentId: OPERATOR, scope }, expected)).toEqual({ ok: true });
+    expect(reads).toBe(1);
+  });
+});
+
+describe("the lockstep vectors pin the count boundary (cross-family review E3b, finding M2)", () => {
+  it("with maxSignatures 10: a count of 0 and of 10 are accepted, 11 and -1 are refused", () => {
+    const byCount: Record<string, string> = {};
+    for (const v of vectors.scope) {
+      const count = (v.expected as DelegationScopeExpectation).sessionSignedEventCount;
+      const max = (v.delegation as { scope?: { maxSignatures?: unknown } }).scope?.maxSignatures;
+      if (count !== undefined && max === 10) byCount[String(count)] = v.result;
+    }
+    expect(byCount).toEqual({ "0": "ok", "10": "ok", "11": "scope-signatures-exhausted", "-1": "scope-signatures-exhausted" });
+  });
+});

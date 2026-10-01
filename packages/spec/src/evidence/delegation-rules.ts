@@ -20,6 +20,11 @@
  *     `eip155:<chainId>:0x<40 lowercase hex>`). The key is bound elsewhere, by
  *     the delegation signature under the funded device key. This makes the
  *     signed label say the same thing.
+ *   The delegation is judged on OWN DATA only, each field read once: a
+ *   property that is inherited, an accessor (its getter is never called) or
+ *   missing is refused with the reason for a missing one, and the function
+ *   never throws. A mirror reads the same way (JSON cannot encode these cases,
+ *   so they are pinned in the JavaScript tests, not in the vectors).
  *
  * Event time (`checkEventTimes`):
  *   - every event `timestamp` is RFC 3339 with an explicit offset (`Z` or
@@ -100,41 +105,83 @@ export interface DelegationScopeExpectation {
   sessionSignedEventCount?: number;
 }
 
-/** Check a session key's scope and parent label against the job being settled. Never throws. */
+// Captured when this module loads, so that code run later (a patched `Object`, a
+// polluted prototype) cannot change how the rules read the evidence they judge.
+const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const objectHasOwnProperty = Object.prototype.hasOwnProperty;
+const isArray = Array.isArray;
+const isSafeInteger = Number.isSafeInteger;
+
+/** What `ownData` answers for a property that is not an own data property. */
+const NOT_OWN_DATA = Symbol("not-own-data");
+
+/**
+ * The value of an OWN DATA property of `holder`, read once through its
+ * descriptor; `NOT_OWN_DATA` when `holder` is not an object or the property is
+ * missing, inherited from a prototype, or an accessor. A getter is never called,
+ * so what a rule reads is what is stored, never what a getter answers this time
+ * (cross-family review E3b, finding M1). It throws only for a hostile proxy, and
+ * `checkDelegationScope` catches that.
+ */
+function ownData(holder: unknown, key: string | number): unknown {
+  if (typeof holder !== "object" || holder === null) return NOT_OWN_DATA;
+  const descriptor = getOwnPropertyDescriptor(holder, key);
+  return descriptor !== undefined && objectHasOwnProperty.call(descriptor, "value") ? descriptor.value : NOT_OWN_DATA;
+}
+
+/**
+ * Check a session key's scope and parent label against the job being settled.
+ * Never throws. It reads `scope`, `scope.contractIds` (its length and every
+ * index), `scope.maxSignatures` and `parentAgentId` as OWN DATA properties of the
+ * delegation, each once: an inherited or accessor property, or one that is
+ * missing, is not the delegation's and is refused with the reason for a missing
+ * one (`malformed-delegation`, `max-signatures-invalid`, `parent-not-operator`).
+ * No new reason code.
+ */
 export function checkDelegationScope(delegation: unknown, expected: DelegationScopeExpectation): DelegationScopeResult {
-  if (typeof delegation !== "object" || delegation === null) return { ok: false, reason: "malformed-delegation" };
-  const d = delegation as { parentAgentId?: unknown; scope?: unknown };
-  const scope = d.scope as { contractIds?: unknown; maxSignatures?: unknown } | null | undefined;
-  if (typeof scope !== "object" || scope === null || !Array.isArray(scope.contractIds)) {
+  try {
+    return judgeDelegationScope(delegation, expected);
+  } catch {
+    // Something the rule cannot read (a hostile proxy, an `expected` that throws) is a
+    // delegation it cannot vouch for.
     return { ok: false, reason: "malformed-delegation" };
   }
-  // Every index must be an own string: `every` skips holes and `includes` reads
+}
+
+function judgeDelegationScope(delegation: unknown, expected: DelegationScopeExpectation): DelegationScopeResult {
+  const { settlingJobId, operatorPrincipalId, sessionSignedEventCount } = expected;
+  if (typeof delegation !== "object" || delegation === null) return { ok: false, reason: "malformed-delegation" };
+  const scope = ownData(delegation, "scope");
+  if (typeof scope !== "object" || scope === null) return { ok: false, reason: "malformed-delegation" };
+  const ids = ownData(scope, "contractIds");
+  if (!isArray(ids)) return { ok: false, reason: "malformed-delegation" };
+  // Every index must be an own data string: `every` skips holes and `includes` reads
   // inherited indices, so a sparse or prototype-backed list could name the job
-  // without holding it (cross-family review E3).
-  const ids = scope.contractIds as unknown[];
-  let names = false;
-  for (let i = 0; i < ids.length; i++) {
-    if (!Object.prototype.hasOwnProperty.call(ids, i) || typeof ids[i] !== "string") {
-      return { ok: false, reason: "malformed-delegation" };
-    }
-    if (ids[i] === expected.settlingJobId) names = true;
+  // without holding it (cross-family review E3), and an accessor element could
+  // answer differently each time it is read.
+  const length = ownData(ids, "length");
+  if (typeof length !== "number" || !isSafeInteger(length) || length < 0) {
+    return { ok: false, reason: "malformed-delegation" };
   }
-  if (ids.length === 0) return { ok: false, reason: "contract-ids-empty" };
+  let names = false;
+  for (let i = 0; i < length; i++) {
+    const id = ownData(ids, i);
+    if (typeof id !== "string") return { ok: false, reason: "malformed-delegation" };
+    if (id === settlingJobId) names = true;
+  }
+  if (length === 0) return { ok: false, reason: "contract-ids-empty" };
   if (!names) return { ok: false, reason: "contract-not-allowed" };
-  if (!Number.isSafeInteger(scope.maxSignatures) || (scope.maxSignatures as number) < 1) {
+  const maxSignatures = ownData(scope, "maxSignatures");
+  if (typeof maxSignatures !== "number" || !isSafeInteger(maxSignatures) || maxSignatures < 1) {
     return { ok: false, reason: "max-signatures-invalid" };
   }
   if (
-    expected.sessionSignedEventCount !== undefined &&
-    !(
-      Number.isSafeInteger(expected.sessionSignedEventCount) &&
-      expected.sessionSignedEventCount >= 0 &&
-      expected.sessionSignedEventCount <= (scope.maxSignatures as number)
-    )
+    sessionSignedEventCount !== undefined &&
+    !(isSafeInteger(sessionSignedEventCount) && sessionSignedEventCount >= 0 && sessionSignedEventCount <= maxSignatures)
   ) {
     return { ok: false, reason: "scope-signatures-exhausted" };
   }
-  if (expected.operatorPrincipalId !== undefined && d.parentAgentId !== expected.operatorPrincipalId) {
+  if (operatorPrincipalId !== undefined && ownData(delegation, "parentAgentId") !== operatorPrincipalId) {
     return { ok: false, reason: "parent-not-operator" };
   }
   return { ok: true };
