@@ -17,7 +17,9 @@ The manifest is derived, not hand-kept:
 
 pytest runs with external options neutralized: PYTEST_ADDOPTS and
 PYTEST_PLUGINS are removed, plugin autoload is off, ini `addopts` is
-overridden, and `--runxfail` makes an xfail marker run the test normally.
+overridden, `--noconftest` keeps every conftest.py hook out (one could
+replace the test bodies or rewrite the reports; review A01d), and
+`--runxfail` makes an xfail marker run the test normally.
 Results are read from pytest's JUnit XML, never from its text summary.
 Stdlib only.
 """
@@ -98,7 +100,7 @@ def run_manifest():
     env["PYTHONPATH"] = "."
     with tempfile.TemporaryDirectory() as tmp:
         report = os.path.join(tmp, "manifest.xml")
-        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--runxfail",
+        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--noconftest", "--runxfail",
                "-o", "addopts=", "-o", "junit_family=xunit2", "--junitxml", report]
         cmd += ["%s::%s" % (TEST_FILE, fn) for fn in sorted(MANIFEST)]
         proc = subprocess.run(cmd, cwd=PKG, env=env, capture_output=True, text=True)

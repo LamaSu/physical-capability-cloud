@@ -7,7 +7,8 @@
 # The negative control runs the SAME manifest without PyNaCl, and every test must
 # fail on the PyNaCl requirement itself. Then the whole parity file runs with the
 # same neutralization, and any skipped, deselected, xfailed, xpassed or errored
-# test fails the job.
+# test fails the job. Every run uses --noconftest, and hostile conftest.py files are
+# planted first: if any run loads one, the job fails (cross-family review A01d).
 name: evidence-signature-parity
 
 on:
@@ -36,6 +37,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Plant hostile conftest.py files that no enforcement run may load
+        run: |
+          for d in . tests; do
+            cat > "$d/conftest.py" <<EOF
+          import pathlib
+          pathlib.Path("$RUNNER_TEMP/conftest-was-loaded").touch()
+          def pytest_collection_modifyitems(items):
+              for item in items:
+                  item.runtest = lambda: None
+          EOF
+          done
+
       - name: Negative control - without PyNaCl the required run must fail on the PyNaCl check
         run: |
           python -m venv "$RUNNER_TEMP/no-nacl"
@@ -46,6 +59,10 @@ jobs:
           fi
           # Every manifest test must be collected and fail on the PyNaCl requirement.
           "$RUNNER_TEMP/no-nacl/bin/python" tests/signature_manifest_check.py negative
+          if [ -e "$RUNNER_TEMP/conftest-was-loaded" ]; then
+            echo "a conftest.py was loaded by the negative control"
+            exit 1
+          fi
 
       - name: Signature parity (PyNaCl required, nothing may skip)
         env:
@@ -58,12 +75,16 @@ jobs:
           # skipped, deselected, xfailed, xpassed or errored.
           set +e
           out=$(env -u PYTEST_ADDOPTS -u PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=. \
-            python -m pytest -q -p no:cacheprovider --runxfail -o addopts= -rs tests/test_signing_preimage_parity.py 2>&1)
+            python -m pytest -q -p no:cacheprovider --noconftest --runxfail -o addopts= -rs tests/test_signing_preimage_parity.py 2>&1)
           rc=$?
           set -e
           echo "$out"
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
           if echo "$out" | grep -Eq "[0-9]+ (skipped|deselected|xfailed|xpassed|error)"; then
             echo "a test was skipped, deselected, xfailed, xpassed or errored in the required run"
+            exit 1
+          fi
+          if [ -e "$RUNNER_TEMP/conftest-was-loaded" ]; then
+            echo "a conftest.py was loaded by the required run"
             exit 1
           fi
