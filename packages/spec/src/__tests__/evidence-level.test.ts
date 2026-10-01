@@ -708,6 +708,12 @@ describe("single read: one snapshot of the input per call, so no pass can disagr
     // First read 1, every later read 5: a second read would walk past the end into undefined elements.
     const bundles = countingArray([bundle([done(), failed()], OP_A)], { length: (n) => (n === 1 ? 1 : 5) });
     expect(deriveContradictions(bundles.proxy)).toEqual(["completion-and-failure"]);
+    // The assignment's own length is read once too: first 1, then 0 (a second read would lose the assigned executor).
+    const assigned = countingArray([OP_A], { length: (n) => (n === 1 ? 1 : 0) });
+    expect(
+      level([executorBundle(), bundle([inspectPass()], OP_B)], { executorTrustDomains: assigned.proxy }),
+    ).toBe("inspected_output");
+    expect([...assigned.log].sort()).toEqual(["0", "length"]);
   });
 
   it("a length that is not a non-negative safe integer is refused", () => {
@@ -719,6 +725,12 @@ describe("single read: one snapshot of the input per call, so no pass can disagr
     }
     const domains = countingArray([OP_A], { length: () => "1" });
     expect(() => level([], { executorTrustDomains: domains.proxy })).toThrow(EvidenceLevelInputError);
+    // A fractional length is refused for what it is, not merely because an index happens to be missing: here every
+    // index answers with a valid event, so only the length can refuse it.
+    for (const fractional of [0.5, 1.5]) {
+      const generous = countingArray<EvidenceEvent>([], { length: () => fractional, "0": () => done(), "1": () => done() });
+      expect(() => level([{ events: generous.proxy, trustDomain: OP_A }]), String(fractional)).toThrow(EvidenceLevelInputError);
+    }
   });
 
   it("a bundle's events and trustDomain are each read once", () => {
@@ -740,34 +752,46 @@ describe("single read: one snapshot of the input per call, so no pass can disagr
   });
 
   it("the payload's own verdict material is read once: prototype, key names and the pinned field's descriptor", () => {
-    const traps: string[] = [];
-    const payload = new Proxy({ pass: true } as Record<string, unknown>, {
-      getPrototypeOf(target) {
-        traps.push("getPrototypeOf");
-        return Reflect.getPrototypeOf(target);
-      },
-      ownKeys(target) {
-        traps.push("ownKeys");
-        return Reflect.ownKeys(target);
-      },
-      getOwnPropertyDescriptor(target, key) {
-        traps.push("getOwnPropertyDescriptor:" + String(key));
-        return Reflect.getOwnPropertyDescriptor(target, key);
-      },
-      get(target, key, receiver) {
-        traps.push("get:" + String(key));
-        return Reflect.get(target, key, receiver);
-      },
-      has(target, key) {
-        traps.push("has:" + String(key));
-        return Reflect.has(target, key);
-      },
-    });
-    expect(level([executorBundle(), bundle([ev("instrument_result", READER, payload)], OP_B)], ASSIGNED_A)).toBe(
-      "inspected_output",
-    );
-    // get:mock is isFabricated's single read of payload.mock.
-    expect([...traps].sort()).toEqual(["get:mock", "getOwnPropertyDescriptor:pass", "getPrototypeOf", "ownKeys"]);
+    const trapped = (target: Record<string, unknown>) => {
+      const traps: string[] = [];
+      const payload = new Proxy(target, {
+        getPrototypeOf(inner) {
+          traps.push("getPrototypeOf");
+          return Reflect.getPrototypeOf(inner);
+        },
+        ownKeys(inner) {
+          traps.push("ownKeys");
+          return Reflect.ownKeys(inner);
+        },
+        getOwnPropertyDescriptor(inner, key) {
+          traps.push("getOwnPropertyDescriptor:" + String(key));
+          return Reflect.getOwnPropertyDescriptor(inner, key);
+        },
+        get(inner, key, receiver) {
+          traps.push("get:" + String(key));
+          return Reflect.get(inner, key, receiver);
+        },
+        has(inner, key) {
+          traps.push("has:" + String(key));
+          return Reflect.has(inner, key);
+        },
+      });
+      return { payload, traps };
+    };
+    // Once for an Object.prototype payload and once for a null-prototype one: the plain-object check has two branches.
+    const targets: Array<[string, Record<string, unknown>]> = [
+      ["Object.prototype", { pass: true }],
+      ["null prototype", Object.assign(Object.create(null) as Record<string, unknown>, { pass: true })],
+    ];
+    for (const [label, target] of targets) {
+      const { payload, traps } = trapped(target);
+      expect(
+        level([executorBundle(), bundle([ev("instrument_result", READER, payload)], OP_B)], ASSIGNED_A),
+        label,
+      ).toBe("inspected_output");
+      // get:mock is isFabricated's single read of payload.mock.
+      expect([...traps].sort(), label).toEqual(["get:mock", "getOwnPropertyDescriptor:pass", "getPrototypeOf", "ownKeys"]);
+    }
   });
 
   it("a getter that throws refuses the classification; it cannot skew one", () => {
