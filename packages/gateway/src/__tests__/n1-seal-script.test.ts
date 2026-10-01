@@ -199,7 +199,8 @@ describe("N1 seal-custodial-keys script", () => {
       },
     ];
     secrets.push(...rows.map((r) => r.id), g1.address, g2.address, s1.address);
-    return { g1, g2, s1, rows };
+    // Inserted in REVERSE id order: the report is ordered by id, not by insertion.
+    return { g1, g2, s1, rows: [...rows].reverse() };
   }
 
   function mixedRows() {
@@ -217,7 +218,7 @@ describe("N1 seal-custodial-keys script", () => {
       },
     ];
     secrets.push(...rows.map((r) => r.id), g.address, m.address, other.address, s.address);
-    return { g, m, other, s, rows };
+    return { g, m, other, s, rows: [...rows].reverse() };
   }
 
   // ── clean database ──────────────────────────────────────────────────
@@ -300,6 +301,21 @@ describe("N1 seal-custodial-keys script", () => {
       // The already-sealed row is byte-for-byte what it was.
       expect(after["rowid-c-sealed"]).toEqual(before["rowid-c-sealed"]);
       expectNoLeaks(r.all);
+    });
+
+    it("names the configured KEK id, whatever it is: in the report and in every blob it writes", async () => {
+      const k = newKey();
+      secrets.push("rowid-rot", k.address);
+      seed([{ id: "rowid-rot", address: k.address, plaintext: k.key }]);
+      const rotated = new CustodyKek("rot-2_A", kekBytes);
+      const r = await run(["--apply"], { env: { ...env, PCC_CUSTODY_KEK_ID: "rot-2_A" } });
+      expect(r.code).toBe(0);
+      expect(r.report!.kekId).toBe("rot-2_A");
+      const after = state()["rowid-rot"];
+      expect(after.s).toMatch(/^pcc-seal:v1:rot-2_A:/);
+      expect(unsealCustodialKey(after.s!, { rowId: "rowid-rot", address: k.address }, rotated)).toBe(k.key);
+      // The same blob is refused under a KEK id that is not the one that sealed it.
+      expect(() => unsealCustodialKey(after.s!, { rowId: "rowid-rot", address: k.address }, kek)).toThrow();
     });
 
     it("is idempotent: a second --apply finds nothing left to do and is clean", async () => {
