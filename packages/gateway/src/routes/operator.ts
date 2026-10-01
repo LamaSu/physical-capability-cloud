@@ -272,7 +272,7 @@ export async function operatorRoutes(app: FastifyInstance) {
   });
 
   /** GET /api/operator/approvals — List pending approvals */
-  app.get("/api/operator/approvals", async (req) => {
+  app.get("/api/operator/approvals", async (req, reply) => {
     const { kernelId, status } = req.query as { kernelId?: string; status?: string };
 
     try {
@@ -296,8 +296,11 @@ export async function operatorRoutes(app: FastifyInstance) {
       }
 
       return { approvals: rows };
-    } catch {
-      return { approvals: [] };
+    } catch (err) {
+      // A failed read is not "no approvals": an empty list here would hide recorded
+      // approvals during an outage. Same refusal as the operator policy read above.
+      req.log.warn({ kernelId, status, err }, "operator approvals read failed");
+      return reply.code(503).send({ error: "read_failed", message: "The approvals could not be read. Try again shortly." });
     }
   });
 

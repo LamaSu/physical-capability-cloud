@@ -7,13 +7,13 @@
  * operator's earnings. They now answer 501 `not_available` with pointers to the reads
  * that are real. The operator policy read no longer turns a failed read into the defaults.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { operatorRoutes } from "../routes/operator.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getStore } from "../db.js";
 
 const UNAVAILABLE = [
   "/api/operator/machines",
@@ -82,6 +82,87 @@ describe("operator read routes: no fabricated data", () => {
     } finally {
       initStore({ seed: true });
     }
+  });
+});
+
+/**
+ * Operator approvals: a failed read, an omitted field and a repeated decision are each
+ * reported as what they are, never as a plausible answer. From the cross-family review of
+ * PR #362 (verdict rm-n32-362-r1-d30de649):
+ *   M1  a failed read answers 503, never an empty list that hides recorded approvals
+ */
+describe("operator approvals: no silent substitution", () => {
+  let app: FastifyInstance;
+  const KERNEL = "kernel-nyc"; // seeded
+
+  beforeAll(async () => {
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: true });
+    app = Fastify({ logger: false });
+    await app.register(operatorRoutes);
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    closeStore();
+  });
+
+  async function submit(payload: Record<string, unknown> = {}) {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/operator/approvals",
+      payload: { kernelId: KERNEL, agentId: "agent-test", capabilityType: "fdm", ...payload },
+    });
+    expect(res.statusCode).toBe(200);
+    return res.json().approval as { id: string; status: string };
+  }
+
+  describe("M1 GET /api/operator/approvals", () => {
+    it("lists what is recorded, and a real empty result is still an empty list", async () => {
+      const a = await submit();
+      const all = await app.inject({ method: "GET", url: "/api/operator/approvals" });
+      expect(all.statusCode).toBe(200);
+      expect(all.json().approvals.map((r: { id: string }) => r.id)).toContain(a.id);
+
+      // Nothing recorded for this kernel: absence is a truthful 200 with an empty list.
+      const none = await app.inject({ method: "GET", url: "/api/operator/approvals?kernelId=kernel-with-no-approvals" });
+      expect(none.statusCode).toBe(200);
+      expect(none.json()).toEqual({ approvals: [] });
+    });
+
+    it("NEGATIVE: M1 a failed read is 503 read_failed, never an empty list", async () => {
+      await submit(); // a recorded approval the outage must not hide
+      closeStore(); // every store read now throws, as in the operator policy test
+      try {
+        const res = await app.inject({ method: "GET", url: "/api/operator/approvals" });
+        expect(res.statusCode).toBe(503);
+        expect(res.json().error).toBe("read_failed");
+        expect(res.json()).not.toHaveProperty("approvals");
+      } finally {
+        initStore({ seed: true });
+      }
+    });
+
+    it("NEGATIVE: M1 a throwing .all() is 503 for every filter combination", async () => {
+      const { db } = getStore();
+      const boom = () => {
+        throw new Error("SQLITE_IOERR: disk I/O error");
+      };
+      const chain: Record<string, unknown> = {};
+      Object.assign(chain, { from: () => chain, where: () => chain, all: boom });
+      const spy = vi.spyOn(db, "select").mockImplementation((() => chain) as never);
+      try {
+        for (const q of ["", "?kernelId=kernel-nyc", "?status=pending", "?kernelId=kernel-nyc&status=pending"]) {
+          const res = await app.inject({ method: "GET", url: `/api/operator/approvals${q}` });
+          expect(res.statusCode, `GET approvals${q}`).toBe(503);
+          expect(res.json().error, `GET approvals${q}`).toBe("read_failed");
+          expect(res.json(), `GET approvals${q}`).not.toHaveProperty("approvals");
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });
 
