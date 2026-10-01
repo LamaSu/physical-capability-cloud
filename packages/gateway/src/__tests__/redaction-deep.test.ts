@@ -137,6 +137,14 @@ describe("redactSecretsDeep", () => {
     const once = redactSecretsDeep({
       api_key: LIVE_KEY, note: `Bearer ${JWT}`, body: JSON.stringify({ secret: "s3cr3t-value" }), [TEST_KEY]: true,
     });
+    // The first pass must have removed every secret, exactly: a second pass over text
+    // that was never redacted changes nothing either, so idempotence alone proves nothing.
+    expect(once).toEqual({
+      api_key: REDACTED_VALUE,
+      note: `Bearer ${REDACTED_VALUE}`,
+      body: JSON.stringify({ secret: REDACTED_VALUE }),
+      [REDACTED_VALUE]: true, // the TEST_KEY key
+    });
     const { out, seen } = collect(once);
     expect(out).toEqual(once);
     expect(seen).toHaveLength(0);
@@ -236,6 +244,11 @@ describe("redactSecretsDeep closes the R6 gaps", () => {
         expect(json, text).not.toContain("opaque-secret-value");
       }
     }
+    // Exactly what is left: the parse keeps the LAST duplicate, and the text is rebuilt from it, so the dropped
+    // value is gone and the survivor is the safe one. JSON's own null is no secret and stays valid JSON.
+    expect(redactSecretsDeep(`{"k":"${LIVE_KEY}","k":"x"}`)).toBe('{"k":"x"}');
+    expect(redactSecretsDeep('{"api_key":"opaque-secret-value","api_key":null}')).toBe('{"api_key":null}');
+    expect(redactSecretsDeep(`[{"note":"${LIVE_KEY}","note":"fine"}]`)).toBe('[{"note":"fine"}]');
   });
 
   it("an unchanged JSON string is still scrubbed for shapes the parse cannot see", () => {
@@ -283,8 +296,16 @@ describe("redactSecretsDeep closes the R6 gaps", () => {
     for (const secret of [basic, "opaque-proxy-credential", "12ab34cd", "bob:hunter2", "svc:p4ss"]) {
       expect(out, secret).not.toContain(secret);
     }
-    expect(out).toContain(`Authorization: Basic ${REDACTED_VALUE}`);
-    expect(out).toContain(`https://${REDACTED_VALUE}@github.com/x.git`);
+    // The exact text: every other character of every line is the author's, untouched.
+    expect(out).toBe(
+      [
+        `curl -H 'Authorization: Basic ${REDACTED_VALUE}' https://api.example.com`,
+        `use Basic ${REDACTED_VALUE} to sign in`,
+        `proxy-authorization=${REDACTED_VALUE}`,
+        `Authorization: Token ${REDACTED_VALUE}`,
+        `clone https://${REDACTED_VALUE}@github.com/x.git or postgres://${REDACTED_VALUE}@db:5432/app`,
+      ].join("\n"),
+    );
     expect(seen.map((r) => r.value)).toEqual(expect.arrayContaining([basic, "bob:hunter2", "svc:p4ss"]));
   });
 
@@ -298,6 +319,13 @@ describe("redactSecretsDeep closes the R6 gaps", () => {
       a: `Authorization: Basic ${Buffer.from("u:secret-pw").toString("base64")}`,
       b: "https://u:p@host/x", c: `{"k":"${LIVE_KEY}","k":"x"}`, tokens: ["t"],
     });
+    // Exact first-pass output (the duplicate key's dropped value is gone, not kept).
+    expect(once).toEqual({
+      a: `Authorization: Basic ${REDACTED_VALUE}`,
+      b: `https://${REDACTED_VALUE}@host/x`,
+      c: '{"k":"x"}',
+      tokens: REDACTED_VALUE,
+    });
     const { out, seen } = collect(once);
     expect(out).toEqual(once);
     expect(seen).toHaveLength(0);
@@ -305,34 +333,59 @@ describe("redactSecretsDeep closes the R6 gaps", () => {
 });
 
 describe("redactSecretsDeep closes the round-3 coverage gaps (WP-D round 4, L5)", () => {
-  const leaks = (value: unknown, secret: string) => JSON.stringify(redactSecretsDeep(value)).includes(secret);
+  // Every assertion in this block is on the EXACT sanitized text (astra pack 97, F6). "The whole
+  // secret is gone" is not enough: a partial redaction (`password=[REDACTED]$sw0rd!rest`) passes it.
+  // A check on what was KEPT is not enough either: a redactor that removes nothing passes that.
+  // The same text must come out the same one level down in an object.
+  const sanitized = (text: string): string => {
+    const direct = redactSecretsDeep(text);
+    expect((redactSecretsDeep({ note: text }) as { note: string }).note, "the same text under an object key").toBe(direct);
+    return direct;
+  };
 
   it("parses BOM-prefixed JSON (the trimmed text), so a secret field inside it is removed", () => {
-    const text = '﻿{"api_key":"opaque-bom-value"}';
-    expect(leaks(text, "opaque-bom-value")).toBe(false);
-    expect(leaks({ body: text }, "opaque-bom-value")).toBe(false);
+    const text = `${String.fromCharCode(0xfeff)}{"api_key":"opaque-bom-value"}`;
+    expect(sanitized(text)).toBe(`{"api_key":"${REDACTED_VALUE}"}`);
   });
 
   it.each<[string, string, string]>([
-    ["a secret-named URL query parameter (access_token)", "https://cb.test/return?access_token=opaqueQueryToken123&state=1", "opaqueQueryToken123"],
-    ["a secret-named URL query parameter (api_key)", "GET /v1/items?api_key=opaqueApiKeyValue9&page=2", "opaqueApiKeyValue9"],
-    ["a password=value pair", "login with password=hunter2-correct-horse please", "hunter2-correct-horse"],
-    ["an X-Api-Key header line", "X-Api-Key: opaque-header-key-77\nAccept: */*", "opaque-header-key-77"],
-    ["a Cookie header line", "Cookie: pcc_session=6f1c2a9e-8b3d-4c5e-9f7a-1b2c3d4e5f60; theme=dark", "6f1c2a9e-8b3d-4c5e-9f7a-1b2c3d4e5f60"],
-    ["a secret-named JSON fragment inside prose", 'the config is {"api_key":"opaque in prose value"} and more', "opaque in prose value"],
-  ])("removes %s", (_name, text, secret) => {
-    expect(leaks(text, secret)).toBe(false);
-    expect(leaks({ note: text }, secret)).toBe(false);
+    [
+      "a secret-named URL query parameter (access_token)",
+      "https://cb.test/return?access_token=opaqueQueryToken123&state=1",
+      `https://cb.test/return?access_token=${REDACTED_VALUE}&state=1`,
+    ],
+    [
+      "a secret-named URL query parameter (api_key)",
+      "GET /v1/items?api_key=opaqueApiKeyValue9&page=2",
+      `GET /v1/items?api_key=${REDACTED_VALUE}&page=2`,
+    ],
+    ["a password=value pair", "login with password=hunter2-correct-horse please", `login with password=${REDACTED_VALUE} please`],
+    ["an X-Api-Key header line", "X-Api-Key: opaque-header-key-77\nAccept: */*", `X-Api-Key: ${REDACTED_VALUE}\nAccept: */*`],
+    [
+      "a Cookie header line",
+      "Cookie: pcc_session=6f1c2a9e-8b3d-4c5e-9f7a-1b2c3d4e5f60; theme=dark",
+      `Cookie: ${REDACTED_VALUE}`,
+    ],
+    [
+      "a secret-named JSON fragment inside prose",
+      'the config is {"api_key":"opaque in prose value"} and more',
+      `the config is {"api_key":"${REDACTED_VALUE}"} and more`,
+    ],
+  ])("removes %s, and only the secret", (_name, text, expected) => {
+    expect(sanitized(text)).toBe(expected);
   });
 
   it("keeps what follows a redacted query parameter or header line", () => {
-    expect(redactSecretsDeep("https://cb.test/return?access_token=opaqueQueryToken123&state=1")).toContain("&state=1");
-    expect(redactSecretsDeep("X-Api-Key: opaque-header-key-77\nAccept: */*")).toContain("\nAccept: */*");
+    // Not a test of "something survived": the secret is removed in the same exact string.
+    expect(redactSecretsDeep("https://cb.test/return?access_token=opaqueQueryToken123&state=1")).toBe(
+      `https://cb.test/return?access_token=${REDACTED_VALUE}&state=1`,
+    );
+    expect(redactSecretsDeep("X-Api-Key: opaque-header-key-77\nAccept: */*")).toBe(`X-Api-Key: ${REDACTED_VALUE}\nAccept: */*`);
   });
 
   it("a string session / sessionId / sid is a secret; an object named session is walked, not erased", () => {
     const uuid = "6f1c2a9e-8b3d-4c5e-9f7a-1b2c3d4e5f60";
-    for (const key of ["session", "sessionId", "sid"]) expect(leaks({ [key]: uuid }, uuid)).toBe(false);
+    for (const key of ["session", "sessionId", "sid"]) expect(redactSecretsDeep({ [key]: uuid })).toEqual({ [key]: REDACTED_VALUE });
     const info = { session: { address: "0x" + "12".repeat(20), expiresAt: "2026-09-25T00:00:00Z" } };
     expect(redactSecretsDeep(info)).toEqual(info);
   });
@@ -342,17 +395,17 @@ describe("redactSecretsDeep closes the round-3 coverage gaps (WP-D round 4, L5)"
     ["a Google API key", "AIza" + "Sy0123456789abcdefghijklmnopqrstuvwxyz".slice(0, 35)],
     ["an npm token", "npm_" + "a1B2c3D4e5".repeat(4).slice(0, 36)],
   ])("removes %s in plain text", (_name, token) => {
-    expect(leaks(`see ${token} end`, token)).toBe(false);
+    expect(sanitized(`see ${token} end`)).toBe(`see ${REDACTED_VALUE} end`);
   });
 
   it("removes a 12- or 24-word BIP-39 seed phrase; keeps 11 words, ordinary prose and a repeated word", () => {
     const words = english.slice(100, 124);
     const seed12 = words.slice(0, 12).join(" ");
     const seed24 = words.join(" ");
-    expect(leaks(`zzqx ${seed12} zzqx`, seed12)).toBe(false);
-    expect(leaks(`backup:\n${seed24}\n`, seed24)).toBe(false);
+    expect(redactSecretsDeep(`zzqx ${seed12} zzqx`)).toBe(`zzqx ${REDACTED_VALUE} zzqx`);
+    expect(redactSecretsDeep(`backup:\n${seed24}\n`)).toBe(`backup:\n${REDACTED_VALUE}\n`);
     const eleven = words.slice(0, 11).join(" ");
-    expect(redactSecretsDeep(`zzqx ${eleven}.`)).toContain(eleven);
+    expect(redactSecretsDeep(`zzqx ${eleven}.`)).toBe(`zzqx ${eleven}.`);
     const prose = "The operator ships the order today and the buyer confirms the delivery at the dock.";
     expect(redactSecretsDeep(prose)).toBe(prose);
     // A repeated word is prose only while no window of it passes the BIP-39 checksum:
@@ -377,6 +430,10 @@ describe("redactSecretsDeep closes the round-3 coverage gaps (WP-D round 4, L5)"
   it("is still idempotent: a second pass over the new detectors' output changes and reports nothing", () => {
     const once = redactSecretsDeep({
       note: 'X-Api-Key: abc123def456\n{"password":"p w d"} password=abc see github_pat_' + "x".repeat(30),
+    });
+    // What the first pass made, exactly; a second pass over unredacted text would "be idempotent" too.
+    expect(once).toEqual({
+      note: `X-Api-Key: ${REDACTED_VALUE}\n{"password":"${REDACTED_VALUE}"} password=${REDACTED_VALUE} see ${REDACTED_VALUE}`,
     });
     const seen: unknown[] = [];
     expect(redactSecretsDeep(once, (r) => seen.push(r))).toEqual(once);
