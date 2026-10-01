@@ -18,11 +18,13 @@
  *                           bytes32 challengeNonce)): binds the block to one settlement
  *                           unit and one challenge, so evidence for unit A cannot be
  *                           replayed onto unit B
- *   kernelSignedEventsRoot  the bundle's `hashBundle` digest, as 0x + hex. ONE bundle:
- *                           a settlement unit's evidence is one kernel-signed bundle
- *                           holding every outcome-bearing event (terminal events and
- *                           inspections), so nothing can be left out by choosing which
- *                           bundle to commit (LO-EV-9 header; bus #3543)
+ *   kernelSignedEventsRoot  the bundle's `hashBundle` digest, as 0x + hex, derived by
+ *                           `computeKernelSignedEventsRoot(bundle)`, which recomputes every
+ *                           event hash and the bundleHash instead of trusting the carried
+ *                           ones. ONE bundle: a settlement unit's evidence is one
+ *                           kernel-signed bundle holding every outcome-bearing event
+ *                           (terminal events and inspections), so nothing can be left out
+ *                           by choosing which bundle to commit (LO-EV-9 header; bus #3543)
  *   sessionKeyAuthDigest    0x + sha256(canonicalize(SessionKeyAuthorization))
  *   attestationSetRoot      0x + sha256(canonicalize(sorted role digests)); each role
  *                           digest binds roleId, the quorum config, the job and the
@@ -44,12 +46,29 @@
  * The block is evaluator-ready, not a money authority by itself: the oracle
  * reconstructs the unit context independently and pins programHash to the
  * funded policy's committed program.
+ *
+ * BOUNDARY: what this module does NOT do (E7 verdict on #361, F1). A root derived
+ * here proves the CONTENT of one bundle is self-consistent. It does not prove the
+ * bundle is authentic, final or the only one, and none of the following is
+ * enforced by a pure function. Each has an owner:
+ *   1. The kernel signature over bundleHash and the session-key delegation are
+ *      verified by the consumer with the LO-EV-1 verifier (#338).
+ *      `computeKernelSignedEventsRoot` checks the events and the bundleHash only.
+ *   2. "ONE finalized bundle per settlement unit" needs a stateful finalization
+ *      record at the evidence-finalization boundary (gateway/VCR). Without it a
+ *      producer can cherry-pick one favorable signed bundle and omit a later
+ *      execution_failed or inspection event.
+ *   3. The oracle independently repeats these checks and rejects parallel,
+ *      partial, superseded or unfinalized bundles.
+ * `computeEvidenceBlockHash(roots)` is the low-level, mirror-exact function: it
+ * hashes whatever bytes32 roots it is handed. Those roots must come only from the
+ * verified derivations in this module (or the oracle's own).
  */
 
 import { createHash } from "node:crypto";
 import { keccak_256 } from "@noble/hashes/sha3";
-import { canonicalize } from "../util/canonical.js";
-import type { SessionKeyAuthorization } from "../types/evidence.js";
+import { canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
+import type { EvidenceBundle, EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
 
 export type Bytes32Hex = `0x${string}`;
 
@@ -186,6 +205,72 @@ export function taggedDigestToBytes32(digest: string): Bytes32Hex {
   return `0x${digest.slice("sha256:".length)}`;
 }
 
+/** One event as plain data: a JSON round trip reads every property exactly once. */
+function snapshotEvent(field: string, event: unknown): EvidenceEvent {
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(event);
+  } catch {
+    throw new EvidenceBlockInputError(field, "is not JSON-serializable plain data");
+  }
+  const parsed: unknown = text === undefined ? undefined : JSON.parse(text);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new EvidenceBlockInputError(field, "expected an event object");
+  }
+  return parsed as EvidenceEvent;
+}
+
+/**
+ * The kernelSignedEventsRoot of ONE evidence bundle, derived from what its events
+ * actually say rather than from the hashes it carries. `hashBundle` trusts each
+ * `event.hash`, so on its own two bundles with different payloads and the same
+ * carried hashes share a root.
+ *
+ * The events are snapshotted once (a JSON round trip of each event: one read, then
+ * plain data). Every event hash is recomputed with `hashEvent` and must equal the
+ * carried `event.hash`; `hashBundle` is recomputed over that snapshot and must equal
+ * `bundle.bundleHash`; an empty event list is refused. Throws `EvidenceBlockInputError`
+ * on any failure. Returns the bundleHash as a bytes32 root.
+ *
+ * Only the root is returned: a consumer that evaluates events afterwards must evaluate
+ * plain data it holds, not a live object it passed here. This does not verify the kernel
+ * signature, the session-key delegation, or that this is the one finalized bundle for the
+ * settlement unit; see BOUNDARY in the module header.
+ */
+export async function computeKernelSignedEventsRoot(
+  bundle: Pick<EvidenceBundle, "events" | "bundleHash">,
+): Promise<Bytes32Hex> {
+  if (bundle === null || typeof bundle !== "object") {
+    throw new EvidenceBlockInputError("bundle", "expected an evidence bundle object");
+  }
+  // Each bundle property is read exactly once; only the local copies are used after this.
+  const rawEvents: unknown = bundle.events;
+  const carriedBundleHash: unknown = bundle.bundleHash;
+  if (!Array.isArray(rawEvents)) {
+    throw new EvidenceBlockInputError("events", "expected an array of evidence events");
+  }
+  const count = rawEvents.length;
+  if (!Number.isSafeInteger(count) || count < 1) {
+    throw new EvidenceBlockInputError("events", "expected at least one event (an empty bundle commits to nothing)");
+  }
+  const events: EvidenceEvent[] = [];
+  for (let i = 0; i < count; i++) events.push(snapshotEvent(`events[${i}]`, rawEvents[i]));
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i];
+    if ((await hashEvent(event)) !== event.hash) {
+      throw new EvidenceBlockInputError(
+        `events[${i}].hash`,
+        "does not match the hash recomputed from the event's type, timestamp, source and payload",
+      );
+    }
+  }
+  const bundleHash = await hashBundle(events);
+  if (bundleHash !== carriedBundleHash) {
+    throw new EvidenceBlockInputError("bundleHash", "does not match the hash recomputed from the bundle's event hashes");
+  }
+  return taggedDigestToBytes32(bundleHash);
+}
+
 export function computeSessionKeyAuthDigest(auth: SessionKeyAuthorization): Bytes32Hex {
   return sha256Canonical(auth);
 }
@@ -227,6 +312,14 @@ export interface EvidenceBlockRoots {
   programHash: string;
 }
 
+/**
+ * The block hash over six roots. This is the low-level, mirror-exact function: it
+ * checks each root's form (0x + 64 lowercase hex) and nothing else, so it cannot tell a
+ * verified root from an arbitrary one. The roots must come only from the verified
+ * derivations in this module (`computeUnitContextDigest`, `computeKernelSignedEventsRoot`,
+ * `computeSessionKeyAuthDigest`, `computeAttestationSetRoot`, ...) or from the oracle's
+ * own. See BOUNDARY in the module header.
+ */
 export function computeEvidenceBlockHash(roots: EvidenceBlockRoots): Bytes32Hex {
   return keccakWords([
     bytes32Word("EVIDENCE_BLOCK_DOMAIN_V2", EVIDENCE_BLOCK_DOMAIN_V2),

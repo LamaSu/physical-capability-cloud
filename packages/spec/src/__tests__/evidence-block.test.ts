@@ -8,6 +8,7 @@ import {
   UNIT_CONTEXT_DOMAIN_V1,
   computeAttestationSetRoot,
   computeEvidenceBlockHash,
+  computeKernelSignedEventsRoot,
   computeSessionKeyAuthDigest,
   computeSettlementUnitId,
   computeUnitContextDigest,
@@ -307,5 +308,196 @@ describe("EvidenceBlockV1 v2 — input forms are pinned", () => {
     expect(() =>
       computeAttestationSetRoot(attJob, [{ ...roles[0]!, attestationHashes: ["sha256:" + "ab".repeat(32)] }]),
     ).toThrow(EvidenceBlockInputError);
+  });
+});
+
+// ── E7 verdict on #361 (round 2) ───────────────────────────────────────────
+// Helpers: return the refusal so a test can pin WHICH input was refused (`field`),
+// not just that something threw.
+function refusalOf(fn: () => unknown): EvidenceBlockInputError {
+  try {
+    fn();
+  } catch (e) {
+    expect(e).toBeInstanceOf(EvidenceBlockInputError);
+    return e as EvidenceBlockInputError;
+  }
+  throw new Error("expected an EvidenceBlockInputError, but the call returned");
+}
+
+async function refusalOfAsync(fn: () => Promise<unknown>): Promise<EvidenceBlockInputError> {
+  try {
+    await fn();
+  } catch (e) {
+    expect(e).toBeInstanceOf(EvidenceBlockInputError);
+    return e as EvidenceBlockInputError;
+  }
+  throw new Error("expected an EvidenceBlockInputError, but the call resolved");
+}
+
+// ── F1 (HIGH): the events root is recomputed, not trusted ────────────────────
+describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead of trusting carried hashes", () => {
+  const raw: Array<Omit<EvidenceEvent, "id" | "hash">> = [
+    { type: "execution_completed", timestamp: "2026-08-20T00:00:00Z", source, payload: { ok: true } },
+    { type: "cv_inspection_result", timestamp: "2026-08-20T00:00:05Z", source, payload: { pass: 1, defects: 0 } },
+  ];
+  const PINNED_ROOT = "0x4e0af964e4e066717998ed7a49bf7c874023bd402b825da22b4dabd70fb6f9fe";
+  const hashed = (list: Array<Omit<EvidenceEvent, "id" | "hash">>) =>
+    Promise.all(list.map(async (e) => ({ ...e, id: e.type, hash: await hashEvent(e) })));
+  const honest = async (list = raw) => {
+    const events = await hashed(list);
+    return { events, bundleHash: await hashBundle(events) };
+  };
+
+  it("an honest bundle yields the pinned production-form root, identical to taggedDigestToBytes32(hashBundle)", async () => {
+    const b = await honest();
+    expect(await computeKernelSignedEventsRoot(b)).toBe(PINNED_ROOT);
+    expect(await computeKernelSignedEventsRoot(b)).toBe(taggedDigestToBytes32(b.bundleHash));
+  });
+
+  it("an honest bundle over the v2 mirror inputs reproduces the block golden 0x854079f7…", async () => {
+    const r = await goldenRoots();
+    const root = await computeKernelSignedEventsRoot(await honest(rawEvents));
+    expect(root).toBe(r.kernelSignedEventsRoot);
+    expect(computeEvidenceBlockHash({ ...r, kernelSignedEventsRoot: root })).toBe(
+      "0x854079f7d819e2fba76b259a8c61f6ef842b7472088fd5c4948c3c76974b4450",
+    );
+  });
+
+  it("refuses two bundles with different payloads that carry the same event hash (the reviewer's repro)", async () => {
+    const [first] = await hashed(raw);
+    const a = [{ ...first!, payload: { pass: true } }];
+    const b = [{ ...first!, payload: { pass: false } }];
+    // hashBundle trusts the carried hash, so on their own these two share one root:
+    expect(await hashBundle(a)).toBe(await hashBundle(b));
+    for (const events of [a, b]) {
+      const bundleHash = await hashBundle(events);
+      const err = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events, bundleHash }));
+      expect(err.field).toBe("events[0].hash");
+    }
+  });
+
+  it("refuses an event whose payload changed after it was hashed", async () => {
+    const b = await honest();
+    const events = [b.events[0]!, { ...b.events[1]!, payload: { pass: 1, defects: 7 } }];
+    const err = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events, bundleHash: b.bundleHash }));
+    expect(err.field).toBe("events[1].hash");
+  });
+
+  it("refuses an altered carried event hash, even when bundleHash was recomputed over it", async () => {
+    const b = await honest();
+    const forged = { ...b.events[0]!, hash: `sha256:${"ee".repeat(32)}` as typeof b.events[0]["hash"] };
+    const events = [forged, b.events[1]!];
+    const bundleHash = await hashBundle(events);
+    const err = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events, bundleHash }));
+    expect(err.field).toBe("events[0].hash");
+  });
+
+  it("refuses a bundleHash that is not the hash of the events", async () => {
+    const b = await honest();
+    for (const carried of [`sha256:${"cd".repeat(32)}`, undefined, 7, null]) {
+      const err = await refusalOfAsync(() =>
+        computeKernelSignedEventsRoot({ events: b.events, bundleHash: carried as never }),
+      );
+      expect(err.field, String(carried)).toBe("bundleHash");
+    }
+  });
+
+  it("refuses a partial bundle: an event dropped under the original bundleHash", async () => {
+    const b = await honest();
+    const err = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events: [b.events[0]!], bundleHash: b.bundleHash }));
+    expect(err.field).toBe("bundleHash");
+  });
+
+  it("refuses an extra event added under the original bundleHash", async () => {
+    const b = await honest();
+    const [extra] = await hashed([{ type: "execution_failed", timestamp: "2026-08-20T00:00:09Z", source, payload: { reason: "late" } }]);
+    const err = await refusalOfAsync(() =>
+      computeKernelSignedEventsRoot({ events: [...b.events, extra!], bundleHash: b.bundleHash }),
+    );
+    expect(err.field).toBe("bundleHash");
+  });
+
+  it("refuses an empty event list, a non-array, and a missing bundle", async () => {
+    // An empty list is a self-consistent bundle (sha256 of "[]"), so only the explicit refusal stops it.
+    const emptyHash = await hashBundle([]);
+    expect((await refusalOfAsync(() => computeKernelSignedEventsRoot({ events: [], bundleHash: emptyHash }))).field).toBe("events");
+    for (const events of [undefined, null, "events", { length: 1, 0: {} }]) {
+      const err = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events: events as never, bundleHash: emptyHash }));
+      expect(err.field, String(events)).toBe("events");
+    }
+    for (const bundle of [null, undefined, "bundle", 7]) {
+      const err = await refusalOfAsync(() => computeKernelSignedEventsRoot(bundle as never));
+      expect(err.field, String(bundle)).toBe("bundle");
+    }
+  });
+
+  it("refuses an event that is not plain JSON data (cycle, bigint, non-object)", async () => {
+    const b = await honest();
+    const cyclic: Record<string, unknown> = { ...b.events[0]! };
+    cyclic.self = cyclic;
+    const withBigInt = { ...b.events[0]!, payload: { n: 1n } };
+    for (const bad of [cyclic, withBigInt, null, 42, "event", () => 1]) {
+      const err = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events: [bad as never], bundleHash: b.bundleHash }));
+      expect(err.field, String(bad)).toBe("events[0]");
+    }
+  });
+
+  it("does not depend on event order or on the transport id (neither is in the preimage)", async () => {
+    const b = await honest();
+    expect(await computeKernelSignedEventsRoot({ events: [...b.events].reverse(), bundleHash: b.bundleHash })).toBe(PINNED_ROOT);
+    const renamed = b.events.map((e, i) => ({ ...e, id: `transport-${i}` }));
+    expect(await computeKernelSignedEventsRoot({ events: renamed, bundleHash: b.bundleHash })).toBe(PINNED_ROOT);
+  });
+
+  it("reads the bundle's events and bundleHash exactly once each", async () => {
+    const b = await honest();
+    const reads = { events: 0, bundleHash: 0 };
+    const live = {
+      get events() {
+        reads.events++;
+        return b.events;
+      },
+      get bundleHash() {
+        reads.bundleHash++;
+        return b.bundleHash;
+      },
+    };
+    expect(await computeKernelSignedEventsRoot(live)).toBe(PINNED_ROOT);
+    expect(reads).toEqual({ events: 1, bundleHash: 1 });
+  });
+
+  it("reads each event once: a hash getter that changes its answer cannot split verification from hashing", async () => {
+    const b = await honest();
+    const fake = `sha256:${"fa".repeat(32)}` as typeof b.events[0]["hash"];
+    let reads = 0;
+    const shifty = {
+      ...b.events[0]!,
+      get hash() {
+        reads++;
+        return reads === 1 ? b.events[0]!.hash : fake;
+      },
+    };
+    // The attacker commits bundleHash over the SECOND answer. A live-object implementation
+    // verifies the first answer, then hashBundle reads the second, and roots a hash the event
+    // does not have. One snapshot read closes that.
+    const bundleHash = await hashBundle([{ ...b.events[0]!, hash: fake }, b.events[1]!]);
+    const err = await refusalOfAsync(() =>
+      computeKernelSignedEventsRoot({ events: [shifty as typeof b.events[0], b.events[1]!], bundleHash }),
+    );
+    expect(err.field).toBe("bundleHash");
+    expect(reads).toBe(1);
+  });
+
+  it("reads each element of the events array once", async () => {
+    const b = await honest();
+    const reads: Record<string, number> = {};
+    const counted = new Proxy([...b.events], {
+      get(target, key, receiver) {
+        if (typeof key === "string" && /^\d+$/.test(key)) reads[key] = (reads[key] ?? 0) + 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    expect(await computeKernelSignedEventsRoot({ events: counted, bundleHash: b.bundleHash })).toBe(PINNED_ROOT);
+    expect(reads).toEqual({ "0": 1, "1": 1 });
   });
 });
