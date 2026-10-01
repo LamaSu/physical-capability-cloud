@@ -300,6 +300,13 @@ export interface RequiredRegistryPin {
 const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
+ * A registry id the deal can seal: printable ASCII, 1 to 128 characters. It is the
+ * same id rule the accepted deal's parser applies (`ID_PATTERN`), so a bad id is
+ * refused here, before funding, instead of at compile.
+ */
+const REGISTRY_ID = /^[\x21-\x7E]{1,128}$/;
+
+/**
  * The registry pins a funded (CSD, tier k) needs sealed in the accepted deal:
  * every registry-backed primitive in tiers 0..k, with the registry its params
  * name. Deduped on (primitiveId, registryId), and sorted by primitiveId then
@@ -318,6 +325,10 @@ export function requiredRegistryPins(
       const registryId = (p.params as { registryId?: unknown } | undefined)?.registryId;
       if (typeof registryId !== "string" || registryId.length === 0) {
         reasons.push(`tier${t}: "${p.id}" names no registryId, so the deal cannot pin its registry`);
+        continue;
+      }
+      if (!REGISTRY_ID.test(registryId)) {
+        reasons.push(`tier${t}: "${p.id}" names a registryId that is not 1-128 printable ASCII characters, so the deal cannot pin it`);
         continue;
       }
       pins.set(JSON.stringify([p.id, registryId]), { primitiveId: p.id, registryId });

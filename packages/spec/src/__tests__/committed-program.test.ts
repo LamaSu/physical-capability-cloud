@@ -371,4 +371,26 @@ describe("requiredRegistryPins — what the accepted deal must pin (bus #3391)",
     );
     expect(r).toMatchObject({ ok: false, code: "registry-not-named" });
   });
+
+  it("a registryId outside 1-128 printable ASCII characters is refused, at the gate too (composition v3, #4568)", () => {
+    const withId = (registryId: string) => {
+      const t = fixedTiers();
+      t["tier1"]!.primitives = t["tier1"]!.primitives!.map((p) => (p.id === "ident.registered_key" ? { id: p.id, params: { registryId } } : p));
+      return t;
+    };
+    for (const bad of ["pcc.registry." + String.fromCharCode(0x212a) + ".v1", "pcc registry", "pcc.registry.v1" + String.fromCharCode(0x7f), "x".repeat(129)]) {
+      const r = requiredRegistryPins(withId(bad), 1);
+      expect(r.ok, JSON.stringify(bad)).toBe(false);
+      const g = assertAcceptedProgramForTier(
+        { csd: CSD, tierKey: "tier2", evidence: withId(bad), committedProgramHash: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH },
+        COMMITTED_PROGRAM_REGISTRY,
+        { primitiveIndex: LIVE },
+      );
+      expect(g, JSON.stringify(bad)).toMatchObject({ ok: false, code: "registry-not-named" });
+    }
+    expect(requiredRegistryPins(withId("x".repeat(128)), 1)).toEqual({
+      ok: true,
+      pins: [{ primitiveId: "ident.registered_key", registryId: "x".repeat(128) }],
+    });
+  });
 });
