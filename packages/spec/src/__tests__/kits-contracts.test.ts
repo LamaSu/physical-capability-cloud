@@ -1179,6 +1179,104 @@ describe("astra pack 112b", () => {
     expect("isSpdxLicenseExpression" in kit).toBe(false);
     expect("isAllowedLicenseExpression" in kit).toBe(true);
   });
+
+  // ── D. MEDIUM 5: masking, and describe ──
+
+  const withPayee = (maskedDestination: string) => {
+    const b = binding();
+    b.payee = { ...b.payee!, maskedDestination };
+    return b;
+  };
+  const acceptsMask = (maskedDestination: string) => OperatorBindingDTOSchema.safeParse(withPayee(maskedDestination)).success;
+  const withDescribe = (describe?: string) => {
+    const b = binding();
+    b.bindings = [{ ...b.bindings[0]!, availability: { mode: "manual-claim", ...(describe !== undefined ? { describe } : {}) } }];
+    return b;
+  };
+  const evm = "0x282Fa9C122b433864f8C8a8F2EfE411b52067539";
+
+  it("MEDIUM 5a: a short destination is never shown in full", () => {
+    const masked = maskPayoutDestination("AB");
+    expect(masked).toBe("…");
+    expect(masked).not.toContain("AB");
+  });
+
+  it("maskPayoutDestination: under 8 characters shows none, under 40 shows the last 2, otherwise the first 6 and last 4", () => {
+    expect(maskPayoutDestination("")).toBe("…");
+    expect(maskPayoutDestination("1234567")).toBe("…"); // 7
+    expect(maskPayoutDestination("12345678")).toBe("…78"); // 8
+    expect(maskPayoutDestination("acct-1234567")).toBe("…67"); // 12
+    expect(maskPayoutDestination("x".repeat(39))).toBe("…xx"); // 39
+    expect(maskPayoutDestination(`abcdef${"-".repeat(30)}wxyz`)).toBe("abcdef…wxyz"); // 40
+    expect(maskPayoutDestination(evm)).toBe("0x282F…7539"); // an EVM address, 42: 6+4
+    // It trims first, so padding cannot push a short destination over a threshold.
+    expect(maskPayoutDestination("  AB  ")).toBe("…");
+    expect(maskPayoutDestination(`\n  12345678\t`)).toBe("…78");
+    expect(maskPayoutDestination(` ${"x".repeat(7)} `)).toBe("…");
+  });
+
+  it("maskPayoutDestination reveals at most 25% at every length, and always produces a form the schema accepts", () => {
+    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+    for (let n = 0; n <= 120; n++) {
+      const destination = Array.from({ length: n }, (_, i) => alphabet[i % alphabet.length]).join("");
+      const masked = maskPayoutDestination(destination);
+      expect((masked.length - 1) * 4, `shown of ${n}`).toBeLessThanOrEqual(n);
+      expect(acceptsMask(masked), `form at ${n}`).toBe(true);
+    }
+  });
+
+  it("the schema accepts three forms of mask, and only those: it checks the FORM, not the source length", () => {
+    for (const ok of ["…", "…34", "0x282F…7539", "abcdef…ghij"]) expect(acceptsMask(ok), ok).toBe(true);
+    for (const bad of [
+      "",
+      " …",
+      "……",
+      "…3",
+      "…345",
+      "abcde…ghij",
+      "abcdef…ghi",
+      "abcdef…ghijk",
+      "abcdef……ghij",
+      "…ab…",
+      "ab…",
+      "abcdef",
+      evm,
+    ]) {
+      expect(acceptsMask(bad), bad).toBe(false);
+    }
+    // "abcdef…ghij" masks a longer value, but a 10-character value would reconstruct to it: the form cannot
+    // tell, so the helper's thresholds are what guarantee the ratio.
+    expect(maskPayoutDestination("abcdefghij")).toBe("…ij");
+  });
+
+  it("MEDIUM 5b: availability.describe may not carry URL-scheme text (the 'never an endpoint' claim)", () => {
+    expect(OperatorBindingDTOSchema.safeParse(withDescribe("POST jobs to https://agent.example/claim")).success).toBe(false);
+    for (const refused of [
+      "HTTP://x",
+      "see https://a.b",
+      "ftp://host/file",
+      "ssh://git@host/repo",
+      "s3://bucket/key",
+      "custom+scheme.v1://x",
+      "wss://relay.example",
+      "a://",
+    ]) {
+      expect(OperatorBindingDTOSchema.safeParse(withDescribe(refused)).success, refused).toBe(false);
+    }
+    // Plain display text is fine, colons and slashes included.
+    for (const plain of ["Weekdays 9 to 5, message the lab first", "", "Open 09:00 // 17:00", "Ask in the lab chat: no links here", "Call 555-0100"]) {
+      expect(OperatorBindingDTOSchema.safeParse(withDescribe(plain)).success, plain).toBe(true);
+    }
+    const r = OperatorBindingDTOSchema.safeParse(withDescribe("POST jobs to https://agent.example/claim"));
+    expect(r.success ? [] : r.error.issues.map((i) => i.message)).toEqual([
+      "describe is display text: it may not contain URL-scheme text such as https://",
+    ]);
+  });
+
+  it("control for 5b: the same binding without describe parses (else the fixture is wrong)", () => {
+    const r = OperatorBindingDTOSchema.safeParse(withDescribe());
+    expect(r.success ? "ok" : JSON.stringify(r.error.issues)).toBe("ok");
+  });
 });
 
 // ── pack 112 MEDIUM 8: a shape or enum change must bump the schema literal ──
@@ -1238,7 +1336,7 @@ describe("pack 112 MEDIUM 8: every shape or enum change bumps the schema literal
     });
     expect({ literal: OPERATOR_BINDING_SCHEMA, shape: fingerprint(OperatorBindingDTOSchema) }).toEqual({
       literal: "pcc.operator-binding.v0",
-      shape: "9eebfd0313ddcecf",
+      shape: "ca2f94ba7aa72ade",
     });
     expect({ literal: KIT_MANIFEST_SCHEMA, shape: fingerprint(CapabilityKitManifestV1Schema) }).toEqual({
       literal: "pcc.capability-kit/v1",

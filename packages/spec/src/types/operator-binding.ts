@@ -49,7 +49,7 @@ export interface OperatorBindingEntry {
   /** The Capability Kit version this binding hosts, if any. */
   kitDigest: SHA256 | null;
   presence: "online" | "offline" | "unknown";
-  /** A typed summary of the capability's availability; never an endpoint or any authority field. */
+  /** A typed summary of the capability's availability, with no endpoint or authority field (see AvailabilitySummary). */
   availability: AvailabilitySummary | null;
   /** Capped by the server from proven evidence; never the self-declared tier. */
   assuranceTierCap: 0 | 1 | 2 | 3;
@@ -64,18 +64,27 @@ export interface OperatorUnmappedCapacity {
   legacyType: string;
 }
 
-/** What a binding may say about availability (astra pack 112 MEDIUM 5): a closed, typed shape. */
+/**
+ * What a binding may say about availability (astra pack 112 MEDIUM 5): a closed,
+ * typed shape with no endpoint or authority FIELD (strict, nested windows
+ * included). `describe` is display text for the operator: a consumer must never
+ * parse, fetch or execute it. The schema refuses ASCII `scheme://` text in it as
+ * a backstop (astra pack 112b); it cannot recognise any other way of writing an
+ * endpoint or an instruction. Its other strings are typed values (a time of day,
+ * a cron expression, a timezone name) whose schema bounds their length only.
+ */
 export interface AvailabilitySummary {
   mode: "always" | "windows" | "cron" | "manual-claim" | "delegate-to-agent";
   windows?: Array<{ start: string; end: string; daysOfWeek?: number[]; timezone?: string }>;
   cron?: string;
   timezone?: string;
+  /** Display text only; see AvailabilitySummary. */
   describe?: string;
 }
 
 export interface OperatorPayeeView {
   kind: "wallet" | "fiat_ref";
-  /** Never the full destination: see maskPayoutDestination. */
+  /** Masked by maskPayoutDestination; the schema checks only the FORM of the mask. */
   maskedDestination: string;
   /** Which record the destination came from, e.g. the payout-wallet store (N21). */
   source: string;
@@ -107,21 +116,32 @@ export interface OperatorBindingDTO {
 const MASK = "…"; // "…"
 
 /**
- * Mask a payout destination for display: the first 6 and last 4 characters,
- * joined by an ellipsis. Short values are masked entirely except their last 2.
+ * Mask a payout destination for display. It trims first, then: under 8
+ * characters, the mask alone; under 40, the mask and the last 2 characters;
+ * otherwise the first 6 and the last 4 around the mask. It reveals at most 25%
+ * of the destination: an EVM address (42 characters) shows 6+4, and shorter
+ * destinations show 2 characters or none. Lengths count UTF-16 code units.
  */
 export function maskPayoutDestination(destination: string): string {
   const d = destination.trim();
-  if (d.length <= 12) return `${MASK}${d.slice(-2)}`;
+  if (d.length < 8) return MASK;
+  if (d.length < 40) return `${MASK}${d.slice(-2)}`;
   return `${d.slice(0, 6)}${MASK}${d.slice(-4)}`;
 }
 
 /**
- * Exactly the two shapes maskPayoutDestination produces (astra pack 112 MEDIUM
- * 5): "…" + the last 2 characters, or the first 6 + "…" + the last 4. A full
- * address of any case or kind, with or without an ellipsis, cannot fit.
+ * The three FORMS maskPayoutDestination produces (astra pack 112b), for a
+ * destination that holds no mask character itself: the bare mask, the mask and 2
+ * characters, or 6 characters, the mask and 4 characters. The schema checks the
+ * FORM only and cannot know the source length, so it cannot tell "abcdef…ghij"
+ * masking a longer value from one that reconstructs a whole 10-character value;
+ * the helper is what guarantees the ratio. A full address of 12 or more
+ * characters, with or without an ellipsis, cannot fit any form.
  */
-const MASKED_DESTINATION = new RegExp(`^(?:${MASK}[^${MASK}]{2}|[^${MASK}]{6}${MASK}[^${MASK}]{4})$`);
+const MASKED_DESTINATION = new RegExp(`^(?:${MASK}|${MASK}[^${MASK}]{2}|[^${MASK}]{6}${MASK}[^${MASK}]{4})$`);
+
+/** ASCII `scheme://` text, in any case: the backstop that keeps an endpoint out of `describe`. */
+const URL_SCHEME_TEXT = /[a-z][a-z0-9+.-]*:\/\//i;
 
 export const OperatorPayeeViewSchema = z
   .object({
@@ -154,7 +174,11 @@ export const AvailabilitySummarySchema = z
       .optional(),
     cron: z.string().min(1).max(120).optional(),
     timezone: z.string().min(1).max(64).optional(),
-    describe: z.string().max(2000).optional(),
+    describe: z
+      .string()
+      .max(2000)
+      .refine((d) => !URL_SCHEME_TEXT.test(d), "describe is display text: it may not contain URL-scheme text such as https://")
+      .optional(),
   })
   .strict();
 
