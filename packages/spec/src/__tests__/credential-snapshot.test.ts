@@ -167,6 +167,22 @@ describe("verifyCredential -- a polluted Object.prototype supplies nothing that 
     expect(verdicts).toEqual([true, false]);
   });
 
+  it("A05c F1: an issuer-signed credential whose expirationDate is not a date string fails closed", () => {
+    // `new Date({})` is an Invalid Date, and `NaN < now` is false, so the expiry check used to be skipped and a
+    // signed credential carrying an object as its expiry verified. The snapshot's object has no prototype to
+    // coerce through, so the date cannot be built and the verdict is false.
+    const keypair = createKeyDID();
+    const credential = issueCapabilityCredential({
+      issuerDid: keypair.did,
+      subjectDid: createPCCDID("device", "dev_01"),
+      capability: "fdm_printing",
+      assuranceTier: 2,
+      expirationDate: { not: "a date" } as unknown as string,
+      issuerPrivateKeyHex: keypair.privateKeyHex,
+    });
+    expect(verifyCredential(credential, keypair.publicKeyHex)).toBe(false); // faac0003 returned true
+  });
+
   it("leaves Object.prototype exactly as it found it (no test above leaks a pollution)", () => {
     expect(Object.getOwnPropertyNames(Object.prototype).sort()).toEqual(OBJECT_PROTOTYPE_AT_LOAD);
   });
