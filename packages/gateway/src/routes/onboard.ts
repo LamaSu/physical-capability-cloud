@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { MachineRegistration } from "@pcc/spec";
 import { sql, type RegistrationRow } from "@pcc/store";
@@ -35,7 +35,7 @@ import {
   coalesceSourceDocumentId,
 } from "./onboard-analysis.js";
 import { bindRegistrationOwner } from "./onboard-owner.js";
-import { adminOrCaller, mayAccess } from "../auth/admin-secret-gate.js";
+import { adminOrCaller, mayAccess, requireAdminSecret } from "../auth/admin-secret-gate.js";
 // Wave 4.1 — TENANT_ENFORCE feature flag. Default OFF; when on, the listing
 // route filters registrations by req.tenantId (from T1.9 tenantContext
 // middleware). The /register handler always backfills tenant_id at insert
@@ -52,29 +52,22 @@ const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production
 // admin actions in routes/kernel-marketplace.ts. A caller's operatorId is not
 // enough, because /api/auth/provision issues keys for any email or wallet
 // without proving ownership, so an identity allowlist could be claimed by
-// anyone who knows an admin's address. With PCC_ADMIN_KEY unset, these routes
-// stay open only when NODE_ENV is "test" or "development"; anything else,
-// including an unset NODE_ENV, fails closed.
-function isOnboardAdmin(req: FastifyRequest): boolean {
-  const expected = process.env.PCC_ADMIN_KEY;
-  if (!expected) return process.env.NODE_ENV === "test" || process.env.NODE_ENV === "development";
-  const provided = req.headers["x-admin-key"];
-  if (typeof provided !== "string") return false;
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
+// anyone who knows an admin's address. They use the shared requireAdminSecret
+// (auth/admin-secret-gate.ts), so an unset PCC_ADMIN_KEY fails closed (503) in
+// EVERY environment, development and test included (astra pack 89b: the old
+// local check stayed open there and handed full registrations to any caller).
 
 /**
  * Audit identity for an admin-key action: the constant "admin-key", plus how
- * the route was authorized (adminAuth: "admin-key", or "open-test-dev" where
- * PCC_ADMIN_KEY is unset in test/development). Nothing derived from the
+ * the route was authorized (adminAuth: always "admin-key"; there is no open
+ * mode since astra pack 89b). Nothing derived from the
  * provided key is recorded (WP-B round 5, L3): any deterministic function of
  * the key alone, even 32 bits of its sha256, lets anyone who can read audit
  * rows test guesses of a weak PCC_ADMIN_KEY offline.
  */
-function adminAuditIdentity(): { actor: "admin-key"; adminAuth: "admin-key" | "open-test-dev" } {
-  return { actor: "admin-key", adminAuth: process.env.PCC_ADMIN_KEY ? "admin-key" : "open-test-dev" };
+function adminAuditIdentity(): { actor: "admin-key"; adminAuth: "admin-key" } {
+  // Only reachable after requireAdminSecret succeeded: there is no open mode (astra pack 89b).
+  return { actor: "admin-key", adminAuth: "admin-key" };
 }
 
 /** The authenticated caller set by the auth middleware, for audit attribution only. */
@@ -570,9 +563,9 @@ export async function onboardRoutes(app: FastifyInstance) {
   // read and this call gets 409 evidence_changed and nothing is approved.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/approve", async (req, reply) => {
     // Checked before the lookup so a non-admin learns nothing about which ids exist.
-    if (!isOnboardAdmin(req)) {
-      return reply.status(403).send({ error: "forbidden", message: "Approving a registration requires the admin key" });
-    }
+    // The shared admin secret, with NO environment bypass (astra pack 89b): 401 blank,
+    // 403 wrong, 503 unconfigured, in every NODE_ENV. Checked before the lookup.
+    if (!requireAdminSecret(req, reply)) return reply;
     const expectedEvidenceDigest = isPlainObject(req.body) ? req.body.expectedEvidenceDigest : undefined;
     if (typeof expectedEvidenceDigest !== "string") {
       return reply.status(400).send({
@@ -622,9 +615,9 @@ export async function onboardRoutes(app: FastifyInstance) {
 
   // ── Reject a registration (admin key required) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/reject", async (req, reply) => {
-    if (!isOnboardAdmin(req)) {
-      return reply.status(403).send({ error: "forbidden", message: "Rejecting a registration requires the admin key" });
-    }
+    // The shared admin secret, with NO environment bypass (astra pack 89b): 401 blank,
+    // 403 wrong, 503 unconfigured, in every NODE_ENV. Checked before the lookup.
+    if (!requireAdminSecret(req, reply)) return reply;
     const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     if (!REJECT_FROM.includes(reg.status)) {
@@ -786,9 +779,9 @@ export async function onboardRoutes(app: FastifyInstance) {
 
   // ── Activate an approved registration (admin key required) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/activate", async (req, reply) => {
-    if (!isOnboardAdmin(req)) {
-      return reply.status(403).send({ error: "forbidden", message: "Activating a registration requires the admin key" });
-    }
+    // The shared admin secret, with NO environment bypass (astra pack 89b): 401 blank,
+    // 403 wrong, 503 unconfigured, in every NODE_ENV. Checked before the lookup.
+    if (!requireAdminSecret(req, reply)) return reply;
     const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     if (!ACTIVATE_FROM.includes(reg.status)) {
