@@ -1016,7 +1016,7 @@ class TestA02eAliasesUnionsAndCleanup:
             return real(fd)
 
         monkeypatch.setattr(crypto_module, "_mount_of", mount_of)
-        with pytest.raises(crypto_module.KeyFileError, match="union filesystem"):
+        with pytest.raises(crypto_module.KeyFileError, match="union or FUSE filesystem"):
             load_or_create_keys(str(keys / "keys.json"))
         assert os.listdir(keys) == []
 
@@ -1038,3 +1038,48 @@ class TestA02eAliasesUnionsAndCleanup:
         monkeypatch.setattr(crypto_module.os, "pwrite", lambda fd, data, offset: 0)
         with pytest.raises(crypto_module.KeyFileError, match="SECRET MAY REMAIN"):
             load_or_create_keys(str(keys / "keys.json"))
+
+
+@needs_nacl
+class TestA02fFuseAndHonestCleanup:
+    """A02f: every FUSE filesystem is refused; a failed scrub is reported even when the name was removed."""
+
+    @pytest.mark.parametrize("fstype", ["fuse.fuse-overlayfs", "fuse.mergerfs", "fuse", "fuseblk", "fuse.sshfs"])
+    def test_a_key_on_any_fuse_filesystem_is_refused(self, monkeypatch, tmp_path, fstype):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        keys_id = (os.stat(keys).st_dev, os.stat(keys).st_ino)
+        real = crypto_module._mount_of
+
+        def mount_of(fd):
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) == keys_id:
+                return {"id": "61", "devno": "0:61", "root": "/", "mountpoint": str(keys), "fstype": fstype, "source": "x", "super": "rw"}
+            return real(fd)
+
+        monkeypatch.setattr(crypto_module, "_mount_of", mount_of)
+        with pytest.raises(crypto_module.KeyFileError, match="union or FUSE filesystem"):
+            load_or_create_keys(str(keys / "keys.json"))
+        assert os.listdir(keys) == []
+
+    def test_a_failed_scrub_is_reported_even_when_the_name_was_removed(self, monkeypatch, tmp_path):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        real = crypto_module._judge_key_file
+        calls = []
+
+        def judge(fd, key_path):
+            calls.append(1)
+            if len(calls) == 2:  # the terminal judge of the new key: a second name appears in a checkout
+                os.link(keys / "keys.json", repo / "keys.json")
+            real(fd, key_path)
+
+        def refuse(*args, **kwargs):
+            raise PermissionError("refused for the test")
+
+        monkeypatch.setattr(crypto_module, "_judge_key_file", judge)
+        monkeypatch.setattr(crypto_module.os, "ftruncate", refuse)
+        monkeypatch.setattr(crypto_module.os, "pwrite", refuse)
+        with pytest.raises(crypto_module.KeyFileError, match="SECRET MAY REMAIN"):
+            load_or_create_keys(str(keys / "keys.json"))
+        assert not (keys / "keys.json").exists(), "the name the key was created under is removed"

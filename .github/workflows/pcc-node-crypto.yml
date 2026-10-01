@@ -200,3 +200,32 @@ jobs:
             exit 1
           fi
           exit "$rc"
+
+      - name: A bind mount of the key file itself is walked too (review A02f)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          # The key is created outside any checkout, then the FILE is bind-mounted into a
+          # checkout: no extra hard link, a second visible name. Loading it again must refuse.
+          T=$(mktemp -d)
+          mkdir -p "$T/outside/keys" "$T/repo/.git"
+          chmod 700 "$T/outside/keys"
+          PYTHONPATH=. python -c "import sys; from pcc_node.crypto import load_or_create_keys; load_or_create_keys(sys.argv[1])" "$T/outside/keys/keys.json"
+          touch "$T/repo/keys.json"
+          sudo -n mount --bind "$T/outside/keys/keys.json" "$T/repo/keys.json"
+          set +e
+          PYTHONPATH=. python - "$T/outside/keys/keys.json" <<'PY'
+          import sys
+          from pcc_node.crypto import KeyFileError, load_or_create_keys
+          try:
+              load_or_create_keys(sys.argv[1])
+          except KeyFileError as err:
+              print("ok: refused:", err)
+              sys.exit(0)
+          print("ACCEPTED a key whose file is bind-mounted into a checkout")
+          sys.exit(1)
+          PY
+          rc=$?
+          set -e
+          sudo -n umount "$T/repo/keys.json"
+          exit "$rc"

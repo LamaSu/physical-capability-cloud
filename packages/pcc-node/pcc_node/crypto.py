@@ -302,7 +302,14 @@ def _mount_of(fd):
 # Filesystems whose files live in backing directories elsewhere (an overlay's upper
 # directory receives every new file): the backing paths are not evaluated, so a key
 # on one is refused (review A02e).
-_UNION_FSTYPES = {"overlay", "aufs", "unionfs", "fuse.unionfs", "fuse.unionfs-fuse", "fuse.mergerfs"}
+_UNION_FSTYPES = {"overlay", "aufs", "unionfs"}
+
+
+def _is_union_or_fuse(fstype):
+    """A union filesystem, or ANY FUSE filesystem: a FUSE backend stores files
+    wherever its userspace program puts them (fuse-overlayfs, mergerfs, ...), so
+    no mount record can show where else they are visible (review A02f)."""
+    return fstype in _UNION_FSTYPES or fstype == "fuse" or fstype.startswith("fuse.") or fstype == "fuseblk"
 
 
 def _whole_filesystem(mount):
@@ -317,11 +324,11 @@ def _whole_filesystem(mount):
 
 def _refuse_bind_mounted(fd, key_path, what):
     mount = _mount_of(fd)
-    if mount is not None and mount["fstype"] in _UNION_FSTYPES:
+    if mount is not None and _is_union_or_fuse(mount["fstype"]):
         raise KeyFileError(
-            "refusing to use a key file on a union filesystem (%s %s is on a %s mount): its files are written "
-            "to backing directories this check does not evaluate, and one may be inside a source checkout. Keep "
-            "the key on an ordinary filesystem." % (key_path, what, mount["fstype"])
+            "refusing to use a key file on a union or FUSE filesystem (%s %s is on a %s mount): its files are "
+            "stored where this check cannot follow, and may be visible inside a source checkout. Keep the key on "
+            "an ordinary filesystem." % (key_path, what, mount["fstype"])
         )
     if not _whole_filesystem(mount):
         raise KeyFileError(
@@ -350,6 +357,51 @@ def _alias_paths(fs_path, mine, mounts):
     return aliases
 
 
+def _fs_path_of(fd, mount):
+    """The path, inside its filesystem, of the object open as *fd* (Linux): its
+    /proc/self/fd link relative to its mount point, under the mount's root."""
+    try:
+        here = os.readlink("/proc/self/fd/%d" % fd)
+    except OSError:
+        raise _unreadable_mounts() from None
+    point = mount["mountpoint"].rstrip("/")
+    if not here.startswith("/") or (here != (point or "/") and not here.startswith(point + "/")):
+        raise _unreadable_mounts()
+    return (mount["root"].rstrip("/") + here[len(point):]) or "/"
+
+
+def _refuse_file_aliases(key_fd, key_path):
+    """Every other mount-visible name of the key FILE itself must lie outside every
+    checkout (review A02f): a bind mount of the file (its mount root is the file's
+    own path) adds a name without adding a hard link. Each such name that still
+    shows this file is judged by walking the directory that holds it. Linux only."""
+    if not _LINUX:
+        return
+    mine = _mount_of(key_fd)
+    fs_path = _fs_path_of(key_fd, mine)
+    st = os.fstat(key_fd)
+    for alias in _alias_paths(fs_path, mine, _mountinfo()):
+        parent, name = os.path.split(alias)
+        try:
+            parent_fd = os.open(parent or "/", _directory_flags())
+        except FileNotFoundError:
+            continue
+        except OSError as err:
+            raise KeyFileError(
+                "%s has another name, %s, that cannot be checked (%s); a location that is not proven is not "
+                "used" % (key_path, alias, err)
+            ) from None
+        try:
+            try:
+                alias_st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if (alias_st.st_dev, alias_st.st_ino) == (st.st_dev, st.st_ino):
+                _refuse_checkout(parent_fd, key_path, aliases=False)
+        finally:
+            os.close(parent_fd)
+
+
 def _refuse_aliases(dir_fd, key_path):
     """Every other mount-visible name of the key's directory must lie outside every
     checkout too (review A02e): the same filesystem mounted again whole, a tmpfs
@@ -359,15 +411,7 @@ def _refuse_aliases(dir_fd, key_path):
     if not _LINUX:
         return
     mine = _mount_of(dir_fd)
-    try:
-        here = os.readlink("/proc/self/fd/%d" % dir_fd)
-    except OSError:
-        raise _unreadable_mounts() from None
-    point = mine["mountpoint"].rstrip("/")
-    if not here.startswith("/") or (here != (point or "/") and not here.startswith(point + "/")):
-        raise _unreadable_mounts()
-    rel = here[len(point):]
-    fs_path = (mine["root"].rstrip("/") + rel) or "/"
+    fs_path = _fs_path_of(dir_fd, mine)
     st = os.fstat(dir_fd)
     for alias in _alias_paths(fs_path, mine, _mountinfo()):
         try:
@@ -644,15 +688,28 @@ def _scrub_and_remove(dir_fd, name, fd, key_path, cause):
     try:
         os.unlink(name, dir_fd=dir_fd)
     except OSError as err:
+        unlink_error = err
+    else:
+        unlink_error = None
+    if unlink_error is None:
         if emptied:
-            raise KeyFileError(
-                "%s was refused, and the new key file could not be removed (it was emptied first: no secret "
-                "remains in it): %s" % (key_path, err)
-            ) from cause
+            return
+        # The name is gone, but the bytes were never scrubbed: another hard link, or an
+        # open descriptor elsewhere, can still reach them (review A02f).
         raise KeyFileError(
-            "%s was refused, and the new key file could neither be emptied nor removed: THE SECRET MAY REMAIN "
-            "in it. Delete %s by hand: %s" % (key_path, key_path, err)
+            "%s was refused; its name was removed, but the new key file could not be emptied first: THE SECRET "
+            "MAY REMAIN through another name of the same file (%d other link(s) right now). Find and delete it "
+            "by hand." % (key_path, os.fstat(fd).st_nlink)
         ) from cause
+    if emptied:
+        raise KeyFileError(
+            "%s was refused, and the new key file could not be removed (it was emptied first: no secret "
+            "remains in it): %s" % (key_path, unlink_error)
+        ) from cause
+    raise KeyFileError(
+        "%s was refused, and the new key file could neither be emptied nor removed: THE SECRET MAY REMAIN "
+        "in it. Delete %s by hand: %s" % (key_path, key_path, unlink_error)
+    ) from cause
 
 
 def load_or_create_keys(path=None):
@@ -676,6 +733,13 @@ def load_or_create_keys(path=None):
     through a bind mount of a subtree, which would give it names this process
     cannot see. A checkout hidden above this process's root (a chroot or a
     mount namespace that shows only part of a tree) cannot be seen from here.
+    On Linux every other mount of the same filesystem that shows the key's
+    directory or the key file itself is walked too, and union and FUSE
+    filesystems are refused. Not covered: the same bytes exposed through a
+    different block device (two loop devices of one image, a multi-device btrfs
+    addressed by another device), which only a privileged user can arrange and
+    who can read the key anyway; and anything a same-user process does after
+    the last check (a later hard link or mount).
 
     Before anything is read or written, the directory the key file lives in is
     opened once and judged as that open directory, never by pathname. It, and
@@ -738,6 +802,7 @@ def load_or_create_keys(path=None):
             # check can stop: such a process can read the key anyway.
             _refuse_checkout(dir_fd, abs_path)
             _judge_key_file(key_fd, abs_path)
+            _refuse_file_aliases(key_fd, abs_path)
         except BaseException as err:
             if created is not None:
                 _scrub_and_remove(dir_fd, name, key_fd, abs_path, err)
