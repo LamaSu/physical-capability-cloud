@@ -76,9 +76,16 @@ export function endpointsEqual(
  * code-unit order (never locale collation), so the result is deterministic
  * regardless of input ordering or host ICU. Endpoints equal on all three
  * serialize identically (see `canonicalIdentityJson`). Lower priority value =
- * preferred.
+ * preferred. A priority that is not a finite number is refused (RangeError).
  */
 export function sortedEndpoints(endpoints: PeerEndpoint[]): PeerEndpoint[] {
+  // A non-finite priority has no place in a total order (NaN compares as "equal" and keeps its
+  // input order) or in a signed preimage (JSON writes it as null), so it is refused (review E1c).
+  for (const e of endpoints) {
+    if (typeof e.priority !== "number" || !Number.isFinite(e.priority)) {
+      throw new RangeError(`endpoint priority must be a finite number, got ${String(e.priority)}`);
+    }
+  }
   return [...endpoints].sort((a, b) => {
     if (a.priority !== b.priority) return a.priority - b.priority;
     return compareCodeUnits(a.url, b.url) || compareCodeUnits(a.transport, b.transport);

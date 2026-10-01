@@ -86,6 +86,18 @@ describe("identity", () => {
       expect(b).toBe(a);
     });
 
+    it("a non-finite priority is refused, never left to keep its input order (review E1c)", () => {
+      const a = { transport: "websocket-direct", url: "wss://a", priority: NaN } as PeerEndpoint;
+      const b = { transport: "websocket-relay", url: "wss://b", priority: NaN } as PeerEndpoint;
+      for (const bad of [NaN, Infinity, -Infinity]) {
+        const e = { transport: "websocket-direct", url: "wss://c", priority: bad } as PeerEndpoint;
+        expect(() => sortedEndpoints([e]), String(bad)).toThrow(/priority/);
+        expect(() => canonicalIdentityJson(createPeerIdentity({ ...base, endpoints: [e] })), String(bad)).toThrow(/priority/);
+      }
+      expect(() => canonicalIdentityJson(createPeerIdentity({ ...base, endpoints: [a, b] }))).toThrow(/priority/);
+      expect(() => canonicalIdentityJson(createPeerIdentity({ ...base, endpoints: [b, a] }))).toThrow(/priority/);
+    });
+
     it("lane-found: an endpoint's key order cannot change the preimage", () => {
       const e1 = { transport: "websocket-direct", url: "wss://a", priority: 1 } as PeerEndpoint;
       const e2 = { priority: 1, url: "wss://a", transport: "websocket-direct" } as PeerEndpoint;
