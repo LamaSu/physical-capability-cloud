@@ -289,3 +289,37 @@ describe("the ident.registered_key verifier never throws, even on a hostile thro
     expect(r.met).toBe(false);
   });
 });
+
+describe("every pin, snapshot and locator field is read once (E2c: F1 was still open)", () => {
+  const OTHER = "pcc.registry.other.v1";
+
+  it("a pin whose registryId getter names the kernel registry first and another registry later is refused", async () => {
+    // The snapshot is another registry's, with the same rows, so it hashes to the same snapshotHash.
+    const snapshot = snapshotOf(ENTRIES, { registryId: OTHER });
+    const pin = () => {
+      let reads = 0;
+      return { get registryId() { return ++reads <= 1 ? KERNEL_SIGNING_KEY_REGISTRY_ID : OTHER; }, snapshotHash: SNAP.snapshotHash };
+    };
+    expect(verifyRegisteredKey({ snapshot, pinned: pin(), kernelId: "kernel-a", signer: KEY_A })).toMatchObject({ ok: false });
+    const r = await makeRegisteredKeyVerifier().verify({ snapshot, kernelId: "kernel-a", signer: KEY_A }, pin(), { vocabVersion: 1 });
+    expect(r).toMatchObject({ met: false });
+  });
+
+  it("reads each field of the pin, the snapshot and its locator exactly once", () => {
+    const reads: Record<string, number> = {};
+    const counted = <T extends object>(name: string, target: T): T =>
+      new Proxy(target, {
+        get(t, p, r) {
+          if (typeof p === "string") reads[`${name}.${p}`] = (reads[`${name}.${p}`] ?? 0) + 1;
+          return Reflect.get(t, p, r);
+        },
+      });
+    const locator = counted("locator", { ...(SNAP.entriesLocator as object) });
+    const snapshot = counted("snapshot", { ...SNAP, entriesLocator: locator } as RegistrySnapshot);
+    const pinned = counted("pinned", { ...PINNED });
+    expect(verifyRegisteredKey({ snapshot, pinned, kernelId: "kernel-a", signer: KEY_A })).toEqual({ ok: true });
+    for (const field of ["pinned.registryId", "pinned.snapshotHash", "snapshot.registryId", "snapshot.snapshotHash", "snapshot.entriesLocator", "locator.kind", "locator.entries"]) {
+      expect(reads[field], field).toBe(1);
+    }
+  });
+});

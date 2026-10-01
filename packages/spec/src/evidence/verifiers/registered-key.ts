@@ -126,14 +126,25 @@ export function verifyRegisteredKey(input: {
   signer: unknown;
 }): RegisteredKeyResult {
   try {
+    // Every field of the input, the pin, the snapshot and its locator is read exactly once, here,
+    // into inert locals; nothing below reads the untrusted objects again (E2c: a registryId getter
+    // read twice could pass the pin check with one registry and the snapshot check with another).
     const { snapshot, pinned, kernelId, signer } = input;
-    if (pinned.registryId !== KERNEL_SIGNING_KEY_REGISTRY_ID) {
-      return { ok: false, reason: `pinned registry ${JSON.stringify(pinned.registryId)} is not the kernel signing-key registry` };
+    const pinnedRegistryId: unknown = pinned.registryId;
+    const pinnedHash: unknown = pinned.snapshotHash;
+    const snapshotRegistryId: unknown = snapshot.registryId;
+    const snapshotHash: unknown = snapshot.snapshotHash;
+    const locator: unknown = snapshot.entriesLocator;
+    const locatorKind: unknown = (locator as { kind?: unknown }).kind;
+    const locatorEntries: unknown = (locator as { entries?: unknown }).entries;
+    if (pinnedRegistryId !== KERNEL_SIGNING_KEY_REGISTRY_ID) {
+      return { ok: false, reason: `pinned registry ${JSON.stringify(pinnedRegistryId)} is not the kernel signing-key registry` };
     }
-    if (snapshot.registryId !== pinned.registryId) return { ok: false, reason: "snapshot is from another registry" };
-    if (snapshot.entriesLocator.kind !== "inline") return { ok: false, reason: "snapshot entries must be inline to verify" };
+    if (snapshotRegistryId !== pinnedRegistryId) return { ok: false, reason: "snapshot is from another registry" };
+    if (typeof pinnedHash !== "string" || typeof snapshotHash !== "string") return { ok: false, reason: "snapshotHash must be a string" };
+    if (locatorKind !== "inline") return { ok: false, reason: "snapshot entries must be inline to verify" };
     // From here on only the rows are read, never the snapshot's entry objects again.
-    const rows = readRowsOnce(snapshot.entriesLocator.entries);
+    const rows = readRowsOnce(locatorEntries);
     if (rows === null) return { ok: false, reason: "snapshot entries must be an array" };
     for (const e of rows) {
       const problem = entryProblem(e);
@@ -145,7 +156,7 @@ export function verifyRegisteredKey(input: {
     } catch (err) {
       return { ok: false, reason: `malformed registry: ${err instanceof Error ? err.message : String(err)}` };
     }
-    if (recomputed !== snapshot.snapshotHash.toLowerCase() || recomputed !== pinned.snapshotHash.toLowerCase()) {
+    if (recomputed !== snapshotHash.toLowerCase() || recomputed !== pinnedHash.toLowerCase()) {
       return { ok: false, reason: "the snapshot does not hash to the pinned snapshotHash" };
     }
     const row = rows.find((e) => e.key === kernelId);
