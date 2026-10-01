@@ -34,6 +34,7 @@ import type {
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { createJobFromSession, isMockSettlement } from "./paid-job-flow.js";
+import { checkKernelAcceptsJobs, replyKernelNotAccepting } from "../services/kernel-emergency-stop.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
   getCapabilityDescriptor,
@@ -633,6 +634,14 @@ export async function negotiationRoutes(app: FastifyInstance) {
           return reply.status(410).send({ error: "Quote expired — re-quote before commit" });
         }
 
+        // A kernel in emergency stop takes no new job, including from a session
+        // made before the stop: 409 kernel_emergency_stopped (503 policy_unavailable
+        // when its policy cannot be read). Asked BEFORE the session is marked
+        // committed, so a refusal leaves it 'reviewing' and it can be committed
+        // once the kernel is resumed. createJobFromSession asks again, first.
+        const accepts = checkKernelAcceptsJobs(row.kernelId);
+        if (!accepts.ok) return replyKernelNotAccepting(reply, accepts);
+
         const jobId = `job-${crypto.randomUUID().slice(0, 12)}`;
         const cwmId = `cwm-${crypto.randomUUID().slice(0, 12)}`;
         const now = new Date().toISOString();
@@ -815,6 +824,13 @@ export async function negotiationRoutes(app: FastifyInstance) {
         }
 
         // ── 3. Safe to (re-)mint. Mirror /commit: mark committed, then wire. ─────
+        // The re-mint creates a job, so a kernel in emergency stop is refused here
+        // (409 kernel_emergency_stopped; 503 policy_unavailable when its policy
+        // cannot be read), before the session is marked committed: it stays
+        // 'settlement_failed' and can be retried once the kernel is resumed.
+        const accepts = checkKernelAcceptsJobs(row.kernelId);
+        if (!accepts.ok) return replyKernelNotAccepting(reply, accepts);
+
         const now = new Date().toISOString();
         const jobId = row.jobId ?? `job-${crypto.randomUUID().slice(0, 12)}`;
         const cwmId = row.cwmId ?? `cwm-${crypto.randomUUID().slice(0, 12)}`;

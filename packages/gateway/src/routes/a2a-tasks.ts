@@ -53,6 +53,10 @@ import type {
 import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import { getEventBus } from "../services/event-bus.js";
 import { createJobFromSession } from "./paid-job-flow.js";
+import {
+  KernelNotAcceptingJobsError,
+  assertKernelAcceptsJobs,
+} from "../services/kernel-emergency-stop.js";
 import { assertSessionLive } from "./session-liveness.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
@@ -434,6 +438,12 @@ export async function commitPccSession(
   if (quote.validUntil && new Date(quote.validUntil) < new Date()) {
     throw new Error("Quote expired — re-quote before commit");
   }
+  // A kernel in emergency stop takes no new job, including from a session quoted
+  // before the stop: throws a KernelNotAcceptingJobsError (kernel_emergency_stopped,
+  // or policy_unavailable when its policy cannot be read). Asked BEFORE the
+  // session is marked committed, so a refusal leaves it 'quoted'. The error is
+  // not swallowed by the best-effort job creation below, which asks again.
+  assertKernelAcceptsJobs(row.kernelId);
   const stepId = `step-${crypto.randomUUID().slice(0, 8)}`;
   const contractTerms = {
     milestones: [
@@ -1083,6 +1093,11 @@ async function dispatchTasksSend(
         return rpcError(rpcId, -32602, `Unknown skill: ${skill}`, { skill });
     }
   } catch (err) {
+    if (err instanceof KernelNotAcceptingJobsError) {
+      // The kernel is in emergency stop, or its policy cannot be read: say which,
+      // with the code and the HTTP status the REST routes answer.
+      return rpcError(rpcId, -32603, err.message, { skill, error: err.code, status: err.status });
+    }
     return rpcError(
       rpcId,
       -32603,

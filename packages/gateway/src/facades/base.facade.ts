@@ -81,6 +81,15 @@ export abstract class BaseFacade {
             if (error.name === "ForbiddenError") {
               return err("FORBIDDEN", message, 403) as Result<T>;
             }
+            if (error.name === "KernelNotAcceptingJobsError") {
+              // services/kernel-emergency-stop.ts: the kernel is in emergency stop
+              // (409 kernel_emergency_stopped) or its policy cannot be read (503
+              // policy_unavailable). The error carries its own code and status.
+              const { code, status } = error as Error & { code?: string; status?: number };
+              const errorCode = code ?? "kernel_emergency_stopped";
+              span.setAttribute("facade.error_code", errorCode);
+              return err(errorCode, message, status ?? 409) as Result<T>;
+            }
             if (error.name === "ConflictError") {
               return err("SIGNER_ALREADY_BOUND", message, 409) as Result<T>;
             }

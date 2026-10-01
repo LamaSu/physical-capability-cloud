@@ -40,6 +40,7 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { assertKernelAcceptsJobs } from "../services/kernel-emergency-stop.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
@@ -243,6 +244,19 @@ function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
   }
 }
 
+/**
+ * Create the escrow, the job and its execution scope for a committed session.
+ *
+ * EMERGENCY STOP. This is the one place every paid path creates its job (the
+ * negotiation /commit and /retry-settlement, the fast-track flow, the A2A
+ * commit), so a kernel in emergency stop is refused here, FIRST: before any
+ * escrow is created or any row is written. It throws a
+ * KernelNotAcceptingJobsError (409 kernel_emergency_stopped, or 503
+ * policy_unavailable when the policy cannot be read; no policy row means not
+ * stopped). The callers that commit a session ask earlier still, before they
+ * mark it committed, so the session is left as it was (see
+ * services/kernel-emergency-stop.ts).
+ */
 export async function createJobFromSession(
   session: typeof negotiationSessions.$inferSelect,
 ): Promise<{
@@ -252,6 +266,7 @@ export async function createJobFromSession(
   escrowAddress: string;
   escrowStatus: string;
 }> {
+  assertKernelAcceptsJobs(session.kernelId);
   const repos = getRepos();
   const { db } = getStore();
   const now = new Date().toISOString();

@@ -14,6 +14,7 @@ import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { checkKernelAcceptsJobs, replyKernelNotAccepting } from "../services/kernel-emergency-stop.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
@@ -801,6 +802,18 @@ export async function setupRoutes(app: FastifyInstance) {
     const stepId = `setup-test-${Date.now()}`;
     const resolvedKernelId = kernelId ?? "kernel_dev_001";
     const startTime = Date.now();
+
+    // A kernel in emergency stop takes no job, test jobs included: 409
+    // kernel_emergency_stopped (503 policy_unavailable when its policy cannot be
+    // read), before any row is written. Two kernels are involved: the one the job
+    // row is recorded under, and the gateway's own kernel service, which is what
+    // actually runs it. Both are asked.
+    const localKernelId = (svc as unknown as { config?: { kernelId?: string } }).config?.kernelId;
+    for (const target of new Set([resolvedKernelId, localKernelId])) {
+      if (!target) continue;
+      const accepts = checkKernelAcceptsJobs(target);
+      if (!accepts.ok) return replyKernelNotAccepting(reply, accepts);
+    }
 
     // Insert a job record into the DB so status polling works
     try {

@@ -31,6 +31,7 @@ import {
   isAssuranceTier,
   type AssuranceClaimKernel,
 } from "../services/assurance-ceiling.js";
+import { assertKernelAcceptsJobs } from "../services/kernel-emergency-stop.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -225,6 +226,11 @@ export class JobFacade extends BaseFacade {
    *     `assurance_tier_not_authorized`. A kernel with no row is served at 0.
    *   - tier 0 needs no authorization, so external kernels with no row keep
    *     working at tier 0.
+   *
+   * EMERGENCY STOP. A kernel whose stored policy has `emergencyStop` takes no
+   * new job: 409 `kernel_emergency_stopped`, before the job row is written. A
+   * policy that cannot be read is 503 `policy_unavailable`. No policy row means
+   * not stopped.
    */
   async submit(
     body: SubmitJobInput,
@@ -263,6 +269,13 @@ export class JobFacade extends BaseFacade {
           );
         }
       }
+
+      // A kernel in emergency stop takes no new job: 409 kernel_emergency_stopped,
+      // or 503 policy_unavailable when its policy cannot be read (never "not
+      // stopped"). After the input checks above, so bad input is still a 400, and
+      // before the first write. The one rule is services/kernel-emergency-stop.ts;
+      // POST /api/jobs/submit and the composition executor both come through here.
+      assertKernelAcceptsJobs(kernelId);
 
       const jobId = body.jobId ?? `job-${uuidv4()}`;
 
