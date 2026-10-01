@@ -10,6 +10,13 @@
  *
  * Not a security boundary on its own — it reduces accidental leakage; the real
  * control is that the agent should never send secrets. Unit-tested in redaction.test.ts.
+ *
+ * Also here: scrubbing for DIAGNOSTIC text that leaves the gateway in a response (an adapter's
+ * exception message, a status line). redactUrlCredentials drops the userinfo, query and fragment
+ * of every URL in the text, because an error that quotes the URL a device was configured with
+ * quotes its credentials too (Node's fetch does: "Request cannot be constructed from a URL that
+ * includes credentials: http://user:pass@host/"). redactDiagnostic adds redactSecrets. Neither is
+ * a substitute for not putting a value in the message in the first place (N71).
  */
 
 const REDACTED = "[redacted]";
@@ -46,4 +53,27 @@ export function redactSecrets(s: string): string {
 /** redactSecrets that passes null through (for optional fields). */
 export function redactOrNull(s: string | null): string | null {
   return s === null ? null : redactSecrets(s);
+}
+
+// scheme://[userinfo@]authority-and-path[?query][#fragment], per URL grammar: the authority ends at the
+// first "/", "?" or "#" (or whitespace/quote), and its userinfo is everything before the LAST "@" in it.
+// Userinfo, query and fragment are dropped; the location (host, port, path) is kept.
+const URL_WITH_SCHEME =
+  /\b([a-z][a-z0-9+.-]*:\/\/)(?:[^\s/?#'"<>`\\]*@)?([^\s?#'"<>`]*)(?:\?[^\s#'"<>`]*)?(?:#[^\s'"<>`]*)?/gi;
+
+/**
+ * Drop the credentials from every URL in `s`: userinfo (`user:pass@`), query string and fragment, which
+ * routinely carry tokens (`?apikey=...`). The scheme, host, port and path stay, so the text is still a
+ * usable diagnostic. Idempotent; text with no URL in it is returned unchanged.
+ */
+export function redactUrlCredentials(s: string): string {
+  return s.replace(URL_WITH_SCHEME, "$1$2");
+}
+
+/**
+ * Scrub free text that is about to leave the gateway in a response (an adapter's exception message):
+ * URL credentials first, then secret-shaped substrings (redactSecrets).
+ */
+export function redactDiagnostic(s: string): string {
+  return redactSecrets(redactUrlCredentials(s));
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { redactSecrets, redactOrNull } from "../redaction.js";
+import { redactSecrets, redactOrNull, redactUrlCredentials, redactDiagnostic } from "../redaction.js";
 
 /**
  * Secret scrubbing for the public feedback sink (Phase 2). Conservative: redacts
@@ -81,5 +81,74 @@ describe("redactSecrets", () => {
   it("redactOrNull passes null through", () => {
     expect(redactOrNull(null)).toBeNull();
     expect(redactOrNull("pcc_live_XXXXXXXX")).toBe("pcc_live_redacted");
+  });
+});
+
+/**
+ * Diagnostic text that leaves the gateway in a response (an adapter exception message, a status
+ * env value). An error that quotes the URL a device was configured with quotes its credentials
+ * too, so URL userinfo, query and fragment are dropped and the location is kept (N71).
+ */
+describe("redactUrlCredentials", () => {
+  it("drops the userinfo and keeps scheme, host, port and path", () => {
+    expect(redactUrlCredentials("connect failed for http://u:N71-SENTINEL@printer.invalid:5000/api/printer")).toBe(
+      "connect failed for http://printer.invalid:5000/api/printer",
+    );
+  });
+
+  it("drops the query string and the fragment, which carry tokens", () => {
+    expect(redactUrlCredentials("GET https://h.invalid/v1/status?apikey=N71-SENTINEL&x=1#frag failed")).toBe(
+      "GET https://h.invalid/v1/status failed",
+    );
+  });
+
+  it("takes everything before the LAST @ of the authority as userinfo (a password with an @)", () => {
+    expect(redactUrlCredentials("http://u:p@ss@host.invalid/path")).toBe("http://host.invalid/path");
+    expect(redactUrlCredentials("http://user%40mail:pw@host.invalid/")).toBe("http://host.invalid/");
+  });
+
+  it("knows other schemes: ipp, opc.tcp, ws, uppercase", () => {
+    expect(redactUrlCredentials("ipp://op:pw@printer.local:631/ipp/print.")).toBe("ipp://printer.local:631/ipp/print.");
+    expect(redactUrlCredentials("opc.tcp://op:pw@plc.local:4840")).toBe("opc.tcp://plc.local:4840");
+    expect(redactUrlCredentials("HTTP://U:P@HOST/X")).toBe("HTTP://HOST/X");
+  });
+
+  it("scrubs every URL in the text, including one inside brackets or followed by punctuation", () => {
+    expect(redactUrlCredentials("(see http://a:b@one.invalid:80/x), then https://c:d@two.invalid/y?k=v done")).toBe(
+      "(see http://one.invalid:80/x), then https://two.invalid/y done",
+    );
+  });
+
+  it("does not take an @ in the path for userinfo", () => {
+    expect(redactUrlCredentials("https://medium.invalid/@user and ws://h.invalid/a@b")).toBe(
+      "https://medium.invalid/@user and ws://h.invalid/a@b",
+    );
+  });
+
+  it("leaves a URL with no credentials, and text with no URL, untouched", () => {
+    expect(redactUrlCredentials("http://host.invalid:5000/api/job")).toBe("http://host.invalid:5000/api/job");
+    expect(redactUrlCredentials("file:///etc/hosts")).toBe("file:///etc/hosts");
+    const prose = "connect ECONNREFUSED 10.0.0.5:5000 for ops@example.com";
+    expect(redactUrlCredentials(prose)).toBe(prose);
+  });
+
+  it("is idempotent", () => {
+    const once = redactUrlCredentials("x http://u:p@h.invalid/p?q=1 y");
+    expect(redactUrlCredentials(once)).toBe(once);
+  });
+});
+
+describe("redactDiagnostic", () => {
+  it("drops URL credentials AND secret-shaped substrings", () => {
+    const out = redactDiagnostic("401 from http://u:N71-SENTINEL@h.invalid/x with Authorization: Bearer abcDEF123456789xyz");
+    expect(out).not.toContain("N71-SENTINEL");
+    expect(out).not.toContain("abcDEF123456789xyz");
+    expect(out).toContain("http://h.invalid/x");
+    expect(out).toContain("Bearer [redacted]");
+  });
+
+  it("leaves an ordinary status line alone", () => {
+    expect(redactDiagnostic("idle")).toBe("idle");
+    expect(redactDiagnostic("device_not_found")).toBe("device_not_found");
   });
 });

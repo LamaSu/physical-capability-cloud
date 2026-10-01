@@ -16,6 +16,7 @@ import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { redactUrlCredentials } from "../redaction.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 import { z } from "zod";
 import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
@@ -53,8 +54,9 @@ const ENV_VAR_CHECKS = [
   { name: "PORT", category: "gateway" },
   { name: "NODE_ENV", category: "gateway" },
   { name: "PCC_DB_PATH", category: "database" },
-  // Kernel Runtime
-  { name: "KERNEL_CONFIG", category: "kernel" },
+  // Kernel Runtime. KERNEL_CONFIG is every device's connection config: API keys and
+  // URLs with embedded credentials. Presence only (N71).
+  { name: "KERNEL_CONFIG", category: "kernel", sensitive: true },
   { name: "KERNEL_CONFIG_FILE", category: "kernel" },
   { name: "KERNEL_ID", category: "kernel" },
   // Evidence Storage
@@ -167,6 +169,11 @@ function buildDeviceConfig(desc: DeviceDescription, kernelId: string, index: num
   return { id, type: desc.type, adapterType: desc.adapterType, config: cfg };
 }
 
+/**
+ * Adapter checks. A message names the device and the field; it never carries the field's VALUE.
+ * A url, host, endpoint or uri can hold credentials (user:pass@host, ?token=...) and, in the
+ * server's own KERNEL_CONFIG, says where its devices are. N71.
+ */
 function validateAdapterConfig(
   device: DeviceConfig,
 ): Array<{ name: string; status: "pass" | "warn" | "fail"; message: string }> {
@@ -185,7 +192,7 @@ function validateAdapterConfig(
         checks.push({
           name: `device:${device.id}:url`,
           status: "pass",
-          message: `OctoPrint URL set: ${String(cfg.url)}`,
+          message: `OctoPrint adapter "${device.id}": url is set`,
         });
       }
       if (!cfg.apiKey) {
@@ -202,7 +209,7 @@ function validateAdapterConfig(
         name: `device:${device.id}:host`,
         status: cfg.host ? "pass" : "warn",
         message: cfg.host
-          ? `Modbus host: ${String(cfg.host)}`
+          ? `Modbus adapter "${device.id}": host is set`
           : `Modbus adapter "${device.id}" has no host set (will default to localhost)`,
       });
       break;
@@ -212,7 +219,7 @@ function validateAdapterConfig(
         name: `device:${device.id}:endpoint`,
         status: cfg.endpoint ? "pass" : "warn",
         message: cfg.endpoint
-          ? `OPC-UA endpoint: ${String(cfg.endpoint)}`
+          ? `OPC-UA adapter "${device.id}": endpoint is set`
           : `OPC-UA adapter "${device.id}" has no endpoint set`,
       });
       break;
@@ -222,7 +229,7 @@ function validateAdapterConfig(
         name: `device:${device.id}:url`,
         status: cfg.url ? "pass" : "warn",
         message: cfg.url
-          ? `SiLA URL: ${String(cfg.url)}`
+          ? `SiLA adapter "${device.id}": url is set`
           : `SiLA adapter "${device.id}" has no url set (mock mode)`,
       });
       break;
@@ -239,13 +246,13 @@ function validateAdapterConfig(
         checks.push({
           name: `device:${device.id}:uri`,
           status: "fail",
-          message: `IPP adapter "${device.id}" uri must start with ipp:// or ipps://: ${uri}`,
+          message: `IPP adapter "${device.id}" uri must start with ipp:// or ipps://`,
         });
       } else {
         checks.push({
           name: `device:${device.id}:uri`,
           status: "pass",
-          message: `IPP URI: ${uri}`,
+          message: `IPP adapter "${device.id}": uri is set`,
         });
       }
       break;
@@ -278,8 +285,9 @@ export async function setupRoutes(app: FastifyInstance) {
         name: v.name,
         category: v.category,
         set: Boolean(value),
-        // Don't expose sensitive values
-        value: value && !v.sensitive ? value : undefined,
+        // Don't expose sensitive values. The rest are shown as they are, except that a URL
+        // never carries its userinfo or query out (X402_FACILITATOR_URL could).
+        value: value && !v.sensitive ? redactUrlCredentials(value) : undefined,
       };
     });
 
@@ -442,14 +450,15 @@ export async function setupRoutes(app: FastifyInstance) {
           status: "pass",
           message: "Config JSON is valid",
         });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+      } catch {
+        // Not the parser's message: V8's JSON.parse error quotes the text it choked on, and
+        // this can be the server's own KERNEL_CONFIG (N71).
         checks.push({
           name: "config_parseable",
           status: "fail",
-          message: `Config JSON parse error: ${msg}`,
+          message: "Config JSON could not be parsed",
         });
-        errors.push(`JSON parse error: ${msg}`);
+        errors.push("Config JSON could not be parsed");
         return { valid: false, checks, errors, warnings };
       }
     }
@@ -497,7 +506,7 @@ export async function setupRoutes(app: FastifyInstance) {
           checks.push({
             name: `device:${device.id}:type`,
             status: "fail",
-            message: `Device "${device.id}" has invalid type "${device.type}"`,
+            message: `Device "${device.id}" has an invalid type (valid: ${VALID_DEVICE_ROLES.join(", ")})`,
           });
           errors.push(`Device ${device.id}: invalid type`);
           continue;
@@ -506,7 +515,7 @@ export async function setupRoutes(app: FastifyInstance) {
           checks.push({
             name: `device:${device.id}:adapterType`,
             status: "fail",
-            message: `Device "${device.id}" has invalid adapterType "${device.adapterType}"`,
+            message: `Device "${device.id}" has an invalid adapterType (valid: ${VALID_ADAPTER_TYPES.join(", ")})`,
           });
           errors.push(`Device ${device.id}: invalid adapterType`);
           continue;
