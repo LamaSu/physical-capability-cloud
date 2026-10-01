@@ -859,3 +859,96 @@ class TestA02cTheLastCheckAndTheWalksEnd:
         left = keys / "keys.json"
         assert not left.exists() or left.stat().st_size == 0, "a written secret was left inside the checkout"
         assert "could not be removed" in str(refused.value)
+
+
+@needs_nacl
+class TestA02dMountsAndScrubbing:
+    """A02d: a "/" alias below a checkout does not end the walk; a bind-mounted subtree is refused; scrubbing is honest."""
+
+    def test_a_directory_that_looks_like_the_root_but_is_another_mount_does_not_end_the_walk(self, monkeypatch, tmp_path):
+        # "/" bind-mounted at repo/rootalias has the root's device and inode, on another mount.
+        held, _ = _checkout_holding(tmp_path)
+        alias = _private_dir(held / "rootalias")
+        keys = _private_dir(alias / "keys")
+        root_st = os.stat("/")
+        alias_id = (os.stat(alias).st_dev, os.stat(alias).st_ino)
+        real_fstat = os.fstat
+
+        def fstat(fd):
+            st = real_fstat(fd)
+            if (st.st_dev, st.st_ino) != alias_id:
+                return st
+            fields = {k: getattr(st, k) for k in ("st_mode", "st_uid", "st_gid", "st_nlink", "st_size")}
+            return __import__("types").SimpleNamespace(st_dev=root_st.st_dev, st_ino=root_st.st_ino, **fields)
+
+        monkeypatch.setattr(crypto_module.os, "fstat", fstat)
+        with pytest.raises(crypto_module.KeyFileError):
+            load_or_create_keys(str(keys / "keys.json"))
+        assert os.listdir(keys) == [], "a new secret was created inside the checkout"
+
+    def test_a_key_reached_through_a_bind_mounted_subtree_is_refused(self, monkeypatch, tmp_path):
+        keys = _private_dir(tmp_path / "outside" / "keys")
+        keys_id = (os.stat(keys).st_dev, os.stat(keys).st_ino)
+        real = crypto_module._mount_of
+
+        def mount_of(fd):
+            m = real(fd)
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) == keys_id:
+                return {"id": "bind-1", "root": "/home/dev/repo/keys", "fstype": "ext4", "super": "rw"}
+            return m
+
+        monkeypatch.setattr(crypto_module, "_mount_of", mount_of)
+        with pytest.raises(crypto_module.KeyFileError, match="bind mount of a subtree"):
+            load_or_create_keys(str(keys / "keys.json"))
+        assert os.listdir(keys) == []
+
+    def test_a_btrfs_subvolume_mounted_as_such_is_a_whole_filesystem(self):
+        assert crypto_module._whole_filesystem({"id": "1", "root": "/@home", "fstype": "btrfs", "super": "rw,subvol=/@home"})
+        assert not crypto_module._whole_filesystem({"id": "1", "root": "/@home/dev/repo", "fstype": "btrfs", "super": "rw,subvol=/@home"})
+        assert not crypto_module._whole_filesystem({"id": "1", "root": "/srv/repo/keys", "fstype": "ext4", "super": "rw"})
+        assert crypto_module._whole_filesystem({"id": "1", "root": "/", "fstype": "ext4", "super": "rw"})
+        assert crypto_module._unescape_mountinfo("/a" + chr(92) + "040b") == "/a b"
+
+    def test_an_unreadable_proc_refuses_on_linux(self, monkeypatch, tmp_path):
+        if not crypto_module._LINUX:
+            pytest.fail("this check is Linux-only, and CI runs it on Linux")
+        keys = _private_dir(tmp_path / "home" / "keys")
+        real_open = open
+
+        def guarded_open(path, *args, **kwargs):
+            if str(path).startswith("/proc/self/"):
+                raise PermissionError("no /proc for the test")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", guarded_open)
+        with pytest.raises(crypto_module.KeyFileError, match="cannot read this process's mounts"):
+            load_or_create_keys(str(keys / "keys.json"))
+
+    @pytest.mark.parametrize("pwrite_fails", [False, True], ids=["overwritten", "nothing-works"])
+    def test_scrubbing_is_honest_when_truncation_fails(self, monkeypatch, tmp_path, pwrite_fails):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        real = crypto_module._judge_key_file
+
+        def judge(fd, key_path):
+            real(fd, key_path)
+            if not (tmp_path / "home" / ".git").exists():
+                (tmp_path / "home" / ".git").mkdir()
+
+        def refuse(*args, **kwargs):
+            raise PermissionError("refused for the test")
+
+        monkeypatch.setattr(crypto_module, "_judge_key_file", judge)
+        monkeypatch.setattr(crypto_module.os, "unlink", refuse)
+        monkeypatch.setattr(crypto_module.os, "ftruncate", refuse)
+        if pwrite_fails:
+            monkeypatch.setattr(crypto_module.os, "pwrite", refuse)
+        with pytest.raises(crypto_module.KeyFileError) as refused:
+            load_or_create_keys(str(keys / "keys.json"))
+        left = (keys / "keys.json").read_bytes()
+        if pwrite_fails:
+            assert "SECRET MAY REMAIN" in str(refused.value)
+            assert "emptied first" not in str(refused.value)
+        else:
+            assert left.strip(b"\0") == b"", "the secret was not overwritten"
+            assert "emptied first" in str(refused.value)

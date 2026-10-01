@@ -114,3 +114,48 @@ jobs:
             exit 1
           fi
           exit "$rc"
+
+      - name: Bind-mount aliases are refused or walked through (review A02d)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          # (1) a checkout's subtree bind-mounted onto an outside directory: the key would
+          #     have a second name inside the checkout, so it must be refused;
+          # (2) "/" bind-mounted below a checkout: that alias has the root's device and
+          #     inode on another mount, so the walk must go on and find the .git above it.
+          T=$(mktemp -d)
+          mkdir -p "$T/repo/.git" "$T/repo/keys" "$T/outside"
+          chmod 700 "$T/repo/keys" "$T/outside"
+          sudo -n mount --bind "$T/repo/keys" "$T/outside"
+          H="$HOME/pcc-node-a02d-$$"
+          mkdir -p "$H/keys"
+          chmod 700 "$H/keys"
+          mkdir -p "$T/repo/rootalias"
+          sudo -n mount --bind / "$T/repo/rootalias"
+          set +e
+          PYTHONPATH=. python - "$T/outside/keys.json" "$T/repo/rootalias$H/keys/keys.json" <<'PY'
+          import sys
+          from pcc_node.crypto import KeyFileError, load_or_create_keys
+          failed = False
+          for path in sys.argv[1:]:
+              try:
+                  load_or_create_keys(path)
+              except KeyFileError as err:
+                  print("ok: refused %s: %s" % (path, err))
+                  continue
+              print("ACCEPTED %s" % path)
+              failed = True
+          sys.exit(1 if failed else 0)
+          PY
+          rc=$?
+          set -e
+          left_bind=$(ls -A "$T/repo/keys")
+          left_alias=$(ls -A "$H/keys")
+          sudo -n umount "$T/outside"
+          sudo -n umount "$T/repo/rootalias"
+          rm -rf "$H"
+          if [ -n "$left_bind$left_alias" ]; then
+            echo "a key file was left behind: [$left_bind] [$left_alias]"
+            exit 1
+          fi
+          exit "$rc"

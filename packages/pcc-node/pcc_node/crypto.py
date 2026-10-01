@@ -14,6 +14,7 @@ import os
 import logging
 import re
 import stat
+import sys
 
 log = logging.getLogger("pcc-node.crypto")
 
@@ -236,6 +237,62 @@ def _require_descriptor_support():
         )
 
 
+_LINUX = sys.platform.startswith("linux")
+
+
+def _unescape_mountinfo(field):
+    """mountinfo writes a space, tab, newline or backslash in a path as a 3-digit octal escape."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def _mount_of(fd):
+    """The mount an open descriptor lives on, as ``{"id", "root", "fstype", "super"}``
+    (Linux: /proc/self/fdinfo gives its mount id, /proc/self/mountinfo the rest).
+    ``root`` is the path inside the filesystem that the mount shows: ``/`` for
+    a whole filesystem, a subtree for a bind mount of one. None off Linux. On
+    Linux an unreadable /proc refuses: a location that is not proven is not used."""
+    if not _LINUX:
+        return None
+    try:
+        with open("/proc/self/fdinfo/%d" % fd, encoding="ascii") as f:
+            mnt_id = next(line.split()[1] for line in f if line.startswith("mnt_id:"))
+        with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as f:
+            for line in f:
+                fields = line.split()
+                if fields and fields[0] == mnt_id:
+                    sep = fields.index("-")
+                    return {"id": mnt_id, "root": _unescape_mountinfo(fields[3]), "fstype": fields[sep + 1],
+                            "super": fields[sep + 3] if len(fields) > sep + 3 else ""}
+    except (OSError, StopIteration, ValueError, IndexError):
+        pass
+    raise KeyFileError(
+        "cannot read this process's mounts from /proc, so the key's location cannot be proven to be "
+        "outside every source checkout; a location that is not proven is not used"
+    )
+
+
+def _whole_filesystem(mount):
+    """Does the mount show its whole filesystem, so that it gives its files no
+    other names? A bind mount of a subtree does not: the same files have names
+    under the subtree's own directory, which this process may not be able to
+    see. A btrfs subvolume mounted as such (root equal to its ``subvol=``
+    option) is a whole filesystem in this sense."""
+    if mount is None or mount["root"] == "/":
+        return True
+    return mount["fstype"] == "btrfs" and ("subvol=" + mount["root"]) in mount["super"].split(",")
+
+
+def _refuse_bind_mounted(fd, key_path, what):
+    mount = _mount_of(fd)
+    if not _whole_filesystem(mount):
+        raise KeyFileError(
+            "refusing to use a key file reached through a bind mount of a subtree (%s %s is on a mount of "
+            "%r): the same file has other names this process cannot check, and one may be inside a source "
+            "checkout. Keep the key on a filesystem mounted whole." % (key_path, what, mount["root"])
+        )
+    return mount
+
+
 def _directory_flags():
     return os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
 
@@ -265,9 +322,12 @@ def _refuse_checkout(dir_fd, key_path):
         root_fd = os.open("/", flags)
         try:
             root = os.fstat(root_fd)
+            root_mount = _mount_of(root_fd)
         finally:
             os.close(root_fd)
-        root_id = (root.st_dev, root.st_ino)
+        # The root is this process's "/" AND its mount: "/" bind-mounted somewhere below a
+        # checkout has the same device and inode, on another mount (review A02d).
+        root_id = (root.st_dev, root.st_ino, root_mount["id"] if root_mount else None)
         for level in range(_MAX_ANCESTORS):
             try:
                 os.stat(".git", dir_fd=current, follow_symlinks=False)
@@ -282,7 +342,8 @@ def _refuse_checkout(dir_fd, key_path):
                     "every repository." % (key_path, where, KEY_PATH_ENV)
                 )
             here = os.fstat(current)
-            if (here.st_dev, here.st_ino) == root_id:
+            mount = _refuse_bind_mounted(current, key_path, "has a directory that")
+            if (here.st_dev, here.st_ino, mount["id"] if mount else None) == root_id:
                 return  # this level IS the process's root directory: every level has been looked at
             above = os.open("..", flags, dir_fd=current)
             if current != dir_fd:
@@ -369,6 +430,9 @@ def _judge_key_file(fd, key_path):
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
         raise KeyFileError(key_path + " is not a regular file")
+    # st_nlink counts hard links only: a bind mount of the file, or of a directory
+    # above it, adds a name without adding a link (review A02d).
+    _refuse_bind_mounted(fd, key_path, "itself")
     if st.st_uid != os.getuid():
         raise KeyFileError(key_path + " is not owned by this user")
     if st.st_nlink != 1:
@@ -455,17 +519,33 @@ def _scrub_and_remove(dir_fd, name, fd, key_path, cause):
     first (so no secret survives even if removal fails), then remove its name.
     The descriptor is closed by the caller. A failed removal is reported, never
     treated as success."""
+    emptied = False
     try:
         os.ftruncate(fd, 0)
         os.fsync(fd)
+        emptied = True
     except OSError:
-        pass
+        # Truncation refused: overwrite every byte with zeros through the same descriptor instead.
+        try:
+            size = os.fstat(fd).st_size
+            written = 0
+            while written < size:
+                written += os.pwrite(fd, b"\0" * min(65536, size - written), written)
+            os.fsync(fd)
+            emptied = True
+        except OSError:
+            emptied = False
     try:
         os.unlink(name, dir_fd=dir_fd)
     except OSError as err:
+        if emptied:
+            raise KeyFileError(
+                "%s was refused, and the new key file could not be removed (it was emptied first: no secret "
+                "remains in it): %s" % (key_path, err)
+            ) from cause
         raise KeyFileError(
-            "%s was refused, and the new key file could not be removed (it was emptied first: no secret "
-            "remains in it): %s" % (key_path, err)
+            "%s was refused, and the new key file could neither be emptied nor removed: THE SECRET MAY REMAIN "
+            "in it. Delete %s by hand: %s" % (key_path, key_path, err)
         ) from cause
 
 
@@ -480,8 +560,16 @@ def load_or_create_keys(path=None):
     open directory and the same open key file; what another process of this
     user changes after that step is outside any check (such a process can read
     the key anyway). A key created in this call and then refused is emptied
-    through its descriptor before its name is removed, and a failed removal is
-    reported.
+    through its descriptor (truncated, or else overwritten with zeros) before
+    its name is removed; a failed removal is reported, and says plainly when
+    the secret may remain.
+
+    What is proven is relative to this process's view: no checkout is visible
+    above the key through this process's root and mounts, the key has one hard
+    link, and (on Linux) neither the key nor any directory above it is reached
+    through a bind mount of a subtree, which would give it names this process
+    cannot see. A checkout hidden above this process's root (a chroot or a
+    mount namespace that shows only part of a tree) cannot be seen from here.
 
     Before anything is read or written, the directory the key file lives in is
     opened once and judged as that open directory, never by pathname. It, and
