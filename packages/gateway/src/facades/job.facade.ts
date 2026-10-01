@@ -22,15 +22,15 @@ import {
   populateJobDetailDTO,
   populateJobList,
 } from "./populators/job.populator.js";
-import { getKernelService } from "../services/kernel-service.js";
-import { auditService } from "../services/audit-service.js";
-import { pipelineTelemetry } from "../telemetry.js";
-import { trackServerEvent } from "../services/posthog-service.js";
-import { redactDiagnostic } from "../redaction.js";
 import {
   populateDeviceRegistrationDTO,
   type DeviceRegistrationDTO,
 } from "./populators/device.populator.js";
+import { getKernelService } from "../services/kernel-service.js";
+import { redactDiagnostic } from "../redaction.js";
+import { auditService } from "../services/audit-service.js";
+import { pipelineTelemetry } from "../telemetry.js";
+import { trackServerEvent } from "../services/posthog-service.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
