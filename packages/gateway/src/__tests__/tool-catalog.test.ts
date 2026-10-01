@@ -139,7 +139,7 @@ describe("POST /api/tool-catalog/register: ownership (kits K0)", () => {
     const update = await app.inject({
       method: "POST",
       url: "/api/tool-catalog/register",
-      headers: { "x-test-operator": "  OWNER@kits.test " },
+      headers: { "x-test-operator": "OWNER@KITS.TEST" },
       payload: { ...SAMPLE, status: "beta" },
     });
     expect(update.statusCode).toBe(200);

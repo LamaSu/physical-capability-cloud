@@ -18,17 +18,24 @@ export function authenticatedActor(req: FastifyRequest): string | null {
   return null;
 }
 
-/** WP-A's fold (#326 `normalizeIdentity`): trimmed, lower-cased; null/undefined fold to "". */
-function normalizeIdentity(id: unknown): string {
-  return String(id ?? "").trim().toLowerCase();
+/**
+ * The compared form of an id: ASCII letters folded to lower case, and nothing
+ * else changed. No Unicode case folding (U+212A KELVIN SIGN lower-cases to
+ * ASCII "k" under String#toLowerCase) and no trimming (NBSP, BOM and other
+ * padding), so a lookalike or padded id stays a different principal (cf. #461
+ * HIGH 2). A non-string is "".
+ */
+function comparedIdentity(id: unknown): string {
+  return typeof id === "string" ? id.replace(/[A-Z]/g, (c) => c.toLowerCase()) : "";
 }
 
 /**
- * Identity comparison with WP-A's semantics: trimmed, case-insensitive, and
- * never true for an id that folds to empty, so a blank owner can't match a blank
- * actor. Swap to WP-A's `sameIdentity` once #326 merges (this PR merges after it).
+ * Identity comparison: ASCII case-insensitive (emails and hex addresses), never
+ * Unicode-folded or trimmed, and never true for a blank or whitespace-only id,
+ * so a blank owner can't match a blank actor. Do not swap to WP-A's (#326)
+ * `sameIdentity` while it folds with trim().toLowerCase().
  */
 export function sameIdentity(a: string | null | undefined, b: string | null | undefined): boolean {
-  const x = normalizeIdentity(a);
-  return x.length > 0 && x === normalizeIdentity(b);
+  const x = comparedIdentity(a);
+  return x.trim().length > 0 && x === comparedIdentity(b);
 }

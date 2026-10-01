@@ -23,6 +23,9 @@ beforeAll(async () => {
   app.addHook("onRequest", async (req) => {
     const h = req.headers["x-test-operator"];
     if (typeof h === "string" && h !== "") (req as unknown as { operatorId?: string }).operatorId = h;
+    // A URI-encoded principal, for ids a raw header can't carry (e.g. U+212A).
+    const u = req.headers["x-test-operator-uri"];
+    if (typeof u === "string" && u !== "") (req as unknown as { operatorId?: string }).operatorId = decodeURIComponent(u);
   });
   await app.register(templateRoutes);
   await app.ready();
@@ -148,7 +151,7 @@ describe("POST /api/templates/capabilities/:id/rate", () => {
     expect(first.statusCode).toBe(200);
     const again = await app.inject({
       method: "POST", url: `/api/templates/capabilities/${t.id}/rate`,
-      headers: as(" OTHER@kits.test "), payload: { score: 1 },
+      headers: as("OTHER@KITS.TEST"), payload: { score: 1 },
     });
     expect(again.statusCode).toBe(409);
     const row = getRepos().templateStore.findCapabilityTemplateById(t.id)!;
@@ -169,5 +172,20 @@ describe("PUT /api/templates/machines/:id", () => {
       headers: as(OTHER), payload: { machineName: "renamed by someone else" },
     });
     expect(res.statusCode).toBe(403);
+  });
+});
+
+describe("a lookalike principal is not the author (kits #395; cf. #461 HIGH 2)", () => {
+  it("refuses an update from a U+212A KELVIN SIGN lookalike of the author (403), and changes nothing", async () => {
+    const t = await createTemplate("kate@kits.test");
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/templates/capabilities/${t.id}`,
+      headers: { "x-test-operator-uri": encodeURIComponent("\u212Aate@kits.test") },
+      payload: { name: "hijacked" },
+    });
+    expect(res.statusCode).toBe(403);
+    const after = await app.inject({ method: "GET", url: `/api/templates/capabilities/${t.id}` });
+    expect((after.json() as { name: string }).name).not.toBe("hijacked");
   });
 });
