@@ -19,20 +19,27 @@
  *                         (`hashBundle`). A supplied event `hash`, or a supplied or
  *                         device-signed `bundleHash`, must equal the recomputation, or the
  *                         body is refused. The events are stored.
- *   device_signed_digest  no `events`, but a device-signed bundle was captured
- *                         (`extractNodeSignedBundle`): the digest the device signed is stored
- *                         as signed, and only in the canonical tagged form (`sha256:` + 64
- *                         lowercase hex). The gateway cannot recompute it, and nothing
- *                         verifies the signature here.
+ *   device_signed_document  no `events`, but a device-signed DOCUMENT was captured
+ *                         (`extractNodeSignedBundle`), in the form pcc-node's job port signs
+ *                         (#471): the digest is `sha256(canonicalize(the envelope minus
+ *                         bundleHash and kernelSignature))`. The gateway recomputes it and
+ *                         requires it to equal the signed digest (canonical tagged form,
+ *                         `sha256:` + 64 lowercase hex). The document must name THIS job
+ *                         (`jobId`) and the job's kernel (`kernelId`): a document signed for
+ *                         another job or kernel is refused (adk #4322, review 117 on #471).
+ *                         Nothing verifies the signature here.
  *
- * Anything else (a device document, pcc-node's current events without a `source`) is refused:
- * the gateway has nowhere to keep such a document, so it stores nothing rather than a hash
- * nobody can reproduce.
+ * Anything else is refused:
+ *   - a device-signed digest with no document and no events: it names no job, so job A's
+ *     signature could be filed under job B (`evidence_not_bound`);
+ *   - an unsigned document (the rehearsal daemon's run and log), or pcc-node's current events
+ *     without a `source`: the gateway has nowhere to keep such a document, so it stores
+ *     nothing rather than a hash nobody can reproduce.
  */
-import { hashBundle, hashEvent, type EvidenceEvent } from "@pcc/spec";
+import { canonicalize, hashBundle, hashEvent, sha256, type EvidenceEvent } from "@pcc/spec";
 import type { CapturedDeviceBundle } from "./device-evidence-settlement.js";
 
-export type RelayHashModel = "event_bundle_hash" | "device_signed_digest";
+export type RelayHashModel = "event_bundle_hash" | "device_signed_document";
 
 export interface RelayStoredEvent {
   type: string;
@@ -59,11 +66,24 @@ export type RelayEvidenceRefusal =
   | { error: "bundle_hash_mismatch" }
   | { error: "bundle_hash_malformed" }
   | { error: "evidence_not_lo_ev" }
-  | { error: "evidence_not_canonical" };
+  | { error: "evidence_not_canonical" }
+  | { error: "evidence_not_bound" }
+  | { error: "job_mismatch" }
+  | { error: "kernel_mismatch" };
+
+/** The job the evidence is filed under, from the job row: never from the evidence. */
+export interface RelayJobContext {
+  jobId: string;
+  kernelId: string | null;
+}
 
 type Result = { ok: true; commitment: RelayEvidenceCommitment } | { ok: false; refusal: RelayEvidenceRefusal };
 
 const TAGGED_DIGEST = /^sha256:[0-9a-f]{64}$/;
+
+/** Envelope keys that carry the signature and its metadata, not signed content. An envelope with
+ *  nothing else is a bare digest. */
+const SIGNATURE_KEYS = new Set(["bundleHash", "kernelSignature", "signature", "assuranceTier", "sessionKeyAuthorization", "kernelSessionPublicKey", "signerPublicKey"]);
 
 /** The fields that commit to evidence content; they may sit at the root or in `bundle`, not both. */
 const COMMITMENT_FIELDS = ["events", "bundleHash", "kernelSignature", "signature"] as const;
@@ -82,7 +102,11 @@ function isLoEvEvent(e: unknown): e is Record<string, unknown> & RelayStoredEven
   );
 }
 
-export async function commitRelayEvidence(evidence: unknown, captured: CapturedDeviceBundle | null): Promise<Result> {
+export async function commitRelayEvidence(
+  evidence: unknown,
+  captured: CapturedDeviceBundle | null,
+  job: RelayJobContext,
+): Promise<Result> {
   const root = isPlainObject(evidence) ? evidence : {};
   let b = root;
   if (root.bundle !== undefined) {
@@ -115,8 +139,24 @@ export async function commitRelayEvidence(evidence: unknown, captured: CapturedD
   }
 
   if (captured) {
+    // A bare digest names no job: the same signature could be filed under any job of the kernel.
+    if (Object.keys(b).every((k) => SIGNATURE_KEYS.has(k))) return { ok: false, refusal: { error: "evidence_not_bound" } };
+    // The document must name this job and its kernel, inside the signed content.
+    if (typeof b.jobId !== "string" || b.jobId !== job.jobId) return { ok: false, refusal: { error: "job_mismatch" } };
+    if (typeof b.kernelId !== "string" || job.kernelId === null || b.kernelId !== job.kernelId) {
+      return { ok: false, refusal: { error: "kernel_mismatch" } };
+    }
     if (!TAGGED_DIGEST.test(captured.bundleHash)) return { ok: false, refusal: { error: "bundle_hash_malformed" } };
-    return { ok: true, commitment: { bundleHash: captured.bundleHash, hashModel: "device_signed_digest", events: [] } };
+    // pcc-node's job port (#471): sha256 over the canonical document without bundleHash and kernelSignature.
+    const { bundleHash: _signed, kernelSignature: _signature, ...document } = b;
+    let recomputed: string;
+    try {
+      recomputed = await sha256(canonicalize(document));
+    } catch {
+      return { ok: false, refusal: { error: "evidence_not_canonical" } };
+    }
+    if (recomputed !== captured.bundleHash) return { ok: false, refusal: { error: "bundle_hash_mismatch" } };
+    return { ok: true, commitment: { bundleHash: recomputed, hashModel: "device_signed_document", events: [] } };
   }
 
   return { ok: false, refusal: { error: "evidence_not_lo_ev" } };

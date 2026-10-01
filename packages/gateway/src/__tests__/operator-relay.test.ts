@@ -13,7 +13,7 @@ import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { initStore, closeStore, getRepos } from "../db.js";
-import { hashBundle, hashEvent, type EvidenceEvent } from "@pcc/spec";
+import { canonicalize, hashBundle, hashEvent, sha256, type EvidenceEvent } from "@pcc/spec";
 
 /** A real device-signed (#236) evidence bundle in the wire form the node produces (hex Ed25519
  *  sig, truncated EVM-looking signer): LO-EV events, and the bundle hash computed from them and
@@ -345,6 +345,77 @@ describe("Operator Relay Routes", () => {
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toBe("kernel_mismatch");
       expect(bundlesFor(job.id)).toBe(before);
+    });
+  });
+
+  describe("POST /api/operator/evidence binds a signed document to its job (adk #4322, review 117 on #471)", () => {
+    /** #471's wire form (pcc-node jobport.py report()): bundleHash = sha256(canonicalize(the bundle
+     *  minus bundleHash and kernelSignature)), and the node signs the UTF-8 bytes of that digest. */
+    async function signedDocument(jobId: string, kernelId: string) {
+      const kp = nacl.sign.keyPair();
+      const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
+      const doc: Record<string, unknown> = {
+        jobId,
+        kernelId,
+        operation: "plate_read",
+        runId: "run-000003",
+        record: { state: "completed", result: { wavelengthNm: 450, readings: { A1: 0.412 } } },
+        logChain: [{ seq: 1, entryHash: `sha256:${"cd".repeat(32)}` }],
+        signerPublicKey: `0x${hex(kp.publicKey)}`,
+      };
+      const bundleHash = await sha256(canonicalize(doc));
+      const sig = nacl.sign.detached(new TextEncoder().encode(bundleHash), kp.secretKey);
+      return { ...doc, bundleHash, kernelSignature: { signer: `0x${hex(kp.publicKey)}`, algorithm: "ed25519", value: hex(sig) } };
+    }
+
+    it("NEGATIVE (claim 2): a signed document naming another job is refused (409), and nothing is stored", async () => {
+      const job = seededJob();
+      const before = bundlesFor(job.id);
+      const bundle = await signedDocument(`${job.id}-another-job`, job.kernelId!);
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "job_mismatch", stored: false });
+      expect(bundlesFor(job.id)).toBe(before);
+    });
+
+    it("NEGATIVE (claim 2): a signed document naming another kernel than the job's is refused (409), and nothing is stored", async () => {
+      const job = seededJob();
+      const before = bundlesFor(job.id);
+      const bundle = await signedDocument(job.id, `${job.kernelId}-not-this-job`);
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "kernel_mismatch", stored: false });
+      expect(bundlesFor(job.id)).toBe(before);
+    });
+
+    it("NEGATIVE (claim 1): a document edited after signing does not reproduce its signed hash (422), and nothing is stored", async () => {
+      const job = seededJob();
+      const before = bundlesFor(job.id);
+      const bundle = await signedDocument(job.id, job.kernelId!);
+      const edited = { ...bundle, record: { state: "completed", result: { wavelengthNm: 450, readings: { A1: 0.999 } } } };
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle: edited } } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ error: "bundle_hash_mismatch", stored: false });
+      expect(bundlesFor(job.id)).toBe(before);
+    });
+
+    it("NEGATIVE (lane-found): job A's signature stripped to a bare digest cannot be filed under job B (422), and nothing is stored", async () => {
+      const job = seededJob();
+      const before = bundlesFor(job.id);
+      const a = await signedDocument(`${job.id}-job-a`, job.kernelId!);
+      const bare = { bundleHash: a.bundleHash, kernelSignature: a.kernelSignature };
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle: bare } } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ stored: false });
+      expect(bundlesFor(job.id)).toBe(before);
+    });
+
+    it("a signed document that names this job and kernel and reproduces its hash is stored as device_signed_document", async () => {
+      const job = seededJob();
+      const bundle = await signedDocument(job.id, job.kernelId!);
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ stored: true, hashModel: "device_signed_document", contentHash: bundle.bundleHash, deviceSigned: true, signatureVerified: false });
     });
   });
 

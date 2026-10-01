@@ -4,11 +4,13 @@
  * and never a hash of content the gateway does not keep (cross-family review E4, round 2).
  */
 import { describe, it, expect } from "vitest";
-import { hashBundle, hashEvent, type EvidenceEvent } from "@pcc/spec";
+import { canonicalize, hashBundle, hashEvent, sha256, type EvidenceEvent } from "@pcc/spec";
 import { commitRelayEvidence } from "../services/relay-evidence-commitment.js";
 import type { CapturedDeviceBundle } from "../services/device-evidence-settlement.js";
 
 const TAGGED = /^sha256:[0-9a-f]{64}$/;
+/** The job the evidence is filed under (from the job row). */
+const J = { jobId: "job-1", kernelId: "kernel-1" };
 const source = { deviceId: "reader-1", deviceType: "plate_reader", kernelId: "kernel-1" };
 const loEv = (type: string, n: number) => ({ type, timestamp: `2026-09-29T22:35:0${n}.000Z`, source, payload: { n } });
 
@@ -36,7 +38,7 @@ function captured(bundleHash: string): CapturedDeviceBundle {
 describe("commitRelayEvidence (N80: never a made-up hash)", () => {
   it("LO-EV events: every hash is recomputed, the bundle hash is hashBundle over them, and the events are kept", async () => {
     const events = [loEv("execution_completed", 1), loEv("cv_inspection_result", 2)];
-    const r = await commitRelayEvidence({ events }, null);
+    const r = await commitRelayEvidence({ events }, null, J);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const hashes = await Promise.all(events.map((e) => hashEvent(e as Omit<EvidenceEvent, "hash" | "id">)));
@@ -49,41 +51,76 @@ describe("commitRelayEvidence (N80: never a made-up hash)", () => {
     const raw = [loEv("execution_completed", 1)];
     const events = await Promise.all(raw.map(async (e) => ({ ...e, hash: await hashEvent(e as Omit<EvidenceEvent, "hash" | "id">) })));
     const bundleHash = await hashBundle(events as unknown as EvidenceEvent[]);
-    const r = await commitRelayEvidence({ bundle: { events, bundleHash } }, null);
+    const r = await commitRelayEvidence({ bundle: { events, bundleHash } }, null, J);
     expect(r.ok && r.commitment.bundleHash).toBe(bundleHash);
   });
 
   it("NEGATIVE: a supplied event hash that does not reproduce is refused, with its index", async () => {
     const events = [loEv("execution_completed", 1), { ...loEv("cv_inspection_result", 2), hash: `sha256:${"ab".repeat(32)}` }];
-    expect(await commitRelayEvidence({ events }, null)).toEqual({ ok: false, refusal: { error: "event_hash_mismatch", eventIndex: 1 } });
+    expect(await commitRelayEvidence({ events }, null, J)).toEqual({ ok: false, refusal: { error: "event_hash_mismatch", eventIndex: 1 } });
   });
 
   it("NEGATIVE: a supplied bundleHash that the events do not reproduce is refused", async () => {
-    const r = await commitRelayEvidence({ events: [loEv("execution_completed", 1)], bundleHash: `sha256:${"cd".repeat(32)}` }, null);
+    const r = await commitRelayEvidence({ events: [loEv("execution_completed", 1)], bundleHash: `sha256:${"cd".repeat(32)}` }, null, J);
     expect(r).toEqual({ ok: false, refusal: { error: "bundle_hash_mismatch" } });
   });
 
-  it("a device-signed bundle without events keeps the digest the device signed", async () => {
-    const digest = `sha256:${"ef".repeat(32)}`;
-    const r = await commitRelayEvidence({ bundleHash: digest }, captured(digest));
-    expect(r).toEqual({ ok: true, commitment: { bundleHash: digest, hashModel: "device_signed_digest", events: [] } });
+  it("a device-signed document naming this job and kernel is committed by its recomputed hash (adk #4322)", async () => {
+    const doc = { jobId: J.jobId, kernelId: J.kernelId, operation: "plate_read", record: { A1: 0.412 }, logChain: [] };
+    const digest = await sha256(canonicalize(doc));
+    const r = await commitRelayEvidence({ bundle: { ...doc, bundleHash: digest } }, captured(digest), J);
+    expect(r).toEqual({ ok: true, commitment: { bundleHash: digest, hashModel: "device_signed_document", events: [] } });
   });
 
-  it("NEGATIVE: a device-signed digest that is not a canonical tagged digest is refused", async () => {
+  it("NEGATIVE (adk #4322): a bare device digest names no job, so it is refused", async () => {
+    const digest = `sha256:${"ef".repeat(32)}`;
+    for (const body of [{ bundleHash: digest }, { bundle: { bundleHash: digest, assuranceTier: 2, signerPublicKey: "0xabc" } }]) {
+      expect(await commitRelayEvidence(body, captured(digest), J)).toEqual({ ok: false, refusal: { error: "evidence_not_bound" } });
+    }
+  });
+
+  it("NEGATIVE (adk #4322): a signed document for another job, another kernel, or none is refused", async () => {
+    const make = async (doc: Record<string, unknown>) => ({ body: { bundle: { ...doc, bundleHash: await sha256(canonicalize(doc)) } }, digest: await sha256(canonicalize(doc)) });
+    const cases: Array<[Record<string, unknown>, string, typeof J | { jobId: string; kernelId: string | null }]> = [
+      [{ jobId: "job-2", kernelId: J.kernelId, record: {} }, "job_mismatch", J],
+      [{ kernelId: J.kernelId, record: {} }, "job_mismatch", J],
+      [{ jobId: J.jobId, kernelId: "kernel-2", record: {} }, "kernel_mismatch", J],
+      [{ jobId: J.jobId, record: {} }, "kernel_mismatch", J],
+      [{ jobId: J.jobId, kernelId: J.kernelId, record: {} }, "kernel_mismatch", { jobId: J.jobId, kernelId: null }],
+    ];
+    for (const [doc, error, job] of cases) {
+      const { body, digest } = await make(doc);
+      expect(await commitRelayEvidence(body, captured(digest), job), JSON.stringify(doc)).toEqual({ ok: false, refusal: { error } });
+    }
+  });
+
+  it("NEGATIVE (adk #4322): a document edited after signing, or signed under the `signature` alias, does not reproduce its digest", async () => {
+    const doc = { jobId: J.jobId, kernelId: J.kernelId, record: { A1: 0.412 } };
+    const digest = await sha256(canonicalize(doc));
+    const edited = { bundle: { ...doc, record: { A1: 0.999 }, bundleHash: digest } };
+    expect(await commitRelayEvidence(edited, captured(digest), J)).toEqual({ ok: false, refusal: { error: "bundle_hash_mismatch" } });
+    const alias = { bundle: { ...doc, bundleHash: digest, signature: { signer: "0xabc", algorithm: "ed25519", value: "sig" } } };
+    expect(await commitRelayEvidence(alias, captured(digest), J)).toEqual({ ok: false, refusal: { error: "bundle_hash_mismatch" } });
+  });
+
+  it("NEGATIVE: a signed document whose digest is not a canonical tagged digest is refused", async () => {
+    const doc = { jobId: J.jobId, kernelId: J.kernelId, record: {} };
     for (const bad of [`sha256-ev-1234`, `0x${"ef".repeat(32)}`, `sha256:${"EF".repeat(32)}`]) {
-      expect(await commitRelayEvidence({ bundleHash: bad }, captured(bad)), bad).toEqual({ ok: false, refusal: { error: "bundle_hash_malformed" } });
+      expect(await commitRelayEvidence({ bundle: { ...doc, bundleHash: bad } }, captured(bad), J), bad).toEqual({ ok: false, refusal: { error: "bundle_hash_malformed" } });
     }
   });
 
   it("NEGATIVE: a device-signed digest that its own LO-EV events do not reproduce is refused", async () => {
     const digest = `sha256:${"ef".repeat(32)}`;
-    const r = await commitRelayEvidence({ events: [loEv("execution_completed", 1)], bundleHash: digest }, captured(digest));
+    const r = await commitRelayEvidence({ events: [loEv("execution_completed", 1)], bundleHash: digest }, captured(digest), J);
     expect(r).toEqual({ ok: false, refusal: { error: "bundle_hash_mismatch" } });
   });
 
   it("every accepted body is committed by a canonical tagged digest", async () => {
     const digest = `sha256:${"ef".repeat(32)}`;
-    const accepted = [await commitRelayEvidence({ events: [loEv("execution_completed", 1)] }, null), await commitRelayEvidence({ bundleHash: digest }, captured(digest))];
+    const doc = { jobId: J.jobId, kernelId: J.kernelId, record: { ok: true } };
+    const docDigest = await sha256(canonicalize(doc));
+    const accepted = [await commitRelayEvidence({ events: [loEv("execution_completed", 1)] }, null, J), await commitRelayEvidence({ bundle: { ...doc, bundleHash: docDigest } }, captured(docDigest), J)];
     for (const r of accepted) expect(r.ok && r.commitment.bundleHash).toMatch(TAGGED);
   });
 });
@@ -91,34 +128,34 @@ describe("commitRelayEvidence (N80: never a made-up hash)", () => {
 describe("commitRelayEvidence refuses what it cannot store reproducibly (cross-family review E4, round 2)", () => {
   it("NEGATIVE (E4 finding 1): a document with no LO-EV events and no device signature is refused, never hashed and dropped", async () => {
     for (const body of [rehearsalBody, { printed: true, returncode: 0 }]) {
-      expect(await commitRelayEvidence(body, null)).toEqual({ ok: false, refusal: { error: "evidence_not_lo_ev" } });
+      expect(await commitRelayEvidence(body, null, J)).toEqual({ ok: false, refusal: { error: "evidence_not_lo_ev" } });
     }
   });
 
   it("NEGATIVE (E4 finding 3): events that are present but not all LO-EV are malformed, never a quieter model", async () => {
-    expect(await commitRelayEvidence(pccNodeBody, null)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: 0 } });
+    expect(await commitRelayEvidence(pccNodeBody, null, J)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: 0 } });
     const mixed = { events: [loEv("execution_completed", 1), { type: "execution_completed", timestamp: "2026-09-29T22:35:02Z" }] };
-    expect(await commitRelayEvidence(mixed, null)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: 1 } });
-    expect(await commitRelayEvidence({ events: [] }, null)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: null } });
-    expect(await commitRelayEvidence({ events: "not-a-list" }, null)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: null } });
+    expect(await commitRelayEvidence(mixed, null, J)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: 1 } });
+    expect(await commitRelayEvidence({ events: [] }, null, J)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: null } });
+    expect(await commitRelayEvidence({ events: "not-a-list" }, null, J)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: null } });
   });
 
   it("NEGATIVE (E4 finding 3): a device signature over events without a source is malformed, not a device-signed digest", async () => {
     const digest = `sha256:${"ef".repeat(32)}`;
     const body = { events: [{ type: "execution_completed", timestamp: "2026-09-29T22:35:01Z" }], bundleHash: digest };
-    expect(await commitRelayEvidence(body, captured(digest))).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: 0 } });
+    expect(await commitRelayEvidence(body, captured(digest), J)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: 0 } });
   });
 
   it("NEGATIVE (E4 finding 3): commitment fields both at the root and under `bundle` are ambiguous", async () => {
     for (const field of ["events", "bundleHash", "kernelSignature", "signature"]) {
       const body = { bundle: { events: [loEv("execution_completed", 1)] }, [field]: field === "events" ? [] : `sha256:${"ab".repeat(32)}` };
-      expect(await commitRelayEvidence(body, null), field).toEqual({ ok: false, refusal: { error: "ambiguous_envelope" } });
+      expect(await commitRelayEvidence(body, null, J), field).toEqual({ ok: false, refusal: { error: "ambiguous_envelope" } });
     }
   });
 
   it("NEGATIVE (E4 finding 3): a `bundle` that is present but not an object is malformed", async () => {
     for (const bundle of ["x", 1, null, [loEv("execution_completed", 1)]]) {
-      const r = await commitRelayEvidence({ bundle, events: [loEv("execution_completed", 1)] }, null);
+      const r = await commitRelayEvidence({ bundle, events: [loEv("execution_completed", 1)] }, null, J);
       expect(r, JSON.stringify(bundle)).toEqual({ ok: false, refusal: { error: "malformed_envelope" } });
     }
   });
