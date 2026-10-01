@@ -72,12 +72,28 @@ function canonicalScopeList(field: string, value: unknown): string[] {
     throw new Error(`${field} must be an array of strings, got ${describeType(value)}`);
   }
   // Index loop, not forEach: a sparse array's holes must be seen as undefined.
-  for (let i = 0; i < value.length; i++) {
-    if (typeof value[i] !== "string") {
-      throw new Error(`${field}[${i}] must be a string, got ${describeType(value[i])}`);
-    }
+  // Each element is read EXACTLY ONCE into a local, validated, and copied into a
+  // fresh snapshot; only the snapshot is de-duplicated and sorted. Validating
+  // value[i] but then consuming `new Set(value)` would read the caller's array a
+  // second time through its iterator, so a custom Symbol.iterator or an accessor
+  // that changes between reads could slip an unvalidated element past the check
+  // and into the signed scope (astra pack 145, F1).
+  // An array with its own iterator is not a plain JSON-shaped list. Refuse it rather
+  // than guess which of its two "contents" the caller meant (defense in depth; the
+  // snapshot below already ensures only validated reads are signed).
+  if (Object.prototype.hasOwnProperty.call(value, Symbol.iterator)) {
+    throw new Error(`${field} must be a plain array of strings (a custom iterator is not accepted)`);
   }
-  return [...new Set(value as string[])].sort();
+  const length = value.length;
+  const snapshot: string[] = [];
+  for (let i = 0; i < length; i++) {
+    const element: unknown = value[i];
+    if (typeof element !== "string") {
+      throw new Error(`${field}[${i}] must be a string, got ${describeType(element)}`);
+    }
+    snapshot.push(element);
+  }
+  return [...new Set(snapshot)].sort();
 }
 
 /**
