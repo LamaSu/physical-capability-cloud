@@ -43,6 +43,14 @@
  * must be lowercased by the caller), and integers are non-negative bigints,
  * safe integers or decimal strings.
  *
+ * The attestation set is validated before it is hashed (E7 F2): the job id and
+ * every roleId are 1-128 printable ASCII characters with no whitespace; a set has
+ * at least one role and roleIds are distinct; a role has at least one attestation;
+ * minPositive and total are safe integers with 1 <= minPositive <= total; minScore
+ * is a safe integer in [0, 100]; attestation hashes are distinct and no more than
+ * `total`. Duplicates are refused, never silently de-duplicated. The #270 mirror
+ * pins no empty set, so an empty set is refused.
+ *
  * The block is evaluator-ready, not a money authority by itself: the oracle
  * reconstructs the unit context independently and pins programHash to the
  * funded policy's committed program.
@@ -284,9 +292,103 @@ export interface AttestationQuorumRole {
   attestationHashes: string[];
 }
 
-/** One role's digest: binds roleId, its quorum config, the job and its sorted attestations. */
-export function computeAttestationRoleDigest(job: string, role: AttestationQuorumRole): Bytes32Hex {
-  role.attestationHashes.forEach((h, i) => bytes32Word(`attestationHashes[${i}]`, h));
+/** 1-128 printable ASCII characters, no whitespace: the pinned form of a roleId and of the attestation job id. */
+const TOKEN = /^[\x21-\x7E]{1,128}$/;
+
+function requireToken(field: string, value: unknown): string {
+  if (typeof value !== "string" || !TOKEN.test(value)) {
+    throw new EvidenceBlockInputError(field, "expected 1-128 printable ASCII characters with no whitespace");
+  }
+  return value;
+}
+
+/** A safe integer in [min, max]. Negative zero is refused: it is not the pinned spelling of 0. */
+function boundedInt(field: string, value: unknown, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || Object.is(value, -0) || value < min || value > max) {
+    throw new EvidenceBlockInputError(field, `expected a safe integer in [${min}, ${max}]`);
+  }
+  return value;
+}
+
+/** A role as validated, frozen plain data. */
+interface AttestationRoleSnapshot {
+  readonly roleId: string;
+  readonly minPositive: number;
+  readonly total: number;
+  readonly minScore: number;
+  readonly attestationHashes: readonly string[];
+}
+
+/**
+ * Validate one role and copy it into frozen plain data. Every field and every array
+ * element is read exactly once, and only the copy is validated and hashed, so a getter
+ * or Proxy that changes its answer cannot make the validated value differ from the
+ * committed one.
+ */
+function snapshotAttestationRole(path: string, input: unknown): AttestationRoleSnapshot {
+  if (input === null || typeof input !== "object") {
+    throw new EvidenceBlockInputError(path, "expected a role object");
+  }
+  const raw = input as Record<string, unknown>;
+  const roleIdRaw = raw.roleId;
+  const minPositiveRaw = raw.minPositive;
+  const totalRaw = raw.total;
+  const minScoreRaw = raw.minScore;
+  const hashesRaw = raw.attestationHashes;
+
+  const roleId = requireToken(`${path}.roleId`, roleIdRaw);
+  const total = boundedInt(`${path}.total`, totalRaw, 1, Number.MAX_SAFE_INTEGER);
+  const minPositive = boundedInt(`${path}.minPositive`, minPositiveRaw, 1, Number.MAX_SAFE_INTEGER);
+  if (minPositive > total) {
+    throw new EvidenceBlockInputError(`${path}.minPositive`, "must not exceed total");
+  }
+  const minScore = boundedInt(`${path}.minScore`, minScoreRaw, 0, 100);
+
+  if (!Array.isArray(hashesRaw)) {
+    throw new EvidenceBlockInputError(`${path}.attestationHashes`, "expected an array of attestation hashes");
+  }
+  const count = hashesRaw.length;
+  if (!Number.isSafeInteger(count) || count < 1) {
+    throw new EvidenceBlockInputError(`${path}.attestationHashes`, "expected at least one attestation hash");
+  }
+  if (count > total) {
+    throw new EvidenceBlockInputError(`${path}.attestationHashes`, "more attestation hashes than total");
+  }
+  const attestationHashes: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const hash = hashesRaw[i];
+    bytes32Word(`${path}.attestationHashes[${i}]`, hash);
+    attestationHashes.push(hash as string);
+  }
+  if (new Set(attestationHashes).size !== attestationHashes.length) {
+    throw new EvidenceBlockInputError(`${path}.attestationHashes`, "attestation hashes must be distinct");
+  }
+  return Object.freeze({ roleId, minPositive, total, minScore, attestationHashes: Object.freeze(attestationHashes) });
+}
+
+/** Validate and snapshot a whole role set: at least one role, distinct roleIds. */
+function snapshotAttestationRoles(input: unknown): readonly AttestationRoleSnapshot[] {
+  if (!Array.isArray(input)) {
+    throw new EvidenceBlockInputError("roles", "expected an array of roles");
+  }
+  const count = input.length;
+  if (!Number.isSafeInteger(count) || count < 1) {
+    throw new EvidenceBlockInputError("roles", "expected at least one role (the mirror defines no empty attestation set)");
+  }
+  const roles: AttestationRoleSnapshot[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < count; i++) {
+    const role = snapshotAttestationRole(`roles[${i}]`, input[i]);
+    if (seen.has(role.roleId)) {
+      throw new EvidenceBlockInputError(`roles[${i}].roleId`, `duplicate roleId ${JSON.stringify(role.roleId)}`);
+    }
+    seen.add(role.roleId);
+    roles.push(role);
+  }
+  return Object.freeze(roles);
+}
+
+function roleDigestOf(job: string, role: AttestationRoleSnapshot): Bytes32Hex {
   return sha256Canonical({
     roleId: role.roleId,
     minPositive: role.minPositive,
@@ -297,8 +399,24 @@ export function computeAttestationRoleDigest(job: string, role: AttestationQuoru
   });
 }
 
+/**
+ * One role's digest: binds roleId, its quorum config, the job and its sorted attestations.
+ * The role is validated and snapshotted first; only the snapshot is hashed.
+ */
+export function computeAttestationRoleDigest(job: string, role: AttestationQuorumRole): Bytes32Hex {
+  return roleDigestOf(requireToken("job", job), snapshotAttestationRole("role", role));
+}
+
+/**
+ * The attestation set root: sha256 of the sorted role digests. The whole set is validated
+ * and snapshotted before anything is hashed: duplicate roleIds, duplicate attestation
+ * hashes, an empty set, an empty role and an invalid quorum are refused, never silently
+ * de-duplicated.
+ */
 export function computeAttestationSetRoot(job: string, roles: readonly AttestationQuorumRole[]): Bytes32Hex {
-  return sha256Canonical(roles.map((r) => computeAttestationRoleDigest(job, r)).sort());
+  const checkedJob = requireToken("job", job);
+  const snapshot = snapshotAttestationRoles(roles);
+  return sha256Canonical(snapshot.map((r) => roleDigestOf(checkedJob, r)).sort());
 }
 
 // ── The block ────────────────────────────────────────────────────────────────

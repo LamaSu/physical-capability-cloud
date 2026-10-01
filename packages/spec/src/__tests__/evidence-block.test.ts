@@ -6,6 +6,7 @@ import {
   EvidenceBlockInputError,
   SETTLEMENT_UNIT_DOMAIN_V1,
   UNIT_CONTEXT_DOMAIN_V1,
+  computeAttestationRoleDigest,
   computeAttestationSetRoot,
   computeEvidenceBlockHash,
   computeKernelSignedEventsRoot,
@@ -499,5 +500,130 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
     });
     expect(await computeKernelSignedEventsRoot({ events: counted, bundleHash: b.bundleHash })).toBe(PINNED_ROOT);
     expect(reads).toEqual({ "0": 1, "1": 1 });
+  });
+});
+
+// ── F2 (HIGH): invalid and duplicate quorums are refused ─────────────────────
+describe("E7 F2 — the attestation set is validated before it is hashed", () => {
+  const H1 = sha("f2-attestation-1");
+  const H2 = sha("f2-attestation-2");
+  const H3 = sha("f2-attestation-3");
+  const okRole = (over: Record<string, unknown> = {}) =>
+    ({ roleId: "inspector", minPositive: 1, total: 2, minScore: 50, attestationHashes: [H1], ...over }) as AttestationQuorumRole;
+  const refuseSet = (rolesIn: unknown) =>
+    refusalOf(() => computeAttestationSetRoot(attJob, rolesIn as AttestationQuorumRole[]));
+
+  it("refuses the reviewer's invalid quorum, and each of its defects on its own", () => {
+    const invalid = { roleId: "", minPositive: 2, total: 1, minScore: NaN, attestationHashes: [H1, H1] };
+    expect(refuseSet([invalid]).field).toBe("roles[0].roleId");
+    expect(refuseSet([okRole({ roleId: "" })]).field).toBe("roles[0].roleId");
+    const quorum = refuseSet([okRole({ minPositive: 2, total: 1 })]);
+    expect(quorum.field).toBe("roles[0].minPositive");
+    expect(quorum.message).toMatch(/must not exceed total/);
+    expect(refuseSet([okRole({ minScore: NaN })]).field).toBe("roles[0].minScore");
+    const dup = refuseSet([okRole({ attestationHashes: [H1, H1] })]);
+    expect(dup.field).toBe("roles[0].attestationHashes");
+    expect(dup.message).toMatch(/distinct/);
+  });
+
+  it("refuses an empty role set, a non-array set, and a role that is not an object", () => {
+    expect(refuseSet([]).field).toBe("roles");
+    for (const bad of [undefined, null, "roles", { length: 1, 0: okRole() }]) {
+      expect(refuseSet(bad).field, String(bad)).toBe("roles");
+    }
+    for (const bad of [null, undefined, 3, "role"]) {
+      expect(refuseSet([bad]).field, String(bad)).toBe("roles[0]");
+    }
+  });
+
+  it("refuses an empty role (no attestation hashes) and attestationHashes that is not an array", () => {
+    const empty = refuseSet([okRole({ attestationHashes: [] })]);
+    expect(empty.field).toBe("roles[0].attestationHashes");
+    expect(empty.message).toMatch(/at least one attestation hash/);
+    for (const bad of [undefined, null, H1, new Set([H1])]) {
+      const err = refuseSet([okRole({ attestationHashes: bad })]);
+      expect(err.field, String(bad)).toBe("roles[0].attestationHashes");
+      expect(err.message, String(bad)).toMatch(/expected an array/);
+    }
+  });
+
+  it("refuses two roles with the same roleId, and names the second one", () => {
+    const err = refuseSet([okRole(), okRole({ attestationHashes: [H2] })]);
+    expect(err.field).toBe("roles[1].roleId");
+    expect(err.message).toMatch(/duplicate roleId "inspector"/);
+  });
+
+  it("refuses duplicate attestation hashes, but only inside one role", () => {
+    const dup = refuseSet([okRole({ total: 3, attestationHashes: [H1, H2, H1] })]);
+    expect(dup.field).toBe("roles[0].attestationHashes");
+    expect(dup.message).toMatch(/distinct/);
+    // distinctness is per role: another role may list the same hash
+    expect(() => computeAttestationSetRoot(attJob, [okRole(), okRole({ roleId: "buyer" })])).not.toThrow();
+  });
+
+  it("refuses more attestation hashes than total", () => {
+    const err = refuseSet([okRole({ minPositive: 1, total: 2, attestationHashes: [H1, H2, H3] })]);
+    expect(err.field).toBe("roles[0].attestationHashes");
+    expect(err.message).toMatch(/more attestation hashes than total/);
+    expect(() => computeAttestationSetRoot(attJob, [okRole({ total: 3, attestationHashes: [H1, H2, H3] })])).not.toThrow();
+  });
+
+  it("refuses a malformed attestation hash and names its index", () => {
+    for (const bad of [`sha256:${"ab".repeat(32)}`, `0x${"AB".repeat(32)}`, "0x12", 7, null, undefined]) {
+      const err = refuseSet([okRole({ attestationHashes: [H1, bad] })]);
+      expect(err.field, String(bad)).toBe("roles[0].attestationHashes[1]");
+    }
+  });
+
+  it("refuses a minPositive that is not a safe integer >= 1", () => {
+    for (const bad of [0, -1, 1.5, NaN, Infinity, "1", null, undefined, -0, 2 ** 53]) {
+      expect(refuseSet([okRole({ minPositive: bad })]).field, String(bad)).toBe("roles[0].minPositive");
+    }
+  });
+
+  it("refuses a total that is not a safe integer >= 1", () => {
+    for (const bad of [0, -1, 2.5, NaN, Infinity, "2", null, undefined, -0, 2 ** 53]) {
+      expect(refuseSet([okRole({ total: bad })]).field, String(bad)).toBe("roles[0].total");
+    }
+  });
+
+  it("refuses a minScore that is not a safe integer in [0, 100]", () => {
+    for (const bad of [NaN, -1, 101, 50.5, Infinity, "80", null, undefined, -0]) {
+      expect(refuseSet([okRole({ minScore: bad })]).field, String(bad)).toBe("roles[0].minScore");
+    }
+  });
+
+  it("refuses a roleId outside 1-128 printable ASCII characters with no whitespace", () => {
+    for (const bad of ["", " ", "in spector", "tab\t", "new\nline", "x".repeat(129), 7, null, undefined, "ünï"]) {
+      expect(refuseSet([okRole({ roleId: bad })]).field, JSON.stringify(bad)).toBe("roles[0].roleId");
+    }
+  });
+
+  it("refuses a job outside 1-128 printable ASCII characters with no whitespace, for the set and for one role", () => {
+    for (const bad of ["", " ", "a b", "x".repeat(129), 7, null, undefined]) {
+      expect(refusalOf(() => computeAttestationSetRoot(bad as string, [okRole()])).field, JSON.stringify(bad)).toBe("job");
+      expect(refusalOf(() => computeAttestationRoleDigest(bad as string, okRole())).field, JSON.stringify(bad)).toBe("job");
+    }
+  });
+
+  it("accepts the boundary values", () => {
+    expect(() => computeAttestationSetRoot(attJob, [okRole({ minPositive: 2, total: 2, attestationHashes: [H1, H2] })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attJob, [okRole({ minScore: 0 })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attJob, [okRole({ minScore: 100 })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attJob, [okRole({ minPositive: 1, total: 1 })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attJob, [okRole({ roleId: "x".repeat(128) })])).not.toThrow();
+    expect(() => computeAttestationSetRoot("x".repeat(128), [okRole({ roleId: "qa/lead:1" })])).not.toThrow();
+  });
+
+  it("validates a single role the same way, under the field prefix 'role'", () => {
+    expect(refusalOf(() => computeAttestationRoleDigest(attJob, okRole({ roleId: "" }))).field).toBe("role.roleId");
+    expect(refusalOf(() => computeAttestationRoleDigest(attJob, okRole({ attestationHashes: [] }))).field).toBe("role.attestationHashes");
+    const one = okRole();
+    expect(computeAttestationSetRoot(attJob, [one])).toBe(sha(canonicalize([computeAttestationRoleDigest(attJob, one)])));
+  });
+
+  it("the golden attestation set is still valid and its root is unchanged by validation", () => {
+    const direct = sha(canonicalize([computeAttestationRoleDigest(attJob, roles[0]!)]));
+    expect(computeAttestationSetRoot(attJob, roles)).toBe(direct);
   });
 });
