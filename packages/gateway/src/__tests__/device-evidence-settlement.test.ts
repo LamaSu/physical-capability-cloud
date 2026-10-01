@@ -1211,6 +1211,35 @@ describe("session evidence needs the funded operator and the receipt time (cross
       gateOpen: true,
     });
 
+  /** Transparent proxies that count every read of a string-keyed property, per label: by [[Get]], by
+   *  descriptor and by `in` (or by [[Get]] alone, for an object that is spread, which reads both). */
+  function reader() {
+    const reads: Record<string, number> = {};
+    const bump = (label: string, key: string | symbol) => {
+      if (typeof key === "string") reads[`${label}.${key}`] = (reads[`${label}.${key}`] ?? 0) + 1;
+    };
+    const counted = <T extends object>(label: string, target: T, only?: "get"): T =>
+      new Proxy(target, {
+        get(t, k, r) {
+          bump(label, k);
+          return Reflect.get(t, k, r);
+        },
+        ...(only === "get"
+          ? {}
+          : {
+              getOwnPropertyDescriptor(t: T, k: string | symbol) {
+                bump(label, k);
+                return Reflect.getOwnPropertyDescriptor(t, k);
+              },
+              has(t: T, k: string | symbol) {
+                bump(label, k);
+                return Reflect.has(t, k);
+              },
+            }),
+      });
+    return { reads, counted };
+  }
+
   it("H1(a): an authorization that answers undefined on its first read does not skip the event window", async () => {
     const b = await sessionBundle({ issuedAt: now - 60, expiresAt: now + 240, eventsAt: now - 3660 });
     const plain = { ...b.a.slot(), sessionKeyAuthorization: b.auth, receivedAt: now };
@@ -1310,26 +1339,7 @@ describe("session evidence needs the funded operator and the receipt time (cross
 
   it("H1(f): one successful verification reads each field of the slot, the authorization and the input exactly once", async () => {
     const b = await sessionBundle({ issuedAt: now - 60, expiresAt: now + 240, eventsAt: now - 30 });
-    const reads: Record<string, number> = {};
-    const bump = (label: string, key: string | symbol) => {
-      if (typeof key === "string") reads[`${label}.${key}`] = (reads[`${label}.${key}`] ?? 0) + 1;
-    };
-    /** A transparent proxy that counts every read of a string-keyed property: by [[Get]], by descriptor, or by `in`. */
-    const counted = <T extends object>(label: string, target: T): T =>
-      new Proxy(target, {
-        get(t, k, r) {
-          bump(label, k);
-          return Reflect.get(t, k, r);
-        },
-        getOwnPropertyDescriptor(t, k) {
-          bump(label, k);
-          return Reflect.getOwnPropertyDescriptor(t, k);
-        },
-        has(t, k) {
-          bump(label, k);
-          return Reflect.has(t, k);
-        },
-      });
+    const { reads, counted } = reader();
     const auth = counted("auth", {
       ...b.auth,
       scope: counted("scope", {
@@ -1338,8 +1348,11 @@ describe("session evidence needs the funded operator and the receipt time (cross
         maxSignatures: b.auth.scope.maxSignatures,
       }),
     });
+    const base = b.a.slot();
     const slot = counted("slot", {
-      ...b.a.slot(),
+      ...base,
+      subject: counted("subject", base.subject!, "get"),
+      kernelSignature: counted("signature", base.kernelSignature, "get"),
       sessionKeyAuthorization: auth,
       receivedAt: now,
       contractId: SUBJECT_JOB,
@@ -1361,6 +1374,7 @@ describe("session evidence needs the funded operator and the receipt time (cross
     for (const key of [
       "slot.subject", "slot.contractId", "slot.bundleHash", "slot.kernelSignature", "slot.assuranceTier", "slot.bundleId",
       "slot.events", "slot.receivedAt", "slot.sessionKeyAuthorization",
+      "subject.jobId", "subject.kernelId", "signature.signer", "signature.algorithm", "signature.value",
       "auth.sessionId", "auth.parentAgentId", "auth.publicKey", "auth.issuedAt", "auth.expiresAt", "auth.scope", "auth.parentSignature",
       "scope.allowedActions", "scope.contractIds", "scope.maxSignatures",
       "allowedActions.length", "allowedActions.0", "contractIds.length", "contractIds.0",
@@ -1368,6 +1382,79 @@ describe("session evidence needs the funded operator and the receipt time (cross
     ]) {
       expect(seen[key], key).toBe(1);
     }
+  });
+
+  it("H1(h): called directly, verifyDeviceSignedEvidence reads each field of its input and of the authorization exactly once", async () => {
+    const b = await sessionBundle({ issuedAt: now - 60, expiresAt: now + 240, eventsAt: now - 30 });
+    const { reads, counted } = reader();
+    const auth = counted("auth", {
+      ...b.auth,
+      scope: counted("scope", {
+        allowedActions: counted("allowedActions", [...b.auth.scope.allowedActions]),
+        contractIds: counted("contractIds", [...b.auth.scope.contractIds]),
+        maxSignatures: b.auth.scope.maxSignatures,
+      }),
+    });
+    const input = counted("input", {
+      signature: counted("signature", b.a.signature, "get"),
+      bundleHash: b.a.bundleHash,
+      registeredSigner: b.signer,
+      sessionKeyAuthorization: auth,
+      contractId: SUBJECT_JOB,
+      sessionSignedEventCount: 2,
+      operatorPrincipalId: OPERATOR,
+      receivedAt: now,
+      verifyEd25519: naclEd25519Verify,
+    });
+    const result = await verifyDeviceSignedEvidence(input);
+    const seen = { ...reads };
+    expect(result).toMatchObject({ ok: true });
+    expect(Object.entries(seen).filter(([, n]) => n !== 1)).toEqual([]);
+    for (const key of [
+      "input.signature", "input.bundleHash", "input.registeredSigner", "input.sessionKeyAuthorization", "input.contractId",
+      "input.sessionSignedEventCount", "input.operatorPrincipalId", "input.receivedAt", "input.verifyEd25519",
+      "signature.signer", "signature.algorithm", "signature.value",
+      "auth.sessionId", "auth.parentAgentId", "auth.publicKey", "auth.issuedAt", "auth.expiresAt", "auth.scope", "auth.parentSignature",
+      "scope.allowedActions", "scope.contractIds", "scope.maxSignatures",
+      "allowedActions.length", "allowedActions.0", "contractIds.length", "contractIds.0",
+    ]) {
+      expect(seen[key], key).toBe(1);
+    }
+  });
+
+  it("a receipt time that is not a safe integer is no trusted context", async () => {
+    const b = await sessionBundle({ issuedAt: now - 60, expiresAt: now + 240, eventsAt: now - 30 });
+    for (const receivedAt of [now + 0.5, Number.NaN, Infinity, 2 ** 53, -Infinity]) {
+      expect(await decide(b, { operatorPrincipalId: OPERATOR, receivedAt }), String(receivedAt)).toMatchObject({
+        source: "gateway-fallback",
+        reason: "session-evidence-needs-trusted-context",
+      });
+    }
+  });
+
+  it("H1(h2): called directly, a parentAgentId that a proxy answers differently on its second read is read once", async () => {
+    const b = await sessionBundle({ parentAgentId: " attacker ", issuedAt: now - 60, expiresAt: now + 240, eventsAt: now - 30 });
+    let reads = 0;
+    const answer = () => (++reads === 1 ? " attacker " : OPERATOR);
+    const auth = new Proxy(b.auth, {
+      get: (t, k, r) => (k === "parentAgentId" ? answer() : Reflect.get(t, k, r)),
+      getOwnPropertyDescriptor: (t, k) =>
+        k === "parentAgentId"
+          ? { value: answer(), writable: true, enumerable: true, configurable: true }
+          : Reflect.getOwnPropertyDescriptor(t, k),
+    });
+    const result = await verifyDeviceSignedEvidence({
+      signature: b.a.signature,
+      bundleHash: b.a.bundleHash,
+      registeredSigner: b.signer,
+      sessionKeyAuthorization: auth,
+      contractId: SUBJECT_JOB,
+      sessionSignedEventCount: 2,
+      operatorPrincipalId: OPERATOR,
+      receivedAt: now,
+    });
+    expect(result).toEqual({ ok: false, reason: "parent-not-operator" });
+    expect(reads).toBe(1);
   });
 
   it("H1(g): recovery reads the pinned row's receipt time once", async () => {
