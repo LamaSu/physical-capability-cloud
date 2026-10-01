@@ -344,6 +344,12 @@ This prevents the brain from uploading a different protocol than what was approv
 
 ## Rate Limiting (per-scope)
 
+> **Status:** only the defaults are applied today. The scope mint
+> (`POST /scope`) takes `maxCommands`, `maxRetries` and `expiresInMinutes` as
+> given, uses the defaults below when they are omitted, and enforces no ceiling.
+> The Max column and the concurrent-scopes limit are the intended ceilings, not
+> current enforcement.
+
 | Resource | Default | Max |
 |----------|---------|-----|
 | Commands per scope | 100 | 500 |
@@ -353,13 +359,17 @@ This prevents the brain from uploading a different protocol than what was approv
 
 ## Audit Trail
 
-Every tool call is logged with:
+Every tool call under a scope is recorded in `tool_call_relay` with:
 - Scope ID
-- Tool name + args (hashed for sensitive data)
-- Validation result (allowed/rejected + reason)
-- Execution result
-- Timestamp
-- Who requested it (brain agent ID)
+- Tool name and args, stored and returned as submitted (they are not hashed)
+- Status and reason: `pending`, `claimed`, `completed`, `failed`, or `rejected`
+  with the reason (`scope_expired`, `emergency_stopped`, `circuit_open`, ...),
+  and `failed` with `claim_timeout` for a claim that was never reported
+- The executor's result or error
+- When it was created, claimed and completed
+
+The requesting principal is not recorded per call; the scope's `createdBy` is
+the holder it was minted for.
 
 Query via: `GET /api/relay/:kernelId/scope/:scopeId/audit`
 
