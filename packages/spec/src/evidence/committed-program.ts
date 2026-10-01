@@ -328,7 +328,8 @@ export function checkCommittedProgramForTier(
 
 /** Tier number from a CSD tier key ("tier2" -> 2); null for any other key. */
 export function tierNumber(tierKey: string): number | null {
-  const m = /^tier(\d+)$/.exec(tierKey);
+  // Canonical decimal only: "tier00" is not tier 0 (it would take the tier-zero path unchecked).
+  const m = /^tier(0|[1-9][0-9]*)$/.exec(tierKey);
   return m ? Number(m[1]) : null;
 }
 

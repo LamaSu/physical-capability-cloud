@@ -985,3 +985,23 @@ describe("checkCommittedProgramForTier — independence rests on evidence-owned 
     expect(checkCommittedProgramForTier(noEvent, tiers.tier1!).violations).toEqual([{ code: "stage-missing-event-type", stageId: "y" }]);
   });
 });
+
+describe("tier keys are canonical: no leading zeros", () => {
+  it("tierNumber reads only canonical decimal tier keys", () => {
+    expect(tierNumber("tier0")).toBe(0);
+    expect(tierNumber("tier2")).toBe(2);
+    expect(tierNumber("tier10")).toBe(10);
+    for (const bad of ["tier00", "tier000", "tier02", "tier-0", "tier 0", "Tier0", "tier"]) {
+      expect(tierNumber(bad), bad).toBeNull();
+    }
+  });
+
+  it("a non-canonical tier-zero key is not funded through the tier-zero path", () => {
+    const evidence = printAndMailCsd.evidence as unknown as Record<string, CsdEvidenceTier>;
+    const base = { csd: printAndMailCsd.url as string, evidence, committedProgramHash: null };
+    expect(assertAcceptedProgramForTier({ ...base, tierKey: "tier0" }).ok).toBe(true);
+    for (const tierKey of ["tier00", "tier000"]) {
+      expect(assertAcceptedProgramForTier({ ...base, tierKey }), tierKey).toEqual({ ok: false, code: "no-committed-program" });
+    }
+  });
+});
