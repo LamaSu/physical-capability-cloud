@@ -560,7 +560,7 @@ function authCredentialStart(s: string, k: number): number {
 //                     followed by `name=` or by the end of the line (form bodies,
 //                     logfmt). A scheme word (Bearer, Basic) takes the token after it.
 
-/** A bare or quoted name is read at most this many characters long: the regex below hardcodes it, keep them in step. */
+/** A bare or quoted name is read at most this many characters long (raw, before decoding). */
 const MAX_LABEL_RAW = 192;
 /** A decoded name is at most this long: a longer one is no field name (the scanner's limit before decoding was 64 too). */
 const MAX_LABEL_NAME = 64;
@@ -573,12 +573,16 @@ const MAX_FIELD_NAME = 64;
  * Groups: 1 a double-quoted name, 2 a single-quoted name, 3 a bare name, 4 the
  * separator (`:` or `=`), 5 an opening quote of the value. A bare name is a whole run
  * of [A-Za-z0-9_%.+~[]-] (the lookbehind makes it start where the run starts), so
- * there is one candidate per run and no suffix is retried. Every repeat is bounded and
- * its two alternatives start with different characters, so a failing candidate costs
- * at most MAX_LABEL_RAW steps and never backtracks combinatorially.
+ * there is one candidate per run and no suffix is retried. Every repeat is bounded by
+ * MAX_LABEL_RAW and its two alternatives start with different characters, so a failing
+ * candidate costs at most 2 * MAX_LABEL_RAW steps and never backtracks combinatorially.
+ * (decodeLabelName enforces MAX_LABEL_RAW on the raw length of a quoted name, whose
+ * escape pairs make a repeat two characters long.)
  */
-const LABEL_RE =
-  /(?<![A-Za-z0-9_%.+~[\]-])(?:"((?:[^"\\\r\n]|\\.){1,192})"|'((?:[^'\\\r\n]|\\.){1,192})'|([A-Za-z0-9_%.+~-][A-Za-z0-9_%.+~[\]-]{0,191}))[ \t]*([:=])[ \t]*(["']?)/g;
+const LABEL_RE = new RegExp(
+  String.raw`(?<![A-Za-z0-9_%.+~[\]-])(?:"((?:[^"\\\r\n]|\\.){1,${MAX_LABEL_RAW}})"|'((?:[^'\\\r\n]|\\.){1,${MAX_LABEL_RAW}})'|([A-Za-z0-9_%.+~-][A-Za-z0-9_%.+~[\]-]{0,${MAX_LABEL_RAW - 1}}))[ \t]*([:=])[ \t]*(["']?)`,
+  "g",
+);
 /** A value that is already a redaction placeholder: left alone, so a second pass changes nothing. */
 const PLACEHOLDER_VALUE_RE = /^(?:\[REDACTED\]|\[redacted(?:-[a-z]+)?\])$/;
 /** The header line of a YAML block scalar: `|`, `>`, `|-`, `>+`, `|2`. */
@@ -601,14 +605,14 @@ function trimEnd(s: string, from: number, to: number): number {
   return e;
 }
 
-/** Percent-decoding of a URL parameter NAME: `%5f` is `_`, `+` is a space. A malformed `%` stays as it is. */
+/**
+ * Percent-decoding of a URL parameter NAME: `%5f` is `_`. A malformed `%` stays as it is.
+ * (A `+`, a space in a form, needs no decoding: normalizeName drops it either way.)
+ */
 function percentDecode(raw: string): string {
   let out = "";
   for (let i = 0; i < raw.length; i += 1) {
-    const c = raw.charCodeAt(i);
-    if (c === 43) {
-      out += " ";
-    } else if (c === 37 && i + 2 < raw.length && isHexDigit(raw.charCodeAt(i + 1)) && isHexDigit(raw.charCodeAt(i + 2))) {
+    if (raw.charCodeAt(i) === 37 && i + 2 < raw.length && isHexDigit(raw.charCodeAt(i + 1)) && isHexDigit(raw.charCodeAt(i + 2))) {
       out += String.fromCharCode(parseInt(raw.slice(i + 1, i + 3), 16));
       i += 2;
     } else {
@@ -645,13 +649,18 @@ function unescapeName(raw: string): string {
   return out;
 }
 
-/** The name as written, decoded for its format; undefined when it is over a budget. */
+/**
+ * The name as written, decoded for its format; undefined when it is over a budget:
+ * more than MAX_LABEL_RAW raw characters (LABEL_RE bounds the REPEATS of a quoted name,
+ * and an escape pair is one repeat of two characters, so a raw name can be up to twice
+ * that long) or more than MAX_LABEL_NAME once decoded.
+ */
 function decodeLabelName(raw: string, quoted: boolean): string | undefined {
   if (raw.length > MAX_LABEL_RAW) return undefined;
   let name = raw;
   if (quoted) {
     if (raw.indexOf("\\") !== -1) name = unescapeName(raw);
-  } else if (raw.indexOf("%") !== -1 || raw.indexOf("+") !== -1) {
+  } else if (raw.indexOf("%") !== -1) {
     name = percentDecode(raw);
   }
   return name.length > MAX_LABEL_NAME ? undefined : name;

@@ -371,7 +371,7 @@ describe("the label scanner's other delimiters and budgets", () => {
       `Password=${R};MultipleActiveResultSets=True`,
     ],
     ["a markdown reference is not a label, a real one beside it is", "[token]: see below\npassword: x", `[token]: see below\npassword: ${R}`],
-    ["a plus sign is a space in a form name", "?access+token=v1&x=2", `?access+token=${R}&x=2`],
+    ["a plus sign (a space) in a form name does not hide it", "?access+token=v1&x=2", `?access+token=${R}&x=2`],
     ["a JS x escape in a quoted name", `x {"api${BS}x5fkey":"v1"} y`, `x {"api${BS}x5fkey":"${R}"} y`],
     ["an unknown escape keeps its character", `x {"api${BS}_key":"v1"} y`, `x {"api${BS}_key":"${R}"} y`],
     ["a malformed percent escape does not break the name", "?pass%zzword=v1&access%5ftoken=v2", `?pass%zzword=v1&access%5ftoken=${R}`],
