@@ -51,6 +51,17 @@
  * `total`. Duplicates are refused, never silently de-duplicated. The #270 mirror
  * pins no empty set, so an empty set is refused.
  *
+ * The session authorization is snapshotted before it is hashed (E7 F3, F4): a frozen
+ * plain copy of exactly the declared fields, read once, with `publicKey` pinned to 64
+ * and `parentSignature` to 128 lowercase hex characters with NO 0x prefix, the form the
+ * golden uses and every in-repo producer emits. Other spellings of the same key are
+ * refused rather than normalized, so one authorization has one digest and neither the
+ * oracle mirror nor the goldens change. The scope arrays are committed in the order
+ * given: the same permissions in another order, or with a duplicate, have another digest.
+ * They are not pinned here because `SessionKeyService.issueSessionKey` passes the
+ * caller's order and duplicates through verbatim (the parent signature covers a sorted
+ * copy), so a producer exists that would not comply; that needs a producer-side decision.
+ *
  * The block is evaluator-ready, not a money authority by itself: the oracle
  * reconstructs the unit context independently and pins programHash to the
  * funded policy's committed program.
@@ -371,6 +382,24 @@ function requireNonEmptyString(field: string, value: unknown): string {
   return value;
 }
 
+/**
+ * The pinned spelling of the session public key (a raw 32-byte Ed25519 key) and of the
+ * parent signature (64 bytes): bare lowercase hex, no 0x prefix. This is the form the
+ * golden uses and the only form the in-repo producers emit (kernel-sdk job-handler.ts
+ * `toHex`, gateway identity-session.ts `toHex`). The type permits an optional 0x prefix
+ * and the gateway intake accepts uppercase, but those spellings of one key would give one
+ * authorization several digests, so they are refused here, never normalized.
+ */
+const SESSION_PUBLIC_KEY = /^[0-9a-f]{64}$/;
+const SESSION_PARENT_SIGNATURE = /^[0-9a-f]{128}$/;
+
+function requirePinnedHex(field: string, value: unknown, pattern: RegExp, expected: string): string {
+  if (typeof value !== "string" || !pattern.test(value)) {
+    throw new EvidenceBlockInputError(field, expected);
+  }
+  return value;
+}
+
 /** A frozen copy of a dense, plain array of strings; elements are read through descriptors. */
 function readStringArray(path: string, input: unknown): readonly string[] {
   if (!Array.isArray(input) || utilTypes.isProxy(input)) {
@@ -406,10 +435,20 @@ export function sessionKeyAuthSnapshot(auth: SessionKeyAuthorization): SessionKe
   const top = readPlainFields(path, auth, SESSION_KEY_AUTH_FIELDS);
   const sessionId = requireNonEmptyString(`${path}.sessionId`, requiredField(path, top, "sessionId"));
   const parentAgentId = requireNonEmptyString(`${path}.parentAgentId`, requiredField(path, top, "parentAgentId"));
-  const publicKey = requireNonEmptyString(`${path}.publicKey`, requiredField(path, top, "publicKey"));
+  const publicKey = requirePinnedHex(
+    `${path}.publicKey`,
+    requiredField(path, top, "publicKey"),
+    SESSION_PUBLIC_KEY,
+    "expected 64 lowercase hex characters with no 0x prefix (the raw 32-byte Ed25519 key)",
+  );
   const issuedAt = boundedInt(`${path}.issuedAt`, requiredField(path, top, "issuedAt"), 0, Number.MAX_SAFE_INTEGER);
   const expiresAt = boundedInt(`${path}.expiresAt`, requiredField(path, top, "expiresAt"), 0, Number.MAX_SAFE_INTEGER);
-  const parentSignature = requireNonEmptyString(`${path}.parentSignature`, requiredField(path, top, "parentSignature"));
+  const parentSignature = requirePinnedHex(
+    `${path}.parentSignature`,
+    requiredField(path, top, "parentSignature"),
+    SESSION_PARENT_SIGNATURE,
+    "expected 128 lowercase hex characters with no 0x prefix (the 64-byte parent signature)",
+  );
   // An optional field that is absent or undefined is the same value: canonicalize omits undefined.
   const derivationRaw = top.get("derivationPath");
   const derivationPath =

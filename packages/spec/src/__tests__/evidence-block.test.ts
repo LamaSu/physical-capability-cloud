@@ -932,3 +932,65 @@ describe("E7 F3 — roles are read once and the session authorization is a froze
     });
   });
 });
+
+// ── F4 (MEDIUM): one authorization, one spelling, one digest ─────────────────
+describe("E7 F4 — one session authorization has exactly one accepted spelling and one digest", () => {
+  const P = "sessionKeyAuthorization";
+  const KEY = "aa".repeat(32);
+  const SIG = "bb".repeat(64);
+  const freshAuth = (): SessionKeyAuthorization => structuredClone(sessionKeyAuth);
+  const refuseAuth = (auth: unknown) =>
+    refusalOf(() => computeSessionKeyAuthDigest(auth as SessionKeyAuthorization));
+
+  it("the golden spelling (bare lowercase hex) is accepted and keeps the mirror's digest", () => {
+    expect(computeSessionKeyAuthDigest(freshAuth())).toBe(sha(canonicalize(sessionKeyAuth)));
+  });
+
+  it("refuses the same Ed25519 key with a 0x prefix, in uppercase or in mixed case, so it cannot get a second digest", () => {
+    for (const variant of [`0x${KEY}`, `0X${KEY}`, KEY.toUpperCase(), `0x${KEY.toUpperCase()}`, `Aa${KEY.slice(2)}`]) {
+      const err = refuseAuth({ ...freshAuth(), publicKey: variant });
+      expect(err.field, variant).toBe(`${P}.publicKey`);
+      expect(err.message, variant).toMatch(/64 lowercase hex characters with no 0x prefix/);
+    }
+  });
+
+  it("refuses a publicKey of the wrong length, with non-hex characters, or padded", () => {
+    for (const bad of [KEY.slice(1), `${KEY}a`, SIG, "g".repeat(64), ` ${KEY}`, `${KEY}\n`, `${KEY} `]) {
+      expect(refuseAuth({ ...freshAuth(), publicKey: bad }).field, JSON.stringify(bad)).toBe(`${P}.publicKey`);
+    }
+  });
+
+  it("refuses the same parentSignature with a 0x prefix, in uppercase or in mixed case", () => {
+    for (const variant of [`0x${SIG}`, `0X${SIG}`, SIG.toUpperCase(), `0x${SIG.toUpperCase()}`, `Bb${SIG.slice(2)}`]) {
+      const err = refuseAuth({ ...freshAuth(), parentSignature: variant });
+      expect(err.field, variant).toBe(`${P}.parentSignature`);
+      expect(err.message, variant).toMatch(/128 lowercase hex characters with no 0x prefix/);
+    }
+  });
+
+  it("refuses a parentSignature of the wrong length, with non-hex characters, or padded", () => {
+    for (const bad of [SIG.slice(1), `${SIG}b`, KEY, "z".repeat(128), ` ${SIG}`, `${SIG}\n`]) {
+      expect(refuseAuth({ ...freshAuth(), parentSignature: bad }).field, JSON.stringify(bad)).toBe(`${P}.parentSignature`);
+    }
+  });
+
+  it("accepts exactly the hex the in-repo producers emit (kernel-sdk and gateway `toHex` over raw bytes)", () => {
+    // Same helper as packages/kernel-sdk/src/job-handler.ts:33 and gateway/src/routes/identity-session.ts:20.
+    const toHex = (bytes: Uint8Array) => Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+    const key = Uint8Array.from({ length: 32 }, (_, i) => (i % 3 === 0 ? i : 255 - i)); // includes 0x00 and 0xff
+    const sig = Uint8Array.from({ length: 64 }, (_, i) => (i * 5) % 256);
+    key[0] = 0;
+    sig[1] = 255;
+    const auth = { ...freshAuth(), publicKey: toHex(key), parentSignature: toHex(sig) };
+    expect(auth.publicKey).toMatch(/^00/);
+    expect(sessionKeyAuthSnapshot(auth).value.publicKey).toBe(auth.publicKey);
+    expect(computeSessionKeyAuthDigest(auth)).toBe(sha(canonicalize(auth)));
+  });
+
+  // E7 F4 scope arrays: STOPPED, not implemented. The design asks for strictly ascending,
+  // duplicate-free allowedActions and contractIds "IF every producer already complies".
+  // gateway/src/routes/identity-session.ts:99-124 does not: it returns the caller's arrays
+  // verbatim via SessionKeyService.issueSessionKey (verifier/src/workflow/ephemeral-identity.ts:156-160),
+  // and that is covered by verifier/src/workflow/__tests__/ephemeral-identity.test.ts:1184-1232.
+  it.todo("scope arrays strictly ascending and duplicate-free: blocked on a producer decision (E7 r2 triage, F4)");
+});
