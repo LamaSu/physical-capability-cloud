@@ -13,6 +13,7 @@ import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { writeFileSync } from "node:fs";
+import { safeLogJson } from "../packages/gateway/src/util/redact-log.js";
 
 const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
 if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY"); process.exit(1); }
@@ -53,7 +54,7 @@ async function gw(method: string, path: string, body?: any): Promise<any> {
   const n = ++reqNum;
   const url = `${GW}${path}`;
   L(`  [HTTP ${n}] ${method} ${url}`);
-  if (body) L(`  [HTTP ${n}] Body: ${JSON.stringify(body).slice(0, 500)}`);
+  if (body) L(`  [HTTP ${n}] Body: ${safeLogJson(body, 500)}`);
   const t0 = Date.now();
   const opts: RequestInit = {
     method,
@@ -66,7 +67,7 @@ async function gw(method: string, path: string, body?: any): Promise<any> {
   let data: any;
   try { data = JSON.parse(text); } catch { data = text; }
   L(`  [HTTP ${n}] ${r.status} ${r.statusText} (${ms}ms)`);
-  L(`  [HTTP ${n}] Response: ${JSON.stringify(data).slice(0, 800)}`);
+  L(`  [HTTP ${n}] Response: ${safeLogJson(data, 800)}`);
   return data;
 }
 

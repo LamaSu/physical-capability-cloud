@@ -25,6 +25,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
+import { safeLogJson } from "../packages/gateway/src/util/redact-log.js";
 
 const PK = process.env.PCC_GATEWAY_PRIVATE_KEY as Hex;
 if (!PK || !PK.startsWith("0x") || PK.length !== 66) {
@@ -254,7 +255,9 @@ async function main() {
     body: JSON.stringify(verifyBody),
   });
   const oracleText = await oracleRes.text();
-  L(`     HTTP ${oracleRes.status}: ${oracleText.slice(0, 600)}`);
+  // FC-8: the oracle response may reflect the x-oracle-key or carry a secret; redact before logging.
+  const oracleShown = (() => { try { return safeLogJson(JSON.parse(oracleText), 600); } catch { return "[non-JSON response withheld]"; } })();
+  L(`     HTTP ${oracleRes.status}: ${oracleShown}`);
   let oracleData: any = {};
   try { oracleData = JSON.parse(oracleText); } catch {}
   L("");
