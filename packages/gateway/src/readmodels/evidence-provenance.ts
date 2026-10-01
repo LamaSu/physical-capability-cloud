@@ -13,12 +13,16 @@ import { createHash } from "node:crypto";
 import {
   DEFAULT_TIER_REQUIREMENTS,
   EVIDENCE_PROVENANCE_SCHEMA_ID,
+  EVIDENCE_STORED_FIELDS,
+  INTEGRITY_COVERAGE,
   hashBundle,
   hashEvent,
   isFabricated,
   type EvidenceEvent,
   type EvidenceIntegrity,
+  type EvidenceIntegrityModel,
   type EvidenceProvenanceDTO,
+  type EvidenceStoredField,
   type ProvenanceBundle,
 } from "@pcc/spec";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
@@ -89,8 +93,8 @@ const gatewayStamped = (e: ProvenanceEventRow) => e.source?.deviceId === GATEWAY
  * presence of a device.
  */
 const deviceReported = (e: ProvenanceEventRow) => {
-  const deviceId = e.source?.deviceId;
-  return typeof deviceId === "string" && deviceId !== "" && deviceId !== GATEWAY_DEVICE;
+  const deviceId = typeof e.source?.deviceId === "string" ? e.source.deviceId.trim() : "";
+  return deviceId !== "" && deviceId !== GATEWAY_DEVICE;
 };
 
 function claimedTier(t: unknown): 0 | 1 | 2 | 3 | null {
@@ -126,8 +130,14 @@ function storageEnvelopeMatches(b: ProvenanceBundleRow): boolean {
  * form refuses, e.g. an integer beyond 2^53-1 once #359 lands) does not reproduce: it is caught
  * for that bundle, so one old row never fails the whole read.
  */
+
+/** What a result vouches for: its model's covered fields, and every other stored field as not covered. */
+function coverageOf(model: EvidenceIntegrityModel | null): { covers: readonly EvidenceStoredField[]; notCovered: readonly EvidenceStoredField[] } {
+  const covers = model ? INTEGRITY_COVERAGE[model] : [];
+  return { covers, notCovered: EVIDENCE_STORED_FIELDS.filter((f) => !covers.includes(f)) };
+}
 async function integrityOf(b: ProvenanceBundleRow): Promise<EvidenceIntegrity> {
-  if (b.events.length === 0) return { state: "not_recomputable", model: null };
+  if (b.events.length === 0) return { state: "not_recomputable", model: null, ...coverageOf(null) };
   const safely = async (check: () => boolean | Promise<boolean>) => {
     try {
       return await check();
@@ -135,9 +145,9 @@ async function integrityOf(b: ProvenanceBundleRow): Promise<EvidenceIntegrity> {
       return false;
     }
   };
-  if (await safely(() => eventBundleHashMatches(b))) return { state: "recomputed_match", model: "event_bundle_hash" };
-  if (await safely(() => storageEnvelopeMatches(b))) return { state: "storage_envelope_match", model: "gateway_envelope" };
-  return { state: "no_model_reproduces", model: null };
+  if (await safely(() => eventBundleHashMatches(b))) return { state: "recomputed_match", model: "event_bundle_hash", ...coverageOf("event_bundle_hash") };
+  if (await safely(() => storageEnvelopeMatches(b))) return { state: "storage_envelope_match", model: "gateway_envelope", ...coverageOf("gateway_envelope") };
+  return { state: "no_model_reproduces", model: null, ...coverageOf(null) };
 }
 
 function tierCoverageOf(tier: 0 | 1 | 2 | 3 | null, events: ProvenanceEventRow[]): ProvenanceBundle["tierCoverage"] {

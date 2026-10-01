@@ -41,11 +41,53 @@ export type EvidenceIntegrityState = "recomputed_match" | "storage_envelope_matc
 /** event_bundle_hash: evidence integrity (LO-EV). gateway_envelope: gateway storage integrity only. */
 export type EvidenceIntegrityModel = "event_bundle_hash" | "gateway_envelope";
 
-/** Recomputed integrity: each state pairs with exactly one model (or none). */
+/** A stored field of an evidence bundle row (`bundle.`) or of one of its events (`event.`). */
+export type EvidenceStoredField =
+  | "bundle.id"
+  | "bundle.jobId"
+  | "bundle.stepId"
+  | "bundle.kernelId"
+  | "bundle.assuranceTier"
+  | "bundle.createdAt"
+  | "bundle.kernelSignature"
+  | "bundle.bundleHash"
+  | "event.id"
+  | "event.type"
+  | "event.timestamp"
+  | "event.source"
+  | "event.payload"
+  | "event.hash";
+
+export const EVIDENCE_STORED_FIELDS: readonly EvidenceStoredField[] = Object.freeze([
+  "bundle.id", "bundle.jobId", "bundle.stepId", "bundle.kernelId", "bundle.assuranceTier", "bundle.createdAt",
+  "bundle.kernelSignature", "bundle.bundleHash", "event.id", "event.type", "event.timestamp", "event.source",
+  "event.payload", "event.hash",
+] as const);
+
+/**
+ * Which stored fields a model's match vouches for (cross-family review r1b of #441, MEDIUM 2).
+ * The LO-EV event hash commits only {type, timestamp, source, payload}, and the bundle hash only
+ * the sorted event hashes, so a recomputed_match says nothing about the row's own id, job, step,
+ * kernel, claimed tier, time or signature, or an event's id: those are shown as stored. The
+ * /complete envelope binds every stored field, but it is storage integrity only.
+ */
+export const INTEGRITY_COVERAGE: Readonly<Record<EvidenceIntegrityModel, readonly EvidenceStoredField[]>> = Object.freeze({
+  event_bundle_hash: Object.freeze(["event.type", "event.timestamp", "event.source", "event.payload", "event.hash", "bundle.bundleHash"] as const),
+  gateway_envelope: EVIDENCE_STORED_FIELDS,
+});
+
+interface IntegrityFields {
+  /** The stored fields this result vouches for; empty when no model reproduces. */
+  covers: readonly EvidenceStoredField[];
+  /** Every other stored field: shown as stored, and covered by no hash here. */
+  notCovered: readonly EvidenceStoredField[];
+}
+
+/** Recomputed integrity: each state pairs with exactly one model (or none), and says what it covers. */
 export type EvidenceIntegrity =
-  | { state: "recomputed_match"; model: "event_bundle_hash" }
-  | { state: "storage_envelope_match"; model: "gateway_envelope" }
-  | { state: "no_model_reproduces" | "not_recomputable"; model: null };
+  | ({ state: "recomputed_match"; model: "event_bundle_hash" } & IntegrityFields)
+  | ({ state: "storage_envelope_match"; model: "gateway_envelope" } & IntegrityFields)
+  | ({ state: "no_model_reproduces" | "not_recomputable"; model: null } & IntegrityFields);
 
 export type TierCoverageState = "covers" | "missing" | "unknown_tier";
 

@@ -58,12 +58,12 @@ const build = (rows: ProvenanceBundleRow[]) => buildEvidenceProvenanceDTO("job-1
 describe("integrity is recomputed, and only event_bundle_hash is evidence integrity (recomputed_match)", () => {
   it("an LO-EV bundle reproduces under event_bundle_hash", async () => {
     const dto = await build([await loEvBundle("b-a", [ev("e1", "gcode_hash_verified"), ev("e2", "execution_completed")])]);
-    expect(dto.bundles[0]!.integrity).toEqual({ state: "recomputed_match", model: "event_bundle_hash" });
+    expect(dto.bundles[0]!.integrity).toMatchObject({ state: "recomputed_match", model: "event_bundle_hash" });
   });
 
   it("NEGATIVE (evidence #3680 F3): a /complete bundle is storage_envelope_match, never recomputed_match", async () => {
     const dto = await build([envelopeBundle("b-b", [ev("e1", "execution_completed")])]);
-    expect(dto.bundles[0]!.integrity).toEqual({ state: "storage_envelope_match", model: "gateway_envelope" });
+    expect(dto.bundles[0]!.integrity).toMatchObject({ state: "storage_envelope_match", model: "gateway_envelope" });
     // A surface reading only `state` never sees "recomputed" for a bundle /settle would refuse.
     expect(dto.bundles[0]!.integrity.state).not.toBe("recomputed_match");
   });
@@ -79,8 +79,8 @@ describe("integrity is recomputed, and only event_bundle_hash is evidence integr
     const dto = await build([bad, good]);
     expect(dto.state).toBe("received");
     const byId = Object.fromEntries(dto.bundles.map((b) => [b.bundleId, b.integrity]));
-    expect(byId["b-big"]).toEqual({ state: "no_model_reproduces", model: null });
-    expect(byId["b-ok"]).toEqual({ state: "recomputed_match", model: "event_bundle_hash" });
+    expect(byId["b-big"]).toMatchObject({ state: "no_model_reproduces", model: null });
+    expect(byId["b-ok"]).toMatchObject({ state: "recomputed_match", model: "event_bundle_hash" });
   });
 
   it("NEGATIVE: a payload changed after hashing reproduces under no model", async () => {
@@ -89,14 +89,35 @@ describe("integrity is recomputed, and only event_bundle_hash is evidence integr
     const b = envelopeBundle("b-d", [ev("e1", "execution_completed")]);
     b.events[0] = { ...b.events[0]!, payload: { n: "tampered" } };
     const dto = await build([a, b]);
-    for (const bundle of dto.bundles) expect(bundle.integrity, bundle.bundleId).toEqual({ state: "no_model_reproduces", model: null });
+    for (const bundle of dto.bundles) expect(bundle.integrity, bundle.bundleId).toMatchObject({ state: "no_model_reproduces", model: null });
+  });
+
+  it("NEGATIVE (r1b MEDIUM 2): a match says which stored fields it covers; the row's own fields are listed as not covered", async () => {
+    const a = await loEvBundle("b-r", [ev("e1", "gcode_hash_verified"), ev("e2", "execution_completed")]);
+    // The reviewer's reproduction: these change, and the LO-EV match still holds.
+    const mutated = { ...a, kernelId: "kernel-other", assuranceTier: 3, events: a.events.map((e, i) => (i === 0 ? { ...e, id: "e-renamed" } : e)) };
+    const integrity = (await build([mutated])).bundles[0]!.integrity;
+    expect(integrity).toMatchObject({ state: "recomputed_match", model: "event_bundle_hash" });
+    expect([...integrity.covers].sort()).toEqual(["bundle.bundleHash", "event.hash", "event.payload", "event.source", "event.timestamp", "event.type"]);
+    expect([...integrity.notCovered].sort()).toEqual([
+      "bundle.assuranceTier", "bundle.createdAt", "bundle.id", "bundle.jobId", "bundle.kernelId", "bundle.kernelSignature", "bundle.stepId", "event.id",
+    ]);
+  });
+
+  it("the storage envelope covers every stored field; a non-match covers none", async () => {
+    const env = (await build([envelopeBundle("b-s", [ev("e1", "execution_completed")])])).bundles[0]!.integrity;
+    expect(env.notCovered).toEqual([]);
+    expect(env.covers).toHaveLength(14);
+    const none = (await build([{ id: "b-n", jobId: "job-1", stepId: "s", kernelId: "k", assuranceTier: 0, bundleHash: "x", kernelSignature: null, createdAt: AS_OF, events: [] }])).bundles[0]!.integrity;
+    expect(none.covers).toEqual([]);
+    expect(none.notCovered).toHaveLength(14);
   });
 
   it("NEGATIVE: a bundle hash with no events (relay, setup) is not recomputable, never a match", async () => {
     const dto = await build([
       { id: "b-e", jobId: "job-1", stepId: "s", kernelId: "k", assuranceTier: 0, bundleHash: "sha256-b-e", kernelSignature: null, createdAt: AS_OF, events: [] },
     ]);
-    expect(dto.bundles[0]!.integrity).toEqual({ state: "not_recomputable", model: null });
+    expect(dto.bundles[0]!.integrity).toMatchObject({ state: "not_recomputable", model: null });
   });
 });
 
@@ -181,6 +202,19 @@ describe("tier coverage counts the event types a DEVICE recorded: not fabricated
     expect(b.tierCoverage.state).not.toBe("covers");
     expect(b.tierCoverage.countedEvents).toBe(0);
     expect(b.tierCoverage.missing).toHaveLength(3);
+  });
+
+  it("NEGATIVE (M3): a blank deviceId names no device either, nor does the gateway's stamp with spaces around it", async () => {
+    const src = (deviceId: string) => ({ source: { deviceId, deviceType: "machine", kernelId: "kernel-nyc" } });
+    const dto = await build([
+      await loEvBundle(
+        "b-blank",
+        [ev("e1", "gcode_hash_verified", src("   ")), ev("e2", "execution_completed", src("")), ev("e3", "power_profile_summary", src(" gateway "))],
+        1,
+      ),
+    ]);
+    expect(dto.bundles[0]!.tierCoverage.countedEvents).toBe(0);
+    expect(dto.bundles[0]!.tierCoverage.state).not.toBe("covers");
   });
 });
 
@@ -369,7 +403,7 @@ describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
     const dto = res.json();
     expect(dto.state).toBe("received");
     const b = dto.bundles[0];
-    expect(b.integrity).toEqual({ state: "storage_envelope_match", model: "gateway_envelope" });
+    expect(b.integrity).toMatchObject({ state: "storage_envelope_match", model: "gateway_envelope" });
     expect(b.signature).toEqual({ signer: null, algorithm: null, checked: false });
     expect(b.events.count).toBeGreaterThan(0);
     expect(b.events.gatewayAuthored).toBe(b.events.count);
