@@ -918,10 +918,13 @@ describe("PlanPresentation (astra review of #357, round 2b): the contract is bou
   const presentFor = (dag: ExternalPlanSubmission, outcome: SeamResult) => presentPlan({ submission: dag, outcome, asOf: ASOF });
 
   it("M2 coverage: a node without a verdict is invalid, with a plan or without one", () => {
-    const { dag, outcome, top } = requoteOf({ print: "5.00" });
+    const { dag, outcome, top, nested } = requoteOf({ print: "5.00" });
     expect(presentFor(dag, outcome).state).toBe("needs-requote"); // control: the seam's own shape
     refusedAsMalformed(presentFor(dag, { ...outcome, verdicts: top.filter((v) => v.nodeId !== "mail") } as SeamResult), "a refusal with no verdict for mail");
     refusedAsMalformed(presentFor(dag, { ...outcome, verdicts: [] } as SeamResult), "a refusal with an empty top-level list");
+    // Every node has a verdict and one has two, the nested list repeating it: only the exact-cover rule refuses this.
+    const twiceStale = { ...outcome, verdicts: [...top, top[1]!], refusal: { stage: "revalidation", verdicts: [...nested, nested[0]!] } } as SeamResult;
+    refusedAsMalformed(presentFor(dag, twiceStale), "a stale node covered twice, both lists agreeing");
     // With a plan this was already refused by the count check; it stays refused.
     const { outcome: ok } = accepted();
     refusedAsMalformed(presentFor(agentDag(), { ...ok, verdicts: ok.verdicts.slice(1) }), "a plan with one verdict for two nodes");
@@ -937,6 +940,7 @@ describe("PlanPresentation (astra review of #357, round 2b): the contract is bou
       ["a node the top-level list calls current", refusalWith([{ ...printStale, nodeId: "mail" }, printStale])],
       ["a node the top-level list does not name", refusalWith([printStale, { nodeId: "ghost", status: "missing", reason: "capability-not-found" }])],
       ["the same stale node twice", refusalWith([printStale, printStale])],
+      ["the right status on the wrong node", refusalWith([{ ...printStale, nodeId: "mail" }])],
       ["a nested list with no top-level list", { ok: false, refusal: outcome.refusal, submissionDigest: outcome.submissionDigest } as SeamResult],
       ["a later-stage refusal beside a verdict that is not current", { ...outcome, refusal: { stage: "economics", reason: "quote-not-covered", nodeId: "print" } } as SeamResult],
     ];
