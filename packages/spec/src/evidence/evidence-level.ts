@@ -218,7 +218,14 @@ export const NO_OUTCOME_LEVEL_EVENT_TYPES = [
  *
  * Every submitted and device-reported type is here: a party that took or
  * finished the work (a courier leg too) is executing it (cross-family E5b). So
- * are the executing party's own lifecycle records and logs. Telemetry,
+ * are the executing party's own lifecycle records and logs, and the custody
+ * chain: sealing, initiating and confirming a handoff are a physical leg's work
+ * (E5c). In PCC the only producer of `custody_handoff_confirmed` and of
+ * `photo_captured` is the print-and-mail driver handoff
+ * (gateway/src/services/print-and-mail-handoff.ts), i.e. the party doing the
+ * leg. A future flow where an inspector confirms receipt needs its own type and
+ * ruling: until then a receiving party that confirms custody is part of the
+ * chain, not independent (fail closed). Telemetry,
  * captures, custody, integrity and device-lifecycle records are NOT: an
  * independent observer (a sensor kit, a receiving lab) may emit them
  * (`NON_EXECUTOR_EVENT_TYPES`). Every vocabulary member is in exactly one of
@@ -245,12 +252,31 @@ export const EXECUTION_EVENT_TYPES = [
   "printer_job_verified",
   "process_log_summary",
   "log_hash_chain_entry",
+  "custody_sealed",
+  "custody_handoff_initiated",
+  "custody_handoff_confirmed",
+  "photo_captured",
 ] as const satisfies readonly EvidenceEventType[];
 
 /**
  * Event types that do not identify an executing party: inspections, and the
- * telemetry, captures, custody, integrity and device-lifecycle records an
- * independent observer may also emit.
+ * telemetry, captures, integrity and device-lifecycle records an independent
+ * observer may also emit. The rulings are tied to the producers in this repo
+ * (audit for cross-family E5c, 2026-10-01):
+ *   - inspections: inspection cameras (kernel photo-camera-adapter,
+ *     mock-camera, onboard-kit camera template), lab instruments (sila,
+ *     pylabrobot), the chromatograph;
+ *   - camera_snapshot: inspection cameras, and the driver handoff (which always
+ *     also emits custody_handoff_confirmed, so the driver is an executor anyway);
+ *   - power / temperature / sensor_data_summary: sensor kits and power monitors
+ *     (modbus, onboard-kit sensor template), which can be independent observers;
+ *   - calibration_record, device_birth/death/heartbeat: instrument and device
+ *     lifecycle (sila, pylabrobot);
+ *   - evidence_encrypted: the gateway's encrypted-evidence record;
+ *   - the rest have no producer yet (vibration, acoustic, tee_attestation,
+ *     sensor_anomaly_detected, evidence_committed, zk_*, photo_reference_set,
+ *     photo_anti_spoof_check, touchstone_*, capture_*). A new producer of any of
+ *     them must re-check this ruling.
  */
 export const NON_EXECUTOR_EVENT_TYPES = [
   "cv_inspection_result",
@@ -264,9 +290,6 @@ export const NON_EXECUTOR_EVENT_TYPES = [
   "temperature_log",
   "camera_snapshot",
   "tee_attestation",
-  "custody_sealed",
-  "custody_handoff_initiated",
-  "custody_handoff_confirmed",
   "sensor_data_summary",
   "sensor_anomaly_detected",
   "evidence_committed",
@@ -277,7 +300,6 @@ export const NON_EXECUTOR_EVENT_TYPES = [
   "device_death",
   "device_heartbeat",
   "calibration_record",
-  "photo_captured",
   "photo_reference_set",
   "photo_anti_spoof_check",
   "touchstone_dispatched",

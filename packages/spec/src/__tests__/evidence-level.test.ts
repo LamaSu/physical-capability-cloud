@@ -1487,3 +1487,19 @@ describe("executor identification: every vocabulary member is ruled on", () => {
     }
   });
 });
+
+describe("E5c (cross-family): custody confirmed by the party doing the drop-off is execution", () => {
+  it("a custody handoff confirmed in an unassigned domain makes that domain's inspection non-independent (the reviewer's reproduction)", () => {
+    expect(level([bundle([ev("custody_handoff_confirmed", "human-driver"), ev("instrument_result", "reader", { pass: true })], OP_B)], ASSIGNED_A)).toBe("device_reported");
+  });
+
+  it("the driver handoff's own photo, and sealing or initiating a handoff, also make the domain an executor", () => {
+    for (const type of ["photo_captured", "custody_sealed", "custody_handoff_initiated"] as const) {
+      expect(level([bundle([ev(type, "human-driver"), inspectPass()], OP_B)], ASSIGNED_A), type).toBe("device_reported");
+    }
+  });
+
+  it("camera_snapshot alone does not: an independent inspection camera emits it too", () => {
+    expect(level([executorBundle(), bundle([ev("camera_snapshot", "camera-c"), inspectPass()], OP_C)], ASSIGNED_A)).toBe("inspected_output");
+  });
+});
