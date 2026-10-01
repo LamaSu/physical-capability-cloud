@@ -14,6 +14,8 @@
  *    and plan id, and to exactly its node set;
  *  - each node's execution contract is the one its planHash names, and agrees with its binding (step,
  *    operator, tier, program) and its unit (amount, currency, decimals);
+ *  - R10's verdicts are exactly one per submitted node, and a refusal's nested verdicts are exactly the
+ *    top-level ones that are not current;
  *  - the seal record names this reservation and exactly this deal digest.
  *
  * Every input is read ONCE into owned, validated data (the review pattern of #351/#355/#356). A
@@ -472,6 +474,30 @@ function planIsBound(plan: CompiledAcceptedPlan, snap: SubmissionSnapshot, nodeI
   });
 }
 
+/**
+ * The verdicts are an exact one-to-one cover of the submitted nodes: every submitted node id has a
+ * verdict, and no id has more verdicts than nodes were submitted under it. R10 gives an id it could
+ * read, submitted twice, ONE verdict, and an id it could not read one verdict per claim, so the bound
+ * is the number of nodes submitted under that id, not 1. A verdict for an id nobody submitted counts
+ * as more than the zero allowed.
+ */
+function coversNodes(verdicts: readonly VerdictView[], nodeIds: readonly string[]): boolean {
+  const submitted = new Map<string, number>();
+  for (const id of nodeIds) submitted.set(id, (submitted.get(id) ?? 0) + 1);
+  const given = new Map<string, number>();
+  for (const v of verdicts) given.set(v.nodeId, (given.get(v.nodeId) ?? 0) + 1);
+  for (const [id, n] of given) if (n > (submitted.get(id) ?? 0)) return false;
+  return [...submitted.keys()].every((id) => given.has(id));
+}
+
+/** Two verdict lists say the same thing: the same nodes with the same statuses, in any order. */
+function sameVerdicts(a: readonly VerdictView[], b: readonly VerdictView[]): boolean {
+  const key = (v: VerdictView) => JSON.stringify([v.nodeId, v.status]);
+  const x = a.map(key).sort();
+  const y = b.map(key).sort();
+  return x.length === y.length && x.every((k, i) => k === y[i]);
+}
+
 function money(amount: bigint, plan: CompiledAcceptedPlan): Money {
   return { baseUnits: amount.toString(), currency: plan.currency, decimals: plan.currencyDecimals };
 }
@@ -502,8 +528,14 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
     const plan = outcome?.ok ? outcome.plan : undefined;
     if (plan && !planIsIntact(plan)) return invalid("plan-integrity", asOf, snap);
     if (plan && !planIsBound(plan, snap, nodeIds)) return invalid("plan-binding", asOf, snap);
-    const verdictList = outcome ? (outcome.ok ? outcome.verdicts : outcome.verdicts ?? outcome.refusal.verdicts ?? []) : [];
-    if (!verdictList.every((v) => nodeIds.includes(v.nodeId))) return invalid("malformed-outcome", asOf, snap);
+    // The top-level verdicts are R10's, one per submitted node (absent only when R10 never ran).
+    const verdictList = outcome?.verdicts ?? [];
+    if (outcome?.verdicts !== undefined && !coversNodes(outcome.verdicts, nodeIds)) return invalid("malformed-outcome", asOf, snap);
+    // A refusal repeats the verdicts that are not current, as its nested list. The two lists must agree
+    // exactly: the nested list is not a second source of node states, and an absent list is an empty one.
+    if (outcome && !outcome.ok && !sameVerdicts(outcome.refusal.verdicts ?? [], verdictList.filter((v) => v.status !== "current"))) {
+      return invalid("malformed-outcome", asOf, snap);
+    }
     if (plan && !(verdictList.length === nodeIds.length && verdictList.every((v) => v.status === "current"))) {
       return invalid("malformed-outcome", asOf, snap);
     }
