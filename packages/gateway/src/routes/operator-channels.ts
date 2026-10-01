@@ -35,6 +35,7 @@
 import type { FastifyInstance } from "fastify";
 import { randomBytes, createHmac } from "node:crypto";
 import { getEmailTransport } from "../services/email-transport.js";
+import { checkOutboundUrl, guardedFetch, OutboundError } from "../services/outbound-url-guard.js";
 
 /**
  * The transport is "what wire does the message go over." It stays small and
@@ -224,8 +225,9 @@ interface ChannelDispatchResult {
    * Machine-readable failure code when `delivered` is false. Lets the
    * operator's agent and the dashboard distinguish an honest "not configured"
    * (`email_not_configured`) from a transport that isn't wired
-   * (`transport_not_implemented`), a bad endpoint (`invalid_endpoint`), or a
-   * provider rejection (`send_failed`).
+   * (`transport_not_implemented`), a bad endpoint (`invalid_endpoint`, which
+   * includes a webhook URL that is not an allowed destination), or a
+   * provider rejection / unreachable or refused destination (`send_failed`).
    */
   error?: string;
   warning?: string;
@@ -259,6 +261,41 @@ export interface ChannelInput {
   enabled?: boolean;
 }
 
+type CodedError = Error & { code: string };
+
+function codedError(code: string, message: string): CodedError {
+  return Object.assign(new Error(message), { code });
+}
+
+/**
+ * Attach-time (and PATCH-time) URL rule for webhook channels (N84).
+ *
+ * The gateway POSTs to this URL from inside its own network, so a webhook URL
+ * is only accepted when it is an https URL (http only when NODE_ENV is "test"
+ * or "development") to a public destination: no userinfo, no IP literal in a
+ * private/loopback/link-local/metadata range (any spelling), no internal host
+ * name. Host names are not resolved here; the send path resolves them and
+ * vetoes private answers (see services/outbound-url-guard.ts), and checks the
+ * URL again, so records stored before this rule existed are refused too.
+ *
+ * A webhook with no `endpoint.url` yet is still accepted (the agent may add it
+ * later); sendWebhook reports "no endpoint.url". Other transports never dial
+ * `endpoint.url`, so it is not checked for them, but PATCH re-checks the merged
+ * record when the transport changes to "webhook".
+ */
+function assertWebhookUrlAllowed(transport: unknown, endpoint: unknown): void {
+  if (transport !== "webhook") return;
+  const url = endpoint && typeof endpoint === "object" ? (endpoint as { url?: unknown }).url : undefined;
+  if (url === undefined || url === null) return;
+  const check = checkOutboundUrl(url);
+  if (!check.ok) {
+    throw codedError(
+      "invalid_channel_url",
+      `endpoint.url is not an allowed webhook destination (${check.reason}); use a public https URL`,
+    );
+  }
+}
+
 /**
  * Programmatic attach — used by HTTP route AND by the A2A `pcc-attach-channel`
  * skill (so an agent doesn't have to make a second HTTP call).
@@ -280,6 +317,7 @@ export function attachChannel(operatorSlug: string, input: ChannelInput): Channe
       { code: "invalid_body" },
     );
   }
+  assertWebhookUrlAllowed(input.transport, input.endpoint);
   const ch: ChannelRecord = {
     id: newId(),
     operatorSlug,
@@ -441,11 +479,46 @@ function emailBody(ch: ChannelRecord, p: ChannelDispatchPayload): string {
   return lines.join("\n");
 }
 
+/**
+ * Maps a refused or failed guarded send to a dispatch result. Deliberately
+ * coarse: a blocked destination, a name that does not resolve and a connection
+ * failure all read the same, so the test-send route cannot be used to probe
+ * which internal names exist or which internal ports answer, and no address,
+ * resolver message or socket error text ever reaches the caller. The precise
+ * reason goes to the server log only (JSON-encoded: the slug is caller-chosen).
+ */
+function webhookFailure(ch: ChannelRecord, e: unknown): ChannelDispatchResult {
+  if (!(e instanceof OutboundError)) throw e; // unexpected: dispatchOne reports send_failed
+  console.warn(
+    `[op-channel] webhook not sent ${JSON.stringify({
+      operator: ch.operatorSlug,
+      channel: ch.id,
+      code: e.code,
+      reason: e.reason,
+    })}`,
+  );
+  const base = { channelId: ch.id, transport: "webhook" as const, delivered: false };
+  switch (e.code) {
+    case "invalid_url":
+      return {
+        ...base,
+        error: "invalid_endpoint",
+        warning: "webhook endpoint.url is not an allowed destination; use a public https URL",
+      };
+    case "redirect_not_followed":
+      return { ...base, warning: `HTTP ${e.status} (redirects are not followed; configure the final URL)` };
+    case "timeout":
+      return { ...base, error: "send_failed", warning: "webhook request timed out" };
+    default:
+      return { ...base, error: "send_failed", warning: "webhook destination is not reachable or not permitted" };
+  }
+}
+
 async function sendWebhook(
   ch: ChannelRecord,
   p: ChannelDispatchPayload,
 ): Promise<ChannelDispatchResult> {
-  const url = (ch.endpoint as { url?: string }).url;
+  const url = (ch.endpoint as { url?: unknown }).url;
   if (!url) {
     return {
       channelId: ch.id,
@@ -453,6 +526,12 @@ async function sendWebhook(
       delivered: false,
       warning: "no endpoint.url",
     };
+  }
+  // A record stored before attach-time validation existed (or edited around
+  // it) must not be sent: check the URL again, before anything is signed.
+  const urlCheck = checkOutboundUrl(url);
+  if (!urlCheck.ok) {
+    return webhookFailure(ch, new OutboundError("invalid_url", "url is not an allowed destination", { reason: urlCheck.reason }));
   }
   const body = JSON.stringify({
     source: "pcc.capability.network",
@@ -469,10 +548,22 @@ async function sendWebhook(
       headers["x-pcc-signature"] = `sha256=${sig}`;
     }
   }
-  const r = await fetch(url, { method: "POST", headers, body });
-  return r.ok
-    ? { channelId: ch.id, transport: "webhook", delivered: true, ref: r.headers.get("x-request-id") ?? undefined }
-    : { channelId: ch.id, transport: "webhook", delivered: false, warning: `HTTP ${r.status}` };
+  try {
+    // The only network call a channel can trigger: resolve once, refuse any
+    // private answer, dial the validated address, never follow a redirect.
+    const r = await guardedFetch(String(url), { method: "POST", headers, body });
+    const requestId = r.headers["x-request-id"];
+    return r.ok
+      ? {
+          channelId: ch.id,
+          transport: "webhook",
+          delivered: true,
+          ref: (Array.isArray(requestId) ? requestId[0] : requestId) ?? undefined,
+        }
+      : { channelId: ch.id, transport: "webhook", delivered: false, warning: `HTTP ${r.status}` };
+  } catch (e) {
+    return webhookFailure(ch, e);
+  }
 }
 
 /**
@@ -525,14 +616,28 @@ export async function operatorChannelsRoutes(app: FastifyInstance): Promise<void
   }>("/api/operators/channels/:id", async (req, reply) => {
     const ch = channels.get(req.params.id);
     if (!ch) return reply.status(404).send({ error: "not_found" });
+    const patch: Partial<ChannelRecord> = req.body && typeof req.body === "object" ? req.body : {};
     const merged: ChannelRecord = {
       ...ch,
-      ...req.body,
+      ...patch,
       id: ch.id,
       operatorSlug: ch.operatorSlug,
       createdAt: ch.createdAt,
       updatedAt: nowIso(),
     };
+    // PATCH must not be a way around the attach-time rules: whatever the patch
+    // touches is validated on the MERGED record, and nothing is written when
+    // it fails. A patch that touches neither field (rename, disable) is never
+    // blocked by a stale stored value, so an operator can still switch off a
+    // channel that predates the rules; send time refuses it either way.
+    if ("transport" in patch || "endpoint" in patch) {
+      try {
+        assertWebhookUrlAllowed(merged.transport, merged.endpoint);
+      } catch (e) {
+        const err = e as CodedError;
+        return reply.status(400).send({ error: err.code, message: err.message });
+      }
+    }
     channels.set(ch.id, merged);
     return reply.status(200).send({ channel: merged });
   });

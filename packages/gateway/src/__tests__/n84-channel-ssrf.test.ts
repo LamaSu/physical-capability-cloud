@@ -36,7 +36,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
 import { createHmac, randomBytes } from "node:crypto";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, LookupFunction } from "node:net";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
   attachChannel,
@@ -1029,5 +1029,327 @@ describe("guarded send: injected resolver + transport (no real DNS, no sockets)"
       expect(res[0]!.delivered).toBe(false);
       expect(res[0]!.warning).toBe("HTTP 500");
     });
+  });
+});
+
+// ── Group D: bounds, defaults and error text of guardedFetch ─────────────────
+
+describe("guardedFetch: defaults, bounds and generic errors", () => {
+  const HOST = "hooks.n84.test";
+
+  it("applies the 5 s deadline and the response-body cap when the caller gives none", async () => {
+    const g = await loadGuard();
+    expect(g.DEFAULT_TIMEOUT_MS).toBe(5000);
+    expect(g.DEFAULT_MAX_RESPONSE_BYTES).toBe(65536);
+    const { resolve } = fakeResolver({ [HOST]: [PUBLIC_V4] });
+    let seen: any;
+    const transport = async (req: any) => {
+      seen = req;
+      return { status: 200, headers: {}, bytesRead: 0, truncated: false };
+    };
+    await g.guardedFetch(`https://${HOST}/hook`, POST_INIT, { resolve, transport });
+    expect(seen.timeoutMs).toBeGreaterThan(4000);
+    expect(seen.timeoutMs).toBeLessThanOrEqual(5000);
+    expect(seen.maxResponseBytes).toBe(65536);
+    expect(seen.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("honours explicit timeoutMs and maxResponseBytes", async () => {
+    const g = await loadGuard();
+    const { resolve } = fakeResolver({ [HOST]: [PUBLIC_V4] });
+    let seen: any;
+    const transport = async (req: any) => {
+      seen = req;
+      return { status: 200, headers: {}, bytesRead: 0, truncated: false };
+    };
+    await g.guardedFetch(`https://${HOST}/hook`, { ...POST_INIT, timeoutMs: 1500, maxResponseBytes: 123 }, { resolve, transport });
+    expect(seen.timeoutMs).toBeLessThanOrEqual(1500);
+    expect(seen.timeoutMs).toBeGreaterThan(1000);
+    expect(seen.maxResponseBytes).toBe(123);
+  });
+
+  it("[neg] a hung transport is aborted through the signal when the deadline passes", async () => {
+    const g = await loadGuard();
+    const { resolve } = fakeResolver({ [HOST]: [PUBLIC_V4] });
+    let aborted = false;
+    const transport = (req: any) =>
+      new Promise<never>(() => {
+        req.signal.addEventListener("abort", () => {
+          aborted = true;
+        });
+      });
+    await expect(g.guardedFetch(`https://${HOST}/hook`, { ...POST_INIT, timeoutMs: 40 }, { resolve, transport })).rejects.toMatchObject({
+      code: "timeout",
+    });
+    expect(aborted).toBe(true);
+  });
+
+  it("[neg] transport and resolver failures carry generic text: no address, port or system error leaks", async () => {
+    const g = await loadGuard();
+    const leaky = async () => {
+      throw Object.assign(new Error("connect ECONNREFUSED 10.1.2.3:5432"), { code: "ECONNREFUSED" });
+    };
+    const { resolve } = fakeResolver({ [HOST]: [PUBLIC_V4] });
+    const err1 = await g.guardedFetch(`https://${HOST}/hook`, POST_INIT, { resolve, transport: leaky as never }).catch((e: Error) => e);
+    expect(err1).toMatchObject({ code: "request_failed", message: "request failed" });
+    const leakyResolve = async () => {
+      throw Object.assign(new Error("getaddrinfo ENOTFOUND secret-internal-name"), { code: "ENOTFOUND" });
+    };
+    const err2 = await g.guardedFetch(`https://${HOST}/hook`, POST_INIT, { resolve: leakyResolve as never, transport: leaky as never }).catch((e: Error) => e);
+    expect(err2).toMatchObject({ code: "dns_failure", message: "name resolution failed" });
+    for (const e of [err1, err2]) {
+      expect((e as Error).message).not.toMatch(/10\.1\.2\.3|5432|secret-internal-name|ECONNREFUSED|ENOTFOUND/);
+    }
+  });
+
+  it("[neg] a malformed transport status is a failure, not a success", async () => {
+    const g = await loadGuard();
+    const { resolve } = fakeResolver({ [HOST]: [PUBLIC_V4] });
+    for (const status of [0, 99, 600, 200.5, Number.NaN]) {
+      const transport = async () => ({ status, headers: {}, bytesRead: 0, truncated: false });
+      await expect(g.guardedFetch(`https://${HOST}/hook`, POST_INIT, { resolve, transport })).rejects.toMatchObject({
+        code: "request_failed",
+      });
+    }
+  });
+
+  it("[neg] the test seam refuses to run when NODE_ENV is production", async () => {
+    const g = await loadGuard();
+    process.env.NODE_ENV = "production";
+    expect(() => g._setOutboundDepsForTests({ resolve: async () => [] })).toThrow(/not available in production/);
+    expect(() => g._setOutboundDepsForTests(null)).toThrow(/not available in production/);
+  });
+
+  it("[neg] default dependencies refuse a loopback literal even where http is allowed (NODE_ENV=test)", async () => {
+    const g = await loadGuard();
+    g._setOutboundDepsForTests(null); // production defaults: real resolver, real transport
+    expect(process.env.NODE_ENV).toBe("test");
+    await expect(g.guardedFetch(`http://127.0.0.1:${port}/hook`, POST_INIT)).rejects.toMatchObject({ code: "invalid_url" });
+    await expect(g.guardedFetch(`http://localhost:${port}/hook`, POST_INIT)).rejects.toMatchObject({ code: "invalid_url" });
+    await expect(g.guardedFetch(`http://[::1]:${port}/hook`, POST_INIT)).rejects.toMatchObject({ code: "invalid_url" });
+    expect(hits).toHaveLength(0);
+  });
+});
+
+// ── Group E: the production transport on real loopback sockets ───────────────
+//
+// nodeTransport is the mechanism only (policy lives in guardedFetch), so it can
+// be driven against a local listener by handing it a lookup that returns
+// 127.0.0.1. Nothing here goes through the guard, and nothing leaves the host.
+
+describe("nodeTransport (production mechanism) on loopback sockets", () => {
+  interface Srv {
+    server: http.Server;
+    port: number;
+    close: () => Promise<void>;
+  }
+  const servers: Srv[] = [];
+
+  async function startServer(handler: http.RequestListener): Promise<Srv> {
+    const server = http.createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const srv: Srv = {
+      server,
+      port: (server.address() as AddressInfo).port,
+      close: async () => {
+        server.closeAllConnections?.();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      },
+    };
+    servers.push(srv);
+    return srv;
+  }
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => s.close()));
+  });
+
+  /** Test-only lookup that dials loopback no matter what the host name says. */
+  const loopbackLookup = ((_host: string, options: { all?: boolean }, cb: (...args: unknown[]) => void) => {
+    if (options?.all) cb(null, [{ address: "127.0.0.1", family: 4 }]);
+    else cb(null, "127.0.0.1", 4);
+  }) as unknown as LookupFunction;
+
+  function request(url: string, over: Record<string, unknown> = {}) {
+    return {
+      url: new URL(url),
+      addresses: null,
+      lookup: loopbackLookup,
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"a":1}',
+      timeoutMs: 2000,
+      maxResponseBytes: 65536,
+      signal: new AbortController().signal,
+      ...over,
+    };
+  }
+
+  it("sends method, path, query, headers and body exactly, dials only the looked-up address, and returns status and headers", async () => {
+    const g = await loadGuard();
+    const seen: Array<{ method?: string; url?: string; headers: http.IncomingHttpHeaders; body: string }> = [];
+    const srv = await startServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        seen.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString("utf8") });
+        res.statusCode = 201;
+        res.setHeader("x-request-id", "mech-1");
+        res.end("created");
+      });
+    });
+    // a name that does not exist in real DNS: only the lookup can have resolved it
+    const res = await g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/a/b?x=1#frag`, { body: '{"unicode":"é"}' }) as never);
+    expect(res.status).toBe(201);
+    expect(res.headers["x-request-id"]).toBe("mech-1");
+    expect(res.truncated).toBe(false);
+    expect(res.bytesRead).toBe("created".length);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.method).toBe("POST");
+    expect(seen[0]!.url).toBe("/a/b?x=1");
+    expect(seen[0]!.headers.host).toBe(`pinned.n84.test:${srv.port}`);
+    expect(seen[0]!.headers["content-type"]).toBe("application/json");
+    expect(seen[0]!.headers["content-length"]).toBe(String(Buffer.byteLength('{"unicode":"é"}')));
+    expect(seen[0]!.body).toBe('{"unicode":"é"}');
+  });
+
+  it("ignores a caller-supplied Host or Content-Length header (the URL and body are authoritative)", async () => {
+    const g = await loadGuard();
+    const seen: http.IncomingHttpHeaders[] = [];
+    const srv = await startServer((req, res) => {
+      seen.push(req.headers);
+      req.resume();
+      req.on("end", () => res.end("ok"));
+    });
+    await g.nodeTransport(
+      request(`http://pinned.n84.test:${srv.port}/`, {
+        headers: { "Content-Length": "9999", Host: "evil.example", "content-type": "text/plain" },
+        body: "abc",
+      }) as never,
+    );
+    expect(seen[0]!.host).toBe(`pinned.n84.test:${srv.port}`);
+    expect(seen[0]!["content-length"]).toBe("3");
+  });
+
+  it("[neg] never follows a redirect: a 302 to an internal service is returned as a 302 and the target sees nothing", async () => {
+    const g = await loadGuard();
+    let internalHits = 0;
+    const internal = await startServer((_req, res) => {
+      internalHits++;
+      res.end("internal secret");
+    });
+    const redirector = await startServer((_req, res) => {
+      res.statusCode = 302;
+      res.setHeader("location", `http://127.0.0.1:${internal.port}/secret`);
+      res.end();
+    });
+    const res = await g.nodeTransport(request(`http://pinned.n84.test:${redirector.port}/hook`) as never);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`http://127.0.0.1:${internal.port}/secret`);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(internalHits).toBe(0);
+  });
+
+  it("[neg] stops reading at the response-body cap and drops the connection", async () => {
+    const g = await loadGuard();
+    let serverSawClose = false;
+    const srv = await startServer((_req, res) => {
+      res.statusCode = 200;
+      res.write("x".repeat(4096));
+      const iv = setInterval(() => res.write("x".repeat(4096)), 5);
+      res.on("close", () => {
+        clearInterval(iv);
+        serverSawClose = true;
+      });
+    });
+    const started = Date.now();
+    const res = await g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/endless`, { maxResponseBytes: 1024 }) as never);
+    expect(res.status).toBe(200);
+    expect(res.truncated).toBe(true);
+    expect(res.bytesRead).toBeGreaterThan(1024);
+    expect(Date.now() - started).toBeLessThan(1500);
+    for (let i = 0; i < 40 && !serverSawClose; i++) await new Promise((r) => setTimeout(r, 25));
+    expect(serverSawClose, "the connection must be dropped once the cap is hit").toBe(true);
+  });
+
+  it("[neg] a server that never answers is cut off at the deadline with a timeout", async () => {
+    const g = await loadGuard();
+    const srv = await startServer(() => undefined);
+    const started = Date.now();
+    await expect(g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/`, { timeoutMs: 120 }) as never)).rejects.toMatchObject({
+      code: "timeout",
+    });
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  it("[neg] aborting the signal cuts the request off", async () => {
+    const g = await loadGuard();
+    const srv = await startServer(() => undefined);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 40);
+    await expect(
+      g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/`, { timeoutMs: 5000, signal: controller.signal }) as never),
+    ).rejects.toMatchObject({ code: "timeout" });
+  });
+
+  it("[neg] a request whose signal is already aborted never connects", async () => {
+    const g = await loadGuard();
+    let connections = 0;
+    const srv = await startServer((_req, res) => res.end("ok"));
+    srv.server.on("connection", () => connections++);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/`, { signal: controller.signal }) as never),
+    ).rejects.toMatchObject({ code: "timeout" });
+    expect(connections).toBe(0);
+  });
+
+  it("headers received but the body stalls: the deadline yields the status as a truncated success", async () => {
+    const g = await loadGuard();
+    const srv = await startServer((_req, res) => {
+      res.writeHead(202, { "x-request-id": "slow-1" });
+      res.write("partial");
+    });
+    const res = await g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/`, { timeoutMs: 150 }) as never);
+    expect(res.status).toBe(202);
+    expect(res.headers["x-request-id"]).toBe("slow-1");
+    expect(res.truncated).toBe(true);
+  });
+
+  it("[neg] a refused connection fails with generic text (no address or port)", async () => {
+    const g = await loadGuard();
+    const srv = await startServer((_req, res) => res.end("ok"));
+    const closedPort = srv.port;
+    await srv.close();
+    const err = await g.nodeTransport(request(`http://pinned.n84.test:${closedPort}/`) as never).catch((e: Error) => e);
+    expect(err).toMatchObject({ code: "request_failed", message: "request failed" });
+    expect((err as Error).message).not.toMatch(/127\.0\.0\.1|ECONNREFUSED/);
+  });
+
+  it("[neg] a lookup that refuses (a blocked pinned address) stops the connection before any socket is opened", async () => {
+    const g = await loadGuard();
+    let connections = 0;
+    const srv = await startServer((_req, res) => res.end("ok"));
+    srv.server.on("connection", () => connections++);
+    const lookup = g.createPinnedLookup([{ address: "127.0.0.1", family: 4 }]);
+    const err = await g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/`, { lookup }) as never).catch((e: Error) => e);
+    expect(err).toMatchObject({ code: "request_failed" });
+    expect(connections).toBe(0);
+  });
+
+  it("an IP-literal URL is dialed directly and the lookup is never consulted", async () => {
+    const g = await loadGuard();
+    let lookups = 0;
+    const lookup = ((...args: unknown[]) => {
+      lookups++;
+      (args[2] as (e: Error) => void)(new Error("must not be called"));
+    }) as unknown as LookupFunction;
+    const srv = await startServer((_req, res) => {
+      res.end("ok");
+    });
+    const res = await g.nodeTransport(request(`http://127.0.0.1:${srv.port}/lit`, { lookup }) as never);
+    expect(res.status).toBe(200);
+    expect(lookups).toBe(0);
   });
 });
