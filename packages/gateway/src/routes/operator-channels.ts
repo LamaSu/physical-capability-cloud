@@ -35,6 +35,8 @@
 import type { FastifyInstance } from "fastify";
 import { randomBytes, createHmac } from "node:crypto";
 import { getEmailTransport } from "../services/email-transport.js";
+import { adminOrCaller, callerIdentity, mayAccess, type AdminOrCaller } from "../auth/admin-secret-gate.js";
+import { normalizeIdentity } from "../auth/identity-normalize.js";
 
 /**
  * The transport is "what wire does the message go over." It stays small and
@@ -204,6 +206,15 @@ export interface ChannelRecord {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+  /**
+   * N84: the identity that attached this channel: the normalized authenticated actor at attach, never a
+   * body field, and never changed afterwards (PATCH pins it). A slug is a free-form string with no owner
+   * record, so anyone authenticated may attach under any slug, but the channel is THEIRS: only this
+   * identity (sameIdentity) or the admin secret lists, patches, deletes or test-sends it, and everyone
+   * else's channels are omitted from every list. Absent (legacy, or attached by the admin secret with no
+   * identity of its own) means the admin's alone.
+   */
+  creatorId?: string;
 }
 
 interface ChannelDispatchPayload {
@@ -263,9 +274,14 @@ export interface ChannelInput {
  * Programmatic attach — used by HTTP route AND by the A2A `pcc-attach-channel`
  * skill (so an agent doesn't have to make a second HTTP call).
  *
+ * `creatorId` is the authenticated actor who is attaching (N84): the channel is recorded as theirs,
+ * normalized, and from then on only they (or the admin secret) see or change it. It comes from the
+ * request's authentication, never from the body. null is for the admin secret attaching with no identity
+ * of its own: the channel is then the admin's alone, like a legacy one.
+ *
  * Throws on validation failure with a `code` property so callers can branch.
  */
-export function attachChannel(operatorSlug: string, input: ChannelInput): ChannelRecord {
+export function attachChannel(operatorSlug: string, input: ChannelInput, creatorId: string | null): ChannelRecord {
   if (!input.transport) {
     throw Object.assign(new Error("transport required"), { code: "invalid_body" });
   }
@@ -294,6 +310,8 @@ export function attachChannel(operatorSlug: string, input: ChannelInput): Channe
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
+  const creator = normalizeIdentity(creatorId);
+  if (creator !== "") ch.creatorId = creator;
   channels.set(ch.id, ch);
   let set = byOperator.get(operatorSlug);
   if (!set) { set = new Set(); byOperator.set(operatorSlug, set); }
@@ -301,11 +319,23 @@ export function attachChannel(operatorSlug: string, input: ChannelInput): Channe
   return ch;
 }
 
-/** List all channels for an operator. */
+/**
+ * List ALL channels under a slug, whoever attached them. This is the admin's view (and the tests'):
+ * anything that answers a caller must go through channelsVisibleTo instead.
+ */
 export function getChannelsByOperator(operatorSlug: string): ChannelRecord[] {
   const ids = byOperator.get(operatorSlug);
   if (!ids) return [];
   return Array.from(ids).map((i) => channels.get(i)).filter((c): c is ChannelRecord => !!c);
+}
+
+/**
+ * What `who` may see under a slug (N84): the admin sees every channel; anyone else sees only the channels
+ * they attached. The rest are omitted outright, so a list carries no trace of them: no count, no kind.
+ * mayAccess is false for a channel with no creator, so a legacy channel is the admin's alone.
+ */
+export function channelsVisibleTo(operatorSlug: string, who: AdminOrCaller): ChannelRecord[] {
+  return getChannelsByOperator(operatorSlug).filter((c) => mayAccess(who, c.creatorId));
 }
 
 /**
@@ -317,19 +347,28 @@ export function getChannelsByOperator(operatorSlug: string): ChannelRecord[] {
  * For the demo path we ship a minimal "naive" composer that does the obvious
  * thing per transport. The richer LLM-driven composer is a follow-on and can
  * be swapped in without changing this surface.
+ *
+ * N84: with `onlyFor` (the caller of a test send), only the channels that caller may access are sent to.
+ * WITHOUT it this delivers to EVERY enabled channel under the slug, whoever attached it. Anyone
+ * authenticated may attach under any slug and no record says who owns a slug, so the unfiltered form must
+ * NOT be wired to job notifications until slugs have a durable owner record.
  */
 export async function dispatchToChannels(
   operatorSlug: string,
   payload: ChannelDispatchPayload,
+  onlyFor?: AdminOrCaller,
 ): Promise<ChannelDispatchResult[]> {
   const ids = byOperator.get(operatorSlug);
   if (!ids || ids.size === 0) {
+    // A caller held to its own channels is told nothing about the slug: with none of its own, an empty result.
+    if (onlyFor && !onlyFor.admin) return [];
     return [{ channelId: "", transport: "manual", delivered: true, ref: "no-channels-attached" }];
   }
   const results: ChannelDispatchResult[] = [];
   for (const id of ids) {
     const ch = channels.get(id);
     if (!ch || !ch.enabled) continue;
+    if (onlyFor && !mayAccess(onlyFor, ch.creatorId)) continue;
     results.push(await dispatchOne(ch, payload));
   }
   return results;
@@ -493,13 +532,19 @@ export async function operatorChannelsRoutes(app: FastifyInstance): Promise<void
    * Called by the operator's onboarding agent after it has had the
    * conversation that produced the channel record. PCC accepts any
    * combination of fields that satisfies the envelope.
+   *
+   * N84: the channel is recorded as the CALLER's (the authenticated identity, never a body field). Anyone
+   * authenticated may attach under any slug, but the channel is theirs alone. A presented admin secret must
+   * check out (403), and no identity is 401, both before the body is looked at.
    */
   app.post<{
     Params: { slug: string };
     Body: ChannelInput;
   }>("/api/operators/:slug/channels", async (req, reply) => {
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
     try {
-      const ch = attachChannel(req.params.slug, req.body ?? ({} as ChannelInput));
+      const ch = attachChannel(req.params.slug, req.body ?? ({} as ChannelInput), callerIdentity(req));
       return reply.status(201).send({ channel: ch });
     } catch (e) {
       const err = e as Error & { code?: string };
@@ -510,12 +555,14 @@ export async function operatorChannelsRoutes(app: FastifyInstance): Promise<void
     }
   });
 
+  // N84: a caller lists only the channels it attached; the admin secret lists all. Everyone else's are
+  // omitted, with no count and no kind.
   app.get<{ Params: { slug: string } }>(
     "/api/operators/:slug/channels",
     async (req, reply) => {
-      const ids = byOperator.get(req.params.slug);
-      const list = ids ? Array.from(ids).map((i) => channels.get(i)).filter(Boolean) : [];
-      return reply.status(200).send({ channels: list });
+      const who = adminOrCaller(req, reply);
+      if (!who) return reply;
+      return reply.status(200).send({ channels: channelsVisibleTo(req.params.slug, who) });
     },
   );
 
@@ -523,13 +570,19 @@ export async function operatorChannelsRoutes(app: FastifyInstance): Promise<void
     Params: { id: string };
     Body: Partial<ChannelRecord>;
   }>("/api/operators/channels/:id", async (req, reply) => {
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
     const ch = channels.get(req.params.id);
-    if (!ch) return reply.status(404).send({ error: "not_found" });
+    // N84: only the channel's STORED creator (or the admin) may change it. Anyone else gets the answer for
+    // an unknown id. A slug, owner or creatorId in the body is never consulted, and never kept: the merge
+    // below pins creatorId like id, operatorSlug and createdAt.
+    if (!ch || !mayAccess(who, ch.creatorId)) return reply.status(404).send({ error: "not_found" });
     const merged: ChannelRecord = {
       ...ch,
       ...req.body,
       id: ch.id,
       operatorSlug: ch.operatorSlug,
+      creatorId: ch.creatorId,
       createdAt: ch.createdAt,
       updatedAt: nowIso(),
     };
@@ -540,8 +593,11 @@ export async function operatorChannelsRoutes(app: FastifyInstance): Promise<void
   app.delete<{ Params: { id: string } }>(
     "/api/operators/channels/:id",
     async (req, reply) => {
+      const who = adminOrCaller(req, reply);
+      if (!who) return reply;
       const ch = channels.get(req.params.id);
-      if (!ch) return reply.status(404).send({ error: "not_found" });
+      // N84: as for PATCH: the stored creator or the admin; anyone else gets the answer for an unknown id.
+      if (!ch || !mayAccess(who, ch.creatorId)) return reply.status(404).send({ error: "not_found" });
       channels.delete(ch.id);
       byOperator.get(ch.operatorSlug)?.delete(ch.id);
       return reply.status(200).send({ deleted: true });
@@ -552,15 +608,27 @@ export async function operatorChannelsRoutes(app: FastifyInstance): Promise<void
    * POST /api/operators/:slug/channels/test — fire a synthetic job at every
    * enabled channel so the operator's agent (and the human watching) can
    * verify the integration end-to-end before any real job lands.
+   *
+   * N84: a caller's send reaches ONLY the channels it attached; the admin secret reaches all. A caller with
+   * none of its own under the slug gets 404, the same answer as for a slug with no channels at all.
    */
   app.post<{ Params: { slug: string } }>(
     "/api/operators/:slug/channels/test",
     async (req, reply) => {
-      const results = await dispatchToChannels(req.params.slug, {
-        jobId: "test_" + randomBytes(4).toString("hex"),
-        contextRef: "synthetic",
-        summary: "TEST DISPATCH — your channel is wired up correctly.",
-      });
+      const who = adminOrCaller(req, reply);
+      if (!who) return reply;
+      if (!who.admin && channelsVisibleTo(req.params.slug, who).length === 0) {
+        return reply.status(404).send({ error: "not_found" });
+      }
+      const results = await dispatchToChannels(
+        req.params.slug,
+        {
+          jobId: "test_" + randomBytes(4).toString("hex"),
+          contextRef: "synthetic",
+          summary: "TEST DISPATCH — your channel is wired up correctly.",
+        },
+        who,
+      );
       return reply.status(200).send({ results });
     },
   );

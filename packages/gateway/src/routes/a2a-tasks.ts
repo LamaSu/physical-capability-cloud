@@ -55,11 +55,13 @@ import { getEventBus } from "../services/event-bus.js";
 import { createJobFromSession } from "./paid-job-flow.js";
 import { assertSessionLive } from "./session-liveness.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
+import { checkAdminKey, type AdminKeyCheck } from "../auth/admin-key.js";
+import { presentsAdminSecret, type AdminOrCaller } from "../auth/admin-secret-gate.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { canAnonA2aDiscover } from "../middleware/security-hardening.js";
 import {
   attachChannel,
-  getChannelsByOperator,
+  channelsVisibleTo,
   serializeAvailability,
   type ChannelInput,
   type ChannelRecord,
@@ -742,13 +744,14 @@ async function handlePccAuthorIntegration(
   // the wire-protocol slot — how PCC will ping the operator when a job lands.
   // Operator slug defaults to a sanitized form of name so the same agent can
   // attach more channels later without us having to mint a separate id.
+  // N84: each channel is recorded as the authenticated caller's (`actor`), whatever slug it names.
   const operatorSlug = p.operatorSlug ?? slugify(p.name);
   const attached: ChannelRecord[] = [];
   const channelErrors: Array<{ index: number; error: string }> = [];
   if (Array.isArray(p.channels) && p.channels.length > 0) {
     for (let i = 0; i < p.channels.length; i++) {
       try {
-        attached.push(attachChannel(operatorSlug, p.channels[i]!));
+        attached.push(attachChannel(operatorSlug, p.channels[i]!, actor));
       } catch (e) {
         channelErrors.push({ index: i, error: (e as Error).message });
       }
@@ -864,8 +867,16 @@ interface PccAttachChannelParams {
  * Two input shapes accepted:
  *   - { operatorSlug, channels: [ChannelInput, ...] }  (batch)
  *   - { operatorSlug, label, transport, describe, ... } (single, shorthand)
+ *
+ * N84: each channel is recorded as the authenticated caller's (`creatorId`), whatever slug it names, and
+ * `totalChannelsNow` counts only the channels `who` may see (the caller's own; every one for the admin),
+ * so the reply says nothing about anyone else's channels under the slug.
  */
-async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArtifact[]> {
+async function handlePccAttachChannel(
+  p: PccAttachChannelParams,
+  who: AdminOrCaller,
+  creatorId: string | null,
+): Promise<A2AArtifact[]> {
   if (!p.operatorSlug) {
     throw new Error("operatorSlug is required for pcc-attach-channel");
   }
@@ -892,7 +903,7 @@ async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArt
   const errors: Array<{ index: number; error: string }> = [];
   for (let i = 0; i < inputs.length; i++) {
     try {
-      attached.push(attachChannel(p.operatorSlug, inputs[i]!));
+      attached.push(attachChannel(p.operatorSlug, inputs[i]!, creatorId));
     } catch (e) {
       errors.push({ index: i, error: (e as Error).message });
     }
@@ -903,7 +914,7 @@ async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArt
     data: {
       operatorSlug: p.operatorSlug,
       attached,
-      totalChannelsNow: getChannelsByOperator(p.operatorSlug).length,
+      totalChannelsNow: channelsVisibleTo(p.operatorSlug, who).length,
       ...(errors.length ? { errors } : {}),
       testDispatch: `POST /api/operators/${p.operatorSlug}/channels/test — fire a synthetic job at every enabled channel to verify`,
     },
@@ -929,14 +940,30 @@ function requestActor(req: FastifyRequest): string | undefined {
 }
 
 /**
+ * N84: a PRESENTED admin secret must check out before a channel skill does anything. A wrong one is
+ * refused (as the HTTP routes do through adminOrCaller), never downgraded to the caller's own rights.
+ * Returns the refusal, or null when no secret was presented or it checks out.
+ */
+function adminSecretRefusal(
+  rpcId: string | number | null,
+  adminCheck: AdminKeyCheck | null,
+): JsonRpcError | null {
+  if (adminCheck && !adminCheck.ok) return rpcError(rpcId, -32600, `Invalid Request: ${adminCheck.message}`);
+  return null;
+}
+
+/**
  * @param getActor - the AUTHENTICATED caller (API-key operatorId, else SIWE
  *   address), or undefined. Resolved lazily by the route; only skills that
  *   create owned resources call it.
+ * @param getAdminCheck - the outcome of a PRESENTED X-Admin-Key (null when none
+ *   was presented). Only the channel skills ask for it.
  */
 async function dispatchTasksSend(
   rpcId: string | number | null,
   params: Record<string, unknown>,
   getActor: () => string | undefined = () => undefined,
+  getAdminCheck: () => AdminKeyCheck | null = () => null,
 ): Promise<JsonRpcSuccess | JsonRpcError> {
   pruneExpired();
   const requestedSkill = (params.skill ?? params.skillId) as string | undefined;
@@ -1049,6 +1076,9 @@ async function dispatchTasksSend(
         // is no owner, so refuse, with the same error the route gives an
         // unauthenticated gated call, rather than mint a kernel owned by a body
         // field or by nobody.
+        // N84: and a presented admin secret must check out, before anything is registered.
+        const adminRefusal = adminSecretRefusal(rpcId, getAdminCheck());
+        if (adminRefusal) return adminRefusal;
         const actor = getActor();
         if (!actor) {
           return rpcError(
@@ -1073,7 +1103,22 @@ async function dispatchTasksSend(
       }
 
       case "pcc-attach-channel": {
-        const artifacts = await handlePccAttachChannel(skillParams as PccAttachChannelParams);
+        // N84: a channel belongs to the identity that attaches it, so the caller must be known, or hold the
+        // admin secret. A presented secret must check out: a wrong one is refused, never downgraded.
+        const adminCheck = getAdminCheck();
+        const adminRefusal = adminSecretRefusal(rpcId, adminCheck);
+        if (adminRefusal) return adminRefusal;
+        const actor = getActor();
+        const who: AdminOrCaller | null = adminCheck ? { admin: true } : actor ? { admin: false, caller: actor } : null;
+        if (!who) {
+          return rpcError(
+            rpcId,
+            -32600,
+            "Invalid Request: authentication required (Authorization: Bearer pcc_live_...); " +
+              "a channel belongs to the identity that attaches it",
+          );
+        }
+        const artifacts = await handlePccAttachChannel(skillParams as PccAttachChannelParams, who, actor ?? null);
         const task: A2ATask = {
           ...baseTask,
           state: "COMPLETED",
@@ -1326,10 +1371,14 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
       }
     }
 
+    // N84: the channel skills honour a PRESENTED admin secret (X-Admin-Key). The outcome is read lazily,
+    // only by those skills; a wrong secret is refused, never downgraded to the caller's own rights.
+    const getAdminCheck = (): AdminKeyCheck | null => (presentsAdminSecret(req) ? checkAdminKey(req) : null);
+
     let result: JsonRpcSuccess | JsonRpcError;
     switch (method) {
       case "tasks/send":
-        result = await dispatchTasksSend(rpcId, params, getActor);
+        result = await dispatchTasksSend(rpcId, params, getActor, getAdminCheck);
         break;
       case "tasks/get":
         result = await dispatchTasksGet(rpcId, params);
