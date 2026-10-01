@@ -92,6 +92,16 @@
  *     guessable format are refused (404) (D3). A signed-in caller's
  *     conversation is bound to that principal: GET and resume from anyone
  *     else is 404 (R5). An anonymous conversation's id is its only credential.
+ *
+ * Whose conversation and holds these are (astra pack 91b, F3; by design)
+ * -----------------------------------------------------------------------
+ * The owner is a PRINCIPAL, not one session. A SIWE caller's principal is its
+ * WALLET: every session of that wallet is the same principal, so a second
+ * session (another browser, a new login) reads the conversation and confirms its
+ * holds, running the call as itself. An API key is a principal of its own, by
+ * the key's id: another key, even of the same operator, is not. A session of
+ * another wallet, or anonymous, is none of them (404). Nothing below promises
+ * per-session isolation, and nothing should be read as doing so.
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -192,7 +202,11 @@ interface PendingActionRecord {
   summary: string;
   /** For a credential-minting call: the email or wallet the credential will be bound to. */
   bindsTo?: string;
-  /** Fingerprint of the principal whose chat held it (or of an anonymous conversation): only they can confirm. */
+  /**
+   * Fingerprint of the principal whose chat held it (or of an anonymous conversation):
+   * only they can confirm. For a SIWE caller that principal is the wallet, so any
+   * session of the same wallet can (by design, astra 91b F3), and no other can.
+   */
   owner: string;
   createdAt: string;
   expiresAt: string;
@@ -551,7 +565,11 @@ function blockChars(block: AnthropicMessageContent): number {
 
 // ── Caller principal (WP-D D6, R5) ──────────────────────────────────
 
-/** sha256 of the principal's identity: the API key's id, or the session's wallet address. */
+/**
+ * sha256 of the principal's identity: the API key's id, or the session's wallet
+ * address (lower-cased). Deliberately NOT the session's id or token: the principal is
+ * the wallet, so every session of one wallet is the same principal (astra 91b F3).
+ */
 function principalFingerprint(kind: "api_key" | "session", id: string): string {
   return createHash("sha256").update(`pcc-onboard-chat/${kind}/${id}`).digest("hex");
 }

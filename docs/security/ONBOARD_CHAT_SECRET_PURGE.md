@@ -34,7 +34,9 @@ gets 404 from `GET` and from resume. New rows store a JSON envelope in the
 `messages` column, `{"v":1,"owner":…,"messages":[…],"pendingActions":[…]}`.
 `owner` is the sha256 fingerprint of the signed-in principal that owns the
 conversation (null for an anonymous one), and `GET` and resume from any other
-principal get 404. A row whose `messages` column is a bare array has no owner, so
+principal get 404. A principal is not one browser session: for a SIWE login it is
+the wallet, so every session of one wallet is the same principal, and an API key
+is a principal of its own (by key id). A row whose `messages` column is a bare array has no owner, so
 it is not served either. **The code does not delete or rewrite old rows**, and it
 cannot un-send what the model provider already received. That is why this
 runbook exists, and why **every key found must be rotated**, whether or not the
@@ -307,7 +309,9 @@ JS
   before the confirm button. The owner view keeps digests (a 64-hex hash) so the
   person can check them, and removes secrets. `GET /api/onboard/chat/:id` lists
   the open ones to their owner, or for an anonymous conversation, to whoever
-  holds its id.
+  holds its id. The owner is the principal, not a browser session (by design):
+  another session of the same wallet sees the same holds and can confirm them, and
+  a session of another wallet cannot.
   It runs only when the same user sends
   `POST /api/onboard/chat { conversationId, confirmActionId }` within 10 minutes,
   once. The reply to that request carries `confirmedAction` and the call in

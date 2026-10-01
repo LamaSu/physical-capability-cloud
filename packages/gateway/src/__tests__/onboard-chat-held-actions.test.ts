@@ -314,7 +314,7 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     expect(get.json().pendingActions.map((a: { actionId: string }) => a.actionId)).toEqual([actionId]);
   });
 
-  it("a wallet session holds and confirms its own actions; an API key of the same operator cannot confirm them", async () => {
+  it("a wallet session holds and confirms its wallet's actions; an API key of the same operator is another principal and cannot", async () => {
     const token = randomUUID();
     const now = Date.now();
     getRepos().sessions.insert({
@@ -333,6 +333,52 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     expect(ok.statusCode).toBe(200);
     expect(counter).toBe(1);
     expect(dispatched.filter((d) => d.url === "/api/test/counter").map((d) => d.authorization)).toEqual([`Bearer ${token}`]);
+  });
+
+  // ── astra pack 91b, F3: holds belong to the WALLET principal, by design ─────────────
+  // The principal of a SIWE caller is its wallet, as an API key's is that key. Two sessions
+  // of one wallet are one principal: the second reads and confirms the first's hold. This
+  // is not isolation between sessions and is not claimed to be; it is no access across
+  // wallets. The test pins the designed behavior so that a change to it is deliberate.
+  it("holds belong to the wallet principal: another session of the same wallet reads and confirms them; a session of another wallet cannot (astra 91b F3, by design)", async () => {
+    const walletSession = (address: string) => {
+      const token = randomUUID();
+      const now = Date.now();
+      getRepos().sessions.insert({
+        id: randomUUID(),
+        walletAddress: address,
+        token,
+        createdAt: new Date(now).toISOString(),
+        expiresAt: new Date(now + 3_600_000).toISOString(),
+        lastActiveAt: new Date(now).toISOString(),
+      });
+      return { token, headers: { authorization: `Bearer ${token}` } };
+    };
+    const first = walletSession(WALLET);
+    const second = walletSession(WALLET.toUpperCase().replace("0X", "0x")); // the same wallet, stored in another case
+    const stranger = walletSession("0x" + "b0b0".repeat(10));
+    const { conversationId, actionId } = await holdBump(first.headers);
+
+    // Another wallet's session: the conversation does not exist for it, and nothing runs.
+    const strangerGet = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: stranger.headers });
+    expect(strangerGet.statusCode).toBe(404);
+    const strangerConfirm = await chat({ conversationId, confirmActionId: actionId }, stranger.headers);
+    expect(strangerConfirm.statusCode).toBe(404);
+    expect(counter).toBe(0);
+
+    // The wallet's other session reads the hold ...
+    const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: second.headers });
+    expect(get.statusCode).toBe(200);
+    expect(get.json().pendingActions.map((a: { actionId: string }) => a.actionId)).toEqual([actionId]);
+    // ... and confirms it; the call runs as the confirming session, once.
+    const confirm = await chat({ conversationId, confirmActionId: actionId }, second.headers);
+    expect(confirm.statusCode).toBe(200);
+    expect(confirm.json().confirmedAction).toMatchObject({ actionId, tool: "bump_counter", status: 200 });
+    expect(counter).toBe(1);
+    expect(dispatched.filter((d) => d.url === "/api/test/counter").map((d) => d.authorization)).toEqual([`Bearer ${second.token}`]);
+    const replay = await chat({ conversationId, confirmActionId: actionId }, first.headers);
+    expect(replay.statusCode).toBe(409); // still only once, whichever session asks
+    expect(counter).toBe(1);
   });
 
   it("a confirmed call whose error echoes a key is redacted in the reply, the history and the model request", async () => {
