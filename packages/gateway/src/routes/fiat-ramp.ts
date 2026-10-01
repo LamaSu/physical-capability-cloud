@@ -369,10 +369,6 @@ function providerMode(reply: FastifyReply, p: RampProvider): "live" | "demo" | n
 }
 
 /**
- * Marks a provider response with what produced it: in demo, mock/demo; live, the
- * provider's environment, so a sandbox answer is never mistaken for real money moving.
- */
-/**
  * A demo answer never carries a wallet address (cross-family review r3, A06a, CRITICAL): a mock
  * wallet's address is valid EVM hex that NO key controls, so anything sent to it is gone, whatever
  * flags the answer carries. Demo answers name a mock wallet by a reference that is not an address;
@@ -399,6 +395,10 @@ function scrubMockAddresses(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Marks a provider response with what produced it: in demo, mock/demo; live, the
+ * provider's environment, so a sandbox answer is never mistaken for real money moving.
+ */
 function markRamp<T extends object>(mode: "live" | "demo", p: RampProvider, body: T) {
   if (mode === "demo") return markDemo("demo", scrubMockAddresses(body) as T);
   const environment = providerConfig(p).environment;

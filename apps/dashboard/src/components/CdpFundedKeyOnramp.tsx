@@ -1,5 +1,6 @@
 import React from "react";
 import { getAuthHeaders } from "../stores/auth-store.js";
+import { canFundByCard, walletLabel, walletRequestRef, type CdpWallet } from "../lib/cdp-wallet-view.js";
 
 /**
  * CdpFundedKeyOnramp — zero-friction PCC onboarding.
@@ -17,12 +18,8 @@ import { getAuthHeaders } from "../stores/auth-store.js";
  *   DELETE /api/fiat-ramp/cdp/spend-permission/:id
  */
 
-interface Wallet {
-  walletAddress: string;
-  network: string;
-  smartAccount: boolean;
-  mock?: boolean;
-}
+/** A live wallet has an address; a demo wallet has only a reference (see cdp-wallet-view). */
+type Wallet = CdpWallet;
 interface Permission {
   permissionId: string;
   spender: string;
@@ -72,7 +69,7 @@ export function CdpFundedKeyOnramp() {
   }
 
   async function fund() {
-    if (!wallet) return;
+    if (!wallet || !canFundByCard(wallet)) return;
     setFunding(true);
     setErr(null);
     try {
@@ -88,13 +85,14 @@ export function CdpFundedKeyOnramp() {
   }
 
   async function issue() {
-    if (!wallet) return;
+    const ref = wallet ? walletRequestRef(wallet) : null;
+    if (!ref) return;
     setIssuing(true);
     setErr(null);
     try {
       setPerm(
         await api("/api/fiat-ramp/cdp/spend-permission", "POST", {
-          walletAddress: wallet.walletAddress,
+          ...ref,
           spender: spender.trim(),
           allowanceUSDC: Number(allowance),
           periodSec: Math.round(Number(periodHrs) * 3600),
@@ -147,7 +145,7 @@ export function CdpFundedKeyOnramp() {
             <div className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-3 space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono text-[12px] text-white/70 break-all">
-                  {wallet.walletAddress}
+                  {walletLabel(wallet)}
                 </span>
                 {wallet.mock && (
                   <span className="text-[10px] text-amber-400/70 border border-amber-400/30 rounded px-1.5 py-0.5">
@@ -155,9 +153,15 @@ export function CdpFundedKeyOnramp() {
                   </span>
                 )}
               </div>
-              <div className="text-[11px] text-emerald-400/70">
-                ✓ Usable on PCC now · {wallet.network} · gasless
-              </div>
+              {canFundByCard(wallet) ? (
+                <div className="text-[11px] text-emerald-400/70">
+                  ✓ Usable on PCC now · {wallet.network} · gasless
+                </div>
+              ) : (
+                <div className="text-[11px] text-amber-400/70">
+                  Demo wallet · no key controls it, so nothing can be paid into it
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -168,7 +172,9 @@ export function CdpFundedKeyOnramp() {
             <div className="text-[11px] uppercase tracking-wide text-white/30">
               Step 2 · Add funds (optional — only to spend)
             </div>
-            {!onrampUrl ? (
+            {!canFundByCard(wallet) ? (
+              <div className="text-[12px] text-white/40">A demo wallet cannot be funded.</div>
+            ) : !onrampUrl ? (
               <button
                 onClick={fund}
                 disabled={funding}
