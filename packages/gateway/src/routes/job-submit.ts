@@ -218,13 +218,16 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
             }
           }
         } catch (err) {
-          // Fail-open — a policy read failure should not block jobs that
-          // don't actually require CVP. The facade and subsequent gates
-          // will still run. Log for observability.
-          req.log.warn(
+          // Fail closed. When the policy cannot be read, whether this kernel
+          // requires a capture verdict is unknown, so the job is not
+          // dispatched on the assumption that it does not. (No stored row is
+          // not an error: it passes above, with nothing to enforce.) Same
+          // answer as the other readers of the operator policy.
+          req.log.error(
             { err, kernelId },
-            "capture policy gate read failed; proceeding without CVP check",
+            "capture policy gate read failed; refusing the job (503 policy_unavailable)",
           );
+          return reply.status(503).send({ error: "policy_unavailable" });
         }
       }
 

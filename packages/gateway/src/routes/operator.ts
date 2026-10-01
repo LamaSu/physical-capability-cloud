@@ -85,6 +85,14 @@ export async function operatorRoutes(app: FastifyInstance) {
    * alone (fail closed), matching the write path. No identity -> 401; a
    * non-owner -> 403 not_kernel_owner. The default-policy fallback for an
    * unknown kernel is unchanged, but only for an authorized caller.
+   *
+   * Three outcomes, and only two of them produce a policy. A stored row is
+   * returned as stored. No row is DEFAULT_OPERATOR_POLICY, marked
+   * `source: "default"`. A read that FAILS (the store cannot be opened, the
+   * query throws, the stored row cannot be parsed) is not "no row": it answers
+   * 503 `policy_unavailable` and never a policy, because the default carries
+   * `emergencyStop: false` and a caller (a node, a runtime) would read the
+   * failure as "no emergency stop".
    */
   app.get<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
@@ -101,19 +109,24 @@ export async function operatorRoutes(app: FastifyInstance) {
         if (!actor) return reply;
         if (!(await requireOwnerOf(actor, reply, req.params.kernelId))) return reply;
       }
+      let row: typeof operatorPolicies.$inferSelect | undefined;
       try {
         const { db } = getStore();
-        const row = db.select().from(operatorPolicies)
+        row = db.select().from(operatorPolicies)
           .where(eq(operatorPolicies.kernelId, req.params.kernelId))
           .get();
+      } catch (err) {
+        req.log.error(
+          { err, kernelId: req.params.kernelId },
+          "operator policy read failed; answering 503 policy_unavailable",
+        );
+        return reply.status(503).send({ error: "policy_unavailable" });
+      }
 
-        if (!row) {
-          return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };
-        }
-        return { policy: row.policy, updatedAt: row.updatedAt };
-      } catch {
+      if (!row) {
         return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };
       }
+      return { policy: row.policy, updatedAt: row.updatedAt };
     },
   );
 
