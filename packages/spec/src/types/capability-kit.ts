@@ -145,9 +145,9 @@ export type KitCompatibility = z.infer<typeof KitCompatibilitySchema>;
 export const KitEconomicsSchema = z
   .object({
     /**
-     * SPDX license expression for the kit's own software and design artifacts.
-     * Parsing keeps any string; validateKitCompleteness counts only a valid
-     * expression (isSpdxLicenseExpression) as a license.
+     * License expression for the kit's own software and design artifacts.
+     * Parsing keeps any string; validateKitCompleteness counts only an allowed
+     * license expression (isAllowedLicenseExpression) as a license.
      */
     spdxLicense: z.string().min(1).max(100).optional(),
     /**
@@ -286,10 +286,14 @@ export const KIT_REQUIRED_ROLES: readonly KitArtifactRole[] = [
 
 export interface KitCompleteness {
   complete: boolean;
-  /** Human-readable gaps, e.g. "role:tests", "implementation", "license", "distinct-artifacts". */
+  /**
+   * Human-readable gaps, e.g. "role:tests", "implementation", "distinct-artifacts", or
+   * "license" (neither an allowed license expression nor a rights-terms hash).
+   */
   missing: string[];
 }
 
+/** PCC's allow-list of SPDX license and exception ids (see isAllowedLicenseExpression). */
 const SPDX_LICENSE_IDS: ReadonlySet<string> = new Set([
   "0BSD", "AGPL-3.0-only", "AGPL-3.0-or-later", "Apache-2.0", "Artistic-2.0", "BSD-2-Clause", "BSD-3-Clause",
   "BSL-1.0", "CC-BY-4.0", "CC-BY-SA-4.0", "CC0-1.0", "CERN-OHL-P-2.0", "CERN-OHL-S-2.0", "CERN-OHL-W-2.0",
@@ -306,12 +310,13 @@ const spdxKey = (t: string | undefined): string | null =>
   t !== undefined && /^[A-Za-z0-9.+-]+$/.test(t) ? t.toLowerCase() : null;
 
 /**
- * A valid SPDX license expression over a curated list of license ids (common
- * software, content and open-hardware licenses) plus `LicenseRef-<id>`: ids
- * joined by AND / OR (upper case), optional `WITH <exception>`, and
- * parentheses. Anything else, e.g. "not-a-license", is not a license.
+ * SPDX expression syntax (AND, OR, WITH, parentheses) over PCC's ALLOW-LIST of
+ * SPDX license and exception ids, plus LicenseRef-<id>. Not a general SPDX
+ * validator. A real SPDX id outside the list (e.g. EUPL-1.2) and DocumentRef
+ * references are refused by policy. Extend the list by PR. The operators are
+ * upper case; the listed ids match ASCII case-insensitively.
  */
-export function isSpdxLicenseExpression(expr: string): boolean {
+export function isAllowedLicenseExpression(expr: string): boolean {
   const tokens = expr.match(/\(|\)|[^\s()]+/g);
   if (!tokens || tokens.length === 0) return false;
   let i = 0;
@@ -348,8 +353,8 @@ export function isSpdxLicenseExpression(expr: string): boolean {
  * STRUCTURAL completeness only (astra pack 112 HIGH 2): whether a manifest has
  * the SHAPE of a reusable kit rather than a one-off listing. It needs an
  * implementation (an adapter or a method), tests, an install recipe and a
- * provenance recipe as DISTINCT artifacts, and a license: a valid SPDX
- * expression or an economics rights-terms hash.
+ * provenance recipe as DISTINCT artifacts, and a license: an allowed license
+ * expression (isAllowedLicenseExpression) or an economics rights-terms hash.
  *
  * It is NEVER the acceptance rule for a paid kit-build bounty. Acceptance (kits
  * K2) must fetch every referenced artifact, verify each digest, run role-specific
@@ -362,7 +367,7 @@ export function validateKitCompleteness(manifest: CapabilityKitManifestV1): KitC
   if (!roles.has("adapter") && !roles.has("method")) missing.push("implementation");
   for (const r of KIT_REQUIRED_ROLES) if (!roles.has(r)) missing.push(`role:${r}`);
   const spdx = manifest.economics?.spdxLicense;
-  const licensed = (spdx !== undefined && isSpdxLicenseExpression(spdx)) || Boolean(manifest.economics?.rightsTermsHash);
+  const licensed = (spdx !== undefined && isAllowedLicenseExpression(spdx)) || Boolean(manifest.economics?.rightsTermsHash);
   if (!licensed) missing.push("license");
   // One artifact may not stand in for another required role (same bytes for the
   // implementation, the tests and a recipe is not a kit).

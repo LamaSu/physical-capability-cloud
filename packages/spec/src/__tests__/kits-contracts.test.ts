@@ -7,11 +7,12 @@
 import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
+import * as kit from "../types/capability-kit.js";
 import {
   CapabilityKitManifestV1Schema,
   KIT_MANIFEST_SCHEMA,
   computeKitDigest,
-  isSpdxLicenseExpression,
+  isAllowedLicenseExpression,
   normalizeKitManifest,
   validateKitCompleteness,
   type CapabilityKitManifestV1,
@@ -511,7 +512,7 @@ describe("pack 112 reproductions", () => {
     expect(res.missing).toEqual(expect.arrayContaining(["license", "distinct-artifacts"]));
   });
 
-  it("HIGH 2: SPDX expressions: curated ids (ASCII case-insensitive), LicenseRef-, AND/OR, WITH, parentheses", () => {
+  it("HIGH 2: license expressions: allow-listed ids (ASCII case-insensitive), LicenseRef-, AND/OR, WITH, parentheses", () => {
     for (const ok of [
       "Apache-2.0",
       "mit",
@@ -520,10 +521,10 @@ describe("pack 112 reproductions", () => {
       "(MIT AND CC-BY-4.0) OR LicenseRef-acme-1",
       "CERN-OHL-S-2.0",
     ]) {
-      expect(isSpdxLicenseExpression(ok), ok).toBe(true);
+      expect(isAllowedLicenseExpression(ok), ok).toBe(true);
     }
     for (const bad of ["not-a-license", "", "MIT OR", "(MIT", "MIT)", "MIT WITH not-an-exception", "MIT and Apache-2.0", "MIT Apache-2.0", "MİT"]) {
-      expect(isSpdxLicenseExpression(bad), bad).toBe(false);
+      expect(isAllowedLicenseExpression(bad), bad).toBe(false);
     }
     expect(validateKitCompleteness(liquidHandlingKit({ economics: { spdxLicense: "MIT OR Apache-2.0" } })).complete).toBe(true);
   });
@@ -1155,6 +1156,28 @@ describe("astra pack 112b", () => {
     expect(validatePrimitiveParams(stub.paramsSchema, { envelope: "builtin-defaults" })).toBe(false);
     expect(validatePrimitiveParams(stub.paramsSchema, { source: "stream" })).toBe(true);
     expect(parses({ ...kitRequest(), evidence: { tier: 1, requiredPrimitives: [{ id: stub.id, params: { envelope: "builtin-defaults" } }], executable: false } })).toBe(false);
+  });
+
+  // ── C. Finding 2 (MEDIUM): an honest license allow-list ──
+
+  it("finding 2 (policy): a real SPDX id outside PCC's allow-list (EUPL-1.2) is refused by policy", () => {
+    expect(isAllowedLicenseExpression("EUPL-1.2")).toBe(false);
+    // Other real SPDX ids and references outside the list are refused too, however well-formed.
+    for (const outside of ["EUPL-1.1", "Sleepycat", "DocumentRef-acme:LicenseRef-custom", "MIT OR EUPL-1.2", "GPL-2.0+", "GPL-2.0-only WITH Bison-exception-2.2"]) {
+      expect(isAllowedLicenseExpression(outside), outside).toBe(false);
+    }
+    // A kit that names such a license has no license until the list is extended by PR (or a rights-terms hash covers it).
+    const eupl = liquidHandlingKit({ economics: { spdxLicense: "EUPL-1.2" } });
+    expect(validateKitCompleteness(eupl)).toEqual({ complete: false, missing: ["license"] });
+    expect(validateKitCompleteness({ ...eupl, economics: { spdxLicense: "EUPL-1.2", rightsTermsHash: T("f") } }).complete).toBe(true);
+  });
+
+  it("finding 2: an allowed expression is accepted, and the SPDX-validator name is gone from the module", () => {
+    expect(isAllowedLicenseExpression("MIT OR Apache-2.0")).toBe(true);
+    expect(validateKitCompleteness(liquidHandlingKit({ economics: { spdxLicense: "MIT OR Apache-2.0" } })).complete).toBe(true);
+    // Renamed, not aliased: nothing claims to be a general SPDX validator.
+    expect("isSpdxLicenseExpression" in kit).toBe(false);
+    expect("isAllowedLicenseExpression" in kit).toBe(true);
   });
 });
 
