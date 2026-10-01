@@ -28,15 +28,39 @@
 import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
 import type { SHA256 } from "../types/common.js";
 
-// Reflection captured at load, so a later polluted prototype or replaced
-// method cannot change how a descriptor is judged.
-const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-const getPrototypeOf = Object.getPrototypeOf;
+// Everything the encoder uses at call time is captured here, when the module
+// loads, and the code below calls only these captured functions. A prototype or
+// global that is polluted or replaced AFTER this point (an indexed setter on
+// Array.prototype, Array.prototype.push, JSON.stringify, the String global,
+// WeakSet.prototype.has ...) cannot change a byte of the output.
+//
+// Two rules keep Array.prototype out of it. The encoder never looks up a method
+// on an array or on its input (no push / sort / join / for...of, no spread, no
+// array destructuring: each of those reaches Array.prototype), and it never
+// writes an array index that has no own property (an inherited indexed setter
+// would run). The only arrays it touches are the ones Reflect.ownKeys returns,
+// which the engine creates with every index an own data property; it writes to
+// them only at indices that already exist. The text is built by concatenation.
+const getOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+const getPrototypeOf = Reflect.getPrototypeOf;
 const ownKeys = Reflect.ownKeys;
 const apply = Reflect.apply;
+const isArray = Array.isArray;
+const isFiniteNumber = Number.isFinite;
+const isIntegerNumber = Number.isInteger;
+const isSafeIntegerNumber = Number.isSafeInteger;
+const toNumber = Number;
+const toText = String;
+const quote = JSON.stringify; // string escaping, byte-for-byte what JSON transport writes
 const hasOwnProperty = Object.prototype.hasOwnProperty;
 const OBJECT_PROTOTYPE = Object.prototype;
 const ARRAY_PROTOTYPE = Array.prototype;
+const WeakSetConstructor = WeakSet;
+// `set.has(v)` looks the method up on the set at call time; these do not.
+const call = Function.prototype.call;
+const weakSetAdd = call.bind(WeakSet.prototype.add) as unknown as (set: WeakSet<object>, value: object) => void;
+const weakSetHas = call.bind(WeakSet.prototype.has) as unknown as (set: WeakSet<object>, value: unknown) => boolean;
+const weakSetDelete = call.bind(WeakSet.prototype.delete) as unknown as (set: WeakSet<object>, value: object) => void;
 const hasOwn = (o: object, key: PropertyKey): boolean => apply(hasOwnProperty, o, [key]) as boolean;
 
 /**
@@ -100,7 +124,7 @@ export function canonicalize(value: unknown): string {
       getOwnPropertyDescriptor(ARRAY_PROTOTYPE, "toJSON") !== undefined) {
       throw new NonCanonicalValueError("$", "a value under a prototype that defines toJSON (JSON transport would differ)");
     }
-    return canonicalizeAt(value, "$", new Set());
+    return canonicalizeAt(value, "$", new WeakSetConstructor());
   } catch (err) {
     if (err instanceof NonCanonicalValueError) throw err;
     // A Proxy trap threw, or the value nests too deeply to walk: not a plain JSON tree.
@@ -108,7 +132,7 @@ export function canonicalize(value: unknown): string {
   }
 }
 
-function canonicalizeAt(value: unknown, path: string, ancestors: Set<object>): string {
+function canonicalizeAt(value: unknown, path: string, ancestors: WeakSet<object>): string {
   if (value === null) {
     return "null";
   }
@@ -116,81 +140,124 @@ function canonicalizeAt(value: unknown, path: string, ancestors: Set<object>): s
     throw new NonCanonicalValueError(path, "undefined (JSON has no undefined; omit the member instead)");
   }
   if (typeof value === "string") {
-    return JSON.stringify(value);
+    return quote(value);
   }
   if (typeof value === "boolean") {
-    return String(value);
+    return toText(value);
   }
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new NonCanonicalValueError(path, String(value));
-    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+    if (!isFiniteNumber(value)) throw new NonCanonicalValueError(path, toText(value));
+    if (isIntegerNumber(value) && !isSafeIntegerNumber(value)) {
       throw new NonCanonicalValueError(
         path,
-        `the integer ${String(value)}, outside the safe range (send it as a decimal string)`,
+        `the integer ${toText(value)}, outside the safe range (send it as a decimal string)`,
       );
     }
-    return String(value);
+    return toText(value);
   }
   if (typeof value === "object") {
-    if (ancestors.has(value)) throw new NonCanonicalValueError(path, "a cyclic reference");
-    ancestors.add(value);
+    if (weakSetHas(ancestors, value)) throw new NonCanonicalValueError(path, "a cyclic reference");
+    weakSetAdd(ancestors, value);
     try {
-      return Array.isArray(value)
+      return isArray(value)
         ? canonicalArray(value, path, ancestors)
         : canonicalObject(value, path, ancestors);
     } finally {
-      ancestors.delete(value);
+      weakSetDelete(ancestors, value);
     }
   }
   throw new NonCanonicalValueError(path, `a ${typeof value}`);
 }
 
-function canonicalArray(arr: unknown[], path: string, ancestors: Set<object>): string {
+function canonicalArray(arr: unknown[], path: string, ancestors: WeakSet<object>): string {
   if (getPrototypeOf(arr) !== ARRAY_PROTOTYPE) {
     throw new NonCanonicalValueError(path, "an array with a substituted prototype or an Array subclass");
   }
   const length = arr.length; // read once
-  const items: string[] = [];
+  let out = "[";
   for (let i = 0; i < length; i++) {
     const at = `${path}[${i}]`;
     const d = getOwnPropertyDescriptor(arr, i);
     if (d === undefined) throw new NonCanonicalValueError(at, "a hole in a sparse array (or an inherited index)");
     if (!isDataDescriptor(d)) throw new NonCanonicalValueError(at, "an accessor element");
-    items.push(canonicalizeAt(d.value, at, ancestors));
+    if (i !== 0) out += ",";
+    out += canonicalizeAt(d.value, at, ancestors);
   }
-  for (const key of ownKeys(arr)) {
+  const keys = ownKeys(arr);
+  const count = keys.length;
+  for (let k = 0; k < count; k++) {
+    const key = keys[k];
     if (key === "length") continue;
-    if (typeof key === "symbol") throw new NonCanonicalValueError(`${path}[${String(key)}]`, "a symbol-keyed property");
-    const index = Number(key);
-    if (!(Number.isInteger(index) && index >= 0 && index < length && String(index) === key)) {
+    if (typeof key === "symbol") throw new NonCanonicalValueError(`${path}[${toText(key)}]`, "a symbol-keyed property");
+    const index = toNumber(key);
+    if (!(isIntegerNumber(index) && index >= 0 && index < length && toText(index) === key)) {
       throw new NonCanonicalValueError(`${path}.${key}`, "a named property on an array");
     }
   }
-  return "[" + items.join(",") + "]";
+  return out + "]";
 }
 
-function canonicalObject(obj: object, path: string, ancestors: Set<object>): string {
+function canonicalObject(obj: object, path: string, ancestors: WeakSet<object>): string {
   const proto = getPrototypeOf(obj);
   if (proto !== OBJECT_PROTOTYPE && proto !== null) {
     // A constant reason: reading the value's constructor could run its code.
     throw new NonCanonicalValueError(path, "a non-plain object (its prototype is not Object.prototype or null)");
   }
-  const keys: string[] = [];
-  for (const key of ownKeys(obj)) {
-    if (typeof key === "symbol") throw new NonCanonicalValueError(`${path}[${String(key)}]`, "a symbol-keyed property");
-    keys.push(key);
+  const keys = ownKeys(obj);
+  const count = keys.length;
+  for (let i = 0; i < count; i++) {
+    const key = keys[i];
+    if (typeof key === "symbol") throw new NonCanonicalValueError(`${path}[${toText(key)}]`, "a symbol-keyed property");
   }
-  const pairs: string[] = [];
-  for (const key of keys.sort()) {
+  sortByCodeUnits(keys as string[], count);
+  let out = "{";
+  let first = true;
+  for (let i = 0; i < count; i++) {
+    const key = keys[i] as string;
     const at = `${path}.${key}`;
     const d = getOwnPropertyDescriptor(obj, key);
     if (d === undefined) throw new NonCanonicalValueError(at, "a property that vanished while it was read");
     if (!isDataDescriptor(d)) throw new NonCanonicalValueError(at, "an accessor property");
     if (!d.enumerable) throw new NonCanonicalValueError(at, "a non-enumerable property");
     if (d.value === undefined) continue; // omitted, as JSON.stringify omits it
-    pairs.push(JSON.stringify(key) + ":" + canonicalizeAt(d.value, at, ancestors));
+    if (first) first = false;
+    else out += ",";
+    out += quote(key) + ":" + canonicalizeAt(d.value, at, ancestors);
   }
-  return "{" + pairs.join(",") + "}";
+  return out + "}";
+}
+
+/**
+ * Sort `keys[0 .. count)` ascending by UTF-16 code units, which is what `<` does
+ * on strings and what the default Array.prototype.sort did. Heapsort: in place,
+ * O(n log n) however the keys arrive (a quadratic sort would let a wide object
+ * stall a hash), and it only reads and assigns indices that already exist as
+ * own properties of the engine-made key array, so neither a replaced
+ * Array.prototype.sort nor an inherited indexed setter can be reached. Keys are
+ * unique (a Proxy's ownKeys result cannot repeat a key), so stability is moot.
+ */
+function sortByCodeUnits(keys: string[], count: number): void {
+  for (let root = (count >> 1) - 1; root >= 0; root--) siftDown(keys, root, count);
+  for (let end = count - 1; end > 0; end--) {
+    const largest = keys[0];
+    keys[0] = keys[end];
+    keys[end] = largest;
+    siftDown(keys, 0, end);
+  }
+}
+
+function siftDown(keys: string[], start: number, end: number): void {
+  let root = start;
+  for (;;) {
+    let child = 2 * root + 1;
+    if (child >= end) return;
+    if (child + 1 < end && keys[child] < keys[child + 1]) child++;
+    if (!(keys[root] < keys[child])) return;
+    const moved = keys[root];
+    keys[root] = keys[child];
+    keys[child] = moved;
+    root = child;
+  }
 }
 
 /**
