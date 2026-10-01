@@ -1662,6 +1662,35 @@ describe("E7c round 2 — every public entry point refuses code-running input an
         }
       });
 
+      it("judges an accessor by the fields its descriptor owns: a polluted Object.prototype.value does not turn it into data", () => {
+        // `"value" in descriptor` is also true for a `value` inherited from Object.prototype, so an accessor
+        // descriptor would be read as a data property holding the polluter's value (and never refused).
+        const input = entry.make();
+        const member = entry.members[0]!;
+        const holder = member.holder(input);
+        const value = holder[member.key];
+        let runs = 0;
+        Object.defineProperty(holder, member.key, {
+          enumerable: true,
+          configurable: true,
+          get: () => {
+            runs++;
+            return value;
+          },
+        });
+        const polluter = Object.prototype as unknown as Record<string, unknown>;
+        let outcome: ReturnType<typeof settle>;
+        try {
+          polluter.value = value;
+          outcome = settle(() => entry.call(input));
+        } finally {
+          delete polluter.value;
+        }
+        expect(outcome.error).toBeInstanceOf(EvidenceBlockInputError);
+        expect((outcome.error as EvidenceBlockInputError).message).toMatch(/accessor property: its getter runs code/);
+        expect(runs, "no getter may run").toBe(0);
+      });
+
       it("never supplies a missing field from Object.prototype, as an accessor or as data", () => {
         // `chainId` and friends are found by a [[Get]] on the prototype chain: a polluted Object.prototype
         // could run a getter there, or supply a value the caller never gave. Own descriptors only.
@@ -1753,13 +1782,16 @@ describe("E7c round 2 — every public entry point refuses code-running input an
     }
   });
 
-  it("derives every digest without a global or a prototype method the caller can replace", () => {
+  it("derives every digest without a global or a prototype method the caller can replace", async () => {
     // Everything between a validated value and a digest is a pure loop, a captured function or an operator.
     // While Buffer, Array, Set, Map, RegExp, String, Object, Reflect, JSON, Function.prototype and Hash
     // methods all THROW when called, and Number and BigInt cannot be called, every digest is unchanged.
     // (@noble/hashes calls Number.isSafeInteger and typed-array methods itself, inside keccak: not replaced.)
     const unitInput = { ...unit };
+    const unitStrings = { ...unit, chainId: "8453", milestoneIndex: "3" };
+    const unitNumbers = { ...unit, chainId: 8453, milestoneIndex: 3 };
     const ctxInput = ctxOf();
+    const ctxStrings = { ...unitStrings, settlementUnitId, challengeNonce };
     const roleInput = roleOf();
     const rolesInput = [roleOf(), roleOf({ roleId: "buyer" })];
     const rootsInput = rootsOf();
@@ -1768,7 +1800,10 @@ describe("E7c round 2 — every public entry point refuses code-running input an
     const taggedInput = `sha256:${"ab".repeat(32)}`; // built here: String.prototype.repeat is replaced inside the window
     const computeAll = () => ({
       unitId: computeSettlementUnitId(unitInput),
+      unitIdFromStrings: computeSettlementUnitId(unitStrings),
+      unitIdFromNumbers: computeSettlementUnitId(unitNumbers),
       context: computeUnitContextDigest(ctxInput),
+      contextFromStrings: computeUnitContextDigest(ctxStrings),
       role: computeAttestationRoleDigest(attJob, roleInput),
       set: computeAttestationSetRoot(attJob, rolesInput),
       block: computeEvidenceBlockHash(rootsInput),
@@ -1777,10 +1812,16 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       tagged: taggedDigestToBytes32(taggedInput),
     });
     const honest = computeAll();
+    // The events call: honest bundle and root first, then its SYNCHRONOUS part (admission, the walk, the
+    // snapshot and its freezes) runs inside the window; the rest of it runs after the window has closed.
+    const eventBody = { type: "execution_completed", timestamp: "2026-10-01T00:00:00Z", source, payload: { ok: true, list: [1, 2, { deep: "x" }] } };
+    const event = { ...eventBody, id: "e0", hash: await hashEvent(eventBody as never) };
+    const bundle = { events: [event, { ...event, id: "e1" }], bundleHash: await hashBundle([event, { ...event, id: "e1" }] as never) };
+    const honestRoot = (await computeKernelSignedEventsRoot(bundle as never)).root;
     const hashPrototype = Object.getPrototypeOf(createHash("sha256")) as object;
     const named = (label: string, object: object, keys: readonly PropertyKey[]): Array<[string, object, PropertyKey]> =>
       keys.map((key) => [`${label}.${String(key)}`, object, key]);
-    const targets: Array<[string, object, PropertyKey]> = [
+    const common: Array<[string, object, PropertyKey]> = [
       ...named("Buffer", Buffer, ["from", "alloc", "concat"]),
       ...named("Buffer.prototype", Buffer.prototype, ["toString", "slice", "write"]),
       ...named("Uint8Array", Uint8Array, ["from", "of"]),
@@ -1801,39 +1842,51 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       ...named("JSON", JSON, ["stringify", "parse"]),
       ...named("Function.prototype", Function.prototype, ["call", "apply", "bind"]),
       ...named("Hash.prototype", hashPrototype, ["update", "digest", "copy"]),
-      ...named("TextEncoder.prototype", TextEncoder.prototype, ["encode"]),
     ];
-    const reals = targets.map(([, object, key]) => (object as Record<PropertyKey, unknown>)[key]);
+    // canonical.ts's own sha256 (hashEvent, in the synchronous part of the events call) encodes with a TextEncoder.
+    const forDigests: Array<[string, object, PropertyKey]> = [...common, ...named("TextEncoder.prototype", TextEncoder.prototype, ["encode"])];
+    const forEvents = common;
     const globalHolder = globalThis as unknown as Record<string, unknown>;
-    const realNumber = globalHolder.Number;
-    const realBigInt = globalHolder.BigInt;
     const refuseCall = (label: string) => ({
       apply() {
         throw new Error(`${label} was called`);
       },
     });
-    let hostile: ReturnType<typeof computeAll> | undefined;
-    let failure: unknown;
-    try {
-      // Plain indexed loops only: while Array.prototype is replaced, even destructuring and push would throw.
-      for (let i = 0; i < targets.length; i++) {
-        const label = targets[i]![0];
-        (targets[i]![1] as Record<PropertyKey, unknown>)[targets[i]![2]] = () => {
-          throw new Error(`${label} was called`);
-        };
+    /** Make every target throw when called (and Number and BigInt when `numbers`), run `fn`, put everything back. */
+    const withForbidden = <T,>(targets: Array<[string, object, PropertyKey]>, numbers: boolean, fn: () => T): { value?: T; failure?: unknown } => {
+      const reals = targets.map(([, object, key]) => (object as Record<PropertyKey, unknown>)[key]);
+      const realNumber = globalHolder.Number;
+      const realBigInt = globalHolder.BigInt;
+      let value: T | undefined;
+      let failure: unknown;
+      try {
+        // Plain indexed loops only: while Array.prototype is replaced, even destructuring and push would throw.
+        for (let i = 0; i < targets.length; i++) {
+          const label = targets[i]![0];
+          (targets[i]![1] as Record<PropertyKey, unknown>)[targets[i]![2]] = () => {
+            throw new Error(`${label} was called`);
+          };
+        }
+        if (numbers) {
+          globalHolder.Number = new Proxy(realNumber as object, refuseCall("Number"));
+          globalHolder.BigInt = new Proxy(realBigInt as object, refuseCall("BigInt"));
+        }
+        value = fn();
+      } catch (error) {
+        failure = error;
+      } finally {
+        for (let i = 0; i < targets.length; i++) (targets[i]![1] as Record<PropertyKey, unknown>)[targets[i]![2]] = reals[i];
+        globalHolder.Number = realNumber;
+        globalHolder.BigInt = realBigInt;
       }
-      globalHolder.Number = new Proxy(realNumber as object, refuseCall("Number"));
-      globalHolder.BigInt = new Proxy(realBigInt as object, refuseCall("BigInt"));
-      hostile = computeAll();
-    } catch (error) {
-      failure = error;
-    } finally {
-      for (let i = 0; i < targets.length; i++) (targets[i]![1] as Record<PropertyKey, unknown>)[targets[i]![2]] = reals[i];
-      globalHolder.Number = realNumber;
-      globalHolder.BigInt = realBigInt;
-    }
-    expect(failure, "an entry point looked something up at call time").toBeUndefined();
-    expect(hostile).toEqual(honest);
+      return { value, failure };
+    };
+    const digests = withForbidden(forDigests, true, computeAll);
+    expect(digests.failure, "an entry point looked something up at call time").toBeUndefined();
+    expect(digests.value).toEqual(honest);
+    const events = withForbidden(forEvents, false, () => computeKernelSignedEventsRoot(bundle as never));
+    expect(events.failure, "the events call looked something up at call time").toBeUndefined();
+    expect((await events.value!).root).toBe(honestRoot);
   });
 
   it("judges every spelling exactly as the regular expressions it replaced did", () => {
