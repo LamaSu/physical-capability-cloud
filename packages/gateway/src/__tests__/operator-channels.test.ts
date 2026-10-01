@@ -544,6 +544,9 @@ describe("N84: the channel routes bind a channel to its caller", () => {
       const res = await app.inject({ method, url, payload: body as object | undefined });
       expect(res.statusCode, `${method} ${url}`).toBe(401);
     }
+    // Authentication comes before validation: an empty body is still 401, not 400.
+    const empty = await app.inject({ method: "POST", url: `/api/operators/${SLUG}/channels`, payload: {} });
+    expect(empty.statusCode).toBe(401);
     expect(getChannelsByOperator(SLUG).map((c) => c.label)).toEqual(["Mine"]);
     await app.close();
   });
@@ -555,6 +558,14 @@ describe("N84: the channel routes bind a channel to its caller", () => {
       const res = await app.inject({ method, url, payload: body as object | undefined, headers: { "x-admin-key": "not-the-secret" } });
       expect(res.statusCode, `${method} ${url}`).toBe(403);
     }
+    // ... and before validation: an empty body with a wrong secret is 403, not 400.
+    const empty = await app.inject({
+      method: "POST",
+      url: `/api/operators/${SLUG}/channels`,
+      payload: {},
+      headers: { "x-admin-key": "not-the-secret" },
+    });
+    expect(empty.statusCode).toBe(403);
     expect(getChannelsByOperator(SLUG).map((c) => c.label)).toEqual(["Mine"]);
     await app.close();
   });

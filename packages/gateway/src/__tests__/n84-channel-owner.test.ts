@@ -317,6 +317,16 @@ describe("N84 creator binding, HTTP: another identity's channels are not yours t
     expect(stored?.operatorSlug).toBe(SLUG);
     expect(stored?.creatorId).toBe(A);
     expect(chans(SLUG_B)).toHaveLength(0);
+    // A body that names the channel's REAL slug and its real creator is no better.
+    const again = await call("PATCH", `/api/operators/channels/${ids.email}`, keyB, {}, {
+      operatorSlug: SLUG,
+      operatorId: A,
+      owner: A,
+      creatorId: A,
+      label: "N84-B-relabelled-again",
+    });
+    expect([403, 404], again.body).toContain(again.statusCode);
+    expect(chans(SLUG).find((c) => c.id === ids.email)?.label).toBe("N84-A-email");
   });
 
   it("[neg] delete: refused; the channel is still there", async () => {
@@ -675,6 +685,8 @@ describe("N84 creator binding, controls: the creator and the admin keep every ro
     const { body } = await rpc(keyB, "pcc-attach-channel", { operatorSlug: SLUG, ...a2aChannel("N84-admin-a2a", OWNER_ADDRESS) }, adminHeaders);
     expect(body.result?.state, JSON.stringify(body)).toBe("COMPLETED");
     expect(chans(SLUG).map((c) => c.label)).toContain("N84-admin-a2a");
+    // The admin's reply counts every creator's channels (A's two, and this one).
+    expect(rpcData(body)?.totalChannelsNow).toBe(3);
   });
 
   it("control: an ordinary key still manages ITS OWN channels on every route (the binding is per channel, not admin-only)", async () => {
