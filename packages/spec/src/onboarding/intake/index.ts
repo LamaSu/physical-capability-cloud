@@ -30,6 +30,7 @@ import {
   numberParametersOf,
   type SafetyLimit,
 } from "./safety-policy.js";
+import { insubstantialTierFields, stubPrimitivesFor } from "./tier-readiness.js";
 
 export * from "./fields.js";
 export * from "./json-schema.js";
@@ -231,6 +232,17 @@ export interface IntakeValidationReport {
    *  publish): `safety.estop` `{mechanism: "none"}` on a capability that is not
    *  in ESTOP_NONE_APPROVED_CAPABILITIES. */
   safetyBlocks: string[];
+  /** For a milestone that is (or implies) tier1/tier2: the evidence primitives
+   *  its required fields map to that are not `active` + `live` in
+   *  EVIDENCE_PRIMITIVES (stub, planned, reserved, deprecated or unknown), sorted.
+   *  A stub fails closed: tier readiness means only that the intake can feed a
+   *  LIVE verifier, never that the device is assured. */
+  stubPrimitives: string[];
+  /** Field ids required by tier1/tier2 whose answer satisfies the field's
+   *  schema but proves nothing for its primitive (e.g. a camera that sees
+   *  neither the work area nor the output, `exportsOwnLogPerJob: false`); see
+   *  TIER_SUBSTANCE_RULES in tier-readiness.ts. */
+  insubstantial: string[];
 }
 
 /** Every list-valued member of the report: `ok` is true iff all are empty. The
@@ -253,6 +265,8 @@ const REPORT_LISTS = Object.keys({
   unverified: true,
   limitErrors: true,
   safetyBlocks: true,
+  stubPrimitives: true,
+  insubstantial: true,
 } satisfies Record<IntakeReportList, true>) as IntakeReportList[];
 
 function emptyReport(): IntakeValidationReport {
@@ -270,6 +284,8 @@ function emptyReport(): IntakeValidationReport {
     unverified: [],
     limitErrors: [],
     safetyBlocks: [],
+    stubPrimitives: [],
+    insubstantial: [],
   };
 }
 
@@ -484,6 +500,8 @@ function checkParsedRecord(
   }
 
   checkSafetyPolicy(record, impliedMilestones, parsedValues, authority, report);
+  report.stubPrimitives.push(...stubPrimitivesFor(impliedMilestones));
+  report.insubstantial.push(...insubstantialTierFields(impliedMilestones, parsedValues));
 
   report.missing.push(...missing);
   report.unconfirmed.push(...unconfirmed);
@@ -543,6 +561,15 @@ function checkParsedRecord(
  *      `{mechanism: "none"}` blocks publish and every milestone implying it
  *      (accept-jobs, get-paid) unless `capability.type` is in
  *      ESTOP_NONE_APPROVED_CAPABILITIES (`safetyBlocks`).
+ *   6. Tier readiness (tier1, tier2 and anything implying them) means only
+ *      that the intake can feed a LIVE verifier, never that the device is
+ *      assured, and it fails closed (tier-readiness.ts): every evidence
+ *      primitive a required tier field maps to must be active + live in
+ *      EVIDENCE_PRIMITIVES, else it is listed in `stubPrimitives`; and a
+ *      shape-valid answer that proves nothing for its primitive (e.g. a camera
+ *      that sees neither the work area nor the output) is listed in
+ *      `insubstantial`. With the shipped registry (stub primitives) the tiers
+ *      are not ready.
  * Milestone matching is CUMULATIVE (review fix): a field is required for
  * `milestone` if its own `requiredFor` contains `milestone` OR any milestone
  * that `milestone` implies (MILESTONE_IMPLIES in fields.ts — e.g. accept-jobs

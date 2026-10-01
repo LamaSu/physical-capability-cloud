@@ -33,6 +33,7 @@ import {
   type IntakeSecretKind,
 } from "../onboarding/intake/index.js";
 import { BIP39_ENGLISH_WORDLIST } from "../onboarding/intake/bip39-english.js";
+import { TIER_SUBSTANCE_RULE_FIELDS } from "../onboarding/intake/tier-readiness.js";
 import { getPrimitive } from "../evidence/primitives.js";
 import { canonicalize } from "../util/canonical.js";
 import { CsdRegistry, loadBuiltinCsds } from "../csd/registry.js";
@@ -346,7 +347,7 @@ function buildFullValidRecord(): IntakeRecord {
     "evidence.operatorPresence": human("sometimes"),
     "evidence.approver": human({ name: "A. Approver" }),
     "evidence.controllerRunLog": human({ exportsOwnLogPerJob: true, access: "api" }),
-    "evidence.instrumentSignsOutput": human(false),
+    "evidence.instrumentSignsOutput": human(true),
     "evidence.referenceSample": human({ available: true, expectedResultRef: "cube-20mm" }),
     "capability.type": probed("pcc://capabilities/fdm/v2"),
     "capability.parameters": confirmed([{ key: "infill", min: 0, max: 100, unit: "%" }]),
@@ -432,8 +433,11 @@ describe("validateIntake — a fully and correctly answered record", () => {
     expect(IntakeRecordSchema.safeParse(full).success).toBe(true);
   });
 
-  it("is `ok` for every milestone when its confirmation events resolve and a payout destination exists", () => {
+  it("is `ok` for every milestone except the tiers when its confirmation events resolve and a payout destination exists", () => {
+    // The tiers are checked in "validateIntake — tier readiness fails closed": with the shipped
+    // evidence registry their primitives are stubs, so they are NOT ready.
     for (const milestone of INTAKE_MILESTONES) {
+      if (milestone === "tier1" || milestone === "tier2") continue;
       const report = ready(full, milestone);
       expect(report, `${milestone}: ${JSON.stringify(report)}`).toMatchObject({
         ok: true,
@@ -447,6 +451,10 @@ describe("validateIntake — a fully and correctly answered record", () => {
         invalidFields: [],
         unconfirmed: [],
         unverified: [],
+        limitErrors: [],
+        safetyBlocks: [],
+        stubPrimitives: [],
+        insubstantial: [],
       });
     }
   });
@@ -2157,6 +2165,218 @@ describe("validateIntake — estop none is not runnable by default (astra 120b, 
   });
 });
 
+// ── 13. Tier readiness fails closed (astra 120b, finding 5) ──────────────
+
+const TIER_PRIMITIVE_IDS = [
+  "approval.expert",
+  "capture.photo_nonced",
+  "ident.registered_key",
+  "machine.execution_log",
+  "measure.io_test_pair",
+] as const;
+
+/** Run `fn` with registry fields temporarily overridden, restoring them even if `fn` throws. */
+function withPrimitiveFields<T>(
+  overrides: Record<string, { status?: string; verifierStatus?: string }>,
+  fn: () => T,
+): T {
+  const saved: [Record<string, unknown>, string, unknown][] = [];
+  try {
+    for (const [id, fields] of Object.entries(overrides)) {
+      const def = getPrimitive(id) as unknown as Record<string, unknown>;
+      for (const [key, value] of Object.entries(fields)) {
+        saved.push([def, key, def[key]]);
+        def[key] = value;
+      }
+    }
+    return fn();
+  } finally {
+    for (const [def, key, value] of saved.reverse()) def[key] = value;
+  }
+}
+
+const everyTierPrimitiveLive = (): Record<string, { verifierStatus: string }> =>
+  Object.fromEntries(TIER_PRIMITIVE_IDS.map((id) => [id, { verifierStatus: "live" }]));
+
+describe("validateIntake — tier readiness fails closed (astra 120b, finding 5)", () => {
+  const full = buildFullValidRecord();
+
+  it("injects nothing: with the shipped registry tier1 and tier2 are NOT ready, and stubPrimitives is exact", () => {
+    const tier1 = ready(full, "tier1");
+    expect(tier1.ok).toBe(false);
+    expect(tier1.stubPrimitives).toEqual(["ident.registered_key", "machine.execution_log", "measure.io_test_pair"]);
+    expect(tier1.insubstantial).toEqual([]);
+    expect(tier1.missing).toEqual([]);
+
+    const tier2 = ready(full, "tier2");
+    expect(tier2.ok).toBe(false);
+    expect(tier2.stubPrimitives).toEqual([
+      "approval.expert",
+      "capture.photo_nonced",
+      "ident.registered_key",
+      "machine.execution_log",
+      "measure.io_test_pair",
+    ]);
+    expect(tier2.insubstantial).toEqual([]);
+  });
+
+  it("only the tier milestones look at primitives", () => {
+    for (const milestone of INTAKE_MILESTONES) {
+      if (milestone === "tier1" || milestone === "tier2") continue;
+      const report = ready(full, milestone);
+      expect(report.stubPrimitives, milestone).toEqual([]);
+      expect(report.insubstantial, milestone).toEqual([]);
+    }
+  });
+
+  it("takes the status from the evidence registry, not from what the field declared", () => {
+    // fields.ts declares every one of these as "stub"; flipping only the registry changes the result.
+    withPrimitiveFields({ "machine.execution_log": { verifierStatus: "live" } }, () => {
+      expect(ready(full, "tier1").stubPrimitives).toEqual(["ident.registered_key", "measure.io_test_pair"]);
+    });
+    expect(ready(full, "tier1").stubPrimitives).toContain("machine.execution_log"); // restored
+  });
+
+  it("is ready when every mapped primitive is live and the answers are substantive", () => {
+    withPrimitiveFields(everyTierPrimitiveLive(), () => {
+      for (const milestone of ["tier1", "tier2"] as const) {
+        const report = ready(full, milestone);
+        expect(report, `${milestone}: ${JSON.stringify(report)}`).toMatchObject({
+          ok: true,
+          stubPrimitives: [],
+          insubstantial: [],
+        });
+      }
+    });
+  });
+
+  it("a primitive that is live but not active, or active but planned, is still a stub", () => {
+    for (const fields of [
+      { status: "reserved", verifierStatus: "live" },
+      { status: "deprecated", verifierStatus: "live" },
+      { status: "active", verifierStatus: "planned" },
+      { status: "active", verifierStatus: "stub" },
+    ]) {
+      withPrimitiveFields({ ...everyTierPrimitiveLive(), "machine.execution_log": fields }, () => {
+        const report = ready(full, "tier1");
+        expect(report.ok, JSON.stringify(fields)).toBe(false);
+        expect(report.stubPrimitives, JSON.stringify(fields)).toEqual(["machine.execution_log"]);
+      });
+    }
+  });
+
+  it("a field that maps to a primitive the registry does not know is a stub too", () => {
+    const field = INTAKE_FIELDS.find((f) => f.id === "evidence.controllerRunLog")!;
+    const ref = field.evidencePrimitive as { id: string };
+    const original = ref.id;
+    ref.id = "no.such.primitive";
+    try {
+      withPrimitiveFields(everyTierPrimitiveLive(), () => {
+        const report = ready(full, "tier1");
+        expect(report.ok).toBe(false);
+        expect(report.stubPrimitives).toEqual(["no.such.primitive"]);
+      });
+    } finally {
+      ref.id = original;
+    }
+    expect(field.evidencePrimitive!.id).toBe("machine.execution_log");
+  });
+
+  it("every tier field that maps to an evidence primitive has a substance rule, and nothing else is ruled", () => {
+    const mapped = INTAKE_FIELDS.filter(
+      (f) => f.evidencePrimitive && f.requiredFor.some((m) => m === "tier1" || m === "tier2"),
+    ).map((f) => f.id);
+    expect(mapped.length).toBeGreaterThan(0);
+    for (const id of mapped) expect(TIER_SUBSTANCE_RULE_FIELDS, id).toContain(id);
+    for (const id of TIER_SUBSTANCE_RULE_FIELDS) {
+      const field = INTAKE_FIELDS.find((f) => f.id === id)!;
+      expect(field.requiredFor.some((m) => m === "tier1" || m === "tier2"), id).toBe(true);
+    }
+    // operatorPresence is the one tier field with no rule: always, sometimes and never are all honest.
+    expect(TIER_SUBSTANCE_RULE_FIELDS).not.toContain("evidence.operatorPresence");
+  });
+
+  describe("an answer that satisfies its schema but proves nothing is insubstantial", () => {
+    const camera = { seesWorkArea: true, seesOutput: true, mount: "fixed", captureDeviceId: "cam-1" };
+    const rows: [string, string, "tier1" | "tier2", unknown][] = [
+      ["calibration.lastDate", "an impossible day", "tier1", "2026-02-30"],
+      ["calibration.lastDate", "month 13", "tier1", "2026-13-01"],
+      ["calibration.lastDate", "month 00", "tier1", "2026-00-10"],
+      ["calibration.lastDate", "Feb 29 in a common year", "tier1", "2023-02-29"],
+      ["calibration.lastDate", "year 0000", "tier1", "0000-01-01"],
+      ["calibration.procedureRef", "blank", "tier1", "   "],
+      ["evidence.executorDeviceId", "blank", "tier1", "  "],
+      ["evidence.observerDeviceIds", "a blank entry", "tier1", ["cam-1", "  "]],
+      ["evidence.executionMode", "mock", "tier1", "mock"],
+      ["evidence.executionMode", "dry_run", "tier1", "dry_run"],
+      ["evidence.controllerRunLog", "controller does not export its own log", "tier1", { exportsOwnLogPerJob: false, access: "api" }],
+      ["evidence.instrumentSignsOutput", "instrument does not sign", "tier1", false],
+      ["evidence.referenceSample", "none available", "tier1", { available: false }],
+      ["evidence.referenceSample", "available but no expected result", "tier1", { available: true }],
+      ["evidence.referenceSample", "blank expected result", "tier1", { available: true, expectedResultRef: "  " }],
+      ["evidence.camera", "sees neither", "tier2", { ...camera, seesWorkArea: false, seesOutput: false }],
+      ["evidence.camera", "sees the work area but not the output", "tier2", { ...camera, seesOutput: false }],
+      ["evidence.camera", "sees the output but not the work area", "tier2", { ...camera, seesWorkArea: false }],
+      ["evidence.camera", "blank capture device", "tier2", { ...camera, captureDeviceId: "  " }],
+      ["evidence.approver", "blank name", "tier2", { name: "   " }],
+    ];
+
+    it.each(rows)("%s: %s (%s)", (fieldId, _why, milestone, bad) => {
+      const record = cloneRecord(full);
+      record.answers[fieldId] = human(bad);
+      const report = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, milestone));
+      expect(report.ok).toBe(false);
+      expect(report.insubstantial).toEqual([fieldId]);
+      expect(report.stubPrimitives).toEqual([]);
+      expect(report.missing).toEqual([]);
+      expect(report.invalidFields).toEqual([]);
+    });
+
+    it("the matching substantive values are accepted (leap day, empty observer list, never-present operator)", () => {
+      const record = cloneRecord(full);
+      record.answers["calibration.lastDate"] = human("2024-02-29");
+      record.answers["evidence.observerDeviceIds"] = human([]);
+      record.answers["evidence.operatorPresence"] = human("never");
+      const report = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, "tier2"));
+      expect(report.ok).toBe(true);
+    });
+
+    it("a tier2-only answer does not matter for tier1, and tier fields do not matter for other milestones", () => {
+      const weak = cloneRecord(full);
+      weak.answers["evidence.camera"] = human({ ...camera, seesWorkArea: false, seesOutput: false });
+      weak.answers["evidence.controllerRunLog"] = human({ exportsOwnLogPerJob: false, access: "api" });
+      withPrimitiveFields(everyTierPrimitiveLive(), () => {
+        expect(ready(weak, "tier1").insubstantial).toEqual(["evidence.controllerRunLog"]);
+        expect(ready(weak, "tier2").insubstantial).toEqual(["evidence.camera", "evidence.controllerRunLog"]);
+      });
+      for (const milestone of ["publish", "accept-jobs", "get-paid"] as const) {
+        const report = ready(weak, milestone);
+        expect(report.insubstantial, milestone).toEqual([]);
+        expect(report.ok, milestone).toBe(true);
+      }
+    });
+
+    it("an absent or malformed tier answer is missing / invalid, not insubstantial", () => {
+      const record = cloneRecord(full);
+      delete record.answers["evidence.camera"];
+      record.answers["evidence.approver"] = human("A. Approver"); // a string, not {name}
+      const report = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, "tier2"));
+      expect(report.missing).toEqual(["evidence.camera", "evidence.approver"]);
+      expect(report.invalidFields).toEqual(["evidence.approver"]);
+      expect(report.insubstantial).toEqual([]);
+    });
+  });
+
+  it("stub primitives and insubstantial answers are reported together, each on its own list", () => {
+    const record = cloneRecord(full);
+    record.answers["evidence.instrumentSignsOutput"] = human(false);
+    const report = ready(record, "tier1");
+    expect(report.ok).toBe(false);
+    expect(report.stubPrimitives).toEqual(["ident.registered_key", "machine.execution_log", "measure.io_test_pair"]);
+    expect(report.insubstantial).toEqual(["evidence.instrumentSignsOutput"]);
+  });
+});
+
 describe("astra pack 120b", () => {
   it("baseline: the full fixture is ok for identify (else the cases below prove nothing)", () => {
     expect(ready(buildFullValidRecord(), "identify").ok).toBe(true);
@@ -2256,6 +2476,26 @@ describe("astra pack 120b", () => {
     expect(report.safetyBlocks).toEqual(['safety.estop: mechanism "none" is not approved for this capability']);
   });
 
+  it("HIGH 5a: tier2 is not ready while its required primitives are stub", () => {
+    const report = ready(buildFullValidRecord(), "tier2");
+    expect(report.ok).toBe(false);
+    expect(report.stubPrimitives).toEqual([
+      "approval.expert",
+      "capture.photo_nonced",
+      "ident.registered_key",
+      "machine.execution_log",
+      "measure.io_test_pair",
+    ]);
+  });
+  it("HIGH 5b: a camera that sees neither work area nor output does not count for tier2", () => {
+    const answer = human({ seesWorkArea: false, seesOutput: false, mount: "fixed", captureDeviceId: "cam-1" });
+    const record = withAnswer("evidence.camera", answer);
+    expect(ready(record, "tier2").ok).toBe(false);
+    // ... and it is the camera, not just the stubs, that fails once the primitives are live
+    const live = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, "tier2"));
+    expect(live.ok).toBe(false);
+    expect(live.insubstantial).toEqual(["evidence.camera"]);
+  });
   it("HIGH 5c: a malformed execution mode caps at 0, not the no-cap 3", () => {
     expect(executionModeTierCap(withAnswer("evidence.executionMode", probed("MOCK")))).toBe(0);
   });

@@ -88,7 +88,10 @@ export type IntakeGroup = (typeof INTAKE_GROUPS)[number];
 export const INTAKE_FIELD_CLASSES = ["A", "B", "C"] as const;
 export type IntakeFieldClass = (typeof INTAKE_FIELD_CLASSES)[number];
 
-/** Milestones a field can gate. "optional" fields never block a milestone. */
+/** Milestones a field can gate. "optional" fields never block a milestone.
+ *  "tier1" / "tier2" readiness means only that the intake can feed a LIVE
+ *  verifier (validateIntake fails closed on stub primitives and on answers
+ *  that prove nothing); it never means the device is assured. */
 export const INTAKE_MILESTONES = [
   "register",
   "identify",
