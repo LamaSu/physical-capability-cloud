@@ -168,12 +168,21 @@ export async function jobOffersRoutes(app: FastifyInstance) {
           message: result.error,
         });
       }
-      // VerifyFail
+      // SSRF: the URL itself was refused (loopback, private, userinfo, bad scheme, internal
+      // name, not a URL...). Nothing was fetched and nothing was written.
+      if (result.reason === "invalid_source_verify_url") {
+        return reply.code(400).send({
+          error: "invalid_source_verify_url",
+          reason: result.urlRefusal ?? "invalid_url",
+          message: "sourceVerifyUrl must be a public https URL: no credentials, no private, loopback or internal address.",
+        });
+      }
+      // VerifyFail: a status or a verdict, never the remote body. Returning a slice
+      // of whatever the source answered turned this route into an SSRF read primitive.
       return reply.code(400).send({
         error: "source_verify_failed",
         reason: result.reason,
         sourceStatus: result.status ?? null,
-        sourceBody: result.body ?? null,
       });
     }
     if (!result.created) {
