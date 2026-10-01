@@ -240,42 +240,30 @@ describe("Gateway Routes", () => {
   });
 
   // ── Agents (mock conversations plugin) ─────────────────────────
+  // N34: the conversations here are fixtures, so outside demo mode the routes answer
+  // 501 not_available and point at the recorded conversations
+  // (GET /api/agents/live/conversations). The demo answers are covered by
+  // n34-agents-no-fabrication.test.ts.
 
   describe("GET /api/agents/conversations", () => {
-    it("returns array of conversations", async () => {
+    it("NEGATIVE (N34): answers 501 not_available instead of fixture conversations", async () => {
       const res = await app.inject({ method: "GET", url: "/api/agents/conversations" });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(501);
       const body = res.json();
-      expect(body.conversations).toBeDefined();
-      expect(Array.isArray(body.conversations)).toBe(true);
-      expect(body.conversations.length).toBeGreaterThan(0);
-    });
-
-    it("each conversation has id, topic, participants, status", async () => {
-      const res = await app.inject({ method: "GET", url: "/api/agents/conversations" });
-      const body = res.json();
-      const conv = body.conversations[0];
-      expect(conv.id).toBeDefined();
-      expect(conv.topic).toBeDefined();
-      expect(Array.isArray(conv.participants)).toBe(true);
-      expect(conv.status).toBeDefined();
+      expect(body.error).toBe("not_available");
+      expect(body.conversations).toBeUndefined();
+      expect(body.see).toContain("GET /api/agents/live/conversations");
     });
   });
 
   describe("GET /api/agents/conversations/:convId", () => {
-    it("returns a conversation by id", async () => {
-      const res = await app.inject({ method: "GET", url: "/api/agents/conversations/conv-001" });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.conversation).toBeDefined();
-      expect(body.conversation.id).toBe("conv-001");
-    });
-
-    it("returns error for unknown conversation", async () => {
-      const res = await app.inject({ method: "GET", url: "/api/agents/conversations/conv-nonexistent" });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.error).toBe("not_found");
+    it("NEGATIVE (N34): a fixture id and an unknown id get the same 501, so ids cannot be probed", async () => {
+      const known = await app.inject({ method: "GET", url: "/api/agents/conversations/conv-001" });
+      const unknown = await app.inject({ method: "GET", url: "/api/agents/conversations/conv-nonexistent" });
+      expect(known.statusCode).toBe(501);
+      expect(unknown.statusCode).toBe(501);
+      expect(known.json()).toEqual(unknown.json());
+      expect(known.body).not.toContain("conv-001");
     });
   });
 

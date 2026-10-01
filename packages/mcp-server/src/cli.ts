@@ -234,6 +234,7 @@ pcc evidence get <bundleId>
   protocols: `
 pcc protocols list [--tags=<tags>] [--capabilities=<types>] [--search=<term>] [--status=<status>]
   List protocol templates. All filters are optional.
+  Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available.
 `.trim(),
 
   sensors: `
@@ -263,6 +264,7 @@ pcc reputation get <agentId> [--tag=<tag>]
   depin: `
 pcc depin stats
   Get DePIN reward statistics (epochs, certificates, treasury).
+  Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available.
 `.trim(),
 
   setup: `
@@ -308,9 +310,11 @@ pcc csd register <csdJson>
   discover: `
 pcc discover scan [--protocols=ipp] [--timeout=3000]
   Scan local network for physical devices.
+  Without local network discovery (any hosted gateway) it answers 501 not_available outside demo mode.
 
 pcc discover onboard [--uri=<deviceUri>] [--protocol=<proto>] [--timeout=3000]
   One-command device onboarding: discover → generate CSD → register.
+  Without local network discovery (any hosted gateway) it answers 501 not_available outside demo mode.
 `.trim(),
 
   ip: `
@@ -337,12 +341,15 @@ pcc ip splits <ipId> --splits='[{"address":"0x...","role":"protocol-author","per
   swf: `
 pcc swf summary
   Get Sovereign Wealth Fund summary.
+  Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available.
 
 pcc swf participant <participantId>
   Get a participant's SWF dashboard.
+  Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available.
 
 pcc swf proposals [--status=<status>]
   List governance proposals. Status: active, passed, rejected, executed.
+  Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available.
 `.trim(),
 
   wallet: `

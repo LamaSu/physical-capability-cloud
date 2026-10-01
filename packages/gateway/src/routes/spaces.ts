@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { HostingSpace } from "@pcc/spec";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 const mockSpaces: HostingSpace[] = [
   {
@@ -44,7 +45,51 @@ const mockSpaces: HostingSpace[] = [
   },
 ];
 
+// ── Demo gate (board N34, the server side of PX-3) ────────────────────
+//
+// Every route in this plugin answers from the two fixture spaces above (no route reads
+// the hosting_spaces table), and /match scores them with Math.random(): a 70-95
+// "matchScore" with no basis, different on every call. Served as live data, that is
+// plausible fiction. So outside demo mode the WHOLE plugin fails closed: the onRequest
+// hook in spaceRoutes answers 501 not_available before the body is parsed and before any
+// handler runs. A route added to this plugin later is refused by default. Both hooks are
+// encapsulated: server.ts registers this plugin with app.register and no fastify-plugin
+// wrapper, so no other plugin sees them.
+//
+// With PCC_DEMO_ROUTES=true the fixtures are served as before, and every response says
+// so: the x-pcc-demo: true header, plus mock: true, demo: true on object bodies.
+
+const DEMO_HEADER = "x-pcc-demo";
+
+const exampleOnly = (what: string) =>
+  `${what} is not recorded on this gateway, so nothing is returned rather than an example.`;
+
+/** The refusal for each route pattern. `see` lists real routes that exist on this gateway. */
+const REFUSALS: Record<string, { message: string; see: string[] }> = {
+  "/api/spaces": { message: exampleOnly("Hosting space data"), see: [] },
+  "/api/spaces/:id": { message: exampleOnly("Hosting space data"), see: [] },
+  "/api/spaces/match": { message: exampleOnly("Hosting space data"), see: [] },
+};
+const FALLBACK_REFUSAL = { message: exampleOnly("Hosting space data"), see: [] as string[] };
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
 export async function spaceRoutes(app: FastifyInstance) {
+  // Demo gate (see above). Refuses before parsing, so nothing below runs outside demo mode.
+  app.addHook("onRequest", async (req, reply) => {
+    if (isDemoRoutesOn()) {
+      reply.header(DEMO_HEADER, "true");
+      return;
+    }
+    const refusal = REFUSALS[req.routeOptions.url ?? ""] ?? FALLBACK_REFUSAL;
+    return reply.code(501).send({ error: "not_available", message: refusal.message, see: refusal.see });
+  });
+  // A demo response's object body says so too; the header above covers any other shape.
+  app.addHook("preSerialization", async (_req, reply, payload: unknown) =>
+    reply.getHeader(DEMO_HEADER) === "true" && isPlainObject(payload) ? markDemo("demo", payload) : payload,
+  );
+
   // List hosting spaces with optional filters
   app.get("/api/spaces", async (req) => {
     const query = req.query as Record<string, string>;

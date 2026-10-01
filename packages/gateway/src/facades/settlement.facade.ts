@@ -70,7 +70,6 @@ import {
   getQueueStatus,
   getEpochHistory,
 } from "../contracts/batch-settlement.js";
-import { swfAccrue } from "../routes/swf.js";
 
 /**
  * Whether on-chain escrow operations route through the EAS-gated
@@ -685,11 +684,6 @@ export class SettlementFacade extends BaseFacade {
 
       if (result.status === "failed") {
         throw new Error(result.error ?? "Release failed");
-      }
-
-      // SWF accrual: 2% of released milestone value
-      if (result.status === "released") {
-        swfAccrue("settlement", result.jobId, 1000, "USDC", "base");
       }
 
       return {

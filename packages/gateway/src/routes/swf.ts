@@ -1,62 +1,77 @@
 import type { FastifyInstance } from "fastify";
 import { SWFService } from "@pcc/payments";
-import type { SWFParticipantRole, SWFAccrualSource, SWFAllocationStrategy, SWFDemandForecast, SWFOperatorCostModel, SWFEquityTier } from "@pcc/spec";
+import type { SWFParticipantRole, SWFAllocationStrategy, SWFDemandForecast, SWFOperatorCostModel, SWFEquityTier } from "@pcc/spec";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 // ---------------------------------------------------------------------------
-// Shared service instance (in-memory mock)
+// The SWF is a design, not a running fund (board N34; astra round 1 on #421, r1a HIGH)
 // ---------------------------------------------------------------------------
+//
+// SWFService keeps everything in process-local maps: nothing persists or funds it, and its
+// summary reports a "last distribution" of now and a Base USDC balance that no chain read
+// produced. So every route here answers only in demo mode (PCC_DEMO_ROUTES=true, never
+// under NODE_ENV=production), and every demo answer says so: the x-pcc-demo: true header,
+// plus mock: true, demo: true on object bodies. Outside demo mode each route answers 501
+// not_available before its body is parsed, and nothing is read or written. Epoch
+// distribution answers 501 in every mode (the steward's ruling, operator item 69: the SWF's
+// money routes stay disabled). Nothing outside this module writes to the simulation.
 
+/** The in-memory simulation that demo answers come from. Exported for tests. */
 const swfService = new SWFService();
-
-// Seed an initial epoch so the fund is immediately active
-const initialEpoch = swfService.createEpoch();
-
-/** Exported for integration hooks from other route modules */
 export { swfService };
 
-/**
- * Convenience: accrue to the SWF from any service.
- * Call this after escrow collection, bounty payout, pool distribution, etc.
- * Silently no-ops if no active epoch exists (fund not yet initialized).
- */
-export function swfAccrue(
-  sourceType: SWFAccrualSource,
-  sourceId: string,
-  grossAmount: number,
-  currency?: "USDC" | "CREDITS",
-  chain?: string,
-): void {
-  const epoch = swfService.getActiveEpoch();
-  if (!epoch) return;
-  try {
-    swfService.accrue({ sourceType, sourceId, grossAmount, currency, chain, epochId: epoch.id });
-  } catch {
-    // Non-fatal — fund accrual should never break the primary transaction
-  }
-}
+const DEMO_HEADER = "x-pcc-demo";
 
-/**
- * Convenience: auto-register a participant in the SWF.
- * Call when a kernel registers, a user submits a job, or a verifier completes work.
- * Idempotent by DID.
- */
-export function swfAutoRegister(
-  did: string,
-  walletAddress: string,
-  role: SWFParticipantRole,
-): void {
-  try {
-    swfService.registerParticipant({ did, walletAddress, role });
-  } catch {
-    // Non-fatal
-  }
-}
+const SWF_NOT_RECORDED = {
+  error: "not_available",
+  message:
+    "The SWF (sovereign wealth fund) is not recorded on this gateway: nothing persists or funds its epochs, " +
+    "participants, accruals, dividend claims, proposals, equity positions or term sheets, so nothing is " +
+    "returned and nothing was written.",
+  see: [] as string[],
+};
+
+// Distributing an epoch divides its dividend pool by each participant's contribution
+// score, and nothing computes a participant's per-epoch contribution (its jobs, reputation,
+// activity and votes in the epoch; jobs and votes are recorded, the per-epoch score is not).
+// This route drew those inputs from Math.random() and then DISTRIBUTED the epoch on them: a
+// write that shared the fund out by chance. Boards N34 and N46 (money floor): it answers 501
+// not_available before anything is parsed, read, scored or written, in every mode.
+const DISTRIBUTE_PATH = "/api/swf/epochs/:epochId/distribute";
+const DISTRIBUTE_REFUSAL = {
+  error: "not_available",
+  message:
+    "Per-epoch contribution scores (each participant's jobs, reputation, activity and votes in this epoch) " +
+    "are not computed on this gateway, " +
+    "so the epoch was not scored or distributed: without them, every participant's share would come " +
+    "from random numbers.",
+  see: [] as string[],
+};
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
 
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
 export async function swfRoutes(app: FastifyInstance) {
+  // The one gate for every route in this plugin (see above). It is encapsulated: this plugin
+  // is a plain async function (not wrapped with fastify-plugin), so the hooks run only for
+  // the routes declared here. It runs after the root API-key gate and before the body is
+  // parsed, so a refused POST parses, creates and records nothing.
+  app.addHook("onRequest", async (req, reply) => {
+    if (req.routeOptions.url === DISTRIBUTE_PATH) return reply.code(501).send(DISTRIBUTE_REFUSAL);
+    if (!isDemoRoutesOn()) return reply.code(501).send(SWF_NOT_RECORDED);
+    reply.header(DEMO_HEADER, "true");
+    // The simulation opens with one active epoch, on the first demo request (never at import).
+    if (swfService.listEpochs().length === 0) swfService.createEpoch();
+  });
+  // A demo response's object body says so too; the header above covers any other shape.
+  app.addHook("preSerialization", async (_req, reply, payload: unknown) =>
+    reply.getHeader(DEMO_HEADER) === "true" && isPlainObject(payload) ? markDemo("demo", payload) : payload,
+  );
+
   // ── Fund Summary ──────────────────────────────────────────────
 
   app.get("/api/swf/summary", async () => {
@@ -145,35 +160,10 @@ export async function swfRoutes(app: FastifyInstance) {
     return reply.code(201).send({ epoch });
   });
 
-  app.post<{ Params: { epochId: string } }>(
-    "/api/swf/epochs/:epochId/distribute",
-    async (req, reply) => {
-      try {
-        // For mock purposes, generate scores from all active participants
-        const participants = swfService.listParticipants({ status: "active" });
-        if (participants.length > 0) {
-          swfService.calculateContributionScores(
-            req.params.epochId,
-            participants.map((p) => ({
-              participantId: p.id,
-              jobCount: Math.floor(Math.random() * 50),
-              reputation: Math.floor(Math.random() * 1000),
-              uptimeOrActivity: Math.floor(Math.random() * 100),
-              tenureDays: Math.floor(
-                (Date.now() - new Date(p.registeredAt).getTime()) / 86_400_000,
-              ),
-              votedThisEpoch: Math.random() > 0.5,
-            })),
-          );
-        }
-
-        const epoch = swfService.distributeEpoch(req.params.epochId);
-        return { epoch };
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        return reply.code(409).send({ error: "conflict", message });
-      }
-    },
+  // Epoch distribution: the gate above always refuses it (DISTRIBUTE_REFUSAL). The handler
+  // answers the same, so the route cannot distribute even if the hook were bypassed.
+  app.post<{ Params: { epochId: string } }>(DISTRIBUTE_PATH, async (_req, reply) =>
+    reply.code(501).send(DISTRIBUTE_REFUSAL),
   );
 
   // ── Accruals ──────────────────────────────────────────────────

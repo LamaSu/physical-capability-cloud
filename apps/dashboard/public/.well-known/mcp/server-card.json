@@ -90,11 +90,11 @@
     },
     {
       "name": "pcc_list_protocols",
-      "description": "List protocol templates (multi-step manufacturing workflows). Optionally filter by tags, required capabilities, search term, or status."
+      "description": "List protocol templates (multi-step manufacturing workflows). Optionally filter by tags, required capabilities, search term, or status. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data."
     },
     {
       "name": "pcc_depin_stats",
-      "description": "Get DePIN (Decentralized Physical Infrastructure Network) reward statistics: epochs, kernel scores, certificates, and treasury balance."
+      "description": "Get DePIN (Decentralized Physical Infrastructure Network) reward statistics: epochs, kernel scores, certificates, and treasury balance. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data."
     },
     {
       "name": "pcc_subnet_status",
@@ -174,11 +174,11 @@
     },
     {
       "name": "pcc_discover_scan",
-      "description": "Scan the local network for physical devices that can be onboarded to PCC. Currently supports IPP printers via mDNS. Falls back to mock devices in dev mode."
+      "description": "Scan the local network for physical devices that can be onboarded to PCC. Currently supports IPP printers via mDNS. On a gateway without local network discovery (mDNS; any hosted gateway), it answers 501 not_available outside demo mode (PCC_DEMO_ROUTES); in demo mode the example printers it returns are marked mock."
     },
     {
       "name": "pcc_discover_onboard",
-      "description": "One-command device onboarding pipeline: auto-discover a device on the network → generate a CSD → register the CSD in the PCC registry. Returns the discovered device, generated CSD, and registration confirmation."
+      "description": "One-command device onboarding pipeline: auto-discover a device on the network → generate a CSD → register the CSD in the PCC registry. Returns the discovered device, generated CSD, and registration confirmation. On a gateway without local network discovery (mDNS; any hosted gateway), it answers 501 not_available outside demo mode (PCC_DEMO_ROUTES); in demo mode the example printers it returns are marked mock."
     },
     {
       "name": "pcc_ip_register_capability",
@@ -202,15 +202,15 @@
     },
     {
       "name": "pcc_swf_summary",
-      "description": "Get the Sovereign Wealth Fund summary: total balance, accrued/distributed amounts, current allocation strategy, participant count, and active proposals."
+      "description": "Get the Sovereign Wealth Fund summary: total balance, accrued/distributed amounts, current allocation strategy, participant count, and active proposals. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data."
     },
     {
       "name": "pcc_swf_participant_dashboard",
-      "description": "Get a participant's Sovereign Wealth Fund dashboard: total earned, pending dividends, epoch participation count, claim history, and voting history."
+      "description": "Get a participant's Sovereign Wealth Fund dashboard: total earned, pending dividends, epoch participation count, claim history, and voting history. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data."
     },
     {
       "name": "pcc_swf_list_proposals",
-      "description": "List governance proposals for the Sovereign Wealth Fund. Optionally filter by status (active, passed, rejected, executed)."
+      "description": "List governance proposals for the Sovereign Wealth Fund. Optionally filter by status (active, passed, rejected, executed). Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data."
     },
     {
       "name": "pcc_get_wallet_balance",

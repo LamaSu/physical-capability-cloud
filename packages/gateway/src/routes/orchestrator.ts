@@ -9,6 +9,7 @@ import type {
   InstrumentStep,
   ResourceClaim,
 } from "@pcc/spec";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 // ---------------------------------------------------------------------------
 // Mock Data — Biotech lab kernel topology
@@ -92,10 +93,82 @@ const mockClaims: ResourceClaim[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Demo gate (board N34, the server side of PX-3)
+// ---------------------------------------------------------------------------
+//
+// Every route in this plugin answers from the fixtures above: one made-up lab kernel
+// ("kernel-biolab-01") with five instruments, two samples, a running workflow and its
+// resource claims. Nothing is read from the kernels, devices or jobs this gateway records.
+// GET /graphs/:kernelId answered { error: "not_found" } with HTTP 200 for every real
+// kernel, and POST /workflows said accepted: true and recorded nothing. Served as live
+// data, that is plausible fiction. So outside demo mode the WHOLE plugin fails closed: the
+// onRequest hook in orchestratorRoutes answers 501 not_available before the body is parsed
+// and before any handler runs, so nothing is read from a fixture or accepted. A route added
+// to this plugin later is refused by default. Both hooks are encapsulated: server.ts
+// registers this plugin with app.register and no fastify-plugin wrapper, so no other
+// plugin sees them, including the other /api/orchestrator/* plugins (the template
+// directory and the data-product session routes).
+//
+// With PCC_DEMO_ROUTES=true the fixtures are served as before, and every response says
+// so: the x-pcc-demo: true header, plus mock: true, demo: true on object bodies.
+
+const DEMO_HEADER = "x-pcc-demo";
+
+const exampleOnly = (what: string) =>
+  `${what} is not recorded on this gateway, so nothing is returned rather than an example.`;
+
+/**
+ * The refusal for each route, keyed "METHOD /pattern" as registered (HEAD answers as GET).
+ * `see` lists real routes on this gateway that hold the real version of the data, if any.
+ */
+const REFUSALS: Record<string, { message: string; see: string[] }> = {
+  "GET /api/orchestrator/graphs": {
+    message: exampleOnly("Instrument transfer-graph data"),
+    see: ["GET /api/kernels", "GET /api/kernels/:kernelId/devices"],
+  },
+  "GET /api/orchestrator/graphs/:kernelId": {
+    message: exampleOnly("Instrument transfer-graph data"),
+    see: ["GET /api/kernels/:kernelId/devices"],
+  },
+  "GET /api/orchestrator/samples": { message: exampleOnly("Sample location and movement data"), see: [] },
+  "GET /api/orchestrator/samples/:sampleId": { message: exampleOnly("Sample location and movement data"), see: [] },
+  "GET /api/orchestrator/claims": { message: exampleOnly("Instrument resource-claim data"), see: [] },
+  "POST /api/orchestrator/workflows": {
+    message: "Instrument workflow data is not recorded on this gateway, so no workflow was accepted or started.",
+    see: ["POST /api/jobs/submit"],
+  },
+  "GET /api/orchestrator/workflows": { message: exampleOnly("Instrument workflow data"), see: ["GET /api/jobs"] },
+  "GET /api/orchestrator/workflows/:workflowId": {
+    message: exampleOnly("Instrument workflow data"),
+    see: ["GET /api/jobs/:jobId"],
+  },
+};
+/** For a route added later without its own line above: still refused, never served. */
+const FALLBACK_REFUSAL = { message: exampleOnly("Instrument orchestration data"), see: [] as string[] };
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
 export async function orchestratorRoutes(app: FastifyInstance) {
+  // Demo gate (see above). Refuses before parsing, so nothing below runs outside demo mode.
+  app.addHook("onRequest", async (req, reply) => {
+    if (isDemoRoutesOn()) {
+      reply.header(DEMO_HEADER, "true");
+      return;
+    }
+    const method = req.method === "HEAD" ? "GET" : req.method;
+    const refusal = REFUSALS[`${method} ${req.routeOptions.url ?? ""}`] ?? FALLBACK_REFUSAL;
+    return reply.code(501).send({ error: "not_available", message: refusal.message, see: refusal.see });
+  });
+  // A demo response's object body says so too; the header above covers any other shape.
+  app.addHook("preSerialization", async (_req, reply, payload: unknown) =>
+    reply.getHeader(DEMO_HEADER) === "true" && isPlainObject(payload) ? markDemo("demo", payload) : payload,
+  );
+
   // --- Transfer Graphs ---
 
   app.get("/api/orchestrator/graphs", async () => {

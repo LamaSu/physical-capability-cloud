@@ -5,7 +5,12 @@
  * POST /api/discover/generate-csd   — generate a CSD from a discovered device
  * POST /api/discover/onboard        — full pipeline: discover → generate CSD → register device → register CSD
  *
- * Discovery currently supports IPP printers via mDNS (falls back to mock).
+ * Discovery currently supports IPP printers via mDNS. When mDNS is unavailable (it is
+ * on any gateway without a local network, and the optional bonjour-service package is
+ * not installed), the routes answer 501 not_available (board N34): they used to return
+ * two example printers as if they had been found, and /onboard registered one of them.
+ * With PCC_DEMO_ROUTES on, the examples are returned marked mock/demo, and /onboard
+ * registers nothing.
  * The logic here mirrors @pcc/kernel/adapters/ipp-discovery without importing
  * the kernel bundle — that package has optional native deps (ipp, bonjour-service)
  * that may not be available in all environments and would cause the gateway build
@@ -16,6 +21,7 @@ import type { FastifyInstance } from "fastify";
 import type { CSD } from "@pcc/spec";
 import { buildAdapterEvidence } from "@pcc/spec";
 import { getCsdRegistry } from "./csd.js";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 // ── Discovery types ──────────────────────────────────────────────────────────
 
@@ -35,7 +41,7 @@ interface IppPrinterCapabilities {
   mediaTypes?: string[];
 }
 
-/** Mock printers — used when mDNS is unavailable (dev / CI). */
+/** Example printers: returned only in demo mode, marked, when mDNS is unavailable. */
 const MOCK_IPP_PRINTERS: DiscoveredDevice[] = [
   {
     protocol: "ipp",
@@ -65,11 +71,27 @@ const MOCK_IPP_PRINTERS: DiscoveredDevice[] = [
   },
 ];
 
+type Discovery = { ok: true; devices: DiscoveredDevice[] } | { ok: false };
+
+/** The example printers, copied so a caller cannot change the fixtures. */
+function examplePrinters(): DiscoveredDevice[] {
+  return MOCK_IPP_PRINTERS.map((p) => ({ ...p, capabilities: { ...p.capabilities } }));
+}
+
+const DISCOVERY_UNAVAILABLE = {
+  error: "not_available",
+  message:
+    "Network discovery is not available on this gateway (it has no mDNS on a local network), " +
+    "so no devices are returned rather than examples. Discover devices on the operator's machine " +
+    "(pcc-node detect) and register them there.",
+  see: [] as string[],
+};
+
 /**
- * Discover IPP printers via mDNS. Falls back to mock printers when the
- * `bonjour-service` package is unavailable or discovery fails.
+ * Discover IPP printers via mDNS. `{ ok: false }` when the `bonjour-service` package is
+ * unavailable or discovery fails: never example data.
  */
-async function discoverIppDevices(timeoutMs: number): Promise<DiscoveredDevice[]> {
+async function discoverIppDevices(timeoutMs: number): Promise<Discovery> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const bonjourModule = await import("bonjour-service" as string) as any;
@@ -112,13 +134,10 @@ async function discoverIppDevices(timeoutMs: number): Promise<DiscoveredDevice[]
       }, timeoutMs);
     });
 
-    return found;
+    return { ok: true, devices: found };
   } catch {
-    // bonjour-service not installed or mDNS failed — return mock data
-    return MOCK_IPP_PRINTERS.map((p) => ({
-      ...p,
-      capabilities: { ...p.capabilities },
-    }));
+    // bonjour-service not installed or mDNS failed: nothing was discovered.
+    return { ok: false };
   }
 }
 
@@ -246,14 +265,19 @@ export async function discoverRoutes(app: FastifyInstance) {
   // ── POST /api/discover/scan ──────────────────────────────────────
   app.post<{
     Body: { protocols?: string[]; timeoutMs?: number };
-  }>("/api/discover/scan", async (req) => {
+  }>("/api/discover/scan", async (req, reply) => {
     const { protocols = ["ipp"], timeoutMs = 3000 } = req.body ?? {};
 
     const devices: DiscoveredDevice[] = [];
 
     if (protocols.includes("ipp")) {
       const found = await discoverIppDevices(timeoutMs);
-      devices.push(...found);
+      if (!found.ok) {
+        if (!isDemoRoutesOn()) return reply.code(501).send(DISCOVERY_UNAVAILABLE);
+        reply.header("x-pcc-demo", "true");
+        return markDemo("demo", { devices: examplePrinters() });
+      }
+      devices.push(...found.devices);
     }
 
     return { devices };
@@ -281,8 +305,18 @@ export async function discoverRoutes(app: FastifyInstance) {
   }>("/api/discover/onboard", async (req, reply) => {
     const { deviceUri, protocol = "ipp", timeoutMs = 3000 } = req.body ?? {};
 
-    // Step 1: discover devices
-    const devices = await discoverIppDevices(timeoutMs);
+    // Step 1: discover devices. Nothing discovered is nothing onboarded: an example
+    // printer is never registered, demo or not.
+    const found = await discoverIppDevices(timeoutMs);
+    if (!found.ok) {
+      if (!isDemoRoutesOn()) return reply.code(501).send(DISCOVERY_UNAVAILABLE);
+      const example = examplePrinters().find((d) => (deviceUri ? d.uri === deviceUri : true));
+      if (!example) return reply.status(404).send({ error: "No devices found. Ensure the device is on the network." });
+      const exampleDevice: DiscoveredDevice = { ...example, protocol };
+      reply.header("x-pcc-demo", "true");
+      return markDemo("demo", { device: exampleDevice, csd: deviceToCsd(exampleDevice), registered: false });
+    }
+    const devices = found.devices;
 
     const target = devices.find((d) =>
       deviceUri ? d.uri === deviceUri : true,

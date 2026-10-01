@@ -87,8 +87,8 @@ transact end-to-end — are Discovery, Contract building, **Negotiation**, and
 | `pcc_get_kernel` | Full kernel record + devices + capability list. |
 | `pcc_list_sensors` | Sensor channels for a kernel (temperature, pressure, flow, etc). |
 | `pcc_get_sensor_data` | Recent sensor readings for a channel. |
-| `pcc_discover_scan` | Scan local network for onboardable devices (mDNS/IPP). |
-| `pcc_discover_onboard` | One-shot discover → generate CSD → register. |
+| `pcc_discover_scan` | Scan local network for onboardable devices (mDNS/IPP). Answers 501 `not_available` outside demo mode where the gateway has no local network discovery (any hosted gateway). |
+| `pcc_discover_onboard` | One-shot discover → generate CSD → register. Answers 501 `not_available` outside demo mode where the gateway has no local network discovery (any hosted gateway). |
 
 ### Contract building (3)
 
@@ -127,7 +127,7 @@ auto-expire after 30 minutes; committed sessions are immutable. Requires
 |---|---|
 | `pcc_list_jobs` | List jobs across kernels with optional kernel/status filters. |
 | `pcc_get_job` | Full job detail including evidence bundles and timeline. |
-| `pcc_list_protocols` | Protocol templates (multi-step manufacturing workflows). |
+| `pcc_list_protocols` | Protocol templates (multi-step manufacturing workflows). Answers 501 `not_available` outside demo mode. |
 | `pcc_list_evidence` | List all evidence bundles. |
 | `pcc_get_evidence` | A specific bundle's IPFS CID, ZK proof status, Bittensor verification scores, evaluator attestations. |
 
@@ -143,7 +143,7 @@ auto-expire after 30 minutes; committed sessions are immutable. Requires
 
 | Tool | One-line |
 |---|---|
-| `pcc_depin_stats` | DePIN reward epochs + kernel certificates + treasury balance. |
+| `pcc_depin_stats` | DePIN reward epochs + kernel certificates + treasury balance. Answers 501 `not_available` outside demo mode. |
 | `pcc_subnet_status` | PCC agent network status — active agents, types, conversations. |
 | `pcc_get_agent_identity` | ERC-8004 identity for a kernel or agent. |
 | `pcc_get_reputation` | Reputation scores by agent/tag (quality, uptime, assurance). |
@@ -189,9 +189,9 @@ auto-expire after 30 minutes; committed sessions are immutable. Requires
 
 | Tool | One-line |
 |---|---|
-| `pcc_swf_summary` | Fund balance, accrued/distributed, allocation strategy, active proposals. |
-| `pcc_swf_participant_dashboard` | A participant's SWF earnings, dividends, voting history. |
-| `pcc_swf_list_proposals` | Governance proposals filtered by status. |
+| `pcc_swf_summary` | Fund balance, accrued/distributed, allocation strategy, active proposals. Answers 501 `not_available` outside demo mode. |
+| `pcc_swf_participant_dashboard` | A participant's SWF earnings, dividends, voting history. Answers 501 `not_available` outside demo mode. |
+| `pcc_swf_list_proposals` | Governance proposals filtered by status. Answers 501 `not_available` outside demo mode. |
 
 ### Fiat ramp and wallet (7)
 

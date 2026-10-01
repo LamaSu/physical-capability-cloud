@@ -11,6 +11,7 @@ import type {
   AutomationStatus,
   TransferAgent,
 } from "@pcc/spec";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 // ---------------------------------------------------------------------------
 // Mock Data — Protocol system
@@ -453,10 +454,108 @@ const mockTransferAgents: TransferAgent[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Demo gate (board N34, the server side of PX-3)
+// ---------------------------------------------------------------------------
+//
+// Every route in this plugin answers from the fixtures above, and none of it is recorded
+// anywhere. The protocol library is two made-up templates with invented authors and usage
+// ("runCount: 7", "rating: 4.6"). The runs, forks, automation statuses and transfer agents
+// are fabricated execution state: a "running" run on a made-up kernel with evidence hashes
+// and robot transfer episodes. The writes (create, update, publish, fork, start a run,
+// pause, resume, cancel, record an episode, advance a level) answered created, updated,
+// started or recorded, and stored nothing. /validate checked a template against a
+// hard-coded capability list, not the kernel's. Served as live data, that is plausible
+// fiction. So outside demo mode the WHOLE plugin fails closed: the onRequest hook in
+// protocolRoutes answers 501 not_available before the body is parsed and before any
+// handler runs, so nothing is read from a fixture and no write claims success. A route
+// added to this plugin later is refused by default. Both hooks are encapsulated: server.ts
+// registers this plugin with app.register and no fastify-plugin wrapper, so no other
+// plugin sees them.
+//
+// With PCC_DEMO_ROUTES=true the fixtures are served as before, and every response says
+// so: the x-pcc-demo: true header, plus mock: true, demo: true on object bodies.
+
+const DEMO_HEADER = "x-pcc-demo";
+
+const exampleOnly = (what: string) =>
+  `${what} is not recorded on this gateway, so nothing is returned rather than an example.`;
+const TEMPLATES_NOT_RECORDED = "Protocol template data is not recorded on this gateway";
+const RUNS_NOT_RECORDED = "Protocol run data is not recorded on this gateway";
+const AUTOMATION_NOT_RECORDED = "Transfer automation data is not recorded on this gateway";
+
+// Jobs are what this gateway records about work run on a kernel: the real home of what a
+// "protocol run" pretended to track.
+const JOBS = "GET /api/jobs";
+const JOB = "GET /api/jobs/:jobId";
+
+/**
+ * The refusal for each route, keyed "METHOD /pattern" as registered (HEAD answers as GET).
+ * `see` lists real routes on this gateway that hold the real version of the data, if any.
+ */
+const REFUSALS: Record<string, { message: string; see: string[] }> = {
+  // Templates
+  "GET /api/protocols": { message: exampleOnly("Protocol template data"), see: [] },
+  "GET /api/protocols/:id": { message: exampleOnly("Protocol template data"), see: [] },
+  "POST /api/protocols": { message: `${TEMPLATES_NOT_RECORDED}, so no template was created.`, see: [] },
+  "PUT /api/protocols/:id": { message: `${TEMPLATES_NOT_RECORDED}, so no template was updated.`, see: [] },
+  "POST /api/protocols/:id/publish": { message: `${TEMPLATES_NOT_RECORDED}, so nothing was published.`, see: [] },
+  "POST /api/protocols/:id/fork": { message: `${TEMPLATES_NOT_RECORDED}, so no fork was created.`, see: [] },
+  "GET /api/protocols/:id/forks": { message: exampleOnly("Protocol fork data"), see: [] },
+  "POST /api/protocols/:id/validate": {
+    message: `${TEMPLATES_NOT_RECORDED}, so nothing was validated.`,
+    see: ["GET /api/capabilities/by-kernel/:kernelId"],
+  },
+  // Runs
+  "GET /api/protocols/:id/runs": { message: exampleOnly("Protocol run data"), see: [JOBS] },
+  "GET /api/protocol-runs": { message: exampleOnly("Protocol run data"), see: [JOBS] },
+  "GET /api/protocol-runs/:runId": { message: exampleOnly("Protocol run data"), see: [JOB] },
+  "POST /api/protocols/:id/runs": {
+    message: `${RUNS_NOT_RECORDED}, so no run was created or started.`,
+    see: ["POST /api/jobs/submit"],
+  },
+  "POST /api/protocol-runs/:runId/start": { message: `${RUNS_NOT_RECORDED}, so no run was started.`, see: [] },
+  "POST /api/protocol-runs/:runId/pause": { message: `${RUNS_NOT_RECORDED}, so no run was paused.`, see: [] },
+  "POST /api/protocol-runs/:runId/resume": { message: `${RUNS_NOT_RECORDED}, so no run was resumed.`, see: [] },
+  "POST /api/protocol-runs/:runId/cancel": { message: `${RUNS_NOT_RECORDED}, so no run was cancelled.`, see: [] },
+  // Transfer automation
+  "GET /api/automation-status": { message: exampleOnly("Transfer automation data"), see: [] },
+  "GET /api/automation-status/:fromNodeId/:toNodeId": { message: exampleOnly("Transfer automation data"), see: [] },
+  "POST /api/automation-status/:fromNodeId/:toNodeId/episode": {
+    message: `${AUTOMATION_NOT_RECORDED}, so no episode was recorded.`,
+    see: [],
+  },
+  "POST /api/automation-status/:fromNodeId/:toNodeId/advance": {
+    message: `${AUTOMATION_NOT_RECORDED}, so no automation level was changed.`,
+    see: [],
+  },
+  "GET /api/transfer-agents": { message: exampleOnly("Transfer agent data"), see: [] },
+};
+/** For a route added later without its own line above: still refused, never served. */
+const FALLBACK_REFUSAL = { message: exampleOnly("Protocol data"), see: [] as string[] };
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
 export async function protocolRoutes(app: FastifyInstance) {
+  // Demo gate (see above). Refuses before parsing, so nothing below runs outside demo mode.
+  app.addHook("onRequest", async (req, reply) => {
+    if (isDemoRoutesOn()) {
+      reply.header(DEMO_HEADER, "true");
+      return;
+    }
+    const method = req.method === "HEAD" ? "GET" : req.method;
+    const refusal = REFUSALS[`${method} ${req.routeOptions.url ?? ""}`] ?? FALLBACK_REFUSAL;
+    return reply.code(501).send({ error: "not_available", message: refusal.message, see: refusal.see });
+  });
+  // A demo response's object body says so too; the header above covers any other shape.
+  app.addHook("preSerialization", async (_req, reply, payload: unknown) =>
+    reply.getHeader(DEMO_HEADER) === "true" && isPlainObject(payload) ? markDemo("demo", payload) : payload,
+  );
+
   // ── Protocol Templates ──────────────────────────────────────────
 
   app.get<{ Querystring: { tags?: string; capabilities?: string; search?: string; status?: string } }>(

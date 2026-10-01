@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { SampleSlot } from "@pcc/spec";
+import type { BatchManifest, SampleSlot } from "@pcc/spec";
+import { isDemoRoutesOn } from "../config/demo-routes.js";
 
 // SharedBatch + BatchSlotClaim types inlined until spec rebuilds
 interface SharedBatch {
@@ -20,15 +21,26 @@ import { batchTracker } from "../services.js";
 // ── In-memory shared batch storage ────────────────────────────────
 const sharedBatches = new Map<string, SharedBatch>();
 
+// A demo-seeded batch (services.ts, only when demo mode was on at import) carries
+// runConfig.demo: true. board N34, reviewer-n34-c: the tracker is a shared singleton
+// that outlives any later env change, so a read that trusted "it was seeded, so it must
+// be real" kept serving it after an operator turned demo mode off in the same process.
+// Every READ rechecks demo mode now; a caller's own batch (no demo flag) is unaffected.
+const isDemoBatch = (b: BatchManifest): boolean => b.runConfig?.["demo"] === true;
+const visibleBatches = (batches: BatchManifest[]): BatchManifest[] =>
+  isDemoRoutesOn() ? batches : batches.filter((b) => !isDemoBatch(b));
+
 export async function batchRoutes(app: FastifyInstance) {
   // List batch manifests — from in-memory BatchTracker (live lifecycle state)
   app.get<{ Querystring: { kernelId?: string; status?: string } }>(
     "/api/batches",
     async (req) => {
-      const batches = batchTracker.getAllBatches({
-        kernelId: req.query.kernelId,
-        status: req.query.status as any,
-      });
+      const batches = visibleBatches(
+        batchTracker.getAllBatches({
+          kernelId: req.query.kernelId,
+          status: req.query.status as any,
+        }),
+      );
       return { batches };
     },
   );
@@ -36,13 +48,13 @@ export async function batchRoutes(app: FastifyInstance) {
   // Batch detail with slots
   app.get<{ Params: { batchId: string } }>("/api/batches/:batchId", async (req) => {
     const batch = batchTracker.getBatch(req.params.batchId);
-    if (!batch) return { error: "not_found" };
+    if (!batch || (!isDemoRoutesOn() && isDemoBatch(batch))) return { error: "not_found" };
     return { batch, events: batchTracker.getEvents(req.params.batchId) };
   });
 
   // Batches containing a specific job's samples
   app.get<{ Params: { jobId: string } }>("/api/batches/by-job/:jobId", async (req) => {
-    const batches = batchTracker.getBatchesForJob(req.params.jobId);
+    const batches = visibleBatches(batchTracker.getBatchesForJob(req.params.jobId));
     return { batches };
   });
 

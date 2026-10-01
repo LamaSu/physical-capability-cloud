@@ -22,7 +22,6 @@ import {
   isEvidenceHashForm,
 } from "../services/evidence-envelope.js";
 import { getSettlementFacade } from "../facades/index.js";
-import { swfAccrue } from "./swf.js";
 import { releaseMilestoneByJobActivity } from "../activities/escrow.js";
 import {
   isBatchEnabled,
@@ -197,11 +196,6 @@ export async function settlementRoutes(app: FastifyInstance) {
         message: result.error,
         jobId: result.jobId,
       });
-    }
-
-    // SWF accrual: 2% of released milestone value flows into the fund
-    if (result.status === "released") {
-      swfAccrue("settlement", result.jobId, 1000, "USDC", "base");
     }
 
     return {
