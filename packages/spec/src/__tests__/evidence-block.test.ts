@@ -821,6 +821,17 @@ describe("E7b — computeKernelSignedEventsRoot verifies, commits and returns on
     expect(Object.values(descriptorReads).every((n) => n === 1)).toBe(true);
   });
 
+  it("a value nested beyond the engine's recursion limit is refused as an EvidenceBlockInputError, never a RangeError", async () => {
+    let deep: Record<string, unknown> = {};
+    for (let i = 0; i < 100_000; i++) deep = { d: deep };
+    const { bundle } = await bundleOf({ stand: "in" }, deep);
+    const err = await refuse(bundle);
+    expect(err.field).toBe("events[0]");
+    expect(err.message).toMatch(/plain JSON tree/);
+    // The same value as the event itself.
+    expect((await refuse({ ...bundle, events: [deep] })).field).toBe("events[0]");
+  });
+
   it("a refusal names the event and the member, and cannot be used to inject log lines or grow without bound", async () => {
     const hostile = `evil${String.fromCharCode(10)}FORGED LOG LINE${String.fromCharCode(0)}${"k".repeat(5000)}`;
     const { bundle } = await bundleOf({ stand: "in" }, { [hostile]: NaN });

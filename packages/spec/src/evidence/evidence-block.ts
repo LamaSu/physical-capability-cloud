@@ -266,8 +266,9 @@ export function taggedDigestToBytes32(digest: string): Bytes32Hex {
  * bound the length, so an error field or message cannot inject log lines or grow without limit.
  */
 function printable(text: string, max: number): string {
-  const clean = text.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, "?");
-  return clean.length > max ? `${clean.slice(0, max)}...` : clean;
+  // Cut first, then scrub: a very long hostile key must not make the scrub itself expensive.
+  const clean = text.slice(0, max).replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, "?");
+  return text.length > max ? `${clean}...` : clean;
 }
 
 /**
@@ -338,19 +339,19 @@ export interface KernelSignedEventsSnapshot {
  * carried hashes share a root.
  *
  * Each event is snapshotted once with `canonicalSnapshot` (see `snapshotEvent`): it is read
- * through own property descriptors only, so no getter and no `toJSON` of the input runs, and a Proxy
- * is read once, through its reflection traps. Anything JSON cannot carry exactly is refused rather
- * than normalised. Every event hash is recomputed with `hashEvent` over that snapshot and must equal
- * the carried `event.hash`; `hashBundle` is recomputed over the snapshot and must equal
- * `bundle.bundleHash`; an empty event list is refused. Throws `EvidenceBlockInputError` on any
- * failure, naming the event and the member that caused it.
+ * through own property descriptors only, so no getter and no `toJSON` of the input runs. A Proxy
+ * is not refused: it is read once, through its reflection traps, so what is hashed is what is
+ * returned and evaluated, however its traps answer a later read. Anything JSON cannot carry exactly
+ * is refused rather than normalised. Every event hash is recomputed with `hashEvent` over that
+ * snapshot and must equal the carried `event.hash`; `hashBundle` is recomputed over the snapshot
+ * and must equal `bundle.bundleHash`; an empty event list is refused. Throws
+ * `EvidenceBlockInputError` on any failure, naming the event and the member that caused it.
  *
  * Returns `{ root, events }`. `events` is exactly the data whose hashes were recomputed and
- * checked, so what is hashed is what is returned and what a consumer must evaluate: a consumer
- * evaluates `events`, never the object it passed in, which a caller can mutate after this returns
- * and a Proxy can answer differently on a later read. The result and every event in it are
- * deep-frozen. This does not verify the kernel signature, the session-key delegation, or that this
- * is the one finalized bundle for the settlement unit; see BOUNDARY in the module header.
+ * checked: a consumer evaluates `events`, never the object it passed in, which a caller can mutate
+ * after this returns. The result and every event in it are deep-frozen. This does not verify the
+ * kernel signature, the session-key delegation, or that this is the one finalized bundle for the
+ * settlement unit; see BOUNDARY in the module header.
  */
 export async function computeKernelSignedEventsRoot(
   bundle: Pick<EvidenceBundle, "events" | "bundleHash">,
