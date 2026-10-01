@@ -13,6 +13,7 @@ import {
   requireOwnerOf,
 } from "../auth/kernel-owner-guard.js";
 import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
+import { checkKernelAcceptsJobs, replyKernelNotAccepting } from "../services/kernel-emergency-stop.js";
 
 const { operatorPolicies, pendingApprovals } = schema;
 
@@ -257,7 +258,11 @@ export async function operatorRoutes(app: FastifyInstance) {
         })
         .run();
 
-      // Cancel all pending approvals for this kernel
+      // Cancel all pending approvals for this kernel. Only PENDING ones: an
+      // approval already granted, and the kernel's queued jobs, are not touched
+      // here. While the stop lasts they are held back at the queues a node polls
+      // (GET /api/operator/approvals?status=approved and GET /api/operator/jobs),
+      // and they are handed out again on resume.
       db.update(pendingApprovals)
         .set({
           status: "rejected",
@@ -390,6 +395,16 @@ export async function operatorRoutes(app: FastifyInstance) {
    * not_kernel_owner). Without it, only approvals for kernels the actor owns
    * are listed, resolved with one batched kernel lookup. (Before: any key
    * could read every kernel's queue, including the job parameters.)
+   *
+   * EMERGENCY STOP. `?status=approved` is the queue the OT-2 daemon polls for
+   * work to run, so a kernel in emergency stop hands out none of it. The stop
+   * itself only rejects PENDING approvals (POST /emergency-stop below), so an
+   * approval granted before the stop was still handed out. With `?kernelId=` the
+   * answer is 200 `{ approvals: [], emergencyStop: true }` (a 200 for the reason
+   * given at GET /api/operator/jobs), or 503 `policy_unavailable` when the
+   * kernel's policy cannot be read. Without `?kernelId=` the rows of a kernel
+   * that is stopped, or whose policy cannot be read, are left out. Any other
+   * status filter, and the unfiltered history view, are unchanged.
    */
   app.get("/api/operator/approvals", async (req, reply) => {
     const actor = requireActor(req, reply);
@@ -400,6 +415,18 @@ export async function operatorRoutes(app: FastifyInstance) {
       const verdict = await checkKernelOwner(actor, String(kernelId));
       if (!verdict.ok) {
         return reply.status(verdict.status).send({ error: verdict.error, message: verdict.message, kernelId });
+      }
+    }
+
+    // Asking for the approved queue: ?status=approved, or a repeated ?status=
+    // (an array, which is held back like any other work).
+    const asksForApproved =
+      status !== undefined && (typeof status !== "string" || status === "approved");
+    if (kernelId && asksForApproved) {
+      const accepts = checkKernelAcceptsJobs(String(kernelId));
+      if (!accepts.ok) {
+        if (accepts.status === 503) return replyKernelNotAccepting(reply, accepts);
+        return { approvals: [], emergencyStop: true };
       }
     }
 
@@ -431,6 +458,13 @@ export async function operatorRoutes(app: FastifyInstance) {
             .map((k) => k.id),
         );
         rows = rows.filter((r) => owned.has(r.kernelId));
+        if (asksForApproved) {
+          // A kernel that is stopped, or whose policy cannot be read, hands out no work.
+          const heldBack = new Set(
+            [...new Set(rows.map((r) => r.kernelId))].filter((id) => !checkKernelAcceptsJobs(id).ok),
+          );
+          rows = rows.filter((r) => !heldBack.has(r.kernelId));
+        }
       }
 
       return { approvals: rows };

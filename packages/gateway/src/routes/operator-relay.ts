@@ -32,6 +32,7 @@ import {
   INVALID_ACCEPTING_JOBS_MESSAGE,
   isValidAcceptingJobs,
 } from "../facades/kernel.facade.js";
+import { checkKernelAcceptsJobs, replyKernelNotAccepting } from "../services/kernel-emergency-stop.js";
 import { requireActor, requireOwnerOf } from "../auth/kernel-owner-guard.js";
 import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
@@ -74,6 +75,18 @@ interface JobStatusBody {
   metadata?: Record<string, unknown>;
   timestamp?: number;
 }
+
+/**
+ * Statuses that are not work for a node to start. GET /api/operator/jobs lists
+ * these even for a kernel in emergency stop; every other status (queued,
+ * pending, paused, and any a later version adds) is held back.
+ */
+const STATUSES_NOT_TO_START: ReadonlySet<string> = new Set([
+  "in_progress",
+  "completed",
+  "failed",
+  "cancelled",
+]);
 
 // ---------------------------------------------------------------------------
 // Who is asking (N85 b)
@@ -128,6 +141,20 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    *   status    — filter by status (default: "queued")
    *
    * Returns { jobs: Job[] }
+   *
+   * EMERGENCY STOP. This is the queue a node polls for work, so a kernel in
+   * emergency stop hands out none: the answer is 200 `{ jobs: [], emergencyStop:
+   * true }` for every status except those that are not work to start
+   * (in_progress, completed, failed, cancelled). Queued, pending and paused jobs
+   * stay in the table and are handed out again once the kernel is resumed. (The
+   * stop itself only rejects pending APPROVALS, never queued jobs.) It is a 200
+   * and not an error on purpose: the pcc-node client treats a non-200 as "no
+   * jobs", but on a 404 it falls back to the public GET /api/jobs list, so the
+   * answer must never be a 404 and must not read as a fault; to a client that
+   * knows nothing of the flag an empty queue is exactly right, and a new one can
+   * say why. A policy that cannot be read is a 503 `policy_unavailable`, never a
+   * queue. The check follows the owner check, so only the kernel's operator or
+   * the admin learns the stop state here.
    */
   app.get<{
     Querystring: { kernelId?: string; status?: string };
@@ -140,6 +167,16 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "kernelId query param required" });
     }
     if (!caller.admin && !(await requireOwnerOf(caller.actor, reply, kernelId))) return reply;
+
+    // A repeated ?status= arrives as an array: that is not one of the statuses
+    // below, so it is held back like any other work.
+    if (!(typeof status === "string" && STATUSES_NOT_TO_START.has(status))) {
+      const accepts = checkKernelAcceptsJobs(kernelId);
+      if (!accepts.ok) {
+        if (accepts.status === 503) return replyKernelNotAccepting(reply, accepts);
+        return { jobs: [], emergencyStop: true };
+      }
+    }
 
     const result = await jobFacade.list({ kernelId, status });
     if (!result.success) return { jobs: [] };
