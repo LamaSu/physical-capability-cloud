@@ -104,6 +104,18 @@
  * two hash calls. A caller that replaces globals itself is outside the threat model: it already runs
  * arbitrary code in this process.
  *
+ * THE PROXY TEST COMES FROM THE HOST (runtime requirement). Whether a value is a Proxy cannot be asked of
+ * JavaScript itself, only of the runtime: Node's `util.types.isProxy`. It is NOT imported from
+ * "node:util": a browser bundle (the dashboard's Vite build) has no `node:util`, and a static
+ * `import { types } from "node:util"` here failed that build on #361. It is taken ONCE, when the module
+ * loads, from `process.getBuiltinModule("node:util")` (Node >= 20.16 and >= 22.3), with the other
+ * captured references. Where the runtime has no such function (an older Node, a browser) the module still
+ * LOADS, and every entry point that takes an object or an array throws `EvidenceBlockInputError` (field
+ * `runtime`) before it reads that input: with no way to tell a Proxy there is no safe way to read a
+ * caller's object, so an unknown is never a "no". `taggedDigestToBytes32` and the exported constants take
+ * no such input and work everywhere. `node:crypto` is still imported statically: the dashboard aliases it
+ * to a browser shim.
+ *
  * The session authorization is snapshotted before it is hashed (E7 F3, F4): admitted first with the
  * same guard as every other entry point, then a frozen plain copy of exactly the declared fields,
  * read once from their own descriptors, with `publicKey` pinned to 64
@@ -141,10 +153,30 @@
  */
 
 import { createHash } from "node:crypto";
-import { types as utilTypes } from "node:util";
 import { keccak_256 } from "@noble/hashes/sha3";
 import { NonCanonicalValueError, canonicalSnapshot, canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
 import type { EvidenceBundle, EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
+
+/** What `takeHostIsProxy` looks for on `globalThis.process`, spelled out here so no version of @types/node matters. */
+type BuiltinModuleHost = { getBuiltinModule?: (id: string) => { types?: { isProxy?: unknown } } | undefined };
+
+/**
+ * The host's `util.types.isProxy`, or undefined when the runtime cannot give it. Taken from
+ * `process.getBuiltinModule` (Node >= 20.16 and >= 22.3) and not from `import ... from "node:util"`,
+ * because a browser bundle has no `node:util` and a static import of it fails the bundler's build.
+ * Nothing here may throw: a host whose `getBuiltinModule` throws, or answers with something that is not
+ * a function, simply cannot give it, and the module must still LOAD (every call then refuses, see
+ * `isProxy`). It runs once, with the captures below.
+ */
+function takeHostIsProxy(): ((value: unknown) => boolean) | undefined {
+  try {
+    const host = (globalThis as unknown as { process?: BuiltinModuleHost }).process;
+    const candidate = host?.getBuiltinModule?.("node:util")?.types?.isProxy;
+    return typeof candidate === "function" ? (candidate as (value: unknown) => boolean) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // What this module uses to inspect and freeze caller-supplied objects, and to encode and hash what
 // it read from them, is captured here, when the module loads, and the code below calls only these
@@ -158,7 +190,8 @@ import type { EvidenceBundle, EvidenceEvent, SessionKeyAuthorization } from "../
 // `text.charCodeAt(i)` and a regular expression's `test` would find a method on the object, so they
 // use the bound captures, linked frames, char-code loops and `appendTo` instead. (Only the text of a
 // refusal is built with ordinary calls; so is what `@noble/hashes` and `node:crypto` do inside the
-// two hash calls, which this module cannot capture.)
+// two hash calls, which this module cannot capture.) The one exception in HOW it is obtained is the
+// Proxy test: `takeHostIsProxy` above.
 const freeze = Object.freeze;
 const isArray = Array.isArray;
 const ownKeys = Reflect.ownKeys;
@@ -167,7 +200,7 @@ const getPrototypeOf = Reflect.getPrototypeOf;
 const defineProperty = Reflect.defineProperty;
 const isSafeInteger = Number.isSafeInteger;
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
-const isProxy = utilTypes.isProxy;
+const hostIsProxy = takeHostIsProxy();
 const toBigInt = BigInt;
 const toNumber = Number;
 const Uint8ArrayConstructor = Uint8Array;
@@ -188,7 +221,10 @@ const hashDigest = call.bind(getOwnPropertyDescriptor(hashPrototype, "digest")!.
 
 export type Bytes32Hex = `0x${string}`;
 
-/** Raised for an input that is not in its pinned form. */
+/**
+ * Raised for an input that is not in its pinned form. Also raised, with the field `runtime`, when the
+ * runtime cannot tell a Proxy and so cannot refuse code-running input (see `isProxy`).
+ */
 export class EvidenceBlockInputError extends Error {
   readonly field: string;
   constructor(field: string, reason: string) {
@@ -196,6 +232,23 @@ export class EvidenceBlockInputError extends Error {
     this.name = "EvidenceBlockInputError";
     this.field = field;
   }
+}
+
+const PROXY_DETECTION_UNAVAILABLE =
+  "evidence-block needs Node's util.types.isProxy (Node >= 20.16 / 22.3) to refuse code-running input; it is unavailable in this runtime";
+
+/**
+ * Whether `value` is a Proxy, live or revoked: the host's `util.types.isProxy`, captured when the module
+ * loaded. Where the host could not give it, this THROWS instead of answering. "No" would let a Proxy
+ * through to be read, and a Proxy runs the caller's code on every operation (E7c), so an unknown is never
+ * a "no". Every Proxy test in this module goes through here, so no path can read caller input without
+ * having asked.
+ */
+function isProxy(value: unknown): boolean {
+  if (hostIsProxy === undefined) {
+    throw new EvidenceBlockInputError("runtime", PROXY_DETECTION_UNAVAILABLE);
+  }
+  return hostIsProxy(value);
 }
 
 // ── Pure encoding: hex, bytes and ABI words (round 2) ───────────────────────

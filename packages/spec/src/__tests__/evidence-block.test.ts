@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { types as utilTypes } from "node:util";
 import { runInNewContext } from "node:vm";
@@ -2681,5 +2681,171 @@ describe("E7 — an array with a non-integer length is refused, never treated as
       const err = refusalOf(() => computeAttestationSetRoot(attJob, [role as never]));
       expect(err.field, String(length)).toBe("roles[0].attestationHashes");
     }
+  });
+});
+
+// ── The Proxy test comes from the host, and a runtime that cannot give it fails closed ───────────────
+// `util.types.isProxy` used to be a static `import { types } from "node:util"`. A browser bundle has no
+// `node:util`, so the dashboard's Vite build of @pcc/spec failed on that line (build-dashboard on #361). The
+// module now takes the function ONCE, when it loads, from `process.getBuiltinModule("node:util")` (Node >= 20.16
+// and >= 22.3). Where the runtime cannot give it (an older Node, a browser) the module must still LOAD, and every
+// entry point that takes an object or an array must REFUSE before it reads the input: an unknown is never a "no
+// Proxy". Nothing in the module can be overridden for these tests: each one loads a FRESH copy of the real module
+// while the runtime lacks the function, with `node:util` made to throw if anything imports it.
+describe("the Proxy test is taken from the host: a runtime without it still loads the module and refuses every call that needs it", () => {
+  type EvidenceBlockModule = typeof import("../evidence/evidence-block.js");
+  type Host = "absent" | ((id: string) => unknown);
+  type Wrap = <T extends object>(input: T) => T;
+  const WANT =
+    "evidence-block needs Node's util.types.isProxy (Node >= 20.16 / 22.3) to refuse code-running input; it is unavailable in this runtime";
+  const REAL_GET_BUILTIN_MODULE = process.getBuiltinModule;
+  afterEach(() => {
+    const leaked = process.getBuiltinModule !== REAL_GET_BUILTIN_MODULE;
+    (process as unknown as { getBuiltinModule: unknown }).getBuiltinModule = REAL_GET_BUILTIN_MODULE; // do not poison the tests that follow
+    expect(leaked, "a test left process.getBuiltinModule replaced").toBe(false);
+  });
+
+  /**
+   * A fresh copy of the module, evaluated while `process.getBuiltinModule` is `host` ("absent": there is none)
+   * and `node:util` cannot be imported at all (a browser bundle has none, so a static import of it would throw
+   * right here). Everything is put back before it returns.
+   */
+  async function loadWith(host: Host): Promise<EvidenceBlockModule> {
+    const holder = process as unknown as { getBuiltinModule?: unknown };
+    const real = Object.getOwnPropertyDescriptor(process, "getBuiltinModule");
+    vi.resetModules();
+    vi.doMock("node:util", () => {
+      throw new Error("evidence-block must not import node:util: a browser bundle has none");
+    });
+    try {
+      if (host === "absent") delete holder.getBuiltinModule;
+      else holder.getBuiltinModule = host;
+      return await import("../evidence/evidence-block.js");
+    } finally {
+      if (real) Object.defineProperty(process, "getBuiltinModule", real);
+      else delete holder.getBuiltinModule;
+      vi.doUnmock("node:util");
+      vi.resetModules();
+    }
+  }
+
+  // Every shape in which a runtime can fail to give `util.types.isProxy`: each one is a branch of the capture.
+  const hosts: Array<[string, Host]> = [
+    ["process.getBuiltinModule does not exist (Node older than 20.16 / 22.3, or a browser)", "absent"],
+    ["getBuiltinModule has no node:util to give", () => undefined],
+    ["node:util has no `types`", () => ({})],
+    ["util.types has no `isProxy`", () => ({ types: {} })],
+    ["util.types.isProxy is not a function", () => ({ types: { isProxy: true } })],
+    [
+      "getBuiltinModule throws",
+      () => {
+        throw new Error("no builtin modules here");
+      },
+    ],
+  ];
+
+  // Honest inputs, made fresh for every call: the same ones are accepted when the host does give the function.
+  const identity: Wrap = (input) => input;
+  const unitContext = () => ({ ...unit, settlementUnitId: computeSettlementUnitId(unit), challengeNonce });
+  const rootsOf = () => ({
+    unitContextDigest: sha("host-unit-context"),
+    kernelSignedEventsRoot: sha("host-events"),
+    sessionKeyAuthDigest: sha("host-session"),
+    attestationSetRoot: sha("host-attestations"),
+    workProductRoot: sha("host-work-product"),
+    programHash: sha("host-program"),
+  });
+  const bundleOf = async () => {
+    const events = await Promise.all(rawEvents.map(async (e) => ({ ...e, id: e.type, hash: await hashEvent(e) })));
+    return { events, bundleHash: await hashBundle(events) };
+  };
+  const entries: Array<{ name: string; call: (m: EvidenceBlockModule, wrap: Wrap) => unknown }> = [
+    { name: "computeSettlementUnitId", call: (m, wrap) => m.computeSettlementUnitId(wrap({ ...unit })) },
+    { name: "computeUnitContextDigest", call: (m, wrap) => m.computeUnitContextDigest(wrap(unitContext())) },
+    { name: "computeAttestationRoleDigest", call: (m, wrap) => m.computeAttestationRoleDigest(attJob, wrap(structuredClone(roles[0]!))) },
+    { name: "computeAttestationSetRoot", call: (m, wrap) => m.computeAttestationSetRoot(attJob, wrap(structuredClone(roles))) },
+    { name: "computeEvidenceBlockHash", call: (m, wrap) => m.computeEvidenceBlockHash(wrap(rootsOf())) },
+    { name: "sessionKeyAuthSnapshot", call: (m, wrap) => m.sessionKeyAuthSnapshot(wrap(structuredClone(sessionKeyAuth))) },
+    { name: "computeSessionKeyAuthDigest", call: (m, wrap) => m.computeSessionKeyAuthDigest(wrap(structuredClone(sessionKeyAuth))) },
+    { name: "computeKernelSignedEventsRoot", call: async (m, wrap) => m.computeKernelSignedEventsRoot(wrap(await bundleOf())) },
+  ];
+  /** What a call did, without an `expect` in the way: the value it returned (a promise is awaited) or what it threw. */
+  const outcome = async (fn: () => unknown): Promise<{ error?: unknown; value?: unknown }> => {
+    try {
+      return { value: await fn() };
+    } catch (error) {
+      return { error };
+    }
+  };
+  const proxying =
+    (traps: string[]): Wrap =>
+    (input) =>
+      new Proxy(input, recordingHandler(traps));
+
+  it("still LOADS, without throwing at import time, and what takes no object still works", async () => {
+    for (const [label, host] of hosts) {
+      const m = await loadWith(host); // a throw at import time (the old static import of node:util) fails here
+      expect(m.EVIDENCE_BLOCK_DOMAIN_V2, label).toBe(EVIDENCE_BLOCK_DOMAIN_V2);
+      expect(m.taggedDigestToBytes32(`sha256:${"ab".repeat(32)}`), label).toBe(`0x${"ab".repeat(32)}`);
+    }
+  });
+
+  it("refuses every entry point that takes an object or an array, with a typed error, even for an honest input", async () => {
+    for (const [label, host] of hosts) {
+      const m = await loadWith(host);
+      for (const entry of entries) {
+        const where = `${label}: ${entry.name}`;
+        const { error, value } = await outcome(() => entry.call(m, identity));
+        expect(error, `${where} must refuse, not return ${JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? String(v) : v))}`).toBeInstanceOf(m.EvidenceBlockInputError);
+        const refusal = error as EvidenceBlockInputError;
+        expect(refusal.field, where).toBe("runtime");
+        expect(refusal.message, where).toContain(WANT);
+      }
+    }
+  });
+
+  it("refuses a Proxy the same way, before any trap can run: no fallback to 'no Proxy check'", async () => {
+    const m = await loadWith("absent");
+    for (const entry of entries) {
+      const traps: string[] = [];
+      const { error, value } = await outcome(() => entry.call(m, proxying(traps)));
+      expect(error, `${entry.name} must refuse, not return ${typeof value}`).toBeInstanceOf(m.EvidenceBlockInputError);
+      expect((error as EvidenceBlockInputError).field, entry.name).toBe("runtime");
+      expect(traps, `${entry.name}: no trap may run`).toEqual([]);
+    }
+  });
+
+  it("the table above covers every function the module exports: a new entry point must be added to it", async () => {
+    const m = await loadWith("absent");
+    const exported = Object.entries(m)
+      .filter(([name, member]) => typeof member === "function" && name !== "EvidenceBlockInputError")
+      .map(([name]) => name)
+      .sort();
+    expect(exported).toEqual([...entries.map((entry) => entry.name), "taggedDigestToBytes32"].sort());
+  });
+
+  it("given the function by the host, the same module accepts honest input, refuses a Proxy as a Proxy, and asks for it once, at load", async () => {
+    const getBuiltinModule = process.getBuiltinModule as unknown as (id: string) => unknown;
+    const asked: string[] = [];
+    const m = await loadWith((id) => {
+      asked.push(id);
+      return getBuiltinModule.call(process, id);
+    });
+    expect(asked, "asked for node:util when the module loaded").toEqual(["node:util"]);
+    for (const entry of entries) {
+      const { error } = await outcome(() => entry.call(m, identity));
+      expect(error, `${entry.name} must accept an honest input`).toBeUndefined();
+    }
+    expect(m.computeSettlementUnitId({ ...unit })).toBe(computeSettlementUnitId(unit));
+    expect(m.computeEvidenceBlockHash(rootsOf())).toBe(computeEvidenceBlockHash(rootsOf()));
+    expect((await m.computeKernelSignedEventsRoot(await bundleOf())).root).toBe((await computeKernelSignedEventsRoot(await bundleOf())).root);
+    for (const entry of entries) {
+      const traps: string[] = [];
+      const { error } = await outcome(() => entry.call(m, proxying(traps)));
+      expect(error, entry.name).toBeInstanceOf(m.EvidenceBlockInputError);
+      expect((error as EvidenceBlockInputError).message, entry.name).toMatch(/is a Proxy/);
+      expect(traps, `${entry.name}: no trap may run`).toEqual([]);
+    }
+    expect(asked, "never asked again at call time").toEqual(["node:util"]);
   });
 });
