@@ -458,3 +458,50 @@ describe("deriveSessionKey emits the same canonical scope", () => {
     expect(result.valid).toBe(true);
   });
 });
+
+// astra pack 145, F1 (MEDIUM): validation and canonicalization must consume the SAME
+// values. A direct service caller (JSON cannot carry these) can hand an array whose
+// iterator, or an index accessor, yields something other than what the index check saw.
+describe("validation and canonicalization read each element exactly once (astra pack 145 F1)", () => {
+  it("[neg] an array whose iterator yields an unvalidated value is refused, never signed", () => {
+    const contractIds = ["c1"];
+    (contractIds as unknown as { [Symbol.iterator]: () => Iterator<unknown> })[Symbol.iterator] = function* () {
+      yield 42 as unknown as string;
+    };
+    expect(() => issue({ contractIds })).toThrow();
+  });
+
+  it("[neg] an accessor that returns a string on its first read and a number afterwards is refused or canonicalized from the first read", () => {
+    const contractIds: string[] = [];
+    let reads = 0;
+    Object.defineProperty(contractIds, 0, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        reads += 1;
+        return reads === 1 ? "c1" : (7 as unknown as string);
+      },
+    });
+    contractIds.length = 1;
+    let emitted: string[] | undefined;
+    try {
+      emitted = issue({ contractIds }).sessionKey.scope.contractIds;
+    } catch {
+      emitted = undefined; // refusing is also acceptable
+    }
+    if (emitted !== undefined) {
+      expect(emitted).toEqual(["c1"]); // only the validated first read may be signed
+      expect(emitted.every((x) => typeof x === "string")).toBe(true);
+    }
+    expect(reads).toBe(1); // each element is read exactly once
+  });
+
+  it("[neg] the same holds for allowedActions (the shared helper also backs deriveSessionKey)", () => {
+    const allowedActions = ["evidence_submit"];
+    (allowedActions as unknown as { [Symbol.iterator]: () => Iterator<unknown> })[Symbol.iterator] = function* () {
+      yield { not: "a string" } as unknown as string;
+    };
+    expect(() => issue({ allowedActions: allowedActions as never })).toThrow();
+  });
+});
+
