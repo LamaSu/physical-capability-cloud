@@ -12,6 +12,8 @@
  *  - the compiled plan is intact: `acceptedDealDigest` is re-derived from an owned copy of the plan and
  *    must equal the one it carries, and the plan is bound to the submission's request, reservation
  *    and plan id, and to exactly its node set;
+ *  - each node's execution contract is the one its planHash names, and agrees with its binding (step,
+ *    operator, tier, program) and its unit (amount, currency, decimals);
  *  - the seal record names this reservation and exactly this deal digest.
  *
  * Every input is read ONCE into owned, validated data (the review pattern of #351/#355/#356). A
@@ -26,6 +28,7 @@
 import {
   acceptedDealDigest,
   copyPlanJson,
+  planHashOf,
   type CanonicalPlan,
   type CompiledAcceptedPlan,
   type CompiledJob,
@@ -440,17 +443,31 @@ function planIsBound(plan: CompiledAcceptedPlan, snap: SubmissionSnapshot, nodeI
   // Every binding names exactly the unit that carries its node, so identity and money cannot mix.
   return plan.nodeToUnit.every((b) => {
     const job = plan.jobs[b.jobIndex];
+    const unit = job?.units[b.milestoneIndex];
     const cp = b.canonicalPlan;
     return (
       job !== undefined &&
       job.jobId === b.jobId &&
       job.nodeIds[b.milestoneIndex] === b.nodeId &&
-      job.units[b.milestoneIndex] !== undefined &&
+      unit !== undefined &&
       // N25: the node's execution contract names this plan, this node and this unit.
       cp.planId === plan.planId &&
       cp.planNodeId === b.nodeId &&
       cp.job.jobId === b.jobId &&
-      cp.job.milestoneIndex === b.milestoneIndex
+      cp.job.milestoneIndex === b.milestoneIndex &&
+      // The contract shown is the contract hashed, and it agrees with the binding and the unit shown
+      // beside it. The digest commits the carried planHash and the recomputed one without requiring them
+      // to be equal, so equality is checked here. Addresses and hashes compare lowercased (hex case
+      // carries no meaning, and the compiler lowercases the contract); money compares as the exact
+      // base-unit string of the unit's gross, never as a parsed number.
+      b.planHash === planHashOf(cp) &&
+      cp.job.stepId === b.stepId &&
+      cp.operator === b.operator.toLowerCase() &&
+      cp.assurance.tier === b.tier &&
+      cp.assurance.committedProgramHash === (b.committedProgramHash === null ? null : b.committedProgramHash.toLowerCase()) &&
+      cp.amount.baseUnits === unit.g.toString() &&
+      cp.amount.currency === plan.currency &&
+      cp.amount.decimals === plan.currencyDecimals
     );
   });
 }

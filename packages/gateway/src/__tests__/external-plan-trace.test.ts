@@ -19,9 +19,11 @@ import {
   planHashOf,
   payoutsConserve,
   stepIdBytes32,
+  type CanonicalPlan,
   type CompiledAcceptedPlan,
   type ComposeResponse,
   type EvidenceRequirement,
+  type NodeUnitBinding,
 } from "@pcc/spec";
 import {
   acceptExternalPlan,
@@ -781,6 +783,117 @@ describe("PlanPresentation hardening (astra review of #357): bound, intact, vali
       }).not.toThrow();
       expect(p?.state).toBe("invalid");
     }
+  });
+});
+
+describe("PlanPresentation (astra review of #357, round 2b): the contract is bound to its hash and its unit", () => {
+  const ASOF = "2026-09-30T12:00:00.000Z";
+  type Unsealed = Omit<CompiledAcceptedPlan, "acceptedDealDigest">;
+  const unsealed = (p: CompiledAcceptedPlan): Unsealed => {
+    const { acceptedDealDigest: _d, ...rest } = p;
+    return rest;
+  };
+  const reseal = (p: Unsealed): CompiledAcceptedPlan => ({ ...p, acceptedDealDigest: acceptedDealDigest(p) });
+  const accepted = () => {
+    const { store, deps } = world();
+    const outcome = acceptExternalPlan(agentDag(), CTX, deps);
+    if (!outcome.ok) throw new Error("setup");
+    return { store, outcome };
+  };
+  /** The deal with one node's binding rewritten and its digest recomputed, so only a binding check can refuse it. */
+  const rebind = (plan: CompiledAcceptedPlan, nodeId: string, edit: (b: NodeUnitBinding) => NodeUnitBinding): CompiledAcceptedPlan =>
+    reseal({ ...unsealed(plan), nodeToUnit: plan.nodeToUnit.map((b) => (b.nodeId === nodeId ? edit(b) : b)) });
+  /** A binding whose contract was edited AND whose carried planHash was recomputed: only the field under test disagrees. */
+  const recut = (edit: (cp: CanonicalPlan) => CanonicalPlan) => (b: NodeUnitBinding): NodeUnitBinding => {
+    const canonicalPlan = edit(b.canonicalPlan);
+    return { ...b, canonicalPlan, planHash: planHashOf(canonicalPlan) };
+  };
+  const printUnitEdit = (plan: CompiledAcceptedPlan, edit: (u: CompiledAcceptedPlan["jobs"][number]["units"][number]) => CompiledAcceptedPlan["jobs"][number]["units"][number]): CompiledAcceptedPlan =>
+    reseal({ ...unsealed(plan), jobs: plan.jobs.map((j) => (j.nodeIds.includes("print") ? { ...j, units: j.units.map(edit) } : j)) });
+  /** Presents `plan` as if the reservation store had sealed exactly that deal's digest. */
+  const sealedAs = (outcome: Extract<SeamResult, { ok: true }>, plan: CompiledAcceptedPlan) =>
+    presentPlan({ submission: agentDag(), outcome: { ...outcome, plan }, sealed: { reservationId: "resv-1", acceptedDealDigest: plan.acceptedDealDigest }, asOf: ASOF });
+  /** The four facts that matter, compact: layer, state, the invalid reason and how many nodes are shown. */
+  const shape = (p: ReturnType<typeof presentPlan>) => [p.layer, p.state, p.invalid?.reason ?? null, p.nodes.length];
+  const refusedAsBinding = (p: ReturnType<typeof presentPlan>) => expect(shape(p)).toEqual(["C", "invalid", "plan-binding", 0]);
+  const cpOf = (plan: CompiledAcceptedPlan, nodeId: string) => plan.nodeToUnit.find((b) => b.nodeId === nodeId)!;
+
+  it("control: a deal resealed unchanged is still sealed, so each case below can fail only on its own field", () => {
+    const { outcome } = accepted();
+    const same = rebind(outcome.plan, "print", (b) => b);
+    expect(same.acceptedDealDigest).toBe(outcome.plan.acceptedDealDigest);
+    expect(shape(sealedAs(outcome, same))).toEqual(["B", "sealed", null, 2]);
+  });
+
+  it("M1 planHash: the hash shown with a unit is the hash of the contract shown with it, never an older one", () => {
+    const { store, outcome } = accepted();
+    const old = cpOf(outcome.plan, "print").planHash;
+    // The contract's inputs are edited, the old planHash is kept and the deal digest is recomputed and sealed.
+    const plan = rebind(outcome.plan, "print", (b) => ({ ...b, canonicalPlan: { ...b.canonicalPlan, inputs: { pages: 3 } } }));
+    expect(cpOf(plan, "print").planHash).toBe(old);
+    expect(store.consume("resv-1", CTX.principal, plan, NOW)).toEqual({ ok: true }); // a recomputed digest satisfies the store
+    const sealed = presentPlan({ submission: agentDag(), outcome: { ...outcome, plan }, sealed: { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! }, asOf: ASOF });
+    refusedAsBinding(sealed);
+    // Unsealed, the same deal is refused too; and so is a carried hash that no contract hashes to.
+    refusedAsBinding(presentPlan({ submission: agentDag(), outcome: { ...outcome, plan }, asOf: ASOF }));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, planHash: `sha256:${"00".repeat(32)}` }))));
+  });
+
+  it("M1 step: the contract's step is the binding's step", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, job: { ...cp.job, stepId: "mail" } })))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, stepId: "mail" }))));
+  });
+
+  it("M1 operator: the contract's operator is the binding's operator, in whatever hex case", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, operator: OP_MAIL })))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, operator: OP_MAIL }))));
+    // Hex case carries no meaning: the compiler lowercases the contract and keeps the binding's own case.
+    const upper = rebind(outcome.plan, "print", (b) => ({ ...b, operator: `0x${OP_PRINT.slice(2).toUpperCase()}` as typeof b.operator }));
+    expect(upper.acceptedDealDigest).toBe(outcome.plan.acceptedDealDigest);
+    expect(shape(sealedAs(outcome, upper))).toEqual(["B", "sealed", null, 2]);
+  });
+
+  it("M1 tier: the contract's tier is the binding's tier", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, assurance: { ...cp.assurance, tier: 1 } })))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, tier: 1 }))));
+  });
+
+  it("M1 program: the contract's committed program is the binding's, in whatever hex case, and null only for null", () => {
+    const { outcome } = accepted();
+    const other = `0x${"e3".repeat(32)}`;
+    const withProgram = (committedProgramHash: string | null) => recut((cp) => ({ ...cp, assurance: { ...cp.assurance, committedProgramHash } }));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", withProgram(other))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", withProgram(null))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, committedProgramHash: other }))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "mail", withProgram(PROGRAM)))); // the mail binding commits no program
+    const upper = rebind(outcome.plan, "print", (b) => ({ ...b, committedProgramHash: `0x${PROGRAM.slice(2).toUpperCase()}` }));
+    expect(upper.acceptedDealDigest).toBe(outcome.plan.acceptedDealDigest);
+    expect(shape(sealedAs(outcome, upper))).toEqual(["B", "sealed", null, 2]);
+  });
+
+  it("M1 amount: the contract's amount is the unit's gross, as the exact canonical base-unit string", () => {
+    const { outcome } = accepted();
+    expect(cpOf(outcome.plan, "print").canonicalPlan.amount.baseUnits).toBe("6500000");
+    for (const baseUnits of ["6500001", "0", "06500000", "6500000.0", "6.5e6", " 6500000"]) {
+      refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, amount: { ...cp.amount, baseUnits } })))));
+    }
+    // The other direction: the unit's gross moves and the contract stays.
+    refusedAsBinding(sealedAs(outcome, printUnitEdit(outcome.plan, (u) => ({ ...u, g: u.g + 1n }))));
+  });
+
+  it("M1 currency: the contract's currency is the deal's currency", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, amount: { ...cp.amount, currency: "USDT" } })))));
+    refusedAsBinding(sealedAs(outcome, reseal({ ...unsealed(outcome.plan), currency: "USDT" })));
+  });
+
+  it("M1 decimals: the contract's decimals are the deal's decimals", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, amount: { ...cp.amount, decimals: 18 } })))));
+    refusedAsBinding(sealedAs(outcome, reseal({ ...unsealed(outcome.plan), currencyDecimals: 18 })));
   });
 });
 
