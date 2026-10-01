@@ -2,15 +2,22 @@
  * N34 ratchet (steward #2498): gateway routes must not grow new fixtures or random values.
  *
  * For every file under src/routes it counts
- *   - mock DATA declarations: a `mock*`, `MOCK_*`, `fake*` or `FAKE_*` binding initialized
- *     with an array or object literal (or a new Map/Set), and
+ *   - fixture DATA declarations: a top-level binding whose name marks it as a fixture (a demo,
+ *     mock, fake, sample, seed or fixture prefix or suffix, in any case style), whatever its
+ *     initializer, except one that is only a string or template literal (a derived id, address
+ *     or note) or exactly one regular-expression literal (a pattern); and every JSON import;
  *   - value-producing `Math.random()` calls (the `Math.random().toString(36)` id idiom is
  *     not a value a client sees as data, so it is not counted).
  *
- * A file may have them only as ALLOWLIST says, and every entry names an owner and why it may
- * stay for now (in most files: the data is served only with PCC_DEMO_ROUTES, and marked).
+ * A file may have them only as ALLOWLIST says, and every entry names an owner, why it may
+ * stay for now (in most files: the data is served only with PCC_DEMO_ROUTES, and marked) and
+ * the exact binding names it covers, so swapping one fixture for another fails too.
  * Shrink-only: a count above its allowance fails (new fabrication), and so does an allowance
  * above the count (lower it, to lock in the gain) or an entry for a file with none.
+ *
+ * It cannot see a literal written inline in a handler, or an imported mock service (the SWF's
+ * was one). The families' demo-off refusal tests and the context pack's refused-is-documented
+ * check cover those.
  */
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -146,12 +153,13 @@ const JSON_IMPORT_RE = /\bimport\s+[^;\n]*?from\s*["']([^"']+\.json)["']/g;
 /** An initializer that is ITSELF just a string/template literal is a DERIVED value (an id,
  * an address, a note) — not fixture data — even when the name matches (`mockAddress`,
  * `MOCK_NOTE`). An initializer that is exactly one regular-expression literal is a pattern
- * that checks input (fiat-ramp.ts's `DEMO_WALLET_REF_RE`, #373), not data either; a regex
- * that is called (`/x/.exec(rows)`) still counts. These are the only initializer shapes
- * excluded; arrays, objects, `new X()`, and any function call all count once the name
- * matches. */
+ * that checks input (fiat-ramp.ts's `DEMO_WALLET_REF_RE`, #373), not data either. The literal
+ * must end the statement: a regex that is called or combined, on the same line or a later one
+ * (`/x/` then `.exec(rows)`), still counts. These are the only initializer shapes excluded;
+ * arrays, objects, `new X()`, and any function call all count once the name matches. */
 const STRING_INITIALIZER_RE = /^["'`]/;
-const REGEX_LITERAL_INITIALIZER_RE = /^\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+\/[a-z]*\s*(?:;|\n|$)/;
+const REGEX_LITERAL_INITIALIZER_RE =
+  /^\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+\/[a-z]*[ \t]*(?:;|$|\r?\n(?![ \t\r\n]*(?:[.[(`?+\-*\/%&|^<>=!,:]|in\b|instanceof\b)))/;
 
 /** True if the match at `index` sits on a line with zero leading whitespace — a fixture is
  * a top-level (module-scope) declaration, not a handler-local variable derived from one
@@ -290,6 +298,12 @@ describe("the ratchet's detector", () => {
     // ...but a regex that is CALLED can produce data, so it still counts.
     expect(countFabrication("const mockMatch = /^(.*)$/.exec(rowsText);")).toEqual({ mockData: 1, random: 0 });
     expect(countFabrication("const demoRows = /,/[Symbol.split](text);")).toEqual({ mockData: 1, random: 0 });
+    // ...on a later line too: JavaScript continues the expression (packer review of afeda4b8).
+    expect(countFabrication("const mockMatch = /^(.*)$/\n  .exec(rowsText);")).toEqual({ mockData: 1, random: 0 });
+    expect(countFabrication("const demoRows = /,/\n\n  [Symbol.split](text);")).toEqual({ mockData: 1, random: 0 });
+    expect(countFabrication("const mockRows = /x/g\n  || fallbackRows;")).toEqual({ mockData: 1, random: 0 });
+    // A literal that ends its statement, with a comment or a new statement after it, is still a pattern.
+    expect(countFabrication("const MOCK_RE = /^a$/ // the pattern\nconst y = 2;")).toEqual({ mockData: 0, random: 0 });
   });
 
   it("NEGATIVE (F-B, reviewer r1a): catches the three forms that evaded the old narrow regex", () => {
