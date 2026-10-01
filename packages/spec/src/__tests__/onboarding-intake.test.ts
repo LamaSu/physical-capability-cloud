@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,8 @@ import {
   INTAKE_FORBIDDEN_KEYS,
   MILESTONE_IMPLIES,
   buildIntakeJsonSchema,
+  zodToJsonSchemaFragment,
+  INTAKE_JSON_SCHEMA_COMMENT,
   buildFormHtml,
   IntakeAnswerSchema,
   IntakeRecordSchema,
@@ -2377,6 +2380,136 @@ describe("validateIntake — tier readiness fails closed (astra 120b, finding 5)
   });
 });
 
+// ── 14. The JSON Schema is documentation, and it fails rather than guesses (astra 120b, finding 6) ─
+
+type JsonNode = Record<string, unknown>;
+
+/** Every object node in a JSON-like tree, with its path. */
+function walkJson(node: unknown, path: string, visit: (node: JsonNode, path: string) => void): void {
+  if (Array.isArray(node)) {
+    node.forEach((item, i) => walkJson(item, `${path}/${i}`, visit));
+  } else if (node !== null && typeof node === "object") {
+    visit(node as JsonNode, path);
+    for (const [key, value] of Object.entries(node)) walkJson(value, `${path}/${key}`, visit);
+  }
+}
+
+describe("buildIntakeJsonSchema — documentation only (astra 120b, finding 6)", () => {
+  const schema = buildIntakeJsonSchema() as JsonNode & {
+    properties: { answers: { properties: Record<string, JsonNode> } };
+  };
+
+  it("carries the operative warning as a top-level $comment and a machine-readable annotation", () => {
+    expect(schema.$comment).toBe(
+      "Documentation/projection only. Passing this schema is not PCC intake acceptance. Consumers must use the authoritative Zod record parser, per-field validation, milestone validation, and confirmation/secret-policy checks.",
+    );
+    expect(INTAKE_JSON_SCHEMA_COMMENT).toBe(schema.$comment);
+    expect(schema["x-pcc-authority"]).toBe("documentation-only");
+    // prominent: the first keys after the schema identity
+    expect(Object.keys(schema).slice(0, 4)).toEqual(["$schema", "$id", "$comment", "x-pcc-authority"]);
+  });
+
+  it("contains no bare {} node and no accept-anything items anywhere", () => {
+    expect(JSON.stringify(schema)).not.toContain('"items":{}');
+    const empties: string[] = [];
+    walkJson(schema, "", (node, path) => {
+      if (Object.keys(node).length === 0) empties.push(path);
+    });
+    expect(empties).toEqual([]);
+  });
+
+  it("projects safety.limits items through their refinement, with a $comment on that node", () => {
+    const limits = schema.properties.answers.properties["safety.limits"] as JsonNode & {
+      properties: { value: { items: JsonNode; minItems: number } };
+    };
+    const items = limits.properties.value.items;
+    expect(items).toMatchObject({
+      type: "object",
+      required: ["quantity", "unit", "min", "max"],
+      additionalProperties: false,
+      $comment: "refinements not represented",
+    });
+    expect(limits.properties.value.minItems).toBe(1);
+  });
+
+  it("encodes source-required-when-provenance-is-research-or-confirmed with if/then on every answer", () => {
+    for (const field of INTAKE_FIELDS) {
+      const answer = schema.properties.answers.properties[field.id]!;
+      expect(answer.if, field.id).toEqual({
+        properties: { provenance: { enum: ["research", "confirmed"] } },
+        required: ["provenance"],
+      });
+      expect(answer.then, field.id).toEqual({ required: ["source"] });
+    }
+  });
+
+  it("documents the optional strict confirmation reference and which fields need one", () => {
+    for (const field of INTAKE_FIELDS) {
+      const answer = schema.properties.answers.properties[field.id] as JsonNode & { properties: JsonNode };
+      expect(answer.properties.confirmation, field.id).toEqual({
+        type: "object",
+        properties: { eventId: { type: "string", minLength: 1, maxLength: 256 } },
+        required: ["eventId"],
+        additionalProperties: false,
+      });
+      expect(answer["x-pcc-confirmationRequired"], field.id).toBe(CONFIRMATION_REQUIRED_FIELDS.includes(field.id));
+    }
+  });
+});
+
+describe("zodToJsonSchemaFragment — refuses to guess", () => {
+  it("converts a refinement through its inner schema and flags the node", () => {
+    const refined = z.number().int().refine((n) => n % 2 === 0, "even");
+    expect(zodToJsonSchemaFragment(refined)).toEqual({ type: "integer", $comment: "refinements not represented" });
+    const nested = z.array(z.object({ a: z.string() }).strict().refine(() => true));
+    expect(zodToJsonSchemaFragment(nested)).toEqual({
+      type: "array",
+      items: {
+        type: "object",
+        properties: { a: { type: "string" } },
+        required: ["a"],
+        additionalProperties: false,
+        $comment: "refinements not represented",
+      },
+    });
+  });
+
+  it("still converts everything the field registry uses (so generation does not throw)", () => {
+    for (const field of INTAKE_FIELDS) {
+      expect(() => zodToJsonSchemaFragment(field.valueSchema), field.id).not.toThrow();
+    }
+  });
+
+  it.each([
+    ["unknown", z.unknown()],
+    ["any", z.any()],
+    ["record", z.record(z.string())],
+    ["date", z.date()],
+    ["nullable", z.string().nullable()],
+    ["default", z.string().default("x")],
+    ["tuple", z.tuple([z.string(), z.number()])],
+    ["lazy", z.lazy(() => z.string())],
+    ["intersection", z.intersection(z.object({ a: z.string() }), z.object({ b: z.string() }))],
+    ["a transform", z.string().transform((v) => v.length)],
+    ["a preprocess", z.preprocess((v) => v, z.string())],
+    ["an object catchall", z.object({ a: z.string() }).catchall(z.string())],
+    ["an array of unknown", z.array(z.unknown())],
+    ["an object holding an unsupported member", z.object({ a: z.unknown() })],
+    ["a union holding an unsupported member", z.union([z.string(), z.unknown()])],
+    ["a string check it does not project", z.string().uuid()],
+    ["a string trim", z.string().trim()],
+    ["a string startsWith", z.string().startsWith("x")],
+  ])("throws on %s instead of emitting {}", (_name, schema) => {
+    expect(() => zodToJsonSchemaFragment(schema as z.ZodTypeAny)).toThrow(/unsupported/);
+  });
+
+  it("throws on a number check kind it does not project (a kind a future zod might add)", () => {
+    const schema = z.number();
+    (schema._def.checks as unknown[]).push({ kind: "somethingNew" });
+    expect(() => zodToJsonSchemaFragment(schema)).toThrow(/unsupported number check "somethingNew"/);
+  });
+});
+
 describe("astra pack 120b", () => {
   it("baseline: the full fixture is ok for identify (else the cases below prove nothing)", () => {
     expect(ready(buildFullValidRecord(), "identify").ok).toBe(true);
@@ -2474,6 +2607,14 @@ describe("astra pack 120b", () => {
     const report = ready(withAnswer("safety.estop", answer), "accept-jobs");
     expect(report.ok).toBe(false);
     expect(report.safetyBlocks).toEqual(['safety.estop: mechanism "none" is not approved for this capability']);
+  });
+
+  it("MEDIUM 6a: the generated JSON Schema says it is documentation only", () => {
+    expect(JSON.stringify(buildIntakeJsonSchema())).toMatch(/Documentation\/projection only/);
+  });
+  it("MEDIUM 6b: the generated safety.limits items schema is not the accept-anything {}", () => {
+    const text = JSON.stringify(buildIntakeJsonSchema());
+    expect(text.includes('"items":{}')).toBe(false);
   });
 
   it("HIGH 5a: tier2 is not ready while its required primitives are stub", () => {

@@ -5,14 +5,21 @@
  * package intentionally carries no `zod-to-json-schema` dependency (spec
  * constraint: no third-party installs); the converter only needs to cover the
  * finite set of zod primitives actually used by `INTAKE_FIELDS[].valueSchema`
- * (string/number/boolean/enum/literal(true)/object/array/optional) — it is a
- * DOCUMENTATION-grade projection, not a re-implementation of validation.
- * Runtime validation always goes through the zod schemas directly
- * (`validateIntake`, `IntakeAnswerSchema.safeParse`), never through this
- * generated schema.
+ * (string/number/boolean/enum/literal(true)/object/array/optional/union, and
+ * refinements). It is a DOCUMENTATION-grade projection, not a re-implementation
+ * of validation: the generated schema says so in its `$comment`, and passing
+ * it is NOT intake acceptance. Runtime validation always goes through the zod
+ * schemas directly (`validateIntake`, `IntakeAnswerSchema.safeParse`), never
+ * through this generated schema.
+ *
+ * The converter fails rather than guesses: a zod node or check it does not
+ * cover THROWS (it never emits `{}`, which would accept anything), so a field
+ * added with an unsupported schema breaks generation loudly instead of
+ * silently widening the documented schema.
  */
 
 import { z } from "zod";
+import { isConfirmationRequired } from "./confirmation.js";
 import { INTAKE_FIELDS, INTAKE_PROVENANCE_VALUES, type IntakeFieldDef } from "./fields.js";
 
 type ZodCheck = { kind: string; value?: unknown; inclusive?: boolean; regex?: RegExp };
@@ -24,11 +31,21 @@ function unwrapOptional(schema: z.ZodTypeAny): z.ZodTypeAny {
     : schema;
 }
 
+/** The `$comment` on a node that wraps a refinement: the JSON Schema cannot
+ *  express a zod `.refine`, so the projection is looser than the zod schema. */
+const REFINEMENTS_NOT_REPRESENTED = "refinements not represented";
+
+function unsupported(what: string): never {
+  throw new Error(`zodToJsonSchemaFragment: unsupported ${what}`);
+}
+
 /**
- * Project one zod schema to a JSON-Schema-2020-12 fragment. Falls back to `{}`
- * (permissive/"any") for any zod construct outside the covered set — this
- * keeps the converter total (never throws) at the cost of precision on
- * constructs the field registry doesn't currently use.
+ * Project one zod schema to a JSON-Schema-2020-12 fragment. Covers string,
+ * number, boolean, literal, enum, array, object, optional and union nodes; a
+ * `.refine` wrapper (ZodEffects) is converted through its inner schema with
+ * `"$comment": "refinements not represented"` on that node. THROWS on any other
+ * node — and on any string/number check it does not represent — instead of
+ * emitting a permissive `{}`.
  */
 export function zodToJsonSchemaFragment(schema: z.ZodTypeAny): Record<string, unknown> {
   const def = schema._def as {
@@ -38,10 +55,13 @@ export function zodToJsonSchemaFragment(schema: z.ZodTypeAny): Record<string, un
     value?: unknown;
     type?: z.ZodTypeAny;
     innerType?: z.ZodTypeAny;
+    schema?: z.ZodTypeAny;
+    effect?: { type: string };
     minLength?: { value: number } | null;
     maxLength?: { value: number } | null;
     shape?: () => Record<string, z.ZodTypeAny>;
     unknownKeys?: string;
+    catchall?: z.ZodTypeAny;
     options?: readonly z.ZodTypeAny[];
   };
 
@@ -51,10 +71,14 @@ export function zodToJsonSchemaFragment(schema: z.ZodTypeAny): Record<string, un
       for (const check of def.checks ?? []) {
         if (check.kind === "min") fragment.minLength = check.value;
         else if (check.kind === "max") fragment.maxLength = check.value;
-        else if (check.kind === "regex" && check.regex) fragment.pattern = check.regex.source;
+        else if (check.kind === "length") {
+          fragment.minLength = check.value;
+          fragment.maxLength = check.value;
+        } else if (check.kind === "regex" && check.regex) fragment.pattern = check.regex.source;
         else if (check.kind === "email") fragment.format = "email";
         else if (check.kind === "url") fragment.format = "uri";
         else if (check.kind === "datetime") fragment.format = "date-time";
+        else unsupported(`string check "${check.kind}"`);
       }
       return fragment;
     }
@@ -68,7 +92,10 @@ export function zodToJsonSchemaFragment(schema: z.ZodTypeAny): Record<string, un
         } else if (check.kind === "max") {
           if (check.inclusive === false) fragment.exclusiveMaximum = check.value;
           else fragment.maximum = check.value;
-        }
+        } else if (check.kind === "multipleOf") fragment.multipleOf = check.value;
+        else if (check.kind === "finite") {
+          // a JSON number is always finite: nothing to add
+        } else unsupported(`number check "${check.kind}"`);
       }
       return fragment;
     }
@@ -79,15 +106,19 @@ export function zodToJsonSchemaFragment(schema: z.ZodTypeAny): Record<string, un
     case z.ZodFirstPartyTypeKind.ZodEnum:
       return { type: "string", enum: [...(def.values ?? [])] };
     case z.ZodFirstPartyTypeKind.ZodArray: {
+      if (!def.type) unsupported("array without an element schema");
       const fragment: Record<string, unknown> = {
         type: "array",
-        items: def.type ? zodToJsonSchemaFragment(def.type) : {},
+        items: zodToJsonSchemaFragment(def.type),
       };
       if (def.minLength) fragment.minItems = def.minLength.value;
       if (def.maxLength) fragment.maxItems = def.maxLength.value;
       return fragment;
     }
     case z.ZodFirstPartyTypeKind.ZodObject: {
+      if (def.catchall && (def.catchall._def as { typeName: string }).typeName !== z.ZodFirstPartyTypeKind.ZodNever) {
+        unsupported("object catchall");
+      }
       const shape = def.shape?.() ?? {};
       const properties: Record<string, unknown> = {};
       const required: string[] = [];
@@ -102,11 +133,18 @@ export function zodToJsonSchemaFragment(schema: z.ZodTypeAny): Record<string, un
       return fragment;
     }
     case z.ZodFirstPartyTypeKind.ZodOptional:
-      return def.innerType ? zodToJsonSchemaFragment(def.innerType) : {};
+      if (!def.innerType) unsupported("optional without an inner schema");
+      return zodToJsonSchemaFragment(def.innerType);
     case z.ZodFirstPartyTypeKind.ZodUnion:
       return { anyOf: (def.options ?? []).map((o) => zodToJsonSchemaFragment(o)) };
+    case z.ZodFirstPartyTypeKind.ZodEffects: {
+      // A refinement keeps the input shape, so the inner schema is the right
+      // projection; a transform or preprocess can change what is accepted.
+      if (def.effect?.type !== "refinement" || !def.schema) unsupported(`effect "${def.effect?.type ?? "unknown"}"`);
+      return { ...zodToJsonSchemaFragment(def.schema), $comment: REFINEMENTS_NOT_REPRESENTED };
+    }
     default:
-      return {};
+      return unsupported(`zod node ${def.typeName}`);
   }
 }
 
@@ -116,6 +154,7 @@ function fieldAnnotations(field: IntakeFieldDef): Record<string, unknown> {
     "x-pcc-fills": field.fills.map((f) => `${f.artifact}:${f.path}`),
     "x-pcc-requiredFor": field.requiredFor,
     "x-pcc-neverDefault": field.neverDefault ?? false,
+    "x-pcc-confirmationRequired": isConfirmationRequired(field.id),
     "x-pcc-sensitive": field.sensitive ?? false,
     "x-pcc-why": field.why,
   };
@@ -134,10 +173,21 @@ function fieldAnnotations(field: IntakeFieldDef): Record<string, unknown> {
   return annotations;
 }
 
+/** The operative warning carried by the generated schema (top-level `$comment`). */
+export const INTAKE_JSON_SCHEMA_COMMENT =
+  "Documentation/projection only. Passing this schema is not PCC intake acceptance. Consumers must use the authoritative Zod record parser, per-field validation, milestone validation, and confirmation/secret-policy checks.";
+
 /**
- * Build the full device-intake JSON Schema (2020-12). Deterministic key order
- * (properties are inserted in `INTAKE_FIELDS` order) so the committed
- * `device-intake.schema.json` diff is stable across regenerations.
+ * Build the full device-intake JSON Schema (2020-12). DOCUMENTATION ONLY: the
+ * top-level `$comment` and `x-pcc-authority` say so, and passing this schema is
+ * not intake acceptance (it omits the cumulative milestone policy, the
+ * human-confirmation requirement, `min <= max`, the secret scan and the
+ * forbidden-key rules — all enforced by `validateIntake`). It does encode that
+ * an answer with research/confirmed provenance carries a `source` (if/then).
+ * Deterministic key order (properties are inserted in `INTAKE_FIELDS` order) so
+ * the committed `device-intake.schema.json` diff is stable across
+ * regenerations. Throws if a field's schema uses a zod node the converter does
+ * not cover (see `zodToJsonSchemaFragment`).
  */
 export function buildIntakeJsonSchema(): Record<string, unknown> {
   const answerProperties: Record<string, unknown> = {};
@@ -157,8 +207,17 @@ export function buildIntakeJsonSchema(): Record<string, unknown> {
           required: ["doc"],
           additionalProperties: false,
         },
+        confirmation: {
+          type: "object",
+          properties: { eventId: { type: "string", minLength: 1, maxLength: 256 } },
+          required: ["eventId"],
+          additionalProperties: false,
+        },
       },
       required: ["value", "provenance"],
+      // IntakeAnswerSchema: research/confirmed provenance requires a source.
+      if: { properties: { provenance: { enum: ["research", "confirmed"] } }, required: ["provenance"] },
+      then: { required: ["source"] },
       additionalProperties: false,
       question: field.question,
       ...fieldAnnotations(field),
@@ -168,9 +227,11 @@ export function buildIntakeJsonSchema(): Record<string, unknown> {
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "pcc://onboarding/device-intake.schema.json",
+    $comment: INTAKE_JSON_SCHEMA_COMMENT,
+    "x-pcc-authority": "documentation-only",
     title: "PCC Device Intake",
     description:
-      "One entry per permanent intake field id. Each answer records a value, its provenance, and (for research/confirmed provenance) a source. x-pcc-* annotations carry the R2 policy: class, fills, requiredFor, neverDefault, sensitive, why, and evidence-primitive status.",
+      "One entry per permanent intake field id. Each answer records a value, its provenance, (for research/confirmed provenance) a source, and optionally a confirmation reference. x-pcc-* annotations carry the R2 policy: class, fills, requiredFor, neverDefault, confirmationRequired, sensitive, why, and evidence-primitive status.",
     type: "object",
     properties: {
       schema: { const: "pcc.device-intake.v1" },
