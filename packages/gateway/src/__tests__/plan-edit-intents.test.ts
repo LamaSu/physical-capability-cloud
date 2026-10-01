@@ -930,3 +930,33 @@ describe("F2: a plan-wide note and a note on a node with the empty id are differ
     expect(out.constraints).toEqual([note(null), note(""), note("print")]);
   });
 });
+
+describe("F3: the validators refuse a trailing line break (JS `$` without the m flag matches only at the end of the input)", () => {
+  const refusedAs = (edit: unknown, op: string) => expect(planEditsToIntent(compiledPresentation(), [edit]).refused).toEqual([{ index: 0, op, reason: "malformed-value" }]);
+
+  it("maxBaseUnits \"5\\n\" is malformed for both price edits", () => {
+    refusedAs({ op: "max-node-price", nodeId: "print", maxBaseUnits: "5\n" }, "max-node-price");
+    refusedAs({ op: "max-total", maxBaseUnits: "5\n" }, "max-total");
+    expect(planEditsToIntent(compiledPresentation(), [{ op: "max-total", maxBaseUnits: "5" }]).constraints).toEqual([{ kind: "max-total", max: { baseUnits: "5", currency: "USDC", decimals: 6 } }]);
+  });
+
+  it("an operator with a trailing line break is malformed, and none survives into an exclusion", () => {
+    refusedAs({ op: "exclude-operator", operator: `${OP_MAIL}\n` }, "exclude-operator");
+    expect(planEditsToIntent(compiledPresentation(), [{ op: "exclude-operator", operator: OP_MAIL }]).constraints).toEqual([{ kind: "exclude-operator", operator: OP_MAIL }]);
+  });
+
+  it("capabilityId \"cap-mail\\n\" is malformed (printable ASCII only)", () => {
+    refusedAs({ op: "exclude-capability", nodeId: "mail", capabilityId: "cap-mail\n" }, "exclude-capability");
+    expect(planEditsToIntent(compiledPresentation(), [{ op: "exclude-capability", nodeId: "mail", capabilityId: "cap-mail" }]).refused).toEqual([]);
+  });
+
+  it("no other line terminator, leading or trailing, gets through any of the three validators", () => {
+    for (const lt of ["\n", "\r", "\r\n", " ", " ", "\n\n"]) {
+      for (const [lead, trail] of [[lt, ""], ["", lt]]) {
+        refusedAs({ op: "max-total", maxBaseUnits: `${lead}5${trail}` }, "max-total");
+        refusedAs({ op: "exclude-operator", operator: `${lead}${OP_MAIL}${trail}` }, "exclude-operator");
+        refusedAs({ op: "exclude-capability", nodeId: "mail", capabilityId: `${lead}cap-mail${trail}` }, "exclude-capability");
+      }
+    }
+  });
+});
