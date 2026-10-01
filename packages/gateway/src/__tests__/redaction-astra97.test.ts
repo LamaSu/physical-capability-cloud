@@ -233,6 +233,7 @@ describe("F4: a valid JWT whose payload is short", () => {
     const notJwt = [
       "eyJhbGciOiJIUzI1NiJ9.abc.c2lnbmF0dXJl", // payload bytes are not a JSON object
       "eyJhbGciOiJIUzI1NiJ9.e3.c2lnbmF0dXJl", // payload too short to hold {}
+      "eyJhbGciOiJIUzI1NiJ9.abcde.c2lnbmF0dXJl", // 5 characters: still has to be JSON
       "eyJhbGciOiJIUzI1NiJ9.e30.abc", // signature too short
     ];
     for (const text of notJwt) expect(redactSecretsDeep(`x ${text} y`), text).toBe(`x ${text} y`);
@@ -280,6 +281,13 @@ describe("F4: Bearer tokens that are short, and a private key wrapped over two l
   it("keeps a wrapped digest when the caller asked to keep digests", () => {
     const wrapped = `${hex.slice(0, 32)}\n${hex.slice(32)}`;
     expect(redactSecretsDeep(wrapped, undefined, { keepDigests: true })).toBe(wrapped);
+  });
+});
+
+describe("spans that touch are one secret", () => {
+  it("a private-key block and a 64-digit hex key with nothing between them become ONE marker", () => {
+    const pem = ["-----BEGIN ", "PRIVATE KEY-----", "\nMC4CAQAw\n", "-----END ", "PRIVATE KEY-----"].join("");
+    expect(sanitize(`${pem}${"ab12cd34".repeat(8)} end`)).toBe(`${R} end`);
   });
 });
 
@@ -375,6 +383,30 @@ describe("the label scanner's other delimiters and budgets", () => {
     ["a JS x escape in a quoted name", `x {"api${BS}x5fkey":"v1"} y`, `x {"api${BS}x5fkey":"${R}"} y`],
     ["an unknown escape keeps its character", `x {"api${BS}_key":"v1"} y`, `x {"api${BS}_key":"${R}"} y`],
     ["a malformed percent escape does not break the name", "?pass%zzword=v1&access%5ftoken=v2", `?pass%zzword=v1&access%5ftoken=${R}`],
+    ["an escape with bad hex digits is not decoded", `x {"pass${BS}u00zzword":"v1"} y`, `x {"pass${BS}u00zzword":"v1"} y`],
+    ["an unterminated quote keeps the blanks before the line break", 'password="abc  \r\nnext', `password="${R}  \r\nnext`],
+    ["blanks after a comma between pairs", "user=bob, password=hu!nter2, ip=1.2.3.4", `user=bob, password=${R}, ip=1.2.3.4`],
+    ["a CRLF after the last ; of a connection string", "Server=db;Pwd=abc;\r\nnext", `Server=db;Pwd=${R};\r\nnext`],
+    ["a ; before something that is not a field is part of the value", "password=ab;1x=3 tail", `password=${R} tail`],
+    ["a 3-letter session name", "x sid=abc y", `x sid=${R} y`],
+    ["a 3-letter secret name", "jwt: abc.def", `jwt: ${R}`],
+    ["a session name in a URL", "?session=abc&x=1", `?session=${R}&x=1`],
+    [
+      "a URL fragment parameter ends at & though no field follows",
+      "https://cb.test/cb#access_token=abc&x tail",
+      `https://cb.test/cb#access_token=${R}&x tail`,
+    ],
+    ["a URL query parameter ends at & though no field follows", "https://cb.test/?token=abc&x tail", `https://cb.test/?token=${R}&x tail`],
+    ["a parameter after & ends at the next & though no field follows", "a=1&token=abc&x tail", `a=1&token=${R}&x tail`],
+    ["a URL value that starts with a backtick", "https://h.test/?token=`)abc&x tail", `https://h.test/?token=${R}&x tail`],
+    ["a field name with a space after a ;", "Password=abc;User ID=svc", `Password=${R};User ID=svc`],
+    ["a field name with an underscore after a ;", "Password=abc;Trusted_Connection=yes", `Password=${R};Trusted_Connection=yes`],
+    ["a field name with a dot and a dash after a ;", "Password=abc;a.b-c=1", `Password=${R};a.b-c=1`],
+    ["a value on the next line, with CRLF line ends", "password:\r\n  v1\r\nnext", `password:\r\n  ${R}\r\nnext`],
+    ["a quote followed by ) closes a URL value", 'see ("https://h.test/?token=abc") now', `see ("https://h.test/?token=${R}") now`],
+    ["a quote followed by > closes a URL value", '<a href="https://h.test/?token=abc">x</a>', `<a href="https://h.test/?token=${R}">x</a>`],
+    ["a quote followed by ] closes a URL value", '["https://h.test/?token=abc"]', `["https://h.test/?token=${R}"]`],
+    ["a quote followed by ; closes a URL value", 'u = "https://h.test/?token=abc";', `u = "https://h.test/?token=${R}";`],
   ])("%s", (_name, input, expected) => {
     expect(sanitize(input)).toBe(expected);
   });
@@ -392,6 +424,16 @@ describe("the label scanner's other delimiters and budgets", () => {
     expect(sanitize(`x {"${esc(33)}":"v1"} y`)).toBe(`x {"${esc(33)}":"v1"} y`); // 198 + 9 = 207 raw
   });
 
+  it("reports each removed value exactly, as the callback's secret", () => {
+    const seen: Array<{ path: string; value: string }> = [];
+    const out = redactSecretsDeep({ log: "password=$uperSecret!77 and more\nServer=db;Pwd=p w;" }, (r) => seen.push({ path: r.path, value: r.value }));
+    expect(out).toEqual({ log: `password=${R} and more\nServer=db;Pwd=${R};` });
+    expect(seen).toEqual([
+      { path: "$.log", value: "$uperSecret!77" },
+      { path: "$.log", value: "p w" },
+    ]);
+  });
+
   it("a block scalar ends at the first line that is not indented deeper", () => {
     expect(sanitize("  password: >-\n    one\n\n    two\n  next: x\nlast: y")).toBe(`  password: >-\n    ${R}\n  next: x\nlast: y`);
   });
@@ -399,6 +441,10 @@ describe("the label scanner's other delimiters and budgets", () => {
   it("a value on the next line needs a deeper indent; tabs count as one", () => {
     expect(sanitize("a:\n\tpassword:\n\t\tv1\n\tother: x")).toBe(`a:\n\tpassword:\n\t\t${R}\n\tother: x`);
     expect(sanitize("\tpassword:\n\tv1")).toBe("\tpassword:\n\tv1");
+  });
+
+  it("a line less deep than the label's own line is not its value", () => {
+    expect(sanitize("a:\n    password:\n  next")).toBe("a:\n    password:\n  next");
   });
 });
 
@@ -424,6 +470,17 @@ describe("F3 (continued): phrases the checksum rejects, and a run too long to de
     expect(isValid(words)).toBe(false);
     expect(new Set(words).size).toBe(12);
     expect(sanitize(`zzqx ${words.join(" ")} zzqx`)).toBe(`zzqx ${R} zzqx`);
+  });
+
+  it("the longest window wins: a 24-word phrase whose first 12 words are also a phrase goes whole", () => {
+    const phrase = "above able abandon about above about about able above ability about above about about about ability above ability above above above above able ability";
+    const words = phrase.split(" ");
+    expect(words).toHaveLength(24);
+    expect(isValid(words)).toBe(true);
+    expect(isValid(words.slice(0, 12))).toBe(true); // a 12-word window would stop here
+    expect(isValid(words.slice(12))).toBe(false); // and leave these 12 words, which are not a phrase
+    expect(new Set(words).size).toBeLessThan(10); // and the distinct-word rule would not save them
+    expect(sanitize(`zzqx ${phrase} zzqx`)).toBe(`zzqx ${R} zzqx`);
   });
 
   it("the ordinary sentence of the false-positive guard fails the checksum, so only the guard keeps it", () => {
@@ -491,6 +548,17 @@ describe("F4 (continued): JWT payload edges, Bearer edges, and the limits of a w
   it("joins 33 + 31 digits, a key wrapped anywhere", () => {
     expect(sanitize(`${hex.slice(0, 33)}\n${hex.slice(33)}`)).toBe(R);
   });
+
+  it("blanks after the first line's hex do not stop the join", () => {
+    expect(sanitize(`${hex.slice(0, 32)}  \n${hex.slice(32)}`)).toBe(R);
+  });
+
+  it("a middle run that does not end its line, and 62 digits, are not a key", () => {
+    const middle = `${hex.slice(0, 22)}\n${hex.slice(22, 43)} foo\n${hex.slice(43)}`;
+    expect(redactSecretsDeep(middle)).toBe(middle);
+    const sixtyTwo = `${hex.slice(0, 32)}\n${hex.slice(32, 62)}`;
+    expect(redactSecretsDeep(sixtyTwo)).toBe(sixtyTwo);
+  });
 });
 
 describe("the sink stays conservative where the deep redactor is not", () => {
@@ -498,6 +566,17 @@ describe("the sink stays conservative where the deep redactor is not", () => {
     const untouched = "password=hunter2 {'token':'t1'} {\"api_key\": 12345}";
     expect(redactSecrets(untouched)).toBe(untouched);
     expect(redactSecrets('{"api_key": "k1", "n": 1}')).toBe('{"api_key": "[redacted]", "n": 1}');
+  });
+
+  it("a base64 run of 40 characters that mixes upper, lower and digits is key material; 39 is not", () => {
+    const thirtyNine = "aB3".repeat(13);
+    expect(redactSecrets(`x ${thirtyNine} y`)).toBe(`x ${thirtyNine} y`);
+    expect(redactSecrets(`x ${thirtyNine}Q y`)).toBe("x [redacted-b64] y");
+  });
+
+  it("a base64 run needs a digit as well: upper and lower case alone is a word, not a key", () => {
+    const noDigit = "aBcD".repeat(10); // 40 characters
+    expect(redactSecrets(`x ${noDigit} y`)).toBe(`x ${noDigit} y`);
   });
 
   it("decodes an escaped field name as the deep redactor does", () => {
