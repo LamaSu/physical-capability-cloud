@@ -515,6 +515,321 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
   });
 });
 
+// ── E7b (HIGH): the events are ONE snapshot of plain JSON data, and that snapshot is returned ──
+// A JSON.stringify/parse round trip stood in for the snapshot. It ran an attacker's toJSON and
+// getters, accepted class instances and normalised NaN to null, so a bundle was verified and
+// committed as a PROJECTION of the events submitted. The snapshot is now #359's canonicalSnapshot
+// and computeKernelSignedEventsRoot returns it, so a consumer evaluates what was hashed.
+describe("E7b — computeKernelSignedEventsRoot verifies, commits and returns one snapshot of plain JSON data", () => {
+  type Body = Omit<EvidenceEvent, "id" | "hash">;
+  const bodyOf = (payload: unknown): Body =>
+    ({ type: "execution_completed", timestamp: "2026-08-20T00:00:00Z", source, payload }) as unknown as Body;
+  const refuse = (bundle: unknown) => refusalOfAsync(() => computeKernelSignedEventsRoot(bundle as never));
+
+  /**
+   * A bundle whose carried event hash and bundleHash are computed over `preimage`, while the event
+   * SUBMITTED carries `submitted` (the same value by default: an honest bundle).
+   */
+  const bundleOf = async (preimage: unknown, submitted: unknown = preimage) => {
+    const hash = await hashEvent(bodyOf(preimage));
+    const honestEvent = { ...bodyOf(preimage), id: "e1", hash };
+    const bundleHash = await hashBundle([honestEvent]);
+    return { honestEvent, bundleHash, bundle: { events: [{ ...bodyOf(submitted), id: "e1", hash }], bundleHash } };
+  };
+
+  /** Two events with nested payloads, so copying and freezing are exercised at depth. */
+  const twoEvents = async () => {
+    const raw: Body[] = [
+      bodyOf({ ok: true, nested: { list: [1, 2, { deep: "x" }] } }),
+      { ...bodyOf({ pass: 1, defects: 0 }), type: "cv_inspection_result", timestamp: "2026-08-20T00:00:05Z" },
+    ];
+    const events = await Promise.all(raw.map(async (e, i) => ({ ...e, id: `e${i}`, hash: await hashEvent(e) })));
+    return { events, bundleHash: await hashBundle(events) };
+  };
+
+  it("(a) refuses a NaN twin that carries the same event hash and bundleHash as a {value: null} event (the reviewer's repro)", async () => {
+    const honest = await bundleOf({ value: null });
+    const twin = await bundleOf({ value: null }, { value: NaN });
+    expect(twin.bundle.events[0]!.hash).toBe(honest.bundle.events[0]!.hash);
+    expect(twin.bundle.bundleHash).toBe(honest.bundle.bundleHash);
+    // The honest bundle verifies. JSON.stringify turned the twin's NaN into null, so the old round
+    // trip verified it too and committed the same root for evidence that never said null.
+    expect((await computeKernelSignedEventsRoot(honest.bundle as never)).root).toBe(taggedDigestToBytes32(honest.bundleHash));
+    const err = await refuse(twin.bundle);
+    expect(err.field).toBe("events[0].payload.value");
+    expect(err.message).toMatch(/NaN/);
+    // hashEvent has no hash for the twin at all, so it cannot be the event that was hashed.
+    await expect(hashEvent(bodyOf({ value: NaN }))).rejects.toThrow(/NaN/);
+  });
+
+  it("(a) refuses every other value that JSON cannot carry exactly, naming the member, before any hash is compared", async () => {
+    const cases: Array<[string, unknown, string]> = [
+      ["Infinity", { value: Infinity }, "events[0].payload.value"],
+      ["-Infinity", { value: -Infinity }, "events[0].payload.value"],
+      ["an undefined array element (JSON writes null)", { list: [undefined] }, "events[0].payload.list[0]"],
+      // eslint-disable-next-line no-sparse-arrays
+      ["a hole in a sparse array (JSON writes null)", { list: [, 1] }, "events[0].payload.list[0]"],
+      ["a bigint", { n: 1n }, "events[0].payload.n"],
+      ["a function", { f: () => 1 }, "events[0].payload.f"],
+      ["a symbol value", { s: Symbol("s") }, "events[0].payload.s"],
+      ["an integer outside the safe range", { n: 2 ** 53 }, "events[0].payload.n"],
+      ["a symbol-keyed property", { [Symbol("k")]: 1 }, "events[0].payload[Symbol(k)]"],
+    ];
+    for (const [label, submitted, field] of cases) {
+      // The carried hashes are those of a stand-in payload: the refusal comes from the snapshot,
+      // not from a hash mismatch (which would be reported at events[0].hash).
+      const { bundle } = await bundleOf({ stand: "in" }, submitted);
+      expect((await refuse(bundle)).field, label).toBe(field);
+    }
+  });
+
+  it("(a) refuses a hole or an undefined entry in the events array, at its index", async () => {
+    const b = await twoEvents();
+    // eslint-disable-next-line no-sparse-arrays
+    for (const events of [[undefined, b.events[1]], [, b.events[1]]]) {
+      expect((await refuse({ events, bundleHash: b.bundleHash })).field).toBe("events[0]");
+    }
+  });
+
+  it("(b) refuses a toJSON on the event, so the object that was hashed cannot stand in for the one submitted", async () => {
+    const { honestEvent, bundleHash } = await bundleOf({ ok: true });
+    const forged = { ...bodyOf({ reason: "never hashed" }), id: "e1", hash: honestEvent.hash };
+    let calls = 0;
+    const toJSON = () => {
+      calls++;
+      return honestEvent;
+    };
+    // The old round trip called toJSON and committed honestEvent in place of the object submitted.
+    expect((await refuse({ events: [{ ...forged, toJSON }], bundleHash })).field).toBe("events[0].toJSON");
+    const hidden = { ...forged };
+    Object.defineProperty(hidden, "toJSON", { enumerable: false, value: toJSON });
+    expect((await refuse({ events: [hidden], bundleHash })).field).toBe("events[0].toJSON");
+    class Forged {
+      constructor() {
+        Object.assign(this, forged);
+      }
+      toJSON() {
+        return toJSON();
+      }
+    }
+    expect((await refuse({ events: [new Forged()], bundleHash })).field).toBe("events[0]");
+    // The same on a payload: JSON would have replaced it with {ok: true}, the hashed payload.
+    expect((await refuse((await bundleOf({ ok: true }, { toJSON: () => ({ ok: true }) })).bundle)).field).toBe(
+      "events[0].payload.toJSON",
+    );
+    expect(calls, "no toJSON may run").toBe(0);
+  });
+
+  it("(c) refuses an accessor anywhere in an event and never runs it", async () => {
+    let reads = 0;
+    const accessor = {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        reads++;
+        return 1;
+      },
+    };
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["a payload member", { payload: Object.defineProperty({}, "value", accessor) }, "events[0].payload.value"],
+      ["a payload array element", { payload: { list: Object.defineProperty([], 0, accessor) } }, "events[0].payload.list[0]"],
+      ["a member of source", { source: Object.defineProperty({ ...source }, "deviceId", accessor) }, "events[0].source.deviceId"],
+    ];
+    for (const [label, override, field] of cases) {
+      // The getter answers 1, which is what the carried hash was computed over: a round trip accepts it.
+      const { bundle } = await bundleOf({ value: 1 });
+      const err = await refuse({ ...bundle, events: [{ ...bundle.events[0]!, ...override }] });
+      expect(err.field, label).toBe(field);
+      expect(err.message, label).toMatch(/accessor/);
+    }
+    expect(reads, "no getter may run").toBe(0);
+  });
+
+  it("(d) refuses a class instance and every other non-plain object, wherever it appears", async () => {
+    class Payload {
+      value = 1;
+    }
+    const asPayload = await bundleOf({ value: 1 }, new Payload());
+    const err = await refuse(asPayload.bundle);
+    expect(err.field).toBe("events[0].payload");
+    expect(err.message).toMatch(/non-plain object/);
+
+    class Evt {}
+    const { bundle } = await bundleOf({ ok: true });
+    expect((await refuse({ ...bundle, events: [Object.assign(new Evt(), bundle.events[0])] })).field).toBe("events[0]");
+
+    const odd: Array<[string, unknown]> = [
+      ["a Date", new Date(0)],
+      ["a Map", new Map()],
+      ["a Set", new Set()],
+      ["a RegExp", /x/],
+      ["a typed array", new Uint8Array(1)],
+      ["an Error", new Error("x")],
+      ["an object with a substituted prototype", Object.create({ inherited: 1 })],
+    ];
+    for (const [label, value] of odd) {
+      expect((await refuse((await bundleOf({ ok: true }, { odd: value })).bundle)).field, label).toBe("events[0].payload.odd");
+    }
+  });
+
+  it("(e) refuses an undefined array element; an undefined OBJECT member is omitted, in the hash and in the returned events alike", async () => {
+    const { bundle: arrayCase } = await bundleOf({ list: [null] }, { list: [undefined] });
+    expect((await refuse(arrayCase)).field).toBe("events[0].payload.list[0]");
+
+    // canonicalize omits an undefined member everywhere in the repo, and producers rely on it: the
+    // gateway's carrier events leave optional fields (statusDetail, trackingLocation, ...) undefined
+    // and hash them with hashEvent. Refusing the member would reject those honest bundles, so it is
+    // not refused: it is absent from the hashed text and from the events handed back.
+    const { bundle } = await bundleOf({ a: 1, c: {} }, { a: 1, b: undefined, c: { d: undefined } });
+    expect(Object.keys(bundle.events[0]!.payload)).toEqual(["a", "b", "c"]);
+    const result = await computeKernelSignedEventsRoot(bundle as never);
+    const payload = result.events[0]!.payload;
+    expect(Object.keys(payload)).toEqual(["a", "c"]);
+    expect("b" in payload).toBe(false);
+    expect(payload).toEqual({ a: 1, c: {} });
+    expect(result.root).toBe(taggedDigestToBytes32(bundle.bundleHash));
+  });
+
+  describe("(f) the returned events are the verified snapshot", () => {
+    it("returns { root, events }: the root is the bundleHash, and events are the submitted events, in the order given", async () => {
+      const b = await twoEvents();
+      const result = await computeKernelSignedEventsRoot(b);
+      expect(Object.keys(result)).toEqual(["root", "events"]);
+      expect(result.root).toBe(taggedDigestToBytes32(b.bundleHash));
+      expect(result.events).toHaveLength(2);
+      for (let i = 0; i < b.events.length; i++) {
+        expect(result.events[i]).toEqual(b.events[i]);
+        expect(canonicalize(result.events[i])).toBe(canonicalize(b.events[i]));
+      }
+      const reversed = await computeKernelSignedEventsRoot({ events: [...b.events].reverse(), bundleHash: b.bundleHash });
+      expect(reversed.events.map((e) => e.id)).toEqual(["e1", "e0"]);
+      expect(reversed.root).toBe(result.root);
+    });
+
+    it("hands back copies, not the objects that were passed in", async () => {
+      const b = await twoEvents();
+      const result = await computeKernelSignedEventsRoot(b);
+      for (let i = 0; i < b.events.length; i++) {
+        expect(result.events[i]).not.toBe(b.events[i]);
+        expect(result.events[i]!.payload).not.toBe(b.events[i]!.payload);
+        expect(result.events[i]!.source).not.toBe(b.events[i]!.source);
+      }
+      expect(result.events).not.toBe(b.events);
+    });
+
+    it("the result, the events array and every event are frozen at every depth", async () => {
+      const result = await computeKernelSignedEventsRoot(await twoEvents());
+      const nested = (result.events[0]!.payload as { nested: { list: unknown[] } }).nested;
+      for (const frozen of [result, result.events, result.events[0], result.events[0]!.payload, result.events[0]!.source, nested, nested.list, nested.list[2]]) {
+        expect(Object.isFrozen(frozen)).toBe(true);
+      }
+      expect(() => {
+        (result.events[0] as { type: string }).type = "x";
+      }).toThrow(TypeError);
+      expect(() => {
+        (result.events as EvidenceEvent[]).push(result.events[0]!);
+      }).toThrow(TypeError);
+      expect(() => {
+        nested.list.push(3);
+      }).toThrow(TypeError);
+      expect(() => {
+        (nested.list[2] as { deep: string }).deep = "y";
+      }).toThrow(TypeError);
+      expect(() => {
+        (result as { root: string }).root = "0x";
+      }).toThrow(TypeError);
+    });
+
+    it("does not change when the input is mutated afterwards, and still verifies against the root", async () => {
+      const b = await twoEvents();
+      const input = structuredClone(b);
+      const result = await computeKernelSignedEventsRoot(input);
+      const before = result.events.map((e) => canonicalize(e));
+      // Everything a caller could do to the objects it passed in after the call returned.
+      const first = input.events[0] as unknown as { payload: { ok: boolean; nested: { list: unknown[] } }; hash: string };
+      first.payload.ok = false;
+      first.payload.nested.list.push(99);
+      first.hash = `sha256:${"00".repeat(32)}`;
+      input.events[1]!.type = "execution_failed";
+      input.events.length = 0;
+      input.bundleHash = `sha256:${"11".repeat(32)}` as typeof input.bundleHash;
+      expect(result.events.map((e) => canonicalize(e))).toEqual(before);
+      // What was returned is what was hashed: re-verifying it reproduces every carried hash and the root.
+      for (const e of result.events) expect(await hashEvent(e)).toBe(e.hash);
+      expect(taggedDigestToBytes32(await hashBundle([...result.events]))).toBe(result.root);
+    });
+
+    it("hands back prototype-less plain data, as canonicalSnapshot documents", async () => {
+      const result = await computeKernelSignedEventsRoot(await twoEvents());
+      expect(Object.getPrototypeOf(result.events[0])).toBeNull();
+      expect(Object.getPrototypeOf(result.events[0]!.payload)).toBeNull();
+      expect(Object.getPrototypeOf(result.events[0]!.source)).toBeNull();
+      expect(Array.isArray((result.events[0]!.payload as { nested: { list: unknown } }).nested.list)).toBe(true);
+    });
+
+    it("accepts every legitimate spelling of the same plain data and returns the same events", async () => {
+      const b = await twoEvents();
+      const expected = await computeKernelSignedEventsRoot(b);
+      const variants: Array<[string, unknown[]]> = [
+        ["a frozen event", b.events.map((e) => Object.freeze({ ...e }))],
+        ["a structuredClone", b.events.map((e) => structuredClone(e))],
+        ["a null-prototype event", b.events.map((e) => Object.assign(Object.create(null), structuredClone(e)))],
+      ];
+      for (const [label, events] of variants) {
+        const result = await computeKernelSignedEventsRoot({ events, bundleHash: b.bundleHash } as never);
+        expect(result.root, label).toBe(expected.root);
+        expect(result.events, label).toEqual(expected.events);
+      }
+    });
+  });
+
+  it("(g) reads a Proxy event once, through its reflection traps, so a shifting answer cannot split what is hashed from what is returned", async () => {
+    const b = await twoEvents();
+    const first = b.events[0]!;
+    const descriptorReads: Record<string, number> = {};
+    let ownKeysCalls = 0;
+    const shifting = new Proxy(
+      { ...first },
+      {
+        get() {
+          throw new Error("[[Get]] must never be performed on the input");
+        },
+        ownKeys(target) {
+          ownKeysCalls++;
+          return Reflect.ownKeys(target);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          const name = String(key);
+          descriptorReads[name] = (descriptorReads[name] ?? 0) + 1;
+          const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+          // From the second read on, payload would answer differently from what was hashed.
+          return name === "payload" && descriptorReads[name]! > 1 && descriptor !== undefined
+            ? { ...descriptor, value: { ok: false } }
+            : descriptor;
+        },
+      },
+    );
+    const result = await computeKernelSignedEventsRoot({ events: [shifting as never, b.events[1]!], bundleHash: b.bundleHash });
+    expect(result.events[0]!.payload).toEqual(first.payload);
+    expect(await hashEvent(result.events[0]!)).toBe(first.hash);
+    expect(ownKeysCalls).toBe(1);
+    expect(descriptorReads.payload).toBe(1);
+    expect(Object.values(descriptorReads).every((n) => n === 1)).toBe(true);
+  });
+
+  it("a refusal names the event and the member, and cannot be used to inject log lines or grow without bound", async () => {
+    const hostile = `evil${String.fromCharCode(10)}FORGED LOG LINE${String.fromCharCode(0)}${"k".repeat(5000)}`;
+    const { bundle } = await bundleOf({ stand: "in" }, { [hostile]: NaN });
+    const err = await refuse(bundle);
+    expect(err.field.startsWith("events[0].payload.evil")).toBe(true);
+    expect(err.field).not.toMatch(/\p{Cc}/u);
+    expect(err.message).not.toMatch(/\p{Cc}/u);
+    expect(err.field.length).toBeLessThanOrEqual(203);
+    expect(err.message.length).toBeLessThan(700);
+    expect(err.message).toMatch(/NaN/);
+  });
+});
+
 // ── F2 (HIGH): invalid and duplicate quorums are refused ─────────────────────
 describe("E7 F2 — the attestation set is validated before it is hashed", () => {
   const H1 = sha("f2-attestation-1");
