@@ -2824,28 +2824,36 @@ describe("the Proxy test is taken from the host: a runtime without it still load
     expect(exported).toEqual([...entries.map((entry) => entry.name), "taggedDigestToBytes32"].sort());
   });
 
-  it("given the function by the host, the same module accepts honest input, refuses a Proxy as a Proxy, and asks for it once, at load", async () => {
-    const getBuiltinModule = process.getBuiltinModule as unknown as (id: string) => unknown;
+  it("given the function by the host, the same module accepts honest input, refuses a Proxy as a Proxy, and never asks the host again after it has loaded", async () => {
+    const holder = process as unknown as { getBuiltinModule: (id: string) => unknown };
+    const realGetBuiltinModule = holder.getBuiltinModule;
     const asked: string[] = [];
-    const m = await loadWith((id) => {
+    const recorder = (id: string) => {
       asked.push(id);
-      return getBuiltinModule.call(process, id);
-    });
+      return realGetBuiltinModule.call(process, id);
+    };
+    const m = await loadWith(recorder);
     expect(asked, "asked for node:util when the module loaded").toEqual(["node:util"]);
-    for (const entry of entries) {
-      const { error } = await outcome(() => entry.call(m, identity));
-      expect(error, `${entry.name} must accept an honest input`).toBeUndefined();
+    asked.length = 0;
+    holder.getBuiltinModule = recorder; // loadWith has put the real one back: watch the host while the module is used
+    try {
+      for (const entry of entries) {
+        const { error } = await outcome(() => entry.call(m, identity));
+        expect(error, `${entry.name} must accept an honest input`).toBeUndefined();
+      }
+      expect(m.computeSettlementUnitId({ ...unit })).toBe(computeSettlementUnitId(unit));
+      expect(m.computeEvidenceBlockHash(rootsOf())).toBe(computeEvidenceBlockHash(rootsOf()));
+      expect((await m.computeKernelSignedEventsRoot(await bundleOf())).root).toBe((await computeKernelSignedEventsRoot(await bundleOf())).root);
+      for (const entry of entries) {
+        const traps: string[] = [];
+        const { error } = await outcome(() => entry.call(m, proxying(traps)));
+        expect(error, entry.name).toBeInstanceOf(m.EvidenceBlockInputError);
+        expect((error as EvidenceBlockInputError).message, entry.name).toMatch(/is a Proxy/);
+        expect(traps, `${entry.name}: no trap may run`).toEqual([]);
+      }
+    } finally {
+      holder.getBuiltinModule = realGetBuiltinModule;
     }
-    expect(m.computeSettlementUnitId({ ...unit })).toBe(computeSettlementUnitId(unit));
-    expect(m.computeEvidenceBlockHash(rootsOf())).toBe(computeEvidenceBlockHash(rootsOf()));
-    expect((await m.computeKernelSignedEventsRoot(await bundleOf())).root).toBe((await computeKernelSignedEventsRoot(await bundleOf())).root);
-    for (const entry of entries) {
-      const traps: string[] = [];
-      const { error } = await outcome(() => entry.call(m, proxying(traps)));
-      expect(error, entry.name).toBeInstanceOf(m.EvidenceBlockInputError);
-      expect((error as EvidenceBlockInputError).message, entry.name).toMatch(/is a Proxy/);
-      expect(traps, `${entry.name}: no trap may run`).toEqual([]);
-    }
-    expect(asked, "never asked again at call time").toEqual(["node:util"]);
+    expect(asked, "the Proxy test was captured at load: the host is not asked again at call time").toEqual([]);
   });
 });
