@@ -82,3 +82,35 @@ jobs:
             echo "a test skipped in the required run"
             exit 1
           fi
+
+      - name: A real bind mount cannot end the checkout walk early (review A02c)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          # repo/keys bind-mounted onto its own child repo/keys/loop: at the mount root,
+          # ".." reports the same device and inode as the directory itself.
+          T=$(mktemp -d)
+          mkdir -p "$T/repo/.git" "$T/repo/keys/loop"
+          chmod 700 "$T/repo/keys" "$T/repo/keys/loop"
+          sudo -n mount --bind "$T/repo/keys" "$T/repo/keys/loop"
+          set +e
+          PYTHONPATH=. python - "$T/repo/keys/loop/keys.json" <<'PY'
+          import sys
+          from pcc_node.crypto import KeyFileError, load_or_create_keys
+          try:
+              load_or_create_keys(sys.argv[1])
+          except KeyFileError as err:
+              print("ok: refused:", err)
+              sys.exit(0)
+          print("a key was accepted inside a checkout reached through a bind mount")
+          sys.exit(1)
+          PY
+          rc=$?
+          set -e
+          leftover=$(ls -A "$T/repo/keys" | grep -v '^loop$' || true)
+          sudo -n umount "$T/repo/keys/loop"
+          if [ -n "$leftover" ]; then
+            echo "a key file was left inside the checkout: $leftover"
+            exit 1
+          fi
+          exit "$rc"

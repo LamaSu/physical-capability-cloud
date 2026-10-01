@@ -245,7 +245,10 @@ def _refuse_checkout(dir_fd, key_path):
 
     Decided from the open directory, never from a pathname. From *dir_fd* the
     walk goes up through ``..``, relative to each level's own descriptor, to
-    the filesystem root (the level whose ``..`` is itself), and a ``.git``
+    this process's root directory (the level that IS ``/``: a bind mount can
+    make another directory's ``..`` report that directory's own device and
+    inode, so "``..`` is itself" does not prove the root; review A02c), and a
+    ``.git``
     entry of ANY kind at ANY level, the starting directory included, means a
     work tree: a directory, a file (a linked work tree or a submodule), even a
     dangling symbolic link. The answer is about the directory the key file is
@@ -259,6 +262,12 @@ def _refuse_checkout(dir_fd, key_path):
     flags = _directory_flags()
     current = dir_fd
     try:
+        root_fd = os.open("/", flags)
+        try:
+            root = os.fstat(root_fd)
+        finally:
+            os.close(root_fd)
+        root_id = (root.st_dev, root.st_ino)
         for level in range(_MAX_ANCESTORS):
             try:
                 os.stat(".git", dir_fd=current, follow_symlinks=False)
@@ -273,13 +282,12 @@ def _refuse_checkout(dir_fd, key_path):
                     "every repository." % (key_path, where, KEY_PATH_ENV)
                 )
             here = os.fstat(current)
+            if (here.st_dev, here.st_ino) == root_id:
+                return  # this level IS the process's root directory: every level has been looked at
             above = os.open("..", flags, dir_fd=current)
             if current != dir_fd:
                 os.close(current)
             current = above
-            up = os.fstat(current)
-            if (up.st_dev, up.st_ino) == (here.st_dev, here.st_ino):
-                return  # the root: ".." is the directory itself, so every level has been looked at
         raise KeyFileError(
             "%s lies more than %d directories deep, so it cannot be proven to be outside a source "
             "checkout" % (key_path, _MAX_ANCESTORS)
@@ -379,10 +387,15 @@ def _judge_key_file(fd, key_path):
         log.warning("%s was mode %o; corrected to 0600", key_path, mode)
 
 
+_MAX_KEY_FILE_BYTES = 64 * 1024
+
+
 def _read_key_file(dir_fd, name, key_path):
     """Open the key file *name* relative to the verified directory, never
-    through a symbolic link, judge that same open file and parse it.
-    FileNotFoundError when there is no such file."""
+    through a symbolic link, judge that same open file and parse it. Returns
+    ``(fd, data)``: the descriptor stays OPEN, so the caller judges the same
+    file again as its last step (review A02c). FileNotFoundError when there is
+    no such file."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     try:
         fd = os.open(name, flags, dir_fd=dir_fd)
@@ -392,36 +405,68 @@ def _read_key_file(dir_fd, name, key_path):
         raise
     try:
         _judge_key_file(fd, key_path)
-        f = os.fdopen(fd, "r", encoding="utf-8")
+        chunks = []
+        size = 0
+        while True:
+            chunk = os.read(fd, 8192)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > _MAX_KEY_FILE_BYTES:
+                raise KeyFileError(key_path + " is too large to be a key file")
+            chunks.append(chunk)
+        try:
+            data = json.loads(b"".join(chunks).decode("utf-8"))
+        except ValueError:
+            raise KeyFileError(key_path + " is not a JSON key file") from None
     except BaseException:
         os.close(fd)
         raise
-    with f:
-        try:
-            return json.load(f)
-        except ValueError:
-            raise KeyFileError(key_path + " is not a JSON key file") from None
+    return fd, data
 
 
 def _create_key_file(dir_fd, name, key_path, public_hex, secret_hex):
     """Create the key file *name* in the verified directory: 0600 from the
     first byte, never over an existing name, never through a link. The new
     descriptor is judged like an existing key file before the secret is
-    written, and a file that fails is removed again with nothing in it."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    written. Returns the descriptor, still OPEN: the caller judges the same
+    file again as its last step, and on any refusal scrubs it through this
+    descriptor before removing it (review A02c)."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
     try:
         _judge_key_file(fd, key_path)
-        f = os.fdopen(fd, "w")
-    except BaseException:
-        os.close(fd)
+        payload = json.dumps({"public": public_hex, "secret": secret_hex}, indent=2).encode("utf-8")
+        written = 0
+        while written < len(payload):
+            written += os.write(fd, payload[written:])
+        os.fsync(fd)
+    except BaseException as err:
         try:
-            os.unlink(name, dir_fd=dir_fd)
-        except OSError:
-            pass
+            _scrub_and_remove(dir_fd, name, fd, key_path, err)
+        finally:
+            os.close(fd)
         raise
-    with f:
-        json.dump({"public": public_hex, "secret": secret_hex}, f, indent=2)
+    return fd
+
+
+def _scrub_and_remove(dir_fd, name, fd, key_path, cause):
+    """A new key file that must not stay: empty it through its own descriptor
+    first (so no secret survives even if removal fails), then remove its name.
+    The descriptor is closed by the caller. A failed removal is reported, never
+    treated as success."""
+    try:
+        os.ftruncate(fd, 0)
+        os.fsync(fd)
+    except OSError:
+        pass
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except OSError as err:
+        raise KeyFileError(
+            "%s was refused, and the new key file could not be removed (it was emptied first: no secret "
+            "remains in it): %s" % (key_path, err)
+        ) from cause
 
 
 def load_or_create_keys(path=None):
@@ -431,7 +476,12 @@ def load_or_create_keys(path=None):
     The location is checked when the key is loaded or created, which for a
     daemon means at every start; nothing watches it afterwards, so a repository
     created around a key that is already loaded is not noticed until the next
-    start.
+    start. Within one call the checks are repeated as its LAST step, on the same
+    open directory and the same open key file; what another process of this
+    user changes after that step is outside any check (such a process can read
+    the key anyway). A key created in this call and then refused is emptied
+    through its descriptor before its name is removed, and a failed removal is
+    reported.
 
     Before anything is read or written, the directory the key file lives in is
     opened once and judged as that open directory, never by pathname. It, and
@@ -477,30 +527,37 @@ def load_or_create_keys(path=None):
         raise KeyFileError(abs_path + " does not name a file")
 
     dir_fd = _open_key_directory(parent, abs_path)
+    key_fd = None
     try:
         created = None
         try:
-            data = _read_key_file(dir_fd, name, abs_path)
+            key_fd, data = _read_key_file(dir_fd, name, abs_path)
         except FileNotFoundError:
             created = generate_node_keys()
-            _create_key_file(dir_fd, name, abs_path, *created)
-        # Judged again on the same open directory before the key is used: a directory
-        # moved into a checkout, or a .git made above it, since the first check is
-        # refused, and a key just created there is removed (cross-family review A02b, F1).
+            key_fd = _create_key_file(dir_fd, name, abs_path, *created)
         try:
+            public_hex, secret_hex = created if created is not None else _checked_pair(data, abs_path)
+            # The LAST step before the key is returned, on the same open directory and the
+            # same open key file: no .git anywhere above the directory, and the file still a
+            # regular, owner-only file of this user with exactly one name (review A02c). A
+            # change another process of this user makes after this point is outside what any
+            # check can stop: such a process can read the key anyway.
             _refuse_checkout(dir_fd, abs_path)
-        except KeyFileError:
+            _judge_key_file(key_fd, abs_path)
+        except BaseException as err:
             if created is not None:
-                try:
-                    os.unlink(name, dir_fd=dir_fd)
-                except OSError:
-                    pass
+                _scrub_and_remove(dir_fd, name, key_fd, abs_path, err)
             raise
-        if created is not None:
-            return created
+        return public_hex, secret_hex
     finally:
+        if key_fd is not None:
+            os.close(key_fd)
         os.close(dir_fd)
 
+
+def _checked_pair(data, abs_path):
+    """The key pair a loaded file holds, checked: two 64-hex-character keys, the
+    public key derived from the secret, and neither on the denylist."""
     public_hex = data.get("public") if isinstance(data, dict) else None
     secret_hex = data.get("secret") if isinstance(data, dict) else None
     try:

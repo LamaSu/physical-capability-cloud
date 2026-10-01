@@ -780,3 +780,82 @@ class TestTheLocationIsCheckedAgainBeforeTheKeyIsUsed:
         with pytest.raises(crypto_module.KeyFileError):
             load_or_create_keys(str(keys / "keys.json"))
         assert os.listdir(keys) == [], "a new secret was left inside the checkout"
+
+
+@needs_nacl
+class TestA02cTheLastCheckAndTheWalksEnd:
+    """A02c: the walk's root test, a terminal check of the directory AND the open key file, and a scrubbed cleanup."""
+
+    def test_a_directory_whose_parent_reports_its_own_identity_does_not_end_the_walk(self, monkeypatch, tmp_path):
+        # A bind mount of repo/keys onto its child repo/keys/loop makes the mounted directory and its ".."
+        # report the same (st_dev, st_ino). Simulated: fstat answers repo/keys with loop's identity.
+        held, _ = _checkout_holding(tmp_path)
+        loop = _private_dir(held / "loop")
+        real_fstat = os.fstat
+        held_id = (os.stat(held).st_dev, os.stat(held).st_ino)
+        loop_st = os.stat(loop)
+
+        def fstat(fd):
+            st = real_fstat(fd)
+            if (st.st_dev, st.st_ino) != held_id:
+                return st
+            fields = {k: getattr(st, k) for k in ("st_mode", "st_uid", "st_gid", "st_nlink", "st_size")}
+            return __import__("types").SimpleNamespace(st_dev=loop_st.st_dev, st_ino=loop_st.st_ino, **fields)
+
+        monkeypatch.setattr(crypto_module.os, "fstat", fstat)
+        with pytest.raises(crypto_module.KeyFileError):
+            load_or_create_keys(str(loop / "keys.json"))
+        assert os.listdir(loop) == [], "a new secret was created inside the checkout"
+
+    def test_a_checkout_made_while_the_key_is_parsed_is_refused(self, monkeypatch, tmp_path):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        _new_key_pair_file(keys / "keys.json")
+        real = crypto_module._strict_hex
+
+        def strict_hex(*args, **kwargs):
+            if not (tmp_path / "home" / ".git").exists():
+                (tmp_path / "home" / ".git").mkdir()
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(crypto_module, "_strict_hex", strict_hex)
+        with pytest.raises(crypto_module.KeyFileError):
+            load_or_create_keys(str(keys / "keys.json"))
+
+    @pytest.mark.parametrize("existing", [True, False], ids=["existing-key", "new-key"])
+    def test_a_second_name_added_inside_a_checkout_after_the_file_was_judged_is_refused(self, monkeypatch, tmp_path, existing):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        held, _ = _checkout_holding(tmp_path)
+        if existing:
+            _new_key_pair_file(keys / "keys.json")
+        real = crypto_module._judge_key_file
+        calls = []
+
+        def judge(fd, key_path):
+            real(fd, key_path)
+            calls.append(key_path)
+            if len(calls) == 1:
+                os.link(keys / "keys.json", held / "keys.json")
+
+        monkeypatch.setattr(crypto_module, "_judge_key_file", judge)
+        with pytest.raises(crypto_module.KeyFileError):
+            load_or_create_keys(str(keys / "keys.json"))
+
+    def test_a_refused_new_key_is_scrubbed_even_when_it_cannot_be_removed(self, monkeypatch, tmp_path):
+        keys = _private_dir(tmp_path / "home" / "keys")
+        real = crypto_module._judge_key_file
+
+        def judge(fd, key_path):
+            real(fd, key_path)
+            if not (tmp_path / "home" / ".git").exists():
+                (tmp_path / "home" / ".git").mkdir()
+
+        def unlink(*args, **kwargs):
+            raise PermissionError("unlink refused for the test")
+
+        monkeypatch.setattr(crypto_module, "_judge_key_file", judge)
+        monkeypatch.setattr(crypto_module.os, "unlink", unlink)
+        with pytest.raises(crypto_module.KeyFileError) as refused:
+            load_or_create_keys(str(keys / "keys.json"))
+        left = keys / "keys.json"
+        assert not left.exists() or left.stat().st_size == 0, "a written secret was left inside the checkout"
+        assert "could not be removed" in str(refused.value)
