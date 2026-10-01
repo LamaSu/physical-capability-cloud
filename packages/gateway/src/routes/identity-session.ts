@@ -31,6 +31,29 @@ function fromHex(hex: string): Uint8Array {
   return bytes;
 }
 
+// ── Request validation ──────────────────────────────────────────────────────
+
+/**
+ * The first problem with the scope lists in an UNTYPED request body, or null.
+ *
+ * A list that is absent (undefined or null) means "use the default", as it
+ * always has. A list that is present must be an array of strings; anything else
+ * is a 400 here rather than a 500 from issueSessionKey, which enforces the same
+ * rule and then sorts and de-duplicates the lists.
+ */
+function scopeProblem(scope: unknown): string | null {
+  if (scope === null || typeof scope !== "object") return null;
+  const lists = scope as Record<string, unknown>;
+  for (const field of ["allowedActions", "contractIds"] as const) {
+    const value = lists[field];
+    if (value === undefined || value === null) continue;
+    if (!Array.isArray(value)) return `scope.${field} must be an array of strings`;
+    const bad = value.findIndex((item) => typeof item !== "string");
+    if (bad !== -1) return `scope.${field}[${bad}] must be a string`;
+  }
+  return null;
+}
+
 // ── Service singleton ───────────────────────────────────────────────────────
 
 const sessionKeyService = new SessionKeyService();
@@ -58,6 +81,12 @@ export async function identitySessionRoutes(app: FastifyInstance) {
    *   sessionPrivateKey: hex (ONLY returned once!)
    * }
    *
+   * The returned scope is canonical: allowedActions and contractIds are
+   * de-duplicated and sorted (UTF-16 code-unit order) whatever order or
+   * duplicates the request carried, and it is the scope the parent signed.
+   * A present scope list that is not an array of strings is a 400
+   * `invalid_scope`.
+   *
    * The private key is returned exactly ONCE and never stored by the gateway.
    */
   app.post("/api/identity/session", async (req, reply) => {
@@ -73,6 +102,14 @@ export async function identitySessionRoutes(app: FastifyInstance) {
     if (!body?.principalAgentId) {
       return reply.status(400).send({
         error: "principalAgentId is required",
+      });
+    }
+
+    const invalidScope = scopeProblem(body.scope);
+    if (invalidScope) {
+      return reply.status(400).send({
+        error: "invalid_scope",
+        message: invalidScope,
       });
     }
 
