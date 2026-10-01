@@ -361,9 +361,10 @@ export type AcceptedProgramGateResult =
         | "tier-not-in-csd"
         | "tier-not-eligible"
         | "program-fails-tier-check"
-        | "registry-not-named";
+        | "registry-not-named"
+        | "invalid-input";
       violations?: TierAssuranceViolation[];
-      /** tier-not-eligible: why tiers 0..T cannot be verified end to end. */
+      /** tier-not-eligible: why tiers 0..T cannot be verified end to end. registry-not-named: which primitives name no pinnable registry. */
       reasons?: string[];
     };
 
@@ -394,6 +395,13 @@ export interface AcceptedProgramGateInput {
  * primitive index is the built-in vocabulary, so what counts as a live verifier
  * is the evidence lane's data, never the caller's (E8 F4). A second or third
  * argument is a type error, and is ignored at runtime.
+ *
+ * It reads each field of `input` exactly once, at entry, and materializes
+ * `evidence` as a plain-data JSON snapshot. Tier lookup, eligibility, the
+ * program check and pin extraction all use that one snapshot, so a getter or
+ * proxy cannot show one CSD to the checks and another to the pins (E8 F3).
+ * Input that is not plain JSON data (a throwing getter, a cycle, a non-object)
+ * is refused as `invalid-input`.
  */
 export function assertAcceptedProgramForTier(input: AcceptedProgramGateInput): AcceptedProgramGateResult {
   return assertAcceptedProgramForTierWith(input, COMMITTED_PROGRAM_REGISTRY);
@@ -415,27 +423,27 @@ export function assertAcceptedProgramForTierWith(
   registry: readonly CommittedProgramEntry[],
   options: AcceptedProgramGateOptions = {},
 ): AcceptedProgramGateResult {
-  const resolved = resolveAcceptedProgram(input.csd, input.tierKey, registry);
+  const snap = snapshotGateInput(input);
+  if (snap === null) return { ok: false, code: "invalid-input" };
+  const { csd, tierKey, committedProgramHash, evidence } = snap;
+  const resolved = resolveAcceptedProgram(csd, tierKey, registry);
   if (!resolved.ok) return { ok: false, code: "no-committed-program" };
   if (resolved.program === null) {
-    if (input.committedProgramHash !== null) return { ok: false, code: "program-on-tier-zero" };
-    return pinsResult(input.evidence ?? {}, 0);
+    if (committedProgramHash !== null) return { ok: false, code: "program-on-tier-zero" };
+    return pinsResult(evidence, 0);
   }
   if (computeCommittedProgramHash(resolved.program) !== resolved.programHash) {
     return { ok: false, code: "registry-hash-mismatch" };
   }
   // Hex case carries no meaning in a 0x digest; any other difference does.
-  if (
-    typeof input.committedProgramHash !== "string" ||
-    input.committedProgramHash.toLowerCase() !== resolved.programHash
-  ) {
+  if (typeof committedProgramHash !== "string" || committedProgramHash.toLowerCase() !== resolved.programHash) {
     return { ok: false, code: "program-hash-mismatch" };
   }
-  const tier = input.evidence?.[input.tierKey];
-  const k = tierNumber(input.tierKey);
+  const tier = evidence[tierKey];
+  const k = tierNumber(tierKey);
   if (tier === undefined || k === null) return { ok: false, code: "tier-not-in-csd" };
   const eligibility = computeCsdEligibility(
-    { url: input.csd, evidence: { ...input.evidence } },
+    { url: csd, evidence },
     { requireImplementedVerifier: true, index: options.primitiveIndex },
   );
   if (eligibility.eligibleTier < k) {
@@ -447,7 +455,46 @@ export function assertAcceptedProgramForTierWith(
   if (check.violations.length > 0) {
     return { ok: false, code: "program-fails-tier-check", violations: check.violations };
   }
-  return pinsResult(input.evidence, k);
+  return pinsResult(evidence, k);
+}
+
+/** The gate's input after one read of each field. `evidence` is plain JSON data no caller object can change. */
+interface GateSnapshot {
+  csd: string;
+  tierKey: string;
+  committedProgramHash: unknown;
+  evidence: Record<string, CsdEvidenceTier>;
+}
+
+/**
+ * Read `input.csd`, `input.tierKey`, `input.committedProgramHash` and
+ * `input.evidence` exactly once each, and materialize `evidence` through a JSON
+ * round trip. JSON.stringify reads every property of the evidence graph once, so
+ * a getter, proxy or toJSON can answer once and no later read can disagree. A
+ * non-JSON input (undefined, a function, a cycle, a BigInt, a throwing getter)
+ * or a result that is not a plain object returns null.
+ */
+function snapshotGateInput(input: AcceptedProgramGateInput): GateSnapshot | null {
+  try {
+    if (typeof input !== "object" || input === null) return null;
+    const csd: unknown = input.csd;
+    const tierKey: unknown = input.tierKey;
+    const committedProgramHash: unknown = input.committedProgramHash;
+    const rawEvidence: unknown = input.evidence;
+    // A string, not an object with a stateful toString, so no later coercion can disagree either.
+    if (typeof csd !== "string" || typeof tierKey !== "string") return null;
+    const text: unknown = JSON.stringify(rawEvidence);
+    if (typeof text !== "string") return null;
+    const evidence: unknown = JSON.parse(text);
+    if (!isPlainObject(evidence)) return null;
+    return { csd, tierKey, committedProgramHash, evidence: evidence as Record<string, CsdEvidenceTier> };
+  } catch {
+    return null;
+  }
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 function pinsResult(evidence: Readonly<Record<string, CsdEvidenceTier>>, k: number): AcceptedProgramGateResult {

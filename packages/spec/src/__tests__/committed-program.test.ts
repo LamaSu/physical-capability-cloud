@@ -13,6 +13,7 @@ import {
   computeCommittedProgramHash,
   resolveAcceptedProgram,
   tierNumber,
+  type AcceptedProgramGateInput,
   type CommittedProgram,
   type CommittedProgramEntry,
 } from "../evidence/committed-program.js";
@@ -469,5 +470,220 @@ describe("the public surface keeps the override form of the gate test-only (E8 F
     expect(expected.length).toBeGreaterThan(10);
     expect(expected.filter((name) => !(name in evidenceIndex))).toEqual([]);
     expect(expected.filter((name) => !(name in packageRoot))).toEqual([]);
+  });
+});
+
+describe("assertAcceptedProgramForTier — one snapshot of the input (E8 F3)", () => {
+  const HASH = PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH;
+  /** The test-only gate with every verifier live, taking whatever shape the attack gives it. */
+  const gate = (input: unknown) =>
+    assertAcceptedProgramForTierWith(input as AcceptedProgramGateInput, COMMITTED_PROGRAM_REGISTRY, { primitiveIndex: LIVE });
+  const plain = (evidence: unknown) => ({ csd: CSD, tierKey: "tier2", evidence, committedProgramHash: HASH });
+  const withoutRegistryKey = (t: Record<string, CsdEvidenceTier>) => {
+    for (const k of ["tier1", "tier2", "tier3"]) t[k]!.primitives = t[k]!.primitives!.filter((p) => p.id !== "ident.registered_key");
+    return t;
+  };
+
+  /** An input whose four fields are getters that count their reads. */
+  function countingInput(fields: { csd: unknown; tierKey: unknown; committedProgramHash: unknown; evidence: unknown }) {
+    const reads = { csd: 0, tierKey: 0, committedProgramHash: 0, evidence: 0 };
+    const input = {
+      get csd() {
+        reads.csd++;
+        return fields.csd;
+      },
+      get tierKey() {
+        reads.tierKey++;
+        return fields.tierKey;
+      },
+      get committedProgramHash() {
+        reads.committedProgramHash++;
+        return fields.committedProgramHash;
+      },
+      get evidence() {
+        reads.evidence++;
+        return fields.evidence;
+      },
+    };
+    return { input, reads };
+  }
+
+  it("a getter that returns three different maps is evaluated on its first answer only, and the pins come from that same map", () => {
+    const mapA = fixedTiers(); // passes the program check and names the kernel registry
+    const mapB = fixedTiers(); // what a second read would show eligibility: another registry
+    for (const k of ["tier1", "tier2", "tier3"]) {
+      for (const p of mapB[k]!.primitives!) if (p.id === "ident.registered_key") p.params = { registryId: "pcc.registry.other.v1" };
+    }
+    const mapC = withoutRegistryKey(fixedTiers()); // what a third read would show the pins: none
+    const maps = [mapA, mapB, mapC];
+    let reads = 0;
+    const input = {
+      csd: CSD,
+      tierKey: "tier2",
+      committedProgramHash: HASH,
+      get evidence() {
+        return maps[Math.min(reads++, 2)];
+      },
+    };
+    const r = gate(input);
+    expect(reads).toBe(1);
+    expect(r).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+    // It is the result of evaluating the first map alone.
+    expect(r).toEqual(gate(plain(mapA)));
+  });
+
+  it("every field of the input is read exactly once, on every path through the gate", () => {
+    const once = { csd: 1, tierKey: 1, committedProgramHash: 1, evidence: 1 };
+    const paths: Array<[string, string, string | null, object]> = [
+      ["funded tier2", "tier2", HASH, { ok: true }],
+      ["tier0", "tier0", null, { ok: true }],
+      ["tier0 carrying a program", "tier0", HASH, { code: "program-on-tier-zero" }],
+      ["no committed program", "tier3", HASH, { code: "no-committed-program" }],
+      ["wrong hash", "tier2", PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM_HASH, { code: "program-hash-mismatch" }],
+      ["no hash", "tier2", null, { code: "program-hash-mismatch" }],
+    ];
+    for (const [name, tierKey, committedProgramHash, expected] of paths) {
+      const { input, reads } = countingInput({ csd: CSD, tierKey, committedProgramHash, evidence: fixedTiers() });
+      expect(gate(input), name).toMatchObject(expected);
+      expect(reads, name).toEqual(once);
+    }
+    // The production gate reads once too.
+    const { input, reads } = countingInput({ csd: CSD, tierKey: "tier2", committedProgramHash: HASH, evidence: fixedTiers() });
+    expect(assertAcceptedProgramForTier(input as unknown as AcceptedProgramGateInput)).toMatchObject({ ok: false, code: "tier-not-eligible" });
+    expect(reads).toEqual(once);
+  });
+
+  it("a getter on committedProgramHash that changes its answer is read once, so it cannot show the check one hash and the funder another", () => {
+    let reads = 0;
+    const input = {
+      csd: CSD,
+      tierKey: "tier2",
+      evidence: fixedTiers(),
+      get committedProgramHash() {
+        return reads++ === 0 ? HASH : null;
+      },
+    };
+    expect(gate(input)).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+    expect(reads).toBe(1);
+  });
+
+  it("a getter nested inside a tier is read once, so the pins come from the primitives the program check saw", () => {
+    const t = fixedTiers();
+    const real = t["tier2"]!.primitives!;
+    const stripped = real.filter((p) => p.id !== "ident.registered_key");
+    let reads = 0;
+    Object.defineProperty(t["tier2"]!, "primitives", { enumerable: true, get: () => (reads++ === 0 ? real : stripped) });
+    expect(gate(plain(t))).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+    expect(reads).toBe(1);
+  });
+
+  it("a proxy that answers each key once with the real tier and afterwards with a stripped one is evaluated on the real one", () => {
+    const real = fixedTiers();
+    const strip = (tier: CsdEvidenceTier): CsdEvidenceTier => ({
+      ...structuredClone(tier),
+      primitives: (tier.primitives ?? []).filter((p) => p.id !== "ident.registered_key"),
+    });
+    const reads = new Map<string, number>();
+    const proxy = new Proxy(real, {
+      get(target, key, receiver) {
+        if (typeof key === "string" && /^tier\d$/.test(key)) {
+          const n = (reads.get(key) ?? 0) + 1;
+          reads.set(key, n);
+          return n === 1 ? Reflect.get(target, key, receiver) : strip(target[key]!);
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    expect(gate(plain(proxy))).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+    expect([...reads.values()].every((n) => n === 1)).toBe(true);
+    expect(reads.size).toBe(4);
+  });
+
+  it("a toJSON on the evidence is consulted once", () => {
+    let calls = 0;
+    const evidence = {
+      toJSON() {
+        return calls++ === 0 ? fixedTiers() : withoutRegistryKey(fixedTiers());
+      },
+    };
+    expect(gate(plain(evidence))).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+    expect(calls).toBe(1);
+  });
+
+  it("evidence that is not plain JSON data is refused as invalid-input, never thrown", () => {
+    const cycle: Record<string, unknown> = {};
+    cycle["self"] = cycle;
+    const bad: Array<[string, unknown]> = [
+      ["undefined", undefined],
+      ["null", null],
+      ["an array", [fixedTiers()]],
+      ["a string", "tier0"],
+      ["a number", 7],
+      ["a boolean", true],
+      ["a function", () => fixedTiers()],
+      ["a cycle", cycle],
+      ["a BigInt inside", { tier0: { description: "x", required: [], n: 1n } }],
+      ["a toJSON that returns an array", { toJSON: () => [] }],
+      ["a toJSON that returns null", { toJSON: () => null }],
+      [
+        "a throwing getter inside",
+        {
+          get tier0(): unknown {
+            throw new Error("boom");
+          },
+        },
+      ],
+    ];
+    for (const [name, evidence] of bad) {
+      expect(gate(plain(evidence)), name).toEqual({ ok: false, code: "invalid-input" });
+    }
+    const throwing = {
+      csd: CSD,
+      tierKey: "tier2",
+      committedProgramHash: HASH,
+      get evidence(): unknown {
+        throw new Error("boom");
+      },
+    };
+    expect(gate(throwing)).toEqual({ ok: false, code: "invalid-input" });
+  });
+
+  it("an input that is not an object, or whose csd or tierKey is not a string, is invalid-input", () => {
+    for (const input of [undefined, null, "tier2", 7, [plain(fixedTiers())]]) {
+      expect(gate(input), String(input)).toEqual({ ok: false, code: "invalid-input" });
+    }
+    for (const csd of [undefined, null, 7, { toString: () => CSD }]) {
+      expect(gate({ ...plain(fixedTiers()), csd }), String(csd)).toEqual({ ok: false, code: "invalid-input" });
+    }
+    // An object with a stateful toString cannot pass as tier0 on one read and tier2 on the next.
+    let calls = 0;
+    const sneaky = { toString: () => (calls++ === 0 ? "tier0" : "tier2") };
+    expect(gate({ csd: CSD, tierKey: sneaky, evidence: fixedTiers(), committedProgramHash: null })).toEqual({
+      ok: false,
+      code: "invalid-input",
+    });
+    for (const field of ["csd", "tierKey", "committedProgramHash"]) {
+      const throwingField = { ...plain(fixedTiers()) };
+      Object.defineProperty(throwingField, field, {
+        enumerable: true,
+        get(): unknown {
+          throw new Error("boom");
+        },
+      });
+      expect(gate(throwingField), field).toEqual({ ok: false, code: "invalid-input" });
+    }
+  });
+
+  it("evidence that is plain data in any other shape is accepted: a null-prototype map, a class instance", () => {
+    const nullProto = Object.assign(Object.create(null) as Record<string, CsdEvidenceTier>, fixedTiers());
+    class Holder {
+      tier0 = fixedTiers().tier0!;
+      tier1 = fixedTiers().tier1!;
+      tier2 = fixedTiers().tier2!;
+      tier3 = fixedTiers().tier3!;
+    }
+    for (const evidence of [nullProto, new Holder()]) {
+      expect(gate(plain(evidence))).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+    }
   });
 });
