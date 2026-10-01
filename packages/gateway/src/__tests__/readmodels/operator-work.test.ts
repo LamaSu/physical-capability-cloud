@@ -275,6 +275,15 @@ describe("job offers", () => {
     expect(dto.sources.job_offer).toMatchObject({ state: "unavailable", count: 0, durability: "memory" });
   });
 
+  it("NEGATIVE: a failed capability read leaves kernel jobs listed but says their capability names are missing", () => {
+    const dto = work({ capabilities: { ok: false }, kernelJobs: { ok: true, value: [kj(job())] } });
+    expect(dto.items[0]).toMatchObject({ source: "kernel_job", capabilityType: null, title: null });
+    expect(dto.sources.kernel_job.state).toBe("read");
+    expect(dto.sources.kernel_job.reason).toMatch(/capabilit/);
+    // With the capabilities read, nothing is missing.
+    expect(work({ kernelJobs: { ok: true, value: [kj(job())] } }).sources.kernel_job.reason).toBeNull();
+  });
+
   it("NEGATIVE (r1 MEDIUM): a failed capability read is not 'no matching offers': the offer source is unavailable", () => {
     // Open offers are matched to the caller's capability types; without them no match can be made.
     const dto = work({ capabilities: { ok: false }, openOffers: { ok: true, value: [offer()] } });
@@ -548,6 +557,13 @@ describe("GET /api/operator/work and /api/operator/income", () => {
       expect(res.statusCode, `offset=${bad}`).toBe(400);
       expect(res.json().error).toBe("invalid_offset");
     }
+    // A repeated parameter arrives as a list: refused as invalid (400), never a crash (500).
+    for (const url of ["/api/operator/work?offset=1&offset=2", "/api/operator/work?limit=1&limit=2", "/api/operator/income?offset=1&offset=2"]) {
+      expect((await get(url)).statusCode, url).toBe(400);
+    }
+    // Identity comes first: a caller with no credential gets 401 whatever its paging says.
+    expect((await get("/api/operator/work?offset=-1", null)).statusCode).toBe(401);
+    expect((await get("/api/operator/income?limit=0", null)).statusCode).toBe(401);
     // Income takes the same bounds.
     expect((await get("/api/operator/income?limit=0")).statusCode).toBe(400);
     expect((await get("/api/operator/income?offset=-1")).statusCode).toBe(400);

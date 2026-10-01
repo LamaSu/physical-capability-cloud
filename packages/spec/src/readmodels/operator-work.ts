@@ -148,9 +148,11 @@ export interface OperatorWorkPay {
   unit: string | null;
   /**
    * What backs the amount:
-   *   escrowed           a real escrow record holds this job's milestone, uncontested: the
-   *                      escrow is funded, active or completing (or a V-next funded state),
-   *                      and the milestone is funded, locked or releasing (record only)
+   *   escrowed           a real escrow record holds this job's milestone, and neither record's
+   *                      status contests it: the escrow is funded, active or completing (or a
+   *                      V-next funded state), and the milestone is funded, locked or releasing
+   *                      (record only). A dispute recorded elsewhere (the job's own status, shown
+   *                      as the item's phase) is not read here.
    *   not_held           a real escrow record that says it does not hold this job's money:
    *                      never funded (created, unfunded, pending), refunded to the payer, or
    *                      released (record only; a recorded release is never proof of payment)
@@ -254,6 +256,7 @@ export interface OperatorWorkSourceState {
   /** memory: the gateway keeps this source in process memory (lost on restart). */
   durability: "durable" | "memory";
   count: number;
+  /** Why nothing is listed; or, for a read source, what its listed items lack; null otherwise. */
   reason: string | null;
 }
 
