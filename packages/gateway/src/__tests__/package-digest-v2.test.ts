@@ -9,13 +9,13 @@
  * The malleability block is the point. If a relayer can reorder, duplicate, or
  * RE-CASE signatures and move the digest without changing a single semantic
  * fact, then one piece of evidence has two package identities and the
- * anti-replay bind is decorative. Each of those must be a NO-OP.
+ * anti-replay bind is decorative. Reordering is a NO-OP (the entries are sorted);
+ * a signer in any spelling but the pinned one is REFUSED, never normalized.
  *
- * Signature shape and case semantics are the ORACLE's (#1395, ingestion owner):
- * `{signer, scheme, sig}`, and signer is CASE-INSENSITIVE — "changing a signer
- * id's case MUST be a no-op". The signer SET is {operator, kernel} per
- * evidence's frozen profile (D1 operator secp256k1-EIP712, D2 kernel
- * ed25519-raw32).
+ * Signature shape is the ORACLE's (#1395, ingestion owner): `{signer, scheme,
+ * sig}`. The signer SET is {operator, kernel} per evidence's frozen profile (D1
+ * operator secp256k1-EIP712, D2 kernel ed25519-raw32). A signer is `0x` +
+ * lowercase hex (an address, 40 digits, or an ed25519 key, 64 digits).
  *
  * GOLDEN STATUS — read before trusting any cross-codebase claim: the byte-exact
  * golden against the oracle's crossconfirm test is still a `todo`. Q1/Q2 are now
@@ -47,29 +47,59 @@ const BODY = {
   evidenceCid: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
 };
 
-// Deliberately mixed case, to prove case never reaches the digest.
-const SIG_A: PackageSignature = { signer: "0xAAA1", scheme: "secp256k1-eip712", sig: "0xsig-a" };
-const SIG_B: PackageSignature = { signer: "0xbbb2", scheme: "ed25519-raw32", sig: "0xsig-b" };
-const SIG_C: PackageSignature = { signer: "0xCCC3", scheme: "secp256k1-eip712", sig: "0xsig-c" };
+// Signers are the two pinned forms: 0x + lowercase hex, an address (40 digits)
+// or an ed25519 key (64 digits). In the sorted order A < B < C.
+const SIGNER_A = `0x${"a1".repeat(20)}`;
+const SIGNER_B = `0x${"b2".repeat(32)}`;
+const SIGNER_C = `0x${"c3".repeat(20)}`;
+const SIG_A: PackageSignature = { signer: SIGNER_A, scheme: "secp256k1-eip712", sig: "0xsig-a" };
+const SIG_B: PackageSignature = { signer: SIGNER_B, scheme: "ed25519-raw32", sig: "0xsig-b" };
+const SIG_C: PackageSignature = { signer: SIGNER_C, scheme: "secp256k1-eip712", sig: "0xsig-c" };
+
+/** Every spelling of a signer that is NOT 0x + 40 or 64 lowercase hex digits. */
+const BAD_SIGNERS: Array<[string, unknown]> = [
+  ["uppercase digits", SIGNER_A.toUpperCase().replace("0X", "0x")],
+  ["EIP-55 style mixed case", `0x${"Aa".repeat(20)}`],
+  ["a 0X prefix", `0X${"a1".repeat(20)}`],
+  ["no prefix", "a1".repeat(20)],
+  ["38 digits", `0x${"a1".repeat(19)}`],
+  ["42 digits", `0x${"a1".repeat(21)}`],
+  ["62 digits", `0x${"b2".repeat(31)}`],
+  ["66 digits", `0x${"b2".repeat(33)}`],
+  ["not hex", `0x${"zz".repeat(20)}`],
+  ["free text", "kernel-key-1"],
+  ["empty", ""],
+  ["just the prefix", "0x"],
+  ["leading space", ` ${SIGNER_A}`],
+  ["trailing newline", `${SIGNER_A}\n`],
+  ["a number", 12345],
+  ["null", null],
+  ["undefined", undefined],
+];
 
 describe("canonicalSignatures — the malleability closure", () => {
-  it("emits signer LOWERCASED and sorted", () => {
+  it("sorts by signer", () => {
     const out = canonicalSignatures([SIG_C, SIG_A, SIG_B]);
-    expect(out.map((s) => s.signer)).toEqual(["0xaaa1", "0xbbb2", "0xccc3"]);
+    expect(out.map((s) => s.signer)).toEqual([SIGNER_A, SIGNER_B, SIGNER_C]);
   });
 
   it("dedups by signer with FIRST occurrence winning", () => {
-    const dup: PackageSignature = { signer: "0xAAA1", scheme: "x", sig: "0xLATER" };
+    const dup: PackageSignature = { signer: SIGNER_A, scheme: "x", sig: "0xLATER" };
     const out = canonicalSignatures([SIG_A, dup]);
     expect(out).toHaveLength(1);
     expect(out[0].sig).toBe("0xsig-a");
   });
 
-  it("treats case-differing signers as ONE signer", () => {
-    // The same address in two spellings must not become two signers, or the
-    // dedup that closes malleability is trivially bypassed.
-    const lower: PackageSignature = { signer: "0xaaa1", scheme: "x", sig: "0xother" };
-    expect(canonicalSignatures([SIG_A, lower])).toHaveLength(1);
+  it("REFUSES a signer that is not 0x + 40 or 64 lowercase hex digits, and never normalizes it (F5)", () => {
+    // The same address in two spellings must not become two package identities,
+    // and must not be quietly repaired either: one accepted spelling, one digest.
+    for (const [name, signer] of BAD_SIGNERS) {
+      expect(() => canonicalSignatures([{ ...SIG_A, signer } as PackageSignature, SIG_B]), name).toThrow(
+        InvalidSignatureEntryError,
+      );
+    }
+    // Both pinned widths are accepted: an address and an ed25519 key.
+    expect(() => canonicalSignatures([SIG_A, SIG_B])).not.toThrow();
   });
 
   it("does not mutate the caller's array or its entries", () => {
@@ -77,9 +107,9 @@ describe("canonicalSignatures — the malleability closure", () => {
     const snapshot = JSON.stringify(input);
     canonicalSignatures(input);
     expect(JSON.stringify(input)).toBe(snapshot);
-    // In particular the caller's original casing survives — normalization
-    // happens in the returned copy, not in place.
-    expect(SIG_A.signer).toBe("0xAAA1");
+    // In particular the caller's entries survive: the sorted copy is a new array.
+    expect(input[0]).toBe(SIG_C);
+    expect(SIG_A.signer).toBe(SIGNER_A);
   });
 
   it("rejects a malformed entry rather than silently skipping it", () => {
@@ -106,26 +136,25 @@ describe("packageDigestV2 — signature malleability must be a NO-OP", () => {
   });
 
   /**
-   * CASE MUST NOT REACH THE DIGEST — oracle #1395, verbatim: "Do NOT depend on
-   * case; changing a signer id's case MUST be a no-op."
+   * CASE MUST NOT REACH THE DIGEST. Oracle #1395: "Do NOT depend on case;
+   * changing a signer id's case MUST be a no-op." Signer ids are EIP-55-checksummed
+   * in some paths and lowercase in others, so if spelling reached the digest the
+   * SAME evidence assembled by two services would hash differently, and both the
+   * oracle's packageHash bind and the gateway's receipt.packageDigest bind would
+   * fail on identical, valid evidence. (The gateway already shipped one EIP-55
+   * casing bug on this seam, #286.)
    *
-   * This is the assertion that matters most for first live mint. Signer ids are
-   * EIP-55-checksummed in some paths and lowercase in others, so if spelling
-   * reached the digest, the SAME evidence assembled by two services would hash
-   * differently and both the oracle's packageHash bind and the gateway's
-   * receipt.packageDigest bind would fail on identical, valid evidence.
-   *
-   * The gateway already shipped exactly one EIP-55 casing bug on this seam
-   * (#286, InvalidAddressError, caught by CI). This test is the guard against
-   * the second.
+   * The producer closes that by accepting ONE spelling, 0x + lowercase hex, and
+   * REFUSING every other. A re-cased signer is not a second digest, and it is not
+   * quietly repaired either, so the producer never emits a digest over a spelling
+   * the oracle or the evidence mirror would treat differently.
    */
-  it("is stable under signer CASE changes", () => {
-    const recased = [
-      { ...SIG_A, signer: "0xaaa1" },
-      { ...SIG_B, signer: "0xBBB2" },
-      { ...SIG_C, signer: "0xccc3" },
-    ];
-    expect(packageDigestV2(BODY, recased)).toBe(base);
+  it("REFUSES a re-cased signer: a case change is never a second digest (F5)", () => {
+    for (const signer of [SIGNER_A, SIGNER_B, SIGNER_C]) {
+      const recased = signer.toUpperCase().replace("0X", "0x");
+      const sigs = [SIG_A, SIG_B, SIG_C].map((s) => (s.signer === signer ? { ...s, signer: recased } : s));
+      expect(() => packageDigestV2(BODY, sigs), recased).toThrow(InvalidSignatureEntryError);
+    }
   });
 
   it("is stable under BODY key insertion order", () => {
@@ -185,10 +214,9 @@ describe("packageDigestV2 — framing", () => {
     expect(pre).toContain(`"${SIGNATURES_KEY}"`);
     // Canonical JSON: keys sorted at all depths, no whitespace.
     expect(pre).not.toMatch(/\s/);
-    // Signers appear lowercased and in canonical order.
-    expect(pre).toContain('"signer":"0xaaa1"');
-    expect(pre).not.toContain("0xAAA1");
-    expect(pre.indexOf("0xaaa1")).toBeLessThan(pre.indexOf("0xbbb2"));
+    // Signers appear exactly as given (they are already lowercase) and in canonical order.
+    expect(pre).toContain(`"signer":"${SIGNER_A}"`);
+    expect(pre.indexOf(SIGNER_A)).toBeLessThan(pre.indexOf(SIGNER_B));
   });
 });
 

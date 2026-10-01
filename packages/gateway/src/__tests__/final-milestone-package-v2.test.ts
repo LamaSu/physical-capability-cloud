@@ -56,6 +56,10 @@ const BODY: FinalMilestonePackageV2Body = {
   evidenceTimeBounds: { start: "1700000000", end: "1700000100" },
 };
 
+// The two signer forms (0x + lowercase hex): the operator's address and the kernel's ed25519 key.
+const SIGNER_OP = `0x${"a1".repeat(20)}`;
+const SIGNER_KERNEL = `0x${"b2".repeat(32)}`;
+
 describe("SIG_DOMAIN_V2", () => {
   it("is keccak256 of the exact domain string", () => {
     // Pinned so a silent domain drift breaks HERE, not at signature-verify time.
@@ -185,15 +189,16 @@ describe("packageBodyHash vs packageDigestV2 — two DIFFERENT hashes", () => {
     // packageDigestV2. Signing the wrong one yields signatures that verify
     // against nothing — at mint, with funds in escrow.
     const sigs: PackageSignature[] = [
-      { signer: "0xAAA1", scheme: "secp256k1-eip712", sig: "0xop" },
-      { signer: "0xbbb2", scheme: "ed25519-raw32", sig: "0xkernel" },
+      { signer: SIGNER_OP, scheme: "secp256k1-eip712", sig: "0xop" },
+      { signer: SIGNER_KERNEL, scheme: "ed25519-raw32", sig: "0xkernel" },
     ];
     expect(computePackageBodyHash(BODY)).not.toBe(packageDigestV2(BODY, sigs));
   });
 
   it("packageBodyHash does NOT depend on the signatures; packageDigestV2 does", () => {
-    const s1: PackageSignature[] = [{ signer: "0xa", scheme: "secp256k1-eip712", sig: "0x1" }];
-    const s2: PackageSignature[] = [{ signer: "0xa", scheme: "secp256k1-eip712", sig: "0x2" }];
+    const kernel: PackageSignature = { signer: SIGNER_KERNEL, scheme: "ed25519-raw32", sig: "0xkernel" };
+    const s1: PackageSignature[] = [{ signer: SIGNER_OP, scheme: "secp256k1-eip712", sig: "0x1" }, kernel];
+    const s2: PackageSignature[] = [{ signer: SIGNER_OP, scheme: "secp256k1-eip712", sig: "0x2" }, kernel];
     // Body hash is what gets signed, so it cannot depend on the signatures —
     // that would be circular.
     expect(computePackageBodyHash(BODY)).toBe(computePackageBodyHash(BODY));

@@ -341,6 +341,20 @@ export class InvalidSignatureEntryError extends Error {
 }
 
 /**
+ * The two signer forms of the frozen profile, `0x` + LOWERCASE hex only: D1's
+ * address (40 digits) and D2's ed25519 public key (64 digits). A signer in any
+ * other spelling (uppercase or EIP-55 mixed case, a `0X` prefix, no prefix, any
+ * other width, not hex at all) is REFUSED, never normalized: one accepted
+ * spelling per signer is what gives one package one digest.
+ *
+ * The mint guard (`assertMintablePackage`) pins each form to its scheme: 40
+ * digits for D1, 64 for D2. This digest-path check cannot: the published golden
+ * (`g2-settlement-vector-golden.json`) is a sample set whose entry labelled
+ * "ed25519" has a 40-digit signer, and its digest must stay byte-identical.
+ */
+const SIGNER_FORM = /^0x(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
  * The malleability closure: dedup by signer (FIRST occurrence wins), then sort
  * by lowercased signerId.
  *
@@ -360,8 +374,11 @@ export function canonicalSignatures(
     if (s === null || typeof s !== "object") {
       throw new InvalidSignatureEntryError("entry is not an object");
     }
-    if (typeof s.signer !== "string" || s.signer.length === 0) {
-      throw new InvalidSignatureEntryError("signer must be a non-empty string");
+    if (typeof s.signer !== "string" || !SIGNER_FORM.test(s.signer)) {
+      throw new InvalidSignatureEntryError(
+        "signer must be 0x + 40 or 64 lowercase hex digits (an address or an ed25519 key); " +
+          "any other spelling is refused, never normalized",
+      );
     }
     const key = s.signer.toLowerCase();
     if (seen.has(key)) continue; // FIRST wins — later duplicates are dropped
