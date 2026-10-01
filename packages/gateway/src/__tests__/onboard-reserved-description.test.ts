@@ -132,6 +132,12 @@ describe("isReservedDescription: ordinary descriptions are not reserved", () => 
     expect(isReservedDescription("\u{1F600}".repeat(1500))).toBe(false);
   });
 
+  it("does not reserve a short description that is only the start of a reserved word, when nothing was cut off", () => {
+    for (const description of ["Proof", "PROVED", "pro", "proofsubmitted", "Proof submitted", "p", ""]) {
+      expect({ description, reserved: isReservedDescription(description) }).toEqual({ description, reserved: false });
+    }
+  });
+
   it("refuses a scan that is cut short only while it could still become a reserved prefix", () => {
     // 1,023 invisible characters and then an "x": the visible text starts with x, not with PROOF.
     expect(isReservedDescription(ZWSP.repeat(1023) + "xROOF SUBMITTED: {}")).toBe(false);

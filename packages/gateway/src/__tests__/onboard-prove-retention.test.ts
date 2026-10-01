@@ -377,6 +377,14 @@ describe("/prove photo retention is bounded (M4)", () => {
     expect((await blobBytes(cid)).equals(PNG_A)).toBe(true);
   });
 
+  it("a proof whose commit succeeds keeps its fresh blob and does not go looking for an orphan", async () => {
+    const regId = await register(app);
+    const commits = databaseCommits();
+    expect((await proveWith(regId, PNG_A)).statusCode).toBe(200);
+    expect(commits.behaviors()).toEqual(["immediate"]); // the transition itself, and no removal check after it
+    expect(storedCids()).toEqual([computeCid(PNG_A)]);
+  });
+
   it("a blob that was already stored, with no record of it, is kept when this proof fails to commit", async () => {
     // The same bytes were stored before, e.g. by an /api/storage upload.
     await new LocalBlobBackend(blobDir).put(PNG_B, { mediaType: "image/png" });
