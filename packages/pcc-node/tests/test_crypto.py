@@ -131,7 +131,7 @@ class TestLoadOrCreateKeys:
 
 
 # ---------------------------------------------------------------------------
-# N35b: verification fails closed; no key file inside the checkout
+# N35b: verification fails closed; a key file inside a checkout is refused when it is loaded or created
 # ---------------------------------------------------------------------------
 
 import errno  # noqa: E402

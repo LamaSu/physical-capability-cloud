@@ -54,8 +54,8 @@ def _require_nacl(action):
 class KeyFileError(RuntimeError):
     """A key file that cannot be used as it is: malformed, holding a public key
     that does not belong to its secret, readable by other users, with more than
-    one name, or about to be created inside a source checkout. Also raised where
-    the platform cannot check that location."""
+    one name, or, at the moment it is loaded or created, inside a source
+    checkout. Also raised where the platform cannot check that location."""
 
 
 def _strict_hex(value, byte_length):
@@ -193,8 +193,9 @@ KEY_PATH_ENV = "PCC_NODE_KEY_PATH"
 
 def default_key_path():
     """Where a node keeps its key pair: ``$PCC_NODE_KEY_PATH`` when set,
-    otherwise ``~/.pcc-node/keys.json``. Either way the file must lie outside
-    every source checkout (see :func:`load_or_create_keys`). The old default,
+    otherwise ``~/.pcc-node/keys.json``. Either way the location is checked when
+    the key is loaded or created (see :func:`load_or_create_keys`), and the file
+    must then lie outside every source checkout. The old default,
     ``./pcc-keys.json``, resolved to a key file committed to the repository
     whenever the node ran from the package directory."""
     override = os.environ.get(KEY_PATH_ENV)
@@ -426,6 +427,11 @@ def _create_key_file(dir_fd, name, key_path, public_hex, secret_hex):
 def load_or_create_keys(path=None):
     """Load existing keys from *path* (default :func:`default_key_path`), or
     create and save new ones there.
+
+    The location is checked when the key is loaded or created, which for a
+    daemon means at every start; nothing watches it afterwards, so a repository
+    created around a key that is already loaded is not noticed until the next
+    start.
 
     Before anything is read or written, the directory the key file lives in is
     opened once and judged as that open directory, never by pathname. It, and

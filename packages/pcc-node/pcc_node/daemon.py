@@ -170,7 +170,9 @@ def run_daemon(config: NodeConfig):
     # A node must not run without its own valid key. Running on with an empty
     # secret would turn a refused key (compromised, inside a checkout, not this
     # user's own, or PyNaCl missing) into unsigned operation, which is the
-    # failure the refusal exists to stop (N35b).
+    # failure the refusal exists to stop (N35b). The key's location is checked
+    # here, when the key is loaded or created, so once per start: a repository
+    # created around the key while the daemon runs is noticed at the next start.
     try:
         public_key, secret_key = load_or_create_keys()
     except Exception as e:
