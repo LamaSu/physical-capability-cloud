@@ -207,15 +207,15 @@ export function makeRegisteredKeyVerifier(): PrimitiveVerifier {
         if (instance === null || instance === undefined) {
           return { met: "pending", detail: ["no registry resolution yet"] };
         }
+        // Each instance field is read once, and the detail reports the kernel that was verified
+        // (E2d: a kernelId getter read twice could verify one kernel and report another).
         const inst = instance as RegisteredKeyInstance;
-        const r = verifyRegisteredKey({
-          snapshot: inst.snapshot,
-          pinned: { registryId, snapshotHash },
-          kernelId: inst.kernelId,
-          signer: inst.signer,
-        });
+        const snapshot = inst.snapshot;
+        const kernelId = inst.kernelId;
+        const signer = inst.signer;
+        const r = verifyRegisteredKey({ snapshot, pinned: { registryId, snapshotHash }, kernelId, signer });
         return r.ok
-          ? { met: true, detail: [`signer resolves for ${inst.kernelId} in the pinned registry`] }
+          ? { met: true, detail: [`signer resolves for ${kernelId} in the pinned registry`] }
           : { met: false, detail: [r.reason] };
       } catch (err) {
         return { met: false, detail: [`malformed instance: ${errorText(err)}`] };

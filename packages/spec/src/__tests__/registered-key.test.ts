@@ -323,3 +323,32 @@ describe("every pin, snapshot and locator field is read once (E2c: F1 was still 
     }
   });
 });
+
+describe("the wrapper reads each instance field once (E2d: F1 still open)", () => {
+  it("a kernelId getter is read once, and the success detail names the kernel that was verified", async () => {
+    let reads = 0;
+    const instance = {
+      snapshot: SNAP,
+      signer: KEY_A,
+      get kernelId() {
+        reads++;
+        return reads <= 1 ? "kernel-a" : "kernel-b";
+      },
+    };
+    const r = await makeRegisteredKeyVerifier().verify(instance as never, PINNED, { vocabVersion: 1 });
+    expect(reads).toBe(1);
+    expect(r).toEqual({ met: true, detail: ["signer resolves for kernel-a in the pinned registry"] });
+  });
+
+  it("reads the instance's snapshot, kernelId and signer exactly once each", async () => {
+    const reads: Record<string, number> = {};
+    const instance = new Proxy({ snapshot: SNAP, kernelId: "kernel-a", signer: KEY_A }, {
+      get(t, p, r) {
+        if (typeof p === "string") reads[p] = (reads[p] ?? 0) + 1;
+        return Reflect.get(t, p, r);
+      },
+    });
+    expect(await makeRegisteredKeyVerifier().verify(instance as never, PINNED, { vocabVersion: 1 })).toMatchObject({ met: true });
+    expect(reads).toEqual({ snapshot: 1, kernelId: 1, signer: 1 });
+  });
+});
