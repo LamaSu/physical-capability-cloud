@@ -407,3 +407,17 @@ describe("wizard device-builder: devices are registered only on a kernel the ses
     expect(devicesOn(kernelId)).toEqual([]);
   });
 });
+
+// Keep this block LAST: the gateway store is a per-process singleton and this
+// test closes it (afterAll's closeStore() is then a no-op).
+describe("wizard device-builder: a process with no store", () => {
+  it("control: with no store at all nothing is guarded and nothing is written, so the honest 'no database' skip stays", async () => {
+    closeStore();
+    const sid = await buildSession(bareApp, {}, { kernelId: uid("kernel-wizdevb-nostore") });
+    const res = await complete(bareApp, {}, sid);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(registerStep(res)?.status).toBe("skipped");
+    expect(registerStep(res)?.message).toContain("no database available");
+    expect(res.json().result.registeredDevices).toEqual([]);
+  });
+});
