@@ -264,6 +264,10 @@ function recordFunding(s: SettlementAxis): OperatorWorkPay["funding"] {
  * do not record (they record operatorAddress), so it never recognizes the kernel operator's proven
  * wallet, the identity this read model uses. That route's authorization is gateway's to fix.
  */
+/** The kernel-job source's reason when the jobs were read but the capabilities they name were not. */
+export const CAPABILITY_NAMES_UNREAD =
+  "The capability records could not be read, so each job's capabilityType and title are null (not known), not absent.";
+
 export const UPDATE_STATUS_UNRECOGNIZED =
   "The status route cannot recognize a kernel's operator yet: it checks an operator id that kernels do not record.";
 
@@ -616,7 +620,11 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
     truncated: shown.truncated,
     nextOffset: shown.nextOffset,
     sources: {
-      kernel_job: sourceState(src.kernelJobs, "durable", "The gateway's job records could not be read.", kernelJobCount),
+      kernel_job: {
+        ...sourceState(src.kernelJobs, "durable", "The gateway's job records could not be read.", kernelJobCount),
+        // The jobs are listed, but each one's capabilityType and title come from the capability read.
+        ...(src.kernelJobs.ok && !src.capabilities.ok ? { reason: CAPABILITY_NAMES_UNREAD } : {}),
+      },
       approval: sourceState(src.approvals, "durable", "The gateway's approval records could not be read.", approvalOnlyCount),
       job_offer: sourceState(offersRead, "memory", "The job-offers store, or the capabilities offers are matched against, could not be read.", offersCount),
       skill_job: { state: "not_attributable", durability: "durable", count: 0, reason: SKILL_JOBS_NOT_ATTRIBUTABLE },

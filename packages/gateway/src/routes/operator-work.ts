@@ -34,20 +34,21 @@ export const OPERATOR_WORK_DEFAULT_LIMIT = OPERATOR_PAGE_DEFAULT_LIMIT;
 export const OPERATOR_WORK_MAX_LIMIT = OPERATOR_PAGE_MAX_LIMIT;
 
 /** `?limit=` (1 to the maximum) and `?offset=` (0 or more), the same for the work list and the income rows. */
-function pageFrom(q: { limit?: string; offset?: string }):
+function pageFrom(q: { limit?: unknown; offset?: unknown }):
   | { ok: true; page: OperatorPage }
   | { ok: false; body: { error: string; message: string } } {
   const page: OperatorPage = { limit: OPERATOR_PAGE_DEFAULT_LIMIT, offset: 0 };
+  // A repeated parameter arrives as a list: anything but one string is invalid, never a crash.
   if (q.limit !== undefined) {
-    const n = Number(q.limit);
+    const n = typeof q.limit === "string" ? Number(q.limit) : Number.NaN;
     if (!Number.isInteger(n) || n < 1 || n > OPERATOR_PAGE_MAX_LIMIT) {
       return { ok: false, body: { error: "invalid_limit", message: `limit must be an integer from 1 to ${OPERATOR_PAGE_MAX_LIMIT}.` } };
     }
     page.limit = n;
   }
   if (q.offset !== undefined) {
-    const n = Number(q.offset);
-    if (q.offset.trim() === "" || !Number.isSafeInteger(n) || n < 0) {
+    const n = typeof q.offset === "string" && q.offset.trim() !== "" ? Number(q.offset) : Number.NaN;
+    if (!Number.isSafeInteger(n) || n < 0) {
       return { ok: false, body: { error: "invalid_offset", message: "offset must be an integer of 0 or more." } };
     }
     page.offset = n;
@@ -65,7 +66,8 @@ function offersReader(): OffersReader | null {
 
 type Load = { ok: true; sources: OperatorWorkSources } | { ok: false; status: 401 | 403 | 503; body: Record<string, unknown> };
 
-function load(req: FastifyRequest): Load {
+/** 401 or 403, decided before anything is validated or read (the job read family's rule). */
+function identityRefusal(req: FastifyRequest): Extract<Load, { ok: false }> | null {
   const caller = jobReadCallerOf(req as unknown as { headers: Record<string, unknown> });
   if (!caller.authenticated) {
     return {
@@ -86,11 +88,19 @@ function load(req: FastifyRequest): Load {
       },
     };
   }
+  return null;
+}
+
+function load(req: FastifyRequest): Load {
+  const refused = identityRefusal(req);
+  if (refused) return refused;
+  // identityRefusal returned null, so the caller has a proven wallet.
+  const wallet = jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }).provenWallet!;
   let store: ReturnType<typeof getStore>;
   let kernels;
   try {
     store = getStore();
-    kernels = findOperatorKernels(caller.provenWallet, store.db);
+    kernels = findOperatorKernels(wallet, store.db);
   } catch (error) {
     req.log.error({ err: error }, "operator read model: kernel read failed");
     return {
@@ -107,8 +117,10 @@ function load(req: FastifyRequest): Load {
 }
 
 export async function operatorWorkRoutes(app: FastifyInstance) {
-  app.get<{ Querystring: { limit?: string; offset?: string } }>("/api/operator/work", async (req, reply) => {
+  app.get<{ Querystring: { limit?: string | string[]; offset?: string | string[] } }>("/api/operator/work", async (req, reply) => {
     const asOf = new Date().toISOString();
+    const refused = identityRefusal(req);
+    if (refused) return reply.code(refused.status).send(refused.body);
     const p = pageFrom(req.query);
     if (!p.ok) return reply.code(400).send(p.body);
     const loaded = load(req);
@@ -117,8 +129,10 @@ export async function operatorWorkRoutes(app: FastifyInstance) {
     return buildOperatorWorkDTO(loaded.sources, asOf, { ...p.page, nowMs: Date.parse(asOf) });
   });
 
-  app.get<{ Querystring: { limit?: string; offset?: string } }>("/api/operator/income", async (req, reply) => {
+  app.get<{ Querystring: { limit?: string | string[]; offset?: string | string[] } }>("/api/operator/income", async (req, reply) => {
     const asOf = new Date().toISOString();
+    const refused = identityRefusal(req);
+    if (refused) return reply.code(refused.status).send(refused.body);
     const p = pageFrom(req.query);
     if (!p.ok) return reply.code(400).send(p.body);
     const loaded = load(req);
