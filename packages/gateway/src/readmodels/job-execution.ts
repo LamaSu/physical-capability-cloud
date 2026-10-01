@@ -311,8 +311,11 @@ const MILESTONE_AMBIGUOUS = new Set(["COMPLETED"]);
 const MILESTONE_REFUNDED = new Set(["REFUNDED", "SETTLED_REFUNDED"]);
 /** Escrow words (escrows.status) that claim everything in the escrow was released. */
 const ESCROW_ALL_RELEASED = new Set(["COMPLETED", "RELEASED", "SETTLED_RELEASED"]);
-/** Escrow words that contradict a release of this job's milestone. */
-const ESCROW_AGAINST_RELEASE = new Set(["REFUNDED", "SETTLED_REFUNDED", "DISPUTED", "SLASHED", "EXPIRED"]);
+/**
+ * Escrow words that contradict a release of this job's milestone. REFUND_PENDING (N79) is a refund the gateway decided
+ * but has not executed on-chain: a milestone claiming release against it is a conflict, never a release.
+ */
+const ESCROW_AGAINST_RELEASE = new Set(["REFUNDED", "SETTLED_REFUNDED", "REFUND_PENDING", "DISPUTED", "SLASHED", "EXPIRED"]);
 
 /** Every word the reconciliation reads, for the test that each one is in the canonical map. */
 export const RECONCILED_WORDS: readonly string[] = Object.freeze([

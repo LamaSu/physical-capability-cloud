@@ -182,7 +182,8 @@ describe("settlement axis", () => {
   });
 
   it("NEGATIVE (review P1-3): a released milestone never beats a refunded, disputed, slashed or expired escrow: a conflict, with its notice", () => {
-    for (const e of ["refunded", "settled_refunded", "disputed", "slashed", "expired"]) {
+    // N79: refund_pending (a refund decided, not yet executed on-chain) contradicts a release too.
+    for (const e of ["refunded", "settled_refunded", "refund_pending", "disputed", "slashed", "expired"]) {
       const dto = build({ settlement: { ok: true, value: linked(escrow({ status: e }), [milestone({ status: "released" })]) } });
       expect(dto.settlement.payout, e).toBe("unknown");
       expect(dto.settlement.payoutUnknownReason, e).toBe("records_conflict");
@@ -239,6 +240,13 @@ describe("settlement axis", () => {
     expect(reconcilePayout(funded, refundedE)).toEqual(ok("not_paid"));
     expect(reconcilePayout(funded, completed)).toEqual(conflict);
     expect(reconcilePayout(completedM, active)).toEqual({ payout: "unknown", unknownReason: "status_ambiguous" });
+    // N79: a refund decided but not executed. Nobody is paid yet, and it contradicts a released milestone.
+    const refundPendingM = v("refund_pending", "escrow_milestone");
+    const refundPendingE = v("refund_pending", "escrow_record");
+    expect(reconcilePayout(refundPendingM, refundPendingE)).toEqual(ok("not_paid"));
+    expect(reconcilePayout(funded, refundPendingE)).toEqual(ok("not_paid"));
+    expect(reconcilePayout(released, refundPendingE)).toEqual(conflict);
+    expect(reconcilePayout(refundPendingM, completed)).toEqual(conflict);
     expect(reconcilePayout(released, unknownE)).toEqual({ payout: "unknown", unknownReason: "status_unrecognized" });
   });
 
