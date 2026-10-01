@@ -244,14 +244,20 @@ describe("GET /api/operators/:slug/status", () => {
     expect(body.agentCardUrls.every((u: string) => u.includes("/agent-card.json"))).toBe(true);
   });
 
-  it("response is cacheable (15s)", async () => {
+  it("[neg] the per-caller status response is never stored, not even in a private cache (astra pack 146, MEDIUM)", async () => {
     const res = await app.inject({
       method: "GET",
       url: `/api/operators/${TEST_OP}/status`,
     });
-    // N84: still cacheable for 15s, but privately: the channels in the body are the caller's own, so no
-    // shared cache may keep or serve it to someone else (this pinned "public, max-age=15" before).
-    expect(res.headers["cache-control"]).toBe("private, max-age=15");
+    // The body is computed from the CALLER's identity (own channels only; admin sees all). A private
+    // cache that may keep it for 15 s without varying on credentials would serve identity A's (or the
+    // admin's) channels to identity B in the same browser after a session switch. So: no-store, and
+    // never a max-age that would make it reusable (this pinned "private, max-age=15" before).
+    const cc = String(res.headers["cache-control"] ?? "");
+    expect(cc).toMatch(/\bno-store\b/);
+    expect(cc).toMatch(/\bprivate\b/);
+    expect(cc).not.toMatch(/max-age=[1-9]/);
+    expect(cc).not.toMatch(/\bpublic\b/);
   });
 
   // ── N84: the channels in this view are the caller's own ───────────────────
