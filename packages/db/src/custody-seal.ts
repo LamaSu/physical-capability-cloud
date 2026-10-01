@@ -298,8 +298,9 @@ function parseBlob(blob: unknown): ParsedBlob {
   if (!iv || iv.length !== IV_BYTES) throw new CustodyBlobMalformedError("bad iv");
   const tag = decodeB64url(tagText);
   if (!tag || tag.length !== TAG_BYTES) throw new CustodyBlobMalformedError("bad tag");
+  // decodeB64url already refuses the empty string, so no empty Buffer can come back here.
   const ciphertext = decodeB64url(ciphertextText);
-  if (!ciphertext || ciphertext.length === 0 || ciphertext.length > MAX_CIPHERTEXT_BYTES) {
+  if (!ciphertext || ciphertext.length > MAX_CIPHERTEXT_BYTES) {
     throw new CustodyBlobMalformedError("bad ciphertext");
   }
   return { kekId, iv, tag, ciphertext };
