@@ -514,8 +514,15 @@ describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
       expect(body.toolCalls).toHaveLength(10);
       expect(body.doneReason).toBe("history_full");
       expect(llm.requests).toHaveLength(1); // no second model call over a full history
-      const stored = persistedMessages(body.conversationId).length;
-      expect(stored).toBeLessThan(256 * 1024 + 8 * 1024);
+      const row = persistedMessages(body.conversationId);
+      expect(row.length).toBeLessThan(256 * 1024 + 8 * 1024);
+      // The cap is not simply lower: the first result still fits and is kept whole; the rest become the notice.
+      const results = (JSON.parse(row).messages as Array<{ role: string; content: unknown }>)
+        .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+        .filter((b: { type?: string }) => b.type === "tool_result") as Array<{ content: string }>;
+      expect(results).toHaveLength(10);
+      expect(results[0].content).not.toContain("history_full");
+      expect(results.filter((r) => r.content.includes("history_full")).length).toBeGreaterThanOrEqual(8);
 
       const next = await chat({ conversationId: body.conversationId, message: "and now?" });
       expect(next.statusCode).toBe(400);

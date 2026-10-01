@@ -264,9 +264,11 @@ const MAX_TOOL_STRING_CHARS = 32 * 1024;
 const MAX_TOOL_BODY_CHARS = 1024 * 1024;
 const MAX_TOOL_RESULT_CHARS = 64 * 1024;
 /**
- * The stored history cap. It is checked before EACH tool result is kept (WP-D
- * round 4, L1), so a conversation's stored history exceeds it by at most one
- * turn's own assistant output plus short notices, never by a turn of results.
+ * The stored history cap, in characters of the SERIALIZED history (blockChars counts
+ * the escaping a tool result's content gets inside the message array's own JSON; astra
+ * pack 91b F5). It is checked before EACH tool result is kept (WP-D round 4, L1), so a
+ * conversation's stored history exceeds it by at most one turn's own assistant output
+ * plus short notices, never by a turn of results.
  */
 const MAX_HISTORY_CHARS = 256 * 1024;
 /**
@@ -532,6 +534,19 @@ function saveConversation(record: ConversationRecord): void {
 /** Size of the stored history, in characters of JSON. */
 function historyChars(record: ConversationRecord): number {
   return JSON.stringify(record.messages).length;
+}
+
+/**
+ * What one content block adds to historyChars(): its size AS THE HISTORY STORES IT
+ * (astra pack 91b F5). A tool result's `content` is itself a JSON string, and it sits
+ * inside the message array's own JSON, so every quote and backslash in it is escaped a
+ * second time (a quote in the page is two characters in the content and four in the
+ * row), and the block adds its own keys. `content.length` counted none of that, so a
+ * page of quotation marks took the history to about 1.5 times its cap. The +1 is the
+ * comma that separates the block from the next one.
+ */
+function blockChars(block: AnthropicMessageContent): number {
+  return JSON.stringify(block).length + 1;
 }
 
 // ── Caller principal (WP-D D6, R5) ──────────────────────────────────
@@ -1720,13 +1735,13 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
           }
           const outcome = await runToolUse(block.name, block.input ?? {});
           toolCalls.push(outcome.trace);
-          let content = outcome.content;
-          if (historyFull || historyUsed + content.length > MAX_HISTORY_CHARS) {
-            content = JSON.stringify(HISTORY_FULL_RESULT);
+          let kept: AnthropicMessageContent = { type: "tool_result", tool_use_id: block.id, content: outcome.content };
+          if (historyFull || historyUsed + blockChars(kept) > MAX_HISTORY_CHARS) {
+            kept = { type: "tool_result", tool_use_id: block.id, content: JSON.stringify(HISTORY_FULL_RESULT) };
             historyFull = true;
           }
-          historyUsed += content.length;
-          toolResultsForNextTurn.push({ type: "tool_result", tool_use_id: block.id, content });
+          historyUsed += blockChars(kept);
+          toolResultsForNextTurn.push(kept);
         }
       }
 
