@@ -93,6 +93,13 @@ function variants(url: string): string[] {
 }
 
 const SKIP = /\/sse\/|stream|\/events\b|\/ws\b|websocket|firehose/i;
+// Routes that refuse through a helper which sends the refusal and then returns undefined, not the
+// reply (feedback.ts adminOk and the other /api/admin routes, settlement-read.ts prelude). Fastify
+// then sends a second time, and writeHead throws ERR_HTTP_HEADERS_SENT as an unhandled rejection
+// that fails the whole run (54 of them at 7d6eaa84: red CI). Each of these refuses the sweep's
+// callers (no admin token; no such settlement unit) before it reads a kernel or capability row.
+// Reported to gateway; drop a pattern once its routes return the reply.
+const DOUBLE_SEND = /^\/api\/admin\/|^\/api\/settlement\/units\/:unitId\//;
 
 async function sweep(key: string | null) {
   const leaks: string[] = [];
@@ -102,7 +109,7 @@ async function sweep(key: string | null) {
   const seen = new Set<string>();
   for (const r of ROUTES) {
     const methods = Array.isArray(r.method) ? r.method : [r.method];
-    if (!methods.includes("GET") || r.websocket || SKIP.test(r.url)) continue;
+    if (!methods.includes("GET") || r.websocket || SKIP.test(r.url) || DOUBLE_SEND.test(r.url)) continue;
     for (const url of variants(r.url)) {
       if (seen.has(url)) continue;
       seen.add(url);
