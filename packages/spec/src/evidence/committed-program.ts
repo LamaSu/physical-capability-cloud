@@ -45,6 +45,13 @@
  * evidence above would silently weaken the promise. As authored,
  * document-print-and-mail is eligible only at tier 0, so its tier2 program
  * stays pinned but cannot be funded until the CSD and its verifiers are fixed.
+ *
+ * The production gate takes no overrides. `assertAcceptedProgramForTier(input)`
+ * always resolves against `COMMITTED_PROGRAM_REGISTRY` and the built-in
+ * primitive vocabulary, so a caller cannot hand it a registry, or a primitive
+ * index that marks every verifier "live", to fund a tier (E8 F4). The
+ * registry- and index-injecting form, `assertAcceptedProgramForTierWith`, is for
+ * tests only and is deliberately absent from `evidence/index.ts`.
  */
 
 import type { CsdEvidenceTier } from "../csd/schema.js";
@@ -360,9 +367,17 @@ export type AcceptedProgramGateResult =
       reasons?: string[];
     };
 
+/** What the test-only form of the gate can override. The production gate takes none of it. */
 export interface AcceptedProgramGateOptions {
   /** Primitive index eligibility resolves against. Defaults to the v1 vocabulary. */
   primitiveIndex?: EligibilityOptions["index"];
+}
+
+export interface AcceptedProgramGateInput {
+  csd: string;
+  tierKey: string;
+  evidence: Readonly<Record<string, CsdEvidenceTier>>;
+  committedProgramHash: string | null;
 }
 
 /**
@@ -374,15 +389,30 @@ export interface AcceptedProgramGateOptions {
  * passes `checkCommittedProgramForTier` for the CSD's own tier. On success it
  * returns the registry pins the accepted deal must seal (`requiredRegistryPins`),
  * taken from the same server-resolved CSD tiers the gate just checked.
+ *
+ * It takes NO overrides: the registry is `COMMITTED_PROGRAM_REGISTRY` and the
+ * primitive index is the built-in vocabulary, so what counts as a live verifier
+ * is the evidence lane's data, never the caller's (E8 F4). A second or third
+ * argument is a type error, and is ignored at runtime.
  */
-export function assertAcceptedProgramForTier(
-  input: {
-    csd: string;
-    tierKey: string;
-    evidence: Readonly<Record<string, CsdEvidenceTier>>;
-    committedProgramHash: string | null;
-  },
-  registry: readonly CommittedProgramEntry[] = COMMITTED_PROGRAM_REGISTRY,
+export function assertAcceptedProgramForTier(input: AcceptedProgramGateInput): AcceptedProgramGateResult {
+  return assertAcceptedProgramForTierWith(input, COMMITTED_PROGRAM_REGISTRY);
+}
+
+/**
+ * TEST-ONLY. `assertAcceptedProgramForTier` with an injectable registry and
+ * primitive index, so tests can drive the program, tier and eligibility legs
+ * with fixtures. It is exported from this module and deliberately NOT from
+ * `evidence/index.ts`, so it is not on the package's public surface. spec's
+ * package.json `exports` map exposes only ".", "./schemas", "./identity" and
+ * "./tool-manifests", so a package consumer cannot deep-import this module
+ * either. Production code must call `assertAcceptedProgramForTier`: a caller
+ * that could inject the index could mark every verifier live and fund a tier
+ * whose evidence nobody can check.
+ */
+export function assertAcceptedProgramForTierWith(
+  input: AcceptedProgramGateInput,
+  registry: readonly CommittedProgramEntry[],
   options: AcceptedProgramGateOptions = {},
 ): AcceptedProgramGateResult {
   const resolved = resolveAcceptedProgram(input.csd, input.tierKey, registry);

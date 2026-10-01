@@ -7,6 +7,7 @@ import {
   PRINT_AND_MAIL_INDEPENDENCE_PROGRAM,
   PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH,
   assertAcceptedProgramForTier,
+  assertAcceptedProgramForTierWith,
   requiredRegistryPins,
   checkCommittedProgramForTier,
   computeCommittedProgramHash,
@@ -15,6 +16,9 @@ import {
   type CommittedProgram,
   type CommittedProgramEntry,
 } from "../evidence/committed-program.js";
+import * as committedProgramModule from "../evidence/committed-program.js";
+import * as evidenceIndex from "../evidence/index.js";
+import * as packageRoot from "../index.js";
 import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
 import type { CsdEvidenceTier } from "../csd/schema.js";
 
@@ -206,7 +210,7 @@ describe("assertAcceptedProgramForTier — the pre-funding gate (required negati
     committedProgramHash: string | null,
     registry: readonly CommittedProgramEntry[] = COMMITTED_PROGRAM_REGISTRY,
   ) =>
-    assertAcceptedProgramForTier(
+    assertAcceptedProgramForTierWith(
       { csd: CSD, tierKey, evidence: fixedTiers(), committedProgramHash },
       registry,
       { primitiveIndex: LIVE },
@@ -283,7 +287,7 @@ describe("assertAcceptedProgramForTier — the funded tier must be verifiable en
     committedProgramHash: string | null,
     evidence: Record<string, CsdEvidenceTier>,
     primitiveIndex?: typeof LIVE,
-  ) => assertAcceptedProgramForTier({ csd: CSD, tierKey, evidence, committedProgramHash }, COMMITTED_PROGRAM_REGISTRY, { primitiveIndex });
+  ) => assertAcceptedProgramForTierWith({ csd: CSD, tierKey, evidence, committedProgramHash }, COMMITTED_PROGRAM_REGISTRY, { primitiveIndex });
 
   it("print-and-mail as authored cannot be funded at tier2, and the reasons say why", () => {
     const r = gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, tiers);
@@ -364,7 +368,7 @@ describe("requiredRegistryPins — what the accepted deal must pin (bus #3391)",
       reasons: ['tier1: "ident.registered_key" names no registryId, so the deal cannot pin its registry'],
     });
     expect(requiredRegistryPins(t, 0)).toEqual({ ok: true, pins: [] });
-    const r = assertAcceptedProgramForTier(
+    const r = assertAcceptedProgramForTierWith(
       { csd: CSD, tierKey: "tier2", evidence: t, committedProgramHash: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH },
       COMMITTED_PROGRAM_REGISTRY,
       { primitiveIndex: LIVE },
@@ -381,7 +385,7 @@ describe("requiredRegistryPins — what the accepted deal must pin (bus #3391)",
     for (const bad of ["pcc.registry." + String.fromCharCode(0x212a) + ".v1", "pcc registry", "pcc.registry.v1" + String.fromCharCode(0x7f), "x".repeat(129)]) {
       const r = requiredRegistryPins(withId(bad), 1);
       expect(r.ok, JSON.stringify(bad)).toBe(false);
-      const g = assertAcceptedProgramForTier(
+      const g = assertAcceptedProgramForTierWith(
         { csd: CSD, tierKey: "tier2", evidence: withId(bad), committedProgramHash: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH },
         COMMITTED_PROGRAM_REGISTRY,
         { primitiveIndex: LIVE },
@@ -392,5 +396,78 @@ describe("requiredRegistryPins — what the accepted deal must pin (bus #3391)",
       ok: true,
       pins: [{ primitiveId: "ident.registered_key", registryId: "x".repeat(128) }],
     });
+  });
+});
+
+describe("assertAcceptedProgramForTier — the production gate takes no overrides (E8 F4)", () => {
+  /** The production gate through a cast: JS, or a cast, can still hand it a 2nd and 3rd argument. */
+  const smuggle = assertAcceptedProgramForTier as unknown as (input: unknown, registry?: unknown, options?: unknown) => unknown;
+  const input = (evidence: Record<string, CsdEvidenceTier> = fixedTiers()) => ({
+    csd: CSD,
+    tierKey: "tier2",
+    evidence,
+    committedProgramHash: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH,
+  });
+
+  it("declares exactly one parameter", () => {
+    expect(assertAcceptedProgramForTier.length).toBe(1);
+  });
+
+  it("an all-live primitive index passed as a 3rd argument is ignored: tier2 is still not eligible", () => {
+    const r = smuggle(input(), COMMITTED_PROGRAM_REGISTRY, { primitiveIndex: LIVE });
+    expect(r).toMatchObject({ ok: false, code: "tier-not-eligible" });
+    expect((r as { reasons: string[] }).reasons.length).toBeGreaterThan(0);
+    expect((r as { reasons: string[] }).reasons.every((x) => x.includes("verifier not implemented"))).toBe(true);
+    // The same call through the test-only form funds it, which is exactly why that form is test-only.
+    expect(assertAcceptedProgramForTierWith(input(), COMMITTED_PROGRAM_REGISTRY, { primitiveIndex: LIVE })).toEqual({
+      ok: true,
+      registryPins: KERNEL_KEY_PIN,
+    });
+  });
+
+  it("a registry passed as a 2nd argument is ignored: only COMMITTED_PROGRAM_REGISTRY resolves programs", () => {
+    const weaker = [entry("tier2", PRINT_ONLY)];
+    const r = smuggle({ ...input(), committedProgramHash: weaker[0]!.programHash }, weaker, { primitiveIndex: LIVE });
+    expect(r).toEqual({ ok: false, code: "program-hash-mismatch" });
+  });
+
+  it("print-and-mail, as authored and as fixed, cannot be funded above tier 0: its built-in verifiers are stubs", () => {
+    for (const evidence of [tiers, fixedTiers()]) {
+      const r = assertAcceptedProgramForTier(input(evidence));
+      expect(r).toMatchObject({ ok: false, code: "tier-not-eligible" });
+    }
+    expect(assertAcceptedProgramForTier({ ...input(), tierKey: "tier1", committedProgramHash: null })).toEqual({
+      ok: false,
+      code: "no-committed-program",
+    });
+  });
+
+  it("tier 0 is unaffected: it takes no program and is fundable", () => {
+    expect(assertAcceptedProgramForTier({ ...input(), tierKey: "tier0", committedProgramHash: null })).toEqual({
+      ok: true,
+      registryPins: [],
+    });
+  });
+});
+
+describe("the public surface keeps the override form of the gate test-only (E8 F4)", () => {
+  const OVERRIDE_FORM = "assertAcceptedProgramForTierWith";
+
+  it("the module exports it, so tests import it from the module path", () => {
+    expect(Object.keys(committedProgramModule)).toContain(OVERRIDE_FORM);
+  });
+
+  it("neither evidence/index.ts nor the package root exposes it (and both expose the production gate)", () => {
+    expect(Object.keys(evidenceIndex)).toContain("assertAcceptedProgramForTier");
+    expect(Object.keys(packageRoot)).toContain("assertAcceptedProgramForTier");
+    expect(Object.keys(evidenceIndex)).not.toContain(OVERRIDE_FORM);
+    expect(Object.keys(packageRoot)).not.toContain(OVERRIDE_FORM);
+  });
+
+  it("evidence/index.ts re-exports every other runtime export of the module, so the explicit list loses nothing", () => {
+    const expected = Object.keys(committedProgramModule).filter((name) => name !== OVERRIDE_FORM);
+    expect(expected.length).toBeGreaterThan(10);
+    expect(expected.filter((name) => !(name in evidenceIndex))).toEqual([]);
+    expect(expected.filter((name) => !(name in packageRoot))).toEqual([]);
   });
 });
