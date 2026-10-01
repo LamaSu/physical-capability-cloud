@@ -263,10 +263,16 @@ export interface OperatorWorkDTO {
   asOf: string;
   /** The caller's kernels that scope this read: kernels whose operatorAddress is the caller. */
   kernels: Array<{ kernelId: string; name: string | null }>;
+  /** One page of the sorted list (`?limit=`, `?offset=`). */
   items: OperatorWorkItem[];
+  /** Every item, across all pages. */
   total: number;
-  /** True when `items` was cut to the limit; `total` counts everything. */
+  /** Where this page starts in the sorted list. */
+  offset: number;
+  /** True when items exist after this page; `nextOffset` reads them. */
   truncated: boolean;
+  /** The offset of the next page, or null on the last page. The list is re-read each time, so it can change between pages. */
+  nextOffset: number | null;
   sources: Record<OperatorWorkSource, OperatorWorkSourceState>;
 }
 
@@ -304,10 +310,19 @@ export interface OperatorIncomeDTO {
   schemaId: typeof OPERATOR_INCOME_SCHEMA_ID;
   asOf: string;
   kernels: Array<{ kernelId: string; name: string | null }>;
+  /** One page of rows, ordered by job (`?limit=`, `?offset=`, the same bounds as the work list). */
   rows: OperatorIncomeRow[];
-  /** Sums of `rows` only, per payout status and currency. */
+  /** Every row, across all pages. */
+  total: number;
+  /** Where this page starts. */
+  offset: number;
+  /** True when rows exist after this page; `nextOffset` reads them. */
+  truncated: boolean;
+  /** The offset of the next page, or null on the last page. */
+  nextOffset: number | null;
+  /** Sums of every row (all pages, not only this one), per payout status and currency. */
   totalsByStatus: OperatorIncomeTotal[];
-  /** Rows left out of the totals because their amount or decimals are unknown. */
+  /** Rows, across all pages, left out of the totals because their amount or decimals are unknown. */
   uncountedRows: number;
   /** False until a per-operator settlement index exists. */
   historyAvailable: boolean;

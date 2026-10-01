@@ -23,12 +23,37 @@ import {
   buildOperatorWorkDTO,
   findOperatorKernels,
   loadOperatorWorkSources,
+  OPERATOR_PAGE_DEFAULT_LIMIT,
+  OPERATOR_PAGE_MAX_LIMIT,
   type OffersReader,
+  type OperatorPage,
   type OperatorWorkSources,
 } from "../readmodels/operator-work.js";
 
-export const OPERATOR_WORK_DEFAULT_LIMIT = 200;
-export const OPERATOR_WORK_MAX_LIMIT = 500;
+export const OPERATOR_WORK_DEFAULT_LIMIT = OPERATOR_PAGE_DEFAULT_LIMIT;
+export const OPERATOR_WORK_MAX_LIMIT = OPERATOR_PAGE_MAX_LIMIT;
+
+/** `?limit=` (1 to the maximum) and `?offset=` (0 or more), the same for the work list and the income rows. */
+function pageFrom(q: { limit?: string; offset?: string }):
+  | { ok: true; page: OperatorPage }
+  | { ok: false; body: { error: string; message: string } } {
+  const page: OperatorPage = { limit: OPERATOR_PAGE_DEFAULT_LIMIT, offset: 0 };
+  if (q.limit !== undefined) {
+    const n = Number(q.limit);
+    if (!Number.isInteger(n) || n < 1 || n > OPERATOR_PAGE_MAX_LIMIT) {
+      return { ok: false, body: { error: "invalid_limit", message: `limit must be an integer from 1 to ${OPERATOR_PAGE_MAX_LIMIT}.` } };
+    }
+    page.limit = n;
+  }
+  if (q.offset !== undefined) {
+    const n = Number(q.offset);
+    if (q.offset.trim() === "" || !Number.isSafeInteger(n) || n < 0) {
+      return { ok: false, body: { error: "invalid_offset", message: "offset must be an integer of 0 or more." } };
+    }
+    page.offset = n;
+  }
+  return { ok: true, page };
+}
 
 function offersReader(): OffersReader | null {
   try {
@@ -82,30 +107,23 @@ function load(req: FastifyRequest): Load {
 }
 
 export async function operatorWorkRoutes(app: FastifyInstance) {
-  app.get<{ Querystring: { limit?: string } }>("/api/operator/work", async (req, reply) => {
+  app.get<{ Querystring: { limit?: string; offset?: string } }>("/api/operator/work", async (req, reply) => {
     const asOf = new Date().toISOString();
-    let limit = OPERATOR_WORK_DEFAULT_LIMIT;
-    if (req.query.limit !== undefined) {
-      const n = Number(req.query.limit);
-      if (!Number.isInteger(n) || n < 1 || n > OPERATOR_WORK_MAX_LIMIT) {
-        return reply.code(400).send({
-          error: "invalid_limit",
-          message: `limit must be an integer from 1 to ${OPERATOR_WORK_MAX_LIMIT}.`,
-        });
-      }
-      limit = n;
-    }
+    const p = pageFrom(req.query);
+    if (!p.ok) return reply.code(400).send(p.body);
     const loaded = load(req);
     if (!loaded.ok) return reply.code(loaded.status).send(loaded.body);
     reply.header("cache-control", "no-store");
-    return buildOperatorWorkDTO(loaded.sources, asOf, { limit, nowMs: Date.parse(asOf) });
+    return buildOperatorWorkDTO(loaded.sources, asOf, { ...p.page, nowMs: Date.parse(asOf) });
   });
 
-  app.get("/api/operator/income", async (req, reply) => {
+  app.get<{ Querystring: { limit?: string; offset?: string } }>("/api/operator/income", async (req, reply) => {
     const asOf = new Date().toISOString();
+    const p = pageFrom(req.query);
+    if (!p.ok) return reply.code(400).send(p.body);
     const loaded = load(req);
     if (!loaded.ok) return reply.code(loaded.status).send(loaded.body);
     reply.header("cache-control", "no-store");
-    return buildOperatorIncomeDTO(loaded.sources, asOf);
+    return buildOperatorIncomeDTO(loaded.sources, asOf, p.page);
   });
 }

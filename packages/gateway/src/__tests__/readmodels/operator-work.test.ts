@@ -344,9 +344,10 @@ describe("OperatorIncomeDTO", () => {
       AS_OF,
     );
     expect(dto.schemaId).toBe("pcc.operator-income/v1");
-    expect(dto.rows.map((r) => r.jobId)).toEqual(["r", "h1", "h2"]);
-    expect(dto.rows[0]).toMatchObject({ workRef: "kernel_job:r", payout: "reported_released", amountBaseUnits: "12500000", settledAt: null });
-    expect(dto.rows[0]!.moneyStatus?.sourceStatus).toBe("released");
+    expect(dto.rows.map((r) => r.jobId)).toEqual(["h1", "h2", "r"]);
+    const r = dto.rows.find((row) => row.jobId === "r")!;
+    expect(r).toMatchObject({ workRef: "kernel_job:r", payout: "reported_released", amountBaseUnits: "12500000", settledAt: null });
+    expect(r.moneyStatus?.sourceStatus).toBe("released");
     expect(dto.totalsByStatus).toEqual([
       { status: "not_paid", currency: "USDC", decimals: 6, amountBaseUnits: "8000000", rows: 2 },
       { status: "reported_released", currency: "USDC", decimals: 6, amountBaseUnits: "12500000", rows: 1 },
@@ -394,6 +395,37 @@ describe("OperatorIncomeDTO", () => {
 // ── Routes on a real (in-memory) store ──────────────────────────────────────
 
 const OPERATOR_NYC = "0x1111111111111111111111111111111111111111"; // seeded kernel-nyc operatorAddress
+
+describe("NEGATIVE (r1 MEDIUM): a truncated list can be continued, and income is bounded", () => {
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => kj(job({ id: `job-${String(i).padStart(4, "0")}` }), linked()));
+
+  it("work: past the limit, nextOffset reads the rest; the last page says there is no more", () => {
+    const src = sources({ kernelJobs: { ok: true, value: many(501) } });
+    const first = buildOperatorWorkDTO(src, AS_OF, { limit: 500, offset: 0, nowMs: NOW });
+    expect(first).toMatchObject({ total: 501, offset: 0, truncated: true, nextOffset: 500 });
+    expect(first.items).toHaveLength(500);
+    const rest = buildOperatorWorkDTO(src, AS_OF, { limit: 500, offset: first.nextOffset!, nowMs: NOW });
+    expect(rest).toMatchObject({ total: 501, offset: 500, truncated: false, nextOffset: null });
+    expect(rest.items).toHaveLength(1);
+    // Every item is reachable exactly once across the pages.
+    const ids = [...first.items, ...rest.items].map((i) => i.id);
+    expect(new Set(ids).size).toBe(501);
+  });
+
+  it("income: rows come in pages of the same bounds, in a stable order; the totals count every row", () => {
+    const src = sources({ kernelJobs: { ok: true, value: many(3) } });
+    const page1 = buildOperatorIncomeDTO(src, AS_OF, { limit: 2, offset: 0 });
+    expect(page1).toMatchObject({ total: 3, offset: 0, truncated: true, nextOffset: 2 });
+    expect(page1.rows.map((r) => r.jobId)).toEqual(["job-0000", "job-0001"]);
+    const page2 = buildOperatorIncomeDTO(src, AS_OF, { limit: 2, offset: 2 });
+    expect(page2).toMatchObject({ total: 3, offset: 2, truncated: false, nextOffset: null });
+    expect(page2.rows.map((r) => r.jobId)).toEqual(["job-0002"]);
+    // 3 x 12.50 USDC, not_paid: the totals do not depend on the page.
+    expect(page1.totalsByStatus).toEqual(page2.totalsByStatus);
+    expect(page1.totalsByStatus).toEqual([{ status: "not_paid", currency: "USDC", decimals: 6, amountBaseUnits: "37500000", rows: 3 }]);
+  });
+});
 
 describe("GET /api/operator/work and /api/operator/income", () => {
   let app: FastifyInstance;
@@ -507,6 +539,19 @@ describe("GET /api/operator/work and /api/operator/income", () => {
     const two = (await get("/api/operator/work?limit=2")).json();
     expect(two.items).toHaveLength(2);
     expect(two.truncated).toBe(true);
+    // The next page continues where the first ended (r1 MEDIUM: a cut list had no continuation).
+    const next = (await get(`/api/operator/work?limit=2&offset=${two.nextOffset}`)).json();
+    expect(next.offset).toBe(2);
+    expect(next.items.map((i: { id: string }) => i.id)).not.toContain(two.items[0].id);
+    for (const bad of ["-1", "1.5", "abc", ""]) {
+      const res = await get(`/api/operator/work?offset=${bad}`);
+      expect(res.statusCode, `offset=${bad}`).toBe(400);
+      expect(res.json().error).toBe("invalid_offset");
+    }
+    // Income takes the same bounds.
+    expect((await get("/api/operator/income?limit=0")).statusCode).toBe(400);
+    expect((await get("/api/operator/income?offset=-1")).statusCode).toBe(400);
+    expect((await get("/api/operator/income?limit=1")).json().rows.length).toBeLessThanOrEqual(1);
   });
 
   it("income lists the operator's linked jobs only, with no history claimed", async () => {

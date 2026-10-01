@@ -511,8 +511,31 @@ const sourceState = (
     ? { state: "read", durability, count, reason: null }
     : { state: "unavailable", durability, count: 0, reason: reasonIfFailed };
 
+/** The work list's and the income rows' page bounds (astra r1 on #389, MEDIUM: a cut list had no continuation). */
+export const OPERATOR_PAGE_DEFAULT_LIMIT = 200;
+export const OPERATOR_PAGE_MAX_LIMIT = 500;
+
+export interface OperatorPage {
+  limit: number;
+  offset: number;
+}
+
+/** One page of a sorted list, and where the next one starts. */
+function pageOf<T>(all: readonly T[], page: OperatorPage) {
+  const end = page.offset + page.limit;
+  return {
+    page: all.slice(page.offset, end),
+    total: all.length,
+    offset: page.offset,
+    truncated: end < all.length,
+    nextOffset: end < all.length ? end : null,
+  };
+}
+
 export interface OperatorWorkBuildOptions {
   limit: number;
+  /** Where the page starts in the sorted list; 0 when absent. */
+  offset?: number;
   nowMs: number;
 }
 
@@ -577,6 +600,7 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
 
+  const shown = pageOf(items, { limit: opts.limit, offset: opts.offset ?? 0 });
   const offersRead: SourceRead<unknown[]> = offersOk ? { ok: true, value: [] } : { ok: false };
   const kernelJobCount = src.kernelJobs.ok ? src.kernelJobs.value.length : 0;
   const approvalOnlyCount = approvals.filter((a) => !jobIds.has(a.jobId)).length;
@@ -586,9 +610,11 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
     schemaId: OPERATOR_WORK_SCHEMA_ID,
     asOf,
     kernels: src.kernels.map((k) => ({ kernelId: k.id, name: nonEmpty(k.name) })),
-    items: items.slice(0, opts.limit),
-    total: items.length,
-    truncated: items.length > opts.limit,
+    items: shown.page,
+    total: shown.total,
+    offset: shown.offset,
+    truncated: shown.truncated,
+    nextOffset: shown.nextOffset,
     sources: {
       kernel_job: sourceState(src.kernelJobs, "durable", "The gateway's job records could not be read.", kernelJobCount),
       approval: sourceState(src.approvals, "durable", "The gateway's approval records could not be read.", approvalOnlyCount),
@@ -605,7 +631,11 @@ export const INCOME_HISTORY_REASON =
   "events, which it does not index per operator, so these rows show only what the escrow records say about " +
   "your kernels' jobs.";
 
-export function buildOperatorIncomeDTO(src: OperatorWorkSources, asOf: string): OperatorIncomeDTO {
+export function buildOperatorIncomeDTO(
+  src: OperatorWorkSources,
+  asOf: string,
+  page: OperatorPage = { limit: OPERATOR_PAGE_DEFAULT_LIMIT, offset: 0 },
+): OperatorIncomeDTO {
   const rows: OperatorIncomeRow[] = [];
   let unreadableJobs = 0;
   if (src.kernelJobs.ok) {
@@ -631,6 +661,8 @@ export function buildOperatorIncomeDTO(src: OperatorWorkSources, asOf: string): 
     }
   }
 
+  // A stable order, so pages do not overlap or skip while the rows are unchanged.
+  rows.sort((a, b) => (a.workRef < b.workRef ? -1 : a.workRef > b.workRef ? 1 : 0));
   const totals = new Map<string, OperatorIncomeTotal & { sum: bigint }>();
   let uncountedRows = 0;
   for (const r of rows) {
@@ -645,6 +677,7 @@ export function buildOperatorIncomeDTO(src: OperatorWorkSources, asOf: string): 
     t.rows++;
     totals.set(key, t);
   }
+  const shown = pageOf(rows, page);
   const totalsByStatus: OperatorIncomeTotal[] = [...totals.values()]
     .map(({ sum, ...t }) => ({ ...t, amountBaseUnits: sum.toString() }))
     .sort((a, b) => (a.status + a.currency < b.status + b.currency ? -1 : 1));
@@ -653,7 +686,11 @@ export function buildOperatorIncomeDTO(src: OperatorWorkSources, asOf: string): 
     schemaId: OPERATOR_INCOME_SCHEMA_ID,
     asOf,
     kernels: src.kernels.map((k) => ({ kernelId: k.id, name: nonEmpty(k.name) })),
-    rows,
+    rows: shown.page,
+    total: shown.total,
+    offset: shown.offset,
+    truncated: shown.truncated,
+    nextOffset: shown.nextOffset,
     totalsByStatus,
     uncountedRows,
     historyAvailable: false,
