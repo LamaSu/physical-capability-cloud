@@ -7,7 +7,12 @@
  *   - per user per UTC day;
  *   - global per UTC month.
  * A call whose worst case would cross any cap is refused (BudgetStop) and never
- * made. After the call, its reservation is settled to the actual usage.
+ * made. After the call, its reservation is settled to the actual usage: the TRUE
+ * cost, never less. Money already spent cannot be un-spent, so a settlement that
+ * exceeds its reservation (an OVERRUN: the upper bound did not hold) is recorded
+ * as it was, flagged in the ledger, and stops that payer for the rest of the UTC
+ * day, whatever the caps. The global kill switch is a separate control and is
+ * not touched by an overrun.
  *
  * Money is integer nano-USD (1e-9 USD), so no float ever decides a refusal.
  */
@@ -44,7 +49,7 @@ export interface Usage {
   readonly cache_read_input_tokens?: number | null;
 }
 
-export type BudgetStopReason = "per-session" | "per-user-day" | "per-month" | "disabled";
+export type BudgetStopReason = "per-session" | "per-user-day" | "per-month" | "disabled" | "overrun";
 
 export class BudgetStop extends Error {
   readonly retryable = false;
@@ -56,7 +61,9 @@ export class BudgetStop extends Error {
     super(
       reason === "disabled"
         ? "the hosted agent is disabled"
-        : `budget stop (${reason}): spent ${spentNanoUsd} of ${capNanoUsd} nano-USD, and this call's worst case would cross the cap`,
+        : reason === "overrun"
+          ? "an earlier call cost more than its reservation, so this payer is stopped for the rest of the UTC day"
+          : `budget stop (${reason}): spent ${spentNanoUsd} of ${capNanoUsd} nano-USD, and this call's worst case would cross the cap`,
     );
     this.name = "BudgetStop";
   }
@@ -81,6 +88,17 @@ CREATE TABLE IF NOT EXISTS hosted_agent_spend (
 CREATE INDEX IF NOT EXISTS hosted_agent_spend_session ON hosted_agent_spend (session_id);
 CREATE INDEX IF NOT EXISTS hosted_agent_spend_user_day ON hosted_agent_spend (user_key, day);
 CREATE INDEX IF NOT EXISTS hosted_agent_spend_month ON hosted_agent_spend (month);
+-- A settlement that cost more than its reservation. One row stops that payer for the rest of its UTC day.
+CREATE TABLE IF NOT EXISTS hosted_agent_overrun (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  user_key TEXT NOT NULL,
+  day TEXT NOT NULL,
+  reserved_nano_usd INTEGER NOT NULL CHECK (reserved_nano_usd >= 0),
+  actual_nano_usd INTEGER NOT NULL CHECK (actual_nano_usd >= 0),
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS hosted_agent_overrun_user_day ON hosted_agent_overrun (user_key, day);
 `;
 
 function nonNegativeSafeInteger(n: number, what: string): number {
@@ -140,6 +158,9 @@ export class BudgetMeter {
     const sum = (where: string, ...args: string[]): number =>
       (this.db.prepare(`SELECT COALESCE(SUM(nano_usd), 0) AS s FROM hosted_agent_spend WHERE ${where}`).get(...args) as { s: number }).s;
     return this.db.transaction((): Reservation => {
+      // An overrun stops the payer for the rest of its UTC day, before any cap is looked at.
+      const overrun = this.db.prepare(`SELECT 1 AS found FROM hosted_agent_overrun WHERE user_key = ? AND day = ? LIMIT 1`).get(payer.userKey, day);
+      if (overrun !== undefined) throw new BudgetStop("overrun", sum("user_key = ? AND day = ?", payer.userKey, day), this.caps.perUserDay);
       const checks: Array<[BudgetStopReason, number, number]> = [
         ["per-session", sum("session_id = ?", payer.sessionId), this.caps.perSession],
         ["per-user-day", sum("user_key = ? AND day = ?", payer.userKey, day), this.caps.perUserDay],
@@ -158,13 +179,38 @@ export class BudgetMeter {
     }).immediate();
   }
 
-  /** Settle a reservation to what the call cost. Each reservation settles once. */
-  settle(reservation: Reservation, actualNanoUsdValue: number): void {
+  /**
+   * Settle a reservation to what the call cost. Each reservation settles once.
+   * The ledger records the TRUE cost, even when it exceeds the reservation. When
+   * it does, that is an overrun: it is flagged in the ledger and the payer is
+   * stopped for the rest of the UTC day (see `blocked`).
+   */
+  settle(reservation: Reservation, actualNanoUsdValue: number): { overrun: boolean } {
     nonNegativeSafeInteger(actualNanoUsdValue, "actual cost");
-    const changed = this.db
-      .prepare(`UPDATE hosted_agent_spend SET state = 'settled', nano_usd = ? WHERE id = ? AND state = 'pending'`)
-      .run(actualNanoUsdValue, reservation.id).changes;
-    if (changed !== 1) throw new Error(`reservation ${reservation.id} is not pending`);
+    const at = this.now();
+    return this.db.transaction((): { overrun: boolean } => {
+      const row = this.db
+        .prepare(`SELECT session_id AS sessionId, user_key AS userKey, nano_usd AS reserved FROM hosted_agent_spend WHERE id = ? AND state = 'pending'`)
+        .get(reservation.id) as { sessionId: string; userKey: string; reserved: number } | undefined;
+      if (row === undefined) throw new Error(`reservation ${reservation.id} is not pending`);
+      this.db.prepare(`UPDATE hosted_agent_spend SET state = 'settled', nano_usd = ? WHERE id = ?`).run(actualNanoUsdValue, reservation.id);
+      const overrun = actualNanoUsdValue > row.reserved;
+      if (overrun) {
+        this.db
+          .prepare(
+            `INSERT INTO hosted_agent_overrun (session_id, user_key, day, reserved_nano_usd, actual_nano_usd, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(row.sessionId, row.userKey, at.toISOString().slice(0, 10), row.reserved, actualNanoUsdValue, at.getTime());
+      }
+      return { overrun };
+    }).immediate();
+  }
+
+  /** Whether an overrun has stopped this payer for the current UTC day. */
+  blocked(payer: Payer): boolean {
+    const day = this.now().toISOString().slice(0, 10);
+    return this.db.prepare(`SELECT 1 AS found FROM hosted_agent_overrun WHERE user_key = ? AND day = ? LIMIT 1`).get(payer.userKey, day) !== undefined;
   }
 
   /** A call that failed without a usage block is charged its worst case. */

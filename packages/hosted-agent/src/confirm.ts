@@ -2,8 +2,9 @@
  * The hosted agent writes only with the user's explicit confirmation.
  *
  * Each tool is classified by the policy (policy.ts) from the pinned agent
- * package: reads run at once; writes are HELD; L2 tools are offered only while
- * the L2 flag is on, and are held like writes; `never` tools are never offered.
+ * package: reviewed passive reads run at once; writes (and any GET that is not a
+ * reviewed passive read) are HELD; L2 tools are offered only while the L2 flag
+ * is on, and are held like writes; `never` tools are never offered.
  * A held call becomes a pending confirmation bound to its session: an
  * unguessable single-use token, a frozen copy of the exact arguments the model
  * supplied, and an expiry. The model is told only that the call is held. It

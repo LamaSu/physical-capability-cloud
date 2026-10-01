@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { classify, DEFAULT_TOOL_POLICY } from "../policy.js";
+import { classify, DEFAULT_TOOL_POLICY, PASSIVE_READS } from "../policy.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PACKAGE = resolve(here, "../../../../apps/dashboard/public/agent-package.json");
@@ -38,8 +38,19 @@ describe("the policy table against the served agent package", () => {
     "pcc_relay_tool_call", "pcc_relay_generic_tool_call", "pcc_create_scope", "pcc_chat_send", "start_protocol_run",
     "cancel_protocol_run", "kernel_heartbeat", "kernel_announce_capabilities", "operator_heartbeat",
     "provision_api_key", "list_api_keys", "pcc_generate_ui", "delete_operator_channel", "fund_escrow",
+    "setup_test_job", "redeem_invite",
   ])("%s is never offered (device, impersonation, credential, absolute URL, or a name LLMAgent reserves)", (name) => {
     expect(level(name)).toBe("never");
+  });
+
+  it("Q3-A: setup_test_job is never: it submits a job that the gateway's runner executes on a device", () => {
+    expect(level("setup_test_job")).toBe("never");
+    expect(DEFAULT_TOOL_POLICY.write.has("setup_test_job")).toBe(false);
+  });
+
+  it("Q3-B: redeem_invite is never: its answer carries a session token and new wallet material", () => {
+    expect(level("redeem_invite")).toBe("never");
+    expect(DEFAULT_TOOL_POLICY.write.has("redeem_invite")).toBe(false);
   });
 
   it.each([
@@ -50,17 +61,57 @@ describe("the policy table against the served agent package", () => {
     expect(level(name)).toBe("l2");
   });
 
-  it.each(["setup_register_device", "setup_test_job", "onboard_machine", "pcc_onboard_session_start", "pcc_report"])(
+  it.each(["setup_register_device", "onboard_machine", "pcc_onboard_session_start", "pcc_report"])(
     "%s is a confirmed write (the onboarding path)",
     (name) => {
       expect(level(name)).toBe("write");
     },
   );
 
-  it("a GET is a read unless it is listed never", () => {
+  it("Q3-C: get_dashboard is held like a write: on the full /mcp surface it bumps loadCount and updatedAt", () => {
+    expect(level("get_dashboard")).toBe("write");
+    expect(PASSIVE_READS.has("get_dashboard")).toBe(false);
+  });
+
+  it("Q3-C: the passive reads are exactly the reviewed set; adding one needs an individual effect review", () => {
+    expect([...PASSIVE_READS].sort()).toEqual([
+      "get_job",
+      "get_kernel",
+      "get_kernel_devices",
+      "get_kernel_jobs",
+      "list_capability_types",
+      "list_jobs",
+      "list_kernels",
+      "search_capabilities",
+      "search_dashboards",
+    ]);
+  });
+
+  it("Q3-C: every passive read is a GET tool of the pinned package, and runs directly", () => {
+    for (const name of PASSIVE_READS) {
+      const tool = pkg.tools.find((t) => t.name === name);
+      expect(tool, `${name} must exist in agent-package ${pkg.version}`).toBeDefined();
+      expect(tool!.endpoint.method.toUpperCase()).toBe("GET");
+      expect(level(name)).toBe("read");
+    }
+  });
+
+  it("Q3-C: every other GET is held for confirmation like a write (or never); none runs directly", () => {
+    const gets = pkg.tools.filter((t) => ["GET", "HEAD"].includes(t.endpoint.method.toUpperCase()));
+    expect(gets.length).toBeGreaterThan(100);
+    for (const t of gets) {
+      if (PASSIVE_READS.has(t.name)) continue;
+      expect(level(t.name), t.name).toBe(DEFAULT_TOOL_POLICY.never.has(t.name) ? "never" : "write");
+    }
+  });
+
+  it("Q3-C: a listed passive read whose pinned endpoint is no longer a GET is not a read; an absolute URL stays never", () => {
+    expect(classify({ name: "list_jobs", method: "POST", path: "/api/jobs" })).not.toBe("read");
+    expect(classify({ name: "list_jobs", method: "GET", path: "https://elsewhere.example/api/jobs" })).toBe("never");
+  });
+
+  it("Q3-C: a GET that is listed never stays never", () => {
     expect(level("list_api_keys")).toBe("never");
-    const get = pkg.tools.find((t) => t.endpoint.method === "GET" && !DEFAULT_TOOL_POLICY.never.has(t.name))!;
-    expect(level(get.name)).toBe("read");
   });
 
   it("a listed write whose path looks like money is escalated to L2", () => {

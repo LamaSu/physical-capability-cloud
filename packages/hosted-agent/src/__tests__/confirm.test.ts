@@ -8,6 +8,7 @@ import { DEFAULT_TOOL_POLICY, type ToolPolicy } from "../policy.js";
  * policy.test.ts tests the real table. */
 const TEST_POLICY: ToolPolicy = {
   ...DEFAULT_TOOL_POLICY,
+  passiveReads: new Set(["list_open_jobs", "r"]),
   write: new Set(["register_machine", "w", "d"]),
   l2: new Set(["claim_job", "emergency_stop"]),
   never: new Set(["relay_to_device"]),
@@ -36,6 +37,15 @@ describe("what the model is offered", () => {
     const held = await on.callers["claim_job"]!({ id: "job-1", kernelId: "k1" });
     expect(held).toMatchObject({ status: "held_for_user_confirmation" });
     expect(CLAIM.caller).not.toHaveBeenCalled();
+  });
+
+  it("Q3-C: a GET that is not a reviewed passive read is held like a write, and not run", async () => {
+    const unreviewed = tool("get_something", "GET", "/api/something");
+    const { callers } = new ConfirmationGate({ policy: TEST_POLICY }).forSession("s1", [unreviewed], { l2Enabled: false });
+    expect(Object.keys(callers)).toEqual(["get_something"]);
+    const out = await callers["get_something"]!({ q: 1 });
+    expect(unreviewed.caller).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ status: "held_for_user_confirmation" });
   });
 
   it("a read runs at once; a write is held and not run", async () => {

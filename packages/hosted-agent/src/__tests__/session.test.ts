@@ -1,9 +1,23 @@
 import { describe, it, expect, vi } from "vitest";
 import Database from "better-sqlite3";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { BudgetMeter, type BudgetCaps, type MessagesClient, type ModelPrice } from "../budget.js";
-import type { PinnedPack } from "../pack.js";
+import { loadPinnedPack, type PinnedPack } from "../pack.js";
 import type { ToolTransport } from "../tools.js";
 import { HostedSession, HOSTED_PREAMBLE, type AttemptReport, type SessionDeps } from "../session.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const REAL_BYTES = new Uint8Array(readFileSync(resolve(here, "../../../../apps/dashboard/public/agent-package.json")));
+/** The real pinned agent package, loaded exactly as the service loads it. */
+async function realPack(): Promise<PinnedPack> {
+  const version = (JSON.parse(new TextDecoder().decode(REAL_BYTES)) as { version: string }).version;
+  return loadPinnedPack(async () => REAL_BYTES, { version, sha256: createHash("sha256").update(REAL_BYTES).digest("hex") });
+}
+/** What a gateway running exactly this pack reports as its server version. */
+const versionOf = (p: PinnedPack): string => `${p.version}+sha256.${p.sha256}`;
 
 const CREDENTIAL = "pcc_live_UsersOwnKeyNeverLeaves42";
 const PRICE: ModelPrice = { input: 3_000, output: 15_000 };
@@ -18,7 +32,7 @@ const PACK: PinnedPack = {
   sha256: "a".repeat(64),
   systemPrompt: "PACK SYSTEM PROMPT",
   tools: [
-    tool("list_open_jobs", "GET", "/api/job-offers/open"),
+    tool("list_jobs", "GET", "/api/jobs"),
     tool("onboard_machine", "POST", "/api/onboard/register"),
     tool("create_capability", "POST", "/api/capabilities"), // L2
     tool("provision_api_key", "POST", "/api/auth/provision"), // never
@@ -27,12 +41,14 @@ const PACK: PinnedPack = {
 
 type Req = { system?: string; tools: Array<{ name: string }>; messages: Array<{ role: string; content: unknown }> };
 
-function harness(opts: { caps?: BudgetCaps; replies?: unknown[]; served?: string[] } = {}) {
+function harness(opts: { caps?: BudgetCaps; replies?: unknown[]; served?: string[]; pack?: PinnedPack; reported?: { version: string | undefined } } = {}) {
+  const pack = opts.pack ?? PACK;
   const requests: Req[] = [];
   const replies = [...(opts.replies ?? [])];
   const create = vi.fn(async (req: Req) => {
     requests.push(JSON.parse(JSON.stringify(req)) as Req);
-    const next = replies.shift();
+    let next = replies.shift();
+    if (typeof next === "function") next = await (next as () => Promise<unknown>)();
     if (next instanceof Error) throw next;
     if (!next) throw new Error("test: no scripted reply");
     return next;
@@ -40,14 +56,15 @@ function harness(opts: { caps?: BudgetCaps; replies?: unknown[]; served?: string
   const calls: Array<[string, Record<string, unknown>]> = [];
   const transport: ToolTransport & { closed: boolean } = {
     closed: false,
-    listTools: async () => [...(opts.served ?? PACK.tools.map((t) => t.def.name)), "delete_preview"],
+    serverVersion: () => (opts.reported ? opts.reported.version : versionOf(pack)),
+    listTools: async () => [...(opts.served ?? pack.tools.map((t) => t.def.name)), "delete_preview"],
     callTool: async (name, args) => (calls.push([name, args]), { ok: true, tool: name }),
     close: async () => void (transport.closed = true),
   };
   const connect = vi.fn(async (_credential: string | null) => transport);
   const reports: AttemptReport[] = [];
   const deps: SessionDeps = {
-    pack: PACK,
+    pack,
     meter: new BudgetMeter(new Database(":memory:"), opts.caps ?? { perSession: USD, perUserDay: USD, perMonth: USD }, () => new Date("2026-10-06T12:00:00Z"), () => false),
     price: PRICE,
     model: "claude-test",
@@ -60,9 +77,11 @@ function harness(opts: { caps?: BudgetCaps; replies?: unknown[]; served?: string
 }
 
 const text = (t: string) => ({ stop_reason: "end_turn", content: [{ type: "text", text: t }], usage: { input_tokens: 10, output_tokens: 5 } });
+// A model's tool_use ids are unique within a conversation; so are the scripted ones.
+let toolUseCount = 0;
 const toolUse = (name: string, input: unknown) => ({
   stop_reason: "tool_use",
-  content: [{ type: "tool_use", id: `tu-${name}`, name, input }],
+  content: [{ type: "tool_use", id: `tu-${name}-${++toolUseCount}`, name, input }],
   usage: { input_tokens: 10, output_tokens: 5 },
 });
 
@@ -86,7 +105,7 @@ describe("a hosted session", () => {
     const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
     await s.send("hi");
     expect(h.requests[0]!.system).toBe(`${HOSTED_PREAMBLE}\n\nPACK SYSTEM PROMPT`);
-    expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_open_jobs", "onboard_machine"]);
+    expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_jobs", "onboard_machine"]);
   });
 
   it("a write is held; the user's confirmation runs it once, and the model hears the outcome next turn", async () => {
@@ -180,10 +199,10 @@ describe("a hosted session", () => {
   });
 
   it("only the pinned tools the connected surface serves are offered", async () => {
-    const h = harness({ replies: [text("ok")], served: ["list_open_jobs"] });
+    const h = harness({ replies: [text("ok")], served: ["list_jobs"] });
     const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
     await s.send("hi");
-    expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_open_jobs"]);
+    expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_jobs"]);
   });
 
   it("a tool name LLMAgent reserves is dropped, not fatal", async () => {
@@ -191,7 +210,7 @@ describe("a hosted session", () => {
     const reserved = { ...h.deps, pack: { ...PACK, tools: [...PACK.tools, tool("delete_preview", "GET", "/api/preview")] } };
     const s = await HostedSession.open(reserved, { userKey: "user:alice", credential: null });
     await s.send("hi");
-    expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_open_jobs", "onboard_machine"]);
+    expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_jobs", "onboard_machine"]);
   });
 
   it("a closed session refuses further use", async () => {
@@ -200,5 +219,207 @@ describe("a hosted session", () => {
     await s.close();
     await expect(s.send("hi")).rejects.toThrow(/closed/);
     await expect(s.close()).rejects.toThrow(/closed/);
+  });
+});
+
+describe("a failing or leaking tool never reaches the model or the caller unscrubbed (Q1-A, Q1-C, Q3-B)", () => {
+  it("Q1-A: a read tool whose transport throws a secret-bearing error: the next model request carries no secret", async () => {
+    const h = harness({ replies: [toolUse("list_jobs", {}), text("It failed.")] });
+    h.transport.callTool = async () => {
+      throw new Error("rejected pcc_live_abcdefgh12345678");
+    };
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    await s.send("list my jobs");
+    expect(h.requests).toHaveLength(2);
+    expect(JSON.stringify(h.requests)).not.toContain("pcc_live_abcdefgh12345678");
+    // the model still learns that the call failed, and why, in scrubbed words
+    const result = (h.requests[1]!.messages.at(-1)!.content as Array<{ is_error?: boolean; content: string }>)[0]!;
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("rejected");
+  });
+
+  it("Q1-C: the confirmation's result is scrubbed whatever the transport returns", async () => {
+    const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?")] });
+    h.transport.callTool = async () => ({ registered: true, apiKey: "pcc_live_LeakedByATransport99", note: "Bearer abcdefgh12345678" });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const turn = await s.send("register");
+    const out = await s.confirm(turn.pending[0]!.token);
+    expect(JSON.stringify(out)).toContain('"registered":true');
+    expect(JSON.stringify(out)).not.toMatch(/pcc_live_|Bearer\s/);
+  });
+
+  it("Q3-B: a token in a confirmed result reaches neither the confirmation nor the next model request", async () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.synthetic.signature";
+    const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?"), text("Done.")] });
+    h.transport.callTool = async () => ({ token: jwt });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const turn = await s.send("register");
+    const out = await s.confirm(turn.pending[0]!.token);
+    expect(JSON.stringify(out)).not.toContain("eyJ");
+    await s.send("thanks");
+    expect(JSON.stringify(h.requests)).not.toContain("eyJ");
+    expect(JSON.stringify(h.requests.at(-1)!.messages.at(-1))).toContain("The user confirmed onboard_machine");
+  });
+});
+
+describe("the hosted agent never actuates a device or provisions a credential (Q3-A, Q3-B)", () => {
+  it("Q3-A: setup_test_job, which runs a job on a device, is never offered or run, with L2 off", async () => {
+    const pack = await realPack();
+    const h = harness({ pack, replies: [toolUse("setup_test_job", { kernelId: "k1", deviceId: "d1" }), text("I cannot run device jobs.")] });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const turn = await s.send("run a test job on my device");
+    for (const held of turn.pending) await s.confirm(held.token).catch(() => undefined);
+    expect.soft(h.requests[0]!.tools.map((t) => t.name)).not.toContain("setup_test_job");
+    expect.soft(turn.pending.map((p) => p.tool)).not.toContain("setup_test_job");
+    expect(h.calls.map(([n]) => n)).not.toContain("setup_test_job"); // the dispatch spy: it never ran
+  });
+
+  it("Q3-B: redeem_invite, which returns a session token and wallet material, is never offered or run", async () => {
+    const pack = await realPack();
+    const h = harness({ pack, replies: [toolUse("redeem_invite", { code: "c", password: "p" }), text("I cannot redeem invites.")] });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const turn = await s.send("redeem my invite");
+    for (const held of turn.pending) await s.confirm(held.token).catch(() => undefined);
+    expect.soft(h.requests[0]!.tools.map((t) => t.name)).not.toContain("redeem_invite");
+    expect(h.calls.map(([n]) => n)).not.toContain("redeem_invite");
+  });
+});
+
+describe("a GET is a read only when it is reviewed to write nothing (Q3-C)", () => {
+  it("Q3-C: get_dashboard on a signed-in session (the full /mcp surface) is held, not run: there it bumps loadCount", async () => {
+    const pack = await realPack();
+    const h = harness({ pack, replies: [toolUse("get_dashboard", { idOrSlug: "d1" }), text("Please confirm.")] });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const turn = await s.send("show my dashboard");
+    expect(h.calls).toEqual([]);
+    expect(turn.pending.map((p) => p.tool)).toEqual(["get_dashboard"]);
+    await s.confirm(turn.pending[0]!.token);
+    expect(h.calls).toEqual([["get_dashboard", { idOrSlug: "d1" }]]);
+  });
+
+  it("Q3-C: a listed passive read still runs directly, with nothing held", async () => {
+    const pack = await realPack();
+    const h = harness({ pack, replies: [toolUse("list_capability_types", {}), text("Here they are.")] });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const turn = await s.send("what capability types exist?");
+    expect(h.calls).toEqual([["list_capability_types", {}]]);
+    expect(turn.pending).toEqual([]);
+  });
+});
+
+describe("the pack the gateway runs is the pack that was pinned (Q5-A)", () => {
+  const A: PinnedPack = { version: "2.19.1", sha256: "a".repeat(64), systemPrompt: "A", tools: [{ def: { name: "list_jobs", description: "", input_schema: { type: "object" } }, spec: { name: "list_jobs", method: "GET", path: "/api/jobs" } }] };
+  const B = { version: "2.19.1", sha256: "b".repeat(64) };
+
+  it("Q5-A: a gateway running a pack other than the pinned one is refused before any tool is listed or offered, even when a tool name matches", async () => {
+    const h = harness({ pack: A, replies: [toolUse("list_jobs", {}), text("never")], reported: { version: versionOf(B as PinnedPack) } });
+    const listed = vi.spyOn(h.transport, "listTools");
+    await expect(HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL })).rejects.toThrow(/pack/i);
+    expect(listed).not.toHaveBeenCalled();
+    expect(h.create).not.toHaveBeenCalled();
+    expect(h.calls).toEqual([]);
+    expect(h.transport.closed).toBe(true);
+  });
+
+  it.each([
+    ["no version at all", undefined],
+    ["the bare pack version, without the digest", "2.19.1"],
+    ["the right version with another digest", `2.19.1+sha256.${"b".repeat(64)}`],
+    ["the right digest under another version", `2.19.2+sha256.${"a".repeat(64)}`],
+    ["an uppercase digest", `2.19.1+sha256.${"A".repeat(64)}`],
+    ["extra text after the digest", `2.19.1+sha256.${"a".repeat(64)}.x`],
+  ])("Q5-A: %s is refused", async (_name, reported) => {
+    const h = harness({ pack: A, reported: { version: reported } });
+    await expect(HostedSession.open(h.deps, { userKey: "user:alice", credential: null })).rejects.toThrow(/pack/i);
+    expect(h.transport.closed).toBe(true);
+  });
+
+  it("Q5-A: the exact pinned version and digest opens", async () => {
+    const h = harness({ pack: A, reported: { version: `2.19.1+sha256.${"a".repeat(64)}` }, replies: [text("ok")] });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    await s.send("hi");
+    expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_jobs"]);
+  });
+});
+
+describe("a session that fails to open leaves nothing open (Q1-B)", () => {
+  it("Q1-B: when listing tools fails, the transport is closed", async () => {
+    const h = harness();
+    h.transport.listTools = async () => {
+      throw new Error("upstream down");
+    };
+    await expect(HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL })).rejects.toThrow("upstream down");
+    expect(h.transport.closed).toBe(true);
+  });
+});
+
+describe("an outcome that arrives mid-message is never lost (Q6-B)", () => {
+  it("Q6-B: confirm while a message is in flight; the outcome reaches the model on the next message", async () => {
+    let release!: () => void;
+    const hold = new Promise<void>((r) => (release = r));
+    const h = harness({
+      replies: [
+        toolUse("onboard_machine", {}),
+        text("Please confirm."),
+        async () => (await hold, text("Answer.")),
+        text("Noted."),
+        text("Later."),
+      ],
+    });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const first = await s.send("register");
+    const inFlight = s.send("one more question"); // blocked inside the model call
+    await new Promise((r) => setTimeout(r, 10));
+    await s.confirm(first.pending[0]!.token); // the user confirms meanwhile
+    release();
+    await inFlight;
+    await s.send("thanks");
+    expect(String(h.requests.at(-1)!.messages.at(-1)!.content)).toContain("(The user confirmed onboard_machine.");
+    // told once: the message after that does not repeat it
+    await s.send("and then?");
+    expect(String(h.requests.at(-1)!.messages.at(-1)!.content)).toBe("and then?");
+  });
+
+  it("Q6-B: a decline that arrives mid-message is kept too, and only the notes a message captured are cleared", async () => {
+    let release!: () => void;
+    const hold = new Promise<void>((r) => (release = r));
+    const h = harness({
+      replies: [
+        toolUse("onboard_machine", { n: 1 }),
+        text("Confirm 1?"),
+        toolUse("onboard_machine", { n: 2 }),
+        text("Confirm 2?"),
+        async () => (await hold, text("Answer.")),
+        text("Noted."),
+      ],
+    });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const one = await s.send("register one");
+    s.reject(one.pending[0]!.token); // note 1: told to the NEXT message (the one that starts below)
+    const two = await s.send("register two"); // captures note 1, completes, clears note 1
+    const inFlight = s.send("question"); // captures nothing
+    await new Promise((r) => setTimeout(r, 10));
+    s.reject(two.pending[0]!.token); // note 2 arrives mid-flight
+    release();
+    await inFlight;
+    await s.send("thanks");
+    const told = String(h.requests.at(-1)!.messages.at(-1)!.content);
+    expect(told).toContain("(The user declined onboard_machine.)");
+    expect(told.endsWith("thanks")).toBe(true);
+  });
+});
+
+describe("an overrun stops the payer for the day (Q4-B, at the session)", () => {
+  it("Q4-B: a payer whose earlier call overran is stopped with the overrun reason, the model is not called, and the report says budget_stop", async () => {
+    const h = harness({ replies: [text("never")] });
+    const payer = { sessionId: "earlier-session", userKey: "user:alice" };
+    h.deps.meter.settle(h.deps.meter.reserve(payer, 1_000), 1_001); // an earlier call cost more than it reserved
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const turn = await s.send("hi");
+    expect(turn.stopped).toBe("overrun");
+    expect(turn.reply).toMatch(/tomorrow/);
+    expect(turn.reply).not.toMatch(/spending limit/);
+    expect(h.create).not.toHaveBeenCalled();
+    expect((await s.close()).report.outcome).toBe("budget_stop");
   });
 });

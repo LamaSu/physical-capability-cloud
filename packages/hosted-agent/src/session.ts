@@ -5,6 +5,10 @@
  * transport AS THE USER, the confirmation gate, the budget meter, and
  * LLMAgent. The user's credential goes only into the transport; the session
  * never stores, logs or reports it.
+ *
+ * A session opens only against a gateway that runs the pinned pack: the server
+ * names the pack it executes (its version plus the sha256 of the exact bytes),
+ * and anything but the pin is refused before a single tool is listed.
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -74,6 +78,19 @@ export interface TurnResult {
 
 const NOTE_LIMIT = 2_000;
 
+/** The gateway does not run the pinned agent package. The tool names would
+ * match, but a name resolves through the gateway's own pack, so no tool is
+ * offered. Carries the two versions for the server-side log; never shown to a caller. */
+export class PackMismatch extends Error {
+  constructor(
+    readonly expected: string,
+    readonly reported: string | undefined,
+  ) {
+    super("the gateway is not running the pinned agent package");
+    this.name = "PackMismatch";
+  }
+}
+
 export class HostedSession {
   private history: Anthropic.MessageParam[] = [];
   private notes: string[] = [];
@@ -97,56 +114,75 @@ export class HostedSession {
   static async open(deps: SessionDeps, opts: { readonly userKey: string; readonly credential: string | null }): Promise<HostedSession> {
     const id = randomBytes(24).toString("base64url");
     const transport = await deps.connect(opts.credential);
-    const gate = new ConfirmationGate({ now: deps.now });
-    const served = new Set(await transport.listTools());
-    const offered = gate.forSession(id, packTools(deps.pack, transport, served), { l2Enabled: deps.l2Enabled });
-    // LLMAgent refuses reserved tool names (delete_*, fund_*, ...). The policy
-    // never offers the ones it knows; any other is dropped here, never renamed.
-    const defs = offered.defs.filter((d) => {
-      try {
-        validateToolNames([d]);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    const callers = Object.fromEntries(defs.map((d) => [d.name, offered.callers[d.name]!]));
-    // Count the tokens each response reports (the metered source), then meter the spend.
-    const tokens = { in: 0, out: 0 };
-    const counting: MessagesClient = {
-      messages: {
-        create: async (request) => {
-          const response = await deps.anthropic.messages.create(request);
-          tokens.in += response.usage?.input_tokens ?? 0;
-          tokens.out += response.usage?.output_tokens ?? 0;
-          return response;
+    try {
+      // The pin names the package; the gateway names the one it runs. Anything
+      // else is refused BEFORE any tool is listed or offered: a tool name
+      // resolves through the gateway's own pack, so a name that matches the pin
+      // proves nothing about what a call would do.
+      const expected = `${deps.pack.version}+sha256.${deps.pack.sha256}`;
+      const reported = transport.serverVersion?.();
+      if (reported !== expected) throw new PackMismatch(expected, reported);
+      const gate = new ConfirmationGate({ now: deps.now });
+      const served = new Set(await transport.listTools());
+      const offered = gate.forSession(id, packTools(deps.pack, transport, served), { l2Enabled: deps.l2Enabled });
+      // LLMAgent refuses reserved tool names (delete_*, fund_*, ...). The policy
+      // never offers the ones it knows; any other is dropped here, never renamed.
+      const defs = offered.defs.filter((d) => {
+        try {
+          validateToolNames([d]);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      const callers = Object.fromEntries(defs.map((d) => [d.name, offered.callers[d.name]!]));
+      // Count the tokens each response reports (the metered source), then meter the spend.
+      const tokens = { in: 0, out: 0 };
+      const counting: MessagesClient = {
+        messages: {
+          create: async (request) => {
+            const response = await deps.anthropic.messages.create(request);
+            tokens.in += response.usage?.input_tokens ?? 0;
+            tokens.out += response.usage?.output_tokens ?? 0;
+            return response;
+          },
         },
-      },
-    };
-    const client = meteredClient(counting, deps.meter, { sessionId: id, userKey: opts.userKey }, deps.price);
-    // LLMAgent calls only messages.create on its client.
-    const agent = new LLMAgent(defs, callers, { client: client as unknown as Anthropic, model: deps.model, maxTokens: deps.maxTokens });
-    return new HostedSession(id, opts.userKey, deps, transport, gate, agent, (deps.now ?? Date.now)(), tokens);
+      };
+      const client = meteredClient(counting, deps.meter, { sessionId: id, userKey: opts.userKey }, deps.price);
+      // LLMAgent calls only messages.create on its client.
+      const agent = new LLMAgent(defs, callers, { client: client as unknown as Anthropic, model: deps.model, maxTokens: deps.maxTokens });
+      return new HostedSession(id, opts.userKey, deps, transport, gate, agent, (deps.now ?? Date.now)(), tokens);
+    } catch (err) {
+      // A session that fails to open leaves no connection behind.
+      await transport.close().catch(() => undefined);
+      throw err;
+    }
   }
 
   /** One user message. The history advances only when the turn completes. */
   async send(text: string): Promise<TurnResult> {
     if (this.closed) throw new Error("the session is closed");
-    const input = this.notes.length > 0 ? `${this.notes.join("\n")}\n\n${text}` : text;
+    // The outcomes this message tells the model. A confirmation or decline that
+    // arrives while it runs is not among them: it is told to the NEXT message.
+    const told = this.notes.slice();
+    const input = told.length > 0 ? `${told.join("\n")}\n\n${text}` : text;
     try {
       const result = await this.agent.chat(input, {
         system: `${HOSTED_PREAMBLE}\n\n${this.deps.pack.systemPrompt}`,
         history: this.history,
       });
       this.history = result.messages;
-      this.notes = [];
+      this.notes = this.notes.slice(told.length); // only what this message told, never what arrived since
       this.turns += 1;
       return { reply: result.text, pending: this.gate.pending(this.id) };
     } catch (err) {
       if (err instanceof BudgetStop) {
         this.outcome = "budget_stop";
         return {
-          reply: "This session has reached its spending limit, so the agent has stopped. Nothing was charged beyond it.",
+          reply:
+            err.reason === "overrun"
+              ? "The agent is paused for your account until tomorrow (UTC), because an earlier call cost more than it was budgeted for. Nothing more was charged."
+              : "This session has reached its spending limit, so the agent has stopped. Nothing was charged beyond it.",
           pending: this.gate.pending(this.id),
           stopped: err.reason,
         };
@@ -170,8 +206,9 @@ export class HostedSession {
   /** The user confirms a held call; it runs once, and the model hears the outcome next turn. */
   async confirm(token: string): Promise<unknown> {
     const held = this.gate.pending(this.id).find((h) => h.token === token);
-    const result = await this.gate.confirm(this.id, token);
-    const shown = JSON.stringify(scrub(result)) ?? "null";
+    // What the user's page and the model are shown is scrubbed here, whatever the transport returned.
+    const result = scrub(await this.gate.confirm(this.id, token));
+    const shown = JSON.stringify(result) ?? "null";
     this.notes.push(
       `(The user confirmed ${held?.tool ?? "an action"}. It returned: ${shown.length > NOTE_LIMIT ? `${shown.slice(0, NOTE_LIMIT)}…` : shown})`,
     );

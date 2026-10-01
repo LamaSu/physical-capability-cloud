@@ -1,10 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
-import { BudgetMeter, type MessagesClient } from "../budget.js";
+import { BudgetMeter, type BudgetCaps, type MessagesClient } from "../budget.js";
 import type { PinnedPack } from "../pack.js";
+import type { ResolvePrincipal } from "../principal.js";
 import type { ToolTransport } from "../tools.js";
 import { buildServer } from "../server.js";
-import type { SessionDeps } from "../session.js";
+import { HostedSession, type SessionDeps } from "../session.js";
 
 const KEY = "pcc_live_ServerTestKey0001";
 const USD = 1_000_000_000;
@@ -15,9 +17,30 @@ const PACK: PinnedPack = {
   tools: [{ def: { name: "onboard_machine", description: "", input_schema: { type: "object" } }, spec: { name: "onboard_machine", method: "POST", path: "/api/onboard/register" } }],
 };
 const text = (t: string) => ({ stop_reason: "end_turn", content: [{ type: "text", text: t }], usage: { input_tokens: 1, output_tokens: 1 } });
-const toolUse = (name: string) => ({ stop_reason: "tool_use", content: [{ type: "tool_use", id: "tu", name, input: { a: 1 } }], usage: { input_tokens: 1, output_tokens: 1 } });
+// A model's tool_use ids are unique within a conversation; so are the scripted ones.
+let toolUseCount = 0;
+const toolUse = (name: string) => ({ stop_reason: "tool_use", content: [{ type: "tool_use", id: `tu-${++toolUseCount}`, name, input: { a: 1 } }], usage: { input_tokens: 1, output_tokens: 1 } });
 
-function setup(o: { replies?: unknown[]; create?: (req: unknown) => Promise<unknown>; maxTurns?: number; clock?: { t: number }; failTool?: string } = {}) {
+/** Every credential resolves, each to an operator of its own, unless a test says otherwise. */
+const anyCredential: ResolvePrincipal = async (credential) => ({ operatorId: `operator-of-${credential}` });
+
+function setup(
+  o: {
+    replies?: unknown[];
+    create?: (req: unknown) => Promise<unknown>;
+    maxTurns?: number;
+    clock?: { t: number };
+    failTool?: string;
+    toolResult?: unknown;
+    caps?: Partial<BudgetCaps>;
+    maxTokens?: number;
+    resolvePrincipal?: ResolvePrincipal;
+    reported?: { version: string | undefined };
+    connectError?: Error;
+    listError?: Error;
+    reportError?: Error;
+  } = {},
+) {
   const replies = [...(o.replies ?? [])];
   const create = vi.fn(o.create ?? (async () => {
     const r = replies.shift();
@@ -25,32 +48,52 @@ function setup(o: { replies?: unknown[]; create?: (req: unknown) => Promise<unkn
     return r ?? text("(default)");
   }));
   const calls: string[] = [];
-  const transport: ToolTransport = {
-    listTools: async () => PACK.tools.map((t) => t.def.name),
+  const transport: ToolTransport & { closes: number } = {
+    closes: 0,
+    serverVersion: () => (o.reported ? o.reported.version : `${PACK.version}+sha256.${PACK.sha256}`),
+    listTools: async () => {
+      if (o.listError) throw o.listError;
+      return PACK.tools.map((t) => t.def.name);
+    },
     callTool: async (n) => {
       if (o.failTool) throw new Error(o.failTool);
       calls.push(n);
-      return { ok: true };
+      return o.toolResult ?? { ok: true };
     },
-    close: async () => {},
+    close: async () => void (transport.closes += 1),
   };
-  const connect = vi.fn(async (_c: string | null) => transport);
+  const connect = vi.fn(async (_c: string | null) => {
+    if (o.connectError) throw o.connectError;
+    return transport;
+  });
   const reports: unknown[] = [];
+  const logs: string[] = [];
   const clock = o.clock ?? { t: 1_000 };
   const db = new Database(":memory:");
   const deps: SessionDeps = {
     pack: PACK,
-    meter: new BudgetMeter(db, { perSession: USD, perUserDay: USD, perMonth: USD }, () => new Date("2026-10-06T00:00:00Z"), () => false),
+    meter: new BudgetMeter(db, { perSession: USD, perUserDay: USD, perMonth: USD, ...o.caps }, () => new Date("2026-10-06T00:00:00Z"), () => false),
     price: { input: 1, output: 1 },
     model: "m",
+    maxTokens: o.maxTokens,
     anthropic: { messages: { create } } as unknown as MessagesClient,
     connect,
     l2Enabled: false,
-    report: (r) => void reports.push(r),
+    report: (r) => {
+      if (o.reportError) throw o.reportError;
+      reports.push(r);
+    },
     now: () => clock.t,
   };
-  const app = buildServer({ deps, maxTurns: o.maxTurns, idleMs: 60_000, now: () => clock.t });
-  return { app, connect, calls, reports, create, clock, db };
+  const app = buildServer({
+    deps,
+    resolvePrincipal: o.resolvePrincipal ?? anyCredential,
+    log: (line) => logs.push(line),
+    maxTurns: o.maxTurns,
+    idleMs: 60_000,
+    now: () => clock.t,
+  });
+  return { app, connect, calls, reports, logs, create, clock, db, transport };
 }
 
 async function open(app: ReturnType<typeof buildServer>, key?: string) {
@@ -72,15 +115,17 @@ describe("the hosted agent's HTTP surface", () => {
     for (const b of bodies) expect(b).not.toContain(KEY);
   });
 
-  it("the spend ledger keys a signed-in user by a digest, never by the raw key", async () => {
-    const { app, db } = setup({ replies: [text("hi")] });
+  it("the spend ledger keys a signed-in user by a digest of the operator id, never by the key or the id", async () => {
+    const { app, db } = setup({ replies: [text("hi")], resolvePrincipal: async () => ({ operatorId: "operator-7" }) });
     const id = await open(app, KEY);
     await say(app, id, "hello");
     const rows = db.prepare("SELECT user_key FROM hosted_agent_spend").all() as Array<{ user_key: string }>;
     expect(rows.length).toBeGreaterThan(0);
+    const expected = `op:${createHash("sha256").update("pcc-operator:operator-7").digest("hex").slice(0, 32)}`;
     for (const r of rows) {
-      expect(r.user_key).toMatch(/^key:[0-9a-f]{32}$/);
+      expect(r.user_key).toBe(expected);
       expect(r.user_key).not.toContain(KEY);
+      expect(r.user_key).not.toContain("operator-7");
     }
   });
 
@@ -178,5 +223,304 @@ describe("the hosted agent's HTTP surface", () => {
     const res = await say(app, id, "hi");
     expect(res.statusCode).toBe(502);
     expect(res.body).not.toContain("secret detail");
+  });
+});
+
+const confirmCall = (app: ReturnType<typeof buildServer>, id: string, token: string) =>
+  app.inject({ method: "POST", url: "/session/confirm", headers: { "x-hosted-session": id }, payload: { token } });
+
+describe("a failed session open leaks no upstream detail (Q1-B)", () => {
+  const generic = { error: "agent_unavailable" };
+
+  it("Q1-B: a connect failure answers the generic upstream error, with no detail", async () => {
+    const { app } = setup({ connectError: new Error("upstream rejected pcc_live_SyntheticCredential0001 at https://gateway.internal:4310") });
+    const res = await app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual(generic);
+    expect(res.body).not.toMatch(/pcc_live_|gateway\.internal|rejected/);
+  });
+
+  it("Q1-B: a tool-listing failure answers the same, and the connection it opened is closed", async () => {
+    const { app, transport } = setup({ listError: new Error("listing said pcc_live_SyntheticCredential0002") });
+    const res = await app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual(generic);
+    expect(res.body).not.toContain("pcc_live_");
+    expect(transport.closes).toBe(1);
+  });
+
+  it("Q1-B: it is the same shape the message route answers for an upstream failure", async () => {
+    const { app } = setup({ replies: [new Error("upstream secret detail")] });
+    const id = await open(app);
+    const viaMessage = await say(app, id, "hi");
+    const failing = setup({ connectError: new Error("upstream secret detail") });
+    const viaOpen = await failing.app.inject({ method: "POST", url: "/session" });
+    expect(viaOpen.statusCode).toBe(viaMessage.statusCode);
+    expect(viaOpen.json()).toEqual(viaMessage.json());
+  });
+
+  it("Q1-B: a failed open is handled at the route and logged once, not left to the catch-all", async () => {
+    const { app, logs } = setup({ connectError: new Error("down") });
+    await app.inject({ method: "POST", url: "/session" });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("session-open-failed");
+    expect(logs.join("\n")).not.toContain("server-error");
+  });
+
+  it("Q1-B: the server-side log names the failure, never its message (which may carry a credential)", async () => {
+    const { app, logs } = setup({ connectError: new Error("upstream rejected pcc_live_SyntheticCredential0004") });
+    await app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
+    const logged = logs.join("\n");
+    expect(logged).toContain("session-open-failed");
+    expect(logged).not.toMatch(/pcc_live_|rejected/);
+  });
+
+  it("Q1-B: no session is recorded for a failed open", async () => {
+    const { app } = setup({ connectError: new Error("down") });
+    const res = await app.inject({ method: "POST", url: "/session" });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().session).toBeUndefined();
+  });
+
+  it("client errors keep their own status: a malformed or oversized body is a 4xx, not the generic upstream error", async () => {
+    const { app } = setup();
+    const id = await open(app);
+    const headers = { "x-hosted-session": id, "content-type": "application/json" };
+    expect((await app.inject({ method: "POST", url: "/session/messages", headers, payload: "{not json" })).statusCode).toBe(400);
+    expect((await app.inject({ method: "POST", url: "/session/messages", headers, payload: JSON.stringify({ text: "x".repeat(70_000) }) })).statusCode).toBe(413);
+  });
+
+  it("Q1-B: no other route echoes an upstream message either (closing a session whose report sink fails)", async () => {
+    const { app } = setup({ reportError: new Error("sink said pcc_live_SyntheticCredential0003") });
+    const id = await open(app);
+    const res = await app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual(generic);
+    expect(res.body).not.toContain("pcc_live_");
+  });
+});
+
+describe("what the HTTP caller is shown is scrubbed (Q1-C, Q3-B)", () => {
+  it("Q1-C: the confirmation response is scrubbed whatever the transport returns", async () => {
+    const { app, create } = setup({
+      replies: [toolUse("onboard_machine"), text("confirm?"), text("ok")],
+      toolResult: { registered: true, apiKey: "pcc_live_LeakedByATransport99", note: "Bearer abcdefgh12345678" },
+    });
+    const id = await open(app, KEY);
+    const [held] = (await say(app, id, "register")).json().pending as Array<{ token: string }>;
+    const res = await confirmCall(app, id, held!.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('"registered":true');
+    expect(res.body).not.toMatch(/pcc_live_|Bearer\s/);
+    await say(app, id, "thanks");
+    expect(JSON.stringify(create.mock.calls.at(-1))).not.toMatch(/pcc_live_Leaked|abcdefgh12345678/);
+  });
+
+  it("Q3-B: a token in a confirmed result reaches neither the confirmation response nor the next model request", async () => {
+    const { app, create } = setup({
+      replies: [toolUse("onboard_machine"), text("confirm?"), text("ok")],
+      toolResult: { token: "eyJhbGciOiJIUzI1NiJ9.synthetic.signature" },
+    });
+    const id = await open(app, KEY);
+    const [held] = (await say(app, id, "register")).json().pending as Array<{ token: string }>;
+    const res = await confirmCall(app, id, held!.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain("eyJ");
+    await say(app, id, "thanks");
+    expect(JSON.stringify(create.mock.calls.at(-1))).not.toContain("eyJ");
+  });
+});
+
+describe("a signed-in budget belongs to an authenticated operator, never to the token (Q4-A)", () => {
+  const VALID: Record<string, string> = { pcc_live_ValidKeyA1: "op-1", pcc_live_ValidKeyA2: "op-1", pcc_live_ValidKeyB1: "op-2" };
+  const resolvePrincipal: ResolvePrincipal = async (credential) => (credential in VALID ? { operatorId: VALID[credential]! } : null);
+  // 9,100 nano-USD actually used, under a worst case of about 11,000: spends the allowance without overrunning the reservation.
+  const spendy = { stop_reason: "end_turn", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 9_000, output_tokens: 100 } };
+  const dayCap = { perUserDay: 15_000 };
+  const openWith = (app: ReturnType<typeof buildServer>, authorization?: string) =>
+    app.inject({ method: "POST", url: "/session", headers: authorization ? { authorization } : {} });
+
+  it("Q4-A: a Bearer string that resolves to no operator refuses the open with 401, never a downgrade to anonymous", async () => {
+    const { app, connect } = setup({ resolvePrincipal });
+    for (const bad of ["Bearer unissued-a", "Bearer unissued-b", "Bearer pcc_live_NotAKnownKey"]) {
+      const res = await openWith(app, bad);
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: "unauthorized" });
+      expect(res.body).not.toMatch(/unissued|pcc_live_/);
+    }
+    expect(connect).not.toHaveBeenCalled(); // nothing was connected on an unverified credential's behalf
+  });
+
+  it("Q4-A: a resolver that answers no usable operator id (empty, missing, not a string) refuses the open", async () => {
+    for (const answer of [{ operatorId: "" }, {}, { operatorId: 7 }, { operatorId: null }, null, undefined]) {
+      const { app, connect } = setup({ resolvePrincipal: (async () => answer) as unknown as ResolvePrincipal });
+      const res = await openWith(app, `Bearer ${KEY}`);
+      expect(res.statusCode, JSON.stringify(answer)).toBe(401);
+      expect(connect).not.toHaveBeenCalled();
+    }
+  });
+
+  it("Q4-A: a resolver that fails or throws refuses the open too", async () => {
+    for (const resolver of [async () => null, async () => Promise.reject(new Error("gateway down pcc_live_ValidKeyA1"))]) {
+      const { app, connect } = setup({ resolvePrincipal: resolver as ResolvePrincipal });
+      const res = await openWith(app, `Bearer ${KEY}`);
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: "unauthorized" });
+      expect(res.body).not.toContain("pcc_live_");
+      expect(connect).not.toHaveBeenCalled();
+    }
+  });
+
+  it("Q4-A: an exhausted daily allowance is not renewed by presenting a different, unresolvable Bearer string", async () => {
+    const { app } = setup({ resolvePrincipal, caps: dayCap, maxTokens: 10_000, replies: [spendy, spendy, spendy] });
+    const a = (await openWith(app, "Bearer pcc_live_ValidKeyA1")).json().session as string;
+    expect((await say(app, a, "one")).json().stopped).toBeUndefined();
+    expect((await say(app, a, "two")).json().stopped).toBe("per-user-day"); // exhausted
+    const other = await openWith(app, "Bearer unissued-b");
+    expect(other.statusCode).toBe(401); // no fresh allowance, because no session at all
+  });
+
+  it("Q4-A: two different valid keys of the SAME operator share ONE daily budget; another operator has its own", async () => {
+    const { app } = setup({ resolvePrincipal, caps: dayCap, maxTokens: 10_000, replies: [spendy, spendy, spendy, spendy] });
+    const a1 = (await openWith(app, "Bearer pcc_live_ValidKeyA1")).json().session as string;
+    expect((await say(app, a1, "one")).json().stopped).toBeUndefined();
+    const second = await openWith(app, "Bearer pcc_live_ValidKeyA2");
+    expect(second.statusCode).toBe(201);
+    expect((await say(app, second.json().session, "two")).json().stopped).toBe("per-user-day");
+    const other = await openWith(app, "Bearer pcc_live_ValidKeyB1");
+    expect(other.statusCode).toBe(201);
+    expect((await say(app, other.json().session, "three")).json().stopped).toBeUndefined();
+  });
+
+  it("Q4-A: an anonymous session is still keyed by address and needs no resolution", async () => {
+    const resolver = vi.fn(resolvePrincipal);
+    const { app, db } = setup({ resolvePrincipal: resolver, replies: [text("hi")] });
+    const id = (await openWith(app)).json().session as string;
+    await say(app, id, "hi");
+    expect(resolver).not.toHaveBeenCalled();
+    const rows = db.prepare("SELECT user_key FROM hosted_agent_spend").all() as Array<{ user_key: string }>;
+    for (const r of rows) expect(r.user_key).toMatch(/^anon:[0-9a-f]{32}$/);
+  });
+
+  it("Q4-A: the credential that resolved is the one forwarded to the transport, unchanged", async () => {
+    const { app, connect } = setup({ resolvePrincipal });
+    await openWith(app, "Bearer pcc_live_ValidKeyA1");
+    expect(connect).toHaveBeenCalledWith("pcc_live_ValidKeyA1");
+  });
+});
+
+describe("the gateway's pack is the pack that was pinned (Q5-A)", () => {
+  it("Q5-A: a pack mismatch refuses the open with the generic error, and logs pack-mismatch server-side only", async () => {
+    const { app, logs, transport } = setup({ reported: { version: `${PACK.version}+sha256.${"0".repeat(64)}` } });
+    const res = await app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: "agent_unavailable" });
+    expect(res.body).not.toMatch(/pack|sha256|2\.19\.1/i);
+    expect(logs.join("\n")).toContain("pack-mismatch");
+    expect(logs.join("\n")).not.toContain(KEY);
+    expect(transport.closes).toBe(1);
+  });
+
+  it("Q5-A: a gateway that reports no version is refused the same way", async () => {
+    const { app, logs } = setup({ reported: { version: undefined } });
+    const res = await app.inject({ method: "POST", url: "/session" });
+    expect(res.statusCode).toBe(502);
+    expect(logs.join("\n")).toContain("pack-mismatch");
+  });
+});
+
+describe("an old session cannot escape idle expiry (Q6-A)", () => {
+  const unknown = { error: "unknown_session" };
+
+  it("Q6-A: a session idle past the limit is refused on lookup, exactly like an unknown one, and is reported", async () => {
+    const clock = { t: 1_000 };
+    const { app, reports, transport } = setup({ clock, replies: [text("hi")] });
+    const id = await open(app);
+    clock.t += 60_001; // no other session is opened, so no sweep runs
+    const res = await say(app, id, "hello");
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual(unknown);
+    expect(res.json()).toEqual((await say(app, "nope", "hello")).json());
+    expect(reports).toHaveLength(1);
+    expect(transport.closes).toBe(1);
+  });
+
+  it.each([
+    ["GET", "/session/pending"],
+    ["POST", "/session/confirm"],
+    ["POST", "/session/reject"],
+    ["DELETE", "/session"],
+  ] as const)("Q6-A: %s %s on an expired session answers the same as an unknown one", async (method, url) => {
+    const clock = { t: 1_000 };
+    const { app } = setup({ clock });
+    const id = await open(app);
+    clock.t += 60_001;
+    const res = await app.inject({ method, url, headers: { "x-hosted-session": id }, payload: method === "POST" ? { token: "t" } : undefined });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual(unknown);
+  });
+
+  it("Q6-A: an expired session is closed exactly once and is gone: a later sweep finds nothing to close", async () => {
+    const clock = { t: 1_000 };
+    const closing = vi.spyOn(HostedSession.prototype, "close");
+    try {
+      const { app } = setup({ clock });
+      const id = await open(app);
+      clock.t += 60_001;
+      expect((await say(app, id, "hello")).statusCode).toBe(404);
+      expect(closing).toHaveBeenCalledTimes(1);
+      await open(app); // opening another session sweeps idle ones: the expired one must already be gone
+      expect((await say(app, id, "again")).statusCode).toBe(404);
+      expect(closing).toHaveBeenCalledTimes(1);
+    } finally {
+      closing.mockRestore();
+    }
+  });
+
+  it("Q6-A: use within the limit keeps a session alive (each call refreshes it)", async () => {
+    const clock = { t: 1_000 };
+    const { app } = setup({ clock, replies: [text("a"), text("b"), text("c")] });
+    const id = await open(app);
+    for (let i = 0; i < 3; i++) {
+      clock.t += 59_000;
+      expect((await say(app, id, `m${i}`)).statusCode).toBe(200);
+    }
+  });
+
+  it("Q6-A: a turn still in flight is not expired under its own feet", async () => {
+    const clock = { t: 1_000 };
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { app } = setup({ clock, create: async () => (await gate, text("slow")) });
+    const id = await open(app);
+    const first = say(app, id, "one");
+    await new Promise((r) => setTimeout(r, 20));
+    clock.t += 120_000;
+    expect((await app.inject({ method: "GET", url: "/session/pending", headers: { "x-hosted-session": id } })).statusCode).toBe(200);
+    release();
+    expect((await first).statusCode).toBe(200);
+  });
+});
+
+describe("an outcome that arrives during a message reaches the model (Q6-B, over HTTP)", () => {
+  it("Q6-B: hold the model response, confirm over HTTP, release; the next message tells the model the outcome", async () => {
+    let release!: () => void;
+    const hold = new Promise<void>((r) => (release = r));
+    const queue: Array<() => Promise<unknown>> = [
+      async () => toolUse("onboard_machine"),
+      async () => text("confirm?"),
+      async () => (await hold, text("answer")),
+      async () => text("noted"),
+    ];
+    const { app, create } = setup({ create: async () => queue.shift()!() });
+    const id = await open(app, KEY);
+    const [held] = (await say(app, id, "register")).json().pending as Array<{ token: string }>;
+    const inFlight = say(app, id, "a question");
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await confirmCall(app, id, held!.token)).statusCode).toBe(200); // not blocked behind the message
+    release();
+    expect((await inFlight).statusCode).toBe(200);
+    await say(app, id, "thanks");
+    expect(JSON.stringify(create.mock.calls.at(-1))).toContain("The user confirmed onboard_machine");
   });
 });

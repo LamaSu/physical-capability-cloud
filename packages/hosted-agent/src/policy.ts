@@ -3,13 +3,17 @@
  * item 100, question 3; this table is the proposal). Keyed by tool NAME in the
  * pinned package, and reviewed against agent-package 2.19.1.
  *
- *   read  — every GET/HEAD not listed in NEVER; runs at once.
- *   write — listed in WRITE; each call waits for the user's confirmation.
+ *   read  — a GET/HEAD listed in PASSIVE_READS (reviewed to write nothing on the
+ *           full /mcp surface); runs at once.
+ *   write — listed in WRITE, or any other GET/HEAD; each call waits for the
+ *           user's confirmation. A GET proves the verb, not the absence of a
+ *           side effect, so a GET that is not reviewed is confirmed like a write.
  *   l2    — money, accepting work, price, payout, authority; offered only
  *           when the L2 flag is on, and confirmed like a write.
  *   never — not offered, whatever the flag: device actuation or impersonation
- *           (the hosted agent never drives a device), credentials passing
- *           through the model, and requests to absolute URLs.
+ *           (the hosted agent never drives a device, so nothing that submits a
+ *           job to one), credentials passing through the model or provisioned
+ *           by a tool, and requests to absolute URLs.
  * An unlisted non-GET tool is NEVER offered, so a new package version adds
  * nothing until its tools are reviewed here. A WRITE tool whose path looks like
  * money or safety is escalated to l2 as a second net.
@@ -17,17 +21,45 @@
 export type ToolLevel = "read" | "write" | "l2" | "never";
 
 export interface ToolPolicy {
+  /** GET tools reviewed to write nothing on the full /mcp surface. */
+  readonly passiveReads: ReadonlySet<string>;
   readonly write: ReadonlySet<string>;
   readonly l2: ReadonlySet<string>;
   readonly never: ReadonlySet<string>;
   readonly l2PathPatterns: readonly RegExp[];
 }
 
+/**
+ * GET tools that write nothing on the FULL /mcp surface, so they run without a
+ * confirmation. This is the gateway's own reviewed /mcp/apps allowlist
+ * (READONLY_APP_PROXY_TOOLS, packages/gateway/src/mcp/http-mcp-server.ts) MINUS
+ * every entry that is passive only because the gateway sets the
+ * `x-pcc-mcp-readonly` header on /mcp/apps, which a signed-in session does not
+ * use. That is get_dashboard: on /mcp its handler bumps loadCount and updatedAt.
+ *
+ * Adding a name here REQUIRES an individual effect review on the full path (no
+ * counter or timestamp write, no lazy insert, no lease, queue or trigger, no
+ * token use, no external or on-chain read). policy.test.ts pins this exact set.
+ */
+const PASSIVE_READS_LIST = [
+  "search_dashboards", //   GET /api/artifacts
+  "list_kernels", //        GET /api/kernels
+  "get_kernel", //          GET /api/kernels/{kernelId}
+  "get_kernel_devices", //  GET /api/kernels/{kernelId}/devices
+  "get_kernel_jobs", //     GET /api/kernels/{kernelId}/jobs
+  "list_jobs", //           GET /api/jobs
+  "get_job", //             GET /api/jobs/{jobId}
+  "list_capability_types", // GET /api/capabilities/types
+  "search_capabilities", //   GET /api/capabilities/templates
+] as const;
+
+export const PASSIVE_READS: ReadonlySet<string> = new Set(PASSIVE_READS_LIST);
+
 /** The onboarding path and harmless writes. */
 const WRITE = [
-  "setup_generate_config", "setup_validate", "setup_register_device", "setup_test_job",
+  "setup_generate_config", "setup_validate", "setup_register_device",
   "get_build_options", "build_contract", "calculate_roi", "match_spaces", "get_shipment_quote", "near_quote",
-  "onboard_machine", "analyze_machine_docs", "redeem_invite",
+  "onboard_machine", "analyze_machine_docs",
   "pcc_onboard_session_start", "pcc_onboard_session_scrape", "pcc_onboard_session_ingest_docs", "pcc_onboard_session_build_agent",
   "pcc_orchestrator_match_capabilities", "pcc_dht_query",
   "create_protocol", "update_protocol", "fork_protocol", "validate_protocol",
@@ -60,13 +92,14 @@ const L2 = [
 
 /** Never offered. */
 const NEVER = [
-  // device actuation: runs or relays commands on hardware
+  // device actuation: runs or relays commands on hardware (setup_test_job submits a job the gateway's runner executes on the device)
   "pcc_relay_tool_call", "pcc_relay_generic_tool_call", "pcc_create_scope", "pcc_revoke_scope", "pcc_chat_send",
-  "start_protocol_run", "pause_protocol_run", "resume_protocol_run", "cancel_protocol_run",
+  "start_protocol_run", "pause_protocol_run", "resume_protocol_run", "cancel_protocol_run", "setup_test_job",
   // device impersonation: calls only the device's own runtime makes
   "kernel_heartbeat", "kernel_announce_capabilities", "operator_heartbeat",
-  // credentials through the model: a key in a tool result lands in the transcript
-  "provision_api_key", "list_api_keys",
+  // credentials through the model, or provisioned by a tool: a key or session token in a tool result lands in the transcript
+  // (redeem_invite takes a password and answers with a session token and new wallet material)
+  "provision_api_key", "list_api_keys", "redeem_invite",
   // requests to an absolute URL
   "pcc_generate_ui",
   // names LLMAgent reserves (validateToolNames: delete_*, fund_*, ...); the loop will not run with them
@@ -74,6 +107,7 @@ const NEVER = [
 ] as const;
 
 export const DEFAULT_TOOL_POLICY: ToolPolicy = {
+  passiveReads: PASSIVE_READS,
   write: new Set(WRITE),
   l2: new Set(L2),
   never: new Set(NEVER),
@@ -94,8 +128,11 @@ export function classify(spec: ToolSpec, policy: ToolPolicy = DEFAULT_TOOL_POLIC
   if (policy.never.has(spec.name)) return "never";
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(spec.path)) return "never";
   const method = spec.method.toUpperCase();
-  if (method === "GET" || method === "HEAD") return "read";
+  const readVerb = method === "GET" || method === "HEAD";
+  // A reviewed passive read runs at once. Any other GET is held like a write: the verb is not the effect.
+  if (readVerb && policy.passiveReads.has(spec.name)) return "read";
   if (policy.l2.has(spec.name)) return "l2";
+  if (readVerb) return "write";
   if (policy.write.has(spec.name)) {
     return policy.l2PathPatterns.some((re) => re.test(spec.path)) ? "l2" : "write";
   }

@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { readConfig, ConfigError } from "../main.js";
+import Database from "better-sqlite3";
+import { BudgetMeter } from "../budget.js";
+import type { PinnedPack } from "../pack.js";
+import { readConfig, ConfigError, createAnthropicClient, buildServerOptions } from "../main.js";
 
 const ENV: NodeJS.ProcessEnv = {
   PCC_HOSTED_GATEWAY_BASE: "http://127.0.0.1:4310",
@@ -95,5 +98,40 @@ describe("the attempt sink", () => {
     await new Promise<void>((r) => server.close(() => r()));
     await attemptSink(`http://127.0.0.1:${port}`, (l) => lines.push(l))(report); // nothing listens now
     expect(lines.some((l) => l.includes("attemptNotSent"))).toBe(true);
+  });
+});
+
+describe("the model client spends only what was reserved (Q4-B)", () => {
+  const PACK: PinnedPack = { version: "2.19.2", sha256: "c".repeat(64), systemPrompt: "P", tools: [] };
+  const meter = () => new BudgetMeter(new Database(":memory:"), { perSession: 1, perUserDay: 1, perMonth: 1 }, () => new Date(), () => false);
+
+  it("Q4-B: the Anthropic client is built with maxRetries 0: an SDK retry is a second billed attempt behind one reservation", () => {
+    expect((createAnthropicClient() as unknown as { maxRetries: number }).maxRetries).toBe(0);
+  });
+
+  it("Q4-A: the service resolves a signed-in key through the gateway's /api/agent/me", async () => {
+    const http = await import("node:http");
+    const seen: Array<{ url: string | undefined; auth: string | undefined }> = [];
+    const gateway = http.createServer((req, res) => {
+      seen.push({ url: req.url, auth: req.headers.authorization });
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true, identity: { operator: "operator-7" } }));
+    });
+    await new Promise<void>((r) => gateway.listen(0, "127.0.0.1", r));
+    const port = (gateway.address() as { port: number }).port;
+    try {
+      const cfg = readConfig({ ...ENV, PCC_HOSTED_GATEWAY_BASE: `http://127.0.0.1:${port}` });
+      const opts = buildServerOptions(cfg, PACK, meter(), () => undefined);
+      expect(await opts.resolvePrincipal("pcc_live_SyntheticKey0001")).toEqual({ operatorId: "operator-7" });
+      expect(seen).toEqual([{ url: "/api/agent/me", auth: "Bearer pcc_live_SyntheticKey0001" }]);
+    } finally {
+      gateway.closeAllConnections();
+      await new Promise<void>((r) => gateway.close(() => r()));
+    }
+  });
+
+  it("Q4-B: the service's sessions use that client", () => {
+    const opts = buildServerOptions(readConfig(ENV), PACK, meter(), () => undefined);
+    expect((opts.deps.anthropic as unknown as { maxRetries: number }).maxRetries).toBe(0);
   });
 });
