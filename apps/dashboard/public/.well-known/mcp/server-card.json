@@ -174,11 +174,11 @@
     },
     {
       "name": "pcc_discover_scan",
-      "description": "Scan the local network for physical devices that can be onboarded to PCC. Currently supports IPP printers via mDNS. Falls back to mock devices in dev mode. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data."
+      "description": "Scan the local network for physical devices that can be onboarded to PCC. Currently supports IPP printers via mDNS. On a gateway without local network discovery (mDNS; any hosted gateway), it answers 501 not_available outside demo mode (PCC_DEMO_ROUTES); in demo mode the example printers it returns are marked mock."
     },
     {
       "name": "pcc_discover_onboard",
-      "description": "One-command device onboarding pipeline: auto-discover a device on the network → generate a CSD → register the CSD in the PCC registry. Returns the discovered device, generated CSD, and registration confirmation. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data."
+      "description": "One-command device onboarding pipeline: auto-discover a device on the network → generate a CSD → register the CSD in the PCC registry. Returns the discovered device, generated CSD, and registration confirmation. On a gateway without local network discovery (mDNS; any hosted gateway), it answers 501 not_available outside demo mode (PCC_DEMO_ROUTES); in demo mode the example printers it returns are marked mock."
     },
     {
       "name": "pcc_ip_register_capability",

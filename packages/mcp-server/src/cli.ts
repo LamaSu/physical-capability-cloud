@@ -310,11 +310,11 @@ pcc csd register <csdJson>
   discover: `
 pcc discover scan [--protocols=ipp] [--timeout=3000]
   Scan local network for physical devices.
-  Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available.
+  Without local network discovery (any hosted gateway) it answers 501 not_available outside demo mode.
 
 pcc discover onboard [--uri=<deviceUri>] [--protocol=<proto>] [--timeout=3000]
   One-command device onboarding: discover → generate CSD → register.
-  Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available.
+  Without local network discovery (any hosted gateway) it answers 501 not_available outside demo mode.
 `.trim(),
 
   ip: `

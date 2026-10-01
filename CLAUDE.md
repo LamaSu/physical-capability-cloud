@@ -925,8 +925,8 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 | 30 | `pcc_csd_list` | List CSD documents |
 | 31 | `pcc_csd_get` | Get CSD by URI |
 | 32 | `pcc_csd_register` | Register a CSD document |
-| 33 | `pcc_discover_scan` | Scan network for devices (mDNS/IPP) (501 `not_available` outside demo mode) |
-| 34 | `pcc_discover_onboard` | Discover, generate CSD, register in one call (501 `not_available` outside demo mode) |
+| 33 | `pcc_discover_scan` | Scan network for devices (mDNS/IPP) (501 `not_available` outside demo mode on a gateway without local network discovery, e.g. any hosted gateway) |
+| 34 | `pcc_discover_onboard` | Discover, generate CSD, register in one call (501 `not_available` outside demo mode on a gateway without local network discovery, e.g. any hosted gateway) |
 | 35 | `pcc_ip_register_capability` | Register CSD as Story Protocol IP |
 | 36 | `pcc_ip_revenue_snapshot` | IP Royalty Vault balance |
 | 37 | `pcc_ip_claim` | Claim accumulated royalties |
