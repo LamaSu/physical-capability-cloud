@@ -473,12 +473,8 @@ export function createDnsGate(limits: Partial<DnsLimits> = {}): DnsGate {
 
   const start = <T>(work: () => Promise<T>): Promise<T> => {
     running++;
-    let lookup: Promise<T>;
-    try {
-      lookup = Promise.resolve(work());
-    } catch (e) {
-      lookup = Promise.reject(e);
-    }
+    // async: a resolver that throws, or hands back a plain value, still yields an ordinary promise
+    const lookup = (async (): Promise<T> => work())();
     // The slot is returned when the lookup settles (answer, error or the
     // resolver's own timeout), never when a caller's deadline fires.
     const release = () => {
@@ -507,7 +503,7 @@ export function createDnsGate(limits: Partial<DnsLimits> = {}): DnsGate {
           waiting.delete(turn);
           reject(new OutboundError("timeout", "name resolution aborted"));
         };
-        signal.addEventListener("abort", leave, { once: true });
+        signal.addEventListener("abort", leave);
         waiting.add(turn);
       });
     },
