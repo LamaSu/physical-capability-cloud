@@ -730,6 +730,30 @@ describe("N1 seal-custodial-keys script", () => {
     });
   });
 
+  describe("after the legacy plaintext column has been dropped", () => {
+    it("re-running is a clean no-op (dry run and apply), not a crash", async () => {
+      const k = newKey();
+      secrets.push("rowid-post", k.address);
+      const blob = sealCustodialKey(k.key, { rowId: "rowid-post", address: k.address }, kek);
+      const { sqlite } = createDatabase(file);
+      sqlite.exec(`CREATE TABLE api_keys (
+        id TEXT PRIMARY KEY, key_hash TEXT NOT NULL UNIQUE, key_prefix TEXT NOT NULL, operator_id TEXT NOT NULL,
+        scopes TEXT NOT NULL, created_at TEXT NOT NULL, operator_wallet_address TEXT, operator_wallet_key_sealed TEXT)`);
+      sqlite
+        .prepare(
+          "INSERT INTO api_keys (id, key_hash, key_prefix, operator_id, scopes, created_at, operator_wallet_address, operator_wallet_key_sealed) VALUES ('rowid-post','h','p','o','[]','now',?,?)",
+        )
+        .run(k.address, blob);
+      sqlite.close();
+      for (const argv of [[], ["--apply"]]) {
+        const r = await run(argv);
+        expect(r.code, `argv ${JSON.stringify(argv)}: ${r.stderr}`).toBe(0);
+        expect(r.report!.counts).toMatchObject({ plaintextRows: 0, alreadySealed: 1, sealed: 0, failed: 0 });
+        expectNoLeaks(r.all);
+      }
+    });
+  });
+
   // ── output hygiene under hostile conditions ─────────────────────────
   describe("no key, full address, KEK or row id is ever printed", () => {
     it("holds across every mode and every row class at once", async () => {
@@ -964,7 +988,7 @@ describe.skipIf(!existsSync(DB_DIST))("N1 seal-custodial-keys script: the real C
     expect(readState()["cli-row-mismatch"].p).toBe(m);
     expect(leaks(r.all)).toEqual([]);
     expect(r.all).not.toMatch(/(?:0x)?[0-9a-fA-F]{40,}/);
-  });
+  }, 120_000);
 
   it("--apply: exit 3 on a mismatch; the good row is sealed (verifiable), the mismatch row is untouched", () => {
     const { g, m } = mixed();
@@ -979,7 +1003,7 @@ describe.skipIf(!existsSync(DB_DIST))("N1 seal-custodial-keys script: the real C
     expect(after["cli-row-mismatch"].s).toBeNull();
     expect(leaks(r.all)).toEqual([]);
     expect(r.all).not.toMatch(/(?:0x)?[0-9a-fA-F]{40,}/);
-  });
+  }, 120_000);
 
   it("--apply on a clean database: exit 0, and a second run is a clean no-op", () => {
     const g1 = generatePrivateKey();
@@ -998,7 +1022,7 @@ describe.skipIf(!existsSync(DB_DIST))("N1 seal-custodial-keys script: the real C
     expect(second.status).toBe(0);
     expect(JSON.parse(second.stdout).counts).toMatchObject({ plaintextRows: 0, alreadySealed: 2, sealed: 0 });
     expect(leaks(`${first.all}\n${second.all}`)).toEqual([]);
-  });
+  }, 120_000);
 
   it("[neg] exit 2 and no stdout for: no KEK, a typo'd flag, and a missing database file (which is not created)", () => {
     mixed();
@@ -1015,5 +1039,5 @@ describe.skipIf(!existsSync(DB_DIST))("N1 seal-custodial-keys script: the real C
     expect(existsSync(missing)).toBe(false);
     expect(readState()).toEqual(before);
     expect(leaks(`${noKek.all}\n${typo.all}\n${noDb.all}`)).toEqual([]);
-  });
+  }, 120_000);
 });

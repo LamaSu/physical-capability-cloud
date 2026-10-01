@@ -446,6 +446,16 @@ describe("N1: provisioning seals the custodial key and fails closed without a KE
       expect(chain.generateOperatorWallet).not.toHaveBeenCalled();
     });
 
+    it("fails CLOSED when reading the environment itself throws: it never throws and never says 'configured'", () => {
+      const hostile = {
+        get [KEK_ENV]() {
+          throw new Error("env access exploded");
+        },
+      } as unknown as Record<string, string | undefined>;
+      expect(() => custodyKekConfigured(hostile)).not.toThrow();
+      expect(custodyKekConfigured(hostile)).toBe(false);
+    });
+
     it("the guard itself: false (and one alert) without a KEK, true with one, and it never throws", () => {
       expect(custodyKekConfigured({ [KEK_ENV]: kekBytes.toString("base64"), [KEK_ID_ENV]: "k1" })).toBe(true);
       expect(noKekCalls()).toHaveLength(0);

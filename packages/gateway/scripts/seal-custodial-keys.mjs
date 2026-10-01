@@ -146,7 +146,7 @@ export function sealCustodialKeysInDb({
 
   // One UPDATE, one transaction (immediate: take the write lock up front, so a busy gateway
   // cannot make the upgrade fail halfway). The WHERE is a compare-and-swap on the state we read.
-  const update = apply
+  const update = apply && plainColumn
     ? client.prepare(
         `UPDATE api_keys
             SET operator_wallet_key_sealed = ?, operator_wallet_private_key = NULL
@@ -155,7 +155,7 @@ export function sealCustodialKeysInDb({
             AND (operator_wallet_key_sealed IS NULL OR trim(operator_wallet_key_sealed) = '')`,
       )
     : null;
-  const writeSealed = apply ? client.transaction((blob, id, plaintext) => update.run(blob, id, plaintext).changes) : null;
+  const writeSealed = update ? client.transaction((blob, id, plaintext) => update.run(blob, id, plaintext).changes) : null;
 
   for (const row of rows) {
     if (!present(row.plaintext)) {

@@ -168,20 +168,30 @@ describe("N1 custody seal: KEK resolution", () => {
     expect(!noId.ok && noId.problems.join(" ")).toContain(CUSTODY_KEK_ID_ENV);
   });
 
-  it("a CustodyKek never exposes its bytes to JSON, inspect or String()", () => {
+  it("a CustodyKek holds nothing but its id, and never exposes its bytes to JSON, inspect or String()", () => {
     const bytes = randomBytes(32);
     const kek = new CustodyKek("k1", bytes);
+    // Nothing but the id lives on the instance: no key, no Buffer, no symbol-keyed slot.
+    expect(Object.getOwnPropertyNames(kek)).toEqual(["id"]);
+    expect(Object.getOwnPropertySymbols(kek)).toEqual([]);
     const shown = [
       JSON.stringify(kek),
       inspect(kek, { showHidden: true, depth: 5 }),
       String(kek),
       `${kek}`,
       JSON.stringify({ kek }),
-      Object.getOwnPropertyNames(kek).join(","),
     ].join("\n");
-    expect(shown).not.toContain(bytes.toString("base64"));
-    expect(shown).not.toContain(bytes.toString("hex"));
-    expect(shown).not.toContain(bytes.toString("base64url"));
+    // Every common rendering of the key: encodings, a JSON-serialised Buffer (decimal array)
+    // and util.inspect's "<Buffer 01 02 ...>" (space-separated hex).
+    const head = [...bytes.subarray(0, 8)];
+    const renderings = [
+      bytes.toString("base64"),
+      bytes.toString("hex"),
+      bytes.toString("base64url"),
+      head.join(","),
+      head.map((b) => b.toString(16).padStart(2, "0")).join(" "),
+    ];
+    for (const r of renderings) expect(shown).not.toContain(r);
     expect(shown).toContain("k1");
   });
 
