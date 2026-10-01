@@ -885,6 +885,28 @@ describe("PlanPresentation (astra review of #357, round 2b): the contract is bou
     refusedAsBinding(sealedAs(outcome, printUnitEdit(outcome.plan, (u) => ({ ...u, g: u.g + 1n }))));
   });
 
+  it("M1 amount under an economics agreement: the contract's amount is the unit's gross (the agreement's), not the operator's quote", () => {
+    const LICENSOR = A("c1");
+    const HASH = (b: string) => `0x${b.repeat(32)}`;
+    const split: EconomicsBinding["splitNet"] = (units) => ({
+      ok: true,
+      agreementHash: HASH("a1"),
+      economicTermsHash: HASH("e1"),
+      rightsTermsHash: HASH("f1"),
+      units: units.map((u) => {
+        const royalty = (u.g - u.quote) / 2n;
+        const legs = royalty > 0n ? [{ recipient: u.payoutAddress, amount: (u.n - royalty).toString() }, { recipient: LICENSOR, amount: royalty.toString() }] : [{ recipient: u.payoutAddress, amount: u.n.toString() }];
+        return { unitRef: u.nodeId, gross: u.g.toString(), fee: u.f.toString(), net: u.n.toString(), payouts: legs };
+      }),
+    });
+    const economics: EconomicsBinding = { unitGross: () => ({ ok: true, gross: { print: 7_000_000n, mail: 3_250_000n } }), splitNet: split };
+    const outcome = acceptExternalPlan(agentDag(), CTX, { ...world().deps, economics });
+    if (!outcome.ok) throw new Error("setup");
+    expect(cpOf(outcome.plan, "print").canonicalPlan.amount.baseUnits).toBe("7000000"); // the quote is 6500000
+    expect(shape(sealedAs(outcome, outcome.plan))).toEqual(["B", "sealed", null, 2]); // an honest agreement deal still presents
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, amount: { ...cp.amount, baseUnits: "6500000" } })))));
+  });
+
   it("M1 currency: the contract's currency is the deal's currency", () => {
     const { outcome } = accepted();
     refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, amount: { ...cp.amount, currency: "USDT" } })))));
