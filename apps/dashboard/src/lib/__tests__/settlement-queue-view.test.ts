@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  averageOpsPerBatch,
   LOADING,
   UNREACHABLE,
   createFlushController,
@@ -127,6 +128,11 @@ describe("epochsFromResponse", () => {
       expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, ...times }] }).state, JSON.stringify(times)).toBe("unavailable");
     }
     expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, startedAt: 1500, completedAt: 1500 }] }).state).toBe("read");
+  });
+
+  it("NEGATIVE (M4): a time beyond what a Date can hold (8.64e15 ms) is refused too", () => {
+    expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, completedAt: 8.64e15 + 1 }] }).state).toBe("unavailable");
+    expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, startedAt: 8.64e15, completedAt: 8.64e15 }] }).state).toBe("read");
   });
 
   it("NEGATIVE (M4): the queue's oldestAge is an age in ms: a non-negative safe integer", () => {
@@ -355,5 +361,20 @@ describe("createFlushController: no double-flush, disabled through the reload (M
     expect(reloaded).toBe(true);
     expect((caught as Error).message).toBe("network");
     expect(controller.isFlushing()).toBe(false);
+  });
+});
+
+describe("averageOpsPerBatch: operations per UserOperation, from the batches themselves", () => {
+  const batch = (operationCount: number) => ({ userOpHash: "0x" + "cd".repeat(32), operationCount, trigger: "size" as const });
+  it("averages the batches' own operation counts", () => {
+    expect(averageOpsPerBatch([{ ...EPOCH, batches: [batch(2), batch(4)] }])).toBe(3);
+  });
+  it("NEGATIVE: an epoch with no batch adds no operations to the average (it used to add its totalIntents)", () => {
+    const empty = { ...EPOCH, totalIntents: 10, batches: [] };
+    expect(averageOpsPerBatch([{ ...EPOCH, batches: [batch(2), batch(4)] }, empty])).toBe(3);
+  });
+  it("no batch at all is no average, never zero", () => {
+    expect(averageOpsPerBatch([])).toBeNull();
+    expect(averageOpsPerBatch([{ ...EPOCH, totalIntents: 5, batches: [] }])).toBeNull();
   });
 });

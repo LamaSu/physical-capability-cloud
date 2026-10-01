@@ -11,6 +11,7 @@ import {
   LOADING,
   UNREACHABLE,
   UNREACHABLE_REASON,
+  averageOpsPerBatch,
   createFlushController,
   epochDetailNote,
   epochsFromResponse,
@@ -108,7 +109,7 @@ export function SettlementPage() {
 
   const totalFlushed = list ? list.reduce((s, e) => s + e.totalIntents, 0) : null;
   const totalBatches = list ? list.reduce((s, e) => s + e.batches.length, 0) : null;
-  const avgOpsPerBatch = totalFlushed !== null && totalBatches ? Math.round(totalFlushed / totalBatches) : null;
+  const avgOpsPerBatch = list ? averageOpsPerBatch(list) : null;
   const queueValue = q ? formatUsdcBaseUnits(q.totalValue) : null;
   const canFlush = !flushing && q !== null && q.batchEnabled && q.pending > 0;
 

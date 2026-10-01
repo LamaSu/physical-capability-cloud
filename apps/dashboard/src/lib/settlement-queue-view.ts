@@ -51,9 +51,11 @@ const SHAPE = "The gateway's answer did not have the expected shape.";
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 /** A count the page can safely display or sum: a non-negative integer within Number's safe range. */
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+/** The largest time a Date can hold, in ms (ECMAScript: 8.64e15). */
+const MAX_DATE_MS = 8.64e15;
 /** A time the bundler stamps with Date.now(), or an age measured from one: whole milliseconds,
- * non-negative, within Number's safe range (the same test as a count). */
-const isTime = (v: unknown): v is number => isCount(v);
+ * non-negative, and no later than a Date can hold. */
+const isTime = (v: unknown): v is number => isCount(v) && v <= MAX_DATE_MS;
 /** A record of per-key counts (byAgent / byOperation): every value is itself a safe count. */
 const isCountRecord = (v: unknown): v is Record<string, number> => isObj(v) && Object.values(v).every(isCount);
 const FLUSH_TRIGGERS: ReadonlySet<string> = new Set(["manual", "size", "age", "value"]);
@@ -112,6 +114,23 @@ function isEpoch(e: unknown): e is EpochSummary {
     isTime(e.completedAt) &&
     e.completedAt >= e.startedAt
   );
+}
+
+/**
+ * Operations per UserOperation across the epochs: the batches' own operationCount over the number
+ * of batches. An epoch with no batch adds nothing (summing epochs' totalIntents counted operations
+ * that no batch carried). Null when there is no batch at all: no average, never zero.
+ */
+export function averageOpsPerBatch(epochs: readonly EpochSummary[]): number | null {
+  let ops = 0;
+  let batches = 0;
+  for (const e of epochs) {
+    for (const b of e.batches) {
+      ops += b.operationCount;
+      batches++;
+    }
+  }
+  return batches === 0 ? null : Math.round(ops / batches);
 }
 
 /** An empty history is a real answer (no epoch settled since the gateway started). */
