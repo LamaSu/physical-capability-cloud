@@ -57,6 +57,24 @@ describe("isReservedDescription: the scan never cuts a surrogate pair", () => {
     expect(isReservedDescription(ZWSP.repeat(1023) + "\u{1D5E3}ROOF SUBMITTED: {}")).toBe(true);
   });
 
+  it("measures the scan in code points: supplementary letters count once, with a pair at or across the boundary", () => {
+    // Mathematical sans-serif bold small letters (U+1D5EE..U+1D607) fold to a..z; each is two UTF-16 units.
+    const astral = (text: string): string => Array.from(text, (ch) => String.fromCodePoint(0x1d5ee + ch.charCodeAt(0) - 97)).join("");
+    // 1,000 invisible characters, then "proofsubmittxxxx": 1,037 UTF-16 units but only 1,021 code points,
+    // so the whole description is scanned and it does not read as PROOF SUBMITTED:. A scan measured in
+    // units would stop after "proofsubmitt", which could still become the reserved prefix.
+    const whole = ZWSP.repeat(1000) + astral("proofsubmittxxxx") + " tail";
+    expect(whole.length).toBeGreaterThan(1024);
+    expect(isReservedDescription(whole)).toBe(false);
+    // The same, with unit 1,024 falling between the two halves of a letter: a high surrogate, then its low half.
+    const across = ZWSP.repeat(1003) + astral("proofsubmittxxxx") + " tail";
+    expect(across.charCodeAt(1023)).toBeGreaterThanOrEqual(0xd800);
+    expect(across.charCodeAt(1023)).toBeLessThanOrEqual(0xdbff);
+    expect(across.charCodeAt(1024)).toBeGreaterThanOrEqual(0xdc00);
+    expect(across.charCodeAt(1024)).toBeLessThanOrEqual(0xdfff);
+    expect(isReservedDescription(across)).toBe(false);
+  });
+
   it.each([
     ["a stranded high surrogate first", "\uD800PROOF SUBMITTED: {}"],
     ["a stranded low surrogate inside", "PROOF\uDC00 SUBMITTED: {}"],

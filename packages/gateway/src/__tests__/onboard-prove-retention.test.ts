@@ -385,6 +385,20 @@ describe("/prove photo retention is bounded (M4)", () => {
     expect(storedCids()).toEqual([computeCid(PNG_A)]);
   });
 
+  it("finishing a staged photo twice releases its hold once, so it cannot free another request's hold", async () => {
+    const store = getEvidencePhotoStore();
+    const first = await store.stage(PNG_A, "image/png");
+    const second = await store.stage(PNG_A, "image/png");
+    expect(heldEvidencePhotos()).toBe(2);
+    first.discard();
+    first.discard();
+    expect(heldEvidencePhotos()).toBe(1); // the second request still holds the bytes
+    second.discard();
+    expect(heldEvidencePhotos()).toBe(0);
+    expect(stagingFiles()).toEqual([]);
+    expect(storedCids()).toEqual([]);
+  });
+
   it("a blob that was already stored, with no record of it, is kept when this proof fails to commit", async () => {
     // The same bytes were stored before, e.g. by an /api/storage upload.
     await new LocalBlobBackend(blobDir).put(PNG_B, { mediaType: "image/png" });
