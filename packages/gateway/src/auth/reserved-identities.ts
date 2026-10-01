@@ -25,6 +25,13 @@
  * The same paths also enforce IDENTITY BINDING (WP-A fold F3, below): an
  * operatorId that has, or ever had, a key, or owns a kernel / registration /
  * job offer / UI artifact, cannot be claimed by anyone but itself.
+ *
+ * SERVICE IDENTITIES: an operatorId that starts with "svc:" (svc:vcr, svc:oracle)
+ * is a service principal. Its keys are issued by the operator out of band, and it
+ * will hold scopes no self-service key may (accepted-deal v3's sealed_deal_read,
+ * reserved in middleware/scope-checker.ts). It is therefore ALWAYS claimed on the
+ * unverified paths, whatever the database holds, and refused even for a caller
+ * authenticated as it (isServiceIdentity, below).
  */
 
 import type { FastifyRequest } from "fastify";
@@ -83,6 +90,20 @@ export function reservedIdentityAllowlists(operatorId: string): AdminIdentityAll
 /** True when `operatorId` appears on ANY elevated-access allowlist. */
 export function isReservedIdentity(operatorId: string): boolean {
   return reservedIdentityAllowlists(operatorId).length > 0;
+}
+
+/** The prefix of a service identity (svc:vcr, svc:oracle), compared after the identity fold. */
+export const SERVICE_IDENTITY_PREFIX = "svc:";
+
+/**
+ * True when `operatorId` is a service identity: it starts with "svc:" after THE
+ * identity fold (trimmed, NFKC, case-folded), so "SVC:Oracle", " svc:vcr " and
+ * the fullwidth spelling of "svc:vcr" all are. Only the prefix counts: "svcs:x",
+ * "my-svc:x" and "svc.x" are ordinary identities. No database lookup: a service
+ * identity is service whatever any table says.
+ */
+export function isServiceIdentity(operatorId: string): boolean {
+  return normalizeIdentity(operatorId).startsWith(SERVICE_IDENTITY_PREFIX);
 }
 
 // A reserved identity is refused with the SAME status and body as a claimed
@@ -222,12 +243,14 @@ const CLAIM_QUERIES: ReadonlyArray<{ sql: string; params: number }> = [
 /**
  * True when `operatorId` (trimmed, case-insensitive — normalizeIdentity on both
  * sides) has, or ever had, an API key (revoked and expired included), or owns
- * a kernel, a machine registration, a job offer or a UI artifact. Errors count
+ * a kernel, a machine registration, a job offer or a UI artifact, or is a
+ * service identity ("svc:...", always claimed: isServiceIdentity). Errors count
  * as claimed (fail closed). An empty id is never claimed.
  */
 export function isClaimedIdentity(operatorId: string): boolean {
   const needle = normalizeIdentity(operatorId);
   if (!needle) return false;
+  if (isServiceIdentity(operatorId)) return true;
   try {
     const db = rawSqlite();
     for (const q of CLAIM_QUERIES) {
@@ -281,8 +304,9 @@ export type UnverifiedIdentityDecision =
  * The ONE decision both unverified email paths (POST /api/auth/provision
  * {email}, POST /api/contributors/quickstart) make before minting anything:
  *
- *   - reserved (on an admin allowlist, A7)  -> refuse, even for a caller that
- *     holds a key of that very identity: an admin key is issued out-of-band;
+ *   - reserved (on an admin allowlist, A7) or a service identity ("svc:...")
+ *     -> refuse, even for a caller that holds a key of that very identity: an
+ *     admin key, like a service key, is issued out-of-band;
  *   - the caller's valid Bearer key IS this identity (F3) -> self (delegate,
  *     never wider — callerMayDelegate — and never longer-lived: the routes
  *     pass the caller key's expiresAt to provisionApiKey as `notAfter`, R4);
@@ -296,7 +320,7 @@ export type UnverifiedIdentityDecision =
  * the reserved refusal is not the one answer that never touches the database.
  */
 export function decideUnverifiedIdentity(req: FastifyRequest, requested: string): UnverifiedIdentityDecision {
-  const reserved = isReservedIdentity(requested);
+  const reserved = isReservedIdentity(requested) || isServiceIdentity(requested);
   if (!reserved) {
     const caller = callerApiKey(req);
     if (caller && sameIdentity(caller.operatorId, requested)) return { kind: "self", caller };
