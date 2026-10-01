@@ -23,17 +23,26 @@ import {
   type OperatorBindingDTO,
 } from "../types/operator-binding.js";
 import {
+  BUILTIN_PUBLIC_CAPABILITY_URLS,
   OPPORTUNITY_SCHEMA,
   OpportunityDTOSchema,
+  approvedSetDigest,
   demandAggregateId,
   demandAggregateTitle,
+  demandAggregatesFromRelease,
+  isPublicCapabilityUrl,
+  opportunityDTOSchemaFor,
   primitivesAreExecutable,
+  publicCapabilityUrls,
   type DemandAggregateDTO,
   type FundedOfferDTO,
   type KitBuildRequestDTO,
   type OpportunityDemandBand,
+  type PublicOpportunityReleaseRecord,
 } from "../types/opportunity.js";
+import type { SHA256 } from "../types/common.js";
 import type { CsdEvidencePrimitiveRef } from "../csd/schema.js";
+import { loadBuiltinCsds } from "../csd/registry.js";
 
 const H = (c: string) => `sha256:${c.repeat(64)}` as const;
 const T = (c: string) => `0x${c.repeat(64)}`;
@@ -273,13 +282,23 @@ function fundedOffer(overrides: Partial<FundedOfferDTO> = {}): FundedOfferDTO {
   };
 }
 
-/** A demand aggregate whose id and title are derived, as its producer must derive them. */
+/**
+ * A demand aggregate whose id and title are derived, as its producer must derive them.
+ * It defaults to a BUILT-IN capability and to instants in the past, so a default
+ * aggregate stays valid and only the field a test changes can refuse it.
+ */
 function aggregate(
-  o: { capabilityType?: string; demandBand?: OpportunityDemandBand; releasePeriod?: string; asOf?: string } = {},
+  o: {
+    capabilityType?: string;
+    demandBand?: OpportunityDemandBand;
+    releasePeriod?: string;
+    asOf?: string;
+    releaseDigest?: SHA256;
+  } = {},
 ): DemandAggregateDTO {
-  const capabilityType = o.capabilityType ?? "pcc://capabilities/hplc/v1";
+  const capabilityType = o.capabilityType ?? "pcc://capabilities/cnc-3axis/v2";
   const demandBand = o.demandBand ?? "5-9";
-  const releasePeriod = o.releasePeriod ?? "2026-09";
+  const releasePeriod = o.releasePeriod ?? "2026-08";
   return {
     schema: OPPORTUNITY_SCHEMA,
     kind: "demand_aggregate",
@@ -288,8 +307,9 @@ function aggregate(
     title: demandAggregateTitle(capabilityType, demandBand, releasePeriod),
     demandBand,
     releasePeriod,
+    releaseDigest: o.releaseDigest ?? H("e"),
     authority: "derived_signal",
-    asOf: o.asOf ?? "2026-10-02T00:00:00Z",
+    asOf: o.asOf ?? "2026-09-02T00:00:00Z",
   };
 }
 
@@ -338,7 +358,7 @@ describe("OpportunityDTO", () => {
     expect(parses({ ...aggregate(), authority: "authoritative" })).toBe(false);
   });
 
-  it("a demand aggregate carries only derived public fields: no location, evidence, deadline, kitRef or digest", () => {
+  it("a demand aggregate carries only derived public fields: no location, evidence, deadline, kitRef or capability digest", () => {
     expect(parses({ ...aggregate(), location: { country: "US" } })).toBe(false);
     expect(parses({ ...aggregate(), evidence: evidence(1, []) })).toBe(false);
     expect(parses({ ...aggregate(), deadline: "2026-10-01T00:00:00Z" })).toBe(false);
@@ -463,7 +483,7 @@ describe("pack 112 reproductions", () => {
     expect(parses({ ...aggregate(), title: "Alice needs HPLC at 123 Main St" })).toBe(false);
     expect(parses({ ...aggregate(), kitRef: { kitDigest: H("c"), name: "alice@example.com" } })).toBe(false);
     // A title that overstates the band is not the derived title.
-    expect(parses({ ...aggregate(), title: demandAggregateTitle("pcc://capabilities/hplc/v1", "100+", "2026-09") })).toBe(false);
+    expect(parses({ ...aggregate(), title: demandAggregateTitle("pcc://capabilities/cnc-3axis/v2", "100+", "2026-08") })).toBe(false);
     // Invented slugs, with id and title derived by the helper: a name, a date, an overlong slug.
     for (const slug of ["alice-at-123-main-st", "hplc-2026", "a".repeat(41)]) {
       expect(parses(aggregate({ capabilityType: `pcc://capabilities/${slug}/v1` })), slug).toBe(false);
@@ -581,10 +601,10 @@ describe("pack 112 reproductions", () => {
 
   it("MEDIUM 7: timestamps are real, and a release period closed before asOf", () => {
     expect(parses({ ...aggregate(), asOf: "yesterday" })).toBe(false);
-    expect(parses(aggregate({ asOf: "2026-09-15T00:00:00Z" }))).toBe(false); // the period is still open
-    expect(parses(aggregate({ asOf: "2026-09-30T23:59:59Z" }))).toBe(false); // its last second
-    expect(parses(aggregate({ asOf: "2026-10-01T00:00:00+02:00" }))).toBe(false); // 22:00Z on the 30th
-    expect(parses(aggregate({ asOf: "2026-10-01T00:00:00Z" }))).toBe(true); // the first instant after it
+    expect(parses(aggregate({ asOf: "2026-08-15T00:00:00Z" }))).toBe(false); // the period is still open
+    expect(parses(aggregate({ asOf: "2026-08-31T23:59:59Z" }))).toBe(false); // its last second
+    expect(parses(aggregate({ asOf: "2026-09-01T00:00:00+02:00" }))).toBe(false); // 22:00Z on the 31st
+    expect(parses(aggregate({ asOf: "2026-09-01T00:00:00Z" }))).toBe(true); // the first instant after it
     expect(parses(aggregate({ releasePeriod: "2099-12" }))).toBe(false); // a future period
     expect(parses(kitRequest({ asOf: "2026-09-24" }))).toBe(false);
     expect(parses(kitRequest({ deadline: "next week" }))).toBe(false);
@@ -592,6 +612,307 @@ describe("pack 112 reproductions", () => {
     const stale = binding();
     stale.bindings = [{ ...stale.bindings[0]!, lastSeenAt: "a while ago" }];
     expect(OperatorBindingDTOSchema.safeParse(stale).success).toBe(false);
+  });
+});
+
+// ── astra pack 112b (verdict on 072f9a17): each reproduction was run first on that head ──
+describe("astra pack 112b", () => {
+  // Independent of the implementation: sorted-key canonical JSON hashed by node:crypto, so the
+  // digests below do not lean on util/canonical or @noble/hashes.
+  const canon = (v: unknown): string =>
+    Array.isArray(v)
+      ? `[${v.map(canon).join(",")}]`
+      : v !== null && typeof v === "object"
+        ? `{${Object.keys(v)
+            .sort()
+            .map((k) => `${JSON.stringify(k)}:${canon((v as Record<string, unknown>)[k])}`)
+            .join(",")}}`
+        : JSON.stringify(v);
+  const digestOf = (v: unknown): SHA256 => `sha256:${createHash("sha256").update(canon(v), "utf8").digest("hex")}`;
+  const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  /** An iterable that counts how many times it is iterated. */
+  const counted = (items: string[]) => {
+    const state = { iterations: 0 };
+    return {
+      state,
+      iterable: {
+        [Symbol.iterator]() {
+          state.iterations++;
+          return items[Symbol.iterator]();
+        },
+      } as Iterable<string>,
+    };
+  };
+  const messagesOf = (v: unknown) => {
+    const r = OpportunityDTOSchema.safeParse(v);
+    return r.success ? [] : r.error.issues.map((i) => i.message);
+  };
+
+  // ── A. CRITICAL 1: public demand names only approved public capabilities, and names its release ──
+
+  it("CRITICAL 1: a private slug (alice-smith) is refused as public demand", () => {
+    const capabilityType = "pcc://capabilities/alice-smith/v1";
+    // Slug syntax is not a privacy boundary: the url is well-formed, and so are its derived id and title.
+    expect(isPublicCapabilityUrl(capabilityType)).toBe(true);
+    expect(parses(aggregate({ capabilityType }))).toBe(false);
+    // Membership is the ONLY reason: the same aggregate for a built-in passes, and nothing else is reported.
+    expect(parses(aggregate())).toBe(true);
+    expect(messagesOf(aggregate({ capabilityType }))).toEqual([
+      "a demand_aggregate's capabilityType must be in the approved public capability set",
+    ]);
+  });
+
+  it("the built-in public set is exactly the CSDs compiled into @pcc/spec, sorted by code unit and frozen", () => {
+    // Pinned. document-print-and-mail/v1 is not in it: that is a draft workflow CSD which
+    // loadBuiltinCsds does not register and the package build does not ship (only its own test imports it).
+    expect([...BUILTIN_PUBLIC_CAPABILITY_URLS]).toEqual([
+      "pcc://capabilities/2d-print/v1",
+      "pcc://capabilities/cnc-3axis/v2",
+      "pcc://capabilities/courier-route/v1",
+      "pcc://capabilities/fdm/v2",
+      "pcc://capabilities/hot-food-prep/v1",
+      "pcc://capabilities/laser-cut/v2",
+      "pcc://capabilities/make-pizza/v1",
+      "pcc://capabilities/sla/v2",
+    ]);
+    // And it is what the registry itself says, filtered and sorted.
+    const fromRegistry = loadBuiltinCsds().list().map((c) => c.url).filter((u) => isPublicCapabilityUrl(u));
+    expect([...BUILTIN_PUBLIC_CAPABILITY_URLS]).toEqual([...new Set(fromRegistry)].sort(byCodeUnit));
+    expect(Object.isFrozen(BUILTIN_PUBLIC_CAPABILITY_URLS)).toBe(true);
+    for (const capabilityType of BUILTIN_PUBLIC_CAPABILITY_URLS) {
+      expect(parses(aggregate({ capabilityType })), capabilityType).toBe(true);
+    }
+  });
+
+  it("publicCapabilityUrls: the built-ins plus ACTIVE kits' csd urls, deduplicated, sorted by code unit and frozen", () => {
+    expect([...publicCapabilityUrls()]).toEqual([...BUILTIN_PUBLIC_CAPABILITY_URLS]);
+    const kitUrl = "pcc://capabilities/liquid-handling/v1";
+    const urls = publicCapabilityUrls([kitUrl, "pcc://capabilities/fdm/v2", kitUrl]);
+    expect([...urls]).toEqual([...BUILTIN_PUBLIC_CAPABILITY_URLS, kitUrl].sort(byCodeUnit));
+    expect(Object.isFrozen(urls)).toBe(true);
+    expect(() => (urls as string[]).push("pcc://capabilities/x/v1")).toThrow();
+  });
+
+  it("publicCapabilityUrls THROWS on any entry that is not a public capability url, and iterates its input once", () => {
+    for (const bad of [
+      42,
+      null,
+      undefined,
+      {},
+      "",
+      "https://agent.example/claim",
+      "alice@example.com",
+      "pcc://capabilities/Alice/v1",
+      "pcc://capabilities/hplc-2026/v1",
+      "pcc://capabilities/a-b-c-d-e/v1",
+      "pcc://capabilities/x/v1234567",
+    ]) {
+      expect(() => publicCapabilityUrls([bad as never]), String(bad)).toThrow(/entry 0 is not a public capability url/);
+    }
+    // A bad entry among good ones is never dropped silently.
+    expect(() => publicCapabilityUrls(["pcc://capabilities/liquid-handling/v1", "pcc://capabilities/hplc-2026/v1"])).toThrow(/entry 1/);
+    // An object is not a string even when its text is a public capability url.
+    const lookalike = { toString: () => "pcc://capabilities/alice-smith/v1" };
+    expect(() => publicCapabilityUrls([lookalike as never])).toThrow(/entry 0/);
+    const input = counted(["pcc://capabilities/liquid-handling/v1"]);
+    expect(publicCapabilityUrls(input.iterable)).toContain("pcc://capabilities/liquid-handling/v1");
+    expect(input.state.iterations).toBe(1);
+  });
+
+  it("approvedSetDigest is byte-identical to #365's: pinned by a golden vector over a fixed two-url list", () => {
+    // #365 (kit-demand.ts) hashes canonicalize(ids): the publishable urls, deduplicated, sorted by code unit.
+    // Here, independently: the JSON text of that array (strings only) hashed by node:crypto.
+    const urls = ["pcc://capabilities/fdm/v2", "pcc://capabilities/cnc-3axis/v2"];
+    const sorted = ["pcc://capabilities/cnc-3axis/v2", "pcc://capabilities/fdm/v2"];
+    const independent = `sha256:${createHash("sha256").update(Buffer.from(JSON.stringify(sorted), "utf8")).digest("hex")}`;
+    expect(approvedSetDigest(urls)).toBe(independent);
+    expect(approvedSetDigest(urls)).toBe("sha256:d8db4afb1321319fe719596fbdfeb2422ff154e56771c610c471de1412120762");
+    // Order, repeats and entries that are not public capability urls do not change it; a different set does.
+    expect(approvedSetDigest([...sorted, ...urls])).toBe(independent);
+    expect(approvedSetDigest([...urls, "pcc://capabilities/hplc-2026/v1", "not a url", 42 as never])).toBe(independent);
+    const lookalike = { toString: () => "pcc://capabilities/alice-smith/v1" };
+    expect(approvedSetDigest([...urls, lookalike as never])).toBe(independent);
+    expect(approvedSetDigest([...urls, "pcc://capabilities/sla/v2"])).not.toBe(independent);
+    expect(approvedSetDigest([])).toBe(`sha256:${createHash("sha256").update("[]").digest("hex")}`);
+    const input = counted(urls);
+    expect(approvedSetDigest(input.iterable)).toBe(independent);
+    expect(input.state.iterations).toBe(1);
+  });
+
+  it("opportunityDTOSchemaFor: a demand_aggregate must be IN the set the schema was built with", () => {
+    const hplc = "pcc://capabilities/hplc/v1";
+    expect(parses(aggregate({ capabilityType: hplc }))).toBe(false); // not a built-in
+    const forKits = opportunityDTOSchemaFor(publicCapabilityUrls([hplc]));
+    expect(forKits.safeParse(aggregate({ capabilityType: hplc })).success).toBe(true);
+    expect(forKits.safeParse(aggregate()).success).toBe(true); // the built-ins stay
+    expect(opportunityDTOSchemaFor([hplc]).safeParse(aggregate()).success).toBe(false); // only what it was given
+    // Membership applies to demand only: funded work and kit requests may name any capability url.
+    expect(parses(fundedOffer())).toBe(true);
+    expect(parses(kitRequest())).toBe(true);
+  });
+
+  it("opportunityDTOSchemaFor snapshots the set once: later changes, and a lying has(), widen nothing", () => {
+    const hplc = "pcc://capabilities/hplc/v1";
+    const lathe = "pcc://capabilities/lathe/v1";
+    const set = new Set([hplc]);
+    const schema = opportunityDTOSchemaFor(set);
+    set.add(lathe);
+    set.delete(hplc);
+    expect(schema.safeParse(aggregate({ capabilityType: hplc })).success).toBe(true);
+    expect(schema.safeParse(aggregate({ capabilityType: lathe })).success).toBe(false);
+    class LyingSet extends Set<string> {
+      override has(): boolean {
+        return true;
+      }
+    }
+    const liar = opportunityDTOSchemaFor(new LyingSet([hplc]));
+    expect(liar.safeParse(aggregate({ capabilityType: hplc })).success).toBe(true);
+    expect(liar.safeParse(aggregate({ capabilityType: lathe })).success).toBe(false);
+    // Only strings that pass isPublicCapabilityUrl enter the snapshot.
+    const syntactic = opportunityDTOSchemaFor(["pcc://capabilities/hplc-2026/v1", 42 as never]);
+    expect(syntactic.safeParse(aggregate({ capabilityType: "pcc://capabilities/hplc-2026/v1" })).success).toBe(false);
+    // ...and an object whose text is a public capability url is not a string, so it does not enter either.
+    const lookalike = { toString: () => "pcc://capabilities/alice-smith/v1" };
+    const objectOnly = opportunityDTOSchemaFor([lookalike as never]);
+    expect(objectOnly.safeParse(aggregate({ capabilityType: "pcc://capabilities/alice-smith/v1" })).success).toBe(false);
+    const input = counted([hplc]);
+    opportunityDTOSchemaFor(input.iterable);
+    expect(input.state.iterations).toBe(1);
+  });
+
+  it("a demand_aggregate carries the releaseDigest of its release record, and no other kind does", () => {
+    const { releaseDigest: _omitted, ...without } = aggregate();
+    expect(parses(without)).toBe(false);
+    for (const bad of ["", "sha256:abc", `sha256:${"E".repeat(64)}`, "e".repeat(64), `sha1:${"e".repeat(40)}`]) {
+      expect(parses({ ...aggregate(), releaseDigest: bad }), bad).toBe(false);
+    }
+    expect(parses({ ...fundedOffer(), releaseDigest: H("e") })).toBe(false);
+    expect(parses({ ...kitRequest(), releaseDigest: H("e") })).toBe(false);
+  });
+
+  describe("demandAggregatesFromRelease", () => {
+    const period = "2026-08";
+    const asOf = "2026-09-02T00:00:00Z";
+    const liquid = "pcc://capabilities/liquid-handling/v1";
+    const cnc = "pcc://capabilities/cnc-3axis/v2";
+    const approved = publicCapabilityUrls([liquid]);
+    const aggregateRecord = (capabilityType: string, demandBand: OpportunityDemandBand = "5-9", p = period) => ({
+      schema: "pcc.public-opportunity-aggregate.v1" as const,
+      capabilityType,
+      demandBand,
+      countedEvidence: "authenticated_order",
+      period: p,
+    });
+    /** A release built the way #365's buildPublicRelease builds one, with both digests computed independently. */
+    const buildRelease = (
+      aggregates: ReturnType<typeof aggregateRecord>[],
+      approvedUrls: readonly string[] = approved,
+      p = period,
+    ): PublicOpportunityReleaseRecord => {
+      const body = {
+        schema: "pcc.public-opportunity-release.v1" as const,
+        period: p,
+        policy: { k: 5, evidenceFloor: "authenticated_order" },
+        approvedSetDigest: digestOf([...new Set(approvedUrls.filter((u) => isPublicCapabilityUrl(u)))].sort(byCodeUnit)),
+        aggregates,
+      };
+      return { ...body, digest: digestOf(body) };
+    };
+    const refused = (release: unknown, urls: Iterable<string> = approved, when = asOf) =>
+      expect(() => demandAggregatesFromRelease(release as PublicOpportunityReleaseRecord, urls, when));
+
+    it("accepts a hand-built release whose digests were computed independently", () => {
+      const release = buildRelease([aggregateRecord(cnc, "10-24"), aggregateRecord(liquid, "100+")]);
+      const dtos = demandAggregatesFromRelease(release, approved, asOf);
+      expect(dtos).toEqual([
+        {
+          schema: OPPORTUNITY_SCHEMA,
+          kind: "demand_aggregate",
+          id: "demand:2026-08:cnc-3axis:v2",
+          capabilityType: cnc,
+          title: "Demand for cnc-3axis v2: 10-24 verified requesters (2026-08)",
+          demandBand: "10-24",
+          releasePeriod: period,
+          releaseDigest: release.digest,
+          authority: "derived_signal",
+          asOf,
+        },
+        {
+          schema: OPPORTUNITY_SCHEMA,
+          kind: "demand_aggregate",
+          id: "demand:2026-08:liquid-handling:v1",
+          capabilityType: liquid,
+          title: "Demand for liquid-handling v1: 100+ verified requesters (2026-08)",
+          demandBand: "100+",
+          releasePeriod: period,
+          releaseDigest: release.digest,
+          authority: "derived_signal",
+          asOf,
+        },
+      ]);
+      const schema = opportunityDTOSchemaFor(approved);
+      for (const d of dtos) expect(schema.safeParse(d).success).toBe(true);
+      expect(demandAggregatesFromRelease(buildRelease([]), approved, asOf)).toEqual([]);
+    });
+
+    it("iterates the approved set once, so a one-shot generator works", () => {
+      const input = counted([...approved]);
+      expect(demandAggregatesFromRelease(buildRelease([aggregateRecord(cnc)]), input.iterable, asOf)).toHaveLength(1);
+      expect(input.state.iterations).toBe(1);
+      function* once() {
+        yield* approved;
+      }
+      expect(demandAggregatesFromRelease(buildRelease([aggregateRecord(cnc)]), once(), asOf)).toHaveLength(1);
+    });
+
+    it("throws on a tampered digest, and on content changed after the digest was computed", () => {
+      const release = buildRelease([aggregateRecord(cnc)]);
+      refused({ ...release, digest: H("0") }).toThrow(/digest does not match/);
+      refused({ ...release, aggregates: [aggregateRecord(cnc, "100+")] }).toThrow(/digest does not match/);
+      refused({ ...release, period: "2026-07", aggregates: [aggregateRecord(cnc, "5-9", "2026-07")] }).toThrow(/digest does not match/);
+    });
+
+    it("throws when the release was built with a different approved set", () => {
+      const forBuiltins = buildRelease([aggregateRecord(cnc)], BUILTIN_PUBLIC_CAPABILITY_URLS);
+      refused(forBuiltins, approved).toThrow(/different approved set/);
+      refused(buildRelease([aggregateRecord(cnc)], approved), BUILTIN_PUBLIC_CAPABILITY_URLS).toThrow(/different approved set/);
+      expect(demandAggregatesFromRelease(forBuiltins, BUILTIN_PUBLIC_CAPABILITY_URLS, asOf)).toHaveLength(1);
+    });
+
+    it("throws on an aggregate whose capabilityType is outside the approved set", () => {
+      // Both digests are valid: only the membership check stands between this record and a DTO.
+      const release = buildRelease([aggregateRecord("pcc://capabilities/alice-smith/v1")]);
+      refused(release).toThrow(/aggregate 0 is not an approved public capability/);
+      refused(buildRelease([aggregateRecord(cnc), aggregateRecord("pcc://capabilities/hplc/v1")])).toThrow(/aggregate 1 is not an approved/);
+    });
+
+    it("throws on an aggregate for a different period than the record", () => {
+      refused(buildRelease([aggregateRecord(cnc, "5-9", "2026-07")])).toThrow(/aggregate 0 is for a different period/);
+    });
+
+    it("throws on a record that is not exactly a pcc.public-opportunity-release.v1", () => {
+      const release = buildRelease([aggregateRecord(cnc)]);
+      const notARecord = /not a pcc.public-opportunity-release.v1 record/;
+      for (const bad of [null, undefined, "release", [], {}, { ...release, schema: "pcc.public-opportunity-release.v2" }]) {
+        refused(bad).toThrow(notARecord);
+      }
+      refused({ ...release, note: "extra" }).toThrow(notARecord);
+      refused({ ...release, policy: { ...release.policy, floorHint: 1 } }).toThrow(notARecord);
+      refused({ ...release, aggregates: [{ ...aggregateRecord(cnc), requester: "alice" }] }).toThrow(notARecord);
+      refused(buildRelease([aggregateRecord(cnc, "1-4" as never)])).toThrow(notARecord);
+      refused(buildRelease([], approved, "2026-13")).toThrow(notARecord);
+      refused({ ...release, aggregates: undefined }).toThrow(notARecord);
+    });
+
+    it("throws on a repeated capabilityType", () => {
+      refused(buildRelease([aggregateRecord(cnc), aggregateRecord(cnc, "10-24")])).toThrow(/aggregate 1 repeats a capability type/);
+    });
+
+    it("throws when a DTO would be invalid: an asOf before the period closed, or not a timestamp", () => {
+      const release = buildRelease([aggregateRecord(cnc)]);
+      refused(release, approved, "2026-08-15T00:00:00Z").toThrow(/aggregate 0 is not a valid demand_aggregate/);
+      refused(release, approved, "yesterday").toThrow(/aggregate 0 is not a valid demand_aggregate/);
+    });
   });
 });
 
@@ -648,7 +969,7 @@ describe("pack 112 MEDIUM 8: every shape or enum change bumps the schema literal
   it("each contract literal is pinned to its exact shape", () => {
     expect({ literal: OPPORTUNITY_SCHEMA, shape: fingerprint(OpportunityDTOSchema) }).toEqual({
       literal: "pcc.opportunity.v0",
-      shape: "42565eaed15fe551",
+      shape: "91d25641c69b4970",
     });
     expect({ literal: OPERATOR_BINDING_SCHEMA, shape: fingerprint(OperatorBindingDTOSchema) }).toEqual({
       literal: "pcc.operator-binding.v0",
