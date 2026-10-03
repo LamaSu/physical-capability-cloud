@@ -256,3 +256,93 @@ def test_stop_recording_answers_only_after_every_notification_scheduled_before_i
     assert after == [], f"written after evidence.stopRecording answered: {after} (lines until then: {by_answer})"
     assert by_answer.index("4") > by_answer.index("aspirate")
     assert by_answer.index("4") > by_answer.index("dispense")
+
+
+# ── recording windows are attested (astra pack 194) ─────────────────────────
+
+
+async def _call(s: Server, out: CapturingStdout, id_: str, method: str, params: dict) -> dict:
+    await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": id_, "method": method, "params": params}))
+    await asyncio.sleep(0)
+    msgs = [m for m in out.pop_messages() if m.get("id") == id_]
+    return msgs[0]
+
+
+def test_a_window_is_attested_with_this_process_generation_on_open_and_close():
+    async def scenario():
+        out = CapturingStdout()
+        s = Server(stdout=out)
+        init = await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        opened = await _call(s, out, "2", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-1"})
+        closed = await _call(s, out, "3", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-1"})
+        again = await _call(s, out, "4", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-1"})
+        return init, opened, closed, again
+
+    init, opened, closed, again = asyncio.run(scenario())
+    gen = init["result"]["generation"]
+    assert isinstance(gen, str) and len(gen) >= 16
+    assert opened["result"]["generation"] == gen and opened["result"]["jobId"] == "job-1"
+    assert closed["result"] == {"ok": True, "jobId": "job-1", "opCount": 0, "generation": gen}
+    # A retried close of the same window answers as the first did.
+    assert again["result"] == closed["result"]
+
+
+def test_closing_a_window_this_process_never_opened_is_refused_with_its_generation():
+    async def scenario():
+        out = CapturingStdout()
+        s = Server(stdout=out)
+        await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        return await _call(s, out, "2", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-x"}), s.evidence.generation
+
+    answer, gen = asyncio.run(scenario())
+    assert answer["error"]["code"] == RPC_ERROR_CODES["NO_RECORDING_WINDOW"]
+    assert answer["error"]["data"]["generation"] == gen
+
+
+def test_closing_another_jobs_window_is_refused_and_leaves_it_open():
+    async def scenario():
+        out = CapturingStdout()
+        s = Server(stdout=out)
+        await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        await _call(s, out, "2", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        answer = await _call(s, out, "3", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-B"})
+        return answer, s.evidence.get_window("dev-1")
+
+    answer, window = asyncio.run(scenario())
+    assert answer["error"]["code"] == RPC_ERROR_CODES["NO_RECORDING_WINDOW"]
+    assert window is not None and window.job_id == "job-A"
+
+
+def test_a_run_without_its_own_window_is_refused():
+    async def scenario():
+        out = CapturingStdout()
+        s = Server(stdout=out)
+        await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        ops = [{"op": "aspirate", "well": "A1"}]
+        none = await _call(s, out, "2", "backend.run", {"deviceId": "dev-1", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": ops})
+        await _call(s, out, "3", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        other = await _call(s, out, "4", "backend.run", {"deviceId": "dev-1", "jobId": "job-B", "protocolSource": "inline-ops", "protocolInline": ops})
+        await asyncio.sleep(0.05)
+        return none, other, out.pop_messages()
+
+    none, other, later = asyncio.run(scenario())
+    assert none["error"]["code"] == RPC_ERROR_CODES["NO_RECORDING_WINDOW"]
+    assert other["error"]["code"] == RPC_ERROR_CODES["NO_RECORDING_WINDOW"]
+    assert [m for m in later if m.get("method") == "evidence"] == []
+
+
+def test_a_restarted_sidecar_attests_nothing_of_the_old_job():
+    async def scenario():
+        out = CapturingStdout()
+        first = Server(stdout=out)
+        await _call(first, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        await _call(first, out, "2", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-1"})
+        restarted = Server(stdout=out)
+        await _call(restarted, out, "3", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        answer = await _call(restarted, out, "4", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-1"})
+        return first.evidence.generation, restarted.evidence.generation, answer
+
+    old_gen, new_gen, answer = asyncio.run(scenario())
+    assert old_gen != new_gen
+    assert answer["error"]["code"] == RPC_ERROR_CODES["NO_RECORDING_WINDOW"]
+    assert answer["error"]["data"]["generation"] == new_gen

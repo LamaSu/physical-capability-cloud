@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
@@ -46,6 +47,9 @@ class EvidenceHandler(logging.Handler):
         self._writer = writer
         self._loop = loop
         self._windows: dict[str, RecordingWindow] = {}  # deviceId -> window
+        # This sidecar process. A recording window is attested with it, so the TS adapter can
+        # tell this process's answer from a restarted one's (astra pack 194).
+        self.generation = uuid.uuid4().hex
         # Each notification is written by a task of its own, so it can be written after an
         # RPC answer sent later. Every one gets a sequence number when it is scheduled and
         # stays pending until written: evidence.stopRecording waits (drain_through) for all
@@ -70,9 +74,14 @@ class EvidenceHandler(logging.Handler):
         return window
 
     def stop_recording(self, device_id: str, job_id: str) -> Optional[RecordingWindow]:
-        """Close the device's window. A notification for it not yet scheduled is dropped."""
+        """Close the device's window if it is this job's (another job's stays open). A
+        notification for it not yet scheduled is dropped."""
         with self._lock:
-            return self._windows.pop(device_id, None)
+            window = self._windows.get(device_id)
+            if window is None or window.job_id != job_id:
+                return None
+            del self._windows[device_id]
+            return window
 
     def watermark(self) -> int:
         """The sequence number of the last notification scheduled so far."""

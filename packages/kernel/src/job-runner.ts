@@ -219,7 +219,9 @@ export class JobRunner {
             async () =>
               this.machine.execute({
                 type: "load_gcode",
-                payload: { gcodeHash },
+                // The job's own id, so the device binds its evidence to this job and no other
+                // (astra pack 194: an adapter left to invent one signed another job's id).
+                payload: { gcodeHash, jobId },
               }),
           );
           if (!loadResult.success) {
@@ -251,7 +253,7 @@ export class JobRunner {
           // 4. Start execution
           const startResult = await Sentry.startSpan(
             { name: "job.start_execution", op: "job.phase", attributes: { "job.id": jobId } },
-            async () => this.machine.execute({ type: "start" }),
+            async () => this.machine.execute({ type: "start", payload: { jobId } }),
           );
           if (!startResult.success) {
             return { success: false, error: `Failed to start: ${startResult.message}`, durationMs: Date.now() - startTime };

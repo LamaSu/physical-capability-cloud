@@ -401,3 +401,23 @@ describe("an event the runner could not record fails the run (lane-found with as
     expect.soft(bundles.map((b) => b.jobId), "bundles finalized").toEqual([]);
   });
 });
+
+describe("JobRunner hands the machine its job's id (astra pack 194)", () => {
+  it("load_gcode and start both carry the run's jobId, so the device binds its evidence to this job", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const sent: MachineCommand[] = [];
+    const base = handshakeMachine("machine-jobid", { hook: async () => {} });
+    const execute = base.execute.bind(base);
+    base.execute = async (command: MachineCommand) => {
+      sent.push(command);
+      return execute(command);
+    };
+
+    const result = await drive(new JobRunner(base, [], null, emitter).run({ jobId: "job-own-id", stepId: STEP, gcodeHash: gcode(181), assuranceTier: 0 }));
+    expect(result.success).toBe(true);
+    expect(sent.map((c) => [c.type, c.payload?.jobId])).toEqual([
+      ["load_gcode", "job-own-id"],
+      ["start", "job-own-id"],
+    ]);
+  });
+});
