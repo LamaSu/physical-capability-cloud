@@ -216,37 +216,22 @@ function rootOf(n: ts.Node): ts.Node {
 
 const isAssignment = (k: ts.SyntaxKind) => k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
 
-/**
- * Calls that change their first argument's properties or prototype, whatever
- * they're called on: Object, an alias of it, or a helper library (_.assign,
- * $.extend, merge).
- */
-const MUTATION_APIS = new Set(["defineProperty", "defineProperties", "setPrototypeOf", "assign", "extend", "merge", "mixin", "defaults"]);
-/** The legacy accessor definers, called on the object they change. */
-const LEGACY_DEFINERS = new Set(["__defineGetter__", "__defineSetter__"]);
 /** Built-ins a request, its headers or the key pass through, or that hold everything else. */
 const BUILTINS = new Set([
   "Headers", "Request", "Response", "Storage", "Navigator", "Window", "Document", "XMLHttpRequest", "WebSocket",
   "EventSource", "URL", "Blob", "FormData", "Object", "Function", "Array", "Promise", "JSON", "fetch",
 ]);
-
-/** The object a mutation call changes: any receiver's defineProperty(target, …), merge(target, …), or target.__defineGetter__(…). */
-function mutationTarget(call: ts.CallExpression): ts.Expression | null {
-  const callee = call.expression;
-  const name = ts.isPropertyAccessExpression(callee) ? callee.name.text : ts.isIdentifier(callee) ? callee.text : "";
-  if (MUTATION_APIS.has(name)) return call.arguments[0] ?? null;
-  return ts.isPropertyAccessExpression(callee) && LEGACY_DEFINERS.has(name) ? callee.expression : null;
-}
-
-/** A built-in's prototype, anything reached from it, or a local alias of one: whatever a call does with it, it can change it for every request. */
-function isBuiltinPrototype(arg: ts.Expression, sf: ts.SourceFile, prototypeAliases: ReadonlySet<string> = new Set()): boolean {
-  return candidates(arg).some((a) => {
-    const root = rootOf(a);
-    if (!ts.isIdentifier(root)) return false;
-    if (prototypeAliases.has(root.text)) return true;
-    return BUILTINS.has(root.text) && /(?:^|\.)prototype(?:\.|$)/.test(a.getText(sf).replace(/\s+/g, ""));
-  });
-}
+/**
+ * The objects a request, its headers or the key pass through: navigator,
+ * document and the built-ins (astra A03e, A03f F1). Our modules read from
+ * them, call and construct them, and test against them, but never hold,
+ * pass, return or store one, or a built-in's prototype. A name that never
+ * holds one can't be used to change one, whatever the alias: a variable, a
+ * property, a class field, a return value, an argument, an array.
+ */
+const PROTECTED_OBJECTS = new Set(["navigator", "document", ...BUILTINS]);
+/** Routes to a prototype that don't name it, and the legacy accessor definers. */
+const PROTOTYPE_ROUTES = new Set(["getPrototypeOf", "__proto__", "constructor", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__"]);
 
 /** An expression without what doesn't change its value: parentheses, casts, a non-null assertion. */
 function unwrapped(e: ts.Expression): ts.Expression {
@@ -256,80 +241,63 @@ function unwrapped(e: ts.Expression): ts.Expression {
   return e;
 }
 
-/** The values an expression may be: both arms of a ?:, both sides of ||, ?? and &&, or the expression itself. */
-function candidates(e: ts.Expression): ts.Expression[] {
+/** The outermost node that is `n` in parentheses or casts: (navigator as any) is navigator. */
+function outermost(n: ts.Node): ts.Node {
+  let top = n;
+  while (top.parent && (ts.isParenthesizedExpression(top.parent) || ts.isAsExpression(top.parent) || ts.isTypeAssertionExpression(top.parent) || ts.isNonNullExpression(top.parent) || ts.isSatisfiesExpression(top.parent))) {
+    top = top.parent;
+  }
+  return top;
+}
+
+/** An identifier used as a value, not a name: not a declaration's or member's own name, a label, a type, or a JSX tag. */
+function isValueReference(id: ts.Identifier): boolean {
+  const p = id.parent as ts.Node & { name?: ts.Node; propertyName?: ts.Node; label?: ts.Node; tagName?: ts.Node };
+  if (ts.isShorthandPropertyAssignment(p)) return true; // { navigator } passes its value
+  if (p.name === id || p.propertyName === id || p.label === id || p.tagName === id) return false;
+  if (ts.isQualifiedName(p) || ts.isTypeReferenceNode(p) || ts.isTypeQueryNode(p) || ts.isTypeParameterDeclaration(p)) return false;
+  // extends / implements: a class built on a built-in changes nothing of it.
+  return !ts.isExpressionWithTypeArguments(p);
+}
+
+/** A built-in itself: Headers, or window.Headers. */
+function isBuiltinRef(e: ts.Expression): boolean {
   const u = unwrapped(e);
-  if (ts.isConditionalExpression(u)) return [...candidates(u.whenTrue), ...candidates(u.whenFalse)];
-  if (ts.isBinaryExpression(u) && [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.AmpersandAmpersandToken].includes(u.operatorToken.kind)) {
-    return [...candidates(u.left), ...candidates(u.right)];
-  }
-  return [u];
+  if (ts.isIdentifier(u)) return BUILTINS.has(u.text) && isValueReference(u);
+  if (!ts.isPropertyAccessExpression(u)) return false;
+  const base = unwrapped(u.expression);
+  return ts.isIdentifier(base) && GLOBAL_NAMES.has(base.text) && BUILTINS.has(u.name.text);
 }
 
-/** A global (window, navigator, document …), anything reached from one, a built-in, any prototype, or a local alias of one. */
-function isProtected(target: ts.Expression, sf: ts.SourceFile, aliases: ReadonlySet<string> = new Set()): boolean {
-  return candidates(target).some((t) => {
-    const root = rootOf(t);
-    if (ts.isIdentifier(root) && (WRITE_ROOTS.has(root.text) || BUILTINS.has(root.text) || aliases.has(root.text))) return true;
-    return /(?:^|\.)prototype(?:\.|$)/.test(t.getText(sf).replace(/\s+/g, ""));
-  });
+/** A protected object: navigator, document, a built-in, any of those reached from window, or a built-in's prototype. */
+function isProtectedRef(e: ts.Expression): boolean {
+  if (ts.isIdentifier(e)) return PROTECTED_OBJECTS.has(e.text) && isValueReference(e);
+  if (!ts.isPropertyAccessExpression(e)) return false;
+  if (e.name.text === "prototype") return isBuiltinRef(e.expression);
+  const base = unwrapped(e.expression);
+  return ts.isIdentifier(base) && GLOBAL_NAMES.has(base.text) && PROTECTED_OBJECTS.has(e.name.text);
 }
 
-/** The names a declaration binds: x, or every name inside { a, b: c, ...d } and [e, f]. */
-function boundNames(name: ts.BindingName): string[] {
-  if (ts.isIdentifier(name)) return [name.text];
-  return name.elements.flatMap((el) => (ts.isOmittedExpression(el) ? [] : boundNames(el.name)));
+/** Where a protected object may appear: read from (x.y, x["y"]), called or constructed, typeof, or the right of instanceof or in. */
+function isReadPosition(e: ts.Node): boolean {
+  const top = outermost(e);
+  const p = top.parent;
+  if (!p) return false;
+  if (ts.isPropertyAccessExpression(p) && p.expression === top) return true;
+  if (ts.isElementAccessExpression(p) && p.expression === top) return ts.isStringLiteralLike(p.argumentExpression);
+  if ((ts.isCallExpression(p) || ts.isNewExpression(p)) && p.expression === top) return true;
+  if (ts.isTypeOfExpression(p)) return true;
+  return ts.isBinaryExpression(p) && p.right === top && (p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword || p.operatorToken.kind === ts.SyntaxKind.InKeyword);
 }
 
-/**
- * Local names that hold a protected target (astra A03f F1): const p =
- * Headers.prototype; const nav = navigator; const { prototype } = Headers;
- * let x; x = p. Followed to a fixed point, so an alias of an alias counts.
- * `prototypes` is the subset that holds a built-in's prototype, and `objects`
- * the subset that holds a protected object itself (navigator, Headers), not
- * a value read from one (window.innerWidth).
- */
-function protectedAliases(sf: ts.SourceFile): { all: Set<string>; prototypes: Set<string>; objects: Set<string> } {
-  const all = new Set<string>();
-  const prototypes = new Set<string>();
-  const objects = new Set<string>();
-  for (let grew = true; grew; ) {
-    grew = false;
-    walk(sf, (n) => {
-      let names: string[] = [];
-      let value: ts.Expression | undefined;
-      if (ts.isVariableDeclaration(n) && n.initializer) {
-        names = boundNames(n.name);
-        value = n.initializer;
-      } else if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left)) {
-        names = [n.left.text];
-        value = n.right;
-      }
-      if (!value || !isProtected(value, sf, all)) return;
-      const ofPrototype = candidates(value).some((v) => isBuiltinPrototype(v, sf, prototypes));
-      const ofObject = isProtectedObject(value, objects);
-      for (const name of names) {
-        if (ofObject && !objects.has(name)) {
-          objects.add(name);
-          grew = true;
-        }
-        if (!all.has(name)) {
-          all.add(name);
-          grew = true;
-        }
-        if (ofPrototype && !prototypes.has(name)) {
-          prototypes.add(name);
-          grew = true;
-        }
-      }
-    });
-  }
-  return { all, prototypes, objects };
-}
-
-/** A protected object itself, or a local name holding one: navigator, document, a built-in such as Headers. */
-function isProtectedObject(e: ts.Expression, objectAliases: ReadonlySet<string>): boolean {
-  return candidates(e).some((c) => ts.isIdentifier(c) && (WRITE_ROOTS.has(c.text) || BUILTINS.has(c.text) || objectAliases.has(c.text)));
+/** A protected object held, passed, returned or stored: anywhere but where it is read. */
+function heldProtectedObject(n: ts.Node): boolean {
+  if (!ts.isIdentifier(n) && !ts.isPropertyAccessExpression(n)) return false;
+  if (!isProtectedRef(n)) return false;
+  // Headers in Headers.prototype is judged with the prototype, as one object.
+  const top = outermost(n);
+  if (top.parent && ts.isPropertyAccessExpression(top.parent) && top.parent.expression === top && top.parent.name.text === "prototype") return false;
+  return !isReadPosition(n);
 }
 
 /** A use of the global object other than reading a named member (window.x) or asking its type (typeof window). */
@@ -425,29 +393,22 @@ const RULES: Rule[] = [
   {
     id: "global-write",
     owners: [BOUNDARY],
-    find: (sf) => {
-      const aliases = protectedAliases(sf);
-      return nodes(sf, (n) => {
-        // The same replacement through a mutation API (astra A03e F1): Object.defineProperty(Headers.prototype, …),
-        // including through a local alias of the target (A03f F1).
-        if (ts.isCallExpression(n)) {
-          const target = mutationTarget(n);
-          if (target !== null && isProtected(target, sf, aliases.all)) return true;
-          // Handed to any call, a built-in's prototype or a protected object can be changed inside it: patch(navigator).
-          return n.arguments.some((arg) => isBuiltinPrototype(arg, sf, aliases.prototypes) || isProtectedObject(arg, aliases.objects));
-        }
+    find: (sf) =>
+      nodes(sf, (n) => {
+        // No module holds, passes or stores a protected object, so none can change one through an alias (astra A03f F1).
+        if (heldProtectedObject(n)) return true;
+        // Nor reach a prototype without naming it, or define accessors the legacy way.
+        if (ts.isPropertyAccessExpression(n) && PROTOTYPE_ROUTES.has(n.name.text)) return true;
         if (!ts.isBinaryExpression(n) || !isAssignment(n.operatorToken.kind)) return false;
         const target = n.left;
         if (ts.isIdentifier(target)) return target.text === "fetch";
         if (GLOBAL_WRITES_ALLOWED.has(target.getText(sf).replace(/\s+/g, ""))) return false;
         const root = rootOf(target);
-        if (ts.isIdentifier(root) && WRITE_ROOTS.has(root.text)) return true;
-        // X.prototype.y = …: a built-in's behaviour replaced for everyone. Also through a local alias: p.y = … with p = Headers.prototype.
-        if (ts.isIdentifier(root) && aliases.all.has(root.text) && root !== target) return true;
+        if (ts.isIdentifier(root) && (WRITE_ROOTS.has(root.text) || BUILTINS.has(root.text))) return true;
+        // X.prototype.y = …: a built-in's behaviour replaced for everyone.
         return ts.isPropertyAccessExpression(target) && /(?:^|\.)prototype\./.test(target.getText(sf).replace(/\s+/g, ""));
-      });
-    },
-    fix: "Don't replace fetch, a global's property or a prototype's method: the key passes through them.",
+      }),
+    fix: "Don't replace fetch, a global's property or a prototype's method, and don't hold, pass or store navigator, document, a built-in or its prototype: the key passes through them.",
   },
   {
     id: "image-egress",
@@ -690,6 +651,7 @@ describe("the rules catch each known way around them (self-test)", () => {
       'const nav = window.navigator;\nObject.defineProperty(nav, "sendBeacon", { value: observe });',
       'const proto = Object.getPrototypeOf(new Headers());\nObject.defineProperty(proto, "set", { value: observe });',
       'const proto = new Headers().__proto__;',
+      'const doc = document;\nconst el = doc.createElement("div");', // harmless here, but an alias all the same: read document directly
     ]) {
       expect(caught(code), code).toContain("global-write");
     }
@@ -710,9 +672,15 @@ describe("the rules catch each known way around them (self-test)", () => {
       ['window.location.assign("/agents");', "pages/Probe.ts"],
       ["const next = merge(state, update);", "pages/Probe.ts"],
       ["const items = Array.prototype.slice.call(list);", "pages/Probe.ts"],
-      ['const doc = document;\nconst el = doc.createElement("div");', "pages/Probe.ts"],
       ["let state = initial;\nstate = Object.assign({}, state, update);", "pages/Probe.ts"],
       ["const w = window.innerWidth;\nconst width = Math.max(w, 1);", "pages/Probe.ts"],
+      ["const ua = (navigator as Navigator).userAgent;", "pages/Probe.ts"],
+      ["if (body instanceof Blob) send(body);", "pages/Probe.ts"],
+      ["const url = new URL(path, window.location.origin);", "pages/Probe.ts"],
+      ["class Rows extends Array<string> {}", "pages/Probe.ts"],
+      ["const h: Headers = new Headers({ accept: 'application/json' });", "pages/Probe.ts"],
+      ['const hasLocks = "locks" in navigator;', "pages/Probe.ts"],
+      ["const items = Array.from(list).filter(Boolean);", "pages/Probe.ts"],
     ]) {
       expect(caught(code, rel), code).toEqual([]);
     }
