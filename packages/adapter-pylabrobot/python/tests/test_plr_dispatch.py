@@ -620,6 +620,28 @@ async def test_a_serialized_function_is_stripped_not_deserialized(fake_plr):
     assert sent["data"]["children"][0]["compute_volume_from_height"] is None
 
 
+# ── R39 MED7: function stripping may not silently change a hardware layout ──
+
+async def test_a_function_bearing_layout_on_ot2_is_refused(fake_plr):
+    layout = dict(DECK, type="OTDeck", children=[dict(DECK["children"][1], compute_volume_from_height={
+        "type": "function", "code": "e30=", "name": "evil"}), DECK["children"][2]])
+    s, out = _server()
+    resp = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "ot2Url": "10.0.0.5", "deckLayout": layout}})
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    # the declared layout is never mutated and then initialized: no deserialize call at all.
+    assert _deserialized(fake_plr) == []
+
+
+async def test_a_function_bearing_layout_on_the_simulator_still_strips_as_before(fake_plr):
+    # Documented, logged behavior on simulators only (R39 MED7's narrower half).
+    layout = dict(DECK, children=[dict(DECK["children"][1], compute_volume_from_height={
+        "type": "function", "code": "e30=", "name": "evil"}), DECK["children"][2]])
+    s, out = _server()
+    resp = await init(s, out, deckLayout=layout)
+    assert resp["result"]["metadata"]["strippedFunctions"] == 1
+
+
 # ── R39 CRIT4: the geometry guard covers z, rotation and nested children ────
 
 async def test_a_negative_z_is_refused_before_deserialize(fake_plr):

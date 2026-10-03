@@ -18,8 +18,10 @@ anything from it (:func:`checked_layout`):
 
 - the root must be the expected deck type, and every typed object in the tree
   must be one of ``LAYOUT_TYPES``;
-- serialized functions are stripped, never deserialized, and it is then loaded
-  with ``Resource.deserialize(..., allow_marshal=False)`` on both paths;
+- serialized functions are never deserialized. On ``ot2`` a function-bearing
+  layout is refused outright (R39 MED7 — stripping would silently change what
+  PLR builds); on the simulator stripping may stand, logged. It is then
+  loaded with ``Resource.deserialize(..., allow_marshal=False)`` on both paths;
 - size, depth, key and number limits apply, and every resource (recursively,
   including nested holders/adapters/plates-in-carriers) must lie inside its
   immediate parent and inside the deck in x, y AND z, with no rotation
@@ -434,7 +436,9 @@ def _check_deck_geometry(deck: dict[str, Any]) -> None:
         placed.append((name, box))
 
 
-def _load_deck(config: dict[str, Any], expected_cls: type, root_types: frozenset) -> tuple[Any, int]:
+def _load_deck(
+    config: dict[str, Any], expected_cls: type, root_types: frozenset, *, hardware: bool,
+) -> tuple[Any, int]:
     """Load the declared deck (R39). Raises ValueError, never returns an empty deck.
 
     ``deckLayout`` is a serialized PLR resource tree; ``deckLayoutPath`` names a
@@ -442,6 +446,12 @@ def _load_deck(config: dict[str, Any], expected_cls: type, root_types: frozenset
     same ``Resource.deserialize(..., allow_marshal=False)``. PLR's loader resolves
     each child by ``type`` and assigns it to its parent, so the loaded deck is the
     populated deck. Returns the deck and the number of functions stripped.
+
+    R39 MED7: a stripped function silently changes what PLR actually builds
+    from the declared layout. On a hardware-capable backend that silent
+    change is refused outright -- the layout is never mutated and then
+    initialized. On a simulator the strip may stand (dry-run only), but it's
+    logged.
     """
     from pylabrobot.resources import Resource
 
@@ -458,6 +468,16 @@ def _load_deck(config: dict[str, Any], expected_cls: type, root_types: frozenset
         raise ValueError("deckLayout must be a serialized PLR resource object")
     data = layout if layout is not None else _read_layout_file(path)
     cleaned, stripped = checked_layout(data, root_types)
+    if stripped:
+        if hardware:
+            raise ValueError(
+                f"deck layout carries {stripped} serialized function(s); refusing on a "
+                "hardware-capable backend rather than silently changing the declared layout",
+            )
+        log.warning(
+            "deck layout for a simulator backend had %d serialized function(s) stripped "
+            "(replaced with null) before loading", stripped,
+        )
     try:
         # allow_marshal stays False: a layout is data and can never carry code.
         deck = Resource.deserialize(cleaned, allow_marshal=False)
@@ -572,7 +592,7 @@ def _create_chatterbox(config: dict[str, Any], other_hardware_loaded: bool) -> t
         raise ValueError("backendConfig.numChannels must be an integer from 1 to 96")
     _max_volume(config)
     tracking = _configure_tracking(config, hardware=False, other_hardware_loaded=other_hardware_loaded)
-    deck, stripped = _load_deck(config, Deck, frozenset({"Deck", "OTDeck"}))
+    deck, stripped = _load_deck(config, Deck, frozenset({"Deck", "OTDeck"}), hardware=False)
     liquids = _declare_liquids(deck, config)
     machine = LiquidHandler(backend=LiquidHandlerChatterboxBackend(num_channels=num_channels), deck=deck)
     return machine, {"tracking": tracking, "strippedFunctions": stripped, "declaredWells": liquids}
@@ -614,7 +634,7 @@ async def _create_ot2(config: dict[str, Any], other_hardware_loaded: bool) -> tu
     host, port = _parse_ot2_url(ot2_url)
     _max_volume(config)
     tracking = _configure_tracking(config, hardware=True, other_hardware_loaded=other_hardware_loaded)
-    deck, stripped = _load_deck(config, OTDeck, frozenset({"OTDeck"}))
+    deck, stripped = _load_deck(config, OTDeck, frozenset({"OTDeck"}), hardware=True)
     liquids = _declare_liquids(deck, config)
     machine = LiquidHandler(backend=OpentronsOT2Backend(host=host, port=port), deck=deck)
     return machine, {"tracking": tracking, "strippedFunctions": stripped, "declaredWells": liquids}

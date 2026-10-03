@@ -154,10 +154,14 @@ is checked as data before PLR builds anything from it, on both paths:
 - the root is the expected deck (`Deck` or `OTDeck` for chatterbox, `OTDeck` for
   `ot2`), and every typed object in it is one of the PLR resource or geometry
   classes in `backend_loader.LAYOUT_TYPES`;
-- a serialized function is stripped (replaced by `null`, counted in
-  `metadata.strippedFunctions`) and never deserialized. Keys starting with `__`,
-  non-finite numbers, strings over 4 KiB, more than 100,000 values or nesting
-  deeper than 32 are refused. A file is at most 5 MB;
+- a serialized function is never deserialized. **On a hardware-capable backend
+  (`ot2`) a function-bearing layout is refused outright** (R39 MED7): stripping
+  it (replacing it with `null`) would silently change what PLR actually
+  builds from the declared layout, so the declared layout is never mutated and
+  then initialized there. On the simulator the strip may still stand
+  (dry-run only, counted in `metadata.strippedFunctions`), but it's logged.
+  Keys starting with `__`, non-finite numbers, strings over 4 KiB, more than
+  100,000 values or nesting deeper than 32 are refused. A file is at most 5 MB;
 - every resource has a size and a location, and lies inside its immediate
   parent and inside the deck in **x, y and z** (R39 CRIT4: z was unchecked
   before this; the deck's own `size_z` is the height bound). Deck-level
