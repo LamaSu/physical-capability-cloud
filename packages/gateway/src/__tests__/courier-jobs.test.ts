@@ -17,6 +17,7 @@ import {
   _resetCourierJobsStoreForTests,
   type VerifyFn,
 } from "../services/courier-jobs-store.js";
+import { getJobOffersStore, type SqliteDatabaseLike } from "../services/job-offers-store.js";
 
 // ── Time controller ────────────────────────────────────────────────────────
 
@@ -786,6 +787,98 @@ describe("background sweep", () => {
       expect(result.expired).toBe(1);
       const got = await app.inject({ method: "GET", url: "/api/courier-jobs/hb-lost" });
       expect(got.json().job.status).toBe("expired");
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// ── astra 142 (verdict on cc66f511): legacy courier claims after a restart ──
+
+describe("POST /api/courier-jobs/:id/events: a claim made before claimant binding (astra 142)", () => {
+  /** Write-through stand-in for job_offers, so a "restart" re-hydrates from the same rows. */
+  function fakeOffersTable() {
+    const rows = new Map<string, string>();
+    const sqlite: SqliteDatabaseLike = {
+      prepare(sql: string) {
+        return {
+          run: (...p: unknown[]) => {
+            if (sql.includes("INSERT INTO job_offers")) rows.set(p[0] as string, p[3] as string);
+            return {};
+          },
+          all: () => (sql.includes("FROM job_offers") ? [...rows].map(([id, data]) => ({ id, data })) : []),
+          get: () => undefined,
+        };
+      },
+    };
+    return { rows, sqlite };
+  }
+
+  async function appWithOwners(owners: Map<string, string>): Promise<FastifyInstance> {
+    const app = Fastify({ logger: false });
+    app.addHook("onRequest", async (req) => {
+      const h = req.headers["x-test-operator"];
+      if (typeof h === "string" && h !== "") (req as unknown as { operatorId?: string }).operatorId = h;
+    });
+    await app.register(courierJobsRoutes, { kernelOwnerOf: (id: string) => owners.get(id) ?? null });
+    await app.ready();
+    return app;
+  }
+
+  /** Post and claim through the shim, then strip the private claimant from the persisted row and restart. */
+  async function legacyClaim(driverAgent: string, operator: string) {
+    const table = fakeOffersTable();
+    _resetCourierJobsStoreForTests();
+    initCourierJobsStore({ verify: stubVerify, now, sqlite: table.sqlite });
+    const app = await appWithOwners(new Map());
+    try {
+      await app.inject({
+        method: "POST", url: "/api/courier-jobs", headers: { "x-posted-by": "did:pcc:poster" },
+        payload: { deliveryId: "legacy-1", pickup: { name: "A" }, dropoff: { name: "B" } },
+      });
+      const claim = await app.inject({
+        method: "POST", url: "/api/courier-jobs/legacy-1/claim", headers: as(operator), payload: { driverAgent },
+      });
+      expect(claim.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+    const row = JSON.parse(table.rows.get("legacy-1")!) as Record<string, unknown>;
+    expect(row._privateClaimantOperatorId).toBe(operator);
+    delete row._privateClaimantOperatorId; // what a pre-binding row looks like
+    table.rows.set("legacy-1", JSON.stringify(row));
+    _resetCourierJobsStoreForTests();
+    initCourierJobsStore({ verify: stubVerify, now, sqlite: table.sqlite });
+    expect(getJobOffersStore().claimantOf("legacy-1")).toBeNull();
+    expect(getJobOffersStore().get("legacy-1")?.status).toBe("claimed");
+  }
+
+  it("resolves the claimant to the current owner of the kernel its driverAgent label names", async () => {
+    await legacyClaim("kernel-driver-7", "driver7@kits.test");
+    const app = await appWithOwners(new Map([["kernel-driver-7", "driver7@kits.test"]]));
+    try {
+      const pickup = await app.inject({
+        method: "POST", url: "/api/courier-jobs/legacy-1/events", headers: as("driver7@kits.test"), payload: { event: "pickup" },
+      });
+      expect(pickup.statusCode).toBe(200);
+      // Anyone else is still refused.
+      const stranger = await app.inject({
+        method: "POST", url: "/api/courier-jobs/legacy-1/events", headers: as("mallory@kits.test"), payload: { event: "delivered" },
+      });
+      expect(stranger.statusCode).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("fails closed when the label names no kernel with a provable owner", async () => {
+    await legacyClaim("did:pcc:driver-label", "driver7@kits.test");
+    const app = await appWithOwners(new Map([["kernel-driver-7", "driver7@kits.test"]]));
+    try {
+      const pickup = await app.inject({
+        method: "POST", url: "/api/courier-jobs/legacy-1/events", headers: as("driver7@kits.test"), payload: { event: "pickup" },
+      });
+      expect(pickup.statusCode).toBe(403);
     } finally {
       await app.close();
     }

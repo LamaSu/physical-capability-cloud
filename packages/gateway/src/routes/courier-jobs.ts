@@ -37,6 +37,12 @@ import { getCourierJobsStore } from "../services/courier-jobs-store.js";
 import { getJobOffersStore } from "../services/job-offers-store.js";
 import { authenticatedActor } from "../auth/actor.js";
 import { authorizeOfferEvent } from "../services/job-offer-authz.js";
+import { kernelOwnerFromStore, offerClaimant, type KernelOwnerOf } from "../services/kernel-owner.js";
+
+export interface CourierJobsRoutesOptions {
+  /** Resolve a kernel's owner (production: shop_kernels); tests inject a stub. */
+  kernelOwnerOf?: KernelOwnerOf;
+}
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -169,7 +175,8 @@ async function handleGetById(req: FastifyRequest<{ Params: { id: string } }>, re
   return { job: j, events: store.getEvents(j.id) };
 }
 
-export async function courierJobsRoutes(app: FastifyInstance) {
+export async function courierJobsRoutes(app: FastifyInstance, opts: CourierJobsRoutesOptions = {}) {
+  const kernelOwnerOf = opts.kernelOwnerOf ?? kernelOwnerFromStore;
   const aliasCreate = "/api/courier-jobs/jobs";
   const aliasOpen = "/api/courier-jobs/jobs/open";
   const aliasDetail = "/api/courier-jobs/jobs/:id";
@@ -261,11 +268,15 @@ export async function courierJobsRoutes(app: FastifyInstance) {
     if (!offer) return reply.code(404).send({ error: "not_found" });
     // pickup/delivered: the authenticated claimant only. cancelled: the poster
     // only (N81; a driver gives a job back with release on /api/job-offers).
-    // note: the claimant or the poster. A body driverAgent grants nothing.
+    // note: the claimant or the poster. A body driverAgent grants nothing. A job
+    // claimed before claimant binding falls back to the owner of the kernel its
+    // legacy driverAgent label names, as the generic route does (astra 142); a
+    // label that names no owned kernel resolves to nobody.
+    const offerStore = getJobOffersStore();
     const decision = authorizeOfferEvent(
       b.event,
       actor,
-      getJobOffersStore().claimantOf(offer.id),
+      offerClaimant((id) => offerStore.claimantOf(id), offer, kernelOwnerOf),
       offer.posterDid,
     );
     if (!decision.ok) {

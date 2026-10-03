@@ -47,26 +47,16 @@ import {
   type GeoFence,
   type PricingSpec,
 } from "../services/job-offers-store.js";
-import { getRepos } from "../db.js";
 import { authenticatedActor, sameIdentity } from "../auth/actor.js";
 import { authorizeOfferEvent } from "../services/job-offer-authz.js";
+import { kernelOwnerFromStore, offerClaimant, type KernelOwnerOf } from "../services/kernel-owner.js";
 
 export interface JobOffersRoutesOptions {
   /**
    * Resolve a kernel's owner (its operatorAddress). Production reads
    * shop_kernels; tests inject a stub so the routes stay hermetic.
    */
-  kernelOwnerOf?: (kernelId: string) => string | null;
-}
-
-function kernelOwnerFromStore(kernelId: string): string | null {
-  try {
-    return getRepos().kernels.findById(kernelId)?.operatorAddress ?? null;
-  } catch {
-    // No store (or a store error): nobody provably owns the kernel, so the
-    // ownership check below fails closed.
-    return null;
-  }
+  kernelOwnerOf?: KernelOwnerOf;
 }
 
 // Posting identity helper — prefers API key operatorId, falls back to
@@ -355,9 +345,7 @@ export async function jobOffersRoutes(app: FastifyInstance, opts: JobOffersRoute
     if (!offer) return reply.code(404).send({ error: "not_found" });
     // The claimant is the authenticated principal recorded at claim time. An
     // offer claimed before claimant binding falls back to its kernel's owner.
-    const claimant =
-      store.claimantOf(offer.id) ??
-      (offer.claimedByKernelId ? kernelOwnerOf(offer.claimedByKernelId) : null);
+    const claimant = offerClaimant((id) => store.claimantOf(id), offer, kernelOwnerOf);
     const decision = authorizeOfferEvent(eventKind, actor, claimant, offer.posterDid);
     if (!decision.ok && decision.reason === "server_only") {
       return reply.code(409).send({
