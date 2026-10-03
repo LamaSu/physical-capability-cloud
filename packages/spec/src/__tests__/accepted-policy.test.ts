@@ -309,6 +309,12 @@ describe("accepted-policy: nothing unknown — exact keys only (the Layer-1 'no 
     const { payer: _omit, ...rest } = GOLDEN_SUBJECT;
     expect(() => computeSubjectBlockHash(rest as unknown as SubjectBlockFields)).toThrow(AcceptedPolicyDigestInputError);
   });
+  it("rejects a same-COUNT key substitution (an unknown key standing in for a required one, so the key-count check alone would not catch it)", () => {
+    const { payer: _omit, ...rest } = GOLDEN_SUBJECT;
+    const substituted = { ...rest, dealDigest: K("some-deal-digest") }; // still exactly 18 keys
+    expect(Object.keys(substituted).length).toBe(Object.keys(GOLDEN_SUBJECT).length);
+    expect(() => computeSubjectBlockHash(substituted as unknown as SubjectBlockFields)).toThrow(AcceptedPolicyDigestInputError);
+  });
   it("rejects a binding carrying an extra planId-shaped key", () => {
     const withPlanId = [{ ...GOLDEN_BINDINGS[0]!, planId: "some-plan-id" } as unknown as SubjectBinding, ...GOLDEN_BINDINGS.slice(1)];
     expect(() => computeBindingsRoot(withPlanId)).toThrow(AcceptedPolicyDigestInputError);
