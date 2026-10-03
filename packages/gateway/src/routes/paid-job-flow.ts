@@ -436,7 +436,8 @@ export async function createJobFromSession(
           // Milestone count reflects the caller's negotiated contract terms, not a
           // server-measured quantity — declare.id, never declare.metric.
           declare.id(normalizedMilestones.length),
-          declare.id(totalFundAmount),
+          // totalFundAmount is a bigint (keyedHash/JSON.stringify cannot take one) — String() it first.
+          declare.id(String(totalFundAmount)),
         );
 
         return addr;
