@@ -347,11 +347,18 @@ describe("D1: a duplicate (jobId, stepId) is refused", () => {
     // At the base, B started device job 200 and waits for it: let it end, so B returns.
     if (printerB.jobs.length > 0) printerB.complete(200);
     const b = await drive(runB);
+    const commandsToB = [...printerB.commands];
+    // The refusal left print B's printer free: another print runs on it at once.
+    const onB = runPrintJob({ adapter: printerB, emitter, jobId: "print-d1-other", jobName: "c.pdf", totalPages: 1 });
+    await drive(printerB.started(1));
+    printerB.complete();
+    const other = await drive(onB);
 
     expect.soft(b, "print B's result").toEqual(refused("step print-d1 of job print-d1 is already running", { reason: "step", jobId: "print-d1", stepId: "print-d1" }));
-    expect.soft(printerB.commands, "commands sent to print B's printer").toEqual([]);
-    expect.soft(registerStep, "steps registered").toHaveBeenCalledTimes(1);
+    expect.soft(commandsToB, "commands sent to print B's printer").toEqual([]);
+    expect.soft(registerStep.mock.calls.map((call) => call[0]), "steps registered").toEqual(["print-d1", "print-d1-other"]);
     expect.soft(a.success, "print A succeeded").toBe(true);
+    expect.soft(other.success, "a print on print B's printer, after the refusal").toBe(true);
     expect(a.bundle?.events.map((e) => e.source.deviceId) ?? [], "printers in print A's bundle").toEqual(["dup-d1-A", "dup-d1-A"]);
   });
 });
@@ -518,6 +525,7 @@ describe("D4: a failed print's step is detached", () => {
       durationMs: expect.any(Number),
     });
     expect.soft(bundles, "bundles finalized").toEqual([]);
+    expect.soft(vi.getTimerCount(), "timers left pending once it returned").toBe(0);
     expect(tags(emitter.getEvents("print-d4", "print-d4")), "the failed print's step once it returned").toEqual([]);
   });
 });
@@ -579,6 +587,42 @@ describe("B1 (P2's cause): another device job inside the print's window fails it
     expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: expect.stringContaining("device job 99"), durationMs: expect.any(Number) });
     expect(bundles, "bundles finalized").toEqual([]);
   });
+
+  it("an event of another device job while the print quiesces, after its own job ended, still fails it closed", async () => {
+    const answer = deferred();
+    const printer = testPrinter("late-foreign-b1c", { quiesceEvidence: () => answer.promise });
+    const { emitter, bundles } = recordingEmitter();
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-b1c", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.complete(100);
+    await vi.advanceTimersByTimeAsync(100); // the print waits for its printer's word
+    printer.emit(printer.event("execution_started", { jobId: 101 })); // something else's job
+    answer.resolve();
+    const result = await drive(run);
+
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: expect.stringContaining("device job 101"), durationMs: expect.any(Number) });
+    expect(bundles, "bundles finalized").toEqual([]);
+  });
+
+  it("names the other job even when the printer, busy with it, does not answer within the quiesce bound; the printer stays quiescing until it does", async () => {
+    // Device job 100 (the print's) takes 400 ms; job 101 (another client's) 200 ms.
+    const printer = queuePrinter("queue-b1d", (job) => (job === 100 ? 400 : 200));
+    const { emitter } = recordingEmitter();
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-b1d", jobName: "a.pdf", totalPages: 1, evidenceQuiesceTimeoutMs: 100 });
+    await drive(printer.started(1));
+    await vi.advanceTimersByTimeAsync(50);
+    await printer.execute({ type: "start", payload: { jobName: "someone-else.pdf" } }); // not through any print
+    const result = await drive(run); // fails at 50 ms; returns at the 100 ms quiesce bound, the printer still busy
+    const whileBusy = await drive(runPrintJob({ adapter: printer, emitter, jobId: "print-b1d-next", jobName: "b.pdf", totalPages: 1 }));
+    await vi.advanceTimersByTimeAsync(400); // both device jobs have ended, so the hook has answered
+    const next = await drive(runPrintJob({ adapter: printer, emitter, jobId: "print-b1d-next", jobName: "b.pdf", totalPages: 1 }));
+
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: expect.stringContaining("device job 101"), durationMs: expect.any(Number) });
+    expect.soft(whileBusy, "a print while the printer is still busy").toEqual(
+      refused("adapter queue-b1d is still quiescing after job print-b1d", { reason: "quiescing", adapterId: "queue-b1d", jobId: "print-b1d" }),
+    );
+    expect(tags(next.bundle?.events ?? []), "the next print's bundle, once the printer answered").toEqual(["execution_started#102", "execution_completed#102"]);
+  });
 });
 
 describe("B2 (P2's cause): only the print's own device job ends it", () => {
@@ -612,6 +656,7 @@ describe("B2 (P2's cause): only the print's own device job ends it", () => {
     const result = await drive(runPrintJob({ adapter: printer, emitter, jobId: "print-b2b", jobName: "a.pdf", totalPages: 1 }));
 
     expect.soft(result.success, "the print succeeded").toBe(true);
+    expect.soft(vi.getTimerCount(), "timers left pending once it returned").toBe(0);
     expect(tags(result.bundle?.events ?? []), "the print's bundle").toEqual(["execution_started#100", "execution_completed#100"]);
   });
 
@@ -752,6 +797,27 @@ describe("the settle bound", () => {
     expect.soft(atBound, "returned at the bound (and not after a second wait)").toBe(true);
     expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: `evidence recording did not settle within ${bound} ms`, durationMs: expect.any(Number) });
     expect(bundles, "bundles finalized").toEqual([]);
+  });
+});
+
+describe("closed before it settles", () => {
+  it("an event after the printer answered, while the print settles, is in neither its bundle nor its step", async () => {
+    const printer = testPrinter("closed-settle");
+    const { emitter } = recordingEmitter();
+    const gate = deferred();
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-closed", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    // Hold the completion's hashing: the printer has answered at once, and the print is settling.
+    hashing.gate = (event) => ((event as Emitted).type === "execution_completed" ? gate.promise : undefined);
+    printer.complete(100);
+    await vi.advanceTimersByTimeAsync(0);
+    printer.emit(printer.event("execution_progress", { jobId: 100, completedSheets: 1 }));
+    gate.resolve();
+    const result = await drive(run);
+
+    expect.soft(result.success, "the print succeeded").toBe(true);
+    expect.soft(tags(result.bundle?.events ?? []), "its bundle").toEqual(["execution_started#100", "execution_completed#100"]);
+    expect(tags(emitter.getEvents("print-closed", "print-closed")), "its step").toEqual(["execution_started#100", "execution_completed#100"]);
   });
 });
 
