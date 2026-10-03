@@ -292,6 +292,18 @@ export function boundValueText(field: string, value: string): string {
   return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
 }
 
+// ── Attributed free text (astra r5 F1; same rule astra accepted on #313's F12) ───────────
+// A free-text value is never shown as PCC's OWN fact, even when the lexical detector doesn't
+// independently catch it (the pair rule only looks 3 words either side — "payment from the
+// remote operator received" is 4 words apart and passes isMoneyClaim unchanged). So every
+// TEXT-kind bound value is explicitly attributed to the record that reported it — structural,
+// not merely a backstop. A value the lexical detector DOES catch is still WITHHELD_FIELD (the
+// detector remains defense in depth underneath this, never replaced by it).
+export const REPORTED_PREFIX = "reported: ";
+export function reportedFieldText(field: string, value: string): string {
+  return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : REPORTED_PREFIX + value;
+}
+
 // ── PCC-owned list field profiles (PX-5 review #2504) ────────────────────────────────────
 // A list may show ONLY these fields of each allowlisted collection route; a selector is never
 // "safe because it parses". Money amounts, prices and payment state are not listable: they
@@ -300,17 +312,22 @@ export function boundValueText(field: string, value: string): string {
 // route inject): GET /api/jobs answers { jobs: [...] }, /api/kernels { kernels: [...] }, and
 // /api/capabilities { items: [...] }. The binder used to guess `.items`, so job and kernel lists
 // never showed a row.
+// `location.label` removed (astra r5 F5): genui measured it by route inject over the seeded
+// store and found it present in 0/8 real kernel rows and 0/19 real capability rows (real data
+// carries `location: {lat, lng}`, never a `.label`) — dead surface, never exercised by a real
+// producer. Also removed from LIST_FIELD_KINDS (below) and LIST_FIELD_LABELS (dashboard-ir-
+// renderer.ts).
 export const LIST_PROFILES: Readonly<Record<string, { rows: string; title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
   "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
-  "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
-  "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] },
+  "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount"], status: ["status"] },
+  "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"] },
 };
-/** The rows of a list response, read by the route's PCC-owned rows key (an own property; never a
- * manifest selector). A bare array is accepted as is; anything else gives no rows. */
+/** The rows of a list response, read ONLY by the route's PCC-owned rows key (an own property;
+ * never a manifest selector, never a bare top-level array — astra r5 F3). A bare array, or any
+ * other shape, gives no rows: rows come from the route's own envelope key or not at all. */
 export function listRowsOf(path: string, data: unknown): unknown[] {
-  if (Array.isArray(data)) return data;
   const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path]!.rows : undefined;
-  if (key && data !== null && typeof data === "object" && Object.prototype.hasOwnProperty.call(data, key)) {
+  if (key && data !== null && typeof data === "object" && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, key)) {
     const v = (data as Record<string, unknown>)[key];
     if (Array.isArray(v)) return v;
   }
@@ -328,7 +345,7 @@ export function listRowsOf(path: string, data: unknown): unknown[] {
 export type ListFieldKind = "id" | "text" | "status" | "bool" | "time" | "version" | "count" | "capType";
 export const LIST_FIELD_KINDS: Readonly<Record<string, ListFieldKind>> = {
   id: "id", capabilityId: "id", kernelId: "id",
-  name: "text", "location.label": "text",
+  name: "text",
   status: "status",
   available: "bool",
   createdAt: "time", updatedAt: "time",
@@ -536,35 +553,59 @@ function isCredentialName(k: string): boolean {
 // time"). The `source` handles per-route unwrapping: GET /api/kernels/:id returns { kernel: … },
 // so "reputation" reads "kernel.reputation" — else the metric would bind but stay inert.
 // validateIr MIRRORS this (stat label + bind.select-as-source must match a profile entry).
-interface MetricField { label: string; source: string }
+// Closed value kind per metric field (astra r5 F2) — mirrors ListFieldKind's discipline (a
+// fetched stat is validated by its KIND, never shown merely because it happened to parse as a
+// string/number/boolean). "percent" (not "capType") replaces the one list-only kind: no metric
+// field needs a capability-type grammar. Picked from each field's real producer:
+//  - jobs/:id/status (routes/job-submit.ts GET): status is the job's status word; progress is
+//    the DB's `integer("progress")` column, seeded 0..100 (packages/db/src/schema/jobs.ts).
+//  - kernels/:id (routes/kernels.ts GET, KernelHealthSnapshot): status is the kernel's status
+//    word; reputation is ReputationService.computeEffectiveReputation's Math.round(...) output,
+//    a non-negative integer (count); uptimePercent is populateKernelHealthSnapshot's
+//    computeUptimePercent, one of 0/50/100/undefined (percent); capabilityCount/
+//    totalJobsCompleted/activeJobCount are all non-negative integer counts.
+export type MetricFieldKind = "status" | "percent" | "count" | "bool" | "time" | "id" | "text" | "version";
+interface MetricField { label: string; source: string; kind: MetricFieldKind }
 const METRIC_PROFILE: ReadonlyArray<{ route: RegExp; fields: Readonly<Record<string, MetricField>> }> = [
   { route: route("/api/jobs/:/status"), fields: { // top-level envelope
-    status: { label: "Status", source: "status" },
-    progress: { label: "Progress", source: "progress" },
+    status: { label: "Status", source: "status", kind: "status" },
+    progress: { label: "Progress", source: "progress", kind: "percent" },
   } },
   { route: route("/api/kernels/:"), fields: { // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
-    status: { label: "Status", source: "kernel.status" },
-    reputation: { label: "Reputation", source: "kernel.reputation" },
-    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent" },
-    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount" },
-    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted" },
-    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount" },
+    status: { label: "Status", source: "kernel.status", kind: "status" },
+    reputation: { label: "Reputation", source: "kernel.reputation", kind: "count" },
+    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", kind: "percent" },
+    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", kind: "count" },
+    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", kind: "count" },
+    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", kind: "count" },
   } },
 ];
-/** Adapter side: (route, logical selector) → the field profile (label + real source), or null. */
+/** Adapter side: (route, logical selector) → the field profile (label + real source + kind), or null. */
 function metricFieldForSelect(path: string, select: unknown): MetricField | null {
   if (typeof select !== "string") return null;
   for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
   return null;
 }
-/** Validator side: (route, SOURCE path already in bind.select) → the expected PCC label, or null. */
-function metricLabelForSource(path: string, source: unknown): string | null {
+/** Shared lookup: (route, SOURCE path already in bind.select) → the field profile, or null. Both
+ * the label lookup (validateIr) and the kind lookup (bindScalar) are one route match away. */
+function metricFieldForSource(path: string, source: unknown): MetricField | null {
   if (typeof source !== "string") return null;
   for (const p of METRIC_PROFILE) if (p.route.test(path)) {
-    for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].label;
+    for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k];
     return null;
   }
   return null;
+}
+/** Validator side: (route, SOURCE path already in bind.select) → the expected PCC label, or null. */
+function metricLabelForSource(path: string, source: unknown): string | null {
+  return metricFieldForSource(path, source)?.label ?? null;
+}
+/** Renderer side (astra r5 F2): (route, SOURCE path already in bind.select) → the field's closed
+ * value kind, or null when the pair isn't an allowlisted metric field at all. bindScalar uses
+ * this to validate the fetched value BY KIND before any content check — off-kind is UNAVAILABLE,
+ * never shown merely because it happened to parse as some other type. */
+export function metricKindForSource(path: string, source: unknown): MetricFieldKind | null {
+  return metricFieldForSource(path, source)?.kind ?? null;
 }
 /** Closed typed-op descriptor grammar (submit/execute/approve/deny/action). Its
  * content is DISCARDED in B, but a malformed shape is REJECTED, never stripped. */

@@ -362,15 +362,18 @@
     if (/(^|\.)status$/.test(field)) return boundStatusText(value);
     return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
   }
+  var REPORTED_PREFIX = "reported: ";
+  function reportedFieldText(field, value) {
+    return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : REPORTED_PREFIX + value;
+  }
   var LIST_PROFILES = {
     "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
-    "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
-    "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] }
+    "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount"], status: ["status"] },
+    "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"] }
   };
   function listRowsOf(path, data) {
-    if (Array.isArray(data)) return data;
     const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path].rows : void 0;
-    if (key && data !== null && typeof data === "object" && Object.prototype.hasOwnProperty.call(data, key)) {
+    if (key && data !== null && typeof data === "object" && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, key)) {
       const v = data[key];
       if (Array.isArray(v)) return v;
     }
@@ -381,7 +384,6 @@
     capabilityId: "id",
     kernelId: "id",
     name: "text",
-    "location.label": "text",
     status: "status",
     available: "bool",
     createdAt: "time",
@@ -562,17 +564,17 @@
   var METRIC_PROFILE = [
     { route: route("/api/jobs/:/status"), fields: {
       // top-level envelope
-      status: { label: "Status", source: "status" },
-      progress: { label: "Progress", source: "progress" }
+      status: { label: "Status", source: "status", kind: "status" },
+      progress: { label: "Progress", source: "progress", kind: "percent" }
     } },
     { route: route("/api/kernels/:"), fields: {
       // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
-      status: { label: "Status", source: "kernel.status" },
-      reputation: { label: "Reputation", source: "kernel.reputation" },
-      uptimePercent: { label: "Uptime", source: "kernel.uptimePercent" },
-      capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount" },
-      totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted" },
-      activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount" }
+      status: { label: "Status", source: "kernel.status", kind: "status" },
+      reputation: { label: "Reputation", source: "kernel.reputation", kind: "count" },
+      uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", kind: "percent" },
+      capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", kind: "count" },
+      totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", kind: "count" },
+      activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", kind: "count" }
     } }
   ];
   function metricFieldForSelect(path, select) {
@@ -580,13 +582,19 @@
     for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
     return null;
   }
-  function metricLabelForSource(path, source) {
+  function metricFieldForSource(path, source) {
     if (typeof source !== "string") return null;
     for (const p of METRIC_PROFILE) if (p.route.test(path)) {
-      for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].label;
+      for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k];
       return null;
     }
     return null;
+  }
+  function metricLabelForSource(path, source) {
+    return metricFieldForSource(path, source)?.label ?? null;
+  }
+  function metricKindForSource(path, source) {
+    return metricFieldForSource(path, source)?.kind ?? null;
   }
   function isOpDescriptor(v) {
     if (!isPlain(v) || !onlyKeys(v, ["id", "label", "confirm", "intentText", "operation_id", "arguments"])) return false;
@@ -1065,13 +1073,6 @@
     }
     return cur;
   }
-  function readSelector(obj, sel) {
-    const cur = readOwnPath(obj, sel);
-    if (typeof cur === "string") return cur;
-    if (typeof cur === "number" && Number.isFinite(cur)) return String(cur);
-    if (typeof cur === "boolean") return String(cur);
-    return "";
-  }
   function el(doc, cls, text, untrusted) {
     const n = doc.createElement("div");
     n.className = untrusted ? cls + " " + CLS.untrusted : cls;
@@ -1124,7 +1125,7 @@
     if (foundKey === null) return { ok: true, text: UNAVAILABLE };
     switch (f.kind) {
       case "text":
-        return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: reportedFieldText(foundKey, raw) } : { ok: false };
       case "capType":
         return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
       case "status":
@@ -1254,7 +1255,6 @@
     updatedAt: "Updated",
     version: "Version",
     capabilityCount: "Capabilities",
-    "location.label": "Location",
     type: "Type",
     available: "Available"
   };
@@ -1262,8 +1262,18 @@
     return LIST_FIELD_LABELS[field] ?? field;
   }
   var LIST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-  var LIST_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
-  var LIST_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$/;
+  var LIST_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
+  function timeRoundTrips(s) {
+    const m = LIST_TIME_RE.exec(s);
+    if (!m) return false;
+    const year = Number(m[1]), month = Number(m[2]), day = Number(m[3]);
+    const hour = Number(m[4]), minute = Number(m[5]), second = Number(m[6]);
+    const ms = m[7] ? Number(m[7].padEnd(3, "0")) : 0;
+    if (year < 2e3 || year > 2100) return false;
+    const d = new Date(Date.UTC(year, month - 1, day, hour, minute, second, ms));
+    return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day && d.getUTCHours() === hour && d.getUTCMinutes() === minute && d.getUTCSeconds() === second && d.getUTCMilliseconds() === ms;
+  }
+  var LIST_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]{1,32})?(?:\+[0-9A-Za-z.-]{1,32})?$/;
   function readListField(row, field) {
     const raw = readOwnPath(row, field);
     if (raw === void 0 || raw === null) return { ok: true, text: "", raw };
@@ -1272,13 +1282,13 @@
       case "id":
         return typeof raw === "string" && LIST_ID_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
       case "text":
-        return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: reportedFieldText(field, raw), raw } : { ok: false };
       case "status":
         return typeof raw === "string" && raw.length > 0 && raw.length <= 64 ? { ok: true, text: boundStatusText(raw), raw } : { ok: false };
       case "bool":
         return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No", raw } : { ok: false };
       case "time":
-        return typeof raw === "string" && LIST_TIME_RE.test(raw) ? { ok: true, text: raw, raw } : { ok: false };
+        return typeof raw === "string" && timeRoundTrips(raw) ? { ok: true, text: raw, raw } : { ok: false };
       case "version":
         return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? { ok: true, text: raw, raw } : { ok: false };
       case "count":
@@ -1295,6 +1305,7 @@
     const statusFrom = typeof node.props?.statusFrom === "string" ? node.props.statusFrom : "";
     const limit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
     const isStatusKind = (field) => LIST_FIELD_KINDS[field] === "status";
+    const isTextKind = (field) => LIST_FIELD_KINDS[field] === "text";
     let shown = 0;
     for (const row of rows) {
       if (shown >= limit) break;
@@ -1309,11 +1320,16 @@
       const rowOk = allCells.every((c) => c.read.ok);
       const texts = new Map(allCells.map((c) => [c, rowOk && c.read.ok ? c.read.text : UNAVAILABLE]));
       if (rowOk) {
+        const rawOf = (c) => {
+          const r = c.read.ok ? c.read.raw : void 0;
+          return typeof r === "string" ? r : null;
+        };
         const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
-        const statusRaw = allCells.filter((c) => isStatusKind(c.field) && c.read.ok).map((c) => c.read.raw).filter((r) => typeof r === "string");
+        const statusRaw = allCells.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r) => r !== null);
         const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
-        const joined = [...nonStatusDisplayed.map((c) => texts.get(c)), ...statusRaw];
-        const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map((c) => texts.get(c)).join(" "));
+        const joinTextOf = (c) => isTextKind(c.field) ? rawOf(c) ?? texts.get(c) : texts.get(c);
+        const joined = [...nonStatusDisplayed.map(joinTextOf), ...statusRaw];
+        const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map(joinTextOf).join(" "));
         const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
         if (nonStatusClaim || crossClaim) for (const c of nonStatusCells) texts.set(c, WITHHELD_FIELD);
       }
@@ -1334,8 +1350,31 @@
   }
   function bindScalar(node, data) {
     const sel = node.bind?.select;
-    if (!sel) return "";
-    return boundValueText(sel, readSelector(data, sel));
+    const path = node.bind?.path;
+    if (typeof sel !== "string" || typeof path !== "string") return UNAVAILABLE;
+    const kind = metricKindForSource(path, sel);
+    if (!kind) return UNAVAILABLE;
+    const raw = readOwnPath(data, sel);
+    switch (kind) {
+      case "status":
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 64 ? boundStatusText(raw) : UNAVAILABLE;
+      case "text":
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? reportedFieldText(sel, raw) : UNAVAILABLE;
+      case "bool":
+        return typeof raw === "boolean" ? raw ? "Yes" : "No" : UNAVAILABLE;
+      case "percent":
+        return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 100 ? String(raw) : UNAVAILABLE;
+      case "count":
+        return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? String(raw) : UNAVAILABLE;
+      case "id":
+        return typeof raw === "string" && LIST_ID_RE.test(raw) ? boundValueText(sel, raw) : UNAVAILABLE;
+      case "time":
+        return typeof raw === "string" && timeRoundTrips(raw) ? raw : UNAVAILABLE;
+      case "version":
+        return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? raw : UNAVAILABLE;
+      default:
+        return UNAVAILABLE;
+    }
   }
   function bootIrView(doc, mount, rawDoc, validate) {
     if (!validate(rawDoc).ok) {

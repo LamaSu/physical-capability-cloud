@@ -22,8 +22,8 @@
  * Written self-contained (siblings-by-name only) so it can be inlined into the view
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
-import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind } from "./dashboard-ir.js";
-import { LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, isMoneyClaim, LIST_FIELD_KINDS } from "./dashboard-ir.js";
+import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind, MetricFieldKind } from "./dashboard-ir.js";
+import { LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -61,15 +61,6 @@ function readOwnPath(obj: unknown, sel: string): unknown {
     cur = (cur as Record<string, unknown>)[seg];
   }
   return cur;
-}
-/** Scalar coercion of an own-property read. "" for anything not a plain own scalar
- * (arrays/objects/null included) — identical behavior to the prior selector reader. */
-function readSelector(obj: unknown, sel: string): string {
-  const cur = readOwnPath(obj, sel);
-  if (typeof cur === "string") return cur;
-  if (typeof cur === "number" && Number.isFinite(cur)) return String(cur);
-  if (typeof cur === "boolean") return String(cur);
-  return "";
 }
 
 function el(doc: RDocument, cls: string, text?: string, untrusted?: boolean): RElement {
@@ -159,8 +150,11 @@ function readField(data: unknown, f: SchemaField): FieldRead {
   if (foundKey === null) return { ok: true, text: UNAVAILABLE };
   switch (f.kind) {
     case "text":
+      // astra r5 F1: a free-text schema-card field is attributed ("reported: …"), never shown
+      // as PCC's own bare fact — structural, on top of (not instead of) the lexical claim filter
+      // reportedFieldText still calls through boundValueText.
       return typeof raw === "string" && raw.length > 0 && raw.length <= 200
-        ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+        ? { ok: true, text: reportedFieldText(foundKey, raw) } : { ok: false };
     case "capType":
       return typeof raw === "string" && CAP_TYPE_RE.test(raw)
         ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
@@ -293,7 +287,7 @@ export function renderIrDoc(doc: RDocument, mount: RElement, ir: IrDoc): void {
 const LIST_FIELD_LABELS: Readonly<Record<string, string>> = {
   id: "ID", name: "Name", capabilityId: "Capability", kernelId: "Kernel", status: "Status",
   createdAt: "Created", updatedAt: "Updated", version: "Version", capabilityCount: "Capabilities",
-  "location.label": "Location", type: "Type", available: "Available",
+  type: "Type", available: "Available",
 };
 /** The PCC-owned label for a list field; an unknown field falls back to the field path itself. */
 export function listFieldLabel(field: string): string { return LIST_FIELD_LABELS[field] ?? field; }
@@ -302,8 +296,32 @@ export function listFieldLabel(field: string): string { return LIST_FIELD_LABELS
 // timestamp/version shape — none admits arbitrary prose, so a hostile "Your payment" can never
 // pass as an id, and a hostile "completed" can never pass as a bool.
 const LIST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const LIST_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
-const LIST_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$/;
+// astra r5 F4: the shape regex alone accepted impossible calendar values ("2026-99-99T99:99:99Z",
+// "2026-02-30T00:00:00Z") — same digit COUNT, nonsense MEANING. Captured so timeRoundTrips can
+// parse each component and round-trip it through Date.UTC: an out-of-range component can never
+// read back equal via getUTC*, since Date's own field-overflow normalization (rolling hour 99
+// into the next day, Feb 30 into March, …) always lands on an IN-range value that differs from
+// the out-of-range input — no hand-written days-per-month table needed.
+const LIST_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
+/** The canonical-UTC shape AND a calendar round trip (astra r5 F4). The year is additionally
+ *  bounded to 2000..2100: Date.UTC accepts (and round-trips) any year at all, so the shape+
+ *  round-trip alone would not catch an out-of-era year. */
+function timeRoundTrips(s: string): boolean {
+  const m = LIST_TIME_RE.exec(s);
+  if (!m) return false;
+  const year = Number(m[1]), month = Number(m[2]), day = Number(m[3]);
+  const hour = Number(m[4]), minute = Number(m[5]), second = Number(m[6]);
+  const ms = m[7] ? Number(m[7].padEnd(3, "0")) : 0;
+  if (year < 2000 || year > 2100) return false;
+  const d = new Date(Date.UTC(year, month - 1, day, hour, minute, second, ms));
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day &&
+    d.getUTCHours() === hour && d.getUTCMinutes() === minute && d.getUTCSeconds() === second &&
+    d.getUTCMilliseconds() === ms;
+}
+// astra r5 F4: strict semver (semver.org's own grammar), not an open-ended alnum token shape —
+// "banana" no longer passes as a version. Real kernels report "1.4.0" / "1.3.2" / "0.1.0"/"1.5.0"
+// (packages/db/src/seed/kernels.ts), each a bare major.minor.patch with no prerelease/build tag.
+const LIST_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]{1,32})?(?:\+[0-9A-Za-z.-]{1,32})?$/;
 type ListFieldRead = { ok: true; text: string; raw: unknown } | { ok: false };
 
 /** Read + type-validate ONE list field from a fetched row, by its CLOSED kind (LIST_FIELD_KINDS,
@@ -324,13 +342,14 @@ function readListField(row: unknown, field: string): ListFieldRead {
     case "id":
       return typeof raw === "string" && LIST_ID_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
     case "text":
-      return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+      // astra r5 F1: attributed, not bare — see reportedFieldText (dashboard-ir.ts).
+      return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: reportedFieldText(field, raw), raw } : { ok: false };
     case "status":
       return typeof raw === "string" && raw.length > 0 && raw.length <= 64 ? { ok: true, text: boundStatusText(raw), raw } : { ok: false };
     case "bool":
       return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No", raw } : { ok: false };
     case "time":
-      return typeof raw === "string" && LIST_TIME_RE.test(raw) ? { ok: true, text: raw, raw } : { ok: false };
+      return typeof raw === "string" && timeRoundTrips(raw) ? { ok: true, text: raw, raw } : { ok: false };
     case "version":
       return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? { ok: true, text: raw, raw } : { ok: false };
     case "count":
@@ -367,6 +386,7 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
   // Hard DOM-node cap whatever the manifest says: omitting `limit` must not lift it.
   const limit = Math.min(typeof node.props?.limit === "number" ? node.props!.limit : LIST_ROW_CAP, LIST_ROW_CAP);
   const isStatusKind = (field: string): boolean => LIST_FIELD_KINDS[field] === "status";
+  const isTextKind = (field: string): boolean => LIST_FIELD_KINDS[field] === "text";
   type Cell = { field: string; read: ListFieldRead };
   let shown = 0;
   for (const row of rows) {
@@ -391,20 +411,26 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
     const texts = new Map<Cell, string>(allCells.map((c) => [c, rowOk && c.read.ok ? c.read.text : UNAVAILABLE]));
 
     if (rowOk) {
-      // The row backstop (astra r3 H2; astra r4 finding 2 "without the escape"). A field is
-      // "status" by its CLOSED KIND (LIST_FIELD_KINDS), never by role or selector name: its RAW
-      // value joins the check below, never boundStatusText's note, and it is never withheld by
-      // this backstop — it is already qualified. A claim the statuses make on their own is
-      // already noted by boundStatusText, so it never withholds an innocent title (the
-      // `!isMoneyClaim(statusRaw...)` guard on crossClaim, unchanged from the prior design).
+      // The row backstop (astra r3 H2; astra r4 finding 2 "without the escape"; astra r5 finding
+      // 1). A field is "status" OR "text" by its CLOSED KIND (LIST_FIELD_KINDS), never by role or
+      // selector name: EACH joins its RAW value here, never its DISPLAY text (boundStatusText's
+      // note, or reportedFieldText's "reported: " prefix) — so a claim split across fields is
+      // still caught by the field's actual words, not by PCC's own added framing. Neither kind is
+      // itself withheld BY THIS BACKSTOP: a status word is already qualified by boundStatusText,
+      // and a text claim is already withheld by reportedFieldText/boundValueText individually. A
+      // claim the statuses make on their own is already noted by boundStatusText, so it never
+      // withholds an innocent title (the `!isMoneyClaim(statusRaw...)` guard on crossClaim,
+      // unchanged from the prior design).
+      const rawOf = (c: Cell): string | null => {
+        const r = c.read.ok ? (c.read as { ok: true; raw: unknown }).raw : undefined;
+        return typeof r === "string" ? r : null;
+      };
       const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
-      const statusRaw = allCells
-        .filter((c) => isStatusKind(c.field) && c.read.ok)
-        .map((c) => (c.read as { ok: true; raw: unknown }).raw)
-        .filter((r): r is string => typeof r === "string");
+      const statusRaw = allCells.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r): r is string => r !== null);
       const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
-      const joined = [...nonStatusDisplayed.map((c) => texts.get(c)!), ...statusRaw];
-      const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map((c) => texts.get(c)!).join(" "));
+      const joinTextOf = (c: Cell): string => (isTextKind(c.field) ? rawOf(c) ?? texts.get(c)! : texts.get(c)!);
+      const joined = [...nonStatusDisplayed.map(joinTextOf), ...statusRaw];
+      const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map(joinTextOf).join(" "));
       const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
       if (nonStatusClaim || crossClaim) for (const c of nonStatusCells) texts.set(c, WITHHELD_FIELD);
     }
@@ -426,12 +452,42 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
 }
 
 /** Fill a STAT value slot from a fetched object via the node's `select` — own-property,
- * text-only. Returns the string written (for tests). (Cards/receipts bind via the fixed
- * PCC schema profiles in bindSchemaCard, NOT a manifest select.) */
+ * text-only, TYPE-VALIDATED by the field's closed kind (astra r5 F2: every METRIC_PROFILE field
+ * now carries a `kind`, mirroring LIST_FIELD_KINDS's discipline for list rows). `select` is
+ * always the REAL SOURCE path the adapter rewrote it to (e.g. "kernel.reputation"), so looking it
+ * up against the SAME (route, source) → field map the validator mirrors is exact, not a guess.
+ * off-kind (wrong JS type, or a value failing its kind's grammar) is UNAVAILABLE — never shown
+ * merely because boundValueText didn't independently recognise it as a claim. (Cards/receipts
+ * bind via the fixed PCC schema profiles in bindSchemaCard, NOT a manifest select.) */
 export function bindScalar(node: IrNode, data: unknown): string {
   const sel = node.bind?.select;
-  if (!sel) return "";
-  return boundValueText(sel, readSelector(data, sel)); // a status word is qualified (#3013); other claims withheld (astra r2 F2)
+  const path = node.bind?.path;
+  if (typeof sel !== "string" || typeof path !== "string") return UNAVAILABLE;
+  const kind: MetricFieldKind | null = metricKindForSource(path, sel);
+  if (!kind) return UNAVAILABLE; // not an allowlisted (route, source) metric field — fail closed
+  const raw = readOwnPath(data, sel);
+  switch (kind) {
+    case "status":
+      // a status word is qualified, never shown bare unless on the closed safe list (#3013)
+      return typeof raw === "string" && raw.length > 0 && raw.length <= 64 ? boundStatusText(raw) : UNAVAILABLE;
+    case "text":
+      // attributed, not bare (astra r5 F1) — on top of, not instead of, the lexical claim filter
+      return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? reportedFieldText(sel, raw) : UNAVAILABLE;
+    case "bool":
+      return typeof raw === "boolean" ? (raw ? "Yes" : "No") : UNAVAILABLE;
+    case "percent":
+      return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 100 ? String(raw) : UNAVAILABLE;
+    case "count":
+      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? String(raw) : UNAVAILABLE;
+    case "id":
+      return typeof raw === "string" && LIST_ID_RE.test(raw) ? boundValueText(sel, raw) : UNAVAILABLE;
+    case "time":
+      return typeof raw === "string" && timeRoundTrips(raw) ? raw : UNAVAILABLE;
+    case "version":
+      return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? raw : UNAVAILABLE;
+    default:
+      return UNAVAILABLE; // exhaustive over MetricFieldKind; defensive fallback mirrors readField's
+  }
 }
 
 /**
