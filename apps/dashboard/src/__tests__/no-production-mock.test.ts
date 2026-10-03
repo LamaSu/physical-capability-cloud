@@ -89,6 +89,10 @@ const KNOWN_OFFENDERS: Record<string, string> = {
   "pages/InstallationDetailPage.tsx": "logistics N-b (carrier #2264)",
   "pages/ShipmentDetailPage.tsx": "logistics N-b (carrier #2264)",
   "pages/SpaceBookingsPage.tsx": "logistics N-b (carrier #2264)",
+  // product review #3985 (#408): RETIRE, left at master pending economics #394
+  "pages/SWFDashboardPage.tsx": "RETIRE (PRODUCT-BOARD s4): economics #394 deletes the page",
+  "pages/SWFGovernancePage.tsx": "RETIRE (PRODUCT-BOARD s4): economics #394 deletes the page",
+  "pages/DePINDashboardPage.tsx": "RETIRE (PRODUCT-BOARD s4): economics #394 deletes the page",
 };
 
 /**
