@@ -2,6 +2,7 @@ import React from "react";
 import { GlassPanel, GlowBadge, DataCell, EmptyState } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { getAuthHeaders } from "../stores/auth-store.js";
+import { SESSION_PIPELINE, sessionPipelineIndex, sessionStatusColor } from "../lib/negotiation-status.js";
 
 const API = import.meta.env.VITE_PCC_URL ?? "";
 
@@ -9,11 +10,10 @@ const API = import.meta.env.VITE_PCC_URL ?? "";
 // Types
 // ---------------------------------------------------------------------------
 
-type SessionStatus = "CREATED" | "CONFIGURING" | "QUOTED" | "REVIEWING" | "COMMITTED";
-
 interface NegotiationSession {
   id: string;
-  status: SessionStatus;
+  /** @pcc/spec's SessionStatus as the API sent it: displayed only through the exact map in lib/negotiation-status. */
+  status: string;
   userAgentId?: string;
   kernelId?: string;
   capabilityType?: string;
@@ -43,14 +43,13 @@ interface NegotiationSession {
 // Status Pipeline
 // ---------------------------------------------------------------------------
 
-const STATUS_STEPS: SessionStatus[] = ["CREATED", "CONFIGURING", "QUOTED", "REVIEWING", "COMMITTED"];
-
-function StatusPipeline({ current }: { current: SessionStatus }) {
-  const currentIdx = STATUS_STEPS.indexOf(current);
+function StatusPipeline({ current }: { current: string }) {
+  // -1 for a status off the happy path (settlement_failed, expired, cancelled): the badge shows it.
+  const currentIdx = sessionPipelineIndex(current);
 
   return (
     <div className="flex items-center gap-1">
-      {STATUS_STEPS.map((step, i) => {
+      {SESSION_PIPELINE.map((step, i) => {
         const isPast = i < currentIdx;
         const isCurrent = i === currentIdx;
         const isFuture = i > currentIdx;
@@ -223,17 +222,6 @@ export function NegotiationSessionPage() {
       .finally(() => setSubmitting(false));
   }
 
-  const statusColor = (status: SessionStatus): "green" | "gold" | "red" | "gray" => {
-    switch (status) {
-      case "COMMITTED": return "green";
-      case "QUOTED":
-      case "REVIEWING": return "gold";
-      case "CREATED":
-      case "CONFIGURING": return "gray";
-      default: return "gray";
-    }
-  };
-
   return (
     <div className="space-y-6">
       {/* Search bar */}
@@ -310,7 +298,7 @@ export function NegotiationSessionPage() {
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-white/80 font-mono">{session.id}</span>
-                  <GlowBadge color={statusColor(session.status)}>{session.status}</GlowBadge>
+                  <GlowBadge color={sessionStatusColor(session.status)}>{session.status}</GlowBadge>
                 </div>
                 {session.createdAt && (
                   <div className="text-[10px] text-white/25">Created: {session.createdAt}</div>
