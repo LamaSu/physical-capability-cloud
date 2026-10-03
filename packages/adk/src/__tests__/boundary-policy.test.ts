@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 // Plain ESM with no side effects on import (unlike the check script itself).
 import {
   contentProblems,
+  installedPackages,
   installedProblems,
   isChainClient,
   manifestProblems,
@@ -84,9 +88,94 @@ describe("verdict 101 F6: the complete installed graph is checked", () => {
   });
 });
 
+describe("verdict 101c: the installed-graph walk fails closed, not open", () => {
+  const writePkg = (dir: string, name: string) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name, version: "1.0.0" }));
+  };
+  // Build a throwaway pnpm consumer, scan it, and clean up even if the build or the walk throws.
+  const scan = (build: (root: string) => void) => {
+    const root = mkdtempSync(join(tmpdir(), "pcc-bnd-"));
+    try {
+      build(root);
+      const installed = installedPackages(root);
+      return { installed, problems: installedProblems(installed, { packed }) };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it("reports an opaque walk entry as a problem", () => {
+    expect(
+      installedProblems([{ opaque: "x has no package.json", dir: "a/node_modules/x", bundledIn: "a" }], { packed }),
+    ).toEqual(["installed graph has an opaque entry at a/node_modules/x, bundled inside a: x has no package.json"]);
+  });
+
+  it("reports a directory under a package's own node_modules that has no package.json", () => {
+    // At 9c0730f9 installedPackages() returned only `wrapper` and installedProblems() said nothing.
+    const { problems } = scan((root) => {
+      const nm = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules");
+      writePkg(join(nm, "wrapper"), "wrapper");
+      mkdirSync(join(nm, "wrapper/node_modules/viem"), { recursive: true });
+      writeFileSync(join(nm, "wrapper/node_modules/viem/index.js"), "module.exports = {};");
+    });
+    expect(problems.some((p) => p.includes("opaque") && p.includes("viem") && p.includes("bundled inside wrapper"))).toBe(true);
+  });
+
+  it("follows a symlinked scope and still catches the package behind it", () => {
+    // At 9c0730f9 the `@pcc` symlink was treated as one unreadable package, so `@pcc/secret` vanished.
+    const { problems } = scan((root) => {
+      const nm = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules");
+      writePkg(join(nm, "wrapper"), "wrapper");
+      mkdirSync(join(nm, "wrapper/node_modules"), { recursive: true });
+      const ext = join(root, "external/scope");
+      writePkg(join(ext, "secret"), "@pcc/secret");
+      symlinkSync(ext, join(nm, "wrapper/node_modules/@pcc"), "dir");
+    });
+    expect(problems.some((p) => p.includes("@pcc/secret") && p.includes("bundled inside wrapper"))).toBe(true);
+  });
+
+  it("walks a bundled graph deeper than the old 16-level limit", () => {
+    // At 9c0730f9 the walk stopped past depth 16, so the deepest package was invisible.
+    const DEPTH = 18;
+    const { installed } = scan((root) => {
+      let dir = join(root, "node_modules/.pnpm/deep@1.0.0/node_modules/deep");
+      writePkg(dir, "deep");
+      for (let i = 1; i <= DEPTH; i++) {
+        dir = join(dir, "node_modules", `nest${i}`);
+        writePkg(dir, `nest${i}`);
+      }
+    });
+    expect(installed.map((e: { name?: string }) => e.name)).toContain(`nest${DEPTH}`);
+  });
+
+  it("reports a package concealed under a dot-prefixed name", () => {
+    // At e0f0a8ee moduleEntries() skipped every dot name, so `.concealed/package.json` vanished (101d).
+    const { problems } = scan((root) => {
+      const nm = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules");
+      writePkg(join(nm, "wrapper"), "wrapper");
+      writePkg(join(nm, "wrapper/node_modules/.concealed"), "viem");
+    });
+    expect(problems.some((p) => p.includes("viem") && p.includes("bundled inside wrapper"))).toBe(true);
+  });
+
+  it("reports a package concealed under a dot-name inside a scope", () => {
+    // At ea73e2df the scope loop also skipped .bin/.pnpm/.modules.yaml, so @scope/.pnpm hid a package (101e).
+    const { problems } = scan((root) => {
+      const nm = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules");
+      writePkg(join(nm, "wrapper"), "wrapper");
+      mkdirSync(join(nm, "wrapper/node_modules/@scope"), { recursive: true });
+      writePkg(join(nm, "wrapper/node_modules/@scope/.pnpm"), "viem");
+    });
+    expect(problems.some((p) => p.includes("viem") && p.includes("bundled inside wrapper"))).toBe(true);
+  });
+});
+
 describe("verdict 101 F6: the payload is an allowlist of fresh build output", () => {
   const sources = new Set(["src/index.ts", "src/a/b.ts", "src/csds/x.csd.json"]);
-  const check = (files: string[]) => payloadProblems("@pcc/x", files, { hasSource: (p: string) => sources.has(p) });
+  // 101b: every dist/ file also needs a pattern in the package's publication manifest.
+  const allowed = ["dist/**/*.js", "dist/**/*.d.ts", "dist/**/*.js.map", "dist/**/*.d.ts.map", "dist/csds/*.csd.json"];
+  const check = (files: string[]) => payloadProblems("@pcc/x", files, { hasSource: (p: string) => sources.has(p), allowed });
 
   it("passes package.json, README, LICENSE and dist output that has a source", () => {
     expect(

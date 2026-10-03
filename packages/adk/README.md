@@ -20,8 +20,9 @@ The surface is an explicit list. A test pins it, so any new export is a reviewed
     Both are deeply frozen. `resolveToolRequest` and `checkAgentPackage` never read them after load; they use private copies.
   - `resolveToolRequest(name, input, { baseUrl })`: a tool call becomes `{ method, url, body? }` against the configured gateway. It is pure: no network and **no credentials**, so the caller decides where a key may go. It refuses:
     - tools whose endpoint is not a gateway path (the `http://localhost:3200/...` class), or not a well-formed one (an unknown method, a query, fragment, backslash, percent-escape or dot segment in the path, a malformed placeholder);
-    - input that is not plain JSON data: accessors, class instances, `toJSON`, symbols, holes, cycles, non-finite numbers;
-    - `.` or `..` as a path parameter;
+    - input that is not plain JSON data: accessors, class instances, `toJSON`, symbols, holes, cycles, non-finite numbers, strings or keys that are not valid Unicode (an unpaired surrogate);
+    - input too large: more than 100,000 values, an array of more than 10,000 items, a string of more than 1 Mi UTF-16 units, a body over 1 MiB, or a URL over 8,192 characters. A long array is refused before anything is copied;
+    - a path parameter that is empty, `.` or `..`, or holds anything but ASCII letters, digits and `- . _ ~ : @ + = ,`. No `/`, `\`, `%`, `;`, `?`, `#`, space, control or non-ASCII character reaches the path, so no intermediary that decodes the path can turn a value into a separator or a dot segment;
     - a base URL that is not plain http(s).
 
     It reads the input once into a plain snapshot. The required check, the path parameters, the query and the body all come from that snapshot. Path parameters are URL-encoded.
@@ -55,10 +56,10 @@ This proves an operator's project can install and use the kit without npm and wi
    - `workspace:` left anywhere, or a bundled dependency;
    - a dependency spec that is not a registry range (`file:`, `link:`, git, a URL, …);
    - a dependency that is an `@pcc/*` package outside the packed set or private in the workspace, or a chain client (`viem`, `ethers`, `wagmi`, the `@ethersproject/*` family, …). An `npm:` alias is checked by its target too;
-   - any payload file other than `package.json`, README, LICENSE, and `dist/` build output that has a matching `src/` source;
+   - any payload file other than `package.json`, README, LICENSE, and `dist/` build output that has a matching `src/` source **and** a pattern in the package's publication manifest (`scripts/publication-manifest.json`). A file ships because the package chose to publish it, not because a source happens to exist. Only `@pcc/spec` publishes data files (its CSDs and tool manifests);
    - payload text that looks like a secret: a private key block, a PCC, AWS, GitHub, Stripe or Slack token, or a secret-valued key field.
 4. **Install.** Create a consumer project **outside the workspace** (under `$TMPDIR`) that depends on the adk tarball, with `pnpm.overrides` pointing `@pcc/spec` and `@pcc/kernel-sdk` at their tarballs. Install it **offline** from the local pnpm store, so no network is used.
-5. **Installed graph.** Check every package in the consumer's pnpm store, by the name in its own `package.json`, for chain clients and for `@pcc/*` packages outside the kit. This covers transitive dependencies.
+5. **Installed graph.** Check every package in the consumer's pnpm store, by the name in its own `package.json`, for chain clients and for `@pcc/*` packages outside the kit. This covers transitive dependencies, and packages bundled inside another (a nested `node_modules`, at any depth), which are refused because they are in no dependency list.
 6. **Import** the kit from plain Node ESM, and **type-check** a TypeScript consumer against the installed declarations. The import check also fails if the kit exports a registration client or a kernel handler.
 
 The chain-client list and the secret patterns are lists of known names and shapes. They catch those, not every possible chain client or secret.
