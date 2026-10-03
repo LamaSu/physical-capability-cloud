@@ -613,41 +613,49 @@ def test_landlock_module_uses_ctypes_only_for_landlock():
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "ctypes":
             assert node.attr in LANDLOCK_CTYPES_NAMES, f"ctypes.{node.attr} is outside the Landlock surface"
 
-    # (4) the only shared library loaded is CDLL(None) (libc already present) -- never a named dlopen.
-    cdll_calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                  and isinstance(n.func.value, ast.Name) and n.func.value.id == "ctypes" and n.func.attr == "CDLL"]
-    for call in cdll_calls:
-        arg = call.args[0] if call.args else None
-        assert isinstance(arg, ast.Constant) and arg.value is None, "ctypes.CDLL must be CDLL(None) only"
-
-    # (5) No dynamic attribute access: getattr/hasattr can reach a libc method by a constant name the
+    # (4) No dynamic attribute access: getattr/hasattr can reach a libc method by a constant name the
     #     general scanner does not reject (`getattr(ctypes.CDLL(None), "system")`). _landlock.py has no
-    #     legitimate use of them, so forbid them outright (verdict 105n MED2).
+    #     legitimate use of them, so forbid them outright.
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and node.id in ("getattr", "hasattr"):
             assert False, "_landlock.py must not use getattr/hasattr (a constant-name reach past the surface)"
 
-    # (6) the only attributes invoked on the libc handle -- the CDLL(None) result, any name bound to it,
-    #     or a transitive alias of such a name -- are the pinned syscall surface. So neither
-    #     `CDLL(None).system(...)` nor `alias = libc; alias.system(...)` can reach another libc symbol.
+    # (5) Robust libc-handle analysis (verdict 105p MED2). Rather than enumerate the ways a handle can
+    #     flow (Assign / AnnAssign / walrus / default arg / container / return), require every CDLL()
+    #     result to appear ONLY in an approved position, and every handle name to be used ONLY as the
+    #     receiver of an allowed attribute. Any other flow is refused -- so `CDLL(None).system(...)`,
+    #     `alias: object = CDLL(None); alias.system(...)`, `(alias := CDLL(None)).system(...)`,
+    #     `alias = libc; alias.system(...)`, `f(libc)`, `return libc`, `[libc]` are all rejected.
+    parent = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parent[id(c)] = n
+
     def _is_cdll_call(n):
         return (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "CDLL"
                 and isinstance(n.func.value, ast.Name) and n.func.value.id == "ctypes")
-    handle_names, changed = set(), True
-    while changed:  # seed from `x = ctypes.CDLL(...)`, then follow `y = x` to a fixpoint
-        changed = False
-        for n in ast.walk(tree):
-            if not isinstance(n, ast.Assign):
-                continue
-            if _is_cdll_call(n.value) or (isinstance(n.value, ast.Name) and n.value.id in handle_names):
-                for t in n.targets:
-                    if isinstance(t, ast.Name) and t.id not in handle_names:
-                        handle_names.add(t.id)
-                        changed = True
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and (
-                (isinstance(node.value, ast.Name) and node.value.id in handle_names) or _is_cdll_call(node.value)):
-            assert node.attr in LANDLOCK_LIBC_ATTRS, f"libc.{node.attr} is outside the pinned syscall surface"
+
+    def _is_allowed_attr_receiver(n):  # n's parent reads one of the allowed libc attributes off n
+        p = parent.get(id(n))
+        return isinstance(p, ast.Attribute) and p.value is n and p.attr in LANDLOCK_LIBC_ATTRS
+
+    handle_names = set()
+    for n in ast.walk(tree):
+        if not _is_cdll_call(n):
+            continue
+        arg = n.args[0] if n.args else None
+        assert isinstance(arg, ast.Constant) and arg.value is None, "ctypes.CDLL must be CDLL(None) only"
+        p = parent.get(id(n))
+        if isinstance(p, ast.Assign) and len(p.targets) == 1 and isinstance(p.targets[0], ast.Name):
+            handle_names.add(p.targets[0].id)            # libc = ctypes.CDLL(None)
+        elif _is_allowed_attr_receiver(n):
+            pass                                         # ctypes.CDLL(None).syscall(...), direct
+        else:
+            assert False, f"ctypes.CDLL(...) result flows to an unapproved position ({type(p).__name__})"
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in handle_names:
+            assert _is_allowed_attr_receiver(n), f"libc handle {n.id!r} is used outside an allowed attribute access"
 
 
 def test_the_allowlist_is_what_the_package_runs():
