@@ -202,7 +202,7 @@ describe("only lib/authorized-fetch.ts holds the API key, and only fetchWithKey 
 
   it("the key's owner and the auth store export exactly the boundary's functions", () => {
     expect(Object.keys(keyOwner).sort()).toEqual(["authorizedFetch", "hasStoredApiKey", "installGatewayKeyGuard", "setStoredApiKey"]);
-    expect(Object.keys(store).sort()).toEqual(["adoptApiKey", "onIdentityChange", "useAuthStore"]);
+    expect(Object.keys(store).sort()).toEqual(["adoptApiKey", "onAccountChange", "onIdentityChange", "useAuthStore"]);
   });
 
   it("the auth store's state holds no key, even while one is held", () => {

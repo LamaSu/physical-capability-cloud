@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../../lib/account-scope.js";
 import type { ComponentType } from "react";
 
 // ---------------------------------------------------------------------------
@@ -160,3 +161,6 @@ export const usePanelStore = create<PanelStoreState>((set, get) => ({
     });
   },
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(usePanelStore);

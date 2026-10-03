@@ -94,3 +94,17 @@ export function onIdentityChange(onChange: () => void): () => void {
   });
 }
 
+/**
+ * Calls `onChange` whenever the signed-in account changes: a key signed in or
+ * out, or a different key, including login() with another key while signed
+ * in. App resets every account-scoped store on it, ends the previous wallet
+ * session, and remounts the signed-in shell (astra 19c, 19d). The account
+ * follows the key, never isAuthenticated. The key is not in this store (N50),
+ * so the change shows as keyEpoch. Zustand calls this inside the set() that
+ * changed it, so it runs before anything renders for the next account.
+ */
+export function onAccountChange(onChange: () => void): () => void {
+  return useAuthStore.subscribe((s, prev) => {
+    if (s.keyEpoch !== prev.keyEpoch) onChange();
+  });
+}

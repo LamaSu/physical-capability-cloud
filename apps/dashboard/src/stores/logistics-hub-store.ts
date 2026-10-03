@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 
 type HubTab = "overview" | "shipments" | "bookings" | "installations" | "providers";
 type ShipmentFilter = "all" | "in_transit" | "delivered" | "pending";
@@ -44,3 +45,6 @@ export const useLogisticsHubStore = create<LogisticsHubState>((set) => ({
   setSelectedInstallation: (id) => set({ selectedInstallationId: id }),
   setSearch: (q) => set({ searchQuery: q }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useLogisticsHubStore);

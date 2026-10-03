@@ -53,6 +53,9 @@ export const KNOWN_KERNEL_STATUSES: ReadonlySet<string> = new Set(["online", "of
  *   active, completing, completed, disputed, refunded.
  * - The dashboard's EscrowStatus type (types/dto.ts), which the money badges
  *   classify, also names: pending, released, expired.
+ * - Escrow's #462 (N79) adds refund_pending: a chain escrow whose refund is
+ *   decided but not yet executed on-chain. It is written to the escrows table
+ *   and named in both @pcc/spec vocabularies and the money map (escrow #4544).
  */
 export const KNOWN_ESCROW_STATUSES: ReadonlySet<string> = new Set([
   "created",
@@ -65,6 +68,7 @@ export const KNOWN_ESCROW_STATUSES: ReadonlySet<string> = new Set([
   "pending",
   "released",
   "expired",
+  "refund_pending",
 ]);
 
 /** An escrow's currency: the escrows table allows USDC, ETH and DAI (db/schema/settlement.ts). */

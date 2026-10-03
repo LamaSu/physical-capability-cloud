@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 
 export interface Notification {
   id: string;
@@ -29,3 +30,6 @@ export const useNotificationStore = create<NotificationState>((set) => ({
   dismiss: (id) => set((s) => ({ notifications: s.notifications.filter((n) => n.id !== id) })),
   clear: () => set({ notifications: [] }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useNotificationStore);

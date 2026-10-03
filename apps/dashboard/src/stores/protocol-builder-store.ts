@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 
 export interface StepDraft {
   id: string;
@@ -237,3 +238,6 @@ export const useProtocolBuilderStore = create<ProtocolBuilderState>((set, get) =
       nextParamId: 1,
     }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useProtocolBuilderStore);

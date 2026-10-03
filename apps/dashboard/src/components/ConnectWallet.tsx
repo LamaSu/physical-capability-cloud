@@ -63,16 +63,32 @@ export function ConnectWallet() {
     }
   }, [isConnected, address, setAddress, setSession]);
 
+  // This component unmounts when the API account changes (App's account
+  // boundary). An async result that arrives after that belongs to the previous
+  // account, so it is dropped rather than written into the next account's
+  // auth state (astra 19d).
+  const alive = React.useRef(true);
+  React.useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
   // Check for existing session on mount
   React.useEffect(() => {
+    let cancelled = false;
     fetch("/api/auth/me", { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data?.address) {
+        if (!cancelled && data?.address) {
           setSession("cookie"); // cookie-based session, token managed server-side
         }
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [setSession]);
 
   // SIWE sign-in after wallet connects
@@ -118,10 +134,16 @@ export function ConnectWallet() {
       }
 
       const data = await verifyRes.json();
+      if (!alive.current) {
+        // The account changed while this wallet was signing in. The cookie the
+        // gateway just set belongs to the previous account: destroy it.
+        void fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
+        return;
+      }
       // Session cookie is set automatically; also store the bearer token
       setSession(data.token ?? "cookie");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sign-in failed");
+      if (alive.current) setError(err instanceof Error ? err.message : "Sign-in failed");
     }
   }, [address, chainId, signMessageAsync, setVerifying, setError, setSession]);
 

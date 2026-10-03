@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 
 /**
  * Ephemeral shell chrome state. Which workspace is showing is not stored
@@ -19,3 +20,6 @@ export const useUIStore = create<UIState>((set) => ({
   currentPageSubtitle: "",
   setPageMeta: (title, subtitle = "") => set({ currentPageTitle: title, currentPageSubtitle: subtitle }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useUIStore);
