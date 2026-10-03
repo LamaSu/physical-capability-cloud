@@ -97,6 +97,13 @@ export interface TelemetryStats {
   totalEvents: number;
   byPhase: Record<PipelinePhase, { total: number; failed: number }>;
   eventsPerMinute: number;
+  /**
+   * The terminal-result denominator successRate was computed from (astra
+   * 408b F2). Optional so an older gateway's response still parses — see
+   * StatsCards, which shows a percentage only when this is a positive
+   * integer.
+   */
+  terminalCount?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -181,9 +188,65 @@ function malformed(what: string): Error {
   return new Error(`The gateway's ${what} response was not in the expected format.`);
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// ---------------------------------------------------------------------------
+// Row guards (astra 408b F5): the envelope being an array says nothing about
+// its entries. A malformed row — missing fields, or an enum value outside
+// the vocabulary the renderer switches on — fails the whole read rather
+// than being displayed as a garbled entry ("Invalid Date", blank fields).
+// ---------------------------------------------------------------------------
+
+const PIPELINE_PHASE_SET = new Set<string>(PIPELINE_PHASES);
+const TELEMETRY_STATUS_SET = new Set<string>(["started", "completed", "failed", "skipped"]);
+const LOG_LEVEL_SET = new Set<string>(["debug", "info", "warn", "error"]);
+
+function isActiveJobSummary(v: unknown): v is ActiveJobSummary {
+  return (
+    isRecord(v) &&
+    typeof v.jobId === "string" &&
+    typeof v.currentPhase === "string" &&
+    PIPELINE_PHASE_SET.has(v.currentPhase) &&
+    typeof v.startedAt === "string" &&
+    typeof v.eventCount === "number" &&
+    typeof v.lastUpdated === "string"
+  );
+}
+
+function isTelemetryEvent(v: unknown): v is TelemetryEvent {
+  return (
+    isRecord(v) &&
+    typeof v.id === "string" &&
+    typeof v.jobId === "string" &&
+    typeof v.timestamp === "string" &&
+    typeof v.phase === "string" &&
+    PIPELINE_PHASE_SET.has(v.phase) &&
+    typeof v.status === "string" &&
+    TELEMETRY_STATUS_SET.has(v.status) &&
+    (v.duration_ms === undefined || typeof v.duration_ms === "number") &&
+    typeof v.level === "string" &&
+    LOG_LEVEL_SET.has(v.level) &&
+    typeof v.source === "string"
+  );
+}
+
+function isLogEntry(v: unknown): v is LogEntry {
+  return (
+    isRecord(v) &&
+    typeof v.id === "string" &&
+    typeof v.timestamp === "string" &&
+    typeof v.level === "string" &&
+    LOG_LEVEL_SET.has(v.level) &&
+    typeof v.message === "string" &&
+    typeof v.source === "string"
+  );
+}
+
 async function fetchTelemetryActive(): Promise<ActiveResponse> {
   const res = await apiGet<ActiveResponse>("/telemetry/active");
-  if (!Array.isArray(res?.active)) throw malformed("active pipelines");
+  if (!Array.isArray(res?.active) || !res.active.every(isActiveJobSummary)) throw malformed("active pipelines");
   return res;
 }
 
@@ -201,7 +264,7 @@ async function fetchTelemetryStats(): Promise<StatsResponse> {
 
 async function fetchTelemetryTimeline(jobId: string): Promise<TimelineResponse> {
   const res = await apiGet<TimelineResponse>(`/telemetry/pipeline/${encodeURIComponent(jobId)}`);
-  if (!Array.isArray(res?.timeline)) throw malformed("pipeline timeline");
+  if (!Array.isArray(res?.timeline) || !res.timeline.every(isTelemetryEvent)) throw malformed("pipeline timeline");
   return res;
 }
 
@@ -212,7 +275,7 @@ async function fetchLogs(params: { level?: string; source?: string; search?: str
   if (params.search) qs.set("search", params.search);
   if (params.limit) qs.set("limit", String(params.limit));
   const res = await apiGet<LogsResponse>(`/telemetry/logs?${qs}`);
-  if (!Array.isArray(res?.entries)) throw malformed("logs");
+  if (!Array.isArray(res?.entries) || !res.entries.every(isLogEntry)) throw malformed("logs");
   return { ...res, sources: Array.isArray(res.sources) ? res.sources : [] };
 }
 
@@ -359,9 +422,13 @@ function PipelineVisualizer({ timeline, onPhaseClick, selectedPhase }: PipelineV
 // ── Stats Cards ──────────────────────────────────────────────────────────
 
 function StatsCards({ stats }: { stats: TelemetryStats }) {
-  // successRate is 0 both when nothing has finished and when everything failed;
-  // show 0% only when a failure was recorded.
-  const hasFailures = Object.values(stats.byPhase ?? {}).some((p) => (p?.failed ?? 0) > 0);
+  // successRate is 0 both when nothing has finished and when every terminal
+  // result failed. terminalCount — the denominator it was computed from —
+  // is the only reliable way to tell those apart: a historical failed phase
+  // followed by a retry whose last event is "started" is not a terminal
+  // result, so it must never be inferred from byPhase (astra 408b F2).
+  const hasTerminalResult =
+    typeof stats.terminalCount === "number" && Number.isInteger(stats.terminalCount) && stats.terminalCount > 0;
   const cards = [
     {
       label: "Total Events",
@@ -383,7 +450,7 @@ function StatsCards({ stats }: { stats: TelemetryStats }) {
     },
     {
       label: "Success Rate",
-      value: stats.successRate > 0 || hasFailures ? `${(stats.successRate * 100).toFixed(0)}%` : "—",
+      value: hasTerminalResult ? `${(stats.successRate * 100).toFixed(0)}%` : "—",
       sub: "last event completed, not failed",
       glow: stats.successRate > 0.8,
     },
@@ -658,7 +725,10 @@ export function TelemetryPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
 
   React.useEffect(() => {
-    setPageMeta("Pipeline Telemetry", "Full pipeline visibility — events, logs, and phase tracking");
+    // astra 408b F7 (LOW): "Full pipeline visibility" overstated a bounded
+    // in-memory view — the gateway keeps at most 200 jobs, 500 events each
+    // (packages/gateway/src/telemetry.ts MAX_JOBS / MAX_EVENTS_PER_JOB).
+    setPageMeta("Pipeline Telemetry", "Recent pipeline telemetry held by this gateway (up to 200 jobs, 500 events each)");
   }, [setPageMeta]);
 
   // Sample values render only when the viewer asked for a demo (lib/demo-mode.ts).
