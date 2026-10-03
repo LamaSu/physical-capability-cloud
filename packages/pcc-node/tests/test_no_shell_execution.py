@@ -42,6 +42,24 @@ computed argv and ``/usr/bin/env sh``). The rules:
    path passes a dunder. A chain's head, or anything past it, is never bound
    to a name or passed as a value, where its attributes would escape these
    rules (``path = os.path``) (verdict 105e).
+7. Nothing reaches a tracked module, an object's internals or a frame
+   through any other object (verdict 105f). On any object, no attribute is
+   named like a module the guard tracks (``pathlib.os``; ``.code`` stays
+   usable, since HTTP errors carry it), no dunder is used but the plain few in
+   ``ALLOWED_DUNDERS`` (``pathlib.__dict__``, ``().__class__``), and no frame
+   or traceback attribute (``f_globals``, ``tb_frame``). ``getattr`` and
+   ``hasattr`` take only a constant name, which those same rules judge, and
+   are never passed as values. No import names a module through another
+   module (``from pathlib import os``) or a dunder outside the allowlist
+   (``from os import __dict__``), and a name is imported as one thing only
+   (an alias reused for another module in an uncalled function would
+   otherwise hide which module it is). ``inspect``, ``gc``, ``sys._getframe``,
+   ``operator.attrgetter`` and ``breakpoint()`` are refused, and so is every
+   module that turns a string into a module or a callable: ``pkgutil``,
+   ``pydoc``, ``zipimport``, ``site`` and ``logging.config``.
+
+The guard reads syntax. It tracks names bound by imports, flow-insensitively,
+and it is not a sandbox: rules 1 and 3 stay the first barriers.
 """
 
 import ast
@@ -68,12 +86,15 @@ REFUSED = {
     "yaml": {"load", "unsafe_load", "full_load", "load_all", "unsafe_load_all"},
     "code": {"interact", "InteractiveInterpreter", "InteractiveConsole"},
     "builtins": {"eval", "exec", "compile", "__import__"},
-    "sys": {"modules"},
+    "sys": {"modules", "_getframe", "_current_frames"},
+    "operator": {"attrgetter", "methodcaller"},
+    "logging": {"config"},  # dictConfig/fileConfig build any callable named by a string
 }
 # Modules with no business in pcc-node: each can run code or start processes.
 REFUSED_IMPORTS = {"ctypes", "cffi", "multiprocessing", "webbrowser", "posix", "nt", "_posixsubprocess",
-                   "commands", "codeop", "shelve", "builtins"}
-REFUSED_BUILTINS = {"eval", "exec", "compile", "__import__"}
+                   "commands", "codeop", "shelve", "builtins", "inspect", "gc",
+                   "pkgutil", "pydoc", "zipimport", "site"}
+REFUSED_BUILTINS = {"eval", "exec", "compile", "__import__", "breakpoint"}
 # The executables pcc-node runs, by bare name (test_the_allowlist_is_what_the_package_runs keeps
 # this list exactly that). A path, or any other executable, is refused.
 EXECUTABLES = {"arp", "dd", "ffmpeg", "journalctl", "sysctl", "v4l2-ctl"}
@@ -84,6 +105,23 @@ MODULE_NAMES = MODULES | REFUSED_IMPORTS
 # keeps this list exactly what the package uses).
 SAFE_CHAINS = {("os", "path"), ("os", "environ"), ("sys", "stdin")}
 LOOKUPS = {"getattr", "hasattr"}
+# Rule 7: the dunders any object may use, the frame attributes none may, and the module names no
+# attribute may carry (.code stays usable: HTTP errors carry it).
+ALLOWED_DUNDERS = {"__name__", "__qualname__", "__doc__", "__init__", "__dataclass_fields__", "__version__"}
+FRAME_ATTRS = {"f_globals", "f_locals", "f_builtins", "f_back", "f_code", "tb_frame", "tb_next",
+               "gi_frame", "gi_code", "cr_frame", "cr_code", "ag_frame", "ag_code"}
+REACH_NAMES = MODULE_NAMES - {"code"}
+
+
+def _reaches(name):
+    """Why an attribute or lookup of this name, on any object, breaks rule 7, or None."""
+    if name in REACH_NAMES:
+        return "names a module the guard tracks"
+    if name.startswith("__") and name not in ALLOWED_DUNDERS:
+        return "is a dunder"
+    if name in FRAME_ATTRS:
+        return "is a frame attribute"
+    return None
 # Calls that rebind names behind the syntax tree's back.
 REBINDERS = {"globals", "locals", "vars", "setattr", "delattr"}
 _MATCH_BINDINGS = tuple(getattr(ast, n) for n in ("MatchAs", "MatchStar") if hasattr(ast, n))
@@ -126,28 +164,43 @@ def _tracked(tree):
     - refusals: (node, reason) for each import that breaks a rule.
     """
     modules, names, prefixed, refusals = {}, {}, {}, []
+    imported = {}  # local name -> {what it was imported as}, every scope (rule 7)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
+                imported.setdefault(alias.asname or parts[0], set()).add(alias.name if alias.asname else parts[0])
                 if parts[0] in REFUSED_IMPORTS:
                     refusals.append((node, f"import {alias.name}"))
-                if parts[0] not in MODULES:
-                    continue
                 if any(part in MODULE_NAMES for part in parts[1:]):
                     refusals.append((node, f"import {alias.name} reaches another module"))
+                if parts[0] not in MODULES:
+                    continue
+                if len(parts) > 1 and parts[1] in REFUSED.get(parts[0], ()):
+                    refusals.append((node, f"import {alias.name}"))
                 if alias.asname is None:
                     modules[parts[0]] = parts[0]  # `import os.path` binds os itself
                 elif len(parts) == 1:
                     modules[alias.asname] = parts[0]
                 else:
                     prefixed[alias.asname] = (parts[0], parts[1:])
-        elif isinstance(node, ast.ImportFrom) and node.module:
+        elif isinstance(node, ast.ImportFrom):
+            source = "." * node.level + (node.module or "")
+            for alias in node.names:
+                imported.setdefault(alias.asname or alias.name, set()).add(f"{source}:{alias.name}")
+                if alias.name in MODULE_NAMES:
+                    refusals.append((node, f"from {source} import {alias.name} reaches a module through another"))
+                elif alias.name.startswith("__") and alias.name not in ALLOWED_DUNDERS:
+                    refusals.append((node, f"from {source} import {alias.name}"))
+            if not node.module:
+                continue
             parts = node.module.split(".")
             if parts[0] in REFUSED_IMPORTS:
                 refusals.append((node, f"from {node.module} import ..."))
             if parts[0] not in MODULES:
                 continue
+            if len(parts) > 1 and parts[1] in REFUSED.get(parts[0], ()):
+                refusals.append((node, f"from {node.module} import ..."))
             for alias in node.names:
                 if alias.name == "*":
                     refusals.append((node, f"from {node.module} import *"))
@@ -159,8 +212,12 @@ def _tracked(tree):
                         refusals.append((node, f"from {node.module} import {alias.name}"))
                 else:
                     prefixed[local] = (parts[0], [*parts[1:], alias.name])
-                if any(part in MODULE_NAMES for part in [*parts[1:], alias.name]):
+                if any(part in MODULE_NAMES for part in parts[1:]):
                     refusals.append((node, f"from {node.module} import {alias.name} reaches another module"))
+    tracked_locals = set(modules) | set(names) | set(prefixed)
+    for local, sources in imported.items():
+        if local in tracked_locals and len(sources) > 1:
+            refusals.append((tree, f"{local} is imported as more than one thing ({', '.join(sorted(sources))})"))
     return modules, names, prefixed, refusals
 
 
@@ -219,6 +276,20 @@ def violations(source, filename="<src>"):
         # Rebinding getattr/hasattr on another object (a module, from outside it).
         if isinstance(node, ast.Attribute) and node.attr in LOOKUPS and isinstance(node.ctx, (ast.Store, ast.Del)):
             bad(node, f"rebinds {node.attr} on another object")
+        # Rule 7, on any object: no module name, dunder or frame attribute (verdict 105f).
+        if isinstance(node, ast.Attribute):
+            why = _reaches(node.attr)
+            if why:
+                bad(node, f".{node.attr} {why}")
+        # getattr/hasattr: a constant name only, judged like an attribute, and never passed on.
+        if isinstance(node, ast.Name) and node.id in LOOKUPS and id(node) not in call_funcs:
+            bad(node, f"{node.id} used as a value can look up anything")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in LOOKUPS:
+            name = node.args[1] if len(node.args) >= 2 else None
+            if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                bad(node, f"{node.func.id} with a computed name can look up anything")
+            elif _reaches(name.value):
+                bad(node, f"{node.func.id}(..., {name.value!r}): the name {_reaches(name.value)}")
         # Any reference to a refused attribute, called or not (invoke = os.system).
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
             module = modules[node.value.id]
@@ -481,6 +552,31 @@ EVASIONS = {
     "a module imported from another, passed on": "from subprocess import os as platform\nrun_with(platform)",
     "a module path from a submodule's names": "from os.path import genericpath as g\ng.os.system('id')",
     "a dunder method past a safe chain": "import os\nos.path.__getattribute__('os').system('id')",
+    # Verdict 105f (on #503): a dunder from-imported, a tracked module through an untracked one, an alias
+    # imported as two modules, and the same routes through any object.
+    "a dunder from-imported": "from os import __dict__ as namespace\nnamespace['system']('id')",
+    "a tracked module from an untracked one": "from pathlib import os\nos.system('id')",
+    "an alias imported as two modules": "import os as platform\n\ndef unused():\n    import yaml as platform\n\nplatform.system('id')",
+    "a tracked module through an untracked module's attribute": "import shutil\nshutil.os.system('id')",
+    "a dunder on an untracked module": "import pathlib\npathlib.__dict__['os'].system('id')",
+    "the object graph from a literal": "classes = ().__class__.__base__.__subclasses__()",
+    "getattr of a module name on any object": "import pathlib\ngetattr(pathlib, 'os').system('id')",
+    "getattr with a computed name": "import pathlib\ngetattr(pathlib, name).system('id')",
+    "getattr passed as a value": "import functools, pathlib\nfunctools.reduce(getattr, ['os'], pathlib).system('id')",
+    "a frame's globals through a traceback": "import sys\nsys.exc_info()[2].tb_frame.f_globals['os'].system('id')",
+    "sys._getframe": "import sys\nsys._getframe().f_globals['os'].system('id')",
+    "import inspect": "import inspect, pathlib\ndict(inspect.getmembers(pathlib))['os'].system('id')",
+    "import gc": "import gc\nm = [o for o in gc.get_objects() if getattr(o, '__name__', '') == 'os'][0]\nm.system('id')",
+    "pkgutil.resolve_name": "import pkgutil\npkgutil.resolve_name('os').system('id')",
+    "pydoc.locate": "import pydoc\npydoc.locate('os').system('id')",
+    "import logging.config": "import logging.config\nlogging.config.dictConfig(spec)",
+    "from logging import config": "from logging import config\nconfig.dictConfig(spec)",
+    "from logging.config import dictConfig": "from logging.config import dictConfig\ndictConfig(spec)",
+    "logging.config by attribute": "import logging\nlogging.config.dictConfig(spec)",
+    "operator.attrgetter": "import operator, pathlib\noperator.attrgetter('os')(pathlib).system('id')",
+    "breakpoint()": "breakpoint()",
+    "a relative dunder import": "from . import __builtins__ as b\nb['eval'](x)",
+    "a dotted import naming a module": "import xml.os",
 }
 SAFE = {
     "fixed argv": "import subprocess\nsubprocess.run(['v4l2-ctl', '--device', dev, '--all'], capture_output=True)",
@@ -499,6 +595,17 @@ SAFE = {
     "a constant bound to a name": "import os\nseparator = os.sep",
     "os.path from a submodule import": "import os.path\nfull = os.path.join('a', 'b')",
     "a safe chain imported by name, used in place": "from os import environ\nhome = environ.get('HOME')",
+    # Verdict 105f: what rule 7 still allows (each is in the package today).
+    "an HTTP error's code": "try:\n    pass\nexcept Exception as e:\n    status = e.code",
+    "a type's name": "name = type(e).__name__",
+    "super().__init__": "class A(B):\n    def __init__(self):\n        super().__init__()",
+    "dataclass fields": "fields = cls.__dataclass_fields__",
+    "the package's own version": "from . import __version__",
+    "exc_info without frames": "import sys\nkind = sys.exc_info()[0]",
+    "a constant hasattr on an object": "supported = hasattr(info, 'server')",
+    "the same import in two scopes": "import os\n\ndef f():\n    import os\n    return os.getcwd()",
+    "a logger": "import logging\nlog = logging.getLogger('pcc-node')\nlogging.basicConfig(level=logging.INFO)",
+    "a rotating log file": "from logging.handlers import RotatingFileHandler\nhandler = RotatingFileHandler(path, maxBytes=1, backupCount=1)",
 }
 
 
