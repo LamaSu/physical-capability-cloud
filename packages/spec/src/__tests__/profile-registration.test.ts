@@ -154,7 +154,10 @@ describe("profile registration — checks, digest and stored row are one copy (a
     expect(r.profileDigest).toBe(computeMeasurementProfileDigest(cameraProfile()));
   });
 
-  it("a getter that lies after the first read cannot split what is checked from what is stored", () => {
+  // A getter could answer the check and the stored row differently, so the
+  // plain-data boundary refuses it without reading it (astra pack 154; it was
+  // once read exactly once, which still ran code supplied with the data).
+  it("a getter that could lie after the first read is refused, never read", () => {
     const p = cameraProfile();
     let reads = 0;
     Object.defineProperty(p.device, "deviceId", {
@@ -163,10 +166,8 @@ describe("profile registration — checks, digest and stored row are one copy (a
       get: () => (reads++ === 0 ? CAMERA : "dev-other"),
     });
     const r = checkProfileRegistration(request(p));
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.profile.device.deviceId).toBe(CAMERA);
-    expect(reads).toBe(1);
+    expect(codes(r)).toEqual(["profile-invalid"]);
+    expect(reads).toBe(0);
   });
 
   it("a request JSON cannot carry is refused as profile-invalid, never coerced", () => {
