@@ -7,6 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OracleAttestation } from "@pcc/contracts";
 import { SettlementService, resetSettlementService } from "../services/settlement-service.js";
 import { closeStore, getRepos, initStore } from "../db.js";
+import { getSettlementFacade } from "../facades/index.js";
+import { pipelineTelemetry } from "../telemetry.js";
+import { auditService } from "../services/audit-service.js";
 
 vi.mock("../contracts/escrow-client.js", () => ({
   submitEvidence: vi.fn(),
@@ -67,5 +70,58 @@ describe("releaseMilestone reports what the chain did, not what was broadcast (a
     expect([r.status, r.txHash]).toEqual(["released", "0xrelease"]);
     expect(escrow.waitForReceipt).toHaveBeenCalledWith("0xrelease");
     expect(jobStatus()).toBe("settled");
+  });
+});
+
+describe("SettlementFacade.releaseMilestone records a release only on a successful receipt (astra A07c F4)", () => {
+  const ADDRESS = "0x00000000000000000000000000000000000e5c01";
+
+  beforeEach(() => {
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: true });
+  });
+
+  // Only this block's spies are restored: restoring every mock would also wipe the escrow-client module mock.
+  let spies: Array<{ mockRestore(): void }> = [];
+  afterEach(() => {
+    closeStore();
+    for (const spy of spies) spy.mockRestore();
+    spies = [];
+    vi.clearAllMocks();
+  });
+
+  /** What the facade announced: completion telemetry and the escrow.released audit event. */
+  const announced = () => ({
+    completed: vi.mocked(pipelineTelemetry.emit).mock.calls.filter(([, phase, status]) => phase === "settlement_complete" && status === "completed").length,
+    released: vi.mocked(auditService.log).mock.calls.filter(([event]) => event.eventType === "escrow.released").length,
+  });
+  const release = async (receipt: () => void) => {
+    spies = [vi.spyOn(pipelineTelemetry, "emit"), vi.spyOn(auditService, "log")];
+    receipt();
+    return getSettlementFacade().releaseMilestone(ADDRESS, 0, attestation, "operator-1");
+  };
+
+  it("an unconfirmed release is submitted, and announces no completion and no release", async () => {
+    const escrow = await import("../contracts/escrow-client.js");
+    const r = await release(() => vi.mocked(escrow.waitForReceipt).mockResolvedValueOnce({ status: "timeout", blockNumber: 0 }));
+    expect(r.success).toBe(true);
+    expect((r as { data: { status: string; transactionHash?: string } }).data).toEqual(expect.objectContaining({ status: "submitted", transactionHash: "0xrelease" }));
+    expect(announced()).toEqual({ completed: 0, released: 0 });
+  });
+
+  it("a reverted release fails, and announces no completion and no release", async () => {
+    const escrow = await import("../contracts/escrow-client.js");
+    const r = await release(() => vi.mocked(escrow.waitForReceipt).mockResolvedValueOnce({ status: "reverted", blockNumber: 7 }));
+    expect(r.success).toBe(false);
+    expect((r as { error: { message: string } }).error.message).toMatch(/reverted/);
+    expect(announced()).toEqual({ completed: 0, released: 0 });
+  });
+
+  it("a release whose receipt shows success is released, and announced once", async () => {
+    const escrow = await import("../contracts/escrow-client.js");
+    const r = await release(() => vi.mocked(escrow.waitForReceipt).mockResolvedValueOnce({ status: "success", blockNumber: 7 }));
+    expect(r.success).toBe(true);
+    expect((r as { data: { status: string } }).data.status).toBe("released");
+    expect(announced()).toEqual({ completed: 1, released: 1 });
   });
 });

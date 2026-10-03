@@ -316,6 +316,17 @@ export class KernelFacade extends BaseFacade {
             { name: "ForbiddenError" },
           );
         }
+        // A row with no recorded owner binds no NEW signer either (astra A07c N1). A kernel's signer is the
+        // trust root its machine logs and evidence are verified against, and a first-come bind would hand it
+        // to whichever key asked first, as the first-come owner claim did. Refused before anything is
+        // written. A row that already has a signer keeps the usual rule: that signer's proof is idempotent,
+        // and another is a conflict.
+        if (!hasRecordedOwner && body.signingProof && !this.signerFromRow(existing)) {
+          throw Object.assign(
+            new Error(`Kernel '${id}' has no recorded owner, so no signer can be bound to it until an admin migration records one`),
+            { name: "ForbiddenError" },
+          );
+        }
         // Upsert: update heartbeat + optional fields
         const updates: Record<string, unknown> = {
           lastHeartbeat: new Date().toISOString(),

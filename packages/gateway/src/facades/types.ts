@@ -358,7 +358,11 @@ export interface EscrowSummaryDTO {
 export interface SettlementResultDTO {
   jobId: Id;
   escrowId: Id;
-  status: "settled" | "disputed" | "refunded";
+  /**
+   * "released" only on a successful receipt; "submitted": broadcast, receipt not seen within the bound
+   * (astra A07c). The escrow lifecycle's own outcomes are "settled", "disputed" and "refunded".
+   */
+  status: "settled" | "released" | "submitted" | "disputed" | "refunded";
   releasedAmount: Amount;
   protocolFee: Amount;
   txHash?: string;

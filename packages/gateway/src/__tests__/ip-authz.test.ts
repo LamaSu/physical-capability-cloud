@@ -11,6 +11,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { privateKeyToAccount } from "viem/accounts";
+import { kernelSigningProofMessage } from "@pcc/kernel";
 import { getLicensingEngine, getStoryIPService, resetLicensingEngine, resetStoryIPService, type LicenseEvaluation } from "@pcc/contracts";
 import { ipRoutes, recordedIpOwner } from "../routes/ip.js";
 import { capabilityRoutes } from "../routes/capabilities.js";
@@ -747,6 +749,65 @@ describe("N10a: /api/ip/* authorization", () => {
         const splits = { ipId, splits: [{ address: OTHER, role: "integrator", percentage: 100, label: "all" }] };
         expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OTHER), payload: splits })).statusCode).toBe(403);
       }
+    });
+  });
+
+  describe("astra A07c (round 4 at a31ae78e)", () => {
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    const attacker = privateKeyToAccount(`0x${"7a".repeat(32)}`);
+    const nodeKey = privateKeyToAccount(`0x${"5c".repeat(32)}`);
+    /** An app with the kernel routes, where an API key's (asserted) operatorId comes from x-test-operator. */
+    async function kernelApp() {
+      await app.close();
+      closeStore();
+      process.env.PCC_DB_PATH = ":memory:";
+      initStore({ seed: true });
+      app = Fastify({ logger: false });
+      app.addHook("onRequest", async (req) => {
+        const op = req.headers["x-test-operator"];
+        if (typeof op === "string") (req as { operatorId?: string }).operatorId = op;
+      });
+      await app.register(kernelRoutes);
+      await app.ready();
+    }
+    const reRegister = async (who: string, signer: ReturnType<typeof privateKeyToAccount>) =>
+      app.inject({
+        method: "POST",
+        url: "/api/kernels",
+        headers: { "x-test-operator": who },
+        payload: {
+          id: "kernel-nyc",
+          name: "mine now",
+          location: { lat: 0, lng: 0 },
+          physicalAddress: "elsewhere",
+          maxAssuranceTier: 0,
+          signingAddress: signer.address,
+          signingProof: await signer.signMessage({ message: kernelSigningProofMessage("kernel-nyc") }),
+        },
+      });
+    const signerOf = () => {
+      const row = getRepos().kernels.findById("kernel-nyc")!;
+      return [row.signingAddress ?? null, row.signingKeyAlgorithm ?? null, row.signingKeyPublicKey ?? null];
+    };
+
+    it("N1: no signer can be bound to a kernel with no recorded owner, so its trust root is not first-come", async () => {
+      await kernelApp();
+      for (const legacy of [ZERO, ""]) {
+        getRepos().kernels.update("kernel-nyc", { operatorAddress: legacy, signingAddress: null, signingKeyAlgorithm: null, signingKeyPublicKey: null });
+        const res = await reRegister(OTHER, attacker);
+        expect(res.statusCode).toBe(403);
+        expect(signerOf()).toEqual([null, null, null]);
+        expect(getRepos().kernels.findById("kernel-nyc")!.name).not.toBe("mine now"); // refused before any write
+      }
+    });
+
+    it("N1: a legacy kernel that already has a signer keeps it: that signer's proof changes nothing, another is refused", async () => {
+      await kernelApp();
+      getRepos().kernels.update("kernel-nyc", { operatorAddress: ZERO, signingAddress: nodeKey.address, signingKeyAlgorithm: "secp256k1", signingKeyPublicKey: null });
+      expect((await reRegister(OTHER, nodeKey)).statusCode).toBeLessThan(300);
+      expect(signerOf()).toEqual([nodeKey.address, "secp256k1", null]);
+      expect((await reRegister(OTHER, attacker)).statusCode).toBe(409);
+      expect(signerOf()).toEqual([nodeKey.address, "secp256k1", null]);
     });
   });
 });
