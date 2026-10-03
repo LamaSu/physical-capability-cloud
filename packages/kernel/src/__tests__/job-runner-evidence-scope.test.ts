@@ -17,6 +17,7 @@ import { verifyBundleHash } from "@pcc/spec";
 
 import type { CameraAdapter, MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus, SensorAdapter } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
+import { setEvidenceClock } from "../evidence-session.js";
 import { JobRunner } from "../job-runner.js";
 import type { JobResult } from "../job-runner.js";
 
@@ -32,6 +33,8 @@ type DeviceType = EvidenceSource["deviceType"];
 
 const KERNEL_ID = "kernel-scope-test";
 const STEP = "step-1";
+/** A quiet period short enough to wait out in real time (the default is 1 s). */
+const QUIET_MS = 20;
 const GUARD_MS = 2_000;
 const STILL_PENDING = `run() still pending after ${GUARD_MS} ms`;
 
@@ -252,8 +255,11 @@ describe("R1: a finished job records nothing from later jobs on the same adapter
   ])("%s", async (_how, sameRunner) => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const addEvent = vi.spyOn(emitter, "addEvent");
-    const machine = testMachine("machine-r1");
-    const runnerA = new JobRunner(machine, [], null, emitter);
+    // A device per case, and a short quiet period: since #502 round 3 a device stays
+    // unavailable to the next job until it has been quiet that long.
+    const machine = testMachine(`machine-r1-${sameRunner ? "one-runner" : "runner-per-job"}`);
+    const options = { evidenceQuietMs: QUIET_MS };
+    const runnerA = new JobRunner(machine, [], null, emitter, options);
     const a = await runnerA.run({ jobId: "job-r1-A", stepId: STEP, gcodeHash: gcode(1), assuranceTier: 1 });
     expect(a.success).toBe(true);
     await addEventsSettled(addEvent);
@@ -261,9 +267,13 @@ describe("R1: a finished job records nothing from later jobs on the same adapter
     const callsForA = namingA();
     const eventsOfA = emitter.getEvents("job-r1-A", STEP).length;
 
-    // An event between the two jobs, then job B on the same machine.
-    machine.emit(evidence("execution_progress", "machine-r1", "controller", { between: "A and B" }));
-    const runnerB = sameRunner ? runnerA : new JobRunner(machine, [], null, emitter);
+    // An event between the two jobs, then job B on the same machine. B is refused until the
+    // machine has been quiet again: that event could still be job A's.
+    machine.emit(evidence("execution_progress", machine.id, "controller", { between: "A and B" }));
+    const runnerB = sameRunner ? runnerA : new JobRunner(machine, [], null, emitter, options);
+    const tooSoon = await runnerB.run({ jobId: "job-r1-B", stepId: STEP, gcodeHash: gcode(2), assuranceTier: 1 });
+    expect(tooSoon.busy).toEqual({ reason: "quiescing", adapterId: machine.id, jobId: "job-r1-A" });
+    await new Promise((resolve) => setTimeout(resolve, QUIET_MS + 5));
     const b = await runnerB.run({ jobId: "job-r1-B", stepId: STEP, gcodeHash: gcode(2), assuranceTier: 1 });
     expect(b.success).toBe(true);
     await addEventsSettled(addEvent);
@@ -362,16 +372,23 @@ class EchoEmitter extends EvidenceEmitter {
 }
 
 describe("R4: a device that emits again whenever an event is recorded", () => {
+  // Since #502 round 3 a job's window stays open until its devices are quiet, and this
+  // device never is: the run fails at the quiesce bound, at every tier, and finalizes
+  // nothing. (In round 2 the window closed after step 7 and the run passed on its events.)
   it.each([
     ["the run ends as soon as the flood starts", false],
     ["the flood runs for the whole of a 500 ms execution", true],
-  ])("run() resolves, and nothing is recorded after the bundle (%s)", async (_when, longRun) => {
+  ])("run() resolves, as a failure, and nothing is recorded after it returns (%s)", async (_when, longRun) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    setEvidenceClock(() => Date.now());
+    // setImmediate is real: the flood runs as fast as real hashing, between clock steps.
+    const turn = () => new Promise((resolve) => setImmediate(resolve));
     const emitter = new EchoEmitter(KERNEL_ID);
     let bundle: EvidenceBundle | undefined;
     emitter.onBundle((b) => {
       bundle = b;
     });
-    const machine = testMachine("machine-r4", {
+    const machine = testMachine(`machine-r4-${longRun ? "long" : "short"}`, {
       onLoad: (id, hash) => [...tier1(id, hash), evidence("execution_progress", id, "controller", { n: 0 })],
     });
     if (longRun) {
@@ -379,19 +396,39 @@ describe("R4: a device that emits again whenever an event is recorded", () => {
       let polls = 0;
       machine.progress = () => (++polls >= 2 ? 100 : 50);
     }
-    emitter.echo = (n) => machine.emit(evidence("execution_progress", "machine-r4", "controller", { n }));
+    let emitted = 0;
+    emitter.echo = (n) => {
+      emitted += 1;
+      machine.emit(evidence("execution_progress", machine.id, "controller", { n }));
+    };
     try {
-      const runner = new JobRunner(machine, [], null, emitter, { evidenceSettleTimeoutMs: 1_000 });
-      const outcome = await withinGuard(runner.run({ jobId: "job-r4", stepId: STEP, gcodeHash: gcode(4), assuranceTier: 1 }));
-      expect(outcome, "run()'s result").toEqual(expect.objectContaining({ success: true }));
+      let outcome: JobResult | undefined;
+      const options = { evidenceSettleTimeoutMs: 1_000, evidenceQuiesceTimeoutMs: 2_000 };
+      void new JobRunner(machine, [], null, emitter, options)
+        .run({ jobId: "job-r4", stepId: STEP, gcodeHash: gcode(4), assuranceTier: 1 })
+        .then((result) => {
+          outcome = result;
+        });
+      // The fake clock moves 10 ms per event the device emits, so on that clock it is
+      // never quiet for 1 s, however fast the real hashing that drives it runs.
+      for (let turns = 0; outcome === undefined && turns < 100_000; turns++) {
+        const before = emitted;
+        await turn();
+        if (emitted > before) await vi.advanceTimersByTimeAsync(10);
+      }
+      expect(outcome, "run()'s result").toEqual({ success: false, error: "evidence did not quiesce within 2000 ms", durationMs: expect.any(Number) });
 
+      const callsAtReturn = emitter.calls.length;
       await Promise.allSettled(emitter.calls);
-      expect(bundle).toBeDefined();
-      expect(emitter.getEvents("job-r4", STEP), "events recorded under the job, after it returned").toHaveLength(bundle!.events.length);
-      expect(await verifyBundleHash(bundle!)).toBe(true);
+      for (let i = 0; i < 5; i++) await turn();
+      expect(emitter.calls.length, "addEvent calls started after run() returned").toBe(callsAtReturn);
+      expect(bundle).toBeUndefined();
+      expect(emitter.getEvents("job-r4", STEP), "events recorded under the job, after it returned").toEqual([]);
     } finally {
       // Stop the device: at 5a3386b5 run() never returns while it emits.
       emitter.echo = null;
+      setEvidenceClock();
+      vi.useRealTimers();
     }
   });
 });
@@ -400,12 +437,13 @@ describe("R5: a run that fails early records nothing after it returns", () => {
   it.each(["load_gcode", "start"] as const)("an event emitted after a failed %s is not recorded", async (failing) => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const addEvent = vi.spyOn(emitter, "addEvent");
-    const machine = testMachine("machine-r5a", { onLoad: () => [] });
+    // A device per case: a refusal while the last case's device is quiescing would pass vacuously.
+    const machine = testMachine(`machine-r5a-${failing}`, { onLoad: () => [] });
     machine.failing = failing;
     const result = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-r5a", stepId: STEP, gcodeHash: gcode(5), assuranceTier: 0 });
     expect(result.success).toBe(false);
 
-    machine.emit(evidence("execution_completed", "machine-r5a", "controller", { after: "return" }));
+    machine.emit(evidence("execution_completed", machine.id, "controller", { after: "return" }));
     await addEventsSettled(addEvent);
 
     expect.soft(addEvent.mock.calls.length, "addEvent calls after the failed run").toBe(0);
@@ -422,7 +460,7 @@ describe("R5: a run that fails early records nothing after it returns", () => {
       if (returned) writtenAfterReturn.push(rawEvent.type);
       return added;
     });
-    const machine = testMachine("machine-r5b");
+    const machine = testMachine(`machine-r5b-${failing}`);
     machine.failing = failing;
     const result = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-r5b", stepId: STEP, gcodeHash: gcode(5), assuranceTier: 0 });
     returned = true;
@@ -518,7 +556,7 @@ describe("Busy: an adapter serves one job at a time", () => {
     const commandsBeforeB = [...machine.commands];
     const b = await new JobRunner(machine, [], camera, emitter).run({ jobId: "job-busy-B", stepId: STEP, gcodeHash: gcode(8), assuranceTier: 2 });
 
-    expect(b).toEqual({ success: false, error: "adapter machine-busy is in use by job job-busy-A", busy: { adapterId: "machine-busy", jobId: "job-busy-A" }, durationMs: expect.any(Number) });
+    expect(b).toEqual({ success: false, error: "adapter machine-busy is in use by job job-busy-A", busy: { reason: "adapter", adapterId: "machine-busy", jobId: "job-busy-A" }, durationMs: expect.any(Number) });
     expect(machine.commands, "commands sent once job B was refused").toEqual(commandsBeforeB);
     expect(registerStep.mock.calls.map(([jobId]) => jobId), "steps registered").toEqual(["job-busy-A"]);
 
@@ -537,22 +575,22 @@ describe("Busy: an adapter serves one job at a time", () => {
     const bundles: EvidenceBundle[] = [];
     emitter.onBundle((bundle) => bundles.push(bundle));
     const release = deferred();
-    const machineA = testMachine("machine-share-A", {
+    const machineA = testMachine(`machine-share-A-${shared}`, {
       onLoad: (id, hash) => tier1(id, hash).filter((e) => e.type !== "power_profile_summary"),
       holdStart: new Map([[1, release.promise]]),
     });
-    const machineB = testMachine("machine-share-B");
+    const machineB = testMachine(`machine-share-B-${shared}`);
     const sensor = testSensor(`power-shared-${shared}`);
     const camera = testCamera(`camera-shared-${shared}`);
-    const sensorsOf = (own: boolean) => (shared === "sensor" || own ? [sensor] : [testSensor("power-B")]);
-    const cameraOf = (own: boolean) => (shared === "camera" || own ? camera : testCamera("camera-B"));
+    const sensorsOf = (own: boolean) => (shared === "sensor" || own ? [sensor] : [testSensor(`power-B-${shared}`)]);
+    const cameraOf = (own: boolean) => (shared === "camera" || own ? camera : testCamera(`camera-B-${shared}`));
 
     const runA = new JobRunner(machineA, sensorsOf(true), cameraOf(true), emitter).run({ jobId: "job-share-A", stepId: STEP, gcodeHash: gcode(11), assuranceTier: 2 });
     await machineA.started(1);
     const b = await new JobRunner(machineB, sensorsOf(false), cameraOf(false), emitter).run({ jobId: "job-share-B", stepId: STEP, gcodeHash: gcode(12), assuranceTier: 2 });
 
     const sharedId = shared === "camera" ? camera.id : sensor.id;
-    expect(b).toEqual({ success: false, error: `adapter ${sharedId} is in use by job job-share-A`, busy: { adapterId: sharedId, jobId: "job-share-A" }, durationMs: expect.any(Number) });
+    expect(b).toEqual({ success: false, error: `adapter ${sharedId} is in use by job job-share-A`, busy: { reason: "adapter", adapterId: sharedId, jobId: "job-share-A" }, durationMs: expect.any(Number) });
     expect(machineB.commands, "commands sent to job B's own machine").toEqual([]);
 
     release.resolve();
@@ -574,7 +612,8 @@ describe("Busy: an adapter serves one job at a time", () => {
     await machine.started(1);
     await until(() => emitter.getEvents("job-dup", STEP).length === 3); // job A's load events are recorded
     const b = await new JobRunner(machine, [], camera, emitter).run(job);
-    expect(b).toEqual({ success: false, error: "adapter machine-dup is in use by job job-dup", busy: { adapterId: "machine-dup", jobId: "job-dup" }, durationMs: expect.any(Number) });
+    // Its (jobId, stepId) is checked first: the duplicate is refused as a running step (#502 round 3).
+    expect(b).toEqual({ success: false, error: "step step-1 of job job-dup is already running", busy: { reason: "step", jobId: "job-dup", stepId: STEP }, durationMs: expect.any(Number) });
 
     release.resolve();
     expect(await runA).toMatchObject({ success: true });
@@ -591,18 +630,22 @@ describe("Busy: an adapter serves one job at a time", () => {
     ["the Tier 2 check fails", (_m, c) => void (c.inspectionsThatEmit = 0)],
     ["evidence recording does not settle", (_m, c) => void (c.afterInspection = () => c.emit(evidence("camera_snapshot", c.id, "camera")))],
     ["finalizeBundle throws", (_m, _c, e) => void vi.spyOn(e, "finalizeBundle").mockRejectedValueOnce(new Error("signer offline"))],
-  ])("after a run that ends because %s, the adapters are free for the next job", async (_why, breakIt) => {
+  ])("after a run that ends because %s, the adapters are free for the next job once they have been quiet", async (why, breakIt) => {
     const emitter = new StuckEmitter("camera_snapshot");
-    const machine = testMachine("machine-free");
-    const camera = testCamera("camera-free");
+    // Devices per case, and a short quiet period: since #502 round 3 a device stays
+    // unavailable to the next job until it has been quiet that long.
+    const slug = why.replace(/\W+/g, "-");
+    const machine = testMachine(`machine-free-${slug}`);
+    const camera = testCamera(`camera-free-${slug}`);
     breakIt(machine, camera, emitter);
-    const options = { evidenceSettleTimeoutMs: 100 };
+    const options = { evidenceSettleTimeoutMs: 100, evidenceQuietMs: QUIET_MS };
 
     const first = await new JobRunner(machine, [], camera, emitter, options).run({ jobId: "job-free-1", stepId: STEP, gcodeHash: gcode(14), assuranceTier: 2 });
     expect(first.success).toBe(false);
 
     Object.assign(machine, { failing: null, progress: () => 100, status: "busy" });
     Object.assign(camera, { inspectionsThatEmit: Number.POSITIVE_INFINITY, afterInspection: null });
+    await new Promise((resolve) => setTimeout(resolve, QUIET_MS + 5));
     const second = await new JobRunner(machine, [], camera, emitter, options).run({ jobId: "job-free-2", stepId: STEP, gcodeHash: gcode(15), assuranceTier: 2 });
     expect(second).toMatchObject({ success: true });
   });
@@ -623,56 +666,82 @@ class SlowEmitter extends EvidenceEmitter {
 }
 
 describe("Sealed: a failed run never writes an event still queued", () => {
-  it("an event queued behind a slow addEvent is not written after the run failed and returned", async () => {
-    const emitter = new SlowEmitter(KERNEL_ID);
-    const bundles: EvidenceBundle[] = [];
-    emitter.onBundle((bundle) => bundles.push(bundle));
-    const machine = testMachine("machine-sealed", {
-      onLoad: (id, hash) => [evidence("gcode_received", id, "controller", { gcodeHash: hash }), ...tier1(id, hash)],
-    });
-    machine.failing = "start";
+  it("an event queued behind a slow addEvent is not written after the run failed and returned (and R10: nothing lands in its step)", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // setImmediate is real: hashing finishes, and every microtask runs, between checks.
+    const turn = () => new Promise((resolve) => setImmediate(resolve));
+    try {
+      const emitter = new SlowEmitter(KERNEL_ID);
+      const bundles: EvidenceBundle[] = [];
+      emitter.onBundle((bundle) => bundles.push(bundle));
+      const machine = testMachine("machine-sealed", {
+        onLoad: (id, hash) => [evidence("gcode_received", id, "controller", { gcodeHash: hash }), ...tier1(id, hash)],
+      });
+      machine.failing = "start";
 
-    // The bounded wait (100 ms) ends before the slow addEvent (300 ms) does.
-    const result = await new JobRunner(machine, [], null, emitter, { evidenceSettleTimeoutMs: 100 }).run({
-      jobId: "job-sealed",
-      stepId: STEP,
-      gcodeHash: gcode(16),
-      assuranceTier: 1,
-    });
-    expect(result.success).toBe(false);
-    await emitter.slow;
-    await new Promise((resolve) => setTimeout(resolve, 20));
+      // The bounded wait (100 ms) ends before the slow addEvent (300 ms) does.
+      const run = new JobRunner(machine, [], null, emitter, { evidenceSettleTimeoutMs: 100 }).run({
+        jobId: "job-sealed",
+        stepId: STEP,
+        gcodeHash: gcode(16),
+        assuranceTier: 1,
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await run;
+      expect(result.success).toBe(false);
+      // R10 (astra pack 172): the slow addEvent is still running when run() returns...
+      expect.soft(emitter.getEvents("job-sealed", STEP), "events recorded under the failed job when run() returned").toEqual([]);
 
-    // The slow one was already running and cannot be recalled; the queued ones never start.
-    expect(emitter.asked).toEqual(["gcode_received"]);
-    expect(bundles).toEqual([]);
+      await vi.advanceTimersByTimeAsync(200);
+      await emitter.slow;
+      await turn();
+
+      // The slow one was already running and cannot be recalled; the queued ones never start.
+      expect(emitter.asked).toEqual(["gcode_received"]);
+      // ...and once it completes, the failed job's step still records nothing.
+      expect.soft(emitter.getEvents("job-sealed", STEP), "events recorded under the failed job once the slow addEvent completed").toEqual([]);
+      expect(bundles).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
 describe("the settle timer", () => {
+  // Since #502 round 3 a run first quiesces, on the evidence clock: these tests put that
+  // clock on the fake one (Date), and move it on.
   it.each([
     ["a run that succeeds", null],
     ["a run whose load fails", "load_gcode"],
-  ] as const)("is cleared when %s returns", async (_how, failing) => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  ] as const)("is cleared, with the quiescence timers, when %s returns", async (_how, failing) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    setEvidenceClock(() => Date.now());
+    // setImmediate is real: hashing finishes, and every microtask runs, between clock steps.
+    const turn = () => new Promise((resolve) => setImmediate(resolve));
     try {
-      const machine = testMachine("machine-timer");
+      const machine = testMachine(`machine-timer-${failing ?? "ok"}`);
       machine.failing = failing;
-      const result = await new JobRunner(machine, [], null, new EvidenceEmitter(KERNEL_ID)).run({
-        jobId: "job-timer",
-        stepId: STEP,
-        gcodeHash: gcode(17),
-        assuranceTier: 1,
-      });
-      expect(result.success).toBe(failing === null);
+      let outcome: JobResult | undefined;
+      void new JobRunner(machine, [], null, new EvidenceEmitter(KERNEL_ID))
+        .run({ jobId: "job-timer", stepId: STEP, gcodeHash: gcode(17), assuranceTier: 1 })
+        .then((result) => {
+          outcome = result;
+        });
+      for (let steps = 0; outcome === undefined && steps < 100; steps++) {
+        await turn();
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      expect(outcome?.success).toBe(failing === null);
       expect(vi.getTimerCount(), "timers left pending").toBe(0);
     } finally {
+      setEvidenceClock();
       vi.useRealTimers();
     }
   });
 
   it("defaults to 30 s, and a run that times out waits for it once, not twice", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    setEvidenceClock(() => Date.now());
     // setImmediate is real: hashing finishes, and every microtask runs, between checks.
     const turn = () => new Promise((resolve) => setImmediate(resolve));
     try {
@@ -685,9 +754,13 @@ describe("the settle timer", () => {
         .then((result) => {
           outcome = result;
         });
-      // Advance only once the settle's timer (the run's only timer) is set and the
-      // stuck addEvent is in flight; earlier, the queued events would just be sealed.
-      while (vi.getTimerCount() === 0 || emitter.stuckCalls === 0) await turn();
+      // Advance only once the stuck addEvent is in flight; earlier, the queued events
+      // would just be sealed.
+      while (emitter.stuckCalls === 0) await turn();
+      // The snapshot was the last event: one default quiet period (1 s) later the run
+      // closes its window and sets the settle's timer, by then its only timer.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(vi.getTimerCount(), "timers pending once the run has quiesced").toBe(1);
 
       await vi.advanceTimersByTimeAsync(29_999);
       await turn();
@@ -696,6 +769,7 @@ describe("the settle timer", () => {
       await turn();
       expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 30000 ms", durationMs: expect.any(Number) });
     } finally {
+      setEvidenceClock();
       vi.useRealTimers();
     }
   });

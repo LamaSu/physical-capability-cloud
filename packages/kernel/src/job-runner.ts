@@ -9,8 +9,17 @@
 import type { AssuranceTier, SHA256 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
-import { openEvidenceSession } from "./evidence-session.js";
+import { DEFAULT_EVIDENCE_QUIET_MS, openEvidenceSession } from "./evidence-session.js";
 import * as Sentry from "@sentry/node";
+
+/**
+ * The (jobId, stepId) keys running on each emitter, each mapped to the run that holds it.
+ * registerStep overwrites a step under an active key, so two runs of one step on disjoint
+ * adapters would read and finalize each other's events (astra pack 172). A run takes the
+ * key before registerStep and releases it on every exit; a run whose key is held is refused.
+ */
+const activeSteps = new WeakMap<EvidenceEmitter, Map<string, string>>();
+let runs = 0;
 
 /** Callback fired at key pipeline phase transitions for external telemetry. */
 export type OnPhaseCallback = (
@@ -42,11 +51,15 @@ export interface JobResult {
   bundleHash?: string;
   error?: string;
   /**
-   * Set when the run was refused because an adapter it needs is recording another
-   * job's evidence. Nothing ran and no step was registered: the device is not at
-   * fault, so a caller should queue or retry the job, never count a device failure.
+   * Set when the run was refused before it started: nothing ran, no step was registered
+   * and nothing was recorded. The device is not at fault, so a caller should queue or
+   * retry the job, never count a device failure.
+   *   - "adapter": the device of adapter `adapterId` is recording job `jobId`'s evidence;
+   *   - "quiescing": that device has not been quiet since job `jobId` ended, so what it
+   *     emits now could still be that job's evidence;
+   *   - "step": this run's (jobId, stepId) is already running on this evidence emitter.
    */
-  busy?: { adapterId: string; jobId: string };
+  busy?: { jobId: string; adapterId?: string; stepId?: string; reason: "adapter" | "step" | "quiescing" };
   durationMs: number;
 }
 
@@ -56,6 +69,14 @@ export interface JobRunnerOptions {
    * to be recorded. Past that it fails: an addEvent may never settle. Default 30 s.
    */
   evidenceSettleTimeoutMs?: number;
+  /**
+   * How long an adapter without quiesceEvidence must have been silent before the run
+   * takes its evidence to be complete; also how long a device stays unavailable to the
+   * next job after its last event. Default 1000 ms.
+   */
+  evidenceQuietMs?: number;
+  /** How long a run waits for its adapters to quiesce before it fails. Default 15 s. */
+  evidenceQuiesceTimeoutMs?: number;
 }
 
 export class JobRunner {
@@ -64,6 +85,8 @@ export class JobRunner {
   private camera: CameraAdapter | null;
   private evidenceEmitter: EvidenceEmitter;
   private evidenceSettleTimeoutMs: number;
+  private evidenceQuietMs: number;
+  private evidenceQuiesceTimeoutMs: number;
 
   constructor(
     machine: MachineAdapter,
@@ -77,6 +100,8 @@ export class JobRunner {
     this.camera = camera;
     this.evidenceEmitter = evidenceEmitter;
     this.evidenceSettleTimeoutMs = options?.evidenceSettleTimeoutMs ?? 30_000;
+    this.evidenceQuietMs = options?.evidenceQuietMs ?? DEFAULT_EVIDENCE_QUIET_MS;
+    this.evidenceQuiesceTimeoutMs = options?.evidenceQuiesceTimeoutMs ?? 15_000;
   }
 
   async run(config: JobConfig): Promise<JobResult> {
@@ -91,6 +116,24 @@ export class JobRunner {
     let recorded: Promise<void> = Promise.resolve();
     // Set when the run fails, so an event still queued is never written.
     let sealed = false;
+
+    // Every refusal below comes before any adapter command, and before registerStep,
+    // which would overwrite the step of a job already running under the same ids. The
+    // checks, the session's claim and the step key's lease are one synchronous block.
+    const stepKey = `${jobId}:${stepId}`; // the emitter's own key for the step
+    let leases = activeSteps.get(this.evidenceEmitter);
+    if (leases === undefined) {
+      leases = new Map();
+      activeSteps.set(this.evidenceEmitter, leases);
+    }
+    if (leases.has(stepKey)) {
+      return {
+        success: false,
+        error: `step ${stepId} of job ${jobId} is already running`,
+        busy: { reason: "step", jobId, stepId },
+        durationMs: Date.now() - startTime,
+      };
+    }
 
     // This run's evidence window: events reach the chain only while it is open.
     // A listener per run could not be removed, so it went on recording later and
@@ -108,18 +151,20 @@ export class JobRunner {
           }
         });
       },
+      { quietMs: this.evidenceQuietMs },
     );
-    // Refused before any adapter command, and before registerStep, which would
-    // overwrite the step of a job already running under the same ids.
     if (!opened.ok) {
+      const { reason, adapterId, jobId: holder } = opened.busy;
       return {
         success: false,
-        error: `adapter ${opened.busy.adapterId} is in use by job ${opened.busy.jobId}`,
-        busy: { adapterId: opened.busy.adapterId, jobId: opened.busy.jobId },
+        error: reason === "adapter" ? `adapter ${adapterId} is in use by job ${holder}` : `adapter ${adapterId} is still quiescing after job ${holder}`,
+        busy: { reason, adapterId, jobId: holder },
         durationMs: Date.now() - startTime,
       };
     }
     const session = opened.session;
+    const lease = `${jobId}#${++runs}`;
+    leases.set(stepKey, lease);
     this.evidenceEmitter.registerStep(jobId, stepId, assuranceTier);
 
     // Wait for the chain, but not forever: an addEvent may never settle.
@@ -218,8 +263,21 @@ export class JobRunner {
             );
           }
 
-          // 8. Stop accepting evidence, so the chain stops growing, then wait for it.
-          // An event emitted from here on is dropped, with a warning.
+          // 8. Wait, still recording, until the adapters have emitted all of this job's
+          // evidence: returning from step 5, 6 or 7 does not prove an adapter is done (a
+          // poll loop may report the completion later). Bounded: a device that never goes
+          // quiet fails the run, at every tier, and nothing is finalized.
+          if (!(await session.quiesce(this.evidenceQuietMs, this.evidenceQuiesceTimeoutMs))) {
+            return {
+              success: false,
+              error: `evidence did not quiesce within ${this.evidenceQuiesceTimeoutMs} ms`,
+              durationMs: Date.now() - startTime,
+            };
+          }
+
+          // Then stop accepting evidence, so the chain stops growing, and wait for it. An
+          // event emitted from here on is dropped, with a warning, and keeps its device
+          // from the next job until it has been quiet again.
           session.close();
           if (!(await settle())) {
             settleTimedOut = true;
@@ -274,16 +332,20 @@ export class JobRunner {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, error: message, durationMs: Date.now() - startTime };
     } finally {
-      // Every exit closes the window. A failed run also seals the chain, so a queued
-      // event is never written, and waits, bounded, for the addEvent in flight, so
-      // nothing lands after run() returns. An addEvent still running at the timeout
-      // cannot be recalled: it can only land in this run's step, which no bundle of
-      // this run includes.
+      // Every exit closes the window. A failed run also seals the chain, so an event
+      // still queued is never written; waits, bounded, for the addEvent in flight; and
+      // then detaches its step (cleanup), so getEvents() for it is empty from then on.
+      // An addEvent still running at that bound cannot be recalled: it holds the step
+      // record it looked up before it awaited the hash, so it appends to that detached
+      // record, which nothing reads, after run() has returned.
       session.close();
       if (!succeeded) {
         sealed = true;
         if (!settleTimedOut) await settle();
+        this.evidenceEmitter.cleanup(jobId, stepId);
       }
+      // Released last, so a later run of this step registers a fresh record.
+      if (leases.get(stepKey) === lease) leases.delete(stepKey);
     }
   }
 

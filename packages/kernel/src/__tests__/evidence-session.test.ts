@@ -9,7 +9,7 @@ import type { SHA256 } from "@pcc/spec";
 
 import type { CameraAdapter, MachineAdapter, SensorAdapter } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
-import { openEvidenceSession } from "../evidence-session.js";
+import { DEFAULT_EVIDENCE_QUIET_MS, openEvidenceSession, setEvidenceClock } from "../evidence-session.js";
 import type { EmittedEvidence } from "../evidence-session.js";
 import { JobRunner } from "../job-runner.js";
 
@@ -25,10 +25,14 @@ function evidence(type: EmittedEvidence["type"], deviceId: string, payload: Reco
   return { type, timestamp: new Date().toISOString(), source: { deviceId, deviceType: "controller", kernelId: KERNEL_ID }, payload };
 }
 
-function fakeAdapter(id: string) {
+let devices = 0;
+
+/** An adapter on a device of its own, unless it is given one (a session locks the device). */
+function fakeAdapter(id: string, deviceId = `${id}-device-${++devices}`) {
   const listeners: Array<(event: EmittedEvidence) => void> = [];
   return {
     id,
+    source: { deviceId, kernelId: KERNEL_ID },
     onEvidence: vi.fn((callback: (event: EmittedEvidence) => void) => {
       listeners.push(callback);
     }),
@@ -53,6 +57,7 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 afterEach(() => {
+  setEvidenceClock();
   vi.restoreAllMocks();
 });
 
@@ -70,6 +75,8 @@ describe("openEvidenceSession", () => {
   });
 
   it("dedupes an adapter passed twice: one listener, one delivery per event, one claim to release", () => {
+    let now = 0;
+    setEvidenceClock(() => now);
     const a = fakeAdapter("adapter-a");
     const deliver = vi.fn();
     const session = mustOpen([a, a], owner("job-1"), deliver);
@@ -79,6 +86,8 @@ describe("openEvidenceSession", () => {
     expect(deliver).toHaveBeenCalledTimes(1);
 
     session.close();
+    // Once its device has been quiet for the quiet period (#502 round 3).
+    now += DEFAULT_EVIDENCE_QUIET_MS;
     expect(openEvidenceSession([a], owner("job-2"), vi.fn()).ok).toBe(true);
   });
 
@@ -88,7 +97,7 @@ describe("openEvidenceSession", () => {
     const c = fakeAdapter("adapter-c");
     mustOpen([a, b], owner("job-1"), vi.fn());
 
-    expect(openEvidenceSession([c, b], owner("job-2"), vi.fn())).toEqual({ ok: false, busy: { adapterId: "adapter-b", jobId: "job-1" } });
+    expect(openEvidenceSession([c, b], owner("job-2"), vi.fn())).toEqual({ ok: false, busy: { reason: "adapter", adapterId: "adapter-b", jobId: "job-1" } });
 
     // Nothing was opened on c: another job can take it, and only that job sees its events.
     expect(c.onEvidence).not.toHaveBeenCalled();
@@ -110,7 +119,7 @@ describe("openEvidenceSession", () => {
 
     a.emit(evidence("execution_started", "adapter-a"));
     expect(deliver).toHaveBeenCalledTimes(1);
-    expect(openEvidenceSession([a], owner("job-3"), vi.fn())).toEqual({ ok: false, busy: { adapterId: "adapter-a", jobId: "job-2" } });
+    expect(openEvidenceSession([a], owner("job-3"), vi.fn())).toEqual({ ok: false, busy: { reason: "adapter", adapterId: "adapter-a", jobId: "job-2" } });
   });
 
   it("drops an event emitted after close, warning with the adapter id and the event type, never the payload", () => {
