@@ -611,23 +611,53 @@ def _prepare_plr_op(lh: Any, op: Any, index: int, limits: _Limits) -> _Step:
     return _Step(index, kind, lambda: lh.return_tips(use_channels=channels), record)
 
 
+# R39 MED6: the stub shares the wire vocabulary with the PLR path (_OP_FIELDS),
+# but — unlike _prepare_plr_op — doesn't require a specific op's own fields
+# (no deck to check a labwareId/tipRack against on the stub). A field valid
+# for ANY real op is accepted on ANY stub op; anything else is unknown.
+_STUB_OP_FIELDS = frozenset({"op"}).union(*_OP_FIELDS.values())
+
+
+def _validate_stub_op(op: Any, index: int) -> dict[str, Any]:
+    """Check one stub op is a known op with no unrecognized fields. Never
+    invents one: malformed input is a validation error, not a synthetic noop.
+    """
+    if not isinstance(op, dict):
+        raise _bad_op(f"each op must be an object (op {index} is a {type(op).__name__})", opIndex=index)
+    kind = op.get("op")
+    if kind not in _PLR_OPS:
+        raise _bad_op(f"unknown op {kind!r}; supported: {', '.join(_PLR_OPS)}", opIndex=index, op=kind)
+    unknown = sorted(str(k) for k in set(op) - _STUB_OP_FIELDS)
+    if unknown:
+        raise _bad_op(f"{kind} does not take {', '.join(unknown)}", opIndex=index, unknownFields=unknown)
+    return op
+
+
 def _normalise_ops(
     protocol_source: str,
     protocol_payload: Any,
     protocol_inline: Any,
     run_params: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Coerce the run payload into a list of inline op dicts.
+    """Coerce the run payload into a list of inline op dicts, or fail loud.
 
     Phase 1 only supports inline ops in detail; other sources are passed
     through to the backend's ``run_protocol`` (handled in commands.backend_run).
+
+    R39 MED6: missing/null ops, a non-list/non-{"ops":[...]} shape, an unknown
+    op, or an unknown field is a validation error -- never a synthetic "noop"
+    standing in for what the caller actually asked for.
     """
     if protocol_source == "inline-ops":
         if isinstance(protocol_inline, list):
-            return [op if isinstance(op, dict) else {"op": op} for op in protocol_inline]
-        if isinstance(protocol_inline, dict) and isinstance(protocol_inline.get("ops"), list):
-            return [op if isinstance(op, dict) else {"op": op} for op in protocol_inline["ops"]]
-        # Fall back to a single synthetic "noop" so the recording isn't empty.
-        return [{"op": "noop"}]
+            ops = protocol_inline
+        elif isinstance(protocol_inline, dict) and isinstance(protocol_inline.get("ops"), list):
+            ops = protocol_inline["ops"]
+        else:
+            found = "null" if protocol_inline is None else type(protocol_inline).__name__
+            raise _bad_op(f'protocolInline must be a list of ops (or {{"ops": [...]}}); got {found}')
+        if not ops:
+            raise _bad_op("inline-ops protocol has no ops")
+        return [_validate_stub_op(op, index) for index, op in enumerate(ops)]
     # Non-inline sources don't produce per-op events here; backend handles it.
     return []

@@ -527,6 +527,38 @@ async def test_every_result_and_event_says_how_the_ops_were_executed(fake_plr):
     assert stub["result"]["executionMode"] == "stub"
 
 
+# ── R39 MED6: malformed stub input fails loud, never a synthetic noop ───────
+
+async def _stub_server():
+    s, out = _server()
+    await call(s, out, "backend.init", {"deviceId": "st", "plrBackend": "stub", "backendConfig": {}}, "init")
+    return s, out
+
+
+@pytest.mark.parametrize(
+    "bad_inline",
+    [None, "not-a-list", 42, {"nope": "wrong-shape"}, [], [{"op": "shake"}], [{"op": "aspirate", "flux": 1}]],
+    ids=["null", "string", "number", "dict-without-ops-key", "empty-list", "unknown-op", "unknown-field"],
+)
+async def test_malformed_or_unknown_stub_ops_fail_loud_with_zero_ops_run(fake_plr, bad_inline):
+    s, out = await _stub_server()
+    resp = await call(s, out, "backend.run", {
+        "deviceId": "st", "jobId": "j", "protocolSource": "inline-ops", "protocolInline": bad_inline,
+    }, "6")
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    await asyncio_sleep_for_notifications()
+    assert not any(m.get("method") == "evidence" for m in out.messages())
+
+
+async def test_a_valid_stub_protocol_still_runs_as_before(fake_plr):
+    s, out = await _stub_server()
+    resp = await call(s, out, "backend.run", {
+        "deviceId": "st", "jobId": "j", "protocolSource": "inline-ops",
+        "protocolInline": [{"op": "pickUpTips", "channel": 0}, {"op": "aspirate", "well": "A1", "volume_uL": 100}],
+    }, "6")
+    assert resp["result"]["opCount"] == 2, resp
+
+
 # ── astra r1 on #378: the layout is checked as data before PLR builds anything ─
 
 def _deserialized(fake) -> list:
