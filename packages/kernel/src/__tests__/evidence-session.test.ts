@@ -345,3 +345,17 @@ describe("quiesce, the handoff guard and the device lock (#502 round 3)", () => 
     expect(openEvidenceSession([otherKernel], owner("job-3"), vi.fn()).ok).toBe(true);
   });
 });
+
+describe("an adapter passed twice (#502 round 3)", () => {
+  it("is asked to quiesce once", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const a = Object.assign(fakeAdapter("adapter-a"), { quiesceEvidence: vi.fn(async () => {}) });
+      const session = mustOpen([a, a], owner("job-1"), vi.fn());
+      expect(await session.quiesce(1_000, 10_000)).toBe(true);
+      expect(a.quiesceEvidence).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

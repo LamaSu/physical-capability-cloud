@@ -656,3 +656,32 @@ describe("Device lock: an adapter's device is its evidence source's (kernelId, d
     for (const run of runs) expect(await drive(run)).toMatchObject({ success: true });
   });
 });
+
+describe("Closed before it settles: an event after quiescence is the next job's problem, never this bundle's", () => {
+  it("an event that arrives once the run has quiesced, while its chain settles, is dropped: it is in neither the bundle nor the step", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const bundles: EvidenceBundle[] = [];
+    emitter.onBundle((bundle) => bundles.push(bundle));
+    const hashHeld = deferred();
+    let held = 0;
+    hashing.gate = (event) => {
+      if ((event as Emitted).type !== "cv_inspection_result") return undefined;
+      held += 1;
+      return hashHeld.promise;
+    };
+    const machine = testMachine("machine-settling");
+    const camera = testCamera("camera-settling");
+
+    const run = track(new JobRunner(machine, [], camera, emitter).run({ jobId: "job-settling", stepId: STEP, gcodeHash: gcode(501), assuranceTier: 2 }));
+    await vi.advanceTimersByTimeAsync(1_000); // every event came at once: the run has quiesced, and settles
+    expect(held, "the inspection's addEvent, still hashing").toBe(1);
+    expect(run.outcome).toBeUndefined();
+    machine.emit(evidence("execution_progress", machine.id, "controller", { late: "while settling" }));
+    hashHeld.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(run.outcome).toMatchObject({ success: true });
+    expect(bundles.flatMap((bundle) => bundle.events.map((e) => e.payload)), "bundled payloads").not.toContainEqual({ late: "while settling" });
+    expect(emitter.getEvents("job-settling", STEP).map((e) => e.payload), "payloads recorded under the job").not.toContainEqual({ late: "while settling" });
+  });
+});
