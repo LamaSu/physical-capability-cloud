@@ -140,6 +140,7 @@ describe("read-only /mcp/apps surface (non-prod: surface active)", () => {
       "list_kernels",
       "pcc.op.capability.request_quote",
       "render_pcc_dashboard",
+      "render_pcc_dashboard_ir", // closed-IR render: effect review (1b) in http-mcp-server.ts
       "search_capabilities",
       "search_dashboards",
     ];
@@ -338,14 +339,17 @@ describe("full /mcp prod domain gate on MCP App views (D14)", () => {
     const gated = await listedTools();
 
     // The data surface is otherwise exactly the same: writes and On-Ramp tools included.
-    expect(toolNames(gated)).toEqual(toolNames(open).filter((n) => n !== "render_pcc_dashboard"));
+    // The view-only tools: render_pcc_dashboard, and #344's render_pcc_dashboard_ir (#344 x #495 merge-up).
+    const VIEW_ONLY = ["render_pcc_dashboard", "render_pcc_dashboard_ir"];
+    expect(toolNames(gated)).toEqual(toolNames(open).filter((n) => !VIEW_ONLY.includes(n)));
     expect(toolNames(open)).toContain("render_pcc_dashboard");
     expect(toolNames(gated)).toContain("save_dashboard");
-    // No descriptor links a ui:// view any more (the render tool and the 5 On-Ramp tools did).
+    // No descriptor links a ui:// view any more (the two render tools and the 5 On-Ramp tools did).
     expect(toolNames(open.filter((t) => viewLink(t._meta) !== undefined)).sort()).toEqual([
       "fork_dashboard",
       "get_dashboard",
       "render_pcc_dashboard",
+      "render_pcc_dashboard_ir",
       "save_dashboard",
       "search_dashboards",
       "update_dashboard",
@@ -515,6 +519,31 @@ describe("full /mcp prod domain gate on MCP App views (D14)", () => {
         expect(read.body.result, uri).toBeUndefined();
         expect(read.body.error.message, uri).toContain("MCP App surface unavailable");
       }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("prod + placeholder domain: the IR render tool (render_pcc_dashboard_ir) is view-only too, and its view is unreadable", async () => {
+    // #344 x #495 merge-up: #344 adds render_pcc_dashboard_ir and its ui://pcc/dashboard/render-ir view.
+    process.env.NODE_ENV = "production";
+    delete process.env.PCC_MCP_APP_DOMAIN;
+    const app = await fullSurfaceApp();
+    try {
+      const session = await initSession(app, "/mcp");
+      const tools = await listTools(app, "/mcp", session);
+      expect(toolNames(tools)).not.toContain("render_pcc_dashboard_ir");
+      for (const tool of tools) expect(viewLink(tool._meta), tool.name).toBeUndefined();
+      const call = await rpc(app, "/mcp", session, {
+        id: 60,
+        method: "tools/call",
+        params: { name: "render_pcc_dashboard_ir", arguments: RENDER_ARGS },
+      });
+      expect(call.body.result.isError).toBe(true);
+      expect(call.body.result.content[0].text).toContain("MCP App surface unavailable");
+      const read = await rpc(app, "/mcp", session, { id: 61, method: "resources/read", params: { uri: "ui://pcc/dashboard/render-ir" } });
+      expect(read.body.result).toBeUndefined();
+      expect(read.body.error.message).toContain("MCP App surface unavailable");
     } finally {
       await app.close();
     }
