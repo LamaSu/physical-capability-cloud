@@ -16,6 +16,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { createHash } from "node:crypto";
 import { getRepos } from "../db.js";
+import { parseScopeColumn } from "./scope-checker.js";
 
 // ── Redaction Rule Types ─────────────────────────────────────────
 
@@ -263,9 +264,17 @@ function applyRedaction(
 /**
  * Determine caller's roles from request context.
  *
- * For API key callers: read scopes from the key record.
- * Scopes are stored as a JSON array or comma-separated string.
- * Wildcard scope ("*") maps to admin.
+ * For API key callers: the key's scopes, read through the SAME parser the
+ * scope-checker enforces with (parseScopeColumn — review R6). So:
+ *   - only a JSON array of strings counts; a bare/CSV string, a non-array or a
+ *     mixed array yields NO roles (the CSV fallback used to turn a malformed
+ *     `admin` column into the unredacted admin view — H3 fail-closed);
+ *   - a legacy `"*"` is NOT admin (A1) and NOT operator (R3): it used to map to
+ *     every role, admin included, i.e. the fully unredacted view. It is now
+ *     just the literal "*", which no default rule lists, so a wildcard key
+ *     gets the most-redacted view, like a key holding no listed role.
+ * (Inert today: dlpRedactor is registered encapsulated, so its onSend hook
+ * reaches no sibling route. This keeps it correct before anyone changes that.)
  */
 function getCallerRoles(req: FastifyRequest): string[] {
   if (!req.apiKeyId && !req.operatorId && !req.userId) {
@@ -276,23 +285,7 @@ function getCallerRoles(req: FastifyRequest): string[] {
     try {
       const keyRecord = getRepos().apiKeys.findById(req.apiKeyId);
       if (!keyRecord) return [];
-
-      let scopesRaw: unknown;
-      try {
-        scopesRaw = JSON.parse(keyRecord.scopes);
-      } catch {
-        scopesRaw = keyRecord.scopes;
-      }
-
-      const scopes: string[] = Array.isArray(scopesRaw)
-        ? (scopesRaw as string[])
-        : typeof scopesRaw === "string"
-          ? scopesRaw.split(",").map((s) => s.trim())
-          : [];
-
-      // Wildcard scope → admin role for DLP purposes
-      if (scopes.includes("*")) return ["admin", "operator", "requestor", "verifier", "agent", "auditor", "template_author"];
-      return scopes;
+      return parseScopeColumn(keyRecord.scopes);
     } catch {
       return [];
     }

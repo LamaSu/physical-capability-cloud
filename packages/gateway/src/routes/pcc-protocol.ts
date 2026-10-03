@@ -20,6 +20,7 @@ import {
   isWriteEnabled,
   getProtocolAddress,
 } from "../contracts/protocol-client.js";
+import { requireAdminSecret } from "../auth/admin-secret-gate.js";
 
 export async function pccProtocolRoutes(app: FastifyInstance) {
   // ── Read routes ────────────────────────────────────────────────────
@@ -157,6 +158,10 @@ export async function pccProtocolRoutes(app: FastifyInstance) {
   }>(
     "/api/protocol/create-escrow",
     async (req, reply) => {
+      // N46 authority (operator item 57): this makes the gateway signer create an
+      // escrow with a caller-chosen payer, arbiter and token. No user flow needs
+      // it, so it is the admin's alone (X-Admin-Key); a wrong secret is refused.
+      if (!requireAdminSecret(req, reply)) return;
       const body = req.body as {
         payer?: string;
         arbiter?: string;

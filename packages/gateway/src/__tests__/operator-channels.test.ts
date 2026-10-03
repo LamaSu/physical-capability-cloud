@@ -43,6 +43,7 @@ import {
 } from "../routes/operator-channels.js";
 import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
 import { initStore, closeStore } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
 
 // ── Helper tests (no Fastify needed) ─────────────────────────────────────────
 
@@ -293,11 +294,17 @@ describe("operator-channels HTTP routes", () => {
 
 describe("A2A skills: pcc-attach-channel + author-integration extension", () => {
   let app: FastifyInstance;
+  // WP-C R6: pcc-author-integration registers a kernel owned by the
+  // AUTHENTICATED caller, so those calls carry this key even with
+  // PCC_A2A_AUTH_DISABLED. (Old: sent anonymously; the kernel was owned by
+  // the body's operatorAddress or "a2a-operator".)
+  let operatorKey: string;
 
   beforeAll(async () => {
     process.env.PCC_DB_PATH = ":memory:";
     process.env.PCC_A2A_AUTH_DISABLED = "true";
     initStore({ seed: true });
+    operatorKey = provisionApiKey({ operatorId: "a2a-channels-operator", scopes: ["operator"] }).rawKey;
     app = Fastify({ logger: false });
     await app.register(a2aTasksRoutes);
     await app.ready();
@@ -442,7 +449,7 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
           },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorKey}` },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -475,7 +482,7 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
           },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorKey}` },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();

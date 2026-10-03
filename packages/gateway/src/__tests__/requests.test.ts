@@ -702,10 +702,32 @@ describe("PUT /api/requests/:id/nodes/:nodeId/status", () => {
     await bootstrap.close();
 
     app = await buildAuthedApp(OPERATOR_ID);
+    // The operator claims the node first: an UNASSIGNED node's status is a broker's to
+    // set (rule 7; registration-and-node-ownership.test.ts).
+    const claim = await app.inject({
+      method: "POST",
+      url: `/api/requests/${requestId}/nodes/${firstNodeId}/assign`,
+      payload: {},
+    });
+    expect(claim.statusCode).toBe(200);
   });
 
   afterEach(async () => {
     await app.close();
+  });
+
+  it("[neg] refuses an operator that neither holds the node nor is a broker (403)", async () => {
+    const other = await buildAuthedApp("op-someone-else");
+    try {
+      const res = await other.inject({
+        method: "PUT",
+        url: `/api/requests/${requestId}/nodes/${firstNodeId}/status`,
+        payload: { status: "completed" },
+      });
+      expect(res.statusCode).toBe(403);
+    } finally {
+      await other.close();
+    }
   });
 
   it("updates node status to in_progress", async () => {

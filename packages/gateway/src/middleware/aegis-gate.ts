@@ -12,6 +12,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { ContentScanResult } from "@pcc/spec";
 import { PatternScanner, type ContentScanner } from "@pcc/a2a";
+import { authPath } from "./route-path.js";
 
 export interface AegisGateConfig {
   /** Content scanner backend (default: PatternScanner) */
@@ -60,9 +61,14 @@ export async function aegisGate(app: FastifyInstance, opts?: AegisGateConfig) {
   let totalScanned = 0;
   let totalBlocked = 0;
 
+  // Both hooks decide on the route Fastify MATCHED (authPath), never the raw
+  // request line: find-my-way percent-decodes before matching, so a raw-string
+  // prefix/skip test let `/%61pi/...` (not "/api/"-prefixed as raw text) reach
+  // an /api handler UNSCANNED, and let an encoded variant of a skip-listed
+  // route be judged differently from the route it runs (MUST-CLOSE 10).
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     // Only scan relevant prefixes
-    const path = req.url.split("?")[0];
+    const path = authPath(req);
     if (!scanPrefixes.some((p) => path.startsWith(p))) return;
 
     // Skip GET requests (no body) and explicitly skipped routes
@@ -73,7 +79,7 @@ export async function aegisGate(app: FastifyInstance, opts?: AegisGateConfig) {
 
   // Use preHandler to access parsed body (onRequest fires before body parsing)
   app.addHook("preHandler", async (req: FastifyRequest, reply: FastifyReply) => {
-    const path = req.url.split("?")[0];
+    const path = authPath(req);
     if (!scanPrefixes.some((p) => path.startsWith(p))) return;
     if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return;
     const routeKey = `${req.method} ${path}`;

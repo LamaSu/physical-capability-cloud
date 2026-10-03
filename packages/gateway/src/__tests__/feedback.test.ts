@@ -39,7 +39,7 @@ beforeAll(async () => {
   feedbackFile = join(tmpDir, "feedback.jsonl");
   process.env.PCC_DB_PATH = join(tmpDir, "pcc.sqlite"); // DATA_DIR = dirname() = tmpDir
   process.env.PCC_FEEDBACK_RATE_MAX = String(RATE_MAX);
-  process.env.WAITLIST_ADMIN_TOKEN = ADMIN_TOKEN;
+  process.env.PCC_ADMIN_KEY = ADMIN_TOKEN; // the admin secret gates the export (round 7, AG-9)
   delete process.env.DISCORD_WEBHOOK_URL; // keep the test offline
 
   const mod = await import("../routes/feedback.js");
@@ -72,7 +72,7 @@ async function adminItems(): Promise<{ total: number; items: any[] }> {
   const res = await app.inject({
     method: "GET",
     url: "/api/admin/feedback",
-    headers: { "x-admin-token": ADMIN_TOKEN },
+    headers: { "x-admin-key": ADMIN_TOKEN },
   });
   expect(res.statusCode).toBe(200);
   return res.json();
@@ -412,18 +412,18 @@ describe("POST /api/feedback (public)", () => {
   });
 });
 
-describe("GET /api/admin/feedback (X-Admin-Token gated)", () => {
-  it("403s without the admin token", async () => {
+describe("GET /api/admin/feedback (admin secret, X-Admin-Key)", () => {
+  it("401s without the admin secret", async () => {
     const res = await app.inject({ method: "GET", url: "/api/admin/feedback" });
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("forbidden");
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("admin_key_required");
   });
 
-  it("403s with the wrong admin token", async () => {
+  it("403s with the wrong admin secret", async () => {
     const res = await app.inject({
       method: "GET",
       url: "/api/admin/feedback",
-      headers: { "x-admin-token": "wrong-token" },
+      headers: { "x-admin-key": "wrong-token" },
     });
     expect(res.statusCode).toBe(403);
   });

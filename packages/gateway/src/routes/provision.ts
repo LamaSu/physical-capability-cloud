@@ -12,6 +12,8 @@ import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
+import { identityTypeRefusal, resolveProvisionIdentity } from "../auth/provision-identity.js";
+import { callerMayDelegate, NOTHING_TO_DELEGATE_RESPONSE } from "../auth/reserved-identities.js";
 import {
   registerAgentOnChain,
   isIdentityWriteEnabled,
@@ -19,6 +21,32 @@ import {
   generateOperatorWallet,
   setAgentWalletOnChain,
 } from "../services/erc8004-identity-write.js";
+
+/**
+ * Operators manually approved to receive the money-moving `settlement` scope
+ * through self-service provisioning. Comma-separated EVM addresses, matched
+ * case-insensitively (a SIWE session address is checksummed; an env var is
+ * typed by a human — neither casing should decide who can move funds).
+ *
+ * FAILS CLOSED. Empty or unset means NOBODY receives `settlement` via
+ * self-service; an admin can still grant it out-of-band. That default is
+ * deliberate: an unconfigured deploy must not hand out funds-movement
+ * authority, and this list is the manual-approval step that
+ * `settlement`-vs-`operator` exists to require.
+ *
+ * Re-read on every call (no import-time freeze) so a deploy can change the
+ * allowlist without a rebuild, mirroring isBrokerOperator/isDemandAdmin.
+ */
+function isSettlementApproved(operatorId: string): boolean {
+  const raw = process.env.PCC_SETTLEMENT_OPERATORS ?? "";
+  const approved = new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return approved.has(operatorId.toLowerCase());
+}
 
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
@@ -47,14 +75,10 @@ export async function provisionRoutes(app: FastifyInstance) {
       publicKey?: string;
     };
 
-    let operatorId: string;
-
     // Type guards — prevent object/array/number injection (red team #14, #15)
-    if (body.walletAddress !== undefined && typeof body.walletAddress !== "string") {
-      return reply.status(400).send({ error: "invalid_type", message: "walletAddress must be a string" });
-    }
-    if (body.email !== undefined && typeof body.email !== "string") {
-      return reply.status(400).send({ error: "invalid_type", message: "email must be a string" });
+    const identityTypeError = identityTypeRefusal(body);
+    if (identityTypeError) {
+      return reply.status(identityTypeError.status).send(identityTypeError.body);
     }
     if (body.name !== undefined && typeof body.name !== "string") {
       return reply.status(400).send({ error: "invalid_type", message: "name must be a string" });
@@ -66,35 +90,54 @@ export async function provisionRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "invalid_type", message: "publicKey must be a string" });
     }
 
-    if (body.walletAddress) {
-      // Wallet address path — format check also implicitly caps length at 42
-      if (!/^0x[0-9a-fA-F]{40}$/.test(body.walletAddress)) {
-        return reply.status(400).send({
-          error: "invalid_wallet_address",
-          message: "walletAddress must be a valid EVM address (0x + 40 hex chars)",
-        });
+    // WHICH identity this key is minted for (a SIWE-proven wallet, an asserted email, or
+    // the signed-in session) is decided in ONE place, auth/provision-identity.ts, which
+    // the onboarding chat also calls to show a person whose credential a held call would
+    // mint (astra pack 91b F2). Do not restate its precedence here.
+    //   siweVerified: true only when the identity was proven by an EIP-4361 signature,
+    //     never when merely asserted; it gates the `settlement` grant below.
+    //   delegatingScopes / delegatingNotAfter: set when the caller is authenticated AS the
+    //     requested email identity (F3); they bound what may be minted and for how long (R4).
+    const identity = resolveProvisionIdentity(req, body);
+    if (!identity.ok) {
+      return reply.status(identity.status).send(identity.body);
+    }
+    const { operatorId, siweVerified, delegatingScopes, delegatingNotAfter } = identity;
+
+    // ── What this key is allowed to do ────────────────────────────
+    //
+    // Retire-the-wildcard #1099 (coord #615 follow-up): self-service keys no
+    // longer mint scopes:["*"]. "operator" covers the documented quick-start
+    // flow (register a kernel, submit evidence, build/negotiate a contract —
+    // see DEFAULT_SCOPE_REQUIREMENTS in middleware/scope-checker.ts) without
+    // handing out admin access.
+    //
+    // "settlement" — the scope that actually moves funds — is granted ONLY
+    // when BOTH hold:
+    //   1. the identity was PROVEN by SIWE, not merely asserted; and
+    //   2. that proven address is on the PCC_SETTLEMENT_OPERATORS allowlist,
+    //      i.e. a human approved it out-of-band.
+    // Signing up can therefore never, by itself, buy the ability to move
+    // money. An email caller gets ["operator"] and is refused at the money
+    // path; a SIWE caller who is not on the allowlist gets exactly the same.
+    //
+    // Pre-existing wildcard keys still exist, but are no longer money or admin
+    // authority (middleware/scope-checker.ts migration note); listing and
+    // retiring them is routes/admin-key-audit.ts +
+    // docs/security/WILDCARD_KEY_ROTATION.md.
+    let scopes =
+      siweVerified && isSettlementApproved(operatorId)
+        ? ["operator", "settlement"]
+        : ["operator"];
+    // An identity adding a key for itself (F3) delegates, and a delegated key is
+    // never wider than the delegating one (a legacy "*" cannot delegate
+    // operator/settlement/admin — see callerMayDelegate) and never outlives it
+    // (R4, notAfter below).
+    if (delegatingScopes !== null) {
+      scopes = callerMayDelegate(delegatingScopes, scopes);
+      if (scopes.length === 0) {
+        return reply.status(403).send(NOTHING_TO_DELEGATE_RESPONSE);
       }
-      operatorId = body.walletAddress;
-    } else if (body.email) {
-      // Email path — RFC 5321 max total length is 254
-      if (body.email.length > 254) {
-        return reply.status(400).send({
-          error: "invalid_email",
-          message: "Email exceeds 254 character limit",
-        });
-      }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
-        return reply.status(400).send({
-          error: "invalid_email",
-          message: "Please provide a valid email address",
-        });
-      }
-      operatorId = body.email;
-    } else {
-      return reply.status(400).send({
-        error: "identifier_required",
-        message: "Either email or walletAddress is required to provision an API key",
-      });
     }
 
     try {
@@ -104,11 +147,16 @@ export async function provisionRoutes(app: FastifyInstance) {
         description: body.capability
           ? `Operator capability: ${body.capability}`
           : undefined,
-        scopes: ["*"],
+        scopes,
+        notAfter: delegatingNotAfter,
         metadata: {
           capability: body.capability,
           provisionedAt: new Date().toISOString(),
           source: "landing-page",
+          // The SIWE proof travels with the key (auth/api-key-auth.ts
+          // provenWalletOfKey), so an owner check can accept this key as the
+          // proven wallet. Only this branch writes it; the email path never does.
+          ...(siweVerified ? { siweVerified: true, provenAddress: operatorId.toLowerCase() } : {}),
         },
         publicKey: body.publicKey,
       });
