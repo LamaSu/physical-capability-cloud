@@ -162,7 +162,7 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     // Fourth outbound: evidence.stopRecording, answered with the close's attestation
     last = transport.lastSent();
     expect((last as { method: string }).method).toBe("evidence.stopRecording");
-    transport.respondSuccess((last as { id: string }).id, { ok: true, jobId: "j-1", generation: "gen-t" });
+    transport.respondSuccess((last as { id: string }).id, { ok: true, jobId: "j-1", generation: "gen-t", notified: transport.evidenceSent("j-1"), failedWrites: 0 });
 
     const res = await startP;
     expect(res.success).toBe(true);
@@ -203,7 +203,7 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
       durationMs: 1234,
     });
     await tick();
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-stream", generation: "gen-t" });
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-stream", generation: "gen-t", notified: transport.evidenceSent("j-stream"), failedWrites: 0 });
 
     await startP;
     const instrumentResults = events.filter((e) => e.type === "instrument_result");
@@ -226,8 +226,8 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
       await tick();
       transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-mode", opCount: 1, durationMs: 5, ...runResult });
       await tick();
-      // evidence.stopRecording: the barrier's attestation
-      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-mode", generation: "gen-t" });
+      // evidence.stopRecording: the barrier's attestation, with the close's counts (#544, N113)
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-mode", generation: "gen-t", notified: transport.evidenceSent("j-mode"), failedWrites: 0 });
       await startP;
       return events.find((e) => e.type === "execution_completed")!.payload as Record<string, unknown>;
     };

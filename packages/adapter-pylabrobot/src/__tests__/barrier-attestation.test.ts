@@ -50,7 +50,10 @@ const GEN = "gen-1";
 const init = (deviceId: string, generation = GEN) => () => ({ result: { ok: true, deviceId, plrBackend: "chatterbox", generation } });
 const opened = (generation = GEN) => (p: Record<string, unknown>) => ({ result: { ok: true, jobId: p.jobId, startedAt: new Date().toISOString(), generation } });
 const ran = (p: Record<string, unknown>) => ({ result: { ok: true, jobId: p.jobId, opCount: 1, durationMs: 5 } });
-const closed = (generation = GEN) => (p: Record<string, unknown>) => ({ result: { ok: true, jobId: p.jobId, opCount: 1, generation } });
+/** The close of the job's window: it attests every notification this fake sent for the job, none failed (refvertical #5668). */
+const closed = (generation = GEN) => (p: Record<string, unknown>, transport: InMemoryTransport) => ({
+  result: { ok: true, jobId: p.jobId, opCount: 1, notified: transport.evidenceSent(String(p.jobId)), failedWrites: 0, generation },
+});
 
 async function adapterOn(transport: InMemoryTransport, deviceId: string) {
   const sidecar = new SidecarClient({ inMemoryTransport: transport });
@@ -82,7 +85,7 @@ describe("astra pack 194: the barrier is proof only from the process that record
       "evidence.startRecording": opened(),
       "backend.run": ran,
       // The first barrier fails; every retry is answered by a fresh process: generation gen-2.
-      "evidence.stopRecording": (p) => (++stops === 1 ? { error: { code: -32603, message: "drain failed" } } : closed("gen-2")(p)),
+      "evidence.stopRecording": (p, t) => (++stops === 1 ? { error: { code: -32603, message: "drain failed" } } : closed("gen-2")(p, t)),
     });
     const { adapter } = await adapterOn(fake.transport, "dev-gen");
     const result = await (async () => {
@@ -260,5 +263,81 @@ describe("astra pack 194 HIGH 2: JobRunner's job id is the one PyLabRobot record
       .filter((j) => j !== undefined);
     expect.soft(named.length, "events naming a job").toBeGreaterThan(0);
     expect.soft([...new Set(named)], "the jobs the bundle's events name").toEqual(["job-A"]);
+  });
+});
+
+describe("refvertical #5668: the close attests what the sidecar sent, and the run proves it received every one", () => {
+  /** A sidecar whose run sends `sent` aspirates for its job, and whose close answers `close`. */
+  function countingSidecar(deviceId: string, sent: number, close: (p: Record<string, unknown>, t: InMemoryTransport) => Answer) {
+    return fakeSidecar({
+      "backend.init": init(deviceId),
+      "evidence.startRecording": opened(),
+      "backend.run": (p, transport) => {
+        for (let i = 0; i < sent; i++) {
+          transport.notify("evidence", { type: "aspirate", deviceId, jobId: p.jobId, timestamp: new Date().toISOString(), payload: { well: `A${i + 1}` } });
+        }
+        return ran(p);
+      },
+      "evidence.stopRecording": close,
+    });
+  }
+  const closeWith = (counts: Record<string, unknown>) => (p: Record<string, unknown>) => ({ result: { ok: true, jobId: p.jobId, opCount: 1, generation: GEN, ...counts } });
+
+  it("a close that attests a failed write fails the run, with no completion, and holds nothing", async () => {
+    const fake = countingSidecar("dev-cnt-fail", 1, closeWith({ notified: 2, failedWrites: 1 }));
+    const { adapter, events } = await adapterOn(fake.transport, "dev-cnt-fail");
+    const result = await adapter.execute({ type: "start", payload: { jobId: "j-cnt-fail" } });
+    expect.soft(result.success, "the run").toBe(false);
+    expect.soft(result.message, "why").toBe("evidence incomplete: 1 of the 2 notifications the sidecar sent for job j-cnt-fail could not be written");
+    expect.soft(events.map((e) => e.type), "events").not.toContain("execution_completed");
+    expect.soft(events.map((e) => e.type), "events").toContain("execution_failed");
+    // The close is attested, so nothing is on its way: nothing is held, and the next start
+    // reaches the sidecar.
+    await adapter.execute({ type: "start", payload: { jobId: "j-cnt-next" } });
+    expect.soft(fake.params("evidence.startRecording").map((p) => p.jobId), "windows opened").toEqual(["j-cnt-fail", "j-cnt-next"]);
+  });
+
+  it("a notification lost on the way (the sidecar sent 2, 1 arrived) fails the run", async () => {
+    const fake = countingSidecar("dev-cnt-lost", 1, closeWith({ notified: 2, failedWrites: 0 }));
+    const { adapter, events } = await adapterOn(fake.transport, "dev-cnt-lost");
+    const result = await adapter.execute({ type: "start", payload: { jobId: "j-cnt-lost" } });
+    expect.soft(result.success, "the run").toBe(false);
+    expect.soft(result.message, "why").toBe("evidence incomplete: the sidecar sent 2 notifications for job j-cnt-lost, and 1 arrived");
+    expect.soft(events.map((e) => e.type), "events").not.toContain("execution_completed");
+  });
+
+  it("a close that does not attest its counts fails the run", async () => {
+    const fake = countingSidecar("dev-cnt-none", 1, closeWith({}));
+    const { adapter } = await adapterOn(fake.transport, "dev-cnt-none");
+    const result = await adapter.execute({ type: "start", payload: { jobId: "j-cnt-none" } });
+    expect.soft(result.success, "the run").toBe(false);
+    expect.soft(result.message, "why").toBe("evidence incomplete: the sidecar did not attest how many notifications it sent for job j-cnt-none");
+  });
+
+  it("a notification the adapter drops by its own rule (a lifecycle type) still arrived: the run succeeds, without it", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fake = fakeSidecar({
+      "backend.init": init("dev-cnt-life"),
+      "evidence.startRecording": opened(),
+      "backend.run": (p, transport) => {
+        transport.notify("evidence", { type: "aspirate", deviceId: "dev-cnt-life", jobId: p.jobId, timestamp: new Date().toISOString(), payload: { well: "A1" } });
+        transport.notify("evidence", { type: "execution_completed", deviceId: "dev-cnt-life", jobId: p.jobId, timestamp: new Date().toISOString(), payload: {} });
+        return ran(p);
+      },
+      "evidence.stopRecording": closed(),
+    });
+    const { adapter, events } = await adapterOn(fake.transport, "dev-cnt-life");
+    const result = await adapter.execute({ type: "start", payload: { jobId: "j-cnt-life" } });
+    expect.soft(result.success, `the run (${result.message})`).toBe(true);
+    expect.soft(events.filter((e) => e.type === "execution_completed").length, "completions: the adapter's own, once").toBe(1);
+    expect.soft(events.filter((e) => e.payload.sidecarType === "execution_completed").length, "the sidecar's completion, recorded").toBe(0);
+  });
+
+  it("every notification attested and received: the run succeeds, with each one in its evidence", async () => {
+    const fake = countingSidecar("dev-cnt-ok", 3, closed());
+    const { adapter, events } = await adapterOn(fake.transport, "dev-cnt-ok");
+    const result = await adapter.execute({ type: "start", payload: { jobId: "j-cnt-ok" } });
+    expect.soft(result.success, "the run").toBe(true);
+    expect.soft(events.filter((e) => e.payload.jobId === "j-cnt-ok" && e.payload.sidecarType === "aspirate").length, "the aspirates recorded").toBe(3);
   });
 });
