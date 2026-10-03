@@ -9,26 +9,33 @@ implements DeviceLock. This module imports none of them (structural typing).
 
 The invariants, in order:
 
+  0. an exclusive claim     -- the job's claim token, and its lease alive (exactly True)
   1. resolve params        -- JobPort.resolve_params
   2. type-check             -- envelope.check_params
   3. envelope-check         -- envelope.check_envelope (fails closed)
   4. the device, held       -- DeviceLock.acquire(): this host's exclusive hold
   4a. readiness             -- DeviceRuntime.is_idle()
   4b. emergency stop        -- Gate.allows_jobs(), re-read just before the device call
+  4b'. the claim's lease    -- lease_alive(), re-read just before the device call
   4c. one-shot record       -- DeviceLock.consume(job): never run a job twice
   5. run exactly one op     -- DeviceRuntime.run()   <- only step that touches hardware
   6. report + complete      -- JobPort.report / JobPort.complete
 
-On ANY refusal (steps 1-4c), run_once returns without ever calling
+On ANY refusal (steps 0-4c), run_once returns without ever calling
 DeviceRuntime.run -- the device is untouched -- and completes the job as
 failed with the reason.
 
-**One device, one run at a time, each job once** (astra 554 F1). Checking that
+**An exclusive claim, one device, one run at a time, each job once** (astra 554
+F1, 565 F1-F2; steward #5933). A job runs only under an exclusive claim: a claim token from
+the gateway's atomic claim, and a lease that is alive now. The gateway gives
+each job's claim to one node. Checking that
 the device is idle and then running it are two steps, so two loops (threads or
 processes) could both see it idle. The hold closes that: it is taken before the
 idle check and kept until run() returns, and every loop on the host that drives
-the device takes the same hold. The one-shot record is made durable before the
-device is driven, so a job is never run twice on this host, even after a crash.
+the device takes the same hold: it is keyed by the identity the device reports
+about itself, not by its URL. The one-shot record, keyed by the job's id alone,
+is made durable before the device is driven, so a job is never run twice on
+this host, under any claim, even after a crash.
 Two HOSTS pointed at one device are outside what a host can enforce; see
 devicelock.py for that boundary.
 
@@ -51,7 +58,9 @@ The loop also fails closed on its seams:
 - a report that raises means the evidence was not stored: the job is completed
   as failed (a port such as GatewayJobPort ends the claim's lease there);
 - a complete that raises stops the loop, after ending the claim's lease by
-  shape (``job.lease.release()``), so a claim is never left renewing.
+  shape (``job.lease.release()``), so a claim is never left renewing;
+- anything else that escapes run_once, a BaseException included, ends the
+  claim's lease the same way before it propagates.
 Every Outcome says whether the gateway accepted the job's completion, and
 run_loop stops (CompletionNotAccepted) the first time it did not: a node that
 cannot record its outcomes must not keep driving the device.
@@ -59,7 +68,7 @@ cannot record its outcomes must not keep driving the device.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
 
 from .envelope import check_envelope, check_params
@@ -74,12 +83,20 @@ class Job:
     needs: an id (for report/complete) and the operation name (to select
     the OperationSpec out of the profile). Everything the buyer actually
     selected is opaque to the loop and lives behind
-    JobPort.resolve_params(job). A ``claim_token``, when the job has one,
-    is part of its one-shot key.
+    JobPort.resolve_params(job). Like pcc_node.operating.jobport's
+    ClaimedJob, it carries its exclusive claim: the gateway's ``claim_token``
+    and a ``lease`` whose ``alive()`` says whether the claim is still held.
+    A job without both is never run.
     """
 
     job_id: str
     operation: str
+    claim_token: str = field(default="", repr=False)
+    lease: Any = field(default=None, repr=False, compare=False)
+
+    def lease_alive(self) -> bool:
+        alive = getattr(self.lease, "alive", None)
+        return callable(alive) and alive() is True
 
 
 @dataclass(frozen=True)
@@ -264,14 +281,35 @@ def _consume(lock: Any, key: str) -> Optional[bool]:
     return True if first is True else False
 
 
+def _lease_alive(job: Any) -> bool:
+    """The job's lease is alive now: lease_alive() answers exactly True. Anything else, or an
+    exception, is a lost claim."""
+    alive = getattr(job, "lease_alive", None)
+    if not callable(alive):
+        return False
+    try:
+        return alive() is True
+    except Exception:
+        return False
+
+
+def _claimed(job: Any) -> bool:
+    """The job carries an exclusive claim: a non-empty claim token and a live lease."""
+    token = getattr(job, "claim_token", None)
+    return isinstance(token, str) and bool(token) and _lease_alive(job)
+
+
 def _job_key(job: Any) -> Optional[str]:
-    """The job's one-shot key: its id and claim token, length-prefixed so no two collide."""
+    """The job's one-shot key: its id alone, never its claim (astra 565 F1).
+
+    A job runs at most once on this host, under any claim: if a run ended with the device
+    state unknown, a new claim must not drive the device again. A re-run is a new job
+    (gateway #4835).
+    """
     job_id = getattr(job, "job_id", None)
     if not isinstance(job_id, str) or not job_id:
         return None
-    token = getattr(job, "claim_token", "")
-    token = token if isinstance(token, str) else ""
-    return f"{len(job_id)}:{job_id}{token}"
+    return "job:" + job_id
 
 
 def _end_lease(job: Any) -> None:
@@ -285,13 +323,9 @@ def _end_lease(job: Any) -> None:
 
 
 def _complete(jobs: Any, job: Any, *, passed: bool, reason: Optional[str]) -> Any:
-    """Complete the job. If the port raises, end the claim's lease first, then let the
-    exception stop the loop: a crashed completion never leaves a claim renewing."""
-    try:
-        return jobs.complete(job, passed=passed, reason=reason)
-    except BaseException:
-        _end_lease(job)
-        raise
+    """Complete the job. If the port raises, run_once ends the claim's lease before the
+    exception stops the loop: a crashed completion never leaves a claim renewing."""
+    return jobs.complete(job, passed=passed, reason=reason)
 
 
 def _run(runtime: Any, job: Any, operation: str, params: dict):
@@ -329,15 +363,33 @@ def run_once(profile: Any, runtime: DeviceRuntime, jobs: JobPort, job: Job, *, g
              lock: DeviceLock) -> Outcome:
     """Run the job contract exactly once, in order, for one job.
 
-    Refuses (steps 1-4c) without ever calling runtime.run -- the device is
+    Refuses (steps 0-4c) without ever calling runtime.run -- the device is
     untouched on any refusal. Evidence is never fabricated: a run with no
     evidence is passed=False, reason="no_evidence", even though ran=True.
+
+    Whatever escapes it -- an exception from the port, or a KeyboardInterrupt
+    or other BaseException from anywhere inside -- first ends the claim's lease
+    (by shape), so a claim is never left renewing after an abnormal exit
+    (astra 565 F3).
     """
+    try:
+        return _run_once(profile, runtime, jobs, job, gate=gate, lock=lock)
+    except BaseException:
+        _end_lease(job)
+        raise
+
+
+def _run_once(profile: Any, runtime: Any, jobs: Any, job: Any, *, gate: Any, lock: Any) -> Outcome:
 
     def fail(reason: str, *, ran: bool = False, evidence: Optional[dict] = None, unknown: bool = False) -> Outcome:
         ack = _complete(jobs, job, passed=False, reason=reason)
         return Outcome(ran=ran, passed=False, reason=reason, evidence=evidence, device_state_unknown=unknown,
                        completion_accepted=_accepted(ack))
+
+    # Step 0: an exclusive claim. A job without the gateway's claim token, or whose lease
+    # isn't alive, is never run (steward #5933): the claim is what gives it to this node alone.
+    if not _claimed(job):
+        return fail("no_claim")
 
     # Step 1: resolve the buyer's typed parameters. A port that raises has resolved nothing.
     try:
@@ -392,6 +444,10 @@ def run_once(profile: Any, runtime: DeviceRuntime, jobs: JobPort, job: Job, *, g
             # Step 4b: the emergency stop, read again as late as possible: it can
             # arrive while the params are resolved or the device is asked if it is idle.
             refusal = "emergency_stop"
+        elif not _lease_alive(job):
+            # Step 4b': the claim's lease, read again just before the device call: a claim
+            # lost while the params were resolved is no longer this node's to run.
+            refusal = "lease_lost"
         else:
             # Step 4c: the one-shot record, made durable before the device moves.
             first = _consume(lock, key)

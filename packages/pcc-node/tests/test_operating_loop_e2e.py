@@ -183,6 +183,16 @@ class SimRuntime:
         return RuntimeResult(ok=False, error="poll_timeout", evidence={"runId": run_id})
 
 
+class _LiveLease:
+    """A claim's lease that stays alive (the shape of #471's Lease)."""
+
+    def alive(self):
+        return True
+
+    def release(self):
+        pass
+
+
 class _OpenGate:
     def allows_jobs(self):
         return True
@@ -264,7 +274,7 @@ class OperatingLoopE2ETest(unittest.TestCase):
         profile = build_r0_plate_reader_profile()
         runtime = SimRuntime(self.base)
         jobs = OneJobPort({"plateFormat": "96-well", "wavelengthNm": 450, "wells": ["A1", "H12"]})
-        outcome = run_once(profile, runtime, jobs, Job("job-ok", "runPlate"), gate=OPEN, lock=_FreeLock())
+        outcome = run_once(profile, runtime, jobs, Job("job-ok", "runPlate", "tok-ok", _LiveLease()), gate=OPEN, lock=_FreeLock())
         self.assertTrue(outcome.ran)
         self.assertTrue(outcome.passed, outcome.reason)
         # Real readings came back from the (fake) instrument.
@@ -283,7 +293,7 @@ class OperatingLoopE2ETest(unittest.TestCase):
         runtime = SimRuntime(self.base)
         # wavelength 500 fails the envelope check -> the loop must never POST /runs.
         jobs = OneJobPort({"plateFormat": "96-well", "wavelengthNm": 500, "wells": "all"})
-        outcome = run_once(profile, runtime, jobs, Job("job-bad", "runPlate"), gate=OPEN, lock=_FreeLock())
+        outcome = run_once(profile, runtime, jobs, Job("job-bad", "runPlate", "tok-bad", _LiveLease()), gate=OPEN, lock=_FreeLock())
         self.assertFalse(outcome.ran)
         self.assertFalse(outcome.passed)
         self.assertTrue(outcome.reason.startswith("envelope_violation"), outcome.reason)

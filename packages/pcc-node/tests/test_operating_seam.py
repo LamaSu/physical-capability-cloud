@@ -1,22 +1,26 @@
-"""The loop with adk's half of item 12: the real AdapterRuntime, ClaimedJob and GatewayJobPort (astra 554 F5).
+"""The loop with adk's half of item 12: the real AdapterRuntime, ClaimedJob and GatewayJobPort (astra 554 F5, 565 F4).
 
 The device is a plate reader served on 127.0.0.1 by this test, bound with the SIM-PR1 rehearsal
-binding. The gateway is the port's injected request function. Skipped until #471
-(pcc_node.operating.runtime and .jobport) is on the branch, and without pynacl.
+binding plus an identity endpoint for the device lock. The gateway is the port's injected request
+function. #471 is on this branch, so nothing here is skipped for a missing module; only a missing
+pynacl skips it, as it does #471's own tests.
 """
 
 import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
 
-runtime_mod = pytest.importorskip("pcc_node.operating.runtime")
-jobport_mod = pytest.importorskip("pcc_node.operating.jobport")
+from pcc_node.operating import jobport as jobport_mod
+from pcc_node.operating import runtime as runtime_mod
+from pcc_node.operating.commitment import idempotency_key
+
 nacl_signing = pytest.importorskip("nacl.signing")
 
 from pcc_node.operating.devicelock import HostDeviceLock  # noqa: E402
@@ -40,6 +44,8 @@ class _PlateReader(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802
+        if self.path == "/identity":
+            return self._send(200, {"serial": "SEAM-PR-1"})
         if self.path == "/status":
             return self._send(200, {"state": "idle"})
         if self.path == "/runs/run-1":
@@ -120,7 +126,8 @@ class LoopWithAdapterRuntimeTests(unittest.TestCase):
         self.runtime = runtime_mod.AdapterRuntime.from_profile(_binding(url), *self.keys)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.lock = HostDeviceLock(url, os.path.join(self.tmp.name, "device-locks"))
+        self.lock = HostDeviceLock(url, identity_path="/identity", identity_field="serial",
+                                   directory=os.path.join(self.tmp.name, "device-locks"))
         self.addCleanup(self.lock.close)
 
     def _port(self, selections):
@@ -139,7 +146,8 @@ class LoopWithAdapterRuntimeTests(unittest.TestCase):
         starts = self.server.starts
         self.assertEqual([(p, b) for p, b, _ in starts], [("/runs", {"plateFormat": "96-well", "wavelengthNm": 450,
                                                                      "wells": ["A1"]})])
-        self.assertTrue(starts[0][2])  # the start carried the claim's Idempotency-Key
+        # The start carried exactly the claim-bound Idempotency-Key, not just some value.
+        self.assertEqual(starts[0][2], idempotency_key(job.job_id, job.kernel_id, job.claim_token))
         self.assertEqual(len(gateway.evidence), 1)
         self.assertEqual(gateway.evidence[0]["claimToken"], "tok-1")
         self.assertEqual([(s["status"], s["claimToken"]) for s in gateway.statuses], [("completed", "tok-1")])
@@ -156,11 +164,26 @@ class LoopWithAdapterRuntimeTests(unittest.TestCase):
         self.assertEqual([s["status"] for s in gateway.statuses], ["failed"])
         self.assertFalse(job.lease_alive())
 
-    def test_the_same_claimed_job_never_runs_twice(self):
+    def test_a_completed_claim_never_runs_again(self):
         gateway, port = self._port({"plateFormat": "96-well", "wavelengthNm": 450, "wells": ["A1"]})
         job = port.claim_next(KERNEL)
         first = run_once(build_r0_plate_reader_profile(), self.runtime, port, job, gate=OPEN, lock=self.lock)
         second = run_once(build_r0_plate_reader_profile(), self.runtime, port, job, gate=OPEN, lock=self.lock)
+        self.assertTrue(first.passed, first.reason)
+        # Completing the job ended its claim's lease, so the second attempt holds no claim.
+        self.assertEqual((second.ran, second.reason), (False, "no_claim"))
+        self.assertEqual(len(self.server.starts), 1)
+
+    def test_a_duplicate_delivery_of_a_live_claim_is_refused_by_the_one_shot_record(self):
+        gateway, port = self._port({"plateFormat": "96-well", "wavelengthNm": 450, "wells": ["A1"]})
+        job = port.claim_next(KERNEL)
+        first = run_once(build_r0_plate_reader_profile(), self.runtime, port, job, gate=OPEN, lock=self.lock)
+        # The same claim delivered again with a lease that is still alive: only the record stops it.
+        lease = jobport_mod.Lease(job.job_id, 60, time.monotonic(), lambda: ("ok", 60, time.monotonic()))
+        self.addCleanup(lease.release)
+        again = jobport_mod.ClaimedJob(job_id=job.job_id, operation=job.operation, capability_type=job.capability_type,
+                                       claim_token=job.claim_token, kernel_id=job.kernel_id, lease=lease)
+        second = run_once(build_r0_plate_reader_profile(), self.runtime, port, again, gate=OPEN, lock=self.lock)
         self.assertTrue(first.passed, first.reason)
         self.assertEqual((second.ran, second.reason), (False, "job_already_run"))
         self.assertEqual(len(self.server.starts), 1)
