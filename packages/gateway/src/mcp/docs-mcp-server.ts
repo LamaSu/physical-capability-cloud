@@ -36,6 +36,7 @@ import "@fastify/swagger";
 import { z } from "zod";
 import { loadAgentPackage, PCC_MCP_ICON_URL } from "./http-mcp-server.js";
 import { resolveGatewayAsset } from "./mcp-app-view.js";
+import { lit } from "../observability/closed-schema.js";
 
 export const DOCS_MOUNT_PATH = "/mcp/docs";
 const DOCS_SESSION_TTL_MS = 10 * 60 * 1000;
@@ -343,7 +344,7 @@ export async function docsHttpMcpRoutes(app: FastifyInstance): Promise<void> {
         request.body,
       );
     } catch (error) {
-      request.log.error({ err: error }, "Docs Streamable HTTP MCP request failed");
+      request.log.error({ err: error }, lit("Docs Streamable HTTP MCP request failed"));
       sendDocsJsonRpcError(reply.raw, 500, "Internal MCP server error");
     }
   });
@@ -366,7 +367,7 @@ export async function docsHttpMcpRoutes(app: FastifyInstance): Promise<void> {
     try {
       await session.transport.handleRequest(request.raw as IncomingMessage, reply.raw);
     } catch (error) {
-      request.log.error({ err: error }, "Docs Streamable HTTP MCP SSE request failed");
+      request.log.error({ err: error }, lit("Docs Streamable HTTP MCP SSE request failed"));
       sendDocsJsonRpcError(reply.raw, 500, "Internal MCP server error");
     }
   });
@@ -389,7 +390,7 @@ export async function docsHttpMcpRoutes(app: FastifyInstance): Promise<void> {
     try {
       await session.transport.handleRequest(request.raw as IncomingMessage, reply.raw);
     } catch (error) {
-      request.log.error({ err: error }, "Docs Streamable HTTP MCP delete failed");
+      request.log.error({ err: error }, lit("Docs Streamable HTTP MCP delete failed"));
       sendDocsJsonRpcError(reply.raw, 500, "Internal MCP server error");
     }
   });
