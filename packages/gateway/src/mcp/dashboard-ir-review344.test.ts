@@ -56,7 +56,7 @@ describe("#344 money: manifest prose cannot present money", () => {
         { kind: "note", text: "$12.50 on the way" },
         { kind: "note", text: "Pаid in full" },             // Cyrillic 'a'
         { kind: "note", text: "ｐａｉｄ" },       // fullwidth "paid"
-        { kind: "note", text: "Settle​d yesterday" },        // zero-width space
+        { kind: "note", text: "Settle\u200Bd yesterday" },        // zero-width space
         { kind: "actions", actions: [{ id: "a", label: "Refunded" }] },
         { kind: "form", schema: { type: "object", properties: { b: { type: "number", title: "Balance confirmed" } } } },
         { kind: "note", text: "Pick a kernel near you" },         // benign prose stays
