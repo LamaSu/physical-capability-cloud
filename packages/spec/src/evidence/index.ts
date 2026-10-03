@@ -26,6 +26,9 @@ export * from "./is-fabricated.js";
 // contract every Ed25519 producer and consumer of evidence builds its message from.
 export * from "./signing-preimage.js";
 export * from "./eligibility.js";
+// Principal ids for FinalMilestonePackageV2: operator = CAIP-10 (D1 signer),
+// device = ed25519:0x<key> (D2 signer, registry-held, never a compromised key).
+export * from "./principal-id.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
 export * from "./emitter-manifest.js";
