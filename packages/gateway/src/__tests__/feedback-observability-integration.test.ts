@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { closedText, keyedHash } from "../observability/closed-schema.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,14 +75,17 @@ describe("feedback → observability view (Phase 3 reconciliation)", () => {
     });
     expect(stream.statusCode).toBe(200);
     const reports = stream.json().reports as Array<Record<string, unknown>>;
-    const mine = reports.find((r) => r.trace_id === "tr_abc0000000000001");
+    // The audit log keeps a report closed (N107b): its trace id as a keyed hash, and each
+    // agent-supplied text as itself only when it is a gateway literal, otherwise as its hash.
+    const mine = reports.find((r) => r.trace_id === keyedHash("tr_abc0000000000001"));
     expect(mine, "the new report must appear in the observability feedback stream").toBeTruthy();
     expect(mine).toMatchObject({
-      summary: "contract build blew up",
-      agent_kind: "claude",
-      last_endpoint: "/api/build/contract",
-      last_error_code: "TIER_MISMATCH",
+      summary: closedText("contract build blew up"),
+      agent_kind: closedText("claude"),
+      last_endpoint: closedText("/api/build/contract"),
+      last_error_code: closedText("TIER_MISMATCH"),
     });
+    expect(JSON.stringify(mine)).not.toContain("contract build blew up");
 
     // 2) the error histogram view counts its errorCode
     const errors = await app.inject({
@@ -91,7 +95,22 @@ describe("feedback → observability view (Phase 3 reconciliation)", () => {
     });
     expect(errors.statusCode).toBe(200);
     const hist = errors.json().by_error_code as Array<{ error_code: string; count: number }>;
-    expect(hist.find((h) => h.error_code === "TIER_MISMATCH")?.count).toBeGreaterThanOrEqual(1);
+    expect(hist.find((h) => h.error_code === closedText("TIER_MISMATCH"))?.count).toBeGreaterThanOrEqual(1);
+  });
+
+  it("the journey view lists a trace's reports: it compares the trace id as the audit log keeps it (N107b)", async () => {
+    process.env.PCC_FUNNEL_ENABLED = "true";
+    try {
+      const journey = await app.inject({
+        method: "GET",
+        url: "/api/admin/observability/journey/tr_abc0000000000001",
+        headers: { "x-admin-token": "t" },
+      });
+      expect(journey.statusCode).toBe(200);
+      expect(journey.json().reports.length, "the report filed above under this trace id").toBeGreaterThanOrEqual(1);
+    } finally {
+      delete process.env.PCC_FUNNEL_ENABLED;
+    }
   });
 
   it("funnel/journey views stay gated on PCC_FUNNEL_ENABLED (journey recording is opt-in)", async () => {

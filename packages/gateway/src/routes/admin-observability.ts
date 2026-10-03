@@ -26,6 +26,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { keyedHash } from "../observability/closed-schema.js";
 import { open } from "node:fs/promises";
 import { dirname } from "node:path";
 import { auditService } from "../services/audit-service.js";
@@ -192,11 +193,13 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
         });
       }
       const stages = getFunnelForTraceId(traceId);
+      // The audit log keeps a report's trace id as its keyed hash (N107b): compare the same way.
+      const traceKey = keyedHash(traceId);
       const reports = auditService
         .query({ eventType: REPORT_EVENT, limit: 1000 })
         .filter((r) => {
           const meta = (r.metadata ?? {}) as Record<string, unknown>;
-          return meta.trace_id === traceId;
+          return meta.trace_id === traceKey;
         })
         .map((r) => ({ report_id: r.resourceId, ...(r.metadata ?? {}) }));
       return {

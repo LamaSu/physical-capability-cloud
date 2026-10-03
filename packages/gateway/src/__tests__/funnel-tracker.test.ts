@@ -27,16 +27,24 @@ const h = vi.hoisted(() => {
   };
 });
 
-vi.mock("../services/audit-service.js", () => ({
+// The audit writer's contract (N107b): the actor and the resource id are stored as keyed hashes.
+vi.mock("../services/audit-service.js", async () => {
+  const { keyedHash } = await import("../observability/closed-schema.js");
+  return {
   auditService: {
     log: (e: Record<string, unknown>) => {
-      h.logged.push({ ...e });
+      h.logged.push({
+        ...e,
+        ...(e.actor != null ? { actor: keyedHash(e.actor) } : {}),
+        ...(e.resourceId != null ? { resourceId: keyedHash(e.resourceId) } : {}),
+      });
     },
     query: (opts: { eventType?: string }) =>
       h.logged.filter((r) => !opts?.eventType || r.eventType === opts.eventType),
     stats: () => [],
   },
-}));
+  };
+});
 
 vi.mock("../services/posthog-service.js", () => ({
   identifyAgent: (...a: unknown[]) => h.identifySpy(...a),

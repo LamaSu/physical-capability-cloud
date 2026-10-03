@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { keyedHash } from "../observability/closed-schema.js";
 import { initStore, closeStore } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 
@@ -94,7 +95,8 @@ describe("AuditService", () => {
     it("filters by actor", () => {
       const rows = auditService.query({ actor: "alice" });
       expect(rows.length).toBe(2);
-      expect(rows.every((r) => r.actor === "alice")).toBe(true);
+      // The actor is stored as its keyed hash (N107b), and the query hashes "alice" the same way.
+      expect(rows.every((r) => r.actor === keyedHash("alice"))).toBe(true);
     });
 
     it("filters by resourceType", () => {

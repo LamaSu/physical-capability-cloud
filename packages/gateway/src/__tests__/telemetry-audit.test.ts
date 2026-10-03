@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { keyedHash } from "../observability/closed-schema.js";
 import Fastify, { type FastifyInstance } from "fastify";
 import { initStore, closeStore } from "../db.js";
 import { auditService } from "../services/audit-service.js";
@@ -116,7 +117,8 @@ describe("GET /api/telemetry/audit", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.count).toBe(2);
-    expect(body.entries.every((e: { actor?: string }) => e.actor === "alice")).toBe(true);
+    // The actor is stored as its keyed hash (N107b); ?actor=alice is hashed the same way.
+    expect(body.entries.every((e: { actor?: string }) => e.actor === keyedHash("alice"))).toBe(true);
     expect(body.filters.actor).toBe("alice");
   });
 
@@ -171,8 +173,9 @@ describe("GET /api/telemetry/audit", () => {
     const entry = body.entries[0];
     expect(typeof entry.eventType).toBe("string");
     expect(typeof entry.action).toBe("string");
-    expect(entry.actor).toBe("alice");
+    // Identifiers are stored as keyed hashes (N107b); the resource type is a closed name.
+    expect(entry.actor).toBe(keyedHash("alice"));
     expect(entry.resourceType).toBe("job");
-    expect(entry.resourceId).toBe("job-123");
+    expect(entry.resourceId).toBe(keyedHash("job-123"));
   });
 });
