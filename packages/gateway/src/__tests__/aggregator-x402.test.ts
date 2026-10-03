@@ -25,6 +25,7 @@ import {
   _resetAggregatorRegistryForTests,
 } from "../routes/aggregator/index.js";
 import { initStore, closeStore } from "../db.js";
+import { _setOutboundDepsForTests } from "../services/outbound-url-guard.js";
 import {
   type IndexedTool,
   type X402PaymentPayload,
@@ -211,6 +212,28 @@ function installFetchMock(opts: {
     return new Response(JSON.stringify(upstreamBody), { status: upstreamStatus });
   });
   vi.spyOn(globalThis, "fetch").mockImplementation(fakeFetch);
+  // The invoke route now sends the upstream call through the outbound guard
+  // (SSRF), not global fetch. Keep this mock as the single recording point for
+  // all three calls (verify, settle, upstream) by routing the guard's injected
+  // transport into it: no real DNS, no real sockets, and every assertion on
+  // the spy is unchanged.
+  _setOutboundDepsForTests({
+    resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+    transport: async (req) => {
+      const res = await (fakeFetch as unknown as typeof fetch)(req.url.href, {
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+      });
+      return {
+        status: res.status,
+        headers: {},
+        bytesRead: 0,
+        truncated: false,
+        body: Buffer.from(await res.arrayBuffer()),
+      };
+    },
+  });
   return fakeFetch;
 }
 
@@ -224,6 +247,7 @@ describe("aggregator x402 gating (e2e)", () => {
   afterEach(() => {
     closeStore();
     vi.restoreAllMocks();
+    _setOutboundDepsForTests(null);
     clearGateEnv();
     _resetAggregatorRegistryForTests();
   });
