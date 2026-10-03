@@ -426,3 +426,32 @@ describe("observability never changes a run's outcome, nor charges a device (ast
     expect.soft(out.unhandled, "unhandled rejections").toBe(0);
   });
 });
+
+describe("a runner's timeouts are timer delays, refused before anything is held otherwise (astra pack 216)", () => {
+  it("a settle timeout whose conversion throws: refused with origin configuration, nothing commanded, no step left behind", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("m-216-symbol");
+    const result = await new JobRunner(machine, [], null, emitter, { evidenceSettleTimeoutMs: Symbol("bad") as unknown as number }).run(job("job-216-symbol", 90, 0));
+    expect.soft(result.error, "why").toBe("the runner's evidenceSettleTimeoutMs must be a number of milliseconds from 0 to 2147483647");
+    expect.soft(result.failure, "where").toEqual({ origin: "configuration" });
+    expect.soft(machine.commands, "commands sent").toEqual([]);
+    expect.soft(emitter.getEvents("job-216-symbol", STEP), "the step's events").toEqual([]);
+    const again = await new JobRunner(machine, [], null, emitter).run(job("job-216-symbol", 90, 0));
+    expect.soft(again.success, "the same step, with good timeouts").toBe(true);
+  });
+
+  it.each([
+    ["evidenceQuiesceTimeoutMs", Number.NaN],
+    ["evidenceQuiesceTimeoutMs", Number.POSITIVE_INFINITY],
+    ["evidenceQuiesceTimeoutMs", -1],
+    ["evidenceSettleTimeoutMs", "30000"],
+    ["evidenceSettleTimeoutMs", 2_147_483_648],
+  ] as const)("%s = %s is refused before anything is held", async (name, ms) => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine(`m-216-${name}-${String(ms)}`);
+    const result = await new JobRunner(machine, [], null, emitter, { [name]: ms as unknown as number }).run(job("job-216-each", 91, 0));
+    expect.soft(result.error, "why").toBe(`the runner's ${name} must be a number of milliseconds from 0 to 2147483647`);
+    expect.soft(result.failure, "where").toEqual({ origin: "configuration" });
+    expect.soft(machine.commands, "commands sent").toEqual([]);
+  });
+});
