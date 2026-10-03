@@ -3,8 +3,10 @@
 **Goal:** close the attempt with one roll-up report, and one idea that would make the next attempt better.
 
 `bin/pcc-report` collects every phase you reported into the roll-up for you. Add the one change you would most like made: to this runbook, the agent pack, the docs, the code or the process. Say where, and what.
+
+On the current gateway an attempt ends with verify and operate blocked (phases 6 and 7), so the session is `blocked` too. It is `ok` only once a test job has run and the loop has a job it may run.
 ```bash
-bin/pcc-report session ok "device onboarded: kernel, capability, device, one test run with stored (unverified) evidence, loop running" \
+bin/pcc-report session blocked "device registered: kernel, capability, device; stop drilled; the test job waits for a queue-only submission, the loop for a job it may run" \
   --proposal-target runbook --proposal-path runbook/05-register.md \
   --proposal-text "register-device should accept the device URL from pcc-node.json instead of repeating it"
 ```
