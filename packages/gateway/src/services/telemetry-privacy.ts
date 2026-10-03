@@ -18,13 +18,27 @@ export const TELEMETRY_SINK_PATH = "/api/feedback";
 /** The request path alone: no query or fragment, percent-decoded where possible, lower-cased, repeated slashes collapsed. */
 export function canonicalRequestPath(rawUrl: string): string {
   const path = rawUrl.split(/[?#]/, 1)[0] ?? "";
-  let decoded = path;
+  return decodePathEscapes(path).toLowerCase().replace(/\/{2,}/g, "/");
+}
+
+/**
+ * Percent-decodes a path. A malformed escape anywhere must not keep the rest from
+ * decoding, or `/api/%66eedback/%E0%A4%A/…` would escape the sink rules (#458
+ * round 4). So when the whole path doesn't decode, each run of escapes is decoded
+ * on its own, and a run that still fails keeps only its ASCII escapes decoded.
+ */
+function decodePathEscapes(path: string): string {
   try {
-    decoded = decodeURIComponent(path);
+    return decodeURIComponent(path);
   } catch {
-    // a malformed escape: keep the raw path
+    return path.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
+      try {
+        return decodeURIComponent(run);
+      } catch {
+        return run.replace(/%([0-7][0-9a-fA-F])/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+      }
+    });
   }
-  return decoded.toLowerCase().replace(/\/{2,}/g, "/");
 }
 
 /** Whether a request targets, or imitates, the public telemetry sink. */

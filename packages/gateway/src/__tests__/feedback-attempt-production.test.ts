@@ -180,6 +180,20 @@ describe("attempt reports through the production wiring", () => {
     for (const leak of ["token-abc", "token-def", "token-ghi", "203.0.113.9", "alice@example.com"]) expect(everything).not.toContain(leak);
   });
 
+  it("leak nothing for an encoded sink prefix with a malformed later escape (round 4)", async () => {
+    // Fastify answers a path with a malformed escape with a 400 before routing, so no
+    // hook, request log line or write audit sees it. The classifier treats it as the
+    // sink anyway, in case that ever changes (frameworkErrors logs such requests).
+    const spy = vi.spyOn(auditService, "log").mockImplementation((() => true) as never);
+    const url = "/api/%66eedback/%E0%A4%A/token-abc?email=alice@example.com";
+    expect(isTelemetrySinkRequest(url)).toBe(true);
+    const res = await app.inject({ method: "POST", url, headers: { "user-agent": "secret-agent", "x-forwarded-for": "203.0.113.9" }, payload: attempt() });
+    await settle();
+    expect(res.statusCode).toBe(400);
+    const everything = JSON.stringify(spy.mock.calls) + logLines.join("");
+    for (const leak of ["token-abc", "alice@example.com", "203.0.113.9", "secret-agent"]) expect(everything).not.toContain(leak);
+  });
+
   it("keep the sink's raw URL, IP and host out of the production request log, and leave other routes' log lines as they were (round 3)", async () => {
     await app.inject({ method: "POST", url: "/api/feedback?token=abc123456789&email=alice@example.com", headers: { "x-forwarded-for": "203.0.113.9" }, payload: attempt() });
     await app.inject({ method: "POST", url: "/api/other-write?page=2", headers: { "x-forwarded-for": "198.51.100.4" }, payload: {} });
@@ -197,6 +211,19 @@ describe("telemetry-privacy path rules", () => {
   it("canonicalises the path: no query or fragment, decoded, lower-cased, single slashes", () => {
     expect(canonicalRequestPath("/API//Feedback/%61bc?x=1#frag")).toBe("/api/feedback/abc");
     expect(canonicalRequestPath("/api/feedback/%E0%A4%A")).toBe("/api/feedback/%e0%a4%a");
+  });
+
+  it("decodes an encoded prefix even when a later escape is malformed (round 4)", () => {
+    expect(canonicalRequestPath("/api/%66eedback/%E0%A4%A/token-abc")).toBe("/api/feedback/%e0%a4%a/token-abc");
+    expect(canonicalRequestPath("/api/%66%65edback/%zz")).toBe("/api/feedback/%zz");
+    expect(canonicalRequestPath("/api/%66eedback/%C3%A9/%FF")).toBe("/api/feedback/\u00e9/%ff");
+    expect(canonicalRequestPath("/api/%66eedback/token%")).toBe("/api/feedback/token%");
+    // An ASCII escape in the same run as a malformed one still decodes.
+    expect(canonicalRequestPath("/api/feedbac%6B%E0%A4%A/x")).toBe("/api/feedback%e0%a4%a/x");
+    for (const u of ["/api/%66eedback/%E0%A4%A/token-abc", "/api/%66eedback/%FF/x", "/%61pi/feedback/%zz", "/api/%46EEDBACK/%E0", "/api/feedbac%6B%E0%A4%A/x"]) {
+      expect(isTelemetrySinkRequest(u)).toBe(true);
+    }
+    expect(isTelemetrySinkRequest("/api/%66eeds/%E0%A4%A")).toBe(false);
   });
 
   it("treats the sink and anything imitating it as the sink, and nothing else", () => {
