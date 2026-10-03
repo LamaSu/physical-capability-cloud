@@ -102,6 +102,43 @@ async def test_plr_log_record_becomes_evidence_notification(captured):
 
 
 @pytest.mark.asyncio
+async def test_drain_awaits_all_pending_notifications_for_a_device(captured):
+    # R39 HIGH5: emit_atomic_op is fire-and-forget (threadsafe scheduling for
+    # logging.Handler.emit's sake); drain is the explicit rendezvous backend.run
+    # uses before it reports success.
+    writer, sent = captured
+    loop = asyncio.get_running_loop()
+    handler = EvidenceHandler(writer=writer, loop=loop)
+    handler.start_recording("dev-1", "job-1")
+    handler.emit_atomic_op("dev-1", "aspirate", {})
+    handler.emit_atomic_op("dev-1", "dispense", {})
+    await handler.drain("dev-1")
+    assert len(sent) == 2  # both writes completed -- no sleep needed to prove it
+
+
+@pytest.mark.asyncio
+async def test_drain_surfaces_a_write_failure_instead_of_swallowing_it():
+    async def failing_writer(method, params):
+        raise RuntimeError("stdout pipe broken")
+
+    loop = asyncio.get_running_loop()
+    handler = EvidenceHandler(writer=failing_writer, loop=loop)
+    handler.start_recording("dev-1", "job-1")
+    handler.emit_atomic_op("dev-1", "aspirate", {})
+    with pytest.raises(RuntimeError, match="stdout pipe broken"):
+        await handler.drain("dev-1")
+
+
+@pytest.mark.asyncio
+async def test_drain_is_a_noop_with_nothing_pending(captured):
+    writer, sent = captured
+    loop = asyncio.get_running_loop()
+    handler = EvidenceHandler(writer=writer, loop=loop)
+    await handler.drain("dev-1")  # must not hang or raise
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_emit_event_outside_window_emits_with_null_job_id(captured):
     writer, sent = captured
     loop = asyncio.get_running_loop()

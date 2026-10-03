@@ -144,6 +144,10 @@ class Commands:
                 op_count = await self._run_plr_ops(
                     handle, device_id, job_id, protocol_source, protocol_inline,
                 )
+                # R39 HIGH5: completion never outruns the evidence it claims --
+                # await every atomic-op write before reporting success. A write
+                # failure here means this run does not report clean success.
+                await self._drain_evidence(device_id, job_id)
                 return {
                     "ok": True,
                     "jobId": job_id,
@@ -182,6 +186,8 @@ class Commands:
                     ) from e
 
             duration_ms = int((time.monotonic() - started_at) * 1000)
+            # R39 HIGH5: same rule on the stub path -- drain before success.
+            await self._drain_evidence(device_id, job_id)
             return {
                 "ok": True,
                 "jobId": job_id,
@@ -194,6 +200,19 @@ class Commands:
             # evidence.stopRecording — leave it open here.
         finally:
             handle.release()
+
+    async def _drain_evidence(self, device_id: str, job_id: str) -> None:
+        """R39 HIGH5: await every atomic-op evidence write scheduled for this
+        run before `backend.run` returns. If a write failed, surface it as an
+        error rather than letting the caller report clean success."""
+        try:
+            await self.evidence.drain(device_id)
+        except Exception as e:  # noqa: BLE001 — any drain failure voids success
+            raise RpcException(
+                RPC_ERROR_CODES["INTERNAL_ERROR"],
+                f"evidence write failed: {e}",
+                {"jobId": job_id, "deviceId": device_id, "plrException": type(e).__name__},
+            ) from e
 
     async def backend_status(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")

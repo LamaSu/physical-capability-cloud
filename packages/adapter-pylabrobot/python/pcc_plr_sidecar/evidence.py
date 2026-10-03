@@ -45,6 +45,11 @@ class EvidenceHandler(logging.Handler):
         self._writer = writer
         self._loop = loop
         self._windows: dict[str, RecordingWindow] = {}  # deviceId -> window
+        # R39 HIGH5: every notification scheduled via _schedule_notify for a
+        # device, not yet confirmed written. drain() is the explicit
+        # rendezvous backend.run uses before it reports success -- completion
+        # must never outrun (or silently drop) the evidence it claims.
+        self._pending: dict[str, list[asyncio.Task]] = {}
         self.setFormatter(logging.Formatter("%(message)s"))
 
     # ── recording window lifecycle ─────────────────────────────────────────
@@ -93,6 +98,7 @@ class EvidenceHandler(logging.Handler):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "payload": dict(payload),
             },
+            device_id=device_id,
         )
 
     def emit_event(self, device_id: str, event_type: str, payload: dict[str, Any]) -> None:
@@ -108,6 +114,7 @@ class EvidenceHandler(logging.Handler):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "payload": dict(payload),
             },
+            device_id=device_id,
         )
 
     # ── logging.Handler override ───────────────────────────────────────────
@@ -142,6 +149,7 @@ class EvidenceHandler(logging.Handler):
                     "line": msg,
                 },
             },
+            device_id=device_id,
         )
 
     # ── private ────────────────────────────────────────────────────────────
@@ -154,15 +162,59 @@ class EvidenceHandler(logging.Handler):
         """
         self._loop = loop
 
-    def _schedule_notify(self, method: str, params: dict[str, Any]) -> None:
+    def _schedule_notify(
+        self, method: str, params: dict[str, Any], device_id: Optional[str] = None,
+    ) -> None:
         if self._loop is None:
             return
-        # logging may be called from threads; schedule the async write
-        # threadsafely onto the running loop.
+        # logging may be called from threads, so cross-thread callers must go
+        # through call_soon_threadsafe. But that defers task creation by at
+        # least one loop tick — if a same-thread caller (emit_atomic_op, called
+        # directly from commands.py's own async code) immediately awaited
+        # drain() with no intervening await, drain would see nothing pending
+        # yet (R39 HIGH5 regression). When we're already running on this
+        # handler's own loop, create (and track) the task right now instead.
         try:
-            self._loop.call_soon_threadsafe(
-                lambda: self._loop.create_task(self._writer(method, params))
-            )
+            running_loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
         except RuntimeError:
-            # Loop is closed — drop silently.
-            pass
+            running_loop = None
+        if running_loop is self._loop:
+            self._create_and_track(method, params, device_id)
+        else:
+            try:
+                self._loop.call_soon_threadsafe(self._create_and_track, method, params, device_id)
+            except RuntimeError:
+                # Loop is closed — drop silently.
+                pass
+
+    def _create_and_track(
+        self, method: str, params: dict[str, Any], device_id: Optional[str],
+    ) -> None:
+        task = self._loop.create_task(self._writer(method, params))
+        if device_id is None:
+            return
+        pending = self._pending.setdefault(device_id, [])
+        pending.append(task)
+
+        def _done(t: asyncio.Task, *, _device_id: str = device_id) -> None:
+            bucket = self._pending.get(_device_id)
+            if bucket and t in bucket:
+                bucket.remove(t)
+
+        task.add_done_callback(_done)
+
+    async def drain(self, device_id: str) -> None:
+        """R39 HIGH5: await every notification scheduled for ``device_id`` so
+        far, including any that get scheduled while we're awaiting the first
+        batch. Raises the first write failure encountered instead of
+        swallowing it: a write failure means the caller (backend.run) must not
+        report clean success.
+        """
+        while True:
+            pending = list(self._pending.get(device_id) or ())
+            if not pending:
+                return
+            results = await asyncio.gather(*pending, return_exceptions=True)
+            failures = [r for r in results if isinstance(r, BaseException)]
+            if failures:
+                raise failures[0]

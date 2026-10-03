@@ -349,6 +349,70 @@ async def test_tips_can_be_dropped_into_a_named_spot(fake_plr):
     assert lh.calls[-1] == ("drop_tips", ["A2"], [0])
 
 
+# ── R39 HIGH5: completion never outruns the evidence it claims ─────────────
+
+async def test_every_atomic_op_notification_precedes_the_runs_response(fake_plr):
+    import asyncio
+
+    s, out = _server()
+    # EvidenceHandler captures a bound reference to Server.write_notification
+    # at construction time (see Server.__init__), so patching s.write_notification
+    # itself would be a no-op for evidence writes -- patch the handler's own
+    # writer, which is what emit_atomic_op's scheduled tasks actually call.
+    original_writer = s.evidence._writer
+
+    async def tracked_writer(method, params):
+        if method == "evidence" and params.get("type") in ("pickUpTips", "aspirate", "dispense", "dropTips"):
+            # Force a genuine scheduling checkpoint on every atomic-op write --
+            # proves backend.run truly awaits it, not just that the fire-and-
+            # forget task object happens to exist.
+            await asyncio.sleep(0)
+        await original_writer(method, params)
+
+    s.evidence._writer = tracked_writer
+
+    await init(s, out, deckLayout=DECK)
+    await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-1"}, "2")
+    resp = await call(s, out, "backend.run", {
+        "deviceId": "lh1", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": TRANSFER,
+    }, "3")
+    assert resp["result"]["ok"] is True, resp
+
+    # No asyncio.sleep() needed here: if backend.run didn't drain the writes,
+    # this would be flaky/wrong by construction, not just slow.
+    messages = out.messages()
+    response_index = next(i for i, m in enumerate(messages) if m.get("id") == "3")
+    op_names = ("pickUpTips", "aspirate", "dispense", "dropTips")
+    before = [
+        m["params"]["type"] for m in messages[:response_index]
+        if m.get("method") == "evidence" and m["params"]["type"] in op_names
+    ]
+    after = [
+        m for m in messages[response_index + 1:]
+        if m.get("method") == "evidence" and m["params"]["type"] in op_names
+    ]
+    assert before == list(op_names), messages
+    assert after == []
+
+
+async def test_backend_run_does_not_report_success_if_an_evidence_write_fails(fake_plr):
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+
+    async def failing_writer(method, params):
+        if method == "evidence":
+            raise RuntimeError("stdout pipe broken")
+
+    s.evidence._writer = failing_writer
+    resp = await _run(s, out, TRANSFER)
+    assert "error" in resp, resp
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INTERNAL_ERROR"], resp
+    # The physical ops already ran -- draining surfaces the write failure, it
+    # doesn't (and can't) undo actuation that already happened.
+    lh = s.loader.get("lh1").machine
+    assert [c[0] for c in lh.calls] == ["setup", "pick_up_tips", "aspirate", "dispense", "return_tips"]
+
+
 # ── astra r1 on #378: no op is skipped, and every op is checked before any runs ─
 
 def _calls(s: Server) -> list:
