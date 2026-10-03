@@ -67,6 +67,7 @@ export function KernelDetailPage() {
 
   const online = isKernelOnline(kernel);
   // A list the snapshot left out is "not reported", not an empty list.
+  const capabilityTypes = Array.isArray(kernel.capabilityTypes) ? kernel.capabilityTypes : null;
   const devices = Array.isArray(kernel.devices) ? kernel.devices : null;
   const activeJobs = Array.isArray(kernel.recentJobs) ? kernel.recentJobs.filter(isActiveJob) : null;
   const loc = kernel.location;
@@ -113,14 +114,16 @@ export function KernelDetailPage() {
           <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">
             Capabilities ({kernel.capabilityCount})
           </h3>
-          {kernel.capabilityTypes?.length ? (
+          {capabilityTypes === null ? (
+            <div className="text-sm text-white/30">The gateway didn't report this kernel's capabilities.</div>
+          ) : capabilityTypes.length === 0 ? (
+            <div className="text-sm text-white/30">No capabilities registered</div>
+          ) : (
             <div className="flex flex-wrap gap-1.5">
-              {kernel.capabilityTypes.map((t) => (
+              {capabilityTypes.map((t) => (
                 <GlowBadge key={t} color="teal">{t}</GlowBadge>
               ))}
             </div>
-          ) : (
-            <div className="text-sm text-white/30">No capabilities registered</div>
           )}
         </div>
 
