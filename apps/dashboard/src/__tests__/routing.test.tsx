@@ -228,3 +228,119 @@ describe("navigation config", () => {
     expect(items.some((i) => i.path === "/")).toBe(false);
   });
 });
+
+// ── astra 19c (round 3, #354 finding 3): one account's in-memory state never
+// reaches the next. These were written before the fix, at 5a226a74, and failed
+// there. Sign-in and sign-out go through the store's public actions; validate
+// answers 200 for any key.
+describe("one account's in-memory state never reaches the next (astra 19c)", () => {
+  const SECRET = "account-A-secret";
+
+  beforeAll(() => {
+    // ChatSidebar scrolls its last message into view; jsdom has no layout.
+    Element.prototype.scrollIntoView = () => {};
+  });
+
+  /** fetch: /api/auth/validate accepts any key; /api/jobs answers per key; anything else fails. */
+  function stubAccounts() {
+    const jobsFor: Record<string, string> = { pcc_test_key: "job-first-account", pcc_test_key_b: "job-second-account" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+        if (url.includes("/api/auth/validate")) return json({ valid: true });
+        if (url.includes("/api/jobs")) {
+          const key = (new Headers(init?.headers).get("Authorization") ?? "").replace(/^Bearer /, "");
+          const id = jobsFor[key];
+          return json({ jobs: id ? [{ id, status: "in_progress", capabilityId: "cap-1" }] : [] });
+        }
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+  }
+
+  /** Type into the spatial ChatBar and press Enter, as a person would. */
+  async function typeInSpatialChat(text: string) {
+    const input = container.querySelector<HTMLInputElement>('input[placeholder^="Open a panel"]');
+    expect(input, "the spatial ChatBar input").not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text);
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+  }
+
+  it("A's spatial chat is gone after A signs out and B signs in (the CRITICAL reproduction)", async () => {
+    stubAccounts();
+    await renderAt("/app", { signedIn: true });
+    await typeInSpatialChat(SECRET);
+    const { useSpatialChatStore } = await import("../features/chat/ChatStore.js");
+    expect(useSpatialChatStore.getState().messages.some((m) => m.content === SECRET), "A's message was entered").toBe(true);
+
+    const { useAuthStore } = await import("../stores/auth-store.js");
+    await act(async () => useAuthStore.getState().logout());
+    await settle();
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    await settle();
+    // B opens /app and the Chat History.
+    await act(async () => useSpatialChatStore.getState().setSidebarOpen(true));
+    await settle();
+    expect(useSpatialChatStore.getState().messages.some((m) => m.content.includes(SECRET))).toBe(false);
+    expect(container.textContent ?? "").not.toContain(SECRET);
+  });
+
+  it("a different key while signed in (A to B, with isAuthenticated true throughout) never shows A's cached reads", async () => {
+    stubAccounts();
+    const r = await renderAt("/jobs", { signedIn: true });
+    expect(await waitForText("job-first-account")).toBe(true);
+    const { useAuthStore } = await import("../stores/auth-store.js");
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    await settle();
+    expect(r.text(), "A's cached job, right after the switch").not.toContain("job-first-account");
+    expect(await waitForText("job-second-account", 4_000)).toBe(true);
+  }, 20_000);
+
+  it("every account-scoped store is back to its initial state before B's workspace renders", async () => {
+    stubAccounts();
+    await renderAt("/app", { signedIn: true });
+    const { useSpatialChatStore } = await import("../features/chat/ChatStore.js");
+    const { usePanelStore } = await import("../features/spatial/PanelStore.js");
+    const { useNotificationStore } = await import("../stores/notification-store.js");
+    const initial = {
+      chat: useSpatialChatStore.getState().messages,
+      sidebar: useSpatialChatStore.getState().sidebarOpen,
+      panels: usePanelStore.getState().panels.size,
+      notifications: useNotificationStore.getState().notifications,
+    };
+    // Account A uses the workspace.
+    await typeInSpatialChat(SECRET);
+    await act(async () => {
+      useSpatialChatStore.getState().setSidebarOpen(true);
+      useNotificationStore.setState({ notifications: [{ id: "n1", title: SECRET } as never] });
+    });
+    await typeInSpatialChat("jobs"); // opens a panel
+    await settle();
+
+    const { useAuthStore } = await import("../stores/auth-store.js");
+    let atSwitch: Record<string, unknown> = {};
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+      // Read synchronously, before React renders anything for B.
+      atSwitch = {
+        chat: useSpatialChatStore.getState().messages,
+        sidebar: useSpatialChatStore.getState().sidebarOpen,
+        panels: usePanelStore.getState().panels.size,
+        notifications: useNotificationStore.getState().notifications,
+      };
+    });
+    expect(atSwitch).toEqual(initial);
+  });
+});
