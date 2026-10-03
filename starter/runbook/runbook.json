@@ -82,22 +82,19 @@
     {
       "id": "verify",
       "file": "06-verify.md",
-      "goal": "The emergency stop reads correctly, and a test job queued for this node with no money attached ran on the real device after a CLEAR read; its evidence was stored for that job, and its final status was computed from the run and the receipt.",
+      "goal": "The emergency stop reads correctly and the device stops on its own command. The test job waits for a queue-only submission and is reported blocked.",
       "doneWhen": [
         "the stop read STOPPED during the drill, then CLEAR from a stored policy, and the device stopped on its own command",
-        "before submitting, GET /api/setup/detect listed no real device the gateway runs itself, and the stop read CLEAR",
-        "the test job was created by POST /api/jobs/submit, answered queued with no deviceId, and its settlement shows no session and no escrow",
-        "the stop read CLEAR immediately before the run, and the test job ran on the device (the device's own log shows it)",
-        "its final status was computed, not typed: completed only for a succeeded run whose receipt says stored: true for that job with a bundleId"
+        "no test job was submitted: the phase reports it blocked until the gateway offers a queue-only submission"
       ],
-      "asksHuman": ["permission for one emergency-stop drill", "permission to run one test job on the device (no money moves)"],
+      "asksHuman": ["permission for one emergency-stop drill"],
       "next": "operate"
     },
     {
       "id": "operate",
       "file": "07-operate.md",
-      "goal": "The device takes test jobs unattended, within its envelope, refuses any job that carries money until payouts can be bound, and says so honestly.",
-      "doneWhen": ["the loop ran one test job unattended and refuses jobs with a negotiation session or an escrow", "GET /api/operators/:slug/status shows no missing slot you can fill"],
+      "goal": "The operating loop runs with all eight rules and refuses any job that carries money; with no job it may run on the current gateway, it reports blocked.",
+      "doneWhen": ["the loop runs and refuses jobs with a negotiation session or an escrow", "GET /api/operators/:slug/status shows no missing slot you can fill", "operate is reported blocked while it has no job it may run"],
       "asksHuman": [],
       "next": "publish"
     },

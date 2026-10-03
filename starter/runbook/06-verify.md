@@ -1,6 +1,6 @@
 # Phase 6: verify
 
-**Goal:** the emergency stop reads correctly, and one test job travels buyer → gateway → your device → evidence → finished, with no money involved. **Ask the human** (class C) once: "May I run one emergency-stop drill, and then one test job on the device? No money moves."
+**Goal:** the emergency stop reads correctly, and the device stops on its own command. The test job waits: no current gateway can queue one without possibly starting it first (section 2). **Ask the human** (class C) once: "May I run one emergency-stop drill on the device?"
 
 Don't use `POST /api/setup/test-job` as proof. On the current gateway it runs on a built-in mock device, not yours (board N59; the fix is #450).
 
@@ -45,40 +45,22 @@ curl -s -X POST "$DEV/reset"
 ```
 Read the stop once more: it must now say `CLEAR`, because the stop and resume left a stored policy. If it doesn't, stop and report `verify blocked`.
 
-## 2. Be your own test buyer, with no money involved
-Use a second key, so the test is a real buyer-to-operator job. A buyer signs nothing, so it sends a throwaway public key: that keeps a private key out of the response here too.
+## 2. The test job: blocked on the current gateway
+A test job needs a submission that only queues it for your node. No current gateway route does that for certain:
+- `POST /api/jobs/submit` starts a job at once, before any check of yours can run, when its kernel is the gateway's own local kernel, or for any kernel when the gateway's runtime has no kernel id configured. It can start any device the gateway has loaded, including devices registered in its database, and a request can even name the device.
+- No endpoint reports the gateway's local kernel id together with every device it can start: `GET /api/setup/detect` lists only its configured devices, not the ones loaded from its database.
+- `submit-from-discovery` creates a paid job. It settles for real whenever the gateway's own settlement mode is real, whatever its `paymentMethod` says. Never use it for a test.
 
-Submit the test job with `POST /api/jobs/submit`. For a kernel the gateway does not run itself, that route only queues the job: no quote, no escrow, no payment, and nothing runs until your node takes it. **For the gateway's own local kernel it starts the job at once** on the gateway's local devices, before any of the checks below. So check two things first:
-- **The gateway can't run a real device itself.** `GET $BASE/api/setup/detect` lists the gateway's own devices under `kernelService.devices`. Every one must be a mock (`"adapterType": "mock"`), or the list empty. If any is real, a submission could start it directly: don't submit, and report `verify blocked` (a queue-only test submission is gateway work).
-- **The stop reads `CLEAR`** (section 1's check).
-
-**Don't use `submit-from-discovery` for a test.** It settles for real whenever the gateway's own settlement mode is real, whatever its `paymentMethod` field says, and it prices the job from a template, not from your capability. No gateway reports its settlement mode yet, so no paid job can be treated as a test.
+So **don't submit a test job.** The drill above is this phase's result. Report the test job blocked:
 ```bash
-umask 077
-curl -s "$BASE/api/setup/detect" -H @.pcc/auth.header > .pcc/detect.json
-python3 -c "import json; ks = json.load(open('.pcc/detect.json')).get('kernelService') or {}; real = [d for d in ks.get('devices') or [] if not isinstance(d, dict) or d.get('adapterType') != 'mock']; assert not real, f'the gateway runs real devices itself: {real}'; print('gateway runs no real device itself')"
-BUYER_PUB=$(python3 -c "import nacl.signing; print(nacl.signing.SigningKey.generate().verify_key.encode().hex())")
-curl -s -X POST "$BASE/api/auth/provision" -H 'Content-Type: application/json' \
-  -d "{\"email\": \"test-buyer@example.org\", \"name\": \"test buyer\", \"publicKey\": \"$BUYER_PUB\"}" \
-  | python3 -c "import json,sys; print('Authorization: Bearer ' + json.load(sys.stdin)['api_key'])" > .pcc/buyer.header
-python3 - <<'EOF' > .pcc/test-job-request.json
-import json
-print(json.dumps({"kernelId": open(".pcc/kernel-id").read().strip(), "stepId": "verify-1",
-                  "capabilityType": "lab.absorbance",
-                  "parameters": {"plateFormat": "96-well", "wavelengthNm": 450, "wells": ["A1", "A2"]}}))
-EOF
-curl -s -X POST "$BASE/api/jobs/submit" -H @.pcc/buyer.header -H 'Content-Type: application/json' \
-  --data-binary @.pcc/test-job-request.json > .pcc/test-job.json
-python3 -c "import json; j = json.load(open('.pcc/test-job.json')); assert j.get('status') == 'queued' and j.get('deviceId') is None and j.get('jobId'), j; print(j['jobId'])"
+bin/pcc-report verify blocked "the stop read STOPPED then CLEAR and the device stopped on command; no queue-only test submission on this gateway, so the test job waits"
 ```
-The answer must be `"status": "queued"` with `"deviceId": null`: queued for your node. A `deviceId`, or any other status, means the gateway took the job to run itself. Then it is not your test: report `verify blocked` with what it answered.
-
-**Check that no money is attached:** `GET $BASE/api/jobs/<jobId>/settlement` must show `"session": null` and `"escrow": null`. Anything else means this is not a test job: don't run it, and report `verify blocked` with what it showed.
+The test job runs as in section 3 once the gateway offers a server-enforced queue-only submission (a gateway row). Then check, before running it: the submission answered `"status": "queued"` with no `deviceId`, and `GET $BASE/api/jobs/<jobId>/settlement` shows `"session": null` and `"escrow": null`.
 
 ## 3. Run it the way the operating loop will (phase 7), once, by hand
-Every step either passes, or refuses **without touching the device**.
+Only once a queue-only test submission exists (section 2). Every step either passes, or refuses **without touching the device**.
 1. **See the job:** `curl -s "$BASE/api/operator/jobs?kernelId=$KID" -H @.pcc/auth.header`.
-2. **Resolve its parameters.** For this test job, they are the ones you sent, in `.pcc/test-job-request.json`. A buyer's job carries none on the current gateway (board G6): they sit in the job's negotiation session (`GET $BASE/api/jobs/<jobId>/settlement` gives `session.id`, then `GET $BASE/api/negotiate/session/<sessionId>` gives the `selections`), and phase 7 does not run buyers' jobs yet.
+2. **Resolve its parameters.** For a test job, they are the ones you sent with its submission. A buyer's job carries none on the current gateway (board G6): they sit in the job's negotiation session (`GET $BASE/api/jobs/<jobId>/settlement` gives `session.id`, then `GET $BASE/api/negotiate/session/<sessionId>` gives the `selections`), and phase 7 does not run buyers' jobs yet.
 3. **Re-check the envelope's confirmation, then type-check and envelope-check the parameters.**
    - Recompute the digest of `.pcc/envelope.json` and compare it with `.pcc/envelope.confirmed.json`. If they differ, the envelope changed after the human confirmed it, so stop and ask again: `python3 -c "import hashlib,json; d='0x'+hashlib.sha256(open('.pcc/envelope.json','rb').read()).hexdigest(); assert d == json.load(open('.pcc/envelope.confirmed.json'))['digest'], 'envelope changed since it was confirmed'; print('envelope as confirmed')"`
    - Type-check the parameters against `.pcc/operations.json`, and envelope-check them against `.pcc/envelope.json`. Any failure means: don't run it; set the status `failed`, with the reason.
@@ -123,8 +105,5 @@ The relay answers HTTP 200 even when it could not store the evidence, with `"sto
 
 On the current gateway, evidence from this by-hand path is stored **unverified** (boards G3 and G1). It stays unverified until the operating agent signs evidence that is checked against your kernel's registered key (#428, D4a).
 
-**Done when:** the stop read `STOPPED` during the drill and `CLEAR` after it, the device stopped on its own command, and the test job (queued for your node, no money attached) ran on the device after one more `CLEAR` read, with its final status computed by the code above.
-```bash
-bin/pcc-report verify ok "the stop read STOPPED then CLEAR and the device stopped on command; one test job (no money, queued for this node) ran after a CLEAR read; its evidence was stored (unverified)" --job-id "<jobId>"
-```
+**Done when:** the stop read `STOPPED` during the drill and `CLEAR` after it, and the device stopped on its own command. The test job stays blocked, and reported so (section 2), until the gateway offers a queue-only submission. When it runs, its final status comes from the code above.
 **Next:** [operate](07-operate.md).

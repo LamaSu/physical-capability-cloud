@@ -138,7 +138,7 @@
     },
     "verify.job-missing": {
       "phase": "verify",
-      "trigger": "The test job never shows up in GET /api/operator/jobs for your kernel.",
+      "trigger": "Once a queue-only submission exists: the test job never shows up in GET /api/operator/jobs for your kernel.",
       "do": "Check that the submit answered with a jobId and that the job names your kernel, then report it. Don't fall back to /api/setup/test-job: it runs on a built-in mock device.",
       "file": "06-verify.md",
       "section": "3. Run it the way the operating loop will (phase 7), once, by hand",
@@ -168,7 +168,7 @@
     },
     "verify.estop-drill-failed": {
       "phase": "verify",
-      "trigger": "During the drill the gateway accepted a new job for the stopped kernel, or the device did not stop.",
+      "trigger": "During the drill the stop did not read STOPPED, or the device did not stop on its own command.",
       "do": "Stop onboarding and report exactly what happened. Clear the stop only after the human confirms the device is safe.",
       "file": "06-verify.md",
       "section": "1. Read the stop, and drill it, before anything runs",
@@ -226,12 +226,12 @@
         "outcome": "abandoned"
       }
     },
-    "verify.gateway-runs-it": {
+    "verify.test-job-blocked": {
       "phase": "verify",
-      "trigger": "GET /api/setup/detect lists a real (non-mock) device under kernelService.devices, or POST /api/jobs/submit answered with a deviceId or a status other than queued.",
-      "do": "Don't submit, or don't run what was submitted: the gateway could start the job on its own devices, before any check. Report what it showed.",
+      "trigger": "The gateway offers no server-enforced queue-only submission (true of every current gateway).",
+      "do": "Don't submit a test job: /api/jobs/submit can start it on the gateway's own devices before any check. Report verify blocked; the drill's result stands.",
       "file": "06-verify.md",
-      "section": "2. Be your own test buyer, with no money involved",
+      "section": "2. The test job: blocked on the current gateway",
       "report": {
         "phase": "verify",
         "outcome": "blocked"
@@ -239,7 +239,7 @@
     },
     "verify.stop-not-clear": {
       "phase": "verify",
-      "trigger": "The stop does not read CLEAR after the drill's resume, before submitting, or immediately before the run.",
+      "trigger": "The stop does not read CLEAR after the drill's resume, or immediately before a run.",
       "do": "Don't submit and don't run. Report what the policy read showed.",
       "file": "06-verify.md",
       "section": "1. Read the stop, and drill it, before anything runs",
@@ -250,10 +250,10 @@
     },
     "verify.money-attached": {
       "phase": "verify",
-      "trigger": "The test job's GET /api/jobs/<jobId>/settlement shows a session or an escrow.",
+      "trigger": "Once a queue-only submission exists: the test job's GET /api/jobs/<jobId>/settlement shows a session or an escrow.",
       "do": "Don't run it: it is not a test job. Report what the settlement showed.",
       "file": "06-verify.md",
-      "section": "2. Be your own test buyer, with no money involved",
+      "section": "2. The test job: blocked on the current gateway",
       "report": {
         "phase": "verify",
         "outcome": "blocked"

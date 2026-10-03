@@ -133,7 +133,7 @@ class TestTruths(unittest.TestCase):
                     self.assertIn('"publicKey"', before, f"{path.name}: provision without publicKey")
                 else:
                     self.assertIn('\\"publicKey\\"', after, f"{path.name}: provision without publicKey")
-        self.assertEqual(calls, 2)
+        self.assertEqual(calls, 1)  # the operator's own; phase 6's buyer key went with its submission (115e)
 
     def test_no_key_is_expanded_onto_a_command_line(self):
         # A key in argv is readable by every user of the machine (ps, /proc/<pid>/cmdline).
@@ -247,7 +247,7 @@ class TestRound3(unittest.TestCase):
                 self.assertNotIn("curl", line)
                 self.assertRegex(line, r"(?i)don't|never", line)
         self.assertNotIn("testnet-mock", verify)
-        self.assertIn("/api/jobs/submit", between(verify, "## 2.", "## 3."))  # the buyer section (renumbered in round 4)
+        self.assertNotRegex(verify, r"curl[^\n]*/api/jobs/submit")  # no test job is submitted (115e)
         phases = {p["id"]: p for p in self.book["phases"]}
         self.assertNotRegex(json.dumps(phases["verify"]), r"(?i)quote equals|at the human's price")
         self.assertNotIn("verify.price-mismatch", self.index["events"])
@@ -296,24 +296,50 @@ class TestRound4(unittest.TestCase):
         # C1: phase 6 ran the device before its first policy read.
         verify = phase_text("06-verify.md")
         first_check = verify.index(self.CHECK)
-        self.assertLess(first_check, verify.index("/api/jobs/submit"))
         self.assertLess(first_check, verify.index("POST $DEV/runs"))
         run_step = between(verify, "5. **Read the stop, then run.**", "6. **")
         self.assertLess(run_step.index("CLEAR"), run_step.index("POST $DEV/runs"))
         self.assertRegex(between(phase_text("07-operate.md"), "5. **", "6. **"), r"immediately before the run")
 
     def test_the_gateway_cannot_run_the_test_job_itself(self):
-        # C2: /api/jobs/submit starts the job at once on the gateway's own local kernel.
-        submit = between(phase_text("06-verify.md"), "## 2.", "## 3.")
-        self.assertLess(submit.index("/api/setup/detect"), submit.index('"$BASE/api/jobs/submit"'))
-        self.assertIn("adapterType", submit)
-        self.assertRegex(submit, r"get\('deviceId'\) is None")
-        self.assertNotRegex(submit, r"(?i)creates a queued job for your kernel and nothing else")
+        # C2 (115d, 115e): no runbook check can prove /api/jobs/submit will not start a job, so none is submitted.
+        verify = phase_text("06-verify.md")
+        for route in ("/api/jobs/submit", "submit-from-discovery", "/commit", "/api/job-offers"):
+            self.assertNotRegex(verify, rf"curl[^\n]*{route}", route)
+        self.assertNotRegex(verify, r"(?i)creates a queued job for your kernel and nothing else")
 
     def test_the_drill_claims_only_what_it_shows(self):
         # The current gateway queues a job for a stopped kernel; nothing may say it refuses one.
         for path, text in text_files():
             self.assertNotRegex(text, r"(?i)gateway (should )?refuse[sd]? (it|a new job|new jobs)", path.name)
+
+
+class TestRound5(unittest.TestCase):
+    """Verdict 115e on #464: each of these failed at 487ab597."""
+
+    def setUp(self):
+        self.index = json.loads((RUNBOOK / "index.json").read_text(encoding="utf-8"))
+
+    def test_no_test_job_is_submitted_and_the_phase_says_so(self):
+        # C2: /api/setup/detect omits DB-loaded runners, so no pre-submit check is sound.
+        # No command anywhere creates a job, continued lines included.
+        for path, text in text_files():
+            joined = text.replace("\\\n", " ")
+            for route in ("/api/jobs/submit", "submit-from-discovery", "/api/setup/test-job", "/api/job-offers", "/commit"):
+                self.assertNotRegex(joined, rf"curl[^\n]*{route}", f"{path.name}: {route}")
+        verify = phase_text("06-verify.md")
+        self.assertNotIn("/api/setup/detect\" -H", verify)
+        self.assertRegex(between(verify, "## 2.", "## 3."), r"bin/pcc-report verify blocked")
+        self.assertIn("verify.test-job-blocked", self.index["events"])
+
+    def test_the_drill_event_does_not_fail_on_documented_gateway_behaviour(self):
+        # MEDIUM: the gateway queues a job for a stopped kernel; that is not a drill failure.
+        trigger = self.index["events"]["verify.estop-drill-failed"]["trigger"]
+        self.assertNotRegex(trigger, r"(?i)accepted a new job")
+
+    def test_phase_7_points_at_the_envelope_check_where_it_is(self):
+        # LOW: phase 6's sections were renumbered in round 4.
+        self.assertNotIn("phase 6 step 2.", phase_text("07-operate.md"))
 
 
 if __name__ == "__main__":
