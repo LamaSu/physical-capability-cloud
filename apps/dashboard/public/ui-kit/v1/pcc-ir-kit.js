@@ -1392,9 +1392,10 @@
       if (row === null || typeof row !== "object") continue;
       const titleRead = readListField(row, rowTitle);
       if (titleRead.ok && titleRead.text === "") continue;
-      const metaCells = rowMeta.map((field) => ({ field, read: readListField(row, field) })).filter((c) => !(c.read.ok && c.read.text === ""));
+      const isAbsent = (c) => c.read.ok && c.read.text === "";
+      const metaCells = rowMeta.map((field) => ({ field, read: readListField(row, field) }));
       const statusReadRaw = statusFrom ? readListField(row, statusFrom) : null;
-      const statusCell = statusReadRaw && !(statusReadRaw.ok && statusReadRaw.text === "") ? { field: statusFrom, read: statusReadRaw } : null;
+      const statusCell = statusReadRaw ? { field: statusFrom, read: statusReadRaw } : null;
       const titleCell = { field: rowTitle, read: titleRead };
       const allCells = statusCell ? [titleCell, ...metaCells, statusCell] : [titleCell, ...metaCells];
       const rowOk = allCells.every((c) => c.read.ok);
@@ -1404,8 +1405,9 @@
           const r = c.read.ok ? c.read.raw : void 0;
           return typeof r === "string" ? r : null;
         };
-        const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
-        const statusRaw = allCells.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r) => r !== null);
+        const present = allCells.filter((c) => !isAbsent(c));
+        const nonStatusCells = present.filter((c) => !isStatusKind(c.field));
+        const statusRaw = present.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r) => r !== null);
         const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
         const isAttributedKind = (field) => {
           const k = LIST_FIELD_KINDS[field];
@@ -1422,11 +1424,11 @@
       line.appendChild(el(doc, CLS.heading, texts.get(titleCell), true));
       for (const c of metaCells) {
         line.appendChild(el(doc, CLS.fieldname, listFieldLabel(c.field) + ":"));
-        line.appendChild(el(doc, CLS.meta, texts.get(c), true));
+        line.appendChild(rowOk && isAbsent(c) ? el(doc, CLS.meta + " " + CLS.absent, "not reported") : el(doc, CLS.meta, texts.get(c), true));
       }
       if (statusCell) {
         line.appendChild(el(doc, CLS.fieldname, listFieldLabel(statusFrom) + ":"));
-        line.appendChild(el(doc, CLS.badge, texts.get(statusCell), true));
+        line.appendChild(rowOk && isAbsent(statusCell) ? el(doc, CLS.badge + " " + CLS.absent, "not reported") : el(doc, CLS.badge, texts.get(statusCell), true));
       }
       listEl.appendChild(line);
       shown++;

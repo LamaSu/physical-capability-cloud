@@ -458,11 +458,13 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
     const titleRead = readListField(row, rowTitle);
     if (titleRead.ok && titleRead.text === "") continue; // drop row: title ABSENT (never a mistyped one)
 
-    const metaCells: Cell[] = rowMeta
-      .map((field) => ({ field, read: readListField(row, field) }))
-      .filter((c) => !(c.read.ok && c.read.text === "")); // an absent meta field is simply not shown
+    // A selected field the row lacks is shown as explicitly ABSENT ("not reported"), never silently
+    // omitted (#348 PX-4 review #2524: absence is not evidence). The marker is PCC's own text, so an
+    // absent cell never joins the backstop below.
+    const isAbsent = (c: Cell): boolean => c.read.ok && c.read.text === "";
+    const metaCells: Cell[] = rowMeta.map((field) => ({ field, read: readListField(row, field) }));
     const statusReadRaw = statusFrom ? readListField(row, statusFrom) : null;
-    const statusCell: Cell | null = statusReadRaw && !(statusReadRaw.ok && statusReadRaw.text === "") ? { field: statusFrom, read: statusReadRaw } : null;
+    const statusCell: Cell | null = statusReadRaw ? { field: statusFrom, read: statusReadRaw } : null;
 
     const titleCell: Cell = { field: rowTitle, read: titleRead };
     const allCells = statusCell ? [titleCell, ...metaCells, statusCell] : [titleCell, ...metaCells];
@@ -487,8 +489,9 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
         const r = c.read.ok ? (c.read as { ok: true; raw: unknown }).raw : undefined;
         return typeof r === "string" ? r : null;
       };
-      const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
-      const statusRaw = allCells.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r): r is string => r !== null);
+      const present = allCells.filter((c) => !isAbsent(c));
+      const nonStatusCells = present.filter((c) => !isStatusKind(c.field));
+      const statusRaw = present.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r): r is string => r !== null);
       const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
       // Every ATTRIBUTED kind (text, id, capType) joins by its RAW value, never the "reported: " display,
       // so the inserted word cannot widen the pair window and hide a claim split across fields.
@@ -505,11 +508,11 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
     line.appendChild(el(doc, CLS.heading, texts.get(titleCell)!, true));
     for (const c of metaCells) {
       line.appendChild(el(doc, CLS.fieldname, listFieldLabel(c.field) + ":"));
-      line.appendChild(el(doc, CLS.meta, texts.get(c)!, true));
+      line.appendChild(rowOk && isAbsent(c) ? el(doc, CLS.meta + " " + CLS.absent, "not reported") : el(doc, CLS.meta, texts.get(c)!, true));
     }
     if (statusCell) {
       line.appendChild(el(doc, CLS.fieldname, listFieldLabel(statusFrom) + ":"));
-      line.appendChild(el(doc, CLS.badge, texts.get(statusCell)!, true));
+      line.appendChild(rowOk && isAbsent(statusCell) ? el(doc, CLS.badge + " " + CLS.absent, "not reported") : el(doc, CLS.badge, texts.get(statusCell)!, true));
     }
     listEl.appendChild(line);
     shown++;
