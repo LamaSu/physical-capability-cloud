@@ -296,11 +296,26 @@ export function boundValueText(field: string, value: string): string {
 // A list may show ONLY these fields of each allowlisted collection route; a selector is never
 // "safe because it parses". Money amounts, prices and payment state are not listable: they
 // appear only in schema cards. Escrow is not a list route at all.
-export const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
-  "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
-  "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
-  "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] },
+// `rows` is the route's own array key (genui review of #344 r5, derived from the real producers by
+// route inject): GET /api/jobs answers { jobs: [...] }, /api/kernels { kernels: [...] }, and
+// /api/capabilities { items: [...] }. The binder used to guess `.items`, so job and kernel lists
+// never showed a row.
+export const LIST_PROFILES: Readonly<Record<string, { rows: string; title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
+  "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+  "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
+  "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] },
 };
+/** The rows of a list response, read by the route's PCC-owned rows key (an own property; never a
+ * manifest selector). A bare array is accepted as is; anything else gives no rows. */
+export function listRowsOf(path: string, data: unknown): unknown[] {
+  if (Array.isArray(data)) return data;
+  const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path]!.rows : undefined;
+  if (key && data !== null && typeof data === "object" && Object.prototype.hasOwnProperty.call(data, key)) {
+    const v = (data as Record<string, unknown>)[key];
+    if (Array.isArray(v)) return v;
+  }
+  return [];
+}
 
 // ── A closed TYPE for every list field (the structural boundary; astra r4 on #344) ───────
 // The list row stops relying on selector NAMES: every field ANY LIST_PROFILES entry allows

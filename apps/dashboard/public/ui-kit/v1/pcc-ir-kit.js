@@ -363,10 +363,19 @@
     return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
   }
   var LIST_PROFILES = {
-    "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
-    "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
-    "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] }
+    "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+    "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
+    "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] }
   };
+  function listRowsOf(path, data) {
+    if (Array.isArray(data)) return data;
+    const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path].rows : void 0;
+    if (key && data !== null && typeof data === "object" && Object.prototype.hasOwnProperty.call(data, key)) {
+      const v = data[key];
+      if (Array.isArray(v)) return v;
+    }
+    return [];
+  }
   var LIST_FIELD_KINDS = {
     id: "id",
     capabilityId: "id",
@@ -1670,7 +1679,7 @@
       const el2 = listEls[i];
       if (!el2) return;
       push(startBind(node, deps, (data) => {
-        const rows = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.items) ? data.items : [];
+        const rows = listRowsOf(String(node.bind?.path ?? ""), data);
         el2.replaceChildren();
         bindListRows(rdoc, wrapEl(el2), node, rows);
       }));

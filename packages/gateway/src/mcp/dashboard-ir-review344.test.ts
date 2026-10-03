@@ -260,7 +260,9 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
     const byPath: Record<string, unknown> = {
       "/api/jobs/j1/status": { status: "settled", progress: 100 },
       "/api/jobs/j2": { job: { status: "SETTLED_RELEASED", progress: 100 } },
-      "/api/jobs": { items: [{ id: "j3", kernelId: "k1", status: "released" }, { id: "j4", kernelId: "k1", status: "running" }] },
+      // The REAL GET /api/jobs answers { jobs: [...] } (route inject: dashboard-ir-list-producers.test.ts);
+      // this fixture said { items: [...] }, which passed only because the binder used to guess `.items`.
+      "/api/jobs": { jobs: [{ id: "j3", kernelId: "k1", status: "released" }, { id: "j4", kernelId: "k1", status: "running" }] },
     };
     w.fetch = (url: string) => {
       const body = byPath[new URL(String(url)).pathname];

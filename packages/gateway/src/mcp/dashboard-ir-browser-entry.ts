@@ -23,7 +23,7 @@
  * Exposes NO host-call interface; contains NONE of tools/call, __PCC_HOST_BRIDGE__,
  * __PCC_HOST_OPERATIONS__, capability registration, or a write transport.
  */
-import { dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
+import { dashboardManifestToIr, listRowsOf, validateIr } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
 import { bootIrView, bindScalar, bindListRows, bindSchemaCard } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
@@ -225,7 +225,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     push(startBind(node, deps, (data) => bindSchemaCard(schema, data, slots)));
   });
   lists.forEach((node, i) => { const el = listEls[i]; if (!el) return; push(startBind(node, deps, (data) => {
-    const rows = Array.isArray(data) ? data : (data && typeof data === "object" && Array.isArray((data as { items?: unknown }).items) ? (data as { items: unknown[] }).items : []);
+    const rows = listRowsOf(String(node.bind?.path ?? ""), data); // the route's own rows key
     el.replaceChildren(); bindListRows(rdoc, wrapEl(el) as unknown as RElement, node, rows);
   })); });
 }
