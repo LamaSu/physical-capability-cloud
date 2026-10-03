@@ -248,6 +248,7 @@ describe("JobRunner's setup, and the latch's event label, whatever a collaborato
     const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-ft-hook", stepId: STEP, gcodeHash: gcode(53), assuranceTier: 1 }));
     expect.soft(out.rejected, "run() rejected").toBeUndefined();
     expect.soft(out.value?.success, "success").toBe(false);
+    expect.soft(out.value?.error, "why").toBe("the run's adapters could not be checked: a reason with no text form");
     expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
   });
 
@@ -292,3 +293,143 @@ describe("JobRunner's setup, and the latch's event label, whatever a collaborato
     expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
   });
 });
+
+describe("run() is total, and what it takes is released even when a release throws (astra pack 212)", () => {
+  /** An emitter whose registerStep registers and then throws, once. */
+  class PartialEmitter extends EvidenceEmitter {
+    failOnce = true;
+    beforeThrow: () => void = () => {};
+    override registerStep(jobId: string, stepId: string, tier: Parameters<EvidenceEmitter["registerStep"]>[2]): void {
+      super.registerStep(jobId, stepId, tier);
+      if (this.failOnce) {
+        this.failOnce = false;
+        this.beforeThrow();
+        throw new Error("registry wedged");
+      }
+    }
+  }
+
+  it("a sensor list whose iterator throws: run() resolves with a failure", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const sensors = new Proxy([] as SensorAdapter[], {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator) throw Object.create(null);
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const out = await catchingUnhandled(() => new JobRunner(testMachine("m-212-iter"), sensors, null, emitter).run({ jobId: "job-212-iter", stepId: STEP, gcodeHash: gcode(81), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.success, "success").toBe(false);
+    expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
+  });
+
+  it("a failed run whose started sensor's stop throws and whose id cannot be read: the stop is logged, and run() resolves", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("m-212-stop");
+    machine.failing = "start";
+    const sensor = {
+      type: "power_monitor",
+      source: { deviceId: "sensor-212-stop", deviceType: "power_monitor", kernelId: KERNEL_ID },
+      startRecording: async () => {},
+      stopRecording: () => {
+        throw new Error("stop failed");
+      },
+      getCurrentReading: async () => ({}),
+      onEvidence: () => {},
+      quiesceEvidence: async () => {},
+      dispose: async () => {},
+    } as unknown as SensorAdapter;
+    Object.defineProperty(sensor, "id", {
+      get: () => {
+        throw Object.create(null);
+      },
+    });
+    const out = await catchingUnhandled(() => new JobRunner(machine, [sensor], null, emitter).run({ jobId: "job-212-stop", stepId: STEP, gcodeHash: gcode(82), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.success, "success").toBe(false);
+    expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
+    expect.soft(console.error, "the failed stop, logged").toHaveBeenCalledWith(expect.stringMatching(/stopping sensor \(unreadable id\) after a failed run/), expect.anything());
+  });
+
+  it("registerStep registers and then throws: the run fails with a result, and the same step then runs", async () => {
+    const emitter = new PartialEmitter(KERNEL_ID);
+    const machine = testMachine("m-212-partial");
+    const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-partial", stepId: STEP, gcodeHash: gcode(83), assuranceTier: 1 }));
+    expect.soft(out.value?.error, "why").toBe("the run's step could not be registered: registry wedged");
+    const again = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-partial", stepId: STEP, gcodeHash: gcode(83), assuranceTier: 1 });
+    expect.soft(again.success, "the same step, run again").toBe(true);
+  });
+
+  it("session.close() throws while a failed registration releases: the step and its lease are still released", async () => {
+    const emitter = new PartialEmitter(KERNEL_ID);
+    const machine = testMachine("m-212-close");
+    let hostile = false;
+    const ownId = machine.id;
+    Object.defineProperty(machine, "id", {
+      get: () => {
+        if (hostile) throw Object.create(null); // the session's close reads it
+        return ownId;
+      },
+    });
+    emitter.beforeThrow = () => {
+      hostile = true;
+    };
+    const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-close", stepId: STEP, gcodeHash: gcode(84), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.error, "why").toBe("the run's step could not be registered: registry wedged");
+    hostile = false;
+    const again = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-close", stepId: STEP, gcodeHash: gcode(84), assuranceTier: 1 });
+    expect.soft(again.success, "the same step, run again").toBe(true);
+  });
+
+  it("cleanup() throws while a failed registration releases: the lease is still released, and the same step then runs", async () => {
+    const emitter = new PartialEmitter(KERNEL_ID);
+    const machine = testMachine("m-212-reg-cleanup");
+    vi.spyOn(emitter, "cleanup").mockImplementationOnce(() => {
+      throw Object.create(null);
+    });
+    const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-reg-cleanup", stepId: STEP, gcodeHash: gcode(87), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.error, "why").toBe("the run's step could not be registered: registry wedged");
+    expect.soft(console.error, "the failed release, logged").toHaveBeenCalledWith(expect.stringMatching(/job job-212-reg-cleanup: detaching the step failed: a reason with no text form/));
+    const again = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-reg-cleanup", stepId: STEP, gcodeHash: gcode(87), assuranceTier: 1 });
+    expect.soft(again.success, "the same step, run again").toBe(true);
+  });
+
+  it("a job id that is not text: refused before anything is held, so its machine runs the next job", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("m-212-ids");
+    // Text once, then a throw: without the check, the run's session opens on the first read
+    // and a later read (its lease, or a cleanup log) throws while the machine is claimed.
+    let reads = 0;
+    const jobId = {
+      toString() {
+        if (++reads > 1) throw Object.create(null);
+        return "job-212-ids";
+      },
+    } as unknown as string;
+    const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId, stepId: STEP, gcodeHash: gcode(86), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.error, "why").toBe("the run's job id and step id must be text");
+    expect.soft(reads, "the id was never read as text").toBe(0);
+    const next = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-ids-next", stepId: STEP, gcodeHash: gcode(86), assuranceTier: 1 });
+    expect.soft(next.success, "the machine's next job").toBe(true);
+  });
+
+  it("cleanup() throws in the final release of a failed run: run() resolves, and the step's lease is still released", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("m-212-cleanup");
+    machine.failing = "start";
+    vi.spyOn(emitter, "cleanup").mockImplementationOnce(() => {
+      throw Object.create(null);
+    });
+    const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-cleanup", stepId: STEP, gcodeHash: gcode(85), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.error, "why: the run's own failure").toBe("Failed to start: start refused");
+    expect.soft(console.error, "the failed release, logged").toHaveBeenCalledWith(expect.stringMatching(/job job-212-cleanup: detaching the step failed: a reason with no text form/));
+    machine.failing = null;
+    const again = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-cleanup", stepId: STEP, gcodeHash: gcode(85), assuranceTier: 1 });
+    expect.soft(again.success, "the same step, run again").toBe(true);
+  });
+});
+
