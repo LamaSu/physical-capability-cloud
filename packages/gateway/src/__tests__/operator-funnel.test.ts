@@ -805,6 +805,31 @@ describe("#469 round-1 fixes", () => {
     expect(passed()).toHaveLength(0);
   });
 
+  // Each of the two tests below passes #450's route (passed:true), so only its
+  // own funnel condition keeps test_job_passed out: removing that condition
+  // from setup.ts fails exactly that test (merge-up review, MEDIUM).
+  it("F1d: a passed run whose job reports a device of ANOTHER kernel does not count", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-nyc-real", ...OCTO_DEVICE } });
+    getRepos().kernels.insertDevice({
+      id: "dev-la-foreign", kernelId: "kernel-la", type: "machine", model: "Real Printer", firmware: "unknown",
+      status: "idle", contributesToCapabilities: [], lastUpdated: new Date().toISOString(),
+      adapterType: "octoprint", capabilities: [], healthStatus: "healthy",
+    });
+    _mockService.submitJob.mockResolvedValue({ jobId: "j", deviceId: "dev-la-foreign", status: "accepted" });
+    const res = await app.inject({ method: "POST", url: "/api/setup/test-job", payload: { kernelId: "kernel-nyc", deviceId: "dev-nyc-real" } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: "completed", passed: true, deviceId: "dev-la-foreign" });
+    expect(passed()).toHaveLength(0);
+  });
+
+  it("F1e: a passed run on a generic-http (placeholder) device does not count", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-generic", type: "machine", model: "Generic", adapterType: "generic-http", adapterConfig: { url: "http://192.168.1.60:8080" } } });
+    const res = await testJob("kernel-nyc", "dev-generic");
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: "completed", passed: true, deviceId: "dev-generic" });
+    expect(passed()).toHaveLength(0);
+  });
+
   it("F1: a real device of the named kernel still counts, attributed to the operator", async () => {
     await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-ok", ...OCTO_DEVICE } });
     await testJob("kernel-nyc", "dev-ok");
