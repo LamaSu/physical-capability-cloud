@@ -583,89 +583,38 @@ def test_the_package_imports_only_what_it_lists():
     assert used == ALLOWED_IMPORTS
 
 
-# The reviewed Landlock surface in _landlock.py: the only ctypes names it may use, and the only
-# attributes it may call on the libc handle. Anything else fails the bounding test (verdict 105n MED2).
-LANDLOCK_CTYPES_NAMES = {"CDLL", "Structure", "byref", "c_int", "c_int32", "c_long", "c_size_t",
-                         "c_uint32", "c_uint64", "get_errno", "set_errno"}
-LANDLOCK_LIBC_ATTRS = {"syscall", "prctl", "restype", "argtypes"}
+# _landlock.py is the ONE module that may use ctypes (there is no stdlib Landlock API). Three rounds of
+# alias bypasses against a pattern allowlist (MED2 r1-r3: CDLL().system, aliased results via
+# AnnAssign/walrus/return, then an aliased CDLL constructor) showed that enumerating safe/unsafe ctypes
+# forms is whack-a-mole, so the module is PINNED instead (steward #5535): any change to _landlock.py
+# fails the test until a reviewer updates the digest, so no reach -- ctypes or otherwise -- can be added
+# without review. The pin is a content digest (a strict superset of the AST); ast.dump is not stable
+# across Python versions, so a byte digest is used (it also forces review of comment changes, which for
+# this one trusted bootstrap module is acceptable). Regenerate after a reviewed change:
+#   python3 -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('pcc_node/_landlock.py').read_bytes()).hexdigest())"
+# The reviewed surface it currently pins: `import ctypes`; one `libc = ctypes.CDLL(None, use_errno=True)`
+# handle used only for `libc.syscall` / `libc.prctl`; and ctypes value types (Structure, byref,
+# c_int/c_int32/c_long/c_size_t/c_uint32/c_uint64, get_errno/set_errno) for the Landlock structs.
+LANDLOCK_SHA256 = "c7b2b94249abe9ea7a3e85f248c517845993f493bddffe20087c1f86d8090019"
 
 
-def test_landlock_module_uses_ctypes_only_for_landlock():
-    # _landlock.py is the ONE module allowed ctypes (no stdlib Landlock API; steward ruling 10/03). The
-    # exemption is scoped AND bounded: the normal no-shell scan still runs over the module -- only the
-    # `import ctypes` refusal is waived -- and the ctypes surface is pinned. So os.system, a named
-    # dlopen, or `CDLL(None).system(...)` added to this file are all still caught (verdict 105n MED2).
-    source = LANDLOCK_SOURCE.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-
-    # (1) imports: only ALLOWED_IMPORTS plus ctypes; the ONLY waived import-violation is ctypes.
+def test_landlock_module_is_pinned():
+    import hashlib
+    raw = LANDLOCK_SOURCE.read_bytes()
+    source = raw.decode("utf-8")
+    # (1) Semantic guards -- a clearer failure than a digest mismatch for the common cases, and they
+    #     hold the line on imports and the no-shell rules (only the `import ctypes` refusal is waived).
     assert imported_modules(source) <= ALLOWED_IMPORTS | {"ctypes"}, imported_modules(source)
     assert import_violations(source) == ["imports ctypes, which ALLOWED_IMPORTS does not list"]
-
-    # (2) the FULL no-shell scan runs over the module; the only violation it may report is that same
-    #     `import ctypes`. os.system / eval / exec / subprocess / a shell start are still flagged,
-    #     because only the import line is exempt -- not the whole module.
     extra = [v for v in violations(source, str(LANDLOCK_SOURCE)) if not v.endswith(": import ctypes")]
     assert extra == [], f"_landlock.py has violations beyond the ctypes import: {extra}"
-
-    # (3) ctypes is reached only via the reviewed Landlock names (no ctypes.util, no ctypes.pythonapi).
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "ctypes":
-            assert node.attr in LANDLOCK_CTYPES_NAMES, f"ctypes.{node.attr} is outside the Landlock surface"
-
-    # (4) No dynamic attribute access: getattr/hasattr can reach a libc method by a constant name the
-    #     general scanner does not reject (`getattr(ctypes.CDLL(None), "system")`). _landlock.py has no
-    #     legitimate use of them, so forbid them outright.
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id in ("getattr", "hasattr"):
-            assert False, "_landlock.py must not use getattr/hasattr (a constant-name reach past the surface)"
-
-    # (5) Robust libc-handle analysis (verdict 105p MED2). Rather than enumerate the ways a handle can
-    #     flow (Assign / AnnAssign / walrus / default arg / container / return), require every CDLL()
-    #     result to appear ONLY in an approved position, and every handle name to be used ONLY as the
-    #     receiver of an allowed attribute. Any other flow is refused -- so `CDLL(None).system(...)`,
-    #     `alias: object = CDLL(None); alias.system(...)`, `(alias := CDLL(None)).system(...)`,
-    #     `alias = libc; alias.system(...)`, `f(libc)`, `return libc`, `[libc]` are all rejected.
-    parent = {}
-    for n in ast.walk(tree):
-        for c in ast.iter_child_nodes(n):
-            parent[id(c)] = n
-
-    def _is_cdll_call(n):
-        return (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "CDLL"
-                and isinstance(n.func.value, ast.Name) and n.func.value.id == "ctypes")
-
-    def _is_allowed_attr_receiver(n):  # n's parent reads one of the allowed libc attributes off n
-        p = parent.get(id(n))
-        return isinstance(p, ast.Attribute) and p.value is n and p.attr in LANDLOCK_LIBC_ATTRS
-
-    # (5a) ctypes.CDLL (the constructor) may appear ONLY as the direct callee of a call -- never bound,
-    #      passed, aliased, or returned -- so `factory = ctypes.CDLL; factory(None).system(...)` cannot
-    #      smuggle a handle past the result/handle checks below (verdict 105q MED2).
-    for n in ast.walk(tree):
-        if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-                and n.value.id == "ctypes" and n.attr == "CDLL"):
-            p = parent.get(id(n))
-            assert isinstance(p, ast.Call) and p.func is n, \
-                "ctypes.CDLL must be called directly, never bound or aliased"
-
-    handle_names = set()
-    for n in ast.walk(tree):
-        if not _is_cdll_call(n):
-            continue
-        arg = n.args[0] if n.args else None
-        assert isinstance(arg, ast.Constant) and arg.value is None, "ctypes.CDLL must be CDLL(None) only"
-        p = parent.get(id(n))
-        if isinstance(p, ast.Assign) and len(p.targets) == 1 and isinstance(p.targets[0], ast.Name):
-            handle_names.add(p.targets[0].id)            # libc = ctypes.CDLL(None)
-        elif _is_allowed_attr_receiver(n):
-            pass                                         # ctypes.CDLL(None).syscall(...), direct
-        else:
-            assert False, f"ctypes.CDLL(...) result flows to an unapproved position ({type(p).__name__})"
-
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in handle_names:
-            assert _is_allowed_attr_receiver(n), f"libc handle {n.id!r} is used outside an allowed attribute access"
+    # (2) The airtight backstop -- the module content is pinned, so ANY edit (a new ctypes reach, an
+    #     aliased CDLL constructor, a dlopen, anything) changes the digest and fails here until reviewed.
+    #     This ends the alias whack-a-mole: there is no pattern allowlist left to bypass (verdict 105q
+    #     MED2 r3; steward #5535).
+    digest = hashlib.sha256(raw).hexdigest()
+    assert digest == LANDLOCK_SHA256, (
+        f"_landlock.py changed -- review the change, then set LANDLOCK_SHA256 = {digest!r}")
 
 
 def test_the_allowlist_is_what_the_package_runs():
