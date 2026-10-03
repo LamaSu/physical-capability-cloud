@@ -150,8 +150,6 @@ interface Rule {
 
 /** The global object, by its three names. */
 const GLOBAL_NAMES = new Set(["window", "globalThis", "self"]);
-/** Objects whose properties our modules read but never replace. */
-const WRITE_ROOTS = new Set([...GLOBAL_NAMES, "navigator", "document"]);
 /** Writes that replace nothing a key passes through: navigation, and Google Analytics' bootstrap (lib/telemetry.ts). */
 const GLOBAL_WRITES_ALLOWED = new Set(["window.location.href", "window.dataLayer", "window.gtag"]);
 /** Properties that hand back a window. */
@@ -200,23 +198,6 @@ function spelled(n: ts.Node): string | null {
     return text;
   }
   return null;
-}
-
-/** The identifier an access chain starts from: window in window.a.b or window["a"].b. */
-function rootOf(n: ts.Node): ts.Node {
-  let e = n;
-  while (
-    ts.isPropertyAccessExpression(e) ||
-    ts.isElementAccessExpression(e) ||
-    ts.isParenthesizedExpression(e) ||
-    ts.isNonNullExpression(e) ||
-    ts.isAsExpression(e) ||
-    ts.isTypeAssertionExpression(e) ||
-    ts.isSatisfiesExpression(e)
-  ) {
-    e = e.expression; // a cast doesn't change the value
-  }
-  return e;
 }
 
 const isAssignment = (k: ts.SyntaxKind) => k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
@@ -553,13 +534,9 @@ const RULES: Rule[] = [
         if (identityRead(n)) return true;
         // And whatever a name came to hold, no mutation API or property write may change a protected object through it.
         if (changesProtectedObject(n, sf) && !(ts.isBinaryExpression(n) && GLOBAL_WRITES_ALLOWED.has(n.left.getText(sf).replace(/\s+/g, "")))) return true;
-        if (!ts.isBinaryExpression(n) || !isAssignment(n.operatorToken.kind)) return false;
-        const target = n.left;
-        if (ts.isIdentifier(target)) return target.text === "fetch";
-        if (GLOBAL_WRITES_ALLOWED.has(target.getText(sf).replace(/\s+/g, ""))) return false;
-        const root = rootOf(target);
-        // A global's property, or a built-in's (Headers.prototype.set = …): replaced for every request.
-        return ts.isIdentifier(root) && (WRITE_ROOTS.has(root.text) || BUILTINS.has(root.text));
+        // fetch itself, replaced by name. (A property of a global or a built-in, Headers.prototype.set = …, is the
+        // mutation-target check's above: its roots are the same objects, followed through aliases too.)
+        return ts.isBinaryExpression(n) && isAssignment(n.operatorToken.kind) && ts.isIdentifier(n.left) && n.left.text === "fetch";
       }),
     fix: "Don't replace fetch, a global's property or a prototype's method, and don't hold, pass or store navigator, document, a built-in or its prototype: the key passes through them.",
   },
@@ -839,6 +816,7 @@ describe("the rules catch each known way around them (self-test)", () => {
     ["a read returning its receiver", "const nav = navigator.valueOf();"],
     ["a method called on a built-in's prototype", "Array.prototype.reverse();"],
     ["a walk to the document", "const d = document.documentElement.parentNode;"],
+    ["the read-only rule, through window", "const nav = window.navigator;"],
     ["the mutation-target check, through a member read", "const c = navigator.clipboard;\nc.writeText = observe;"],
     ["the mutation-target check, through a mutation API", 'const l = navigator.locks;\nObject.defineProperty(l, "request", { value: observe });'],
     ["the mutation-target check, through an alias chain", "const c = navigator.clipboard;\nconst d = c;\ndelete d.writeText;"],
