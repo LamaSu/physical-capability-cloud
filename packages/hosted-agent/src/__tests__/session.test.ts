@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import { BudgetMeter, type BudgetCaps, type MessagesClient, type ModelPrice } from "../budget.js";
 import { loadPinnedPack, type PinnedPack } from "../pack.js";
 import type { ToolTransport } from "../tools.js";
+import { DEFAULT_TOOL_POLICY, type ToolPolicy } from "../policy.js";
 import { HostedSession, HOSTED_PREAMBLE, type AttemptReport, type SessionDeps } from "../session.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +28,30 @@ const tool = (name: string, method: string, path: string) => ({
   def: { name, description: name, input_schema: { type: "object" as const } },
   spec: { name, method, path },
 });
+/** Round 5 (239): TOOL_ALLOWLIST replaced the old read/write/l2/never name
+ * sets. These tests exercise the SESSION's mechanics (confirmation, scrub,
+ * outcome notes), not the real-world table (policy.test.ts owns that), so
+ * they get their own small policy naming exactly this file's synthetic pack
+ * tools -- a generous OutputSpec that does not interfere with what each test
+ * actually asserts (the scrub/projection pipeline itself is tools.test.ts'). */
+const TEST_FIELDS = {
+  ok: { type: "boolean" as const },
+  tool: { type: "string" as const, maxLength: 200 },
+  registered: { type: "boolean" as const },
+  apiKey: { type: "string" as const, maxLength: 200 },
+  note: { type: "string" as const, maxLength: 200 },
+  token: { type: "string" as const, maxLength: 200 },
+};
+const TEST_POLICY: ToolPolicy = {
+  allowlist: new Map([
+    ["list_jobs", { level: "read", reason: "test fixture", output: TEST_FIELDS }],
+    ["onboard_machine", { level: "write", reason: "test fixture", output: TEST_FIELDS }],
+    ["create_capability", { level: "l2", reason: "test fixture", output: TEST_FIELDS }],
+    ["get_dashboard", { level: "write", reason: "test fixture", output: TEST_FIELDS }],
+  ]),
+  never: new Set(["provision_api_key", "setup_test_job"]),
+};
+
 const PACK: PinnedPack = {
   version: "2.19.1",
   sha256: "a".repeat(64),
@@ -50,6 +75,7 @@ function harness(
     reported?: { version: string | undefined };
     toolResult?: unknown;
     packTools?: SessionDeps["packTools"];
+    policy?: ToolPolicy;
   } = {},
 ) {
   const pack = opts.pack ?? PACK;
@@ -82,6 +108,7 @@ function harness(
     connect,
     l2Enabled: false,
     report: (r) => void reports.push(r),
+    policy: opts.policy ?? TEST_POLICY,
     ...(opts.packTools ? { packTools: opts.packTools } : {}),
   };
   return { deps, requests, create, calls, transport, connect, reports };
@@ -243,10 +270,14 @@ describe("a failing or leaking tool never reaches the model or the caller unscru
     await s.send("list my jobs");
     expect(h.requests).toHaveLength(2);
     expect(JSON.stringify(h.requests)).not.toContain("pcc_live_abcdefgh12345678");
-    // the model still learns that the call failed, and why, in scrubbed words
+    // P1 (round 5, 239): the model learns only a CLOSED category, never the
+    // error's own message text -- "rejected" (the upstream wording) must be
+    // as absent as the secret; only "tool_failed" (no recognizable status
+    // on a plain thrown Error) may appear.
     const result = (h.requests[1]!.messages.at(-1)!.content as Array<{ is_error?: boolean; content: string }>)[0]!;
     expect(result.is_error).toBe(true);
-    expect(result.content).toContain("rejected");
+    expect(result.content).not.toContain("rejected");
+    expect(JSON.parse(result.content)).toEqual({ error: "tool_failed" });
   });
 
   it("Q1-C: the confirmation's result is scrubbed whatever the transport returns", async () => {
@@ -310,7 +341,7 @@ describe("a GET is a read only when it is reviewed to write nothing (Q3-C)", () 
 
   it("Q3-C: a listed passive read still runs directly, with nothing held", async () => {
     const pack = await realPack();
-    const h = harness({ pack, replies: [toolUse("list_capability_types", {}), text("Here they are.")] });
+    const h = harness({ pack, replies: [toolUse("list_capability_types", {}), text("Here they are.")], policy: DEFAULT_TOOL_POLICY });
     const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const turn = await s.send("what capability types exist?");
     expect(h.calls).toEqual([["list_capability_types", {}]]);

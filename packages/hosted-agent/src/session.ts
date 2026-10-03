@@ -16,6 +16,7 @@ import { LLMAgent, BudgetExceededError, validateToolNames } from "@pcc/agent-run
 import { BudgetStop, meteredClient, type BudgetMeter, type MessagesClient, type ModelPrice } from "./budget.js";
 import { ConfirmationGate, type HeldCall } from "./confirm.js";
 import type { PinnedPack } from "./pack.js";
+import { DEFAULT_TOOL_POLICY, type ToolPolicy } from "./policy.js";
 import { packTools, scrub, type ToolTransport } from "./tools.js";
 
 export const HOSTED_PREAMBLE = [
@@ -68,6 +69,12 @@ export interface SessionDeps {
   readonly l2Enabled: boolean;
   readonly report?: (report: AttemptReport) => void | Promise<void>;
   readonly now?: () => number;
+  /** Test-only seam: a synthetic policy for exercising the confirmation gate's
+   * read/write/l2/never mechanics without a real allowlisted write or L2 tool
+   * (round 5, 239's TOOL_ALLOWLIST ships PUBLIC READS ONLY; a future tool
+   * reviewed back into write/l2 still works with no change here). Defaults
+   * to the real DEFAULT_TOOL_POLICY in production. */
+  readonly policy?: ToolPolicy;
   /** Builds the session's GatedTools from the pinned pack and the transport.
    * Defaults to the real `packTools` (tools.ts), whose caller scrubs the
    * transport's result. Test-only seam (Q7): overriding this lets a test
@@ -133,10 +140,11 @@ export class HostedSession {
       const expected = `${deps.pack.version}+sha256.${deps.pack.sha256}`;
       const reported = transport.serverVersion?.();
       if (reported !== expected) throw new PackMismatch(expected, reported);
-      const gate = new ConfirmationGate({ now: deps.now });
+      const policy = deps.policy ?? DEFAULT_TOOL_POLICY;
+      const gate = new ConfirmationGate({ now: deps.now, policy });
       const served = new Set(await transport.listTools());
       const buildTools = deps.packTools ?? packTools;
-      const offered = gate.forSession(id, buildTools(deps.pack, transport, served), { l2Enabled: deps.l2Enabled });
+      const offered = gate.forSession(id, buildTools(deps.pack, transport, served, policy), { l2Enabled: deps.l2Enabled });
       // LLMAgent refuses reserved tool names (delete_*, fund_*, ...). The policy
       // never offers the ones it knows; any other is dropped here, never renamed.
       const defs = offered.defs.filter((d) => {

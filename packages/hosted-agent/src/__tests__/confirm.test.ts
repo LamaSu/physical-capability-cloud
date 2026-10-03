@@ -2,15 +2,22 @@ import { describe, it, expect, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import { LLMAgent } from "@pcc/agent-runtime";
 import { ConfirmationGate, ConfirmationRefused, type GatedTool } from "../confirm.js";
-import { DEFAULT_TOOL_POLICY, type ToolPolicy } from "../policy.js";
+import type { ToolPolicy } from "../policy.js";
 
 /** The gate's mechanics are tested on a small policy that names the test tools;
- * policy.test.ts tests the real table. */
+ * policy.test.ts tests the real table (round 5, 239: TOOL_ALLOWLIST, not
+ * separate read/write/l2 name sets -- `output` is unused by these tests, an
+ * empty projection is fine). */
 const TEST_POLICY: ToolPolicy = {
-  ...DEFAULT_TOOL_POLICY,
-  passiveReads: new Set(["list_open_jobs", "r"]),
-  write: new Set(["register_machine", "w", "d"]),
-  l2: new Set(["claim_job", "emergency_stop"]),
+  allowlist: new Map([
+    ["list_open_jobs", { level: "read", reason: "test fixture", output: {} }],
+    ["r", { level: "read", reason: "test fixture", output: {} }],
+    ["register_machine", { level: "write", reason: "test fixture", output: {} }],
+    ["w", { level: "write", reason: "test fixture", output: {} }],
+    ["d", { level: "write", reason: "test fixture", output: {} }],
+    ["claim_job", { level: "l2", reason: "test fixture", output: {} }],
+    ["emergency_stop", { level: "l2", reason: "test fixture", output: {} }],
+  ]),
   never: new Set(["relay_to_device"]),
 };
 
@@ -39,13 +46,12 @@ describe("what the model is offered", () => {
     expect(CLAIM.caller).not.toHaveBeenCalled();
   });
 
-  it("Q3-C: a GET that is not a reviewed passive read is held like a write, and not run", async () => {
+  it("P2 (round 5, 239): a GET that is not in the allowlist is never offered at all -- not held, not run, simply absent", () => {
     const unreviewed = tool("get_something", "GET", "/api/something");
-    const { callers } = new ConfirmationGate({ policy: TEST_POLICY }).forSession("s1", [unreviewed], { l2Enabled: false });
-    expect(Object.keys(callers)).toEqual(["get_something"]);
-    const out = await callers["get_something"]!({ q: 1 });
+    const { defs, callers } = new ConfirmationGate({ policy: TEST_POLICY }).forSession("s1", [unreviewed], { l2Enabled: false });
+    expect(defs).toEqual([]);
+    expect(callers).toEqual({});
     expect(unreviewed.caller).not.toHaveBeenCalled();
-    expect(out).toMatchObject({ status: "held_for_user_confirmation" });
   });
 
   it("a read runs at once; a write is held and not run", async () => {

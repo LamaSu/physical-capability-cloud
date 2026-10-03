@@ -5,6 +5,7 @@ import { BudgetMeter, type BudgetCaps, type MessagesClient } from "../budget.js"
 import type { PinnedPack } from "../pack.js";
 import type { ResolvePrincipal } from "../principal.js";
 import type { ToolTransport } from "../tools.js";
+import type { ToolPolicy } from "../policy.js";
 import { buildServer, errorCategory } from "../server.js";
 import { HostedSession, type SessionDeps } from "../session.js";
 
@@ -15,6 +16,29 @@ const PACK: PinnedPack = {
   sha256: "b".repeat(64),
   systemPrompt: "P",
   tools: [{ def: { name: "onboard_machine", description: "", input_schema: { type: "object" } }, spec: { name: "onboard_machine", method: "POST", path: "/api/onboard/register" } }],
+};
+/** Round 5 (239): TOOL_ALLOWLIST replaced the old name sets; this file tests
+ * the HTTP surface's mechanics, not the real-world table (policy.test.ts
+ * owns that), so "onboard_machine" gets its own small policy entry with a
+ * generous OutputSpec covering every shape this file's tests inject. */
+const TEST_POLICY: ToolPolicy = {
+  allowlist: new Map([
+    [
+      "onboard_machine",
+      {
+        level: "write",
+        reason: "test fixture",
+        output: {
+          ok: { type: "boolean" },
+          registered: { type: "boolean" },
+          apiKey: { type: "string", maxLength: 200 },
+          note: { type: "string", maxLength: 200 },
+          token: { type: "string", maxLength: 200 },
+        },
+      },
+    ],
+  ]),
+  never: new Set(),
 };
 const text = (t: string) => ({ stop_reason: "end_turn", content: [{ type: "text", text: t }], usage: { input_tokens: 1, output_tokens: 1 } });
 // A model's tool_use ids are unique within a conversation; so are the scripted ones.
@@ -87,6 +111,7 @@ function setup(
       reports.push(r);
     },
     now: () => clock.t,
+    policy: TEST_POLICY,
   };
   const app = buildServer({
     deps,
@@ -139,8 +164,13 @@ describe("the hosted agent's HTTP surface", () => {
     const [held] = (await say(app, id, "register")).json().pending as Array<{ token: string }>;
     const res = await app.inject({ method: "POST", url: "/session/confirm", headers: { "x-hosted-session": id }, payload: { token: held!.token } });
     expect(res.statusCode).toBe(502);
-    expect(res.body).toContain("refused");
+    // P1 (round 5, 239): packTools' caller (the held call's `run`) already
+    // converted the tool's own error to a closed category before this
+    // handler ever sees it -- "refused" (the upstream wording) is as absent
+    // as the credential, not merely scrubbed-while-kept.
+    expect(res.body).not.toContain("refused");
     expect(res.body).not.toContain("pcc_live_");
+    expect(res.json()).toEqual({ error: "action_failed", message: "tool_failed" });
   });
 
   it("a keyless open passes no credential; a malformed Authorization is refused", async () => {

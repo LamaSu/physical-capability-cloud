@@ -78,10 +78,20 @@ function nanoPerToken(value: string, name: string): number {
 
 export function readConfig(env: NodeJS.ProcessEnv): HostedConfig {
   const gatewayBase = required(env, "PCC_HOSTED_GATEWAY_BASE");
+  let gatewayUrl: URL;
   try {
-    new URL(gatewayBase);
+    gatewayUrl = new URL(gatewayBase);
   } catch {
     throw new ConfigError("PCC_HOSTED_GATEWAY_BASE", "is not a URL");
+  }
+  // P1 (round 5, 239): credentials never enter tool output AT FETCH TIME --
+  // a userinfo-bearing gateway base would put a credential on every outgoing
+  // request line this service makes (connectMcp, fetchBytes), which an error
+  // or a log could then echo back. The gateway is this service's OWN
+  // deploy-time config, never a per-user address, so it has no legitimate
+  // reason to carry one.
+  if (gatewayUrl.username !== "" || gatewayUrl.password !== "") {
+    throw new ConfigError("PCC_HOSTED_GATEWAY_BASE", "must not contain userinfo (a credential in the URL itself)");
   }
   const sha256 = required(env, "PCC_HOSTED_PACK_SHA256");
   if (!/^[0-9a-f]{64}$/.test(sha256)) throw new ConfigError("PCC_HOSTED_PACK_SHA256", "must be 64 lowercase hex digits");

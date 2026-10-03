@@ -88,6 +88,12 @@ describe("the hosted agent's configuration", () => {
     expect(refusal({ ...ENV, PCC_HOSTED_GATEWAY_BASE: "not a url" })).toBe("PCC_HOSTED_GATEWAY_BASE");
     expect(refusal({ ...ENV, PCC_HOSTED_PORT: "70000" })).toBe("PCC_HOSTED_PORT");
   });
+
+  it("P1 (round 5, 239): a gateway base URL carrying userinfo is refused -- credentials never enter at fetch time", () => {
+    expect(refusal({ ...ENV, PCC_HOSTED_GATEWAY_BASE: "http://user:pcc_live_opaqueSecret@127.0.0.1:4310" })).toBe("PCC_HOSTED_GATEWAY_BASE");
+    expect(refusal({ ...ENV, PCC_HOSTED_GATEWAY_BASE: "http://justauser@127.0.0.1:4310" })).toBe("PCC_HOSTED_GATEWAY_BASE");
+    expect(readConfig({ ...ENV, PCC_HOSTED_GATEWAY_BASE: "http://127.0.0.1:4310" }).gatewayBase).toBe("http://127.0.0.1:4310");
+  });
 });
 
 describe("the attempt sink", () => {

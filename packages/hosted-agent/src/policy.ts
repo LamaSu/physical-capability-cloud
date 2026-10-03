@@ -1,144 +1,168 @@
 /**
- * Which agent-package tools the hosted agent is offered, and how (operator
- * item 100, question 3; this table is the proposal). Keyed by tool NAME in the
- * pinned package, and reviewed against agent-package 2.19.1.
+ * Which agent-package tools the hosted agent is offered, and how.
  *
- *   read  — a GET/HEAD listed in PASSIVE_READS (reviewed to write nothing on the
- *           full /mcp surface); runs at once.
- *   write — listed in WRITE, or any other GET/HEAD; each call waits for the
- *           user's confirmation. A GET proves the verb, not the absence of a
- *           side effect, so a GET that is not reviewed is confirmed like a write.
- *   l2    — money, accepting work, price, payout, authority; offered only
- *           when the L2 flag is on, and confirmed like a write.
- *   never — not offered, whatever the flag: device actuation or impersonation
- *           (the hosted agent never drives a device, so nothing that submits a
- *           job to one), credentials passing through the model or provisioned
- *           by a tool, and requests to absolute URLs.
- * An unlisted non-GET tool is NEVER offered, so a new package version adds
- * nothing until its tools are reviewed here. A WRITE tool whose path looks like
- * money or safety is escalated to l2 as a second net.
+ * P2 (round 5, 239): the arms race on NAME LISTS (round 2's Q2, round 4's
+ * B1/B2, round 5 v1's Q2) kept finding new unowned device/operator reads --
+ * "a list keeps missing instances." The steward's ruling (#5957) replaces
+ * every fallback classifier with a single property: an explicit
+ * TOOL_ALLOWLIST is the ONLY way a tool is offered. Unlisted means `never`,
+ * full stop -- no unlisted GET becomes a confirmed write, no pattern-derived
+ * level. The allowlist starts with PUBLIC READS ONLY (no write, no L2): each
+ * entry was reviewed against its gateway handler and carries a `reason` and
+ * an `output` projection (P1, see below). Adding a tool is a REVIEW, not a
+ * list edit that hopes nothing was missed.
  */
 export type ToolLevel = "read" | "write" | "l2" | "never";
 
+/**
+ * P1 (round 5, 239): the model and the user see a tool's result only through
+ * a TYPED, ALLOW-LISTED projection -- free-text scrubbing (tools.ts'
+ * `scrubText`) is defense in depth, never the boundary itself. A field not
+ * named here, or present with the wrong type, is DROPPED, not redacted:
+ * there is nothing to redact once the shape itself is the fence. A
+ * secret-named key (tools.ts' SECRET_FIELDS) can never appear in a spec --
+ * policy.test.ts pins that as a standing check on every entry below.
+ */
+export type FieldSpec =
+  | { readonly type: "string"; readonly maxLength: number }
+  | { readonly type: "number" }
+  | { readonly type: "boolean" }
+  | { readonly type: "array"; readonly items: FieldSpec; readonly maxItems: number }
+  | { readonly type: "object"; readonly fields: OutputSpec };
+
+export type OutputSpec = Readonly<Record<string, FieldSpec>>;
+
+export interface AllowlistEntry {
+  readonly level: "read" | "write" | "l2";
+  readonly output: OutputSpec;
+  readonly reason: string;
+}
+
 export interface ToolPolicy {
-  /** GET tools reviewed to write nothing on the full /mcp surface. */
-  readonly passiveReads: ReadonlySet<string>;
-  readonly write: ReadonlySet<string>;
-  readonly l2: ReadonlySet<string>;
+  readonly allowlist: ReadonlyMap<string, AllowlistEntry>;
   readonly never: ReadonlySet<string>;
-  readonly l2PathPatterns: readonly RegExp[];
 }
 
 /**
- * GET tools that write nothing on the FULL /mcp surface, so they run without a
- * confirmation. This is the gateway's own reviewed /mcp/apps allowlist
- * (READONLY_APP_PROXY_TOOLS, packages/gateway/src/mcp/http-mcp-server.ts) MINUS
- * every entry that is passive only because the gateway sets the
- * `x-pcc-mcp-readonly` header on /mcp/apps, which a signed-in session does not
- * use. That is get_dashboard: on /mcp its handler bumps loadCount and updatedAt.
+ * The initial allowlist: PUBLIC READS ONLY. Write and L2 tools come back one
+ * by one, each with its own review -- none is allowlisted this round.
  *
- * Adding a name here REQUIRES an individual effect review on the full path (no
- * counter or timestamp write, no lazy insert, no lease, queue or trigger, no
- * token use, no external or on-chain read). policy.test.ts pins this exact set.
+ * Candidates reviewed and REJECTED (read the gateway handler, found
+ * tenant-specific data beyond a public discovery listing -- "otherwise it is
+ * never too"):
+ *   - `list_kernels` (GET /api/kernels) and `get_kernel` (GET
+ *     /api/kernels/{kernelId}): packages/gateway/src/facades/populators/
+ *     kernel.populator.ts `populateKernelDTO` (shared by BOTH endpoints)
+ *     unconditionally returns `operatorAddress` (the operator's wallet
+ *     address) and `location`/`physicalAddress` (real geo-coordinates / a
+ *     street address) for EVERY kernel, to any caller, with no ownership
+ *     check. That is tenant-specific data, not a public discovery profile --
+ *     NEVER this round, pending a redacted public-view endpoint.
+ *   - `get_kernel_devices`, `get_kernel_jobs`, `list_jobs`, `get_job`:
+ *     excluded by the spec itself (any kernel's or any job's data by
+ *     caller-chosen id, no gateway ownership check -- board row N85).
  */
-const PASSIVE_READS_LIST = [
-  "search_dashboards", //   GET /api/artifacts
-  "list_kernels", //        GET /api/kernels
-  "get_kernel", //          GET /api/kernels/{kernelId}
-  "get_kernel_devices", //  GET /api/kernels/{kernelId}/devices
-  "get_kernel_jobs", //     GET /api/kernels/{kernelId}/jobs
-  "list_jobs", //           GET /api/jobs
-  "get_job", //             GET /api/jobs/{jobId}
-  "list_capability_types", // GET /api/capabilities/types
-  "search_capabilities", //   GET /api/capabilities/templates
-] as const;
+const TOOL_ALLOWLIST: ReadonlyMap<string, AllowlistEntry> = new Map<string, AllowlistEntry>([
+  [
+    "list_capability_types",
+    {
+      level: "read",
+      reason:
+        'GET /api/capabilities/types. packages/gateway/src/routes/capabilities.ts: the route\'s own OpenAPI description says "PUBLIC — no auth required"; ' +
+        "it returns only the deduped, sorted union of capability TYPE NAMES (e.g. \"3d-printing\", \"cnc\") -- no kernel, operator or job is named anywhere in the shape.",
+      output: { types: { type: "array", items: { type: "string", maxLength: 100 }, maxItems: 1000 } },
+    },
+  ],
+  [
+    "search_capabilities",
+    {
+      level: "read",
+      reason:
+        "GET /api/capabilities/templates. packages/gateway/src/routes/capabilities.ts: returns the STRUCTURAL template for each registered capability " +
+        "type (name, version, description, param count, group names, base price) -- catalog metadata about capability TYPES, never a specific kernel, operator or job.",
+      output: {
+        templates: {
+          type: "array",
+          maxItems: 500,
+          items: {
+            type: "object",
+            fields: {
+              capabilityType: { type: "string", maxLength: 100 },
+              name: { type: "string", maxLength: 200 },
+              version: { type: "string", maxLength: 50 },
+              description: { type: "string", maxLength: 2000 },
+              paramCount: { type: "number" },
+              groups: { type: "array", items: { type: "string", maxLength: 100 }, maxItems: 50 },
+              basePrice: { type: "number" },
+              currency: { type: "string", maxLength: 10 },
+            },
+          },
+        },
+      },
+    },
+  ],
+  [
+    "search_dashboards",
+    {
+      level: "read",
+      reason:
+        "GET /api/artifacts. packages/gateway/src/routes/artifacts.ts' OWN handler filters to `status===\"active\" && visibility===\"public\"` before " +
+        "returning anything -- the owner's deliberate choice to publish, the same gate a public listing uses; the manifest schema (packages/spec) forbids " +
+        "any API-key/Bearer/JWT-shaped substring at save time. The `owner` field on the stored record is deliberately NOT in this projection (unneeded, " +
+        "and the whole point of P1: the shape is the fence, not a judgment call about whether an owner id counts as sensitive).",
+      output: {
+        entries: {
+          type: "array",
+          maxItems: 200,
+          items: {
+            type: "object",
+            fields: {
+              id: { type: "string", maxLength: 100 },
+              slug: { type: "string", maxLength: 100 },
+              name: { type: "string", maxLength: 200 },
+              description: { type: "string", maxLength: 2000 },
+              capabilityTypes: { type: "array", items: { type: "string", maxLength: 100 }, maxItems: 50 },
+              createdAt: { type: "string", maxLength: 50 },
+            },
+          },
+        },
+        total: { type: "number" },
+        offset: { type: "number" },
+        limit: { type: "number" },
+      },
+    },
+  ],
+]);
 
-export const PASSIVE_READS: ReadonlySet<string> = new Set(PASSIVE_READS_LIST);
-
-/** The onboarding path and harmless writes. */
-const WRITE = [
-  "setup_generate_config", "setup_validate", "setup_register_device",
-  "get_build_options", "build_contract", "calculate_roi", "match_spaces", "get_shipment_quote", "near_quote",
-  "onboard_machine", "analyze_machine_docs",
-  "pcc_onboard_session_start", "pcc_onboard_session_scrape", "pcc_onboard_session_ingest_docs", "pcc_onboard_session_build_agent",
-  "pcc_orchestrator_match_capabilities", "pcc_dht_query",
-  "create_protocol", "update_protocol", "fork_protocol", "validate_protocol",
-  "pcc_trilobio_build_config", "pcc_trilobio_validate_options", "pcc_trilobio_validate_script",
-  "propose_composition", "submit_demand",
-  "submit_feedback", "pcc_report", "report_anomaly", "report_protocol_failure", "resolve_anomaly", "emit_telemetry",
-  "attach_operator_channel", "update_operator_channel", "test_operator_channels",
-  "pcc_contributor_register", "pcc_schedule_publish", "pcc_schedule_evaluate", "pcc_training_manifest_set",
-  "save_dashboard", "fork_dashboard", "update_dashboard", "archive_evidence",
-] as const;
-
-/** Money, accepting or completing work, price, payout, evidence and authority. */
-const L2 = [
-  "calculate_price", "release_milestone", "file_escrow_dispute", "deposit_bond",
-  "submit_evidence_hash", "submit_attestation", "protocol_create_escrow",
-  "pay_ip_royalty", "claim_ip_revenue", "distribute_royalties", "register_capability_ip", "register_job_evidence_ip", "raise_ip_dispute",
-  "claim_bounty", "verify_bounty", "stake_in_pool", "claim_pool", "create_investment_pool", "close_pool", "convert_bounty_to_pool",
-  "approve_registration", "reject_registration", "activate_registration", "prove_registration",
-  "create_kernel", "create_capability", "pcc_dht_announce",
-  "marketplace_create_listing", "marketplace_update_listing", "marketplace_delete_listing", "marketplace_place_order",
-  "pcc_job_complete",
-  "pcc_submit_request", "pcc_decompose_request", "pcc_publish_request", "pcc_assign_node_operator",
-  "pcc_update_node_status", "pcc_update_request", "pcc_cancel_request", "create_shipment",
-  "mint_certificate", "near_intent", "lit_decrypt", "grant_evidence_access", "archive_encrypted_bundle", "revoke_api_key",
-  "pcc_capture_challenge", "pcc_capture_upload", "pcc_capture_anchor", "commit_evidence", "verify_evidence_zk",
-  "submit_for_human_verification", "respond_to_verification", "dispute_verification", "pcc_oracle_verify",
-  "publish_protocol", "create_protocol_run", "record_episode", "advance_automation",
-] as const;
-
-/** Never offered. */
+/**
+ * Explicit NEVER names, kept as an extra guard (belt and braces) even though
+ * anything absent from TOOL_ALLOWLIST is already `never` by construction.
+ * Unchanged from round 4 -- documents WHY specific tools are excluded, for a
+ * reader who has not re-derived it from the allowlist's own absence.
+ */
 const NEVER = [
-  // device actuation: runs or relays commands on hardware (setup_test_job submits a job the gateway's runner executes on the device)
+  // device actuation: runs or relays commands on hardware
   "pcc_relay_tool_call", "pcc_relay_generic_tool_call", "pcc_create_scope", "pcc_revoke_scope", "pcc_chat_send",
   "start_protocol_run", "pause_protocol_run", "resume_protocol_run", "cancel_protocol_run", "setup_test_job",
-  // Q2 round 2 (full audit of every WRITE/L2 tool against its gateway handler): both of these reach real job
-  // submission the same way setup_test_job does, despite looking like ordinary L2 "accept/complete work" tools.
-  // execute_composition: when PCC_COMPOSE_EXECUTE_REAL=true, createProductionBinding().runStep calls
-  // JobFacade.submit() per composition step (packages/gateway/src/routes/compose.ts:677-697).
-  // pcc_submit_paid_job: POST /api/jobs/submit-from-discovery -> createJobFromSession() inserts a REAL job row
-  // targeting the caller's kernelId (status "queued"/"active") AND an execution scope with status "active" that
-  // immediately permits write-tool calls against that kernel (packages/gateway/src/routes/paid-job-flow.ts:636-669).
   "execute_composition", "pcc_submit_paid_job",
   // device impersonation: calls only the device's own runtime makes
   "kernel_heartbeat", "kernel_announce_capabilities", "operator_heartbeat",
-  // B1/B2 (round 4, 224b): the hosted agent never acts as a device or operator
-  // node. Every /api/operator/* tool is this property, whatever its method --
-  // a GET there is still the operator's own relay channel, not a dashboard
-  // read -- plus update_job_status, which (like operator_update_job_status)
-  // is "used by kernels to report job progress" per its own description, not
-  // the brain. Full audit of agent-package 2.19.1's /api/operator/* and
-  // device-only tools; astra named operator_poll_jobs (was unlisted, so
-  // confirmed-write), operator_push_evidence and operator_update_job_status
-  // (both were l2).
   "operator_poll_jobs", "operator_push_evidence", "operator_update_job_status", "update_job_status",
   "get_operator_machines", "get_operator_earnings", "get_operator_certs",
   "send_diagnostics", "send_support_message", "check_support_replies", "reply_to_support_thread",
-  // the device relay's reads (lane review of round 4): the hosted agent never creates a relay call
-  // (pcc_relay_tool_call is never), so it holds no legitimate relay id or device context to read, and
-  // GET /api/ot2/tool-result/:id returns any call's result by id with no ownership check. Offering them
-  // would only add a cross-tenant read surface. The whole relay surface is device-side.
   "pcc_get_tool_result", "pcc_get_tool_manifest",
-  // credentials through the model, or provisioned by a tool: a key or session token in a tool result lands in the transcript
-  // (redeem_invite takes a password and answers with a session token and new wallet material)
+  "get_operator_dashboard", "pcc_camera_latest", "pcc_chat_history", // 239 Q2
+  // credentials through the model, or provisioned by a tool
   "provision_api_key", "list_api_keys", "redeem_invite",
   // requests to an absolute URL
   "pcc_generate_ui",
-  // names LLMAgent reserves (validateToolNames: delete_*, fund_*, ...); the loop will not run with them
+  // names LLMAgent reserves (validateToolNames: delete_*, fund_*, ...)
   "delete_operator_channel", "fund_escrow",
 ] as const;
 
 export const DEFAULT_TOOL_POLICY: ToolPolicy = {
-  passiveReads: PASSIVE_READS,
-  write: new Set(WRITE),
-  l2: new Set(L2),
+  allowlist: TOOL_ALLOWLIST,
   never: new Set(NEVER),
-  l2PathPatterns: [
-    /\/claim\b/i, /\/accept\b/i, /emergency/i, /\/policy\b/i, /\/approv/i, /\/reject\b/i, /payout/i, /pric(e|ing)/i,
-    /wallet/i, /\/fund/i, /transfer/i, /withdraw/i, /escrow/i, /settle/i, /\/pay\b|\/pay\//i, /stake|slash/i,
-  ],
 };
 
 /** A tool's endpoint, from the pinned agent package. */
@@ -148,17 +172,22 @@ export interface ToolSpec {
   readonly path: string;
 }
 
+/**
+ * P2: the allowlist is the ONLY way in. An absolute-URL path and the
+ * explicit NEVER set are extra guards checked first; everything else is
+ * `never` unless TOOL_ALLOWLIST names it, in which case its level is exactly
+ * what the allowlist says -- never derived from the HTTP method or path.
+ */
 export function classify(spec: ToolSpec, policy: ToolPolicy = DEFAULT_TOOL_POLICY): ToolLevel {
-  if (policy.never.has(spec.name)) return "never";
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(spec.path)) return "never";
-  const method = spec.method.toUpperCase();
-  const readVerb = method === "GET" || method === "HEAD";
-  // A reviewed passive read runs at once. Any other GET is held like a write: the verb is not the effect.
-  if (readVerb && policy.passiveReads.has(spec.name)) return "read";
-  if (policy.l2.has(spec.name)) return "l2";
-  if (readVerb) return "write";
-  if (policy.write.has(spec.name)) {
-    return policy.l2PathPatterns.some((re) => re.test(spec.path)) ? "l2" : "write";
-  }
-  return "never";
+  if (policy.never.has(spec.name)) return "never";
+  const entry = policy.allowlist.get(spec.name);
+  return entry ? entry.level : "never";
+}
+
+/** The typed projection for an allowlisted tool, or undefined when the tool
+ * is not (or no longer) allowlisted -- the caller (tools.ts' packTools) must
+ * treat `undefined` as "project to nothing", never as "pass the raw value". */
+export function outputSpecFor(name: string, policy: ToolPolicy = DEFAULT_TOOL_POLICY): OutputSpec | undefined {
+  return policy.allowlist.get(name)?.output;
 }

@@ -14,6 +14,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { GatedTool } from "./confirm.js";
 import type { PinnedPack } from "./pack.js";
+import { DEFAULT_TOOL_POLICY, outputSpecFor, type FieldSpec, type OutputSpec, type ToolPolicy } from "./policy.js";
 
 export interface ToolTransport {
   /** The version the server announced when the session was opened. The gateway
@@ -93,6 +94,13 @@ const TRUNCATED_MARKER = "…[truncated]";
  * scan is O(n) over the input, not O(n^2).
  */
 function redactUrlUserinfo(text: string): string {
+  // Q1-a (round 5, 239): an authority that runs to the literal END of TRUNCATED
+  // input cannot be told apart from one whose "@" fell past SCRUB_TEXT_LIMIT --
+  // the userinfo and a bare host look identical from here, so the whole
+  // truncated tail is redacted rather than trusted. An authority that ends at
+  // a delimiter, or ANY authority in UNtruncated input, is unambiguous: no "@"
+  // really means no userinfo, handled exactly as before this fix.
+  const wasTruncated = text.endsWith(TRUNCATED_MARKER);
   let out = "";
   let cursor = 0;
   const n = text.length;
@@ -112,6 +120,10 @@ function redactUrlUserinfo(text: string): string {
     const authority = text.slice(schemeEnd + 3, authorityEnd);
     const lastAt = authority.lastIndexOf("@");
     if (lastAt === -1) {
+      if (wasTruncated && authorityEnd === n) {
+        out += text.slice(cursor, schemeEnd + 3) + REDACTED;
+        cursor = authorityEnd;
+      }
       searchFrom = authorityEnd;
       continue;
     }
@@ -240,10 +252,17 @@ const NOT_ALREADY_REDACTED = `(?!${REDACTED_ESCAPED})`;
  * The `$` anchor is unanchored by `m`, so it means end of this whole string,
  * i.e. end of the capped text — exactly the span that must be assumed secret.
  */
+// Q1-b (round 5, 239): every quoted alternative's content/escape class now
+// matches a newline too (`[\s\S]` instead of `.`, `\\[\s\S]` instead of
+// `\\.`): a `.` never spans `\n`, so a value cut by, or genuinely containing,
+// a line break was invisible to the content class and left unmatched (and so
+// unredacted) past that point. `[\s\S]` is still ONE character, same as `.`,
+// just with no exclusions -- no change in how much text any of these
+// alternatives can consume per step, only in which characters count.
 const VALUE_PART =
-  '(?:\\\\"((?:(?!\\\\").)*)(?:\\\\"|\\\\?$)' +
-  '|"((?:[^"\\\\]|\\\\.)*)(?:"|\\\\?$)' +
-  "|'((?:[^'\\\\]|\\\\.)*)(?:'|\\\\?$)" +
+  '(?:\\\\"((?:(?!\\\\")[\\s\\S])*)(?:\\\\"|\\\\?$)' +
+  '|"((?:[^"\\\\]|\\\\[\\s\\S])*)(?:"|\\\\?$)' +
+  "|'((?:[^'\\\\]|\\\\[\\s\\S])*)(?:'|\\\\?$)" +
   "|(-?\\d+(?:\\.\\d+)?)(?![\\w.])" +
   '|([^\\s"\'\\\\&,;)\\]}{[]+))';
 
@@ -420,8 +439,19 @@ function redactBracketedValues(text: string): string {
   return out;
 }
 
-export function scrubText(text: string): string {
-  const bounded = text.length > SCRUB_TEXT_LIMIT ? `${text.slice(0, SCRUB_TEXT_LIMIT)}${TRUNCATED_MARKER}` : text;
+/**
+ * P1 (round 5, 239): `preTruncate` defaults to `true` -- every existing
+ * caller and test sees the EXACT prior behavior (bound to SCRUB_TEXT_LIMIT
+ * before any redaction pass runs, unchanged since round 3). The typed
+ * projection path (`projectField` below) passes `preTruncate: false`: that
+ * path has its own, field-scoped size discipline (a hard ceiling that drops
+ * a string whole, then the field's own max length applied AFTER this
+ * function redacts, never before), so SCRUB_TEXT_LIMIT truncating first
+ * would just be a second, earlier, coarser cap doing the same job worse.
+ */
+export function scrubText(text: string, opts: { readonly preTruncate?: boolean } = {}): string {
+  const preTruncate = opts.preTruncate ?? true;
+  const bounded = preTruncate && text.length > SCRUB_TEXT_LIMIT ? `${text.slice(0, SCRUB_TEXT_LIMIT)}${TRUNCATED_MARKER}` : text;
   const shapes = SECRET_STRINGS.reduce((t, re) => t.replace(re, REDACTED), bounded);
   const noUserinfo = redactUrlUserinfo(shapes);
   const noCookies = noUserinfo.replace(COOKIE_HEADER, (_whole, header: string, sep: string, rest: string) => {
@@ -463,7 +493,34 @@ export function scrub(value: unknown): unknown {
   return value;
 }
 
-/** A tool result's text content, parsed as JSON when it is JSON, and scrubbed. */
+/** The largest tool string kept at all: anything longer is dropped whole, never cut. */
+const PROJECTED_STRING_HARD_CEILING = 1_000_000;
+
+/** What an oversized tool string becomes before projection: dropped WHOLE, never cut (a cut can leak a prefix). */
+export const OVERSIZED_STRING = "[omitted: oversized]";
+
+/**
+ * The transport's pre-projection pass (lane review of round 5): REDACTION only, never a cap. A string
+ * over the projection's hard ceiling is replaced WHOLE, so no partial value exists before structural
+ * projection. Every other string is scrubbed in full (no SCRUB_TEXT_LIMIT pre-truncation). The only
+ * cap on the model-visible path is a projected field's own maxLength, applied after its scrub.
+ */
+function redactForProjection(value: unknown): unknown {
+  if (typeof value === "string") {
+    return value.length > PROJECTED_STRING_HARD_CEILING ? OVERSIZED_STRING : scrubText(value, { preTruncate: false });
+  }
+  if (Array.isArray(value)) return value.map(redactForProjection);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = isSecretField(k) ? REDACTED : redactForProjection(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** A tool result's text content, parsed as JSON when it is JSON, and redacted (never truncated) before projection. */
 export function scrubToolResult(result: { content?: unknown; isError?: unknown }): { isError: boolean; value: unknown } {
   const parts = Array.isArray(result.content) ? result.content : [];
   const texts = parts
@@ -471,9 +528,9 @@ export function scrubToolResult(result: { content?: unknown; isError?: unknown }
     .map((p) => p.text);
   const values = texts.map((t) => {
     try {
-      return scrub(JSON.parse(t));
+      return redactForProjection(JSON.parse(t));
     } catch {
-      return scrubText(t);
+      return redactForProjection(t);
     }
   });
   return { isError: result.isError === true, value: values.length === 1 ? values[0] : values };
@@ -497,6 +554,89 @@ export function toolError(err: unknown): Error {
   // Cap the work first, scrub, then cap what is shown: a secret the first cap cut in two is dropped by the last.
   const scrubbed = scrubText(message.slice(0, 20_000));
   return new Error(scrubbed.length > TOOL_ERROR_LIMIT ? `${scrubbed.slice(0, TOOL_ERROR_LIMIT)}…` : scrubbed);
+}
+
+export type ToolErrorCategory = "tool_failed" | "not_found" | "unauthorized" | "bad_request" | "unavailable";
+
+/**
+ * P1 (round 5, 239): a tool error reaches the MODEL as one of these five
+ * closed categories only -- no message text, ever. The category is decided
+ * from a STRUCTURED numeric status when the thrown value actually carries
+ * one (never by reading `.message`, which an upstream tool, compromised or
+ * not, fully controls). No recognizable status is the generic "tool_failed".
+ */
+export function toolErrorCategory(err: unknown): ToolErrorCategory {
+  const e = err as { status?: unknown; statusCode?: unknown } | null;
+  const raw = typeof e?.status === "number" ? e.status : typeof e?.statusCode === "number" ? e.statusCode : undefined;
+  if (raw === 404) return "not_found";
+  if (raw === 401 || raw === 403) return "unauthorized";
+  if (raw !== undefined && raw >= 400 && raw < 500) return "bad_request";
+  if (raw !== undefined && raw >= 500) return "unavailable";
+  return "tool_failed";
+}
+
+/** P1 (round 5, 239): a string field over this ceiling is DROPPED WHOLE,
+ * never cut and then scrubbed -- a cut-then-scrub is exactly the shape of
+ * bug this round closed (Q1-a/Q1-b): a boundary the scrubber never saw
+ * past. "Generous" per the spec: real allowlisted fields are far smaller. */
+
+/**
+ * One allowlisted field. A wrong-type value is DROPPED (returns `undefined`,
+ * which `projectFields` then omits), never coerced and never redacted-in-
+ * place -- there is nothing to redact once the shape itself is the fence.
+ * The only place free-text `scrubText` still runs on this path: a STRING
+ * field, scrubbed in FULL (no SCRUB_TEXT_LIMIT pre-truncation -- the hard
+ * ceiling above already bounds the work) and only THEN capped to its own
+ * `maxLength`. The cap never runs before the scrub.
+ */
+function projectField(value: unknown, spec: FieldSpec): unknown {
+  switch (spec.type) {
+    case "string": {
+      if (typeof value !== "string" || value.length > PROJECTED_STRING_HARD_CEILING) return undefined;
+      const scrubbed = scrubText(value, { preTruncate: false });
+      return scrubbed.length > spec.maxLength ? `${scrubbed.slice(0, spec.maxLength)}…` : scrubbed;
+    }
+    case "number":
+      return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+    case "boolean":
+      return typeof value === "boolean" ? value : undefined;
+    case "array": {
+      if (!Array.isArray(value)) return undefined;
+      const out: unknown[] = [];
+      for (const item of value.slice(0, spec.maxItems)) {
+        const projected = projectField(item, spec.items);
+        if (projected !== undefined) out.push(projected);
+      }
+      return out;
+    }
+    case "object":
+      return typeof value === "object" && value !== null && !Array.isArray(value) ? projectFields(value as Record<string, unknown>, spec.fields) : undefined;
+  }
+}
+
+/** Every field the spec names, each type-checked; an unknown field (one the
+ * spec does not name) is never even looked at. */
+function projectFields(obj: Record<string, unknown>, spec: OutputSpec): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, fieldSpec] of Object.entries(spec)) {
+    if (!(key in obj)) continue;
+    const projected = projectField(obj[key], fieldSpec);
+    if (projected !== undefined) out[key] = projected;
+  }
+  return out;
+}
+
+/**
+ * P1 (round 5, 239): the typed-projection boundary. A top-level value that
+ * is not a plain object -- a bare string/number/array, which is what a
+ * non-JSON tool result resolves to once the transport's own parse-or-text
+ * fallback has run (scrubToolResult) -- is dropped whole, same as a value
+ * that failed to parse at all: the model sees `{ omitted: ... }`, never the
+ * raw text. Otherwise, ONLY the spec's own fields survive.
+ */
+export function projectToolOutput(value: unknown, spec: OutputSpec): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return { omitted: "non-JSON tool output" };
+  return projectFields(value as Record<string, unknown>, spec);
 }
 
 /** Run a transport step; whatever it throws leaves as a scrubbed, bounded Error. */
@@ -539,19 +679,38 @@ export async function connectMcp(gatewayBase: string, credential: string | null)
   };
 }
 
-/** The pinned package's tools that the connected surface serves, each calling
- * through the session's transport. Whatever the transport returns or throws is
- * scrubbed here as well, so a transport that does not scrub (an injected one)
- * still cannot put a secret in front of the model or the confirming user. */
-export function packTools(pack: PinnedPack, transport: ToolTransport, served: ReadonlySet<string>): GatedTool[] {
+/**
+ * The pinned package's tools that the connected surface serves, each calling
+ * through the session's transport.
+ *
+ * P1 (round 5, 239): every result is run through `scrub` (defense in depth --
+ * a transport that does not scrub, an injected one, still cannot put a secret
+ * in front of the model) and THEN the tool's typed OutputSpec projection,
+ * which is now the actual boundary: an unlisted field, or one of the wrong
+ * type, is dropped structurally, never merely redacted. A tool with no
+ * OutputSpec (not, or no longer, allowlisted) projects to nothing -- in
+ * practice unreachable, since confirm.ts never offers a caller for a tool
+ * `classify()` does not allow, but this fails closed regardless. A thrown
+ * error reaches the model as `toolErrorCategory`'s closed category only.
+ */
+export function packTools(
+  pack: PinnedPack,
+  transport: ToolTransport,
+  served: ReadonlySet<string>,
+  policy: ToolPolicy = DEFAULT_TOOL_POLICY,
+): GatedTool[] {
   return pack.tools.filter(({ def }) => served.has(def.name)).map(({ def, spec }) => ({
     def,
     spec,
     caller: async (input: unknown) => {
+      const outputSpec = outputSpecFor(def.name, policy);
       try {
-        return scrub(await transport.callTool(def.name, input !== null && typeof input === "object" ? (input as Record<string, unknown>) : {}));
+        // No second free-text pass here: the transport has already redacted (never truncated), and the
+        // typed projection is the boundary. Its per-field scrub runs before its cap (lane review, round 5).
+        const raw = await transport.callTool(def.name, input !== null && typeof input === "object" ? (input as Record<string, unknown>) : {});
+        return outputSpec ? projectToolOutput(raw, outputSpec) : { omitted: "no output spec" };
       } catch (err) {
-        throw toolError(err);
+        throw new Error(toolErrorCategory(err));
       }
     },
   }));

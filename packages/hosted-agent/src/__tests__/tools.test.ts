@@ -4,8 +4,9 @@ import type { AddressInfo } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
-import { connectMcp, packTools, scrub, scrubText, REDACTED, SCRUB_TEXT_LIMIT } from "../tools.js";
+import { connectMcp, packTools, projectToolOutput, scrub, scrubText, scrubToolResult, OVERSIZED_STRING, REDACTED, SCRUB_TEXT_LIMIT } from "../tools.js";
 import type { PinnedPack } from "../pack.js";
+import { DEFAULT_TOOL_POLICY, type FieldSpec, type OutputSpec, type ToolPolicy } from "../policy.js";
 
 const KEY = "pcc_live_ThisIsTheUsersKey123";
 const seen: Array<{ path: string; auth: string | undefined }> = [];
@@ -33,6 +34,11 @@ beforeAll(async () => {
       res.end(`upstream rejected ${req.headers.authorization ?? "(no credential)"}`);
       return;
     }
+    // P1 (round 5, 239): a synthetic Authorization/Set-Cookie on the RESPONSE
+    // (not the body) -- the transport must never copy a header into a result
+    // or an error; it has no code path that even reads response headers.
+    res.setHeader("authorization", "Bearer pcc_live_ResponseHeaderSecret01");
+    res.setHeader("set-cookie", "session=pcc_live_ResponseCookieSecret02; Path=/");
     const server = new Server({ name: "test-gateway", version: fixtureVersion }, { capabilities: { tools: {} } });
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       if (req.headers.authorization === "Bearer pcc_live_ListingFails0001") {
@@ -228,25 +234,45 @@ describe("a failing tool call never carries a secret to the model (Q1-A)", () =>
     close: async () => {},
   });
 
-  it("Q1-A: whatever an injected transport throws is scrubbed and bounded before it can reach the model", async () => {
+  // P1 (round 5, 239): a thrown error reaches the model as a closed category
+  // only (toolErrorCategory), never free text -- these tests pin the NEW
+  // boundary. A permissive test-local policy (not the real, public-reads-only
+  // DEFAULT_TOOL_POLICY) lets "list_jobs" project a result through, so the
+  // RESULT-side tests below still exercise packTools' own scrub-then-project
+  // pipeline, independent of which real tools happen to be allowlisted today.
+  const PERMISSIVE_POLICY: ToolPolicy = {
+    allowlist: new Map([
+      [
+        "list_jobs",
+        {
+          level: "read",
+          reason: "test fixture",
+          output: { ok: { type: "boolean" }, apiKey: { type: "string", maxLength: 200 }, note: { type: "string", maxLength: 200 }, secret: { type: "string", maxLength: 200 } },
+        },
+      ],
+    ]),
+    never: new Set(),
+  };
+
+  it("Q1-A: whatever an injected transport throws is scrubbed into a closed category before it can reach the model", async () => {
     const raw = new Error(`rejected pcc_live_abcdefgh12345678 ${"y".repeat(10_000)}`);
-    const [tool] = packTools(pack("list_jobs"), throwing(raw), new Set(["list_jobs"]));
+    const [tool] = packTools(pack("list_jobs"), throwing(raw), new Set(["list_jobs"]), PERMISSIVE_POLICY);
     const err = await tool!.caller({}).then(
       () => null,
       (e: unknown) => e as Error,
     );
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBe(raw);
-    expect(err!.message).toContain("rejected");
+    expect(err!.message).not.toContain("rejected");
     expect(err!.message).not.toContain("pcc_live_");
-    expect(err!.message.length).toBeLessThanOrEqual(2_001);
+    expect(err!.message).toBe("tool_failed");
     expect((err as { cause?: unknown }).cause).toBeUndefined();
   });
 
-  it("Q1-A: a thrown value that is not an Error is scrubbed too", async () => {
-    const [tool] = packTools(pack("list_jobs"), throwing("rejected pcc_live_abcdefgh12345678"), new Set(["list_jobs"]));
-    await expect(tool!.caller({})).rejects.toThrow(`rejected ${REDACTED}`);
-    const [other] = packTools(pack("list_jobs"), throwing({ secret: "pcc_live_abcdefgh12345678" }), new Set(["list_jobs"]));
+  it("Q1-A: a thrown value that is not an Error is scrubbed into a closed category too", async () => {
+    const [tool] = packTools(pack("list_jobs"), throwing("rejected pcc_live_abcdefgh12345678"), new Set(["list_jobs"]), PERMISSIVE_POLICY);
+    await expect(tool!.caller({})).rejects.toThrow("tool_failed");
+    const [other] = packTools(pack("list_jobs"), throwing({ secret: "pcc_live_abcdefgh12345678" }), new Set(["list_jobs"]), PERMISSIVE_POLICY);
     const err = await other!.caller({}).then(
       () => null,
       (e: unknown) => e as Error,
@@ -255,15 +281,27 @@ describe("a failing tool call never carries a secret to the model (Q1-A)", () =>
     expect(err!.message).not.toContain("pcc_live_");
   });
 
-  it("Q1-A: a result an injected transport returns is scrubbed before it can reach the model", async () => {
+  it("Q1-A: a result an injected transport returns is scrubbed, then projected, before it can reach the model", async () => {
     const transport = {
       serverVersion: () => undefined,
       listTools: async () => ["list_jobs"],
       callTool: async () => ({ ok: true, apiKey: "pcc_live_abcdefgh12345678", note: "Bearer abcdefgh12345678" }),
       close: async () => {},
     };
-    const [tool] = packTools(pack("list_jobs"), transport, new Set(["list_jobs"]));
+    const [tool] = packTools(pack("list_jobs"), transport, new Set(["list_jobs"]), PERMISSIVE_POLICY);
     expect(await tool!.caller({})).toEqual({ ok: true, apiKey: REDACTED, note: REDACTED });
+  });
+
+  it("P1 (round 5, 239): a tool with no output spec (not, or no longer, allowlisted) projects to nothing, never the raw value", async () => {
+    const transport = {
+      serverVersion: () => undefined,
+      listTools: async () => ["list_jobs"],
+      callTool: async () => ({ ok: true, secret: "pcc_live_abcdefgh12345678" }),
+      close: async () => {},
+    };
+    // DEFAULT_TOOL_POLICY (no override): list_jobs is not in TOOL_ALLOWLIST.
+    const [tool] = packTools(pack("list_jobs"), transport, new Set(["list_jobs"]));
+    expect(await tool!.caller({})).toEqual({ omitted: "no output spec" });
   });
 });
 
@@ -725,6 +763,172 @@ describe("R5 (round 3 addendum 2, availability): URL_USERINFO is linear, and scr
   });
 });
 
+describe("P1 (round 5, 239): the typed projection is the boundary, scrubText is defense in depth", () => {
+  it("239 Q1-a: a URL userinfo whose @ falls past the cap leaks (scrubText itself)", () => {
+    const out = scrubText(`https://user:${"s".repeat(SCRUB_TEXT_LIMIT)}@host`);
+    expect(out).not.toContain("s".repeat(100));
+  });
+  it("239 Q1-b: an escaped-quote value with a newline leaks (scrubText itself)", () => {
+    // a REAL newline (0x0A) inside the escaped-quote (\"...\") span -- VALUE_PART's
+    // escaped-double alternative uses `.`, which does not match it.
+    const out = scrubText(`token=\\"opaqueSecret\nstillSecret\\"`);
+    expect(out).not.toContain("opaqueSecret");
+  });
+
+  const allowlistedPack = (name: string): PinnedPack => ({
+    version: "1",
+    sha256: "0".repeat(64),
+    systemPrompt: "p",
+    tools: [{ def: { name, description: "", input_schema: { type: "object" } }, spec: { name, method: "GET", path: "/api/x" } }],
+  });
+  const transportReturning = (value: unknown) => ({
+    serverVersion: () => undefined,
+    listTools: async () => [] as string[],
+    callTool: async () => value,
+    close: async () => {},
+  });
+
+  it.each(["list_capability_types", "search_capabilities", "search_dashboards"])(
+    "239 Q1, through the allowlisted output path: %s never shows a URL-cut-by-cap or a multiline escaped-quote secret",
+    async (name) => {
+      const urlLeak = `https://user:${"s".repeat(SCRUB_TEXT_LIMIT)}@host`;
+      const multilineLeak = `token=\\"opaqueSecret\nstillSecret\\"`;
+      for (const leak of [urlLeak, multilineLeak]) {
+        // Every allowlisted tool has at least one string field; smuggle the
+        // adversarial text into the FIRST one, wherever it sits structurally.
+        const raw = firstStringFieldCarrying(DEFAULT_TOOL_POLICY.allowlist.get(name)!.output, leak);
+        const [tool] = packTools(allowlistedPack(name), transportReturning(raw), new Set([name]));
+        const out = JSON.stringify(await tool!.caller({}));
+        expect(out).not.toContain("s".repeat(100));
+        expect(out).not.toContain("opaqueSecret");
+      }
+    },
+  );
+
+  const POISON = "pcc_live_AdversarialFixture0001";
+
+  /** Mirrors an OutputSpec's shape but poisons it: every listed field gets a
+   * correctly-shaped value with POISON embedded (a string field straddles its
+   * own cap), PLUS -- at every object level -- an unlisted sibling field and a
+   * secret-named sibling field, both poisoned, and arrays add a wrong-type and
+   * an unlisted-nested item. */
+  function adversarialFor(outputSpec: OutputSpec): Record<string, unknown> {
+    const out: Record<string, unknown> = { unlisted_field_not_in_spec: POISON, apiKey: POISON };
+    for (const [name, fieldSpec] of Object.entries(outputSpec)) out[name] = adversarialValue(fieldSpec);
+    return out;
+  }
+  function adversarialValue(fieldSpec: FieldSpec): unknown {
+    // a space (non-word) separates the padding from POISON: SECRET_STRINGS
+    // anchors on `\b`, which two word characters glued together never satisfy.
+    if (fieldSpec.type === "string") return `${"x".repeat(Math.max(0, fieldSpec.maxLength - 6))} ${POISON}`;
+    if (fieldSpec.type === "number" || fieldSpec.type === "boolean") return POISON; // wrong type: dropped
+    if (fieldSpec.type === "array") return [adversarialValue(fieldSpec.items), POISON, { unlisted_item_field: POISON }];
+    return adversarialFor(fieldSpec.fields); // object: one level deeper than the spec itself asks for
+  }
+  /** A string value this OutputSpec cannot accept at its top level at all (every
+   * current entry's top level is an object), used for the "non-JSON" case. */
+  const NON_JSON_POISON = `plain text, not JSON, carrying ${POISON}`;
+
+  it.each([...DEFAULT_TOOL_POLICY.allowlist.entries()])(
+    "239 P1 generic property: %s's model-visible output never contains the adversarial fixture, in any injection shape",
+    async (name, entry) => {
+      const pack = allowlistedPack(name);
+      // (a) unlisted fields, wrong-type fields, secret-named keys, nested deep, a string straddling its cap.
+      const poisoned = adversarialFor(entry.output);
+      const [structural] = packTools(pack, transportReturning(poisoned), new Set([name]));
+      expect(JSON.stringify(await structural!.caller({}))).not.toContain(POISON);
+      // (b) non-JSON text (a bare string, not an object) at the top level.
+      const [nonJson] = packTools(pack, transportReturning(NON_JSON_POISON), new Set([name]));
+      expect(JSON.stringify(await nonJson!.caller({}))).not.toContain(POISON);
+      // (c) inside a thrown error.
+      const [erroring] = packTools(pack, { ...transportReturning(null), callTool: async () => { throw new Error(`refused: ${POISON}`); } }, new Set([name]));
+      const err = await erroring!.caller({}).then(() => null, (e: unknown) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).not.toContain(POISON);
+    },
+  );
+
+  it("239 P1: projectToolOutput caps AFTER scrubText, never before -- a secret-shaped value whose bare token is cut mid-token by the field's own max length is still fully redacted, not left as an unrecognized fragment", () => {
+    // Called DIRECTLY (not through packTools' caller): packTools' own outer
+    // `scrub()` pre-pass runs on the FULL, uncapped value first and would
+    // already neutralize this secret regardless of projectField's internal
+    // order, masking exactly the bug this test exists to catch. Testing
+    // projectToolOutput in isolation is what actually exercises its own
+    // scrub-then-cap discipline.
+    const maxLength = 2000; // search_capabilities' description field
+    // The secret starts 14 characters before maxLength: "pcc_live_" (9) + 5
+    // more characters. Capped FIRST (the bug this guards against), only
+    // "pcc_live_QQQQQ" (5 chars post-prefix) would survive -- too short for
+    // SECRET_STRINGS' `{8,}` to recognize, so it is never even offered to a
+    // redaction pass, and sits in the output as plain, unredacted text.
+    // Scrubbed first (correct), scrubText sees the WHOLE secret before any
+    // cropping and redacts it outright; nothing of it, long or short, survives.
+    const secret = `pcc_live_${"Q".repeat(40)}`;
+    // a SPACE separates the padding from the secret: SECRET_STRINGS anchors
+    // on `\b`, a word/non-word transition, which two word characters glued
+    // together (padding "d" directly against "p") would never satisfy --
+    // that would defeat the regex for a reason having nothing to do with
+    // cap-vs-scrub ordering, and so would not actually test this property.
+    const value = `${"d".repeat(maxLength - 15)} ${secret}`;
+    const raw = { templates: [{ capabilityType: "x", name: "x", version: "1", description: value, paramCount: 1, groups: [], basePrice: 1, currency: "usd" }] };
+    const out = JSON.stringify(projectToolOutput(raw, DEFAULT_TOOL_POLICY.allowlist.get("search_capabilities")!.output));
+    expect(out).not.toContain("pcc_live_QQQQQ");
+    expect(out).not.toContain("pcc_live_");
+  });
+
+  it("239 P1: credentials never enter tool output at fetch time -- a synthetic Authorization/Set-Cookie response header never reaches the model", async () => {
+    const t = await connectMcp(base, KEY);
+    const out = await t.callTool("echo-shape", {});
+    await t.close();
+    expect(JSON.stringify(out)).not.toContain("pcc_live_ResponseHeaderSecret01");
+    expect(JSON.stringify(out)).not.toContain("pcc_live_ResponseCookieSecret02");
+    // Not merely absent from THIS result -- never read at all: the fixture
+    // server sets these on EVERY response, including the error path, and
+    // connectMcp/tools.ts has no line that reads `res.headers`/`.headers` on
+    // anything the transport returns.
+    const failed = await t2callToolFails();
+    expect(failed).not.toContain("pcc_live_ResponseHeaderSecret01");
+    expect(failed).not.toContain("pcc_live_ResponseCookieSecret02");
+  });
+  async function t2callToolFails(): Promise<string> {
+    const t = await connectMcp(base, KEY);
+    const err = await t.callTool("fails", {}).then(() => null, (e: unknown) => (e as Error).message);
+    await t.close();
+    return err ?? "";
+  }
+});
+
+/** Walks an OutputSpec and returns a raw value of its shape with `leak`
+ * spliced into the FIRST string field found (depth-first), so a scrubText-
+ * level adversarial reproduction can be driven through whichever allowlisted
+ * tool is being tested, wherever its first free-text field actually sits. */
+function firstStringFieldCarrying(outputSpec: OutputSpec, leak: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  let placed = false;
+  for (const [name, fieldSpec] of Object.entries(outputSpec)) {
+    const [value, didPlace] = placed ? [sampleValue(fieldSpec), false] : placeIn(fieldSpec, leak);
+    out[name] = value;
+    placed = placed || didPlace;
+  }
+  return out;
+}
+function placeIn(fieldSpec: FieldSpec, leak: string): [unknown, boolean] {
+  if (fieldSpec.type === "string") return [leak, true];
+  if (fieldSpec.type === "array") {
+    const [item, did] = placeIn(fieldSpec.items, leak);
+    return [[item], did];
+  }
+  if (fieldSpec.type === "object") return [firstStringFieldCarrying(fieldSpec.fields, leak), true];
+  return [sampleValue(fieldSpec), false];
+}
+function sampleValue(fieldSpec: FieldSpec): unknown {
+  if (fieldSpec.type === "string") return "sample";
+  if (fieldSpec.type === "number") return 1;
+  if (fieldSpec.type === "boolean") return true;
+  if (fieldSpec.type === "array") return [];
+  return {};
+}
+
 describe("the gateway names the pack it runs (Q5-A)", () => {
   it("Q5-A: connectMcp reports the version the server announced in its handshake", async () => {
     fixtureVersion = `2.19.1+sha256.${"a".repeat(64)}`;
@@ -735,5 +939,31 @@ describe("the gateway names the pack it runs (Q5-A)", () => {
     } finally {
       fixtureVersion = "1";
     }
+  });
+});
+
+
+describe("lane review of round 5: nothing is capped before structural projection (the transport only redacts)", () => {
+  it("a tool string longer than SCRUB_TEXT_LIMIT reaches projection WHOLE and redacted: no pre-projection cut, no leaked prefix", () => {
+    const secret = "s".repeat(SCRUB_TEXT_LIMIT);
+    const note = `see https://user:${secret}@host/x and more`;
+    const { value } = scrubToolResult({ content: [{ type: "text", text: JSON.stringify({ note }) }] });
+    const out = (value as { note: string }).note;
+    expect(out).not.toContain("s".repeat(100));
+    expect(out).not.toContain("[truncated]");
+    expect(out.endsWith("@host/x and more")).toBe(true); // the tail survives: the string was never cut
+  });
+
+  it("a tool string over the hard ceiling is dropped WHOLE before projection, never cut", () => {
+    const huge = "x".repeat(1_000_001);
+    const { value } = scrubToolResult({ content: [{ type: "text", text: JSON.stringify({ note: huge }) }] });
+    expect((value as { note: string }).note).toBe(OVERSIZED_STRING);
+  });
+
+  it("non-JSON tool text is redacted, never truncated, before projection (projection then drops it)", () => {
+    const text = `token="${"q".repeat(SCRUB_TEXT_LIMIT + 10)}"`;
+    const { value } = scrubToolResult({ content: [{ type: "text", text }] });
+    expect(String(value)).not.toContain("q".repeat(100));
+    expect(String(value)).not.toContain("[truncated]");
   });
 });
