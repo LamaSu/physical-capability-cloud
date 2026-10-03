@@ -43,6 +43,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { auditService } from "../services/audit-service.js";
 
 /**
+ * The audit log's name for a session. Audit reads are not tenant-scoped, so every
+ * audit record names a session by this 128-bit digest of its id, and none holds
+ * the id itself, its name or a URL (verdicts 75 and 75b).
+ */
+function auditId(sessionId: string): string {
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+}
+
+/**
  * Generic activity event written to a session's log. The chat console reads
  * these via /live-data and renders them in the right-side activity sidebar.
  *
@@ -317,9 +326,7 @@ export async function templateSessionRoutes(
         eventType: `${template}.session_started`,
         actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
-        // Audit reads are not tenant-scoped, so the log holds a digest of the id
-        // and neither the session's name nor its URL (verdict 75).
-        resourceId: createHash("sha256").update(sessionId).digest("hex").slice(0, 16),
+        resourceId: auditId(sessionId),
         action: "create",
         metadata: { template },
         ip: req.ip,
@@ -384,9 +391,9 @@ export async function templateSessionRoutes(
         eventType: `${template}.scrape`,
         actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
-        resourceId: session.id,
+        resourceId: auditId(session.id),
         action: "scrape",
-        metadata: { template, url },
+        metadata: { template },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
@@ -442,7 +449,7 @@ export async function templateSessionRoutes(
         eventType: `${template}.ingest_docs`,
         actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
-        resourceId: session.id,
+        resourceId: auditId(session.id),
         action: "ingest_docs",
         metadata: { template, doc_count: docUrls.length },
         ip: req.ip,
@@ -490,9 +497,9 @@ export async function templateSessionRoutes(
           eventType: `${template}.build_complete`,
           actor: req.operatorId ?? req.apiKeyId ?? undefined,
           resourceType: "template_session",
-          resourceId: session.id,
+          resourceId: auditId(session.id),
           action: "build",
-          metadata: { template, capability_count: result.capabilities.length, discovery_url: result.discovery_url },
+          metadata: { template, capability_count: result.capabilities.length },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });

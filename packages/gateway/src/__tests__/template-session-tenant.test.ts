@@ -270,4 +270,32 @@ describe("verdict 75: a session stays in its mount and leaves no usable trail in
     expect(logged).not.toContain("Secret project");
     expect(logged).not.toContain("secret.example");
   });
+
+  it("C2 (75b): /scrape, /ingest-docs and /build-agent log one 128-bit digest and no URL", async () => {
+    agents["physical-operator"].onBuild.mockResolvedValue({
+      capabilities: ["test:cap"], operator_id: "op-1", discovery_url: "https://secret.example/agent.json",
+    });
+    const started = await app.inject({ method: "POST", url: "/api/onboard/start", headers: headers(),
+      payload: { name: "Secret project", url: "https://secret.example/plans" } });
+    const id = started.json().session_id as string;
+    const steps: Array<[string, Record<string, unknown>]> = [
+      ["scrape", { url: "https://secret.example/plans" }],
+      ["ingest-docs", { doc_urls: ["https://secret.example/manual.pdf"] }],
+      ["build-agent", {}],
+    ];
+    for (const [suffix, payload] of steps) {
+      const res = await app.inject({ method: "POST", url: `/api/onboard/${id}/${suffix}`, headers: headers(), payload });
+      expect(res.statusCode, suffix).toBe(200);
+    }
+    const records = vi.mocked(auditService.log).mock.calls.map((call) => call[0] as { eventType: string; resourceId?: string });
+    expect(records.map((r) => r.eventType)).toEqual(expect.arrayContaining([
+      "physical-operator.scrape", "physical-operator.ingest_docs", "physical-operator.build_complete",
+    ]));
+    const logged = JSON.stringify(records);
+    expect(logged).not.toContain(id);
+    expect(logged).not.toContain("secret.example");
+    const ids = new Set(records.map((r) => r.resourceId));
+    expect(ids.size).toBe(1);
+    expect([...ids][0]).toMatch(/^[0-9a-f]{32}$/);
+  });
 });
