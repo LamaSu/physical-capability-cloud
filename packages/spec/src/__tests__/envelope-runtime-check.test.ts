@@ -8,13 +8,17 @@
  * escape sequences, so no editor or tool can turn them into literal bytes.
  */
 
-import { generateKeyPairSync, sign, verify } from "node:crypto";
+import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import * as specPackage from "../index.js";
+import * as runtimeCheckModule from "../onboarding/envelope-runtime-check.js";
 import { checkRuntimeCommand, type RuntimeDecision, type RuntimeState } from "../onboarding/envelope-runtime-check.js";
+import * as onboardingModule from "../onboarding/index.js";
+import * as primordialsModule from "../onboarding/primordials.js";
 import { compileOperationalEnvelope, OperationalEnvelopeV1Schema, type OperationalEnvelopeV1 } from "../onboarding/operational-envelope.js";
 import {
   confirmSafetyEnvelope,
@@ -847,5 +851,405 @@ describe("rule 13 and the decision itself", () => {
     expect(checkRuntimeCommand(envelope, command, state)).toEqual(first);
     expect(JSON.stringify([envelope, command, state])).toBe(before);
     expect(Object.isFrozen(envelope) || Object.isFrozen(command) || Object.isFrozen(state)).toBe(false);
+  });
+});
+
+// ── Intrinsics replaced after load, prototype pollution, recompiled RegExps (astra packs 164 and 167) ──
+
+type Vector = { name: string; envelope: unknown; command: unknown; state: unknown };
+
+const FIXTURE_VECTORS = (
+  JSON.parse(readFileSync(fileURLToPath(new URL("../../fixtures/onboarding/envelope-runtime-check-v1.json", import.meta.url)), "utf8")) as {
+    vectors: Vector[];
+  }
+).vectors;
+
+/** Counts every operation on the proxies below and every call of the getters below: none may ever run. */
+let touched = 0;
+const COUNTING: ProxyHandler<object> = new Proxy({}, { get: () => (touched++, undefined) });
+function withGetter<T extends object>(target: T, key: string, value: unknown): T {
+  Object.defineProperty(target, key, { enumerable: true, configurable: true, get: () => (touched++, value) });
+  return target;
+}
+
+/** Vectors JSON cannot carry, built once, before any patch. */
+const JS_ONLY: Vector[] = [
+  { name: "a proxy envelope", envelope: new Proxy(structuredClone(OT2), COUNTING), command: ASPIRATE, state: stateFor(OT2) },
+  { name: "a proxy state", envelope: OT2, command: ASPIRATE, state: new Proxy(stateFor(OT2), COUNTING) },
+  { name: "a proxy command", envelope: OT2, command: new Proxy({ ...ASPIRATE }, COUNTING), state: stateFor(OT2) },
+  { name: "a proxy list in params", envelope: PLATE, command: { name: "read", params: { seconds: 30, wavelengthNm: 450, wells: new Proxy(["A1"], COUNTING) } }, state: stateFor(PLATE) },
+  { name: "a getter in params", envelope: OT2, command: { name: "aspirate", params: withGetter({}, "volumeUl", 150) }, state: stateFor(OT2) },
+  { name: "a getter in a limit", envelope: changed(OT2, (e) => withGetter(e.limits[0], "max", 300)), command: ASPIRATE, state: stateFor(OT2) },
+  { name: "a getter in the state", envelope: OT2, command: ASPIRATE, state: withGetter({ ...stateFor(OT2) }, "nowMs", NOW) },
+  { name: "NaN in params", envelope: OT2, command: { name: "aspirate", params: { volumeUl: Number.NaN } }, state: stateFor(OT2) },
+  { name: "Infinity in params", envelope: OT2, command: { name: "aspirate", params: { volumeUl: Number.POSITIVE_INFINITY } }, state: stateFor(OT2) },
+  { name: "-0 at a 0 min", envelope: OT2, command: { name: "runProtocol", params: { minutes: -0, labwareSlot: 1 } }, state: stateFor(OT2) },
+  { name: "-0 just above a 0 max", envelope: OT2_COLD, command: { name: "setModuleTemp", params: { celsius: -0 } }, state: stateFor(OT2_COLD) },
+  { name: "a hole in a list", envelope: PLATE, command: { name: "read", params: { seconds: 30, wavelengthNm: 450, wells: [, "A1"] } }, state: stateFor(PLATE) }, // eslint-disable-line no-sparse-arrays
+  { name: "a Date as params", envelope: OT2, command: { name: "aspirate", params: new Date(0) }, state: stateFor(OT2) },
+  { name: "null-prototype params", envelope: OT2, command: { name: "aspirate", params: Object.assign(Object.create(null), { volumeUl: 150 }) }, state: stateFor(OT2) },
+  { name: "an undefined member", envelope: OT2, command: { ...ASPIRATE, id: undefined }, state: stateFor(OT2) },
+  { name: "a hole in the sends", envelope: OT2, command: ASPIRATE, state: stateFor(OT2, { recentCommandsAtMs: [, NOW] as number[] }) }, // eslint-disable-line no-sparse-arrays
+  { name: "the frozen compiled envelope", envelope: OT2, command: { name: "transfer", params: { aspirateUl: 1, dispenseUl: 300, slot: 11 } }, state: stateFor(OT2) },
+];
+
+const ALL: Vector[] = [...FIXTURE_VECTORS, ...JS_ONLY];
+
+/** Every decision, by an indexed loop and assignment: it runs under a patch, so it calls no intrinsic itself. */
+function decideAll(): RuntimeDecision[] {
+  const out: RuntimeDecision[] = new Array(ALL.length);
+  for (let i = 0; i < ALL.length; i++) {
+    const v = ALL[i]!;
+    out[i] = checkRuntimeCommand(v.envelope, v.command, v.state);
+  }
+  return out;
+}
+
+/** The untouched decisions, reasons included: every patched run must reproduce them byte for byte. */
+const CLEAN_DECISIONS = JSON.stringify(decideAll());
+
+const ownKeysAtLoad = Reflect.ownKeys;
+const descriptorAtLoad = Reflect.getOwnPropertyDescriptor;
+
+/**
+ * A value with every writable limit widened, as an attacker's replacement would
+ * return it: a check that used the replacement would let out-of-range values
+ * through. Indexed loops and load-time Reflect only.
+ */
+function raise<T>(value: T, depth = 0): T {
+  if (value !== null && typeof value === "object" && depth < 32) {
+    const keys = ownKeysAtLoad(value);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i]!;
+      const d = descriptorAtLoad(value, key);
+      if (!d || d.get || d.set) continue;
+      if (d.writable && typeof d.value === "number" && (key === "max" || key === "maxCommandsPerMinute")) (value as Record<PropertyKey, unknown>)[key] = 1e12;
+      else if (d.writable && typeof d.value === "number" && key === "min") (value as Record<PropertyKey, unknown>)[key] = -1e12;
+      else raise(d.value, depth + 1);
+    }
+  }
+  return value;
+}
+
+type Patch = [label: string, target: object, key: PropertyKey, replacement: (original: any) => unknown];
+
+const ArrayIteratorPrototype = Object.getPrototypeOf([][Symbol.iterator]());
+const HashPrototype = Object.getPrototypeOf(createHash("sha256"));
+
+/** R8's rows (safety-envelope-intrinsics.test.ts), then rows that return a wrong answer outright. */
+const PATCHES: Patch[] = [
+  ["Array.prototype.map", Array.prototype, "map", (o) => function (this: unknown[], ...a: unknown[]) { return raise(o.apply(this, a)); }],
+  ["Array.prototype.filter", Array.prototype, "filter", (o) => function (this: unknown[], ...a: unknown[]) { return raise(o.apply(this, a)); }],
+  ["Array.prototype.flatMap", Array.prototype, "flatMap", (o) => function (this: unknown[], ...a: unknown[]) { return raise(o.apply(this, a)); }],
+  ["Array.prototype.forEach", Array.prototype, "forEach", (o) => function (this: unknown[], ...a: unknown[]) { raise(this); return o.apply(this, a); }],
+  ["Array.prototype.some", Array.prototype, "some", () => () => false],
+  ["Array.prototype.every", Array.prototype, "every", () => () => true],
+  ["Array.prototype.includes", Array.prototype, "includes", () => () => true],
+  ["Array.prototype.find", Array.prototype, "find", () => () => undefined],
+  ["Array.prototype.join", Array.prototype, "join", () => () => ""],
+  ["Array.prototype.push", Array.prototype, "push", (o) => function (this: unknown[], ...a: unknown[]) { return o.apply(this, raise(a)); }],
+  ["Array.prototype.sort", Array.prototype, "sort", (o) => function (this: unknown[]) { return o.call(this).reverse(); }],
+  ["Array.prototype.slice", Array.prototype, "slice", (o) => function (this: unknown[], ...a: unknown[]) { return raise(o.apply(this, a)); }],
+  ["Array.prototype.concat", Array.prototype, "concat", (o) => function (this: unknown[], ...a: unknown[]) { return raise(o.apply(this, a)); }],
+  ["Array.prototype[Symbol.iterator]", Array.prototype, Symbol.iterator, (o) => function (this: unknown[]) { raise(this); return o.call(this); }],
+  ["%ArrayIteratorPrototype%.next", ArrayIteratorPrototype, "next", (o) => function (this: unknown) { return raise(o.call(this)); }],
+  ["Object.keys", Object, "keys", (o) => (v: object) => (o(v) as string[]).reverse()],
+  ["Object.assign", Object, "assign", (o) => (...a: unknown[]) => raise(o(...a))],
+  ["Object.freeze", Object, "freeze", () => (v: unknown) => v],
+  ["Object.isFrozen", Object, "isFrozen", () => () => true],
+  ["Object.getOwnPropertyDescriptor", Object, "getOwnPropertyDescriptor", (o) => (v: object, k: PropertyKey) => raise(o(v, k))],
+  ["Object.getPrototypeOf", Object, "getPrototypeOf", () => () => null],
+  ["Object.defineProperty", Object, "defineProperty", (o) => (v: object, k: PropertyKey, d: PropertyDescriptor) => o(v, k, raise({ ...d }))],
+  ["Object.create", Object, "create", (o) => (p: object | null) => o(p)],
+  ["Object.is", Object, "is", () => () => false],
+  ["Object.prototype.hasOwnProperty", Object.prototype, "hasOwnProperty", () => () => true],
+  ["JSON.parse", JSON, "parse", (o) => (...a: unknown[]) => raise(o(...a))],
+  ["JSON.stringify", JSON, "stringify", () => () => '"x"'],
+  ["String.prototype.trim", String.prototype, "trim", () => () => "x"],
+  ["String.prototype.toLowerCase", String.prototype, "toLowerCase", () => () => "x"],
+  ["String.prototype.charCodeAt", String.prototype, "charCodeAt", () => () => 0x30],
+  ["RegExp.prototype.exec", RegExp.prototype, "exec", () => () => null],
+  ["RegExp.prototype.test", RegExp.prototype, "test", () => () => true],
+  ["Number.isFinite", Number, "isFinite", () => () => true],
+  ["Number.isInteger", Number, "isInteger", () => () => true],
+  ["Date.parse", Date, "parse", () => () => Number.NaN],
+  ["Math.max", Math, "max", () => () => 1e9],
+  ["Math.min", Math, "min", () => () => -1e9],
+  ["Set.prototype.has", Set.prototype, "has", () => () => true],
+  ["Map.prototype.get", Map.prototype, "get", () => () => undefined],
+  ["Function.prototype.call", Function.prototype, "call", (o) => function (this: Function, ...a: unknown[]) { return raise(o.apply(this, [a[0], ...a.slice(1)])); }],
+  ["Function.prototype.apply", Function.prototype, "apply", (o) => function (this: Function, self: unknown, args: unknown[]) { return raise(o.call(this, self, args)); }],
+  ["Hash.prototype.digest", HashPrototype, "digest", () => () => "0".repeat(64)],
+  ["Hash.prototype.update", HashPrototype, "update", (o) => function (this: unknown) { return o.call(this, "tampered"); }],
+  ["TextEncoder.prototype.encode", TextEncoder.prototype, "encode", () => () => new Uint8Array(71)],
+  // Wrong answers outright: a check that consulted any of these would decide differently.
+  ["Array.isArray (false)", Array, "isArray", () => () => false],
+  ["Array.isArray (true)", Array, "isArray", () => () => true],
+  ["Array.prototype.map (empty)", Array.prototype, "map", () => () => []],
+  ["Array.prototype.filter (empty)", Array.prototype, "filter", () => () => []],
+  ["Array.prototype.indexOf", Array.prototype, "indexOf", () => () => 0],
+  ["Object.keys (empty)", Object, "keys", () => () => []],
+  ["Object.getOwnPropertyDescriptor (a data 0)", Object, "getOwnPropertyDescriptor", () => () => ({ value: 0, writable: true, enumerable: true, configurable: true })],
+  ["Object.prototype.hasOwnProperty (false)", Object.prototype, "hasOwnProperty", () => () => false],
+  ["Number.isFinite (false)", Number, "isFinite", () => () => false],
+  ["Number.isInteger (false)", Number, "isInteger", () => () => false],
+  ["String.prototype.trim (empty)", String.prototype, "trim", () => () => ""],
+  ["String.prototype.charCodeAt (a)", String.prototype, "charCodeAt", () => () => 0x61],
+  ["Number.prototype.toString", Number.prototype, "toString", () => () => "1"],
+  ["Object.prototype.toString", Object.prototype, "toString", () => () => "[object Object]"],
+];
+
+function withPatch<T>(target: object, key: PropertyKey, replacement: unknown, run: () => T): T {
+  const original = Reflect.getOwnPropertyDescriptor(target, key)!;
+  Reflect.defineProperty(target, key, { ...original, value: replacement });
+  try {
+    return run();
+  } finally {
+    Reflect.defineProperty(target, key, original);
+  }
+}
+
+describe("intrinsics replaced after load cannot change a decision (astra pack 164)", () => {
+  it("the harness covers every fixture vector and the vectors JSON cannot carry, none of which runs code", () => {
+    expect(FIXTURE_VECTORS.length).toBeGreaterThan(100);
+    expect(JS_ONLY.length).toBeGreaterThan(15);
+    const decisions = JSON.parse(CLEAN_DECISIONS) as Array<{ allowed: boolean; code?: string }>;
+    expect(new Set(decisions.map((d) => (d.allowed ? "allowed" : d.code))).size).toBe(13);
+    expect(touched).toBe(0);
+  });
+
+  for (const [label, target, key, make] of PATCHES) {
+    it(`with ${label} replaced, every decision, reason included, is exactly the untouched one`, () => {
+      const original = Reflect.getOwnPropertyDescriptor(target, key)!.value;
+      const decisions = withPatch(target, key, make(original), decideAll);
+      expect(JSON.stringify(decisions)).toBe(CLEAN_DECISIONS);
+      expect(touched).toBe(0);
+    });
+  }
+
+  it("data written onto Object.prototype and Array.prototype changes no decision", () => {
+    // Data-only prototype pollution, the kind a JSON merge bug causes: values appear through inheritance.
+    // Every read is of an own property of a null-prototype copy, so none of them is ever seen.
+    const keys = [
+      "min", "max", "value", "get", "set", "name", "params", "allowed", "allowedItems", "unbounded", "quantity", "unit", "mechanism",
+      "stopCommand", "nowMs", "jobStartedAtMs", "recentCommandsAtMs", "adapterManifestDigest", "adapterVersion", "volumeUl", "labwareSlot",
+      "wells", "code", "reason", "strict", "limits", "commands", "deadlineQuantity", "maxCommandsPerMinute", "eStop", "hazards", "supervision",
+      "deviceClass", "envelopeVersion", "envelopeDigest", "0",
+    ];
+    const pollution: Array<[object, PropertyKey, unknown]> = [
+      ...keys.map((k): [object, PropertyKey, unknown] => [Object.prototype, k, 1e12]),
+      [Object.prototype, "toJSON", () => "polluted"],
+      [Array.prototype, 0, { max: 1e12 }],
+      [Array.prototype, 1, "A1"],
+      [Array.prototype, "toJSON", () => "polluted"],
+    ];
+    let decisions: RuntimeDecision[] = [];
+    try {
+      for (const [target, key, value] of pollution) {
+        Reflect.defineProperty(target, key, { __proto__: null, value, writable: true, enumerable: false, configurable: true } as PropertyDescriptor);
+      }
+      decisions = decideAll();
+    } finally {
+      for (const [target, key] of pollution) Reflect.deleteProperty(target, key);
+    }
+    expect(JSON.stringify(decisions)).toBe(CLEAN_DECISIONS);
+    expect(touched).toBe(0);
+  });
+});
+
+/**
+ * Every RegExp reachable from the exports of `modules`: own properties (a getter
+ * is walked as a function, never called), prototypes, Map and Set entries, and
+ * zod's shape thunks. A module's exports are read through its namespace, whose
+ * live bindings vitest serves as getters.
+ */
+function regexpsReachableFrom(modules: object[]): { regexps: RegExp[]; objects: number } {
+  const seen = new Set<unknown>();
+  const regexps: RegExp[] = [];
+  const stack: unknown[] = [];
+  for (const namespace of modules) {
+    for (const key of Reflect.ownKeys(namespace)) stack.push((namespace as Record<PropertyKey, unknown>)[key]);
+  }
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if ((typeof value !== "object" && typeof value !== "function") || value === null || seen.has(value)) continue;
+    seen.add(value);
+    if (value instanceof RegExp) regexps.push(value);
+    if (value instanceof Map) for (const [k, v] of value) stack.push(k, v);
+    if (value instanceof Set) for (const v of value) stack.push(v);
+    // zod keeps an object schema's shape, and a lazy schema, behind a pure thunk: call it to reach the schemas inside.
+    const def = (value as { _def?: { shape?: unknown; getter?: unknown } })._def;
+    if (def !== null && typeof def === "object") {
+      for (const thunk of [def.shape, def.getter]) {
+        if (typeof thunk !== "function") continue;
+        try {
+          stack.push(thunk.call(def));
+        } catch {
+          // Not a thunk after all; nothing to reach.
+        }
+      }
+    }
+    stack.push(Object.getPrototypeOf(value));
+    for (const key of Reflect.ownKeys(value)) {
+      const d = Reflect.getOwnPropertyDescriptor(value, key);
+      if (!d) continue;
+      if ("value" in d) stack.push(d.value);
+      else stack.push(d.get, d.set);
+    }
+  }
+  return { regexps, objects: seen.size };
+}
+
+/** RegExp.prototype.compile (Annex B) replaces the matcher in place; on a frozen RegExp it throws only afterwards. */
+function recompile(re: RegExp, source: string, flags: string): void {
+  try {
+    re.compile(source, flags);
+  } catch {
+    // Frozen: the matcher was replaced before setting lastIndex failed.
+  }
+}
+
+describe("RegExps reachable after load cannot change a decision (astra pack 167)", () => {
+  it("the walk finds a RegExp behind arrays, maps, sets, accessors and prototypes, and recompile replaces even a frozen one", () => {
+    const hidden = [/a/, /b/, /c/, /d/];
+    const holder = Object.create({ proto: hidden[3] });
+    Object.defineProperty(holder, "getter", { get: () => hidden[2] });
+    const root = { list: [{ map: new Map([["k", hidden[0]]]) }], set: new Set([hidden[1]]), getterHolder: holder };
+    const found = regexpsReachableFrom([{ root }]).regexps;
+    // The getter is reached as a function, never called, so its RegExp is not found: nothing is run to walk.
+    expect(found).toEqual(expect.arrayContaining([hidden[0], hidden[1], hidden[3]]));
+    const frozen = Object.freeze(/^x$/);
+    recompile(frozen, ".*", "");
+    expect(frozen.test("anything")).toBe(true);
+    recompile(frozen, "^x$", "");
+    expect(frozen.test("anything")).toBe(false);
+  });
+
+  it("with every RegExp reachable from this module, the onboarding module, primordials and the whole package recompiled to .*, every decision is unchanged", () => {
+    const { regexps, objects } = regexpsReachableFrom([runtimeCheckModule, onboardingModule, primordialsModule, specPackage]);
+    const saved = regexps.map((re) => [re, re.source, re.flags] as const);
+    let decisions: RuntimeDecision[] = [];
+    let allMatchAnything = true;
+    try {
+      for (const re of regexps) recompile(re, ".*", "");
+      for (const re of regexps) allMatchAnything = allMatchAnything && re.test("sha256:NOT-A-DIGEST");
+      decisions = decideAll();
+    } finally {
+      for (const [re, source, flags] of saved) recompile(re, source, flags);
+    }
+    for (const [re, source, flags] of saved) expect(`${re.source}/${re.flags}`).toBe(`${source}/${flags}`);
+    expect(allMatchAnything).toBe(true);
+    // The walk reaches into the package's zod schemas, and finds RegExps there to recompile.
+    expect(objects).toBeGreaterThan(1000);
+    expect(regexps.length).toBeGreaterThan(0);
+    expect(JSON.stringify(decisions)).toBe(CLEAN_DECISIONS);
+  });
+
+  it("the module exports exactly the check, and holds no RegExp itself", () => {
+    expect(Object.keys(runtimeCheckModule)).toEqual(["checkRuntimeCommand"]);
+    expect(regexpsReachableFrom([runtimeCheckModule]).regexps).toEqual([]);
+  });
+});
+
+describe("envelope-runtime-check.ts source: no RegExp, no zod, no ambient call, template interpolations included", () => {
+  const SOURCE = readFileSync(fileURLToPath(new URL("../onboarding/envelope-runtime-check.ts", import.meta.url)), "utf8");
+
+  /**
+   * The code with comments and string text blanked, keeping every template
+   * interpolation as code. R8's codeOnly blanks a template literal whole, so a
+   * call inside `${...}` would be invisible to it.
+   */
+  function codeWithInterpolations(source: string): string {
+    let i = 0;
+    let out = "";
+    const template = (): void => {
+      out += '""';
+      while (i < source.length) {
+        const c = source[i]!;
+        if (c === "\\") i += 2;
+        else if (c === "`") {
+          i++;
+          return;
+        } else if (c === "$" && source[i + 1] === "{") {
+          i += 2;
+          out += "(";
+          code(true);
+          out += ")";
+        } else {
+          if (c === "\n") out += "\n";
+          i++;
+        }
+      }
+    };
+    const code = (inInterpolation: boolean): void => {
+      let depth = 0;
+      while (i < source.length) {
+        const c = source[i]!;
+        const next = source[i + 1];
+        if (c === "/" && next === "*") {
+          const end = source.indexOf("*/", i + 2);
+          i = end < 0 ? source.length : end + 2;
+          out += " ";
+        } else if (c === "/" && next === "/") {
+          const end = source.indexOf("\n", i);
+          i = end < 0 ? source.length : end;
+        } else if (c === '"' || c === "'") {
+          let j = i + 1;
+          while (j < source.length && source[j] !== c) j += source[j] === "\\" ? 2 : 1;
+          i = j + 1;
+          out += '""';
+        } else if (c === "`") {
+          i++;
+          template();
+        } else if (c === "}" && inInterpolation && depth === 0) {
+          i++;
+          return;
+        } else {
+          if (c === "{") depth++;
+          if (c === "}") depth--;
+          out += c;
+          i++;
+        }
+      }
+    };
+    code(false);
+    return out;
+  }
+
+  it("the extractor keeps interpolations, nested ones too, and blanks only text", () => {
+    expect(codeWithInterpolations("const a = `x ${f(/re/)} y`; // c")).toContain("f(/re/)");
+    expect(codeWithInterpolations("const b = `${`${g.map(h)}`} ${ {k: 1}.k }`;")).toContain("g.map(h)");
+    expect(codeWithInterpolations('const c = "/text/"; /* /block/ */')).not.toContain("/");
+  });
+
+  it("imports R8's captured-intrinsic modules only, zod and operational-envelope.ts (its schema) only as types", () => {
+    const imports = [...SOURCE.matchAll(/^import\s+(type\s+)?\{[^}]*\}\s+from\s+"([^"]+)";/gm)].map((m) => `${m[1] ? "type " : ""}${m[2]}`);
+    expect(imports).toEqual(["type ./operational-envelope.js", "./safety-envelope.js", "./primordials.js"]);
+    expect(SOURCE.match(/^import\b/gm)).toHaveLength(3);
+  });
+
+  it("bans, interpolations included: RegExp and regex literals, zod, Function.prototype calls, the in operator, destructuring and spread, and every ambient call R8 bans", () => {
+    const code = codeWithInterpolations(SOURCE);
+    const banned: Array<[RegExp, string]> = [
+      [/\bRegExp\b/, "a RegExp"],
+      [/\.(regex|test|exec|match|matchAll|search|compile|replace|split)\(/, "a regex method"],
+      [/\//, "a slash: the module does no division, so it can only start a regex literal"],
+      [/\bz\.|\.safeParse\(|\.parse\(|\bimport\(|\brequire\(/, "zod, or a dynamic import"],
+      [/\.(call|apply|bind)\(/, "a call through Function.prototype"],
+      [/\sin\s/, "the in operator, or for...in (both read the prototype chain)"],
+      [/\b(const|let|var)\s*\[/, "array destructuring (the iterator protocol)"],
+      [/\.\.\./, "spread or rest"],
+      [/\.(map|filter|flatMap|forEach|some|every|includes|find|findIndex|indexOf|join|push|pop|shift|unshift|splice|sort|reverse|concat|entries|values|trim|toLowerCase|toUpperCase|slice|startsWith|endsWith|padStart|toString|update|digest|has|add|delete|get|set)\(/, "a method looked up at call time"],
+      [/\bfor\s*\([^)]*\bof\b/, "for...of (the iterator protocol)"],
+      [/\bnew\s+(Set|Map|WeakSet|WeakMap|Array|Uint8Array|TextEncoder)\b/, "an ambient constructor"],
+      [/\b(JSON|Object|Array|Number|Math|Date|Reflect|Symbol|Promise|String)\s*\./, "a member of an ambient global"],
+      [/\b(String|Number|Boolean)\s*\(/, "an ambient conversion function"],
+      [/\binstanceof\b/, "instanceof"],
+    ];
+    const found: string[] = [];
+    code.split("\n").forEach((line, n) => {
+      for (const [pattern, what] of banned) if (pattern.test(line)) found.push(`${n + 1} ${what}: ${line.trim()}`);
+    });
+    expect(found).toEqual([]);
   });
 });
