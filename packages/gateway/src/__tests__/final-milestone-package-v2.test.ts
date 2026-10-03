@@ -12,6 +12,7 @@
 
 import { describe, it, expect } from "vitest";
 import { keccak256, toBytes } from "viem";
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import GOLDEN from "./fixtures/g2-settlement-vector-golden.json";
 import {
   validatePackageBody,
@@ -29,8 +30,25 @@ import {
 } from "../settlement/final-milestone-package-v2.js";
 import { packageDigestV2, canonicalSignatures, type PackageSignature } from "../settlement/package-digest-v2.js";
 import { COMPROMISED_DEVICE_PUBLIC_KEYS } from "@pcc/spec";
+import { signWithPrivateKeyHex } from "../auth/ed25519.js";
 
 const H = (n: string) => `0x${n.repeat(64).slice(0, 64)}`;
+
+/**
+ * Deterministic Ed25519 keypair from a 32-byte hex seed — test-only, so D2
+ * fixtures below are REAL signatures instead of the pre-fix 0x22-repeated
+ * placeholder (F1). Mirrors the ASN.1 handling in
+ * `gateway/src/auth/ed25519.ts` (`generateEd25519Keypair`), just keyed from a
+ * fixed seed instead of a random one.
+ */
+function ed25519PublicKeyHexFromSeed(seedHex: string): string {
+  const pkcs8Prefix = Buffer.from("302e020100300506032b657004220420", "hex");
+  const pkcs8Der = Buffer.concat([pkcs8Prefix, Buffer.from(seedHex, "hex")]);
+  const privateKey = createPrivateKey({ key: pkcs8Der, format: "der", type: "pkcs8" });
+  const publicKey = createPublicKey(privateKey);
+  const spkiDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
+  return `0x${spkiDer.subarray(12).toString("hex")}`;
+}
 
 const BODY: FinalMilestonePackageV2Body = {
   packageSchemaVersion: PACKAGE_SCHEMA_VERSION,
@@ -473,18 +491,64 @@ describe("validatePackageBody — pinned forms", () => {
 
 describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted", () => {
   const D1 = { signer: `0x${"ab".repeat(20)}`, scheme: "secp256k1-eip712", sig: `0x${"11".repeat(65)}` };
-  const D2 = { signer: `0x${"cd".repeat(32)}`, scheme: "ed25519-raw32", sig: `0x${"22".repeat(64)}` };
+  // D2 is now a REAL ed25519 signature from a deterministic test key (F1: the
+  // old 0x22-repeated placeholder proved nothing). D1 stays shape-only for
+  // now; see the STOP note above MINT_SIGNER_PROFILE.
+  const DEVICE_SEED = "11".repeat(32);
+  const OTHER_SEED = "22".repeat(32);
+  const DEVICE_PUB = ed25519PublicKeyHexFromSeed(DEVICE_SEED);
   // A mintable body names its principals in the pinned forms, bound to D1 and D2,
   // and the registry holds D2's key for the producing kernel.
   const MINTABLE = clone(BODY);
   MINTABLE.producer.operatorPrincipalId = `eip155:${BODY.unitBinding.chainId}:${D1.signer}`;
-  MINTABLE.producer.devicePrincipalId = `ed25519:${D2.signer}`;
-  const REGISTRY = { algorithm: "ed25519", publicKey: D2.signer };
+  MINTABLE.producer.devicePrincipalId = `ed25519:${DEVICE_PUB}`;
+  const BODY_HASH_RAW32 = Buffer.from(toBytes(computePackageBodyHash(MINTABLE)));
+  const D2 = {
+    signer: DEVICE_PUB,
+    scheme: "ed25519-raw32",
+    sig: `0x${signWithPrivateKeyHex(DEVICE_SEED, BODY_HASH_RAW32)!}`,
+  };
+  const REGISTRY = { algorithm: "ed25519", publicKey: DEVICE_PUB };
 
   it("accepts a real D1 + D2 set and hashes exactly what the digest function would", () => {
     const minted = assertMintablePackage(MINTABLE, [D2, D1], REGISTRY);
     expect(minted.signatures.map((s) => s.scheme)).toEqual(["secp256k1-eip712", "ed25519-raw32"]);
     expect(packageDigestV2(minted.body, minted.signatures)).toBe(packageDigestV2(MINTABLE, [D1, D2]));
+  });
+
+  // ── F1 (cross-family E9): D2's ed25519 signature is now cryptographically
+  // verified over raw32(packageBodyHash). D1 is unchanged (shape-only; STOP).
+  describe("F1 — D2 is cryptographically verified, not just shape-checked", () => {
+    it("refuses random bytes as the D2 signature", () => {
+      const d2 = { ...D2, sig: `0x${"ab".repeat(64)}` }; // right shape, not a real signature
+      expect(() => assertMintablePackage(MINTABLE, [D1, d2], REGISTRY)).toThrow(PackageNotMintableError);
+      expect(() => assertMintablePackage(MINTABLE, [D1, d2], REGISTRY)).toThrow(
+        /D2 ed25519 signature does not verify/,
+      );
+    });
+
+    it("refuses a real D2 signature over the WRONG body", () => {
+      const otherBody = clone(MINTABLE);
+      otherBody.unitBinding.milestoneIndex = "999";
+      const otherHashRaw32 = Buffer.from(toBytes(computePackageBodyHash(otherBody)));
+      const wrongBodySig = { ...D2, sig: `0x${signWithPrivateKeyHex(DEVICE_SEED, otherHashRaw32)!}` };
+      expect(() => assertMintablePackage(MINTABLE, [D1, wrongBodySig], REGISTRY)).toThrow(PackageNotMintableError);
+    });
+
+    it("refuses a real signature produced by the WRONG key", () => {
+      // Signed by OTHER_SEED's key, but the entry still CLAIMS signer = DEVICE_PUB.
+      const wrongKeySig = { ...D2, sig: `0x${signWithPrivateKeyHex(OTHER_SEED, BODY_HASH_RAW32)!}` };
+      expect(() => assertMintablePackage(MINTABLE, [D1, wrongKeySig], REGISTRY)).toThrow(PackageNotMintableError);
+    });
+
+    it("refuses a real signature over the ASCII-HEX STRING of packageBodyHash instead of its raw 32 bytes", () => {
+      const hexString = computePackageBodyHash(MINTABLE); // "0x" + 64 hex chars, as ASCII
+      const asciiHexSig = {
+        ...D2,
+        sig: `0x${signWithPrivateKeyHex(DEVICE_SEED, Buffer.from(hexString, "utf8"))!}`,
+      };
+      expect(() => assertMintablePackage(MINTABLE, [D1, asciiHexSig], REGISTRY)).toThrow(PackageNotMintableError);
+    });
   });
 
   it("fails closed on the interim challenge nonce: nothing is minted until the durable challenge exists (F7)", () => {
@@ -632,11 +696,18 @@ function countingArray<T>(arr: T[], reads: Counts): T[] {
 
 describe("read-once: every input field is read exactly once and only the copies are validated and hashed", () => {
   const D1r = { signer: `0x${"ab".repeat(20)}`, scheme: "secp256k1-eip712", sig: `0x${"11".repeat(65)}` };
-  const D2r = { signer: `0x${"cd".repeat(32)}`, scheme: "ed25519-raw32", sig: `0x${"22".repeat(64)}` };
+  const DEVICE_SEED_R = "33".repeat(32);
+  const DEVICE_PUB_R = ed25519PublicKeyHexFromSeed(DEVICE_SEED_R);
   const MINT_BODY = clone(BODY);
   MINT_BODY.producer.operatorPrincipalId = `eip155:${BODY.unitBinding.chainId}:${D1r.signer}`;
-  MINT_BODY.producer.devicePrincipalId = `ed25519:${D2r.signer}`;
-  const REGISTRY_ED = { algorithm: "ed25519", publicKey: D2r.signer };
+  MINT_BODY.producer.devicePrincipalId = `ed25519:${DEVICE_PUB_R}`;
+  const MINT_BODY_HASH_RAW32 = Buffer.from(toBytes(computePackageBodyHash(MINT_BODY)));
+  const D2r = {
+    signer: DEVICE_PUB_R,
+    scheme: "ed25519-raw32",
+    sig: `0x${signWithPrivateKeyHex(DEVICE_SEED_R, MINT_BODY_HASH_RAW32)!}`,
+  };
+  const REGISTRY_ED = { algorithm: "ed25519", publicKey: DEVICE_PUB_R };
 
   it("validatePackageBody reads each of the body's fields exactly once and returns a copy the caller cannot reach", () => {
     const counts: Counts = {};
@@ -699,7 +770,12 @@ describe("read-once: every input field is read exactly once and only the copies 
     expect(arrayReads).toEqual({ length: 1, "0": 1, "1": 1 });
     // the returned entries are not the caller's objects: a later change to them does not reach the result
     live[0]!.signer = `0x${"ee".repeat(20)}`;
-    expect(out).toEqual([D1r, D2r]);
+    // Sorted by signer — NOT necessarily [D1r, D2r] in source order; D2r's
+    // signer is now a real derived ed25519 key (F1) and may sort either side
+    // of D1r's fake address, so compute the expected order the same way
+    // canonicalSignatures does rather than hardcoding one.
+    const expected = [D1r, D2r].sort((a, b) => (a.signer < b.signer ? -1 : a.signer > b.signer ? 1 : 0));
+    expect(out).toEqual(expected);
   });
 
   it("assertMintablePackage reads each body field, signature field, list slot and registry field once", () => {

@@ -36,6 +36,7 @@ import {
   operatorPrincipalMatchesSigner,
   principalFromRegistry,
 } from "@pcc/spec";
+import { verifyEd25519Signature } from "../auth/ed25519.js";
 
 export type Hex = `0x${string}`;
 
@@ -579,10 +580,46 @@ export class PackageNotMintableError extends Error {
  * is enforced here and not by `packageDigestV2`.)
  *   D1 "secp256k1-eip712" = the operator's EIP-712 signature (signer = 0x +
  *      40-hex address, 65-byte signature);
- *   D2 "ed25519-raw32" = the kernel's ed25519 signature over the raw 32 bytes
- *      of the package digest (signer = 0x + 64-hex public key, the registry's
- *      form; 64-byte signature).
+ *   D2 "ed25519-raw32" = the kernel's ed25519 signature over raw32(packageBodyHash)
+ *      — the raw 32 bytes of packageBodyHash, never packageDigestV2 (which embeds
+ *      D2 itself) and never the hex string (signer = 0x + 64-hex public key, the
+ *      registry's form; 64-byte signature).
  * Lowercase hex only.
+ *
+ * CROSS-FAMILY E9 (2026-09-24 / adfa2695), D1 STATUS — READ BEFORE TOUCHING D1:
+ * D2 above IS cryptographically verified below (ed25519 over
+ * raw32(packageBodyHash), via `verifyEd25519Signature`). D1 IS NOT: this guard
+ * still only checks D1's SHAPE (signer/sig regex, below) and that the CLAIMED
+ * `operatorPrincipalId` matches the CLAIMED D1 signer
+ * (`operatorPrincipalMatchesSigner`) — which is self-consistency, not
+ * authenticity. A fabricated D1 signature of the right SHAPE over the WRONG
+ * (or no) message still passes this guard today.
+ *
+ * Verifying D1 for real needs the EIP-712 domain + typed-data struct the
+ * operator signs. Searched for it in public PCC (2026-10-02) and did not find
+ * a byte-exact one:
+ *   - evidence schema docs (`~/.claude/shared/vnext-finalmilestonepackage-v2-body-schema.md`
+ *     §2) name the domain (`{name:"PCC FinalMilestonePackage", version:"2",
+ *     chainId, verifyingContract=escrow}`, no salt) and the struct name
+ *     (`FinalMilestonePackageV2{8 unitBinding fields + packageBodyHash}`) in
+ *     PROSE, but give no per-field Solidity/ABI type (uint256 vs string, exact
+ *     order) — not enough to compute a correct struct hash;
+ *   - the V-next escrow Solidity (`packages/contracts/src/libraries/VNextSettlementLib.sol`,
+ *     `VNextSettlementEscrowFactory.sol`) defines `JOB_POLICY_TYPEHASH` for
+ *     `PolicyIdentity` and the shared EIP-712 domain hashes, but no typehash for
+ *     a package/release struct;
+ *   - escrow's #367 TS ABI (`packages/contracts/ts/abi/*.ts`, frozen by
+ *     "feat/vnext-settlement-abi-freeze") has no TYPEHASH, FinalMilestone,
+ *     PackageV2, EIP712 or packageBodyHash reference at all;
+ *   - the #270 mirror (`pcc-lanes/wt-evidence-270/packages/verifier/test-vectors/
+ *     finalmilestonepackage-v2-preview-mirror.cjs`) only computes
+ *     `packageBodyHash`; it has no operator-signature verification.
+ * Per the operator's standing rule, a struct guessed from prose here would
+ * verify against a type space ONLY this file invented — not what the real
+ * operator signer or the private Oracle use — which is worse than an honest
+ * gap: it would look fixed while still being bypassable by anyone who reads
+ * this file. D1 STOPS here until the authoritative struct is published in
+ * public PCC. Tracked in triage-E9-358-fixer-tango.md.
  */
 const D1_SCHEME = "secp256k1-eip712";
 const D2_SCHEME = "ed25519-raw32";
@@ -682,6 +719,20 @@ export function assertMintablePackage(
       "must be ed25519:<the D2 signer's key>, never a key whose secret is public (pcc.evidence.principal-id.v1)",
     );
   }
+
+  // F1 (D2 half): the kernel's ed25519 signature must verify over the raw 32
+  // bytes of packageBodyHash — not the hex string, and not packageDigestV2
+  // (which would be circular: it embeds this very signature). D1 is NOT
+  // cryptographically verified here; see the STOP note above
+  // MINT_SIGNER_PROFILE.
+  const bodyHashRaw32 = Buffer.from(toBytes(computePackageBodyHash(valid)));
+  if (!verifyEd25519Signature(d2.signer, bodyHashRaw32, d2.sig)) {
+    throw new PackageNotMintableError(
+      `$signatures[${entries.indexOf(d2)}].sig`,
+      "D2 ed25519 signature does not verify over raw32(packageBodyHash)",
+    );
+  }
+
   if (principalFromRegistry(copyRegisteredSigner(registeredDeviceSigner), chainId) !== valid.producer.devicePrincipalId) {
     throw new PackageNotMintableError(
       "$.producer.devicePrincipalId",
