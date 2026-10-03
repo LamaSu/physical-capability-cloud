@@ -10,16 +10,8 @@ import type { AssuranceTier, SHA256 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
 import { openEvidenceSession } from "./evidence-session.js";
+import { isStepLeased, leaseStep } from "./step-lease.js";
 import * as Sentry from "@sentry/node";
-
-/**
- * The (jobId, stepId) keys running on each emitter, each mapped to the run that holds it.
- * registerStep overwrites a step under an active key, so two runs of one step on disjoint
- * adapters would read and finalize each other's events (astra pack 172). A run takes the
- * key before registerStep and releases it on every exit; a run whose key is held is refused.
- */
-const activeSteps = new WeakMap<EvidenceEmitter, Map<string, string>>();
-let runs = 0;
 
 /** Callback fired at key pipeline phase transitions for external telemetry. */
 export type OnPhaseCallback = (
@@ -130,13 +122,9 @@ export class JobRunner {
       }
     }
 
-    const stepKey = `${jobId}:${stepId}`; // the emitter's own key for the step
-    let leases = activeSteps.get(this.evidenceEmitter);
-    if (leases === undefined) {
-      leases = new Map();
-      activeSteps.set(this.evidenceEmitter, leases);
-    }
-    if (leases.has(stepKey)) {
+    // registerStep overwrites a step under an active key, so a run of a (jobId, stepId)
+    // already running on this emitter is refused (the step lease, step-lease.ts).
+    if (isStepLeased(this.evidenceEmitter, jobId, stepId)) {
       return {
         success: false,
         error: `step ${stepId} of job ${jobId} is already running`,
@@ -172,8 +160,7 @@ export class JobRunner {
       };
     }
     const session = opened.session;
-    const lease = `${jobId}#${++runs}`;
-    leases.set(stepKey, lease);
+    const releaseStep = leaseStep(this.evidenceEmitter, jobId, stepId);
     this.evidenceEmitter.registerStep(jobId, stepId, assuranceTier);
 
     // Wait for the chain, but not forever: an addEvent may never settle.
@@ -378,7 +365,7 @@ export class JobRunner {
         this.evidenceEmitter.cleanup(jobId, stepId);
       }
       // Released last, so a later run of this step registers a fresh record.
-      if (leases.get(stepKey) === lease) leases.delete(stepKey);
+      releaseStep();
     }
   }
 
