@@ -122,7 +122,7 @@ export class JobRunner {
           if (assuranceTier >= 2 && this.camera) {
             await Sentry.startSpan(
               { name: "job.before_snapshot", op: "job.phase", attributes: { "job.id": jobId } },
-              async () => this.camera!.captureSnapshot(),
+              async () => this.camera!.captureSnapshot({ jobId }),
             );
           }
 
@@ -157,13 +157,14 @@ export class JobRunner {
           if (assuranceTier >= 2 && this.camera) {
             await Sentry.startSpan(
               { name: "job.cv_inspection", op: "job.phase", attributes: { "job.id": jobId } },
-              async () => this.camera!.runInspection(),
+              async () => this.camera!.runInspection(undefined, { jobId }),
             );
           }
 
-          // 8. Check tier requirements are met
+          // 8. Check tier requirements are met. A camera event counts only as an
+          //    LO-SE-1 capture for THIS job, so the check needs the jobId.
           const events = this.evidenceEmitter.getEvents(jobId, stepId);
-          const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier);
+          const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier, undefined, { jobId });
           if (!check.met) {
             // For tier >= 2, unmet requirements are a hard failure
             if (assuranceTier >= 2) {

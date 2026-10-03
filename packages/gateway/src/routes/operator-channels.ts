@@ -35,6 +35,7 @@
 import type { FastifyInstance } from "fastify";
 import { randomBytes, createHmac } from "node:crypto";
 import { getEmailTransport } from "../services/email-transport.js";
+import { checkOutboundUrl, guardedFetch, OutboundError } from "../services/outbound-url-guard.js";
 
 /**
  * The transport is "what wire does the message go over." It stays small and
@@ -224,8 +225,11 @@ interface ChannelDispatchResult {
    * Machine-readable failure code when `delivered` is false. Lets the
    * operator's agent and the dashboard distinguish an honest "not configured"
    * (`email_not_configured`) from a transport that isn't wired
-   * (`transport_not_implemented`), a bad endpoint (`invalid_endpoint`), or a
-   * provider rejection (`send_failed`).
+   * (`transport_not_implemented`), a bad endpoint (`invalid_endpoint`, which
+   * includes a webhook URL that is not an allowed destination), a provider
+   * rejection / unreachable or refused destination (`send_failed`), or a
+   * `credentialRef` the gateway operator has not allowlisted
+   * (`credential_ref_not_allowed`; same code whether or not the secret exists).
    */
   error?: string;
   warning?: string;
@@ -259,6 +263,118 @@ export interface ChannelInput {
   enabled?: boolean;
 }
 
+type CodedError = Error & { code: string };
+
+function codedError(code: string, message: string): CodedError {
+  return Object.assign(new Error(message), { code });
+}
+
+/**
+ * Attach-time (and PATCH-time) URL rule for webhook channels (N84).
+ *
+ * The gateway POSTs to this URL from inside its own network, so a webhook URL
+ * is only accepted when it is an https URL (http only when NODE_ENV is "test"
+ * or "development") to a public destination: no userinfo, no IP literal in a
+ * private/loopback/link-local/metadata range (any spelling), no internal host
+ * name. Host names are not resolved here; the send path resolves them and
+ * vetoes private answers (see services/outbound-url-guard.ts), and checks the
+ * URL again, so records stored before this rule existed are refused too.
+ *
+ * A webhook with no `endpoint.url` yet is still accepted (the agent may add it
+ * later); sendWebhook reports "no endpoint.url". Other transports never dial
+ * `endpoint.url`, so it is not checked for them, but PATCH re-checks the merged
+ * record when the transport changes to "webhook".
+ */
+function assertWebhookUrlAllowed(transport: unknown, endpoint: unknown): void {
+  if (transport !== "webhook") return;
+  const url = endpoint && typeof endpoint === "object" ? (endpoint as { url?: unknown }).url : undefined;
+  if (url === undefined || url === null) return;
+  const check = checkOutboundUrl(url);
+  if (!check.ok) {
+    throw codedError(
+      "invalid_channel_url",
+      `endpoint.url is not an allowed webhook destination (${check.reason}); use a public https URL`,
+    );
+  }
+}
+
+// ── credentialRef allowlist (N84) ────────────────────────────────────────────
+//
+// `credentialRef` names a secret the gateway holds in its environment as
+// PCC_VAULT_<REF>. It used to be honoured for ANY ref a caller named: the
+// gateway HMAC-signed the (caller-influenced) webhook body with that secret and
+// sent the signature to the caller's URL. That is a signing oracle over every
+// vault secret and, through "signed vs unsigned", a secret-existence oracle.
+//
+// There is no per-operator secret store yet, so a ref is honoured ONLY when the
+// gateway operator has listed the pair in PCC_CHANNEL_CREDENTIALS:
+//
+//     PCC_CHANNEL_CREDENTIALS="tonys-pizza:printer_hmac, lab-7:lab7_signing"
+//
+// Entries are comma separated "slug:ref". Whitespace is trimmed, the slug is
+// compared case-insensitively, and the ref is normalised exactly like the vault
+// lookup (upper-cased, anything outside A-Z0-9_ becomes "_"), so the allowlist
+// authorises the secret itself and not one spelling of its name. Malformed
+// entries are ignored. Unset or blank means NO credentialRef is allowed for
+// anyone.
+//
+// The rule is enforced at attach and PATCH time (400 credential_ref_not_allowed,
+// nothing written) AND at send time, so a channel stored before the rule
+// existed, or whose allowlist entry was later removed, is neither signed nor
+// sent. The failure is identical for a ref that names no variable, one that
+// names a variable that is not allowlisted, and one that is allowlisted but has
+// no secret configured, so it cannot be used to learn which PCC_VAULT_*
+// variables exist.
+//
+// Known limit, for WP-A (#326): slugs are not yet bound to an owner, so any
+// caller who can reach the route can still attach a channel to a slug that HAS
+// allowlist entries and obtain signatures for it. Allowlist only pairs whose
+// receiver accepts any body PCC signs for that slug. Once the slug owner binding
+// lands, a slug's owner can attach only its allowlisted refs; until then this
+// operator-configured allowlist is the only gate, which is why it lives in the
+// gateway's environment and not in a caller-writable record.
+
+const CHANNEL_CREDENTIALS_ENV = "PCC_CHANNEL_CREDENTIALS";
+
+/** One text for every refusal, so it says nothing about which variables exist. */
+const CREDENTIAL_REF_NOT_USABLE =
+  "credentialRef is not usable for this operator: it is not allowlisted or not configured on the gateway";
+
+/** Normalises a ref exactly like the vault lookup always has (after trimming). */
+function vaultKeyFor(ref: string): string {
+  return ref.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+}
+
+/** True only when the gateway operator listed (slug, ref) in PCC_CHANNEL_CREDENTIALS. */
+export function isChannelCredentialAllowed(operatorSlug: unknown, credentialRef: unknown): boolean {
+  if (typeof operatorSlug !== "string" || typeof credentialRef !== "string") return false;
+  const slug = operatorSlug.trim().toLowerCase();
+  const wanted = vaultKeyFor(credentialRef);
+  // An empty slug or ref never matches: it would otherwise equal an empty
+  // entry part ("lab-7:" or " :ref") and authorise a blank ref or slug.
+  if (slug === "" || wanted === "") return false;
+  const raw = process.env[CHANNEL_CREDENTIALS_ENV];
+  if (!raw) return false;
+  for (const entry of raw.split(",")) {
+    // No colon (or nothing before it) means a malformed entry that matches
+    // nothing; without this guard "ab" would read as slug "a", ref "ab".
+    const colon = entry.indexOf(":");
+    if (colon <= 0) continue;
+    if (entry.slice(0, colon).trim().toLowerCase() === slug && vaultKeyFor(entry.slice(colon + 1)) === wanted) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Throws credential_ref_not_allowed unless the channel names no credential or an allowlisted one. */
+function assertCredentialRefAllowed(operatorSlug: string, credentialRef: unknown): void {
+  if (credentialRef === undefined || credentialRef === null || credentialRef === "") return;
+  if (!isChannelCredentialAllowed(operatorSlug, credentialRef)) {
+    throw codedError("credential_ref_not_allowed", CREDENTIAL_REF_NOT_USABLE);
+  }
+}
+
 /**
  * Programmatic attach — used by HTTP route AND by the A2A `pcc-attach-channel`
  * skill (so an agent doesn't have to make a second HTTP call).
@@ -280,6 +396,8 @@ export function attachChannel(operatorSlug: string, input: ChannelInput): Channe
       { code: "invalid_body" },
     );
   }
+  assertWebhookUrlAllowed(input.transport, input.endpoint);
+  assertCredentialRefAllowed(operatorSlug, input.credentialRef);
   const ch: ChannelRecord = {
     id: newId(),
     operatorSlug,
@@ -441,11 +559,46 @@ function emailBody(ch: ChannelRecord, p: ChannelDispatchPayload): string {
   return lines.join("\n");
 }
 
+/**
+ * Maps a refused or failed guarded send to a dispatch result. Deliberately
+ * coarse: a blocked destination, a name that does not resolve and a connection
+ * failure all read the same, so the test-send route cannot be used to probe
+ * which internal names exist or which internal ports answer, and no address,
+ * resolver message or socket error text ever reaches the caller. The precise
+ * reason goes to the server log only (JSON-encoded: the slug is caller-chosen).
+ */
+function webhookFailure(ch: ChannelRecord, e: unknown): ChannelDispatchResult {
+  if (!(e instanceof OutboundError)) throw e; // unexpected: dispatchOne reports send_failed
+  console.warn(
+    `[op-channel] webhook not sent ${JSON.stringify({
+      operator: ch.operatorSlug,
+      channel: ch.id,
+      code: e.code,
+      reason: e.reason,
+    })}`,
+  );
+  const base = { channelId: ch.id, transport: "webhook" as const, delivered: false };
+  switch (e.code) {
+    case "invalid_url":
+      return {
+        ...base,
+        error: "invalid_endpoint",
+        warning: "webhook endpoint.url is not an allowed destination; use a public https URL",
+      };
+    case "redirect_not_followed":
+      return { ...base, warning: `HTTP ${e.status} (redirects are not followed; configure the final URL)` };
+    case "timeout":
+      return { ...base, error: "send_failed", warning: "webhook request timed out" };
+    default:
+      return { ...base, error: "send_failed", warning: "webhook destination is not reachable or not permitted" };
+  }
+}
+
 async function sendWebhook(
   ch: ChannelRecord,
   p: ChannelDispatchPayload,
 ): Promise<ChannelDispatchResult> {
-  const url = (ch.endpoint as { url?: string }).url;
+  const url = (ch.endpoint as { url?: unknown }).url;
   if (!url) {
     return {
       channelId: ch.id,
@@ -453,6 +606,16 @@ async function sendWebhook(
       delivered: false,
       warning: "no endpoint.url",
     };
+  }
+  // credentialRef gate: a stored channel whose ref is not allowlisted (or whose
+  // secret is not configured) is neither signed nor sent, and the refusal is
+  // the same either way. Checked before the body is even built. (The URL is
+  // checked again inside guardedFetch, so a record stored before the attach-time
+  // rule existed is refused there.)
+  let secret: string | undefined;
+  if (ch.credentialRef) {
+    secret = resolveChannelSecret(ch.operatorSlug, ch.credentialRef);
+    if (!secret) return credentialRefRefused(ch);
   }
   const body = JSON.stringify({
     source: "pcc.capability.network",
@@ -462,27 +625,59 @@ async function sendWebhook(
     job: p,
   });
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (ch.credentialRef) {
-    const secret = await resolveSecret(ch.credentialRef);
-    if (secret) {
-      const sig = createHmac("sha256", secret).update(body).digest("hex");
-      headers["x-pcc-signature"] = `sha256=${sig}`;
-    }
+  if (secret) {
+    const sig = createHmac("sha256", secret).update(body).digest("hex");
+    headers["x-pcc-signature"] = `sha256=${sig}`;
   }
-  const r = await fetch(url, { method: "POST", headers, body });
-  return r.ok
-    ? { channelId: ch.id, transport: "webhook", delivered: true, ref: r.headers.get("x-request-id") ?? undefined }
-    : { channelId: ch.id, transport: "webhook", delivered: false, warning: `HTTP ${r.status}` };
+  try {
+    // The only network call a channel can trigger: resolve once, refuse any
+    // private answer, dial the validated address, never follow a redirect.
+    const r = await guardedFetch(String(url), { method: "POST", headers, body });
+    const requestId = r.headers["x-request-id"];
+    return r.ok
+      ? {
+          channelId: ch.id,
+          transport: "webhook",
+          delivered: true,
+          ref: (Array.isArray(requestId) ? requestId[0] : requestId) ?? undefined,
+        }
+      : { channelId: ch.id, transport: "webhook", delivered: false, warning: `HTTP ${r.status}` };
+  } catch (e) {
+    return webhookFailure(ch, e);
+  }
+}
+
+/** A stored channel's credentialRef is not usable: nothing was signed, nothing was sent. */
+function credentialRefRefused(ch: ChannelRecord): ChannelDispatchResult {
+  console.warn(
+    `[op-channel] webhook not sent ${JSON.stringify({
+      operator: ch.operatorSlug,
+      channel: ch.id,
+      code: "credential_ref_not_allowed",
+    })}`,
+  );
+  return {
+    channelId: ch.id,
+    transport: "webhook",
+    delivered: false,
+    error: "credential_ref_not_allowed",
+    warning: CREDENTIAL_REF_NOT_USABLE,
+  };
 }
 
 /**
- * Vault resolution. The real vault lives in the gatecraft-credentials layer
- * (see ai/research/gatecraft); this stub keeps the surface stable so the
- * rest of the system can develop against it. Returns undefined if the
- * reference is unknown — dispatch falls back to unsigned send + warning.
+ * Vault resolution — the ONLY place a PCC_VAULT_* variable is read, and only
+ * for a (slug, ref) pair the gateway operator allowlisted (see the allowlist
+ * block above). Returns undefined when the pair is not allowlisted or the
+ * secret is unset or empty; callers must treat both identically. The real
+ * vault lives in the gatecraft-credentials layer (see ai/research/gatecraft);
+ * this env-backed stub keeps the surface stable so the rest of the system can
+ * develop against it.
  */
-async function resolveSecret(ref: string): Promise<string | undefined> {
-  return process.env[`PCC_VAULT_${ref.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`];
+function resolveChannelSecret(operatorSlug: string, ref: string): string | undefined {
+  if (!isChannelCredentialAllowed(operatorSlug, ref)) return undefined;
+  const secret = process.env[`PCC_VAULT_${vaultKeyFor(ref)}`];
+  return secret ? secret : undefined;
 }
 
 // ── HTTP routes ────────────────────────────────────────────────────────────
@@ -525,14 +720,31 @@ export async function operatorChannelsRoutes(app: FastifyInstance): Promise<void
   }>("/api/operators/channels/:id", async (req, reply) => {
     const ch = channels.get(req.params.id);
     if (!ch) return reply.status(404).send({ error: "not_found" });
+    const patch: Partial<ChannelRecord> = req.body && typeof req.body === "object" ? req.body : {};
     const merged: ChannelRecord = {
       ...ch,
-      ...req.body,
+      ...patch,
       id: ch.id,
       operatorSlug: ch.operatorSlug,
       createdAt: ch.createdAt,
       updatedAt: nowIso(),
     };
+    // PATCH must not be a way around the attach-time rules: whatever the patch
+    // touches is validated on the MERGED record, and nothing is written when
+    // it fails. A patch that touches neither field (rename, disable) is never
+    // blocked by a stale stored value, so an operator can still switch off a
+    // channel that predates the rules; send time refuses it either way.
+    try {
+      if ("transport" in patch || "endpoint" in patch) {
+        assertWebhookUrlAllowed(merged.transport, merged.endpoint);
+      }
+      if ("credentialRef" in patch) {
+        assertCredentialRefAllowed(merged.operatorSlug, merged.credentialRef);
+      }
+    } catch (e) {
+      const err = e as CodedError;
+      return reply.status(400).send({ error: err.code, message: err.message });
+    }
     channels.set(ch.id, merged);
     return reply.status(200).send({ channel: merged });
   });
