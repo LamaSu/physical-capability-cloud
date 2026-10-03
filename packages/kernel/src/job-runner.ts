@@ -122,7 +122,7 @@ export class JobRunner {
           if (assuranceTier >= 2 && this.camera) {
             await Sentry.startSpan(
               { name: "job.before_snapshot", op: "job.phase", attributes: { "job.id": jobId } },
-              async () => this.camera!.captureSnapshot(),
+              async () => this.camera!.captureSnapshot({ jobId }),
             );
           }
 
@@ -157,7 +157,7 @@ export class JobRunner {
           if (assuranceTier >= 2 && this.camera) {
             await Sentry.startSpan(
               { name: "job.cv_inspection", op: "job.phase", attributes: { "job.id": jobId } },
-              async () => this.camera!.runInspection(),
+              async () => this.camera!.runInspection(undefined, { jobId }),
             );
           }
 
