@@ -148,6 +148,16 @@ describe("verdict 101c: the installed-graph walk fails closed, not open", () => 
     });
     expect(installed.map((e: { name?: string }) => e.name)).toContain(`nest${DEPTH}`);
   });
+
+  it("reports a package concealed under a dot-prefixed name", () => {
+    // At e0f0a8ee moduleEntries() skipped every dot name, so `.concealed/package.json` vanished (101d).
+    const { problems } = scan((root) => {
+      const nm = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules");
+      writePkg(join(nm, "wrapper"), "wrapper");
+      writePkg(join(nm, "wrapper/node_modules/.concealed"), "viem");
+    });
+    expect(problems.some((p) => p.includes("viem") && p.includes("bundled inside wrapper"))).toBe(true);
+  });
 });
 
 describe("verdict 101 F6: the payload is an allowlist of fresh build output", () => {

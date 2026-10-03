@@ -140,6 +140,10 @@ function isDirectory(path) {
   }
 }
 
+// pnpm's own metadata under a node_modules. Every other name is a package to account for, so a
+// package cannot hide under an arbitrary dot-name like `.concealed` (verdict 101d).
+const PNPM_METADATA = new Set([".bin", ".pnpm", ".modules.yaml"]);
+
 /**
  * The entries in one node_modules directory as `[name, dir]`, scopes expanded. A scope directory
  * can be a symlink, so the directory test follows links; a package entry may itself be a symlink,
@@ -148,11 +152,11 @@ function isDirectory(path) {
 function moduleEntries(modules) {
   const out = [];
   for (const child of readdirSync(modules, { withFileTypes: true })) {
-    if (child.name.startsWith(".")) continue; // .bin, .pnpm, .modules.yaml
+    if (PNPM_METADATA.has(child.name)) continue; // only pnpm's own metadata, not any dot-name
     const dir = join(modules, child.name);
     if (child.name.startsWith("@") && isDirectory(dir)) {
       for (const scoped of readdirSync(dir, { withFileTypes: true })) {
-        if (scoped.name.startsWith(".")) continue;
+        if (PNPM_METADATA.has(scoped.name)) continue;
         out.push([`${child.name}/${scoped.name}`, join(dir, scoped.name)]);
       }
     } else {
