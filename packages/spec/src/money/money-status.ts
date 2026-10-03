@@ -286,6 +286,31 @@ export function classifySettlementRead(
   return UNKNOWN("", "final state not shown - not a live read of a settlement route");
 }
 
+// ── Pill text (astra r4 on #313, F6) ────────────────────────────────────────
+// The tone decides the colour, and the TEXT may not claim more. A status value that claims money finally
+// moved (paid, released, settled, refunded...) is shown as the record's own claim, qualified, unless a
+// live read of an exact settlement route verified it. So is any value that is not a plain status word
+// (punctuation, non-ASCII look-alikes). The kit mirrors this (pcc-ui.js statusPillText); the
+// conformance test compares them.
+export const FINAL_MONEY_TOKENS: readonly string[] = Object.freeze([
+  "PAID", "PAIDOUT", "PAYOUT", "SETTLED", "SETTLEMENT", "RELEASED", "REFUNDED", "DISBURSED", "CREDITED",
+]);
+export const UNCONFIRMED_SUFFIX = " - settlement unconfirmed";
+
+/** Does this status text claim that money finally moved (or is it not a plain status word at all)? */
+export function claimsFinalMoney(s: unknown): boolean {
+  if (typeof s !== "string") return false;
+  const k = normalizeMoneyStatus(s);
+  if (k === "") return /[A-Za-z]|[^\x00-\x7f]/.test(s);
+  return k.split("_").some((t) => FINAL_MONEY_TOKENS.includes(t));
+}
+
+/** The text of a status pill: the value itself, qualified when it claims money moved and is not verified. */
+export function statusPillText(raw: unknown, verified: boolean): string {
+  const t = raw == null ? "" : String(raw);
+  return verified || !claimsFinalMoney(t) ? t : "reported status: " + t + UNCONFIRMED_SUFFIX;
+}
+
 // ── Coverage ───────────────────────────────────────────────────────────────
 // The `satisfies` on FLAT is the compile-time guarantee. These records list the same keys for
 // the runtime coverage test (the dashboard DTO and context-pack vocabularies are listed there).

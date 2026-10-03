@@ -512,6 +512,37 @@
     if (isVNextRecord(row)) return settlementReadClass(row, bindingPath, live)[0]; // a read model: schema AND source
     return moneyStatusClass(s); // a bare money word: never green
   }
+  // Pill TEXT (astra r4 on #313, F6). The class decides the colour, and the text may not claim more. A
+  // value that claims money finally moved (paid, released, settled, refunded...) is shown as the record's
+  // own claim, qualified, unless a live read of an exact settlement route verified it. So is any value
+  // that is not a plain status word (punctuation, non-ASCII look-alikes). Mirrors the spec's
+  // statusPillText (the conformance test compares them).
+  var FINAL_MONEY_TOKENS = Object.freeze({ PAID: true, PAIDOUT: true, PAYOUT: true, SETTLED: true, SETTLEMENT: true, RELEASED: true, REFUNDED: true, DISBURSED: true, CREDITED: true });
+  var UNCONFIRMED_SUFFIX = ' - settlement unconfirmed';
+  function claimsFinalMoney(s) {
+    if (typeof s !== 'string') return false;
+    var k = normStatus(s);
+    if (k === '') return /[A-Za-z]|[^\x00-\x7f]/.test(s);
+    var parts = k.split('_');
+    for (var i = 0; i < parts.length; i++) { if (ownKey(FINAL_MONEY_TOKENS, parts[i])) return true; }
+    return false;
+  }
+  function statusPillText(raw, verified) {
+    var t = raw == null ? '' : String(raw);
+    return verified || !claimsFinalMoney(t) ? t : 'reported status: ' + t + UNCONFIRMED_SUFFIX;
+  }
+  // The TEXT of a data status pill (list rows, run windows), paired with dataStatusClass. Money data shows
+  // the classifier's honest label, and a VERIFIED final (a live read of an exact settlement route) keeps
+  // its plain name. Anything else is the value itself, qualified when it claims money moved.
+  function dataStatusText(bindingPath, row, s, live) {
+    if (isMoneyData(bindingPath, row)) {
+      var vnext = isVNextRecord(row);
+      var rc = vnext ? settlementReadClass(row, bindingPath, live) : [moneyStatusClass(s), settlementLabel(s), s];
+      if (vnext && (rc[0] === 'st-settled' || rc[0] === 'st-refunded')) return String(rc[2]);
+      if (rc[1]) return rc[1];
+    }
+    return statusPillText(s, false);
+  }
   // </status-map v2>
 
   // Pull the first array out of a response (for list windows without a select).
@@ -863,7 +894,7 @@
         li.appendChild(main);
         if (w.item.statusFrom) {
           var st = dot(row, w.item.statusFrom);
-          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st, !r.stale), String(st)));
+          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st, !r.stale), dataStatusText(w.binding && w.binding.path, row, st, !r.stale)));
         }
         listNode.appendChild(li);
       }
@@ -999,9 +1030,9 @@
       var bpath = w.binding && w.binding.path;
       if (full && isVNextRecord(data) && isMoneyData(bpath, data)) {
         var rc = settlementReadClass(data, bpath, live); // a settlement read model: by its schema AND source
-        pill.textContent = rc[2]; pill.className = 'pcc-pill ' + rc[0];
+        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + rc[0];
       } else if (statusVal != null) {
-        pill.textContent = String(statusVal); pill.className = 'pcc-pill ' + dataStatusClass(bpath, data, statusVal, live);
+        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + dataStatusClass(bpath, data, statusVal, live);
       } else if (full) {
         // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
         pill.textContent = 'unknown'; pill.className = 'pcc-pill st-unknown';
@@ -1174,7 +1205,10 @@
       // from the receipt's existence (contract rule 12).
       var rec = settlementReadClass(e, w.binding && w.binding.path, !r.stale && ctx.mode !== 'snapshot');
       var railRow = el('div', 'pcc-receipt-rail');
-      railRow.appendChild(el('span', 'pcc-pill ' + rec[0], rec[2]));
+      // The pill text may not claim more than the class (F6): only a verified final keeps its plain name;
+      // "no settlement state" is PCC's own text.
+      var recVerified = isVNextRecord(e) && (rec[0] === 'st-settled' || rec[0] === 'st-refunded');
+      railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], recVerified || (!isVNextRecord(e) && e.status == null))));
       if (rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', ' ' + rec[1]));
       if (e.rail) railRow.appendChild(el('span', 'pcc-muted', ' · ' + String(e.rail)));
       wrap._body.appendChild(railRow);
