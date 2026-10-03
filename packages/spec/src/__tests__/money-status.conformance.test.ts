@@ -22,7 +22,7 @@ import path from "node:path";
 import vm from "node:vm";
 import {
   MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
-  classifySettlementRead, SETTLEMENT_READ_ROUTE, FINAL_MONEY_TOKENS, claimsFinalMoney, statusPillText,
+  classifySettlementRead, SETTLEMENT_READ_ROUTE, SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText,
 } from "../money/money-status.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -43,9 +43,9 @@ type KitRegion = {
   settlementRecordClass: (r: unknown) => [string, string | null, string];
   settlementReadClass: (r: unknown, path: unknown, live: unknown) => [string, string | null, string];
   SETTLEMENT_READ_ROUTE: RegExp;
-  FINAL_MONEY_TOKENS: Record<string, boolean>;
-  claimsFinalMoney: (s: unknown) => boolean;
-  statusPillText: (raw: unknown, verified: boolean) => string;
+  SAFE_STATUS_WORDS: Record<string, boolean>;
+  SAFE_MONEY_STATUS_WORDS: Record<string, boolean>;
+  statusPillText: (raw: unknown, verified: boolean, money: boolean) => string;
 };
 
 function extractRegion(): KitRegion {
@@ -59,7 +59,7 @@ function extractRegion(): KitRegion {
       " this.settlementLabel = settlementLabel; this.isMoneyData = isMoneyData; this.dataStatusClass = dataStatusClass;" +
       " this.VNEXT_UNIT_STATES = VNEXT_UNIT_STATES; this.VNEXT_STATE_PRESENTATION = VNEXT_STATE_PRESENTATION; this.VNEXT_PHASE = VNEXT_PHASE;" +
       " this.settlementRecordClass = settlementRecordClass; this.settlementReadClass = settlementReadClass; this.SETTLEMENT_READ_ROUTE = SETTLEMENT_READ_ROUTE;" +
-      " this.FINAL_MONEY_TOKENS = FINAL_MONEY_TOKENS; this.claimsFinalMoney = claimsFinalMoney; this.statusPillText = statusPillText;",
+      " this.SAFE_STATUS_WORDS = SAFE_STATUS_WORDS; this.SAFE_MONEY_STATUS_WORDS = SAFE_MONEY_STATUS_WORDS; this.statusPillText = statusPillText;",
     ctx,
   );
   return ctx as unknown as KitRegion;
@@ -224,9 +224,19 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
     expect(r.cls).not.toContain("st-settled");
   });
 
-  it("the pill text is the raw server value (never rewritten to look final)", async () => {
+  it("the pill text is the raw server value when the surface's safe vocabulary covers it", async () => {
+    // EXPIRED is on SAFE_MONEY_STATUS_WORDS (astra r5): a word the safe list affirms is shown as-is.
+    const r = await renderedPill({ status: "EXPIRED" });
+    expect(r.text).toBe("EXPIRED");
+  });
+
+  it("astra r5 (#313): a decided-but-not-final money word is qualified on the receipt pill, not rewritten to look final either", async () => {
+    // REFUND_ALLOCATED is not on SAFE_MONEY_STATUS_WORDS: the receipt pill calls statusPillText on the
+    // raw value directly (it does not consult the honest-label table that dataStatusText does), so a
+    // closed safe vocabulary qualifies it. The honest label is still shown alongside, unaffected.
     const r = await renderedPill({ status: "REFUND_ALLOCATED" });
-    expect(r.text).toBe("REFUND_ALLOCATED");
+    expect(r.text).toBe("reported status: REFUND_ALLOCATED - settlement unconfirmed");
+    expect(r.rail).toContain("refund decided - payer not yet refunded");
   });
 });
 
@@ -724,24 +734,168 @@ describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as
 
 describe("astra r4 (#313): the pill-text rule, kit == spec", () => {
   const kit = extractRegion();
-  it("the same final-money tokens", () => {
-    expect(Object.keys(kit.FINAL_MONEY_TOKENS).sort()).toEqual([...FINAL_MONEY_TOKENS].sort());
+  it("the same safe-status vocabularies", () => {
+    expect(Object.keys(kit.SAFE_STATUS_WORDS).sort()).toEqual([...SAFE_STATUS_WORDS].sort());
+    expect(Object.keys(kit.SAFE_MONEY_STATUS_WORDS).sort()).toEqual([...SAFE_MONEY_STATUS_WORDS].sort());
   });
-  it("the same claim test and the same pill text over adversarial inputs, verified or not", () => {
+  it("astra r5: SAFE_STATUS_WORDS (non-money) contains no payment-final or money-movement word", () => {
+    const forbidden = ["PAID", "PAIDOUT", "PAYOUT", "SETTLED", "SETTLEMENT", "RELEASED", "REFUNDED", "DISBURSED", "CREDITED", "TRANSFERRED", "RECEIVED", "FUNDED"];
+    for (const w of SAFE_STATUS_WORDS) for (const bad of forbidden) expect(w.includes(bad), w + " vs " + bad).toBe(false);
+    for (const w of Object.keys(kit.SAFE_STATUS_WORDS)) for (const bad of forbidden) expect(w.includes(bad), w + " vs " + bad).toBe(false);
+  });
+  it("astra r5: SAFE_MONEY_STATUS_WORDS contains no success-ish word", () => {
+    const successIsh = ["DONE", "OK", "APPROVED", "COMPLETE", "COMPLETED", "SUCCESS", "SUCCEEDED", "RESOLVED", "READY"];
+    for (const w of SAFE_MONEY_STATUS_WORDS) expect(successIsh.includes(w), w).toBe(false);
+    for (const w of Object.keys(kit.SAFE_MONEY_STATUS_WORDS)) expect(successIsh.includes(w), w).toBe(false);
+  });
+  it("the same pill text over adversarial inputs, every combination of verified x money", () => {
     const inputs: unknown[] = [...ADVERSARIAL, "paid", "Paid in full", "paidOut", "payout_pending", "settlement_complete", "PAID!", "p\u0430id",
-      "SETTLED_RELEASED", "SETTLED_REFUNDED", "RELEASE_ALLOCATED", "refund_allocated", "running", "pending", "3", "no settlement state", "funded"];
+      "SETTLED_RELEASED", "SETTLED_REFUNDED", "RELEASE_ALLOCATED", "refund_allocated", "running", "pending", "3", "no settlement state", "funded",
+      "PAYEE_RECEIVED_FUNDS", "FUNDS_TRANSFERRED_TO_PAYEE", "payee received funds", "running!", "online", "executing", "approved", "done",
+      "completed", "settled", "PAID", "SETTLED_RELEASED", "RELEASE_ALLOCATED"];
     for (const x of inputs) {
-      expect(kit.claimsFinalMoney(x), JSON.stringify(x)).toBe(claimsFinalMoney(x));
-      for (const v of [true, false]) expect(kit.statusPillText(x, v), JSON.stringify(x)).toBe(statusPillText(x, v));
+      for (const v of [true, false]) for (const money of [true, false]) {
+        expect(kit.statusPillText(x, v, money), JSON.stringify(x) + " v=" + v + " money=" + money).toBe(statusPillText(x, v, money));
+      }
     }
   });
   it("what the rule says", () => {
-    expect(statusPillText("paid", false)).toBe("reported status: paid - settlement unconfirmed");
-    expect(statusPillText("paid", true)).toBe("paid");
-    expect(statusPillText(["released"], false)).toBe("reported status: released - settlement unconfirmed"); // String() of an array
-    expect(statusPillText("running", false)).toBe("running");
-    expect(statusPillText("RELEASE_ALLOCATED", false)).toBe("RELEASE_ALLOCATED"); // decided, not moved: no claim
-    expect(claimsFinalMoney("p\u0430id")).toBe(true); // a look-alike is never a bare status
-    expect(claimsFinalMoney("42")).toBe(false);
+    expect(statusPillText("paid", false, true)).toBe("reported status: paid - settlement unconfirmed");
+    expect(statusPillText("paid", true, true)).toBe("paid");
+    expect(statusPillText(["released"], false, true)).toBe("reported status: released - settlement unconfirmed"); // String() of an array
+    expect(statusPillText("running", false, true)).toBe("running"); // RUNNING is on SAFE_MONEY_STATUS_WORDS
+    expect(statusPillText("running", false, false)).toBe("running"); // and on SAFE_STATUS_WORDS too
+    // RELEASE_ALLOCATED is decided, not moved -- but it is not on the closed money-safe list either (that
+    // list is in-progress/failure words only), so direct-called statusPillText fails closed on it too; the
+    // honest "release decided - payout outstanding" label is what names it, via dataStatusText, not this.
+    expect(statusPillText("RELEASE_ALLOCATED", false, true)).toBe("reported status: RELEASE_ALLOCATED - settlement unconfirmed");
+    expect(statusPillText("p\u0430id", false, true)).not.toBe("p\u0430id"); // a look-alike is never a bare status
+    expect(statusPillText("42", false, true)).not.toBe("42"); // not on any safe list: fails closed
+    // astra r5 F7: explicit payee-received-funds claims are qualified even though no token enumerates them.
+    expect(statusPillText("PAYEE_RECEIVED_FUNDS", false, true)).toBe("reported status: PAYEE_RECEIVED_FUNDS - settlement unconfirmed");
+    expect(statusPillText("FUNDS_TRANSFERRED_TO_PAYEE", false, true)).toBe("reported status: FUNDS_TRANSFERRED_TO_PAYEE - settlement unconfirmed");
+    // astra r5 F9: the same decorated text on a non-money surface reads an outcome-neutral qualifier.
+    expect(statusPillText("running!", false, false)).toBe("reported status: running! - status unverified");
+    expect(statusPillText("running!", false, true)).toBe("reported status: running! - settlement unconfirmed");
+  });
+});
+
+// -- astra round 5 on #313 @d82cde8b (verify before fix): F7, F8, F9 -----------------------------
+// These call shapes are today's API (claimsFinalMoney / 2-arg statusPillText). Step 2 replaces the
+// blacklist with a closed safe vocabulary and changes statusPillText to a 3-arg (raw, verified, money)
+// call; the direct-function assertions below are adapted in place once that lands (same meaning: the
+// value is never shown bare), and the render assertions (which don't depend on the signature) stay as-is.
+describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
+  const man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
+  // Answers only the requests a test expects (null = not this test's), and only its FIRST read of each:
+  // a later poll never settles, so no window keeps polling after the test (same contract as astra r4's bootRead).
+  function bootRead(manifest: string, reply: (url: string) => unknown) {
+    document.documentElement.removeAttribute("data-theme");
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__ = false;
+    const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+    const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest"; mNode.textContent = manifest;
+    document.body.appendChild(mNode); // LIVE mode
+    const seen = new Set<string>();
+    (window as unknown as { fetch: unknown }).fetch = (url: unknown) => {
+      const u = String(url);
+      const body = seen.has(u) ? null : reply(u);
+      seen.add(u);
+      if (body === null) return new Promise(() => {});
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) });
+    };
+    // eslint-disable-next-line no-eval
+    (0, eval)(kitSrc);
+  }
+  // A single SSE frame carrying `payload`, delivered through a real ReadableStream (Node 22's global
+  // Streams API survives the jsdom test environment): proves the kit's SSE feed-line path, not just
+  // its poll path. Closes the stream after one frame so the pump settles instead of hanging.
+  function bootSSE(manifest: string, ssePath: string, payload: unknown) {
+    document.documentElement.removeAttribute("data-theme");
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__ = false;
+    const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+    const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest"; mNode.textContent = manifest;
+    document.body.appendChild(mNode); // LIVE mode, no snapshot
+    const frame = "data: " + JSON.stringify(payload) + "\n\n";
+    (window as unknown as { fetch: unknown }).fetch = (url: unknown) => {
+      const u = new URL(String(url));
+      if (u.pathname !== ssePath) return new Promise(() => {}); // not this test's
+      const enc = new TextEncoder();
+      let sent = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!sent) { sent = true; controller.enqueue(enc.encode(frame)); } else controller.close();
+        },
+      });
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, body });
+    };
+    // eslint-disable-next-line no-eval
+    (0, eval)(kitSrc);
+  }
+  const pills = () => Array.from(document.querySelectorAll(".pcc-pill")).map((p) => (p.textContent || "").trim());
+
+  it("F7 (HIGH): explicit payee-received-funds claims are never shown bare on a money surface (fixed: closed safe vocabulary, no blacklist)", () => {
+    // Same meaning as the pre-fix reproduction (claimsFinalMoney("PAYEE_RECEIVED_FUNDS") === true and
+    // statusPillText(..., false) qualified it): neither word is on SAFE_MONEY_STATUS_WORDS, so the new
+    // 3-arg statusPillText(raw, verified, money) qualifies both the same way, without enumerating them.
+    expect(statusPillText("PAYEE_RECEIVED_FUNDS", false, true)).toBe("reported status: PAYEE_RECEIVED_FUNDS - settlement unconfirmed");
+    expect(statusPillText("PAYEE_RECEIVED_FUNDS", false, true)).not.toBe("PAYEE_RECEIVED_FUNDS");
+    expect(statusPillText("FUNDS_TRANSFERRED_TO_PAYEE", false, true)).toBe("reported status: FUNDS_TRANSFERRED_TO_PAYEE - settlement unconfirmed");
+    expect(statusPillText("FUNDS_TRANSFERRED_TO_PAYEE", false, true)).not.toBe("FUNDS_TRANSFERRED_TO_PAYEE");
+  });
+
+  it("F7 (HIGH) render: a live list on a money read never shows PAYEE_RECEIVED_FUNDS bare", async () => {
+    bootRead(man([{ kind: "list", binding: { path: "/api/escrow" }, item: { title: "id", statusFrom: "status" } }]),
+      (u) => (new URL(u).pathname === "/api/escrow" ? [{ id: "e1", status: "PAYEE_RECEIVED_FUNDS" }] : null));
+    await flush();
+    expect(document.querySelector(".pcc-list-row")).not.toBeNull();
+    expect(pills()).not.toContain("PAYEE_RECEIVED_FUNDS");
+  });
+
+  it("F8 (a) HIGH: a run window's live-poll latest line never shows a bare final money word", async () => {
+    bootRead(man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "status" }]),
+      (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "paid" } : null));
+    await flush();
+    const latest = document.querySelector(".pcc-run-latest") as HTMLElement;
+    expect(latest.textContent).not.toBe("paid");
+  });
+
+  it("F8 (b) HIGH: the same run window via a snapshot also must not show a bare final money word in the latest line", async () => {
+    const manifest = man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "status" }]);
+    boot({}, manifest, { _ts: "2026-09-24T00:00:00Z", "/api/escrow/e1": { status: "paid" } });
+    await flush();
+    const latest = document.querySelector(".pcc-run-latest") as HTMLElement;
+    expect(latest.textContent).not.toBe("paid");
+  });
+
+  it("F8 (c) HIGH: a receipt timeline entry sourced from an event's status never shows a bare final money word", async () => {
+    bootRead(man([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]),
+      (u) => (new URL(u).pathname === "/api/escrow/e1"
+        ? { status: "funded", contractAddress: "0x" + "11".repeat(20), totalAmount: "5", events: [{ status: "paid" }] }
+        : null));
+    await flush();
+    const rows = Array.from(document.querySelectorAll(".pcc-timeline-type")).map((e) => (e.textContent || "").trim());
+    expect(rows).not.toContain("paid");
+  });
+
+  it("F8 (d) HIGH: an SSE run-window feed line sourced from ev.status never shows a bare final money word", async () => {
+    const ssePath = "/sse/stream/escrow/e1";
+    bootSSE(man([{ kind: "run", binding: { path: "/api/escrow/e1", sse: ssePath }, statusFrom: "status", latestFrom: "status" }]), ssePath, { status: "paid" });
+    await flush();
+    await flush();
+    const lines = Array.from(document.querySelectorAll(".pcc-feed-line")).map((e) => (e.textContent || "").trim());
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines).not.toContain("paid");
+  });
+
+  it("F9 (MEDIUM): a non-money surface's decorated status reads an outcome-neutral qualifier, not a settlement one", async () => {
+    bootRead(man([{ kind: "list", binding: { path: "/api/jobs" }, item: { title: "id", statusFrom: "status" } }]),
+      (u) => (new URL(u).pathname === "/api/jobs" ? [{ id: "j1", status: "running!" }] : null));
+    await flush();
+    const text = (document.querySelector(".pcc-pill") as HTMLElement).textContent;
+    expect(text).toBe("reported status: running! - status unverified");
   });
 });
