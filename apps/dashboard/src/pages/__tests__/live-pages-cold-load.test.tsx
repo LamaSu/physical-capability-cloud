@@ -73,7 +73,7 @@ async function coldLoad(
   document.body.appendChild(host);
   const errors: string[] = [];
   const root = createRoot(host, {
-    onUncaughtError: (e) => errors.push(String((e as Error).message)),
+    onUncaughtError: (e: unknown) => errors.push(String((e as Error).message)),
   } as never);
   // A NEW element object each render, same type and position: React re-renders
   // the SAME Page instance (this is what a react-query cache update does).
@@ -101,7 +101,6 @@ describe("live pages survive a cold load (React #310)", () => {
   it("DiscoverPage renders through loading into loaded data without crashing", async () => {
     const { DiscoverPage } = await import("../DiscoverPage.js");
     const { error, text } = await coldLoad(DiscoverPage as React.ComponentType);
-    console.log("DiscoverPage cold-load error:", error);
     expect(error).toBeNull();
     expect(text).toContain("No capabilities available");
   });
@@ -112,7 +111,6 @@ describe("live pages survive a cold load (React #310)", () => {
       (mod as Record<string, unknown>).KernelLeaderboardPage ??
       (mod as Record<string, unknown>).default;
     const { error, text } = await coldLoad(Page as React.ComponentType);
-    console.log("KernelLeaderboardPage cold-load error:", error);
     expect(error).toBeNull();
     expect(text).toContain("No kernels on the network yet");
   });
@@ -142,7 +140,6 @@ describe("KernelsPage: kernel.location must never render as a React child", () =
     ];
     const { KernelsPage } = await import("../KernelsPage.js");
     const { error, text } = await coldLoad(KernelsPage as React.ComponentType);
-    console.log("KernelsPage cold-load error:", error);
     expect(error).toBeNull();
     expect(text).toContain("Geo Kernel");
   });

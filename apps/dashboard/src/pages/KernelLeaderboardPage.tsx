@@ -57,11 +57,6 @@ export function KernelLeaderboardPage() {
   });
   const { data: kernels = [], isLoading: kernelsLoading } = useKernels();
 
-  if (capsLoading || kernelsLoading) return <LoadingShell rows={6} />;
-
-  const capabilities = capabilitiesPage?.items ?? [];
-  const rows = buildLeaderboard(capabilities, kernels);
-
   const minScore = React.useMemo(() => {
     const raw = minScoreInput.trim();
     if (!raw) return null;
@@ -69,6 +64,14 @@ export function KernelLeaderboardPage() {
     if (!Number.isFinite(n)) return null;
     return n > 1 ? n / 100 : n;
   }, [minScoreInput]);
+
+  // Every hook above must run before this early return: a hook called after
+  // an early return changes the hook count between the loading and loaded
+  // renders on a cold load (React #310).
+  if (capsLoading || kernelsLoading) return <LoadingShell rows={6} />;
+
+  const capabilities = capabilitiesPage?.items ?? [];
+  const rows = buildLeaderboard(capabilities, kernels);
 
   const filtered = minScore != null
     ? rows.filter((r) => r.avgScore != null && r.avgScore >= minScore)
