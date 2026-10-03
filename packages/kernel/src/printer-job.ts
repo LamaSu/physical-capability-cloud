@@ -71,6 +71,7 @@ import type { JobResult } from "./job-runner.js";
 import { isStepLeased, leaseStep } from "./step-lease.js";
 import { IppAdapter, type IppAdapterConfig } from "./adapters/ipp-adapter.js";
 import type { MachineAdapter } from "./adapters/types.js";
+import { failureText } from "./failure-text.js";
 
 // ---------------------------------------------------------------------------
 // Ed25519 kernel signer (the way this repo signs any device evidence)
@@ -306,7 +307,7 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
       try {
         await emitter.addEvent(jobId, stepId, event);
       } catch (err) {
-        unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
+        unrecorded.first ??= { type: event.type, error: failureText(err) };
         console.error(err);
       }
     });
@@ -508,7 +509,7 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
     succeeded = result.success;
     return result;
   } catch (err) {
-    return failure(err instanceof Error ? err.message : String(err));
+    return failure(failureText(err));
   } finally {
     // Every exit quiesces before it releases, as in JobRunner. A print that ended before its
     // device job did (a refused or failed start, a timeout, another job's event) waits,
