@@ -200,7 +200,17 @@ function spelled(n: ts.Node): string | null {
 /** The identifier an access chain starts from: window in window.a.b or window["a"].b. */
 function rootOf(n: ts.Node): ts.Node {
   let e = n;
-  while (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) || ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
+  while (
+    ts.isPropertyAccessExpression(e) ||
+    ts.isElementAccessExpression(e) ||
+    ts.isParenthesizedExpression(e) ||
+    ts.isNonNullExpression(e) ||
+    ts.isAsExpression(e) ||
+    ts.isTypeAssertionExpression(e) ||
+    ts.isSatisfiesExpression(e)
+  ) {
+    e = e.expression; // a cast doesn't change the value
+  }
   return e;
 }
 
@@ -228,17 +238,85 @@ function mutationTarget(call: ts.CallExpression): ts.Expression | null {
   return ts.isPropertyAccessExpression(callee) && LEGACY_DEFINERS.has(name) ? callee.expression : null;
 }
 
-/** A built-in's prototype, or anything reached from it: whatever a call does with it, it can change it for every request. */
-function isBuiltinPrototype(arg: ts.Expression, sf: ts.SourceFile): boolean {
-  const root = rootOf(arg);
-  return ts.isIdentifier(root) && BUILTINS.has(root.text) && /(?:^|\.)prototype(?:\.|$)/.test(arg.getText(sf).replace(/\s+/g, ""));
+/** A built-in's prototype, anything reached from it, or a local alias of one: whatever a call does with it, it can change it for every request. */
+function isBuiltinPrototype(arg: ts.Expression, sf: ts.SourceFile, prototypeAliases: ReadonlySet<string> = new Set()): boolean {
+  return candidates(arg).some((a) => {
+    const root = rootOf(a);
+    if (!ts.isIdentifier(root)) return false;
+    if (prototypeAliases.has(root.text)) return true;
+    return BUILTINS.has(root.text) && /(?:^|\.)prototype(?:\.|$)/.test(a.getText(sf).replace(/\s+/g, ""));
+  });
 }
 
-/** A global (window, navigator, document …), anything reached from one, a built-in, or any prototype. */
-function isProtected(target: ts.Expression, sf: ts.SourceFile): boolean {
-  const root = rootOf(target);
-  if (ts.isIdentifier(root) && (WRITE_ROOTS.has(root.text) || BUILTINS.has(root.text))) return true;
-  return /(?:^|\.)prototype(?:\.|$)/.test(target.getText(sf).replace(/\s+/g, ""));
+/** An expression without what doesn't change its value: parentheses, casts, a non-null assertion. */
+function unwrapped(e: ts.Expression): ts.Expression {
+  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e)) {
+    e = e.expression;
+  }
+  return e;
+}
+
+/** The values an expression may be: both arms of a ?:, both sides of ||, ?? and &&, or the expression itself. */
+function candidates(e: ts.Expression): ts.Expression[] {
+  const u = unwrapped(e);
+  if (ts.isConditionalExpression(u)) return [...candidates(u.whenTrue), ...candidates(u.whenFalse)];
+  if (ts.isBinaryExpression(u) && [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.AmpersandAmpersandToken].includes(u.operatorToken.kind)) {
+    return [...candidates(u.left), ...candidates(u.right)];
+  }
+  return [u];
+}
+
+/** A global (window, navigator, document …), anything reached from one, a built-in, any prototype, or a local alias of one. */
+function isProtected(target: ts.Expression, sf: ts.SourceFile, aliases: ReadonlySet<string> = new Set()): boolean {
+  return candidates(target).some((t) => {
+    const root = rootOf(t);
+    if (ts.isIdentifier(root) && (WRITE_ROOTS.has(root.text) || BUILTINS.has(root.text) || aliases.has(root.text))) return true;
+    return /(?:^|\.)prototype(?:\.|$)/.test(t.getText(sf).replace(/\s+/g, ""));
+  });
+}
+
+/** The names a declaration binds: x, or every name inside { a, b: c, ...d } and [e, f]. */
+function boundNames(name: ts.BindingName): string[] {
+  if (ts.isIdentifier(name)) return [name.text];
+  return name.elements.flatMap((el) => (ts.isOmittedExpression(el) ? [] : boundNames(el.name)));
+}
+
+/**
+ * Local names that hold a protected target (astra A03f F1): const p =
+ * Headers.prototype; const nav = navigator; const { prototype } = Headers;
+ * let x; x = p. Followed to a fixed point, so an alias of an alias counts.
+ * `prototypes` is the subset that holds a built-in's prototype.
+ */
+function protectedAliases(sf: ts.SourceFile): { all: Set<string>; prototypes: Set<string> } {
+  const all = new Set<string>();
+  const prototypes = new Set<string>();
+  for (let grew = true; grew; ) {
+    grew = false;
+    walk(sf, (n) => {
+      let names: string[] = [];
+      let value: ts.Expression | undefined;
+      if (ts.isVariableDeclaration(n) && n.initializer) {
+        names = boundNames(n.name);
+        value = n.initializer;
+      } else if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left)) {
+        names = [n.left.text];
+        value = n.right;
+      }
+      if (!value || !isProtected(value, sf, all)) return;
+      const ofPrototype = candidates(value).some((v) => isBuiltinPrototype(v, sf, prototypes));
+      for (const name of names) {
+        if (!all.has(name)) {
+          all.add(name);
+          grew = true;
+        }
+        if (ofPrototype && !prototypes.has(name)) {
+          prototypes.add(name);
+          grew = true;
+        }
+      }
+    });
+  }
+  return { all, prototypes };
 }
 
 /** A use of the global object other than reading a named member (window.x) or asking its type (typeof window). */
@@ -334,13 +412,15 @@ const RULES: Rule[] = [
   {
     id: "global-write",
     owners: [BOUNDARY],
-    find: (sf) =>
-      nodes(sf, (n) => {
-        // The same replacement through a mutation API (astra A03e F1): Object.defineProperty(Headers.prototype, …).
+    find: (sf) => {
+      const aliases = protectedAliases(sf);
+      return nodes(sf, (n) => {
+        // The same replacement through a mutation API (astra A03e F1): Object.defineProperty(Headers.prototype, …),
+        // including through a local alias of the target (A03f F1).
         if (ts.isCallExpression(n)) {
           const target = mutationTarget(n);
-          if (target !== null && isProtected(target, sf)) return true;
-          return n.arguments.some((arg) => isBuiltinPrototype(arg, sf));
+          if (target !== null && isProtected(target, sf, aliases.all)) return true;
+          return n.arguments.some((arg) => isBuiltinPrototype(arg, sf, aliases.prototypes));
         }
         if (!ts.isBinaryExpression(n) || !isAssignment(n.operatorToken.kind)) return false;
         const target = n.left;
@@ -348,9 +428,11 @@ const RULES: Rule[] = [
         if (GLOBAL_WRITES_ALLOWED.has(target.getText(sf).replace(/\s+/g, ""))) return false;
         const root = rootOf(target);
         if (ts.isIdentifier(root) && WRITE_ROOTS.has(root.text)) return true;
-        // X.prototype.y = …: a built-in's behaviour replaced for everyone.
+        // X.prototype.y = …: a built-in's behaviour replaced for everyone. Also through a local alias: p.y = … with p = Headers.prototype.
+        if (ts.isIdentifier(root) && aliases.all.has(root.text) && root !== target) return true;
         return ts.isPropertyAccessExpression(target) && /(?:^|\.)prototype\./.test(target.getText(sf).replace(/\s+/g, ""));
-      }),
+      });
+    },
     fix: "Don't replace fetch, a global's property or a prototype's method: the key passes through them.",
   },
   {
@@ -563,6 +645,10 @@ describe("the rules catch each known way around them (self-test)", () => {
     for (const code of [
       'const headersPrototype = Headers.prototype;\nObject.defineProperty(headersPrototype, "set", { value: observe });',
       'const nav = navigator;\nObject.defineProperty(nav, "sendBeacon", { value: observe });',
+      'const { prototype } = Headers;\nObject.defineProperty(prototype, "set", { value: observe });',
+      "const p = Headers.prototype;\nconst q = p;\nq.set = observe;",
+      "const p = (Headers as any).prototype;\npatch(p, observe);",
+      'const nav = typeof navigator !== "undefined" ? navigator : undefined;\nObject.assign(nav, { sendBeacon: observe });',
     ]) {
       expect(caught(code), code).toContain("global-write");
     }
@@ -583,6 +669,8 @@ describe("the rules catch each known way around them (self-test)", () => {
       ['window.location.assign("/agents");', "pages/Probe.ts"],
       ["const next = merge(state, update);", "pages/Probe.ts"],
       ["const items = Array.prototype.slice.call(list);", "pages/Probe.ts"],
+      ['const doc = document;\nconst el = doc.createElement("div");', "pages/Probe.ts"],
+      ["let state = initial;\nstate = Object.assign({}, state, update);", "pages/Probe.ts"],
     ]) {
       expect(caught(code, rel), code).toEqual([]);
     }
