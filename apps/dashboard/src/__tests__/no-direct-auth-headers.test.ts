@@ -40,6 +40,11 @@
  *      timers) or modules imported by pattern (import.meta.glob). No module
  *      writes fetch, a property of window, navigator or document, or a
  *      prototype's method, except navigation and Google Analytics' bootstrap.
+ *      A literal element read (x["y"]) counts as x.y. No module reads back a
+ *      protected object without naming it (valueOf, a method called on a
+ *      built-in's prototype, a walk to the document), and whatever a name came
+ *      to hold, no mutation API or property write changes a protected object
+ *      through it (astra A03g).
  * The self-tests run the rules over astra's round-3 and round-4 bypasses and
  * over a quickstart line moved into code, and each must be caught.
  *
@@ -269,13 +274,119 @@ function isBuiltinRef(e: ts.Expression): boolean {
   return ts.isIdentifier(base) && GLOBAL_NAMES.has(base.text) && BUILTINS.has(u.name.text);
 }
 
+/** A member read: x.y, or x["y"] by a name built from literals. */
+function isMember(n: ts.Node): n is ts.PropertyAccessExpression | ts.ElementAccessExpression {
+  return ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n);
+}
+
+/** The member a read names: y in x.y and in x["y"] (or x["" + "y"]); null when it is computed (astra A03g F1). */
+function memberName(n: ts.Node): string | null {
+  if (ts.isPropertyAccessExpression(n)) return n.name.text;
+  if (ts.isElementAccessExpression(n)) return spelled(n.argumentExpression);
+  return null;
+}
+
 /** A protected object: navigator, document, a built-in, any of those reached from window, or a built-in's prototype. */
 function isProtectedRef(e: ts.Expression): boolean {
   if (ts.isIdentifier(e)) return PROTECTED_OBJECTS.has(e.text) && isValueReference(e);
-  if (!ts.isPropertyAccessExpression(e)) return false;
-  if (e.name.text === "prototype") return isBuiltinRef(e.expression);
+  if (!isMember(e)) return false;
+  if (memberName(e) === "prototype") return isBuiltinRef(e.expression);
+  if (!ts.isPropertyAccessExpression(e)) return false; // window["x"] is the global-alias rule's
   const base = unwrapped(e.expression);
   return ts.isIdentifier(base) && GLOBAL_NAMES.has(base.text) && PROTECTED_OBJECTS.has(e.name.text);
+}
+
+/** A built-in's prototype: Headers.prototype, or Headers["prototype"]. */
+function isPrototypeRef(e: ts.Expression): boolean {
+  const u = unwrapped(e);
+  return isMember(u) && memberName(u) === "prototype" && isBuiltinRef(u.expression);
+}
+
+/**
+ * Reads that hand back an object we protect without naming it (astra A03g
+ * F1): valueOf() returns its receiver; parentNode of the root element,
+ * getRootNode() and ownerDocument return the document. Our modules never
+ * need them on these objects: React walks the DOM, not us.
+ */
+const IDENTITY_READS = new Set(["valueOf"]);
+const DOCUMENT_HANDLES = new Set(["parentNode", "getRootNode", "ownerDocument"]);
+/** Calls that return their receiver, so an alias survives them: x.valueOf(), and an array prototype's reverse(), sort(), fill(), copyWithin(). */
+const RECEIVER_CALLS = new Set(["valueOf", "reverse", "sort", "fill", "copyWithin", "getRootNode"]);
+/** The mutation APIs: each changes the object it is handed first. */
+const MUTATORS = new Set(["defineProperty", "defineProperties", "setPrototypeOf", "assign"]);
+
+/** Every value a module gives a name: declarations, destructuring and plain assignments, by name, in source order or not. */
+const bindingCache = new Map<ts.SourceFile, Map<string, ts.Expression[]>>();
+function bindingsOf(name: string, sf: ts.SourceFile): ts.Expression[] {
+  let table = bindingCache.get(sf);
+  if (!table) {
+    const t = new Map<string, ts.Expression[]>();
+    const add = (id: string, value: ts.Expression) => t.set(id, [...(t.get(id) ?? []), value]);
+    const bind = (target: ts.BindingName, value: ts.Expression) => {
+      if (ts.isIdentifier(target)) return add(target.text, value);
+      for (const element of target.elements) {
+        if (ts.isOmittedExpression(element)) continue;
+        bind(element.name, value); // a part of value is held through value: { prototype } = Headers
+      }
+    };
+    walk(sf, (n) => {
+      if (ts.isVariableDeclaration(n) && n.initializer) bind(n.name, n.initializer);
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left)) add(n.left.text, n.right);
+    });
+    bindingCache.set(sf, (table = t));
+  }
+  return table.get(name) ?? [];
+}
+
+/**
+ * Whether `e` may be a protected object, or part of one (astra A03g F1): it
+ * reads navigator, document, a built-in or the global, through any member
+ * reads, calls that return their receiver, and the module's own names. A
+ * value a call builds (document.createElement("a")) or a name the module
+ * never binds (a parameter) is the caller's, and isn't followed.
+ */
+function mayHoldProtected(e: ts.Expression, sf: ts.SourceFile, seen = new Set<string>()): boolean {
+  const u = unwrapped(e);
+  if (ts.isIdentifier(u)) {
+    if (PROTECTED_OBJECTS.has(u.text) || GLOBAL_NAMES.has(u.text)) return true;
+    if (seen.has(u.text)) return false;
+    seen.add(u.text);
+    return bindingsOf(u.text, sf).some((value) => mayHoldProtected(value, sf, seen));
+  }
+  if (isMember(u)) return mayHoldProtected(u.expression, sf, seen);
+  if (ts.isCallExpression(u)) {
+    const callee = unwrapped(u.expression);
+    return isMember(callee) && RECEIVER_CALLS.has(memberName(callee) ?? "") && mayHoldProtected(callee.expression, sf, seen);
+  }
+  if (ts.isConditionalExpression(u)) return mayHoldProtected(u.whenTrue, sf, seen) || mayHoldProtected(u.whenFalse, sf, seen);
+  if (ts.isBinaryExpression(u)) {
+    const k = u.operatorToken.kind;
+    if (k === ts.SyntaxKind.CommaToken) return mayHoldProtected(u.right, sf, seen);
+    if (k === ts.SyntaxKind.BarBarToken || k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.QuestionQuestionToken) {
+      return mayHoldProtected(u.left, sf, seen) || mayHoldProtected(u.right, sf, seen);
+    }
+  }
+  return false;
+}
+
+/** x.constructor only read for its name, compared, or asked its type: it holds nothing (astra A03g F2). */
+function readsConstructorHarmlessly(n: ts.Node): boolean {
+  if (memberName(n) !== "constructor") return false;
+  const top = outermost(n);
+  const p = top.parent;
+  if (!p) return false;
+  if (ts.isPropertyAccessExpression(p) && p.expression === top && p.name.text === "name") {
+    return !(ts.isBinaryExpression(p.parent) && p.parent.left === p && isAssignment(p.parent.operatorToken.kind));
+  }
+  if (ts.isTypeOfExpression(p)) return true;
+  if (!ts.isBinaryExpression(p)) return false;
+  const k = p.operatorToken.kind;
+  return (
+    k === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+    k === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+    k === ts.SyntaxKind.EqualsEqualsToken ||
+    k === ts.SyntaxKind.ExclamationEqualsToken
+  );
 }
 
 /** Where a protected object may appear: read from (x.y, x["y"]), called or constructed, typeof, or the right of instanceof or in. */
@@ -292,12 +403,50 @@ function isReadPosition(e: ts.Node): boolean {
 
 /** A protected object held, passed, returned or stored: anywhere but where it is read. */
 function heldProtectedObject(n: ts.Node): boolean {
-  if (!ts.isIdentifier(n) && !ts.isPropertyAccessExpression(n)) return false;
+  if (!ts.isIdentifier(n) && !isMember(n)) return false;
   if (!isProtectedRef(n)) return false;
-  // Headers in Headers.prototype is judged with the prototype, as one object.
+  // Headers in Headers.prototype (or Headers["prototype"]) is judged with the prototype, as one object.
   const top = outermost(n);
-  if (top.parent && ts.isPropertyAccessExpression(top.parent) && top.parent.expression === top && top.parent.name.text === "prototype") return false;
+  if (top.parent && isMember(top.parent) && top.parent.expression === top && memberName(top.parent) === "prototype") return false;
   return !isReadPosition(n);
+}
+
+/**
+ * A read that hands back a protected object without naming it (astra A03g
+ * F1): valueOf on one, a method called directly on a built-in's prototype
+ * (Array.prototype.reverse() returns the prototype), or a walk to the
+ * document. Reading a prototype's method to .call it stays allowed.
+ */
+function identityRead(n: ts.Node): boolean {
+  if (isMember(n)) {
+    const name = memberName(n) ?? "";
+    if (DOCUMENT_HANDLES.has(name)) return true;
+    if (IDENTITY_READS.has(name) && (isProtectedRef(unwrapped(n.expression)) || isBuiltinRef(n.expression))) return true;
+  }
+  if (ts.isCallExpression(n) || ts.isTaggedTemplateExpression(n)) {
+    const callee = unwrapped(ts.isCallExpression(n) ? n.expression : n.tag);
+    return isMember(callee) && isPrototypeRef(callee.expression);
+  }
+  return false;
+}
+
+/**
+ * A change made through the module's own names to what may be a protected
+ * object: a mutation API handed one, or a property written on one, however
+ * the name came to hold it (astra A03g F1: restore the mutation-target check
+ * behind the read-only rule, so a read nobody listed is caught where it is
+ * used).
+ */
+function changesProtectedObject(n: ts.Node, sf: ts.SourceFile): boolean {
+  if (ts.isCallExpression(n)) {
+    const callee = unwrapped(n.expression);
+    const target = n.arguments[0];
+    return isMember(callee) && MUTATORS.has(memberName(callee) ?? "") && target !== undefined && mayHoldProtected(target, sf);
+  }
+  if (ts.isDeleteExpression(n)) return isMember(unwrapped(n.expression)) && mayHoldProtected((unwrapped(n.expression) as ts.PropertyAccessExpression).expression, sf);
+  if (!ts.isBinaryExpression(n) || !isAssignment(n.operatorToken.kind)) return false;
+  const target = unwrapped(n.left);
+  return isMember(target) && mayHoldProtected(target.expression, sf);
 }
 
 /** A use of the global object other than reading a named member (window.x) or asking its type (typeof window). */
@@ -370,7 +519,7 @@ const RULES: Rule[] = [
   {
     id: "window-handle",
     owners: [],
-    find: (sf) => nodes(sf, (n) => ts.isPropertyAccessExpression(n) && WINDOW_HANDLES.has(n.name.text)),
+    find: (sf) => nodes(sf, (n) => isMember(n) && WINDOW_HANDLES.has(memberName(n) ?? "")),
     fix: "Don't reach a window through a document, a frame or an opener.",
   },
   {
@@ -397,8 +546,13 @@ const RULES: Rule[] = [
       nodes(sf, (n) => {
         // No module holds, passes or stores a protected object, so none can change one through an alias (astra A03f F1).
         if (heldProtectedObject(n)) return true;
-        // Nor reach a prototype without naming it, or define accessors the legacy way.
-        if (ts.isPropertyAccessExpression(n) && PROTOTYPE_ROUTES.has(n.name.text)) return true;
+        // Nor reach a prototype without naming it, or define accessors the legacy way, by either access (astra A03g F1).
+        // Reading a constructor's name, comparing it or asking its type holds nothing (astra A03g F2).
+        if (isMember(n) && PROTOTYPE_ROUTES.has(memberName(n) ?? "") && !readsConstructorHarmlessly(n)) return true;
+        // Nor read one back from a read that returns it, or walk to the document (astra A03g F1).
+        if (identityRead(n)) return true;
+        // And whatever a name came to hold, no mutation API or property write may change a protected object through it.
+        if (changesProtectedObject(n, sf) && !(ts.isBinaryExpression(n) && GLOBAL_WRITES_ALLOWED.has(n.left.getText(sf).replace(/\s+/g, "")))) return true;
         if (!ts.isBinaryExpression(n) || !isAssignment(n.operatorToken.kind)) return false;
         const target = n.left;
         if (ts.isIdentifier(target)) return target.text === "fetch";
@@ -424,7 +578,7 @@ const RULES: Rule[] = [
         if (!ts.isCallExpression(n) && !ts.isNewExpression(n)) return false;
         const callee = n.expression;
         if (ts.isIdentifier(callee) && callee.text === "Function") return true;
-        if (ts.isPropertyAccessExpression(callee) && callee.name.text === "constructor") return true;
+        if (isMember(callee) && memberName(callee) === "constructor") return true;
         const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
         const first = n.arguments?.[0];
         return (name === "setTimeout" || name === "setInterval") && first !== undefined && spelled(first) !== null;
@@ -679,9 +833,22 @@ describe("the rules catch each known way around them (self-test)", () => {
     expect(caught(code)).toContain(rule);
   });
 
+  // Each layer on its own: these are caught by exactly one check, so a control that removes the check fails here.
+  it.each([
+    ["the read-only rule, by element access", 'const p = Headers["prototype"];'],
+    ["a read returning its receiver", "const nav = navigator.valueOf();"],
+    ["a method called on a built-in's prototype", "Array.prototype.reverse();"],
+    ["a walk to the document", "const d = document.documentElement.parentNode;"],
+    ["the mutation-target check, through a member read", "const c = navigator.clipboard;\nc.writeText = observe;"],
+    ["the mutation-target check, through a mutation API", 'const l = navigator.locks;\nObject.defineProperty(l, "request", { value: observe });'],
+    ["the mutation-target check, through an alias chain", "const c = navigator.clipboard;\nconst d = c;\ndelete d.writeText;"],
+  ])("A03g F1, one layer at a time (%s): %s", (_layer, code) => {
+    expect(caught(code)).toContain("global-write");
+  });
+
   it.each([
     "const name = ordinary.constructor.name;",
-    "if (value.constructor === Object) merge(value);",
+    "if (value.constructor === Rows) merge(value);",
     'const isPlain = typeof value.constructor === "function";',
   ])("astra A03g F2: reading a constructor's name, or comparing it, is let through: %s", (code) => {
     expect(caught(code)).toEqual([]);
