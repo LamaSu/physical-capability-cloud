@@ -81,6 +81,32 @@
  * establish: accepting one needs an interlock registered with its own
  * commissioning attestation, which is operator item 124.
  *
+ * Every channel reports a STATE (`semantics: "state"`, astra pack 178): the
+ * quantity's current value, which must lie inside the limit's [min, max] at
+ * every enforcement check. A temperature is a state. So is the duration a
+ * device is configured to run for, while it runs. An elapsed-time counter is
+ * not a state: it starts at zero and grows, so its minimum is terminal (met
+ * only when the activity ends). A check of both bounds at every sample cannot
+ * enforce it, and lowering the minimum to 0 to let it pass would erase a real
+ * limit. v1 has no semantics for counters or terminal quantities, so they
+ * cannot be bound (fail closed). A duration no command sets binds to the
+ * channel that reports the duration the device is configured to run for. The
+ * checks are samples: the evidence states that a current reading inside the
+ * limit existed at each enforcement check, never continuous physical
+ * conformance between checks.
+ *
+ * Registration is the authority for what this module cannot observe (astra
+ * pack 178). Before it signs, the registry verifies these points:
+ *   - `adapterVersion` names an approved, immutable release manifest that
+ *     carries exactly this command map and telemetry map;
+ *   - the installed adapter is that release;
+ *   - each channel reads the device signal, quantity and unit it claims, as a
+ *     state;
+ *   - each `maxAgeMs` is safe for that quantity's dynamics and for the stop
+ *     latency (MAX_TELEMETRY_AGE_MS is a ceiling, not an approval);
+ *   - the device's identity, configuration and template fit;
+ *   - commissioning showed that the channels and the stop path work.
+ *
  * Device-to-template fit. A template names what a class must bound, so the
  * class decides which quantities are bounded at all. Nothing here can observe
  * the hardware. The registration's signature is the authority that this
@@ -250,7 +276,8 @@ export interface DeviceIdentity {
   adapterType: string;
   /**
    * The adapter release this envelope commits: `sha256:` + 64 lowercase hex
-   * of its reviewed release manifest (its code and this command map). The
+   * of its reviewed release manifest (its code, this command map and this
+   * telemetry map). The
    * runtime refuses an adapter whose manifest digest differs.
    */
   adapterVersion: string;
@@ -301,7 +328,8 @@ export interface CommandMapV1 {
 
 /**
  * One reading the adapter takes (class A: the adapter declares it, like its
- * commands): the template quantity it reports and how fresh it must be.
+ * commands): the template quantity it reports, what kind of value that is,
+ * and how fresh it must be.
  */
 export interface TelemetryChannelSpec {
   /** What the runtime asks the adapter for: a lowercase token (a letter, then letters, digits, ".", "_" or "-"), at most 64 long. */
@@ -310,9 +338,22 @@ export interface TelemetryChannelSpec {
   quantity: string;
   /** That quantity's unit, so a reading is compared with the limit without conversion. */
   unit: Unit;
+  /** What the reading is. v1 has one kind, "state": a value that must lie inside the limit at every enforcement check. */
+  semantics: TelemetrySemantics;
   /** How old the latest reading may be and still count, in ms: a whole number from 1 to MAX_TELEMETRY_AGE_MS. */
   maxAgeMs: number;
 }
+
+/**
+ * The kinds of reading a channel may report. "state" is the quantity's current
+ * value, a continuous invariant, checked against both bounds at every check.
+ * A counter (an elapsed time) or a terminal quantity is not a state and is not
+ * accepted in v1 (astra pack 178).
+ */
+export type TelemetrySemantics = "state";
+
+/** The reading kinds, frozen. */
+export const TELEMETRY_SEMANTICS: readonly TelemetrySemantics[] = deepFreeze(["state"] as TelemetrySemantics[]);
 
 /** Every channel the adapter reads, in ascending `id` order, each once. */
 export interface TelemetryMapV1 {
@@ -958,12 +999,13 @@ const NO_DEVICE_CONTROLLED: readonly DeviceControlledQuantity[] = deepFreeze(new
 const NO_CHANNELS: readonly TelemetryChannelSpec[] = deepFreeze(newList<TelemetryChannelSpec>(0));
 
 const DEVICE_CONTROLLED_KEYS: readonly string[] = deepFreeze(["quantity", "enforcement", "channel"]);
-const TELEMETRY_CHANNEL_KEYS: readonly string[] = deepFreeze(["id", "quantity", "unit", "maxAgeMs"]);
+const TELEMETRY_CHANNEL_KEYS: readonly string[] = deepFreeze(["id", "quantity", "unit", "semantics", "maxAgeMs"]);
 
 /**
- * The oldest a telemetry reading may be and still count, in ms. A channel may
- * declare a shorter `maxAgeMs`, never a longer one: a reading a minute old
- * cannot stop a job in time.
+ * The oldest any telemetry reading may be and still count, in ms. A channel may
+ * declare a shorter `maxAgeMs`, never a longer one. This is a structural
+ * ceiling, not a safety approval: registration approves a bound that is safe
+ * for the quantity's dynamics and the stop latency (astra pack 178).
  */
 export const MAX_TELEMETRY_AGE_MS = 60_000;
 /** The longest telemetry channel id. */
@@ -976,11 +1018,12 @@ export function isTelemetryChannelId(value: unknown): value is string {
 
 /**
  * Why a list of telemetry channels is malformed for this template, or null.
- * Each channel is exactly {id, quantity, unit, maxAgeMs}:
+ * Each channel is exactly {id, quantity, unit, semantics, maxAgeMs}:
  *   - an id token, with ids strictly ascending, so each id appears once and
  *     the list has one committed order;
  *   - a template quantity other than the deadline (the runtime measures a
  *     job's elapsed time on its own clock), in that quantity's unit;
+ *   - "state" semantics (astra pack 178);
  *   - a whole number of ms from 1 to MAX_TELEMETRY_AGE_MS.
  */
 function telemetryChannelsProblem(channels: unknown, template: DeviceClassTemplate): string | null {
@@ -988,7 +1031,7 @@ function telemetryChannelsProblem(channels: unknown, template: DeviceClassTempla
   let previous: string | null = null;
   for (let i = 0; i < channels.length; i++) {
     const channel: unknown = channels[i];
-    if (!isRecord(channel) || extraKeys(channel, TELEMETRY_CHANNEL_KEYS).length > 0) return "each telemetry channel is exactly {id, quantity, unit, maxAgeMs}";
+    if (!isRecord(channel) || extraKeys(channel, TELEMETRY_CHANNEL_KEYS).length > 0) return "each telemetry channel is exactly {id, quantity, unit, semantics, maxAgeMs}";
     const id: unknown = channel.id;
     if (!isTelemetryChannelId(id)) {
       return `telemetry channel ${quoted(id)}: an id is a lowercase token (a letter, then letters, digits, ".", "_" or "-"), at most ${CHANNEL_ID_MAX_LENGTH} long`;
@@ -1002,6 +1045,9 @@ function telemetryChannelsProblem(channels: unknown, template: DeviceClassTempla
     }
     if (channel.unit !== unit) {
       return `telemetry channel ${id} reports ${text(channel.quantity)} in ${JSONStringify(channel.unit)}, not ${unit}: a reading is compared with the limit without conversion`;
+    }
+    if (!includesValue(TELEMETRY_SEMANTICS, channel.semantics)) {
+      return `telemetry channel ${id}: semantics must be "state", a value that must lie inside the limit at every enforcement check; v1 cannot enforce an elapsed counter or a terminal quantity (astra pack 178)`;
     }
     const age: unknown = channel.maxAgeMs;
     if (!NumberIsInteger(age) || (age as number) < 1 || (age as number) > MAX_TELEMETRY_AGE_MS) {
@@ -1446,10 +1492,11 @@ export const DEVICE_CONTROL_ENFORCEMENTS: readonly DeviceControlEnforcement[] = 
  * still required and still enforced, through `channel`: the id of a channel in
  * the adapter's telemetry map that reports this quantity. The runtime refuses
  * to dispatch, and stops a running job, while that channel's latest reading is
- * missing, older than its `maxAgeMs`, or outside the limit. A reading that
- * grows from zero during a run (an elapsed time) needs a limit whose minimum
- * is 0. Physical absence is never declared here: only a template that does not
- * list the quantity makes it absent.
+ * missing, older than its `maxAgeMs`, or outside the limit. The channel reports
+ * a state (see TELEMETRY_SEMANTICS). A duration binds to the duration the
+ * device is configured to run for, never to an elapsed counter, so its real
+ * minimum stays (astra pack 178). Physical absence is never declared here:
+ * only a template that does not list the quantity makes it absent.
  */
 export interface DeviceControlledQuantity {
   quantity: string;
@@ -1461,7 +1508,7 @@ export interface DeviceControlledQuantity {
 /** How the runtime enforces one limit, as the envelope-conformance evidence lists it. */
 export type EnforcementMechanism =
   | { kind: "dispatch" }
-  | { kind: "telemetry"; channel: string; maxAgeMs: number }
+  | { kind: "telemetry"; channel: string; semantics: TelemetrySemantics; maxAgeMs: number }
   | { kind: "deadline" };
 
 /** The part of a confirmed envelope the digest commits, including who confirmed it and when. */
@@ -2104,14 +2151,19 @@ export function compileSafetyEnvelope(
     if (includesValue(settable, l.quantity)) append(enforcedBy, { kind: "dispatch" });
     for (let i = 0; i < channels.length; i++) {
       const channel = channels[i]!;
-      if (channel.quantity === l.quantity) append(enforcedBy, { kind: "telemetry", channel: channel.id, maxAgeMs: channel.maxAgeMs });
+      if (channel.quantity === l.quantity) {
+        append(enforcedBy, { kind: "telemetry", channel: channel.id, semantics: channel.semantics, maxAgeMs: channel.maxAgeMs });
+      }
     }
     if (l.quantity === template.deadline) append(enforcedBy, { kind: "deadline" });
     return { metric: l.quantity, unit: l.unit, min: l.min, max: l.max, enforcedBy };
   });
   const required = newList<string>(0);
   if (settable.length > 0) append(required, "every parameter that sets a quantity was inside its confirmed limit when it was sent");
-  if (channels.length > 0) append(required, "every telemetry channel had a reading no older than its maxAgeMs, inside its quantity's limit, for the whole job");
+  // Sampled checks claim what was sampled, never continuous conformance between samples (astra pack 178).
+  if (channels.length > 0) {
+    append(required, "at each enforcement check, every telemetry channel had a reading no older than its maxAgeMs, inside its quantity's limit");
+  }
   append(required, `the job ended by the confirmed maximum of ${template.deadline}`);
 
   return deepFreeze({

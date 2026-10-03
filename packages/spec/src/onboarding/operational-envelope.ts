@@ -26,11 +26,17 @@
  *     ascending, then strings ascending by UTF-16 code unit (astra pack 176).
  *   - `telemetryChannels` are the readings the adapter takes, in ascending id
  *     order, each the template quantity it reports, in that quantity's unit.
- *     Every one is enforced. The runtime dispatches a command other than the
- *     stop only when each channel's latest reading is a finite number, taken
- *     no more than `maxAgeMs` earlier, inside its quantity's limit. While a
- *     job runs, a reading that breaks this stops the job. An adapter that
- *     cannot serve a channel cannot run the job.
+ *     Each reports a STATE (`semantics: "state"`): the quantity's current
+ *     value, which must lie inside the limit at every enforcement check. A
+ *     configured duration is a state; an elapsed counter is not, and v1
+ *     cannot bind one (astra pack 178). Every channel is enforced. The runtime
+ *     dispatches a command other than the stop only when each channel's
+ *     latest reading is a finite number, taken no more than `maxAgeMs`
+ *     earlier, inside its quantity's limit. While a job runs, the governor
+ *     applies the same check whenever a reading changes or expires, and a
+ *     failure stops the job. An adapter that cannot serve a channel cannot run
+ *     the job. These are sampled checks: they show a current reading inside
+ *     the limit at each check, never continuous conformance between checks.
  *   - Every template quantity has a limit. `deviceControlled` names the ones
  *     no declared parameter sets but the device can still cause (firmware, a
  *     fixed program, a stored method). Each names the channel of
@@ -99,6 +105,7 @@ import {
   MAX_TELEMETRY_AGE_MS,
   supervisionPolicy,
   telemetryChannelsIssue,
+  TELEMETRY_SEMANTICS,
   type CommandMapV1,
   type ConfirmedSafetyEnvelope,
   type RegistrationVerifier,
@@ -124,7 +131,7 @@ const NonBlank = z.string().refine((s) => trim(s).length > 0, { message: "must n
 /** No quantities, no device-controlled entries and no channels: what an envelope whose map sets every quantity carries. */
 const NO_QUANTITIES: readonly string[] = deepFreeze(newList<string>(0));
 const NO_DEVICE_CONTROLLED: readonly { quantity: string; enforcement: "telemetry"; channel: string }[] = deepFreeze([]);
-const NO_CHANNELS: readonly { id: string; quantity: string; unit: string; maxAgeMs: number }[] = deepFreeze([]);
+const NO_CHANNELS: readonly { id: string; quantity: string; unit: string; semantics: "state"; maxAgeMs: number }[] = deepFreeze([]);
 
 /** A telemetry channel id: a lowercase token, checked without a RegExp. */
 const ChannelId = z.string().refine((s): boolean => isTelemetryChannelId(s), {
@@ -225,6 +232,8 @@ export const OperationalEnvelopeV1Schema = z
           id: ChannelId,
           quantity: NonBlank,
           unit: UnitSchema,
+          /** A state: the quantity's current value, inside the limit at every check (astra pack 178). */
+          semantics: z.enum(TELEMETRY_SEMANTICS as unknown as ["state"]),
           maxAgeMs: z.number().int().min(1).max(MAX_TELEMETRY_AGE_MS),
         })
         .strict(),
@@ -340,7 +349,13 @@ export function compileOperationalEnvelope(
     adapterVersion: envelope.device.adapterVersion,
     strict: true,
     limits: mapList(envelope.limits, (l) => ({ quantity: l.quantity, unit: l.unit, min: l.min, max: l.max })),
-    telemetryChannels: mapList(envelope.telemetryMap?.channels ?? NO_CHANNELS, (c) => ({ id: c.id, quantity: c.quantity, unit: c.unit, maxAgeMs: c.maxAgeMs })),
+    telemetryChannels: mapList(envelope.telemetryMap?.channels ?? NO_CHANNELS, (c) => ({
+      id: c.id,
+      quantity: c.quantity,
+      unit: c.unit,
+      semantics: c.semantics,
+      maxAgeMs: c.maxAgeMs,
+    })),
     deviceControlled: mapList(envelope.deviceControlled ?? NO_DEVICE_CONTROLLED, (d) => ({ quantity: d.quantity, enforcement: d.enforcement, channel: d.channel })),
     commands: mapList(envelope.commandMap.commands, (c) => ({
       name: c.name,

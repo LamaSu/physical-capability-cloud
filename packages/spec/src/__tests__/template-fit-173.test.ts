@@ -33,7 +33,7 @@ function register(c: ConfirmedSafetyEnvelope): SafetyEnvelopeRegistration {
 }
 
 /** Round 3 (astra pack 176): a device-controlled limit is enforced through a channel the adapter declares. */
-const CHAMBER = { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC" as const, maxAgeMs: 5000 };
+const CHAMBER = { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC" as const, semantics: "state" as const, maxAgeMs: 5000 };
 
 function plateReader(commands: SafetyEnvelopeInput["commandMap"]): SafetyEnvelopeInput {
   return {
