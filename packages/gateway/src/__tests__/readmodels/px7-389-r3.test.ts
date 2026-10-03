@@ -182,3 +182,23 @@ describe("the routes refuse a page asked for under an older snapshot (409 list_c
     }
   });
 });
+
+describe("MEDIUM (review r3 of #389): a word outside the milestone record's own vocabulary reads `unknown`", () => {
+  it("the verdict's reproduction: a funded escrow whose milestone says ' refund_allocated ' is unknown, not refund_pending", () => {
+    expect(fundingOf(kj(job(), linked(escrow({ status: "FUNDED" }), [milestone({ status: " refund_allocated " })])))).toBe("unknown");
+  });
+
+  it("an escrow-only or V-next word placed in the milestone field is unknown, whatever it would mean on the escrow", () => {
+    for (const status of ["REFUND_ALLOCATED", "RELEASE_ALLOCATED", "SETTLED_RELEASED", "SETTLED_REFUNDED", "PRIMARY_ASSERTED", "CREATED", "PENDING", "ACTIVE"]) {
+      expect(fundingOf(kj(job(), linked(escrow(), [milestone({ status })]))), status).toBe("unknown");
+    }
+  });
+
+  it("the milestone's own words still decide (positive control)", () => {
+    expect(fundingOf(kj(job(), linked(escrow(), [milestone({ status: "funded" })])))).toBe("escrowed");
+    expect(fundingOf(kj(job(), linked(escrow(), [milestone({ status: "disputed" })])))).toBe("contested");
+    for (const status of ["released", "refunded", "unfunded"]) {
+      expect(fundingOf(kj(job(), linked(escrow(), [milestone({ status })]))), status).toBe("not_held");
+    }
+  });
+});

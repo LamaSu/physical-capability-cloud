@@ -265,6 +265,13 @@ const ESCROW_HOLDS = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEA
  * and `escalation`), and a disputed escrow.
  */
 const ESCROW_CONTESTED = new Set(["PRIMARY_ASSERTED", "CHALLENGED", "BACKUP_PENDING", "BACKUP_ASSERTED", "DISPUTED"]);
+/**
+ * The milestone record's own vocabulary: escrow_milestones.status is an EscrowStatus (@pcc/spec
+ * types/common.ts; packages/db schema/settlement.ts). A word outside it is not a milestone status
+ * (an escrow-only or V-next word placed in the legacy field), so it decides nothing (review r3 of
+ * #389, MEDIUM).
+ */
+const MILESTONE_WORDS = new Set(["UNFUNDED", "FUNDED", "LOCKED", "RELEASING", "RELEASED", "DISPUTED", "REFUNDED", "SLASHED"]);
 /** Milestone words (escrow_milestones.status) under which this job's milestone is funded and still open. */
 const MILESTONE_HOLDS = new Set(["FUNDED", "LOCKED", "RELEASING"]);
 /** Milestone words under which this job's milestone is held but contested. */
@@ -297,6 +304,7 @@ export interface FundingContest {
  * reconciliation, and from every other record that can contest the money: the job's own status
  * and the disputes on its milestone.
  *   the payout is unknown (conflicting, unrecognized or ambiguous records)    -> unknown
+ *   the milestone's word is not a milestone status (MILESTONE_WORDS)          -> unknown
  *   either word says never funded, refunded or released                       -> not_held
  *   a refund to the payer is decided but not made                             -> refund_pending
  *   the words do not say the escrow holds the funds and the milestone is open -> unknown
@@ -312,6 +320,7 @@ function recordFunding(s: SettlementAxis, contest: FundingContest): OperatorWork
   if (s.payout === "unknown" || !record.escrow.known || !ms.status.known) return "unknown";
   const e = normalizeMoneyStatus(record.escrow.sourceStatus);
   const m = normalizeMoneyStatus(ms.status.sourceStatus);
+  if (!MILESTONE_WORDS.has(m)) return "unknown";
   if (NOT_HELD.has(e) || NOT_HELD.has(m)) return "not_held";
   if (REFUND_PENDING.has(e) || REFUND_PENDING.has(m)) return "refund_pending";
   const held = (ESCROW_HOLDS.has(e) || ESCROW_CONTESTED.has(e)) && (MILESTONE_HOLDS.has(m) || MILESTONE_CONTESTED.has(m));
