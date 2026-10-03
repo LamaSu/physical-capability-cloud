@@ -64,8 +64,11 @@ const OT2_MAP = {
   ],
 };
 
-/** All 96 wells of a 96-well plate, A1..H12. */
-const WELLS_96 = [..."ABCDEFGH"].flatMap((row) => Array.from({ length: 12 }, (_, i) => `${row}${i + 1}`));
+/**
+ * All 96 wells of a 96-well plate, in a value set's one committed order:
+ * ascending by UTF-16 code unit, so A1, A10, A11, A12, A2 ... H9 (astra pack 176).
+ */
+const WELLS_96 = [..."ABCDEFGH"].flatMap((row) => Array.from({ length: 12 }, (_, i) => `${row}${i + 1}`)).sort();
 
 /**
  * The plate reader's map, shaped like the rehearsal simulator's run request
@@ -91,10 +94,13 @@ const PLATE_MAP = {
 
 /**
  * SIM-PR1 as refvertical's rehearsal simulator declares it: one run command with
- * three finite-set parameters, and a stop. It has no incubator, so its class is
- * the absorbance-only reader (Addendum 6: physical absence comes only from a
- * reviewed template). Its firmware fixes each read's timing, so read_duration is
- * device-controlled, enforced by that cutoff, and keeps its limit.
+ * three finite-set parameters, and a stop. No command sets its plate temperature
+ * or its read duration (the instrument fixes a run's duration at start-up,
+ * manual 5.1), so both are device-controlled. Each is enforced through a
+ * channel its adapter declares (round 3, astra pack 176): GET /status reports
+ * temperatureC, and a run's elapsed time comes from GET /runs/<id> while it runs.
+ * There is no reduced class: a reader without an incubator still bounds, and
+ * reports, its plate temperature.
  */
 const SIM_PR1_MAP = {
   commands: [
@@ -110,7 +116,7 @@ const SIM_PR1_MAP = {
   ],
 };
 
-/** A heated reader whose incubator the firmware runs: no command sets the temperature, but the device causes it. */
+/** A heated reader whose incubator the firmware runs: no command sets the temperature, but the device causes it and reports it. */
 const HEATED_RUN_ONLY_MAP = {
   commands: [
     { name: "run", params: [] },
@@ -120,14 +126,17 @@ const HEATED_RUN_ONLY_MAP = {
 
 /** What each fixture's operator decides beyond who and when. */
 const DECISIONS: Record<string, Partial<EnvelopeDecision>> = {
-  "plate-reader-sim-pr1-absorbance": {
-    deviceControlled: [{ quantity: "read_duration", enforcement: "cutoff", detail: "the reader's firmware fixes each read's timing (SIM-PR1 manual 5.1)" }],
+  "plate-reader-sim-pr1": {
+    deviceControlled: [
+      { quantity: "incubation_temperature", enforcement: "telemetry", channel: "status.temperature_c" },
+      { quantity: "read_duration", enforcement: "telemetry", channel: "run.elapsed_s" },
+    ],
   },
   // Given out of template order on purpose: the body commits template order.
   "plate-reader-heated-device-controlled": {
     deviceControlled: [
-      { quantity: "read_duration", enforcement: "cutoff", detail: "firmware read timing" },
-      { quantity: "incubation_temperature", enforcement: "telemetry", detail: "chamber thermistor, GET /status" },
+      { quantity: "read_duration", enforcement: "telemetry", channel: "run.elapsed_s" },
+      { quantity: "incubation_temperature", enforcement: "telemetry", channel: "chamber.temperature_c" },
     ],
   },
 };
@@ -185,13 +194,21 @@ const INPUTS: Record<string, SafetyEnvelopeInput> = {
       },
     ],
   },
-  "plate-reader-sim-pr1-absorbance": {
-    deviceClass: "lab-plate-reader-absorbance",
-    device: { deviceId: "sim-pr1", adapterType: "generic-http", adapterVersion: `sha256:${"31".repeat(32)}` },
+  "plate-reader-sim-pr1": {
+    deviceClass: "lab-plate-reader",
+    device: { deviceId: "sim-pr1", adapterType: "generic-http", adapterVersion: `sha256:${"31".repeat(32)}`, vendor: "Veriswell Instruments", model: "SIM-PR1" },
     commandMap: SIM_PR1_MAP,
+    telemetryMap: {
+      channels: [
+        { id: "run.elapsed_s", quantity: "read_duration", unit: "s", maxAgeMs: 1000 },
+        { id: "status.temperature_c", quantity: "incubation_temperature", unit: "degC", maxAgeMs: 5000 },
+      ],
+    },
     intake: {
       limits: [
-        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 60 },
+        { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 15, max: 40 },
+        // From 0: run.elapsed_s is the current run's elapsed time, which every run starts at.
+        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 0, max: 60 },
         { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 30 },
       ],
       eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
@@ -205,10 +222,16 @@ const INPUTS: Record<string, SafetyEnvelopeInput> = {
     deviceClass: "lab-plate-reader",
     device: { deviceId: "pr-heated", adapterType: "generic-http", adapterVersion: `sha256:${"41".repeat(32)}` },
     commandMap: HEATED_RUN_ONLY_MAP,
+    telemetryMap: {
+      channels: [
+        { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", maxAgeMs: 5000 },
+        { id: "run.elapsed_s", quantity: "read_duration", unit: "s", maxAgeMs: 1000 },
+      ],
+    },
     intake: {
       limits: [
         { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 20, max: 40 },
-        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 600 },
+        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 0, max: 600 },
         { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 120 },
       ],
       eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
@@ -295,16 +318,39 @@ const INVALID: Array<[string, Change] | [string, Change, string]> = [
   ],
   // Addendum 6: deviceControlled (astra pack 173).
   ["device-controlled-missing", (e) => delete e.deviceControlled],
-  ["device-controlled-the-deadline", (e) => e.deviceControlled.push({ quantity: "run_duration", enforcement: "cutoff", detail: "x" })],
-  ["device-controlled-unknown-quantity", (e) => e.deviceControlled.push({ quantity: "spindle_speed", enforcement: "cutoff", detail: "x" })],
-  ["device-controlled-a-settable-quantity", (e) => e.deviceControlled.push({ quantity: "module_temperature", enforcement: "telemetry", detail: "x" })],
+  ["device-controlled-the-deadline", (e) => e.deviceControlled.push({ quantity: "run_duration", enforcement: "telemetry", channel: "run.elapsed_min" })],
+  ["device-controlled-unknown-quantity", (e) => e.deviceControlled.push({ quantity: "spindle_speed", enforcement: "telemetry", channel: "spindle.rpm" })],
+  ["device-controlled-a-settable-quantity", (e) => e.deviceControlled.push({ quantity: "module_temperature", enforcement: "telemetry", channel: "module.temperature_c" })],
   ["device-controlled-unknown-enforcement", (e) => (e.deviceControlled[0].enforcement = "trust"), "plate-reader-heated-device-controlled"],
-  ["device-controlled-blank-detail", (e) => (e.deviceControlled[0].detail = " "), "plate-reader-heated-device-controlled"],
+  // Round 3 (astra pack 176): enforcement is a channel the runtime reads, never an operator's words.
+  ["device-controlled-cutoff", (e) => (e.deviceControlled[0].enforcement = "cutoff"), "plate-reader-heated-device-controlled"],
+  ["device-controlled-prose-detail", (e) => (e.deviceControlled[0] = { quantity: "incubation_temperature", enforcement: "cutoff", detail: "x" }), "plate-reader-heated-device-controlled"],
+  ["device-controlled-channel-unresolved", (e) => (e.deviceControlled[0].channel = "chamber.other"), "plate-reader-heated-device-controlled"],
+  ["device-controlled-channel-of-another-quantity", (e) => (e.deviceControlled[0].channel = "run.elapsed_s"), "plate-reader-heated-device-controlled"],
+  ["device-controlled-channel-not-an-id", (e) => (e.deviceControlled[0].channel = "Chamber Thermistor"), "plate-reader-heated-device-controlled"],
   ["device-controlled-extra-key", (e) => (e.deviceControlled[0].limit = "none"), "plate-reader-heated-device-controlled"],
   ["device-controlled-out-of-order", (e) => e.deviceControlled.reverse(), "plate-reader-heated-device-controlled"],
   ["device-controlled-twice", (e) => (e.deviceControlled[1] = e.deviceControlled[0]), "plate-reader-heated-device-controlled"],
   ["device-controlled-omits-an-unset-quantity", (e) => e.deviceControlled.pop(), "plate-reader-heated-device-controlled"],
   ["device-controlled-limit-removed", (e) => e.limits.shift(), "plate-reader-heated-device-controlled"],
+  ["telemetry-channels-missing", (e) => delete e.telemetryChannels],
+  ["telemetry-channels-emptied-while-named", (e) => (e.telemetryChannels = []), "plate-reader-heated-device-controlled"],
+  ["telemetry-channels-out-of-order", (e) => e.telemetryChannels.reverse(), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-twice", (e) => (e.telemetryChannels[1] = e.telemetryChannels[0]), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-retargeted", (e) => (e.telemetryChannels[0].quantity = "read_duration"), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-the-deadline", (e) => e.telemetryChannels.push({ id: "job.elapsed_min", quantity: "job_duration", unit: "min", maxAgeMs: 1000 }), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-unknown-quantity", (e) => e.telemetryChannels.push({ id: "spindle.rpm", quantity: "spindle_speed", unit: "m/s", maxAgeMs: 1000 }), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-other-unit", (e) => (e.telemetryChannels[0].unit = "degF"), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-max-age-zero", (e) => (e.telemetryChannels[0].maxAgeMs = 0), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-max-age-over-a-minute", (e) => (e.telemetryChannels[0].maxAgeMs = 60001), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-max-age-fraction", (e) => (e.telemetryChannels[0].maxAgeMs = 1.5), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-id-uppercase", (e) => (e.telemetryChannels[0].id = "Chamber.temperature_c"), "plate-reader-heated-device-controlled"],
+  ["telemetry-channel-extra-key", (e) => (e.telemetryChannels[0].detail = "thermistor"), "plate-reader-heated-device-controlled"],
+  // One set, one committed form (astra pack 176 MEDIUM).
+  ["enumerated-out-of-order", (e) => (e.commands[2].params[0].allowed = [37, 4])],
+  ["unbounded-allowed-out-of-order", (e) => e.commands[0].params.push({ name: "slot", unbounded: { reason: "a deck slot", allowed: [2, 1] } })],
+  ["unbounded-strings-before-numbers", (e) => e.commands[0].params.push({ name: "slot", unbounded: { reason: "a deck slot", allowed: ["all", 1] } })],
+  ["unbounded-allowedItems-out-of-order", (e) => e.commands[0].params.push({ name: "wells", unbounded: { reason: "plate wells", allowedItems: ["A2", "A10"] } })],
   // Enumerated physical parameters.
   ["enumerated-value-outside-the-limit", (e) => (e.commands[2].params[0].allowed = [4, 120])],
   ["enumerated-value-not-a-number", (e) => (e.commands[2].params[0].allowed = ["hot"])],
@@ -331,7 +377,8 @@ function buildFixtures() {
       "114b: the schema now refuses an unknown deviceClass outright (see 'unknown-class-generic-rules-only', moved here from 'valid'), limits must be in the template's exact order and units, an adapter-stop's command must be one of the declared commands, and deadlineQuantity must be the template's own deadline.",
       "153 (round 3): adapterVersion is the adapter's release manifest digest (sha256: + 64 lowercase hex); an unbounded parameter is {reason, allowed}, and a runtime passes only a value in allowed (same type and value); a reference source carries the bound it cites (value) and its unit.",
       "round 4: the template's deadline (deadlineQuantity) needs no command parameter: the runtime enforces it as elapsed time, and a parameter that does set it is checked against the same limit. A list-valued parameter declares unbounded.allowedItems: a runtime passes a non-empty list of distinct items, each in allowedItems (compared by type and value); a single value must be in allowed.",
-      "Addendum 6 (dispositions, astra pack 173): every template quantity keeps a limit. A required quantity that no declared command parameter sets is device-controlled: the operator confirms how its limit is enforced, {quantity, enforcement: telemetry | cutoff, detail}, and its limit stays in the body, the runtime limits and the conformance evidence. A runtime that cannot enforce a device-controlled limit by its mechanism refuses the job. The confirmed body commits deviceControlled in template order only when non-empty, so every other envelope's digest is unchanged; the runtime envelope always carries it (possibly empty). Physical absence comes only from a template that does not list the quantity (lab-plate-reader-absorbance has no incubator). A parameter that sets a quantity may list its only values (allowed), each inside the limit.",
+      "Addendum 6 (dispositions, astra pack 173): every template quantity keeps a limit. A required quantity that no declared command parameter sets is device-controlled, and its limit stays in the body, the runtime limits and the conformance evidence. The confirmed body commits deviceControlled in template order only when non-empty, so every other envelope's digest is unchanged; the runtime envelope always carries it (possibly empty). A parameter that sets a quantity may list its only values (allowed), each inside the limit.",
+      "Addendum 7 (round 3, astra pack 176): a device-controlled entry is {quantity, enforcement: 'telemetry', channel}. channel must be the id of one of the adapter's declared telemetry channels (body telemetryMap.channels, runtime telemetryChannels) that reports that quantity. Each channel is {id, quantity, unit, maxAgeMs}: a lowercase token id (a letter, then [a-z0-9._-], at most 64), ids strictly ascending; a non-deadline template quantity in that quantity's unit; and maxAgeMs a whole number from 1 to 60000. Every committed channel is enforced: a runtime dispatches a command other than the stop only when each channel's latest reading is a finite number, at most maxAgeMs old, inside its quantity's limit, and it stops a running job when one is not. There is no 'cutoff' and no prose detail. A body omits telemetryMap when the adapter declares no channel; the runtime always carries telemetryChannels (possibly empty). Every value set (allowed, unbounded.allowed, unbounded.allowedItems) lists each value once, in one order: numbers ascending, then strings ascending by UTF-16 code unit. There is no reduced device class: lab-plate-reader-absorbance is gone. The envelope-conformance evidence lists, per limit, enforcedBy: dispatch, telemetry {channel, maxAgeMs} and/or deadline.",
       "registration: the registry signs statementDigest = 'sha256:' + lowercase hex(sha256(UTF-8(canonicalize({domain, deviceId, envelopeDigest, registeredAt})))) with Ed25519; the signed message is the UTF-8 of statementDigest itself (LO-EV-1 signingPreimage, 71 bytes). Signatures are not in this file: verify with the registry's key.",
     ],
     digest: {
