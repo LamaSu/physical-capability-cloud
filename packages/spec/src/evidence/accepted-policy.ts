@@ -519,8 +519,9 @@ type SubjectFieldsMissingFromKeyList = AssertNever<Exclude<keyof SubjectBlockFie
  * block, see the module header's Layer 2 boundary). No field here is deal-derived.
  *
  * `subject` is admitted first (no Proxy, no accessor, exactly these 18 keys, nothing
- * unknown) before any field is read, then every field is read once from its own data
- * descriptor and encoded in its pinned form.
+ * unknown); that same validating pass reads every field once from its own data descriptor
+ * into a snapshot (`checkExactKeys`'s return value), and every field used below is read from
+ * that snapshot, via `requiredField`, never read from `subject` a second time.
  */
 export function computeSubjectBlockHash(subject: SubjectBlockFields): Bytes32Hex {
   const admitted = admitPlainObject(subject, "subject");
@@ -581,8 +582,13 @@ interface PinnedBinding {
  * #786 f1); a duplicate requirementIdHash is refused (globally unique, sol #786 NO-GO #6 /
  * evidence #4569) rather than silently de-duplicated, so one binding set has one root.
  *
- * `bindings` is admitted first as a dense, non-Proxy array; each element is then admitted
- * as a plain object with exactly these 5 keys before any of its fields is read.
+ * `bindings` is admitted first as a dense, non-Proxy array: every index is read once, through
+ * a descriptor (never an ordinary [[Get]]), into a fresh snapshot array (`admitPlainArray`'s
+ * return value) — so neither an indexed getter nor an inherited prototype value at a deleted
+ * index can ever be read, let alone read twice with two different answers (E12 HIGH, astra
+ * r1 98501e35). The loop below reads that snapshot, never the caller's original array. Each
+ * snapshot element is then admitted as a plain object with exactly these 5 keys, itself read
+ * once into its own snapshot (`checkExactKeys`), before any of its fields is used.
  */
 export function computeBindingsRoot(bindings: readonly SubjectBinding[]): Bytes32Hex {
   const admittedArray = admitPlainArray(bindings, "bindings");
