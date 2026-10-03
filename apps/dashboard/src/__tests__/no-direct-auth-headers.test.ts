@@ -308,11 +308,41 @@ function bindingsOf(name: string, sf: ts.SourceFile): ts.Expression[] {
       for (const element of target.elements) {
         if (ts.isOmittedExpression(element)) continue;
         bind(element.name, value); // a part of value is held through value: { prototype } = Headers
+        if (element.initializer) bind(element.name, element.initializer); // { clip = navigator.clipboard } = {}
       }
+    };
+    /** The key a member's own bindings go under: this.f in a class, x.f for a name the module binds (astra A03h F1). */
+    const memberKey = (n: ts.Node): string | null => {
+      if (!isMember(n)) return null;
+      const name = memberName(n);
+      const base = unwrapped(n.expression);
+      if (name === null) return null;
+      if (base.kind === ts.SyntaxKind.ThisKeyword) return `this.${name}`;
+      return ts.isIdentifier(base) ? `${base.text}.${name}` : null;
     };
     walk(sf, (n) => {
       if (ts.isVariableDeclaration(n) && n.initializer) bind(n.name, n.initializer);
-      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left)) add(n.left.text, n.right);
+      // A parameter's default (astra A03h F1).
+      if (ts.isParameter(n) && n.initializer) bind(n.name, n.initializer);
+      // A for-of variable holds an element of what it iterates (astra A03h F1).
+      if (ts.isForOfStatement(n)) {
+        const element = ts.factory.createElementAccessExpression(n.expression, ts.factory.createNumericLiteral(0));
+        const init = n.initializer;
+        if (ts.isVariableDeclarationList(init)) for (const d of init.declarations) bind(d.name, element);
+        else if (ts.isIdentifier(init)) add(init.text, element);
+      }
+      // A class field, under this.f, and a static one under Class.f too (astra A03h F1).
+      if (ts.isPropertyDeclaration(n) && n.initializer && (ts.isIdentifier(n.name) || ts.isPrivateIdentifier(n.name))) {
+        add(`this.${n.name.text}`, n.initializer);
+        const cls = n.parent;
+        const isStatic = n.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword);
+        if (isStatic && ts.isClassLike(cls) && cls.name) add(`${cls.name.text}.${n.name.text}`, n.initializer);
+      }
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        if (ts.isIdentifier(n.left)) add(n.left.text, n.right);
+        const key = memberKey(unwrapped(n.left)); // this.clip = …, handles.clip = …
+        if (key) add(key, n.right);
+      }
     });
     bindingCache.set(sf, (table = t));
   }
@@ -334,7 +364,7 @@ function mayHoldProtected(e: ts.Expression, sf: ts.SourceFile, seen = new Set<st
     seen.add(u.text);
     return bindingsOf(u.text, sf).some((value) => mayHoldProtected(value, sf, seen));
   }
-  if (isMember(u)) return mayHoldProtected(u.expression, sf, seen);
+  if (isMember(u)) return memberMayHoldProtected(u, sf, seen);
   if (ts.isCallExpression(u)) {
     const callee = unwrapped(u.expression);
     return isMember(callee) && RECEIVER_CALLS.has(memberName(callee) ?? "") && mayHoldProtected(callee.expression, sf, seen);
@@ -350,13 +380,71 @@ function mayHoldProtected(e: ts.Expression, sf: ts.SourceFile, seen = new Set<st
   return false;
 }
 
+/**
+ * A member read (astra A03h F1): what the module bound to it (this.f, x.f),
+ * or what its receiver holds there. An object literal holds its own
+ * property; an array literal, any element; anything else may be protected
+ * through its receiver. A literal written to is a fresh object, not a
+ * protected one: only reading into it follows its values.
+ */
+function memberMayHoldProtected(m: ts.PropertyAccessExpression | ts.ElementAccessExpression, sf: ts.SourceFile, seen: Set<string>): boolean {
+  const name = memberName(m);
+  const base = unwrapped(m.expression);
+  const key = name === null ? null : base.kind === ts.SyntaxKind.ThisKeyword ? `this.${name}` : ts.isIdentifier(base) ? `${base.text}.${name}` : null;
+  if (key && !seen.has(key)) {
+    seen.add(key);
+    if (bindingsOf(key, sf).some((value) => mayHoldProtected(value, sf, seen))) return true;
+  }
+  if (base.kind === ts.SyntaxKind.ThisKeyword) return false; // only its fields, above
+  return valuesOf(base, sf, seen).some((value) => {
+    if (ts.isObjectLiteralExpression(value)) {
+      return value.properties.some((p) => {
+        if (ts.isSpreadAssignment(p)) return name === null || mayHoldProtected(ts.factory.createElementAccessExpression(p.expression, ts.factory.createStringLiteral(name)), sf, seen);
+        if (name !== null && p.name && !propertyMayBe(p.name, name)) return false;
+        if (ts.isPropertyAssignment(p)) return mayHoldProtected(p.initializer, sf, seen);
+        if (ts.isShorthandPropertyAssignment(p)) return mayHoldProtected(p.name, sf, seen);
+        return false; // a method or an accessor
+      });
+    }
+    if (ts.isArrayLiteralExpression(value)) {
+      return value.elements.some((el) =>
+        ts.isSpreadElement(el)
+          ? mayHoldProtected(ts.factory.createElementAccessExpression(el.expression, ts.factory.createNumericLiteral(0)), sf, seen)
+          : !ts.isOmittedExpression(el) && mayHoldProtected(el, sf, seen),
+      );
+    }
+    return mayHoldProtected(value, sf, seen);
+  });
+}
+
+/** Whether an object literal's key may be `name`: its own name, a literal that spells it, or a computed key we can't spell. */
+function propertyMayBe(key: ts.PropertyName, name: string): boolean {
+  if (ts.isIdentifier(key) || ts.isPrivateIdentifier(key)) return key.text === name;
+  if (ts.isComputedPropertyName(key)) {
+    const spelledKey = spelled(key.expression);
+    return spelledKey === null || spelledKey === name;
+  }
+  const spelledKey = spelled(key);
+  return spelledKey === null || spelledKey === name;
+}
+
+/** What `e` may evaluate to: itself, or for a name the module binds (and no protected one), every value bound to it. */
+function valuesOf(e: ts.Expression, sf: ts.SourceFile, seen: Set<string>): ts.Expression[] {
+  const u = unwrapped(e);
+  if (!ts.isIdentifier(u) || PROTECTED_OBJECTS.has(u.text) || GLOBAL_NAMES.has(u.text)) return [u];
+  const key = `value:${u.text}`;
+  if (seen.has(key)) return [];
+  seen.add(key);
+  return bindingsOf(u.text, sf).flatMap((value) => valuesOf(value, sf, seen));
+}
+
 /** x.constructor only read for its name, compared, or asked its type: it holds nothing (astra A03g F2). */
 function readsConstructorHarmlessly(n: ts.Node): boolean {
   if (memberName(n) !== "constructor") return false;
   const top = outermost(n);
   const p = top.parent;
   if (!p) return false;
-  if (ts.isPropertyAccessExpression(p) && p.expression === top && p.name.text === "name") {
+  if (isMember(p) && p.expression === top && memberName(p) === "name") { // by either access (astra A03h F2)
     return !(ts.isBinaryExpression(p.parent) && p.parent.left === p && isAssignment(p.parent.operatorToken.kind));
   }
   if (ts.isTypeOfExpression(p)) return true;
@@ -831,6 +919,9 @@ describe("the rules catch each known way around them (self-test)", () => {
     ["a for-of over a named list", 'const clips = [navigator.clipboard];\nfor (const clip of clips) delete clip.writeText;'],
     ["a this-field assigned in a method", "class Patch {\n  setup() { this.clip = navigator.clipboard; }\n  run() { this.clip.writeText = observe; }\n}"],
     ["an object literal's property", "const handles = { clip: navigator.clipboard };\nhandles.clip.writeText = observe;"],
+    ["an object literal's computed key", 'const k = "clip";\nconst handles = { [k]: navigator.clipboard };\nhandles.clip.writeText = observe;'],
+    ["a destructuring default", 'const { clip = navigator.clipboard } = options;\nObject.defineProperty(clip, "writeText", { value: observe });'],
+    ["a static class field", "class Handles {\n  static clip = navigator.clipboard;\n}\nHandles.clip.writeText = observe;"],
   ])("astra A03h F1: the mutation-target check follows %s", (_form, code) => {
     expect(caught(code)).toContain("global-write");
   });
