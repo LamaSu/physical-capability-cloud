@@ -49,9 +49,12 @@
  * and escrow and the bytes32 fields are lowercase hex. So a spelling the body refuses is refused
  * here too, even when it would encode the same bytes, and the principal id cannot embed one.
  *
- * BOUNDED LOOKUP (cross-family E13 F2): `operatorForUnit` gets an AbortSignal and at most
- * `operatorLookupTimeoutMs` (default 10 s). A lookup that has not settled by then is aborted and
- * refused, so a chain read that never answers cannot hold the mint guard open.
+ * BOUNDED LOOKUP (cross-family E13 F2, E13b, E13c): `operatorForUnit` gets an AbortSignal and at
+ * most `operatorLookupTimeoutMs` (default 10 s). A lookup that has not settled by then is aborted and
+ * refused, so a chain read that never answers cannot hold the mint guard open. An answer observed at
+ * or after the bound is refused however it arrives: from an abort listener (the deadline is latched
+ * before the abort), or after blocking the event loop so long that the timer could not run (the
+ * monotonic clock is read when the answer is observed).
  *
  * FAILS CLOSED, NEVER THROWS: every rule below is a refusal (`verifyOperatorSignature` answers
  * `false`), never an exception. A hostile or malformed `input` of any shape, an
@@ -61,6 +64,7 @@
  * a thrown error from this interface into `PackageNotMintableError`, but this implementation
  * does not rely on that safety net — it is designed to never throw in the first place.
  */
+import { performance } from "node:perf_hooks";
 import { hashTypedData, recoverAddress, type Hex } from "viem";
 import type {
   OperatorSignatureVerifier,
@@ -155,8 +159,11 @@ type OperatorForUnit = Eip712OperatorVerifierDeps["operatorForUnit"];
  * `operatorForUnit`'s answer, or TIMED_OUT once `timeoutMs` passes; its signal is aborted then (E13 F2).
  * The deadline is LATCHED before the abort (E13b): abort() runs its listeners synchronously, so a lookup
  * that answers from one (a thenable can settle the race inside abort() itself) answered after the bound,
- * and `expired` turns that answer into TIMED_OUT whichever promise the race saw first. A lookup that
- * answers before the bound settles the race in microtasks, which all run before the timer can fire.
+ * and `expired` turns that answer into TIMED_OUT whichever promise the race saw first. The timer cannot
+ * run while a lookup blocks the event loop (a synchronous lookup, or a thenable that blocks in `then`),
+ * so the monotonic clock is read too (E13c): an answer observed at or after `timeoutMs` is late, timer
+ * or no timer. A lookup that answers before the bound settles the race in microtasks, which all run
+ * before the timer can fire, and is accepted.
  */
 async function lookupOperator(
   operatorForUnit: OperatorForUnit,
@@ -164,6 +171,7 @@ async function lookupOperator(
   timeoutMs: number,
 ): Promise<unknown> {
   const controller = new AbortController();
+  const started = performance.now();
   let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = new Promise<typeof TIMED_OUT>((resolve) => {
@@ -177,7 +185,7 @@ async function lookupOperator(
     // A synchronous throw becomes a rejection, which the outer try/catch turns into false.
     const lookup = Promise.resolve().then(() => operatorForUnit(unitBinding, { signal: controller.signal }));
     const answer = await Promise.race([lookup, timedOut]);
-    return expired ? TIMED_OUT : answer;
+    return expired || performance.now() - started >= timeoutMs ? TIMED_OUT : answer;
   } finally {
     clearTimeout(timer);
   }

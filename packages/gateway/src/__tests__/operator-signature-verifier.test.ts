@@ -553,6 +553,38 @@ describe("E13 F2 — a lookup that never settles is bounded: the verifier answer
     await expect(thenableFromAbortHandler.verifyOperatorSignature(positiveInput())).resolves.toBe(false);
   });
 
+  it("refuses a lookup that blocks the event loop past the bound and then answers (E13c F2)", async () => {
+    // While the loop is blocked the timer cannot run, so only the clock can tell the answer came late.
+    const busyWait = (ms: number) => {
+      const end = performance.now() + ms;
+      while (performance.now() < end) {
+        // spin
+      }
+    };
+    const synchronous = createEip712OperatorVerifier({
+      operatorForUnit: () => {
+        busyWait(50);
+        return OPERATOR_ADDRESS_LOWER;
+      },
+      operatorLookupTimeoutMs: 5,
+    });
+    await expect(synchronous.verifyOperatorSignature(positiveInput())).resolves.toBe(false);
+    const blockingThenable = createEip712OperatorVerifier({
+      operatorForUnit: () =>
+        ({
+          then(resolve: (value: string) => void) {
+            busyWait(50);
+            resolve(OPERATOR_ADDRESS_LOWER);
+          },
+        }) as unknown as Promise<string>,
+      operatorLookupTimeoutMs: 5,
+    });
+    await expect(blockingThenable.verifyOperatorSignature(positiveInput())).resolves.toBe(false);
+    // A timely synchronous answer is still accepted.
+    const timely = createEip712OperatorVerifier({ operatorForUnit: () => OPERATOR_ADDRESS_LOWER, operatorLookupTimeoutMs: 1000 });
+    await expect(timely.verifyOperatorSignature(positiveInput())).resolves.toBe(true);
+  });
+
   it("an undefined bound is the default; it is not an invalid one", async () => {
     const verifier = createEip712OperatorVerifier({ operatorForUnit: operatorForUnitAlways(OPERATOR_ADDRESS_LOWER), operatorLookupTimeoutMs: undefined });
     await expect(verifier.verifyOperatorSignature(positiveInput())).resolves.toBe(true);
