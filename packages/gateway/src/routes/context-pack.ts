@@ -119,10 +119,10 @@ All endpoints are relative to the base URL above. Most return JSON.
 ### Operator Management
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /api/operator/machines | List operator machines |
-| GET | /api/operator/earnings | Operator earnings summary |
-| GET | /api/operator/certifications | Operator certifications |
-| GET | /api/operator/maintenance | Maintenance schedule |
+| GET | /api/operator/machines | Not available yet (501): use /api/agent/me for your kernels, devices and in-flight jobs |
+| GET | /api/operator/earnings | Not available yet (501): per-job payment state is at /api/jobs/:jobId/execution |
+| GET | /api/operator/certifications | Not available yet (501): no certification store |
+| GET | /api/operator/maintenance | Not available yet (501): nothing records maintenance events |
 | GET | /api/operator/work | Your work: job offers for your capability types, your kernels' jobs and approvals (OperatorWorkDTO: server-assigned phase, pay with its funding, actions with routes) |
 | GET | /api/operator/income | What the escrow records show for your kernels' jobs (OperatorIncomeDTO); totals are sums of rows; no payout history yet |
 | GET | /api/operator/approvals | Pending operator approvals |
