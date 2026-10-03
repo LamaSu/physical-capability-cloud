@@ -10,23 +10,26 @@
  * twice, or through a cycle, is visited once.
  */
 
+/** One path step: an object key (a string, whatever it looks like) or an array index (a number). */
+export type WalkPathSegment = string | number;
+
 interface WalkFrame {
   node: unknown;
   parent: WalkFrame | null;
-  key: string;
+  key: WalkPathSegment;
 }
 
-function pathOf(frame: WalkFrame): string[] {
-  const segments: string[] = [];
+function pathOf(frame: WalkFrame): WalkPathSegment[] {
+  const segments: WalkPathSegment[] = [];
   for (let f: WalkFrame | null = frame; f !== null && f.parent !== null; f = f.parent) segments.push(f.key);
   return segments.reverse();
 }
 
 export interface WalkVisitor {
-  /** A string value, with the path to it (array indices as numbers). */
-  string?: (text: string, path: () => string[]) => void;
+  /** A string value, with the path to it. Array indices are numbers; object keys are strings, even "123". */
+  string?: (text: string, path: () => WalkPathSegment[]) => void;
   /** An object key (array indices are not keys), with the path to it, the key last. */
-  key?: (key: string, path: () => string[]) => void;
+  key?: (key: string, path: () => WalkPathSegment[]) => void;
 }
 
 export function walkValue(root: unknown, visitor: WalkVisitor): void {
@@ -43,7 +46,7 @@ export function walkValue(root: unknown, visitor: WalkVisitor): void {
     seen.add(node);
 
     if (Array.isArray(node)) {
-      for (let i = node.length - 1; i >= 0; i--) stack.push({ node: node[i], parent: frame, key: String(i) });
+      for (let i = node.length - 1; i >= 0; i--) stack.push({ node: node[i], parent: frame, key: i });
       continue;
     }
     const entries = Object.entries(node);

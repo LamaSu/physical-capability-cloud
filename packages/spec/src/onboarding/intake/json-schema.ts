@@ -19,6 +19,7 @@
  */
 
 import { z } from "zod";
+import { CONTENT_HASH_PATTERN } from "../citation-rules.js";
 import { isConfirmationRequired } from "./confirmation.js";
 import { INTAKE_FIELDS, INTAKE_PROVENANCE_VALUES, type IntakeFieldDef } from "./fields.js";
 
@@ -204,6 +205,8 @@ export function buildIntakeJsonSchema(): Record<string, unknown> {
             section: { type: "string", pattern: "\\S" },
             // IntakeSourceSchema also requires https and no credentials; not represented here.
             url: { type: "string", format: "uri", $comment: "refinements not represented" },
+            // The same format IntakeSourceSchema and a research citation accept (astra pack 120d).
+            contentHash: { type: "string", pattern: CONTENT_HASH_PATTERN.source },
           },
           required: ["doc"],
           additionalProperties: false,

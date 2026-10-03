@@ -3410,6 +3410,84 @@ describe("astra pack 120b", () => {
 // verifierStatus does not change readiness" (the stub-primitive gate is
 // removed, item 4).
 
+describe("astra pack 120d", () => {
+  const numericKey = "123456";
+  const fakeKey = () => "sk-" + "proj-" + "A".repeat(40);
+  const digest = "sha256:" + "ab".repeat(32);
+
+  it("control: a non-numeric unknown answer id is hashed in unknownFields", () => {
+    const report = validateIntake({ schema: "pcc.device-intake.v1", answers: { "bogus-id": { value: "x", provenance: "human" } } }, "register");
+    expect(report.unknownFields).toEqual([unknownKeyToken("bogus-id")]);
+  });
+
+  it("CRITICAL 1: a numeric unknown answer id is a KEY, not an array index: hashed, never echoed", () => {
+    const report = validateIntake(
+      { schema: "pcc.device-intake.v1", answers: { [numericKey]: { value: "x", provenance: "human" } } },
+      "register",
+    );
+    expect(report.unknownFields).toEqual([unknownKeyToken(numericKey)]);
+    expect(JSON.stringify(report)).not.toContain(numericKey);
+  });
+
+  it("CRITICAL 1: redactIntakeSecrets renames a numeric object key to its token", () => {
+    const out = redactIntakeSecrets({ schema: "pcc.device-intake.v1", answers: { [numericKey]: { value: "x" } } }) as {
+      answers: Record<string, unknown>;
+    };
+    expect(Object.keys(out.answers)).toEqual([unknownKeyToken(numericKey)]);
+    expect(JSON.stringify(out)).not.toContain(numericKey);
+  });
+
+  it("CRITICAL 1: a secret under a numeric key inside a value has a path with the key hashed", () => {
+    const hits = scanIntakeStrings({ answers: { "safety.estop": { value: { mechanism: "button", [numericKey]: fakeKey() } } } });
+    expect(hits.map((h) => h.path)).toEqual([`answers/safety.estop/value/${unknownKeyToken(numericKey)}`]);
+  });
+
+  it("a real array index stays verbatim, and a numeric key inside an array element is still hashed", () => {
+    const hits = scanIntakeStrings({ answers: { "safety.hazards": { value: ["ok", fakeKey(), { "7": fakeKey() }] } } });
+    expect(hits.map((h) => h.path)).toEqual([
+      "answers/safety.hazards/value/1",
+      `answers/safety.hazards/value/2/${unknownKeyToken("7")}`,
+    ]);
+  });
+
+  it("MEDIUM contentHash: the generated JSON Schema documents source.contentHash with the runtime's own pattern", () => {
+    const schema = buildIntakeJsonSchema() as {
+      properties: { answers: { properties: Record<string, { properties: { source: { properties: Record<string, { pattern?: string }> } } }> } };
+    };
+    for (const [fieldId, field] of Object.entries(schema.properties.answers.properties)) {
+      expect(field.properties.source.properties.contentHash, fieldId).toEqual({ type: "string", pattern: "^sha256:[0-9a-f]{64}$" });
+    }
+    // The pattern the JSON Schema documents accepts exactly what IntakeSourceSchema accepts.
+    const pattern = new RegExp(schema.properties.answers.properties["device.description"]!.properties.source.properties.contentHash!.pattern!);
+    for (const candidate of [digest, digest.toUpperCase(), "sha256:" + "ab".repeat(31), digest + "0", "SHA256:" + "ab".repeat(32)]) {
+      expect(pattern.test(candidate), candidate).toBe(IntakeSourceSchema.safeParse({ doc: "manual", contentHash: candidate }).success);
+    }
+  });
+
+  it("MEDIUM contentHash: log redaction keeps the legitimate digest at exactly answers/<field>/source/contentHash", () => {
+    const record = {
+      schema: "pcc.device-intake.v1",
+      answers: { "device.description": { value: "x", provenance: "research", source: { doc: "manual", contentHash: digest } } },
+    };
+    expect(scanIntakeStrings(record)).toEqual([]);
+    const out = redactIntakeSecrets(record) as typeof record;
+    expect(out.answers["device.description"].source.contentHash).toBe(digest);
+  });
+
+  it("MEDIUM contentHash: redaction still masks the same digest anywhere else, and a malformed one at the exempt path", () => {
+    const record = {
+      schema: "pcc.device-intake.v1",
+      answers: {
+        "device.description": { value: digest, provenance: "research", source: { doc: "manual", contentHash: digest.toUpperCase() } },
+      },
+    };
+    const out = redactIntakeSecrets(record) as typeof record;
+    expect(out.answers["device.description"].value).toBe("sha256:[redacted:hex-secret]");
+    expect(out.answers["device.description"].source.contentHash).not.toBe(digest.toUpperCase());
+    expect(JSON.stringify(out)).not.toContain("ab".repeat(32));
+  });
+});
+
 describe("astra pack 120c", () => {
   /** buildFullValidRecord() with evidence.executorDeviceId overridden to `device`. */
   function fullFor(device = "dev-1"): IntakeRecord {

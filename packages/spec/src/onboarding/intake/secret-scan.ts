@@ -66,8 +66,9 @@
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
 import { BIP39_ENGLISH_WORDLIST } from "./bip39-english.js";
+import { CONTENT_HASH_PATTERN } from "../citation-rules.js";
 import { INTAKE_KEY_VOCABULARY } from "./vocabulary.js";
-import { walkValue } from "./walk.js";
+import { walkValue, type WalkPathSegment } from "./walk.js";
 
 export const INTAKE_SECRET_KINDS = [
   "pem",
@@ -295,16 +296,19 @@ export function secretKindsOf(text: string): IntakeSecretKind[] {
 const MAX_SEGMENT_LENGTH = 80;
 
 /**
- * One path segment, safe to put in a report or a log line. Only an array index
- * or a key in the closed intake vocabulary (INTAKE_KEY_VOCABULARY) is shown
- * verbatim, with `~` and `/` escaped (RFC 6901) and anything outside printable
- * ASCII written as `\u{hex}`. Any other key is written as `#` plus the first 12
- * hex digits of its SHA-256: one-way, so a credential pasted as a key, in a
- * format no detector knows, is never echoed (astra pack 120c), yet the same key
- * always gets the same token. Internal: shared with validateIntake's reports.
+ * One path segment, safe to put in a report or a log line. Only a real array
+ * index (a NUMBER, as the walker records one) or an object key in the closed
+ * intake vocabulary (INTAKE_KEY_VOCABULARY) is shown verbatim, with `~` and `/`
+ * escaped (RFC 6901) and anything outside printable ASCII written as `\u{hex}`.
+ * Every other object key, including a numeric-looking one such as "123456", is
+ * written as `#` plus the first 12 hex digits of its SHA-256: one-way, so a
+ * credential or PIN pasted as a key, in a format no detector knows, is never
+ * echoed (astra packs 120c and 120d), yet the same key always gets the same
+ * token. Internal: shared with validateIntake's reports.
  */
-export function pathSegment(raw: string): string {
-  if (!/^(?:0|[1-9][0-9]{0,8})$/.test(raw) && !INTAKE_KEY_VOCABULARY.has(raw)) {
+export function pathSegment(raw: WalkPathSegment): string {
+  if (typeof raw === "number") return Number.isSafeInteger(raw) && raw >= 0 ? String(raw) : "#index";
+  if (!INTAKE_KEY_VOCABULARY.has(raw)) {
     return `#${bytesToHex(sha256(new TextEncoder().encode(raw))).slice(0, 12)}`;
   }
   const escaped = raw
@@ -314,18 +318,22 @@ export function pathSegment(raw: string): string {
   return escaped.length > MAX_SEGMENT_LENGTH ? `${escaped.slice(0, MAX_SEGMENT_LENGTH)}...` : escaped;
 }
 
-export function joinPath(segments: readonly string[]): string {
+export function joinPath(segments: readonly WalkPathSegment[]): string {
   return segments.map(pathSegment).join("/");
 }
 
 // ── Scanning ─────────────────────────────────────────────────────────────
 
-const CONTENT_HASH = /^sha256:[0-9a-f]{64}$/;
-
-/** A typed digest of cited text at answers/<field>/source/contentHash: the one exact exemption. */
-function isSourceContentHash(text: string, path: readonly string[]): boolean {
+/** A typed digest of cited text at answers/<field>/source/contentHash: the one exact exemption,
+ *  shared by the scan and by log redaction (astra pack 120d), in the same format the schema accepts. */
+function isSourceContentHash(text: string, path: readonly WalkPathSegment[]): boolean {
   return (
-    path.length === 4 && path[0] === "answers" && path[2] === "source" && path[3] === "contentHash" && CONTENT_HASH.test(text)
+    path.length === 4 &&
+    path[0] === "answers" &&
+    typeof path[1] === "string" &&
+    path[2] === "source" &&
+    path[3] === "contentHash" &&
+    CONTENT_HASH_PATTERN.test(text)
   );
 }
 
@@ -374,34 +382,38 @@ function setOwn(target: object, key: string, value: unknown): void {
  * its footer). An object key outside the closed intake vocabulary is renamed
  * to its `pathSegment` token (`#` plus 12 hex digits of its SHA-256), suffixed
  * `-2`, `-3`, ... if that would collide, so an unknown key never reaches a log
- * verbatim, whatever its format. Arrays
- * and objects are copied (an object that is not a plain object becomes a plain
- * object of its own enumerable properties); numbers, booleans, null and
- * undefined are returned as they are. The input is not modified.
+ * verbatim, whatever its format; a numeric-looking key ("123456") is a key,
+ * not an array index, and is renamed too (astra pack 120d). The typed digest at
+ * answers/<field>/source/contentHash is kept as it is, exactly as the scan
+ * exempts it. Arrays and objects are copied (an object that is not a plain
+ * object becomes a plain object of its own enumerable properties); an object
+ * reachable twice is copied once, at the first path it is reached by. Numbers,
+ * booleans, null and undefined are returned as they are. The input is not
+ * modified.
  *
  * For safe LOGGING only. A record that has a hit must be rejected (see the
  * file header), not stored in redacted form.
  */
 export function redactIntakeSecrets<T>(record: T): T {
   const copies = new Map<object, unknown>();
-  const pending: { source: object; target: object }[] = [];
+  const pending: { source: object; target: object; path: WalkPathSegment[] }[] = [];
 
-  const copyOf = (node: unknown): unknown => {
-    if (typeof node === "string") return redactText(node);
+  const copyOf = (node: unknown, path: WalkPathSegment[]): unknown => {
+    if (typeof node === "string") return isSourceContentHash(node, path) ? node : redactText(node);
     if (node === null || typeof node !== "object") return node;
     const known = copies.get(node);
     if (known !== undefined) return known;
     const target: object = Array.isArray(node) ? [] : {};
     copies.set(node, target);
-    pending.push({ source: node, target });
+    pending.push({ source: node, target, path });
     return target;
   };
 
-  const root = copyOf(record);
+  const root = copyOf(record, []);
   while (pending.length > 0) {
-    const { source, target } = pending.pop()!;
+    const { source, target, path } = pending.pop()!;
     if (Array.isArray(source)) {
-      for (let i = 0; i < source.length; i++) (target as unknown[])[i] = copyOf(source[i]);
+      for (let i = 0; i < source.length; i++) (target as unknown[])[i] = copyOf(source[i], [...path, i]);
       continue;
     }
     // Keys that are kept as they are claim their names first, so a renamed key
@@ -416,7 +428,7 @@ export function redactIntakeSecrets<T>(record: T): T {
         for (let n = 2; usedKeys.has(outKey); n++) outKey = `${token}-${n}`;
         usedKeys.add(outKey);
       }
-      setOwn(target, outKey, copyOf(value));
+      setOwn(target, outKey, copyOf(value, [...path, key]));
     }
   }
   return root as T;

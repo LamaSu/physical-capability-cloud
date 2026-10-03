@@ -46,6 +46,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -137,6 +141,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -227,6 +235,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -321,6 +333,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -416,6 +432,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -511,6 +531,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -606,6 +630,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -700,6 +728,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -800,6 +832,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -907,6 +943,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1005,6 +1045,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1107,6 +1151,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1200,6 +1248,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1292,6 +1344,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1389,6 +1445,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1501,6 +1561,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1604,6 +1668,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1726,6 +1794,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1821,6 +1893,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -1917,6 +1993,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2010,6 +2090,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2103,6 +2187,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2196,6 +2284,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2294,6 +2386,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2392,6 +2488,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2488,6 +2588,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2585,6 +2689,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2704,6 +2812,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2806,6 +2918,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -2912,6 +3028,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3026,6 +3146,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3123,6 +3247,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3233,6 +3361,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3331,6 +3463,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3446,6 +3582,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3539,6 +3679,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3632,6 +3776,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3726,6 +3874,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3827,6 +3979,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -3961,6 +4117,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -4051,6 +4211,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
@@ -4141,6 +4305,10 @@
                   "type": "string",
                   "format": "uri",
                   "$comment": "refinements not represented"
+                },
+                "contentHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 }
               },
               "required": [
