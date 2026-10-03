@@ -11,10 +11,20 @@ only running the installed ``pcc-node`` script (or :func:`run` below) does.
 
 
 def run() -> None:
-    from . import spawn_guard
+    import shutil
 
+    from . import _landlock, spawn_guard
+
+    # In-process hardening (partial): raise the bar at the kernel before anything else runs -- block
+    # the direct execve of non-pinned binaries, irreversibly (steward ruling 10/03). This is NOT the
+    # hard "only pinned execute" guarantee: the granted ELF loader remains an exec gadget (see
+    # _landlock.py). The complete allowlist is the AppArmor/SELinux profile in deploy/ (applied by the
+    # operator at deploy time, where a MAC LSM can grant the loader map-only).
+    paths = [p for n in sorted(spawn_guard.EXECUTABLES) if (p := shutil.which(n))]
+    _landlock.restrict(paths)
+    # The accidental-spawn check: the in-process audit hook, then the CLI under both.
     spawn_guard.install()
-    from .cli import main  # imported after the hook is live, so the CLI's dependencies load under it
+    from .cli import main
 
     main()
 

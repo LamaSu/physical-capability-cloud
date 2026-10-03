@@ -1,49 +1,53 @@
 #!/bin/sh
-# Install the hardened pcc-node systemd unit (steward ruling 10/03): the OS enforces that pcc-node
-# can execute only its pinned device utilities (NoExecPaths=/ + ExecPaths=<python + libs + utils>,
-# NoNewPrivileges=yes). This resolves ExecPaths for THIS host and writes the unit. Clean-room: no
-# network, no downloads. Run as root (it writes under /etc/systemd/system).
-#
-# Where systemd's ExecPaths= is unavailable (systemd < 248, or a non-systemd host), apply the
-# AppArmor profile in deploy/apparmor/pcc-node instead (see deploy/README.md).
+# Install pcc-node as a hardened systemd service (steward ruling 10/03, verdict 105n). Three layers keep
+# pcc-node from being coerced into running anything but its pinned device utilities:
+#   L1 (HARD)    AppArmor profile deploy/apparmor/pcc-node -- loaded here; the OS exec allowlist.
+#   L2 (partial) Landlock, applied in-process by pcc-node itself at startup (no action needed here).
+#   L3           the PEP 578 spawn hook, installed in-process (no action needed here).
+# This script installs the unit, loads the AppArmor profile, and prepares /etc/pcc-node. Clean-room:
+# no network, no downloads. Run as root (it writes under /etc). It does NOT compute an ExecPaths list:
+# systemd NoExecPaths/ExecPaths was retired (verdict 105m -- it cannot split mmap from execve).
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TEMPLATE="$HERE/pcc-node.service"
 UNIT=/etc/systemd/system/pcc-node.service
+CONFDIR=/etc/pcc-node
 
 PYTHON=$(command -v python3 || true)
 [ -n "$PYTHON" ] || { echo "install.sh: python3 not found on PATH" >&2; exit 1; }
 
-# The interpreter's own library directories, so its C extensions can be mmap'd executable under
-# NoExecPaths=/. Resolved from the live interpreter, so the versioned stdlib dir is correct.
-LIBDIRS=$("$PYTHON" - <<'PY'
-import sys, sysconfig
-dirs = {
-    sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib"),
-    sysconfig.get_path("purelib"), sysconfig.get_path("platlib"),
-    sys.base_prefix + "/lib", sys.base_prefix + "/lib64",
-}
-print(" ".join(sorted(d for d in dirs if d)))
-PY
-)
+# Config dir for the operator's secrets (PCC_API_KEY) and optional KERNEL_CONFIG_FILE. systemd also
+# creates it via ConfigurationDirectory=, but we seed a template env file now so first boot is clean.
+mkdir -p "$CONFDIR"
+if [ ! -e "$CONFDIR/pcc-node.env" ]; then
+    cat > "$CONFDIR/pcc-node.env" <<'ENV'
+# pcc-node service environment. Secrets live here, not in the unit (root-only; chmod 600).
+# PCC_API_KEY=pcc_live_...
+# KERNEL_CONFIG_FILE=/etc/pcc-node/kernel.json
+ENV
+    chmod 600 "$CONFDIR/pcc-node.env"
+    echo "install.sh: wrote template $CONFDIR/pcc-node.env (add PCC_API_KEY, chmod 600 kept)"
+fi
 
-# The pinned device utilities pcc-node runs, by resolved absolute path. A missing one is simply
-# omitted (the node treats it as "not installed"); it is never an arbitrary name.
-UTILS=""
-for u in arp dd ffmpeg journalctl sysctl v4l2-ctl; do
-    p=$(command -v "$u" 2>/dev/null || true)
-    [ -n "$p" ] && UTILS="$UTILS $p"
-done
+# L1: load the AppArmor profile. This is the hard exec allowlist; the unit's AppArmorProfile=pcc-node
+# makes the service FAIL if it is not loaded, so do this before enabling the unit.
+if command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -r -W "$HERE/apparmor/pcc-node"
+    echo "install.sh: loaded AppArmor profile 'pcc-node' (L1 exec allowlist)"
+else
+    echo "install.sh: WARNING -- apparmor_parser not found. L1 (the hard exec allowlist) is NOT in" >&2
+    echo "            force. Use a SELinux-equivalent policy, or edit the unit to drop" >&2
+    echo "            AppArmorProfile= only after accepting that only L2 (Landlock, partial) + L3" >&2
+    echo "            (the spawn hook) remain. See deploy/README.md." >&2
+fi
 
-EXEC_PATHS="$PYTHON $LIBDIRS$UTILS"
-echo "install.sh: ExecPaths = $EXEC_PATHS"
-
-# Substitute into the template. '|' delimiter: paths contain '/'.
-ESCAPED=$(printf '%s' "$EXEC_PATHS" | sed 's/[&|\\]/\\&/g')
-sed "s|@EXEC_PATHS@|$ESCAPED|; s|^ExecStart=/usr/bin/python3|ExecStart=$PYTHON|" "$TEMPLATE" > "$UNIT"
-
+# Install the unit, pointing ExecStart at the resolved interpreter.
+sed "s|^ExecStart=/usr/bin/python3|ExecStart=$PYTHON|" "$TEMPLATE" > "$UNIT"
 systemctl daemon-reload
+
 echo "install.sh: wrote $UNIT. Enable with: systemctl enable --now pcc-node"
-echo "install.sh: verify the sandbox with: systemd-analyze security pcc-node (NoExecPaths/ExecPaths),"
-echo "            and confirm 'systemctl start pcc-node' then 'pcc-node status' works before relying on it."
+echo "install.sh: VERIFY before relying on it --"
+echo "            aa-status | grep pcc-node                 # profile loaded + enforced"
+echo "            systemd-analyze security pcc-node          # hygiene (NoNewPrivileges, dirs)"
+echo "            then confirm a shell is refused and the node still starts (deploy/README.md)."

@@ -7,31 +7,50 @@ Wants=network-online.target
 [Service]
 Type=simple
 # -I (isolated mode): ignore PYTHONPATH and user site-packages, so nothing on them can run before the
-# in-process spawn guard installs. `-m pcc_node` routes through the guarded entry (pcc_node._entry.run),
-# which installs the guard before importing the CLI.
-ExecStart=/usr/bin/python3 -I -m pcc_node start
+# in-process guards install. `-m pcc_node` routes through the guarded entry (pcc_node._entry.run),
+# which applies the Landlock execute restriction (L2) and installs the spawn hook (L3) BEFORE importing
+# the CLI. --yes makes the bootstrap non-interactive (no click.confirm/prompt) so the service starts
+# unattended; the operator supplies PCC_API_KEY (and any KERNEL_CONFIG_FILE) via the env file below.
+ExecStart=/usr/bin/python3 -I -m pcc_node start --yes
 Restart=on-failure
 RestartSec=5
 
-# === Hard spawn allowlist (steward ruling 10/03) ========================================
-# The OS -- not the in-process Python hook -- guarantees that pcc-node can execute only its pinned
-# device utilities. NoExecPaths=/ denies execute (execve and mmap PROT_EXEC) everywhere; ExecPaths=
-# re-allows ONLY the Python interpreter and its library directories (so the C extensions load) and
-# the pinned device utilities. A shell (/bin/sh, /bin/bash) is therefore un-executable.
-#
-# ExecPaths MUST be resolved for this host: the stdlib lives in a versioned directory (e.g.
-# /usr/lib/python3.12) and the utilities differ by distro. deploy/install.sh computes the correct
-# list and substitutes it below. The @EXEC_PATHS@ placeholder is intentionally non-functional so an
-# un-processed unit fails fast rather than silently running without the libraries it needs.
-NoExecPaths=/
-ExecPaths=@EXEC_PATHS@
-NoNewPrivileges=yes
+# === Layer 1, the HARD exec allowlist: AppArmor (steward ruling 10/03, verdict 105n) ===============
+# The OS guarantee "pcc-node executes only its pinned device utilities" is the AppArmor profile in
+# deploy/apparmor/pcc-node, loaded by deploy/install.sh. AppArmor is the right mechanism because it has
+# SEPARATE permissions for execute-as-program (x) and executable memory-map (m): it grants the ELF
+# loader map-only (never x), so `execve(ld.so, [ld, /bin/sh])` is refused -- the loader-gadget that an
+# execve-only control (Landlock, L2) cannot close. NO dash prefix: if the profile cannot be applied the
+# unit FAILS, so a host silently loses L1 rather than the operator noticing. On a SELinux host, replace
+# this with the equivalent SELinux policy; on neither, remove this line only after consciously accepting
+# that L1 is absent and only the in-process Landlock (L2, partial) + spawn hook (L3) remain.
+AppArmorProfile=pcc-node
 
-# The device utilities need no elevated privileges.
+# === Service hygiene (NOT an exec allowlist -- that is L1 above) ====================================
+# A dedicated, ephemeral user; persistent key/state under /var/lib/pcc-node; config under /etc/pcc-node.
+# These replace the retired, unsound NoExecPaths=/ + ExecPaths= directives (verdict 105m: systemd
+# cannot split mmap from execve, so it could never be the exact allowlist).
+DynamicUser=yes
+StateDirectory=pcc-node
+ConfigurationDirectory=pcc-node
+# Absolute key/state paths under the StateDirectory, so ~/.pcc-node resolves somewhere writable by the
+# dynamic user (keys.json, logs/). The operator may override these in the env file.
+Environment=HOME=/var/lib/pcc-node
+Environment=PCC_NODE_KEYS_FILE=/var/lib/pcc-node/keys.json
+Environment=PCC_BASE=https://capability.network
+# Secrets (PCC_API_KEY) and any KERNEL_CONFIG_FILE=/etc/pcc-node/kernel.json live here, not in the unit.
+# The leading '-' makes it optional so first boot does not fail before the operator writes it.
+EnvironmentFile=-/etc/pcc-node/pcc-node.env
+
+NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
 
 [Install]
 WantedBy=multi-user.target

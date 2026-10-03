@@ -550,6 +550,12 @@ def _sources():
     return sorted(p for p in PACKAGE.rglob("*.py") if "__pycache__" not in p.parts)
 
 
+# The one module granted ctypes -- there is no stdlib Landlock API, and the hard execve allowlist is
+# applied with Landlock syscalls (steward ruling 10/03, verdict 105m). The no-shell and import-census
+# checks skip it; test_landlock_module_uses_ctypes_only_for_landlock bounds the exemption.
+LANDLOCK_SOURCE = PACKAGE / "_landlock.py"
+
+
 def test_the_package_sources_are_scanned():
     names = {p.name for p in _sources()}
     assert "job_executor.py" in names and "daemon.py" in names and "camera.py" in names
@@ -558,6 +564,8 @@ def test_the_package_sources_are_scanned():
 def test_no_module_starts_a_shell_or_runs_code_it_was_sent():
     hits = []
     for path in _sources():
+        if path == LANDLOCK_SOURCE:
+            continue  # ctypes-based Landlock bootstrap; bounded by its own test (exemption, 10/03)
         source = path.read_text(encoding="utf-8")
         for v in violations(source, str(path)) + import_violations(source):
             hits.append(f"{path.relative_to(PACKAGE)}:{v}")
@@ -569,8 +577,26 @@ def test_the_package_imports_only_what_it_lists():
     # A new import is a reviewed change to ALLOWED_IMPORTS; an unused entry is removed (verdict 105g).
     used = set()
     for path in _sources():
+        if path == LANDLOCK_SOURCE:
+            continue  # exempt: it alone may import ctypes (bounded by its own test)
         used |= imported_modules(path.read_text(encoding="utf-8"))
     assert used == ALLOWED_IMPORTS
+
+
+def test_landlock_module_uses_ctypes_only_for_landlock():
+    # _landlock.py is the ONE module allowed ctypes (no stdlib Landlock API; steward ruling 10/03).
+    # Bound the exemption: it imports only ALLOWED_IMPORTS plus ctypes, and its only ctypes library
+    # load is CDLL(None) (the already-present libc, for syscall/prctl) -- never a named dlopen.
+    source = LANDLOCK_SOURCE.read_text(encoding="utf-8")
+    assert imported_modules(source) <= ALLOWED_IMPORTS | {"ctypes"}, imported_modules(source)
+    loads = []
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "ctypes"
+                and node.func.attr in ("CDLL", "PyDLL", "WinDLL", "OleDLL", "cdll", "windll", "oledll")):
+            loads.append(node.args[0] if node.args else None)
+    assert all(isinstance(a, ast.Constant) and a.value is None for a in loads), \
+        "ctypes may load only CDLL(None) (libc already present), never a named library"
 
 
 def test_the_allowlist_is_what_the_package_runs():

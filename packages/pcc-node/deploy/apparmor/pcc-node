@@ -1,10 +1,18 @@
-# AppArmor fallback for pcc-node (steward ruling 10/03), for hosts without systemd
-# NoExecPaths=/ / ExecPaths= (systemd < 248, or a non-systemd host). It allows execute of ONLY the
-# Python interpreter and pcc-node's pinned device utilities; AppArmor denies by default, so every
-# other exec (a shell, an arbitrary binary) is refused. Load and run:
+# AppArmor profile for pcc-node -- Layer 1, the HARD exec allowlist (steward ruling 10/03, verdict 105n).
+#
+# This is the mechanism that actually guarantees "pcc-node executes only its pinned device utilities".
+# AppArmor has SEPARATE permissions for execute-as-program (x) and executable memory-map (m). That is
+# the control the in-process Landlock layer (L2) lacks: Landlock must grant the ELF loader EXECUTE so
+# dynamically-linked utilities can run, and its execute right does not govern mmap, so
+# `execve(ld.so, [ld, /bin/sh])` runs a shell (the loader maps it). Here the loader gets map-only (mr
+# via abstractions/base) and is explicitly denied execute-as-program, so that gadget is refused while
+# the utilities still load their libraries. AppArmor denies by default, so only the lines below execute.
+#
+# Load it, then run pcc-node under it (the shipped unit sets AppArmorProfile=pcc-node):
 #   apparmor_parser -r -W deploy/apparmor/pcc-node
-#   # then AppArmorProfile=pcc-node in the unit, or: aa-exec -p pcc-node -- python3 -I -m pcc_node start
-# Verify on the host (aa-status; confirm a shell is denied) before relying on it.
+#   aa-exec -p pcc-node -- python3 -I -m pcc_node start --yes     # (or via the systemd unit)
+# VERIFY on the host before relying on it: aa-status shows it enforced; a shell is refused
+#   (aa-exec -p pcc-node -- /bin/sh -c true  ->  Permission denied); each pinned utility runs.
 #include <tunables/global>
 
 profile pcc-node flags=(attach_disconnected) {
@@ -25,13 +33,22 @@ profile pcc-node flags=(attach_disconnected) {
   /{usr/,}sbin/arp ix,
   /{usr/,}sbin/sysctl ix,
 
-  # Explicit: shells are denied (default-deny already refuses anything unlisted).
+  # Close the loader gadget (verdict 105n): abstractions/base grants the dynamic loader `mr` (map), so
+  # the interpreter and the utilities above load normally -- but executing the loader AS A PROGRAM
+  # (`execve(ld.so, [ld, <any ELF>])`) would otherwise run an un-pinned binary. Deny execute on it;
+  # the map (m) stays, so this costs nothing and shuts the one hole Landlock cannot.
+  deny /{usr/,}lib{,32,64}/**/ld-*.so* x,
+  deny /{usr/,}lib/@{multiarch}/ld-*.so* x,
+
+  # Explicit: shells are denied (default-deny already refuses anything unlisted; this documents intent).
   deny /{usr/,}bin/sh x,
   deny /{usr/,}bin/bash x,
   deny /{usr/,}bin/dash x,
 
-  # pcc-node's own data and network.
+  # pcc-node's own config, key/state, and network. /var/lib/pcc-node is the unit's StateDirectory (where
+  # HOME and keys.json point); @{HOME}/.pcc-node covers the aa-exec case where HOME is a real home.
   /etc/pcc-node/** r,
+  /var/lib/pcc-node/** rwk,
   owner @{HOME}/.pcc-node/** rwk,
   network inet stream,
   network inet6 stream,
