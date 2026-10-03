@@ -12,7 +12,10 @@
  * a promise resolution), runs them again and undoes it. Every result must be
  * identical to the clean one, or a refusal: a reject (or a hold where the
  * clean result admitted), a throw, or more unverifiable terms. A changed
- * acceptance, digest, term list or level fails the scenario.
+ * acceptance, digest, term list or level fails the scenario. Returned promises
+ * are consumed as callers consume them: awaited, and through the promise
+ * `.then`, `.catch` and `.finally` return, used and awaited (astra pack 187:
+ * native `then` builds that promise with the mutable Promise[Symbol.species]).
  *
  * Why children: vitest runs its own runner in the test's realm. With
  * Array.prototype[Symbol.iterator] replaced across an event-loop turn, vitest
@@ -120,9 +123,12 @@ describe("the patch harness: nothing changed after load changes a decision, a di
       "Object.getOwnPropertyDescriptor", "Object.getPrototypeOf", "Reflect.ownKeys", "JSON.stringify", "String", "Number.isFinite",
       "Date.parse", "Set.prototype.has", "Set.prototype.add", "Map.prototype.get", "RegExp.prototype.test", "RegExp.prototype.exec",
       "String.prototype.trim", "String.prototype.charCodeAt", "Promise.prototype.then", "Hash.prototype.update", "Hash.prototype.digest",
+      // astra pack 187: what native then, catch and finally read on the way to the promise a caller receives.
+      "Promise[Symbol.species]",
     ]) {
       expect(has(`patch: ${name}`), name).toBe(true);
     }
+    expect(has("recipe: Promise[Symbol.species] builds a forged thenable (astra pack 187)")).toBe(true);
     expect(SCENARIOS.length).toBeGreaterThan(80);
   });
 
@@ -140,6 +146,18 @@ describe("the patch harness: nothing changed after load changes a decision, a di
     expect(value("terms: every term at once")).toHaveLength(11);
     expect(value("levels: printer completes, camera inspects")).toBe("inspected_output");
     expect(rows.filter((r) => r[0] === "admission").length).toBeGreaterThanOrEqual(60);
+    // Every delivery (4 admissions, 3 digests) through every caller's shape (5), each the same as the promise
+    // awaited directly wherever a direct row exists: the shapes deliver, so a changed one is a forgery.
+    const delivered = rows.filter((r) => r[1].includes(" | delivered as p"));
+    expect(delivered.length).toBe(35);
+    let compared = 0;
+    for (const [kind, label, value] of delivered) {
+      const direct = rows.find((r) => r[0] === kind && r[1] === label.split(" | delivered as p")[0]);
+      if (direct === undefined) continue;
+      compared++;
+      expect(value, label).toEqual(direct[2]);
+    }
+    expect(compared).toBe(30);
     for (const id of SCENARIOS) {
       if (!id.startsWith("patch: ") && !id.startsWith("data: ")) continue;
       expect(OUTCOMES.get(id)?.clean, id).toEqual(rows);

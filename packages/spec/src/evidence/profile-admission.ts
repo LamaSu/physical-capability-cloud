@@ -188,12 +188,18 @@
  *     here before anything it returns is evaluated: each event re-hashed, the
  *     bundle hash recomputed, and every subject commitment checked again, with
  *     the captured hash and own reads. The re-check can only refuse more.
- *   - Promises: `await` reads a promise's `constructor`, and an async
- *     function's resolution looks up `then`. Every promise awaited here, and
- *     every promise returned, has its own `constructor` and `then`
- *     (`ownPromise`); a leg's promise is followed through the `then` captured
- *     at load (`fulfillsWithTrue`); the result is a null-prototype object, so
- *     a `then` written on Object.prototype cannot take over its resolution.
+ *   - Promises: `await` reads a promise's `constructor`, a resolution looks up
+ *     `then`, and a native `then` builds the promise it returns with
+ *     `constructor[Symbol.species]`. Every promise returned
+ *     (`profileAdmitsBundle`, `computeBundleSetDigest`) is an `ownPromise`:
+ *     its own `then` is the one captured at load and its species is pinned,
+ *     so every promise a caller derives from it is pinned too, at any depth
+ *     (astra pack 187). The binding leg's promise is awaited through
+ *     `awaitedHere`, so that `await` reads only its own `constructor` and
+ *     looks nothing up on the answer. A leg's promise is followed through the
+ *     `then` captured at load (`fulfillsWithTrue`). The result is a
+ *     null-prototype object, so a `then` written on Object.prototype cannot
+ *     take over its resolution.
  * The boundary, named honestly: the verification callbacks are the caller's
  * trusted code (a leg's answer must be true, false or a native promise; a
  * thenable is refused). A realm whose intrinsics were replaced BEFORE
@@ -227,6 +233,7 @@ import {
   append,
   ArrayIsArray,
   ArrayPrototype,
+  awaitedHere,
   charCodeAt,
   DateParse,
   deepFreeze,
@@ -528,9 +535,10 @@ function bundleSetDigest(subject: unknown, bundleHashes: unknown): SHA256 {
  * there is nothing meaningful to pin.
  *
  * It reads only the subject's own data properties and the array's own
- * indices, hashes with the SHA-256 captured at load, and resolves a promise
- * with its own `constructor` and `then`, so neither awaiting it nor a
- * replaced Promise.prototype can hand the caller another digest.
+ * indices, hashes with the SHA-256 captured at load, and returns an
+ * `ownPromise` (util/primordials.ts): awaiting it, or following it with
+ * `.then` at any depth, hands the caller this digest or this rejection,
+ * whatever code running after load replaced on Promise.
  */
 export function computeBundleSetDigest(
   subject: Pick<EvidenceSubject, "jobId" | "kernelId" | "settlementUnitId">,
@@ -813,8 +821,10 @@ interface Finding {
  * the profile (through `profileGoverns`, which returns the snapshot it
  * validated and digested), the subject, the pin and the bundles. Everything
  * after reads only the copies, so nothing the caller changes, or a getter
- * answers, after that point can reach the decision. The promise returned has
- * its own `constructor` and `then` (see the header).
+ * answers, after that point can reach the decision. The promise returned is an
+ * `ownPromise` (util/primordials.ts): it, and every promise a caller derives
+ * from it with `.then`, delivers this decision, whatever code running after
+ * load replaced on Promise (see the header).
  */
 export function profileAdmitsBundle(input: ProfileAdmissionInput): Promise<ProfileAdmissionResult> {
   return ownPromise(admit(input));
@@ -947,7 +957,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
 
     let answer: unknown;
     try {
-      answer = await ownPromise(verifyEvidenceSubjectBinding({ bundleHash: bundle.bundleHash, events: bundle.events, subject }));
+      answer = await awaitedHere(verifyEvidenceSubjectBinding({ bundleHash: bundle.bundleHash, events: bundle.events, subject }));
     } catch {
       answer = undefined;
     }

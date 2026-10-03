@@ -66,6 +66,7 @@ const ObjectPrototypeHasOwnProperty = Object.prototype.hasOwnProperty;
 const ReflectApply = Reflect.apply;
 const setTimeoutAtLoad = setTimeout;
 const PromiseAtLoad = Promise;
+const PromiseThenAtLoad = Promise.prototype.then;
 const clearTimeoutAtLoad = clearTimeout;
 const hasOwn = (o: object, k: PropertyKey): boolean => ReflectApply(ObjectPrototypeHasOwnProperty, o, [k]) === true;
 
@@ -364,6 +365,9 @@ const LEVEL_ITEMS: Array<[string, () => unknown]> = [
 // -- every item, built once --
 let CASES: Array<[string, ProfileAdmissionInput]> = [];
 let DIGEST_CASES: Array<[string, Pick<EvidenceSubject, "jobId" | "kernelId" | "settlementUnitId">, readonly string[]]> = [];
+/** Promises a caller is handed, each also consumed through every delivery shape (SHAPES): kind, label, how to make it. */
+type Delivery = [kind: string, label: string, make: () => Promise<unknown>];
+let DELIVERIES: Delivery[] = [];
 let TERM_CASES: Array<[string, MeasurementProfileV1]> = [];
 /** Forged resolutions for the Promise.prototype.then rows: a real value mapped to the one a forger wants. */
 const FORGE_FROM: string[] = [];
@@ -623,6 +627,22 @@ async function buildCases(): Promise<void> {
     ["digest: a hole", SUBJECT, holey],
   ];
 
+  const deliverAdmission = (label: string): Delivery => {
+    const made = cases.find((c) => c[0] === label)![1];
+    return ["admission", label, () => profileAdmitsBundle(made)];
+  };
+  DELIVERIES = [
+    deliverAdmission("reject: the signature leg fails"),
+    deliverAdmission("admit: the pilot, inspected_output"),
+    deliverAdmission("hold: too few samples"),
+    deliverAdmission("reject: a stored failure bundle left out of the pinned set"),
+    // The pilot bundle alone digests to a value in FORGE_FROM, so a forger has something to rewrite.
+    ["digest", "digest: the pilot bundle alone", () => computeBundleSetDigest(SUBJECT, [pilot.bundleHash])],
+    ["digest", "digest: golden", () => computeBundleSetDigest({ jobId: "job-golden-1", kernelId: "kernel-golden-1" }, [h2, h1, h2])],
+    ["digest", "digest: empty", () => computeBundleSetDigest(SUBJECT, [])],
+  ];
+  RECIPE.signatureFailsDelivery = DELIVERIES[0];
+
   TERM_CASES = [
     ["terms: a clean profile", inspectedPageProfile()],
     ["terms: every term at once", edit((x) => {
@@ -681,6 +701,45 @@ async function admissionRow(label: string, made: ProfileAdmissionInput): Promise
   return ["admission", label, value];
 }
 
+type Shape = [name: string, consume: (p: Promise<unknown>) => Promise<unknown>];
+
+/**
+ * How callers consume a returned promise. Each shape USES the promise that `.then`, `.catch` or `.finally`
+ * returns, and awaits it: native `then` builds that promise with `promise.constructor[Symbol.species]`, so a
+ * forged species shows only there. (`viaThen` reads the result through a callback and discards that promise,
+ * which is how astra pack 187's species forgery went unseen.) A rejection reads "threw" in every shape, as in
+ * the direct rows, so a refusal stays a refusal.
+ */
+const SHAPES: Shape[] = [
+  [".then((x) => x)", (p) => p.then((x) => x)],
+  [".then((x) => x).then((y) => y)", (p) => p.then((x) => x).then((y) => y)],
+  ['.then(undefined, () => "threw")', (p) => p.then(undefined, () => "threw")],
+  ['.catch(() => "threw")', (p) => p.catch(() => "threw")],
+  [".finally(() => undefined)", (p) => p.finally(() => undefined)],
+];
+
+/** What a caller receives from `item`'s promise consumed through `shape`; an admission result is summarized. */
+async function deliveredRow(item: Delivery, shape: Shape): Promise<Row> {
+  let value: unknown;
+  try {
+    value = await shape[1](item[2]());
+  } catch {
+    value = "threw";
+  }
+  if (typeof value === "object" && value !== null && hasOwn(value, "decision")) value = summarize(value as ProfileAdmissionResult);
+  return [item[0], `${item[1]} | delivered as p${shape[0]}`, value];
+}
+
+/** Every delivery, through every shape. */
+async function deliveredRows(): Promise<Row[]> {
+  const rows: Row[] = [];
+  let n = 0;
+  for (let i = 0; i < DELIVERIES.length; i++) {
+    for (let s = 0; s < SHAPES.length; s++) rows[n++] = await deliveredRow(DELIVERIES[i]!, SHAPES[s]!);
+  }
+  return rows;
+}
+
 async function results(): Promise<Row[]> {
   const rows: Row[] = [];
   let n = 0;
@@ -712,6 +771,8 @@ async function results(): Promise<Row[]> {
     }
     rows[n++] = ["levels", LEVEL_ITEMS[i]![0], value];
   }
+  const delivered = await deliveredRows();
+  for (let i = 0; i < delivered.length; i++) rows[n++] = delivered[i]!;
   return rows;
 }
 
@@ -787,12 +848,33 @@ function forgedAnything(v: unknown): unknown {
   return forged(v);
 }
 
+/**
+ * A Promise[Symbol.species] as post-load code could install it. Native `then`, `catch` and `finally` build the
+ * promise they return with the species, and this one's promise resolves with what a forger wants
+ * (`forgedAnything`). It is a native promise, so code that discards that promise (an async function's
+ * resolution, a `then` called for its callbacks) runs on unchanged: astra pack 187's forgery, made transparent.
+ */
+function ForgingSpecies(executor: (resolve: (v: unknown) => void, reject: (e: unknown) => void) => void): Promise<unknown> {
+  let fulfil: (v: unknown) => void = () => undefined;
+  let fail: (e: unknown) => void = () => undefined;
+  const real = new PromiseAtLoad<unknown>((resolve, reject) => {
+    fulfil = resolve;
+    fail = reject;
+  });
+  executor(
+    (v) => fulfil(forgedAnything(v)),
+    (e) => fail(e),
+  );
+  return real;
+}
+
 /** The events a forged binding answer carries, for the case being run. */
 let CURRENT_EVENTS: unknown[] | null = null;
 
 /**
  * The admission result, read through the promise's own `.then` as a caller might, into a promise this harness
  * made and gave its own `constructor`, so the harness's own `await` reads nothing on Promise.prototype.
+ * The promise `.then` returns is discarded here; the delivery shapes (SHAPES) use and await it.
  */
 function viaThen(made: ProfileAdmissionInput): Promise<unknown> {
   const settled = new PromiseAtLoad<unknown>((resolve) => {
@@ -867,6 +949,8 @@ const PATCH_ROWS: Array<[string, Apply]> = [
   ["Hash.prototype.digest", replace(HashPrototype, "digest", () => () => "0".repeat(64))],
   ["Promise.prototype.then, forging a carried digest", replace(Promise.prototype, "then", forgingThen)],
   ["Promise.prototype.constructor", replace(Promise.prototype, "constructor", () => function NotPromise() {})],
+  // astra pack 187: a configurable accessor on the global Promise, read by every native then, catch and finally.
+  ["Promise[Symbol.species]", replaceGetter(Promise, Symbol.species, () => () => ForgingSpecies)],
   ["Object.prototype.passed = true", pollute(() => ({ passed: true }))],
   ["Object.prototype.value = \"12.5\"", pollute(() => ({ value: "12.5" }))],
   ["Object.prototype.adapterVersion and firmwareVersion", pollute(() => ({ adapterVersion: CAMERA_VERSION, firmwareVersion: "cam-fw-2.1.0" }))],
@@ -1022,7 +1106,7 @@ const RECIPES: Scenario[] = [
       } catch {
         digest = "threw";
       }
-      return [
+      const rows: Row[] = [
         await admissionRow("the signature leg fails", RECIPE.signatureFails),
         await admissionRow("an async signature leg answers false", RECIPE.asyncSignatureFails),
         await admissionRow("an async primitive leg answers false", RECIPE.asyncPrimitiveFails),
@@ -1030,7 +1114,39 @@ const RECIPES: Scenario[] = [
         ["digest", "the presented set", digest],
         ["admission", "the result read through .then", await viaThen(RECIPE.signatureFails)],
       ];
+      // The promise `.then` returns, awaited: with `constructor` and `then` replaced, an unpinned one resolves through the forger.
+      let n = rows.length;
+      for (let s = 0; s < SHAPES.length; s++) rows[n++] = await deliveredRow(RECIPE.signatureFailsDelivery, SHAPES[s]!);
+      return rows;
     },
+  },
+  {
+    // astra pack 187, verbatim: Promise[Symbol.species] replaced with a constructor that calls its executor with
+    // two no-op functions and returns a thenable resolving with a forged admission. Every delivery, every shape.
+    id: "recipe: Promise[Symbol.species] builds a forged thenable (astra pack 187)",
+    apply: () => {
+      const original = ReflectGetOwnPropertyDescriptor(Promise, Symbol.species)!;
+      ReflectDefineProperty(
+        Promise,
+        Symbol.species,
+        nullDescriptor({
+          configurable: true,
+          value: function Forged(executor: (resolve: () => void, reject: () => void) => void) {
+            executor(
+              () => undefined,
+              () => undefined,
+            );
+            return {
+              then(resolve: (v: unknown) => void) {
+                resolve(FORGED_ADMIT());
+              },
+            };
+          },
+        }),
+      );
+      return () => void ReflectDefineProperty(Promise, Symbol.species, original);
+    },
+    items: deliveredRows,
   },
   {
     // binding's failure is resolved as an ordinary object: a `then` on Object.prototype can turn it into ok.
@@ -1083,7 +1199,12 @@ const RECIPES: Scenario[] = [
       install();
       return () => void ReflectDeleteProperty(Object.prototype, "then");
     },
-    items: one("the signature leg fails", () => RECIPE.signatureFails),
+    // Directly, and through every delivery shape: a derived promise is resolved with the result too.
+    items: async () => {
+      const rows: Row[] = [await admissionRow("the signature leg fails", RECIPE.signatureFails)];
+      for (let s = 0; s < SHAPES.length; s++) rows[s + 1] = await deliveredRow(RECIPE.signatureFailsDelivery, SHAPES[s]!);
+      return rows;
+    },
   },
   {
     id: "recipe: Array.prototype.sort swaps a re-hashed event back into the signed list",

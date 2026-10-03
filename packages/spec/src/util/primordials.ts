@@ -22,7 +22,10 @@
  * #363 round 9 adds what profile admission and the evidence levels need: the
  * tagged-digest check, own-data reads, Set methods for the evidence levels'
  * exported Set API, the structured clone, and promises whose delivery reads
- * nothing on Promise.prototype (`ownPromise`, `fulfillsWithTrue`).
+ * nothing that code running after load can replace: `ownPromise` for a promise
+ * handed to a caller (its species is pinned too, so every promise derived from
+ * it is: astra pack 187), `awaitedHere` for one this package only awaits, and
+ * `fulfillsWithTrue`.
  */
 
 const FunctionPrototype = Function.prototype;
@@ -217,29 +220,103 @@ function fixedDescriptor(value: unknown): PropertyDescriptor {
   return descriptor;
 }
 
+const SymbolSpecies = Symbol.species;
+
 /**
- * `promise`, given its own `constructor` (the Promise captured at load) and its
- * own `then` (Promise.prototype.then as it was at load). `await` reads a
- * promise's `constructor` before it takes the engine's internal path, and a
- * `.then` call looks `then` up. Both live on Promise.prototype, where code
- * running after load can replace them: with `constructor` replaced, `await`
- * resolves through whatever `then` it finds, and that `then` can hand over any
- * value. Own properties are read first. Neither is enumerable.
+ * The species of every promise `ownPromise` returns (astra pack 187). Native
+ * `then`, `catch` and `finally` build the promise they return by constructing
+ * this with their executor: it makes a native promise with the Promise
+ * captured at load and passes it through `ownPromise`, so the derived promise
+ * is pinned like its parent, and so on down any chain. A function declaration,
+ * because a species must be a constructor. Frozen.
+ */
+function PinnedSpecies(executor: (resolve: (value: unknown) => void, reject: (reason: unknown) => void) => void): Promise<unknown> {
+  return ownPromise(new PromiseCtor<unknown>(executor));
+}
+ObjectFreeze(PinnedSpecies);
+
+/**
+ * What `ownPromise` installs as a promise's own `constructor`: a frozen record
+ * with no prototype whose one property, `[Symbol.species]`, is PinnedSpecies,
+ * fixed. SpeciesConstructor reads that property of `constructor` and nothing
+ * else. Every returned promise shares this record, and any caller can reach it
+ * (`promise.constructor`), so it must be frozen: otherwise one caller could
+ * re-point the species every other caller's `.then` uses.
+ */
+const PINNED_CONSTRUCTOR: object = ObjectCreate(null);
+ObjectDefineProperty(PINNED_CONSTRUCTOR, SymbolSpecies, fixedDescriptor(PinnedSpecies));
+ObjectFreeze(PINNED_CONSTRUCTOR);
+
+/**
+ * `promise`, ready to hand to a caller: whatever code running after load
+ * replaces on Promise, Promise.prototype or Promise[Symbol.species], the
+ * caller receives the value the promise settles with, through
+ * `await promise`, through `promise.then`, and through every promise `then`
+ * returns, at any depth.
+ *
+ * It gets own properties, which are read before anything on Promise.prototype,
+ * each fixed (not writable, enumerable or configurable):
+ *   - `then`: Promise.prototype.then as it was at load;
+ *   - `constructor`: PINNED_CONSTRUCTOR, whose `[Symbol.species]` is
+ *     PinnedSpecies. Native `then` builds the promise it returns with
+ *     SpeciesConstructor(promise), that is
+ *     `promise.constructor[Symbol.species]`. A `constructor` pinned to the
+ *     global Promise (#363 round 9) was not enough: its species is a
+ *     configurable accessor, which code running after load can point at a
+ *     constructor whose "promise" is a forged thenable (astra pack 187).
+ *
+ * `await promise` takes the engine's thenable path, since `constructor` is not
+ * %Promise%: it calls the own `then`, which reads only the frozen species, and
+ * the value is then resolved as any resolution is, looking `then` up on it if
+ * it is an object. So hand out only promises that settle with a primitive or
+ * an object with no prototype (admission's result, the set digest, a
+ * boolean). A promise this package awaits itself, and never hands out, takes
+ * `awaitedHere`, on whose value `await` looks nothing up.
+ *
+ * The boundary: the promise returned, its own methods, and the promises they
+ * return. A static that a caller calls after the change, such as
+ * `Promise.all`, `Promise.race` or `Promise.resolve`, reads the global Promise
+ * and its statics as they are then (`Promise.all` looks up `resolve` on its
+ * receiver, and `then` on each promise it makes) and is outside it.
+ * `promise.constructor` is not the global Promise; `instanceof Promise` still
+ * holds.
  */
 export function ownPromise<T>(promise: Promise<T>): Promise<T> {
+  ObjectDefineProperty(promise, "constructor", fixedDescriptor(PINNED_CONSTRUCTOR));
+  ObjectDefineProperty(promise, "then", fixedDescriptor(PromisePrototypeThenOriginal));
+  return promise;
+}
+
+/**
+ * `promise`, to be awaited by this package and never handed out. Its own,
+ * fixed `constructor` is the Promise captured at load, which is %Promise%
+ * itself, so `await` takes the engine's internal path: it reads that one own
+ * property and attaches its reactions directly, with no `then` call and no
+ * species, and the value arrives without `then` being looked up on it. (An
+ * `ownPromise` resolves `await` through its `then`, and a resolution looks
+ * `then` up on an object value; binding's answer is an ordinary object.) Its
+ * own `then` is Promise.prototype.then as it was at load. Never return it: a
+ * `.then` call on it builds its result with the global Promise's species,
+ * which code running after load can replace.
+ */
+export function awaitedHere<T>(promise: Promise<T>): Promise<T> {
   ObjectDefineProperty(promise, "constructor", fixedDescriptor(PromiseCtor));
   ObjectDefineProperty(promise, "then", fixedDescriptor(PromisePrototypeThenOriginal));
   return promise;
 }
 
 /**
- * Whether a trusted callback answered exactly true, or with a promise that
- * fulfills with exactly true. A promise is followed through
- * Promise.prototype.then as it was at load, into a promise made here with
- * `ownPromise`, so nothing replaced after load sees or changes the answer,
- * and awaiting the result reads nothing on Promise.prototype. Anything else
- * answers false: a value that is not exactly true, a rejection, and an object
- * that is not a native promise (a thenable is never followed).
+ * Whether a trusted callback answered exactly true, or with a native promise
+ * that fulfills with exactly true. A promise is followed through
+ * Promise.prototype.then as it was at load: its handlers receive the value
+ * that promise settled with, whatever species that call constructs for the
+ * promise it returns (that promise is discarded; a species that throws, or
+ * never hands over its resolving functions, makes the answer false). The
+ * answer is a boolean, or an `ownPromise` of one, so nothing replaced after
+ * load changes it, whether it is awaited or followed with `.then` (the
+ * boundary is `ownPromise`'s). Anything else answers false: a value that is
+ * not exactly true, a rejection, and an object that is not a native promise
+ * (a thenable is never followed).
  */
 export function fulfillsWithTrue(answer: unknown): boolean | Promise<boolean> {
   if (typeof answer !== "object" || answer === null) return answer === true;
