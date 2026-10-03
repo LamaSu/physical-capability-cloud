@@ -87,16 +87,40 @@ export interface BinderDeps {
  *  not trusted (it would otherwise "win" forever and freeze the view against later real
  *  updates). */
 export const ASOF_MAX_SKEW_MS = 120_000;
-/** The moment the SOURCE read this state: an own-property ISO `asOf` on the payload, valid and
- *  not future-dated beyond the skew, normalized (toISOString) so comparisons are exact. NULL
- *  when the source did not say: receipt time is NOT a substitute (PX-4 review #2524), so
- *  data without a source time is never presented as fresh. */
+/** The only years a source may plausibly report. Outside this, a timestamp is not trusted
+ *  (catches a unit/format bug — e.g. Unix seconds misread as a year, an epoch placeholder —
+ *  independent of "now", so it holds even for a long-past or far-future legitimate read). */
+export const ASOF_MIN_YEAR = 2020;
+export const ASOF_MAX_YEAR = 2100;
+/** Canonical UTC ONLY: `YYYY-MM-DDTHH:mm:ss(.sss)?Z`. No bare offset (`+02:00`), no missing
+ *  zone, no non-ISO format. `Date.parse` is deliberately NOT used on the raw string: it is
+ *  locale/implementation-lenient (a missing zone reads as local time, "09/24/2026" parses,
+ *  an out-of-range field like Feb 30 silently rolls into March), which would make freshness
+ *  non-deterministic across environments and let a malformed `asOf` still "win". */
+const ASOF_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,3})?Z$/;
+/** The moment the SOURCE read this state: an own-property, canonical-UTC, calendar-valid,
+ *  in-range-year `asOf` on the payload, not future-dated beyond the skew, normalized
+ *  (toISOString) so comparisons are exact. NULL when the source did not say, or said
+ *  something that is not a trustworthy timestamp: receipt time is NOT a substitute (PX-4
+ *  review #2524), so data without a source time is never presented as fresh. */
 export function sourceAsOf(json: unknown, nowMs: number): string | null {
   if (json === null || typeof json !== "object" || Array.isArray(json)) return null;
   if (!Object.prototype.hasOwnProperty.call(json, "asOf")) return null;
   const raw = (json as Record<string, unknown>).asOf;
   if (typeof raw !== "string") return null;
-  const t = Date.parse(raw);
+  const m = ASOF_RE.exec(raw);
+  if (!m) return null; // not canonical UTC — no zone, an offset, or any other format
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]), hh = Number(m[4]), mi = Number(m[5]), ss = Number(m[6]);
+  if (y < ASOF_MIN_YEAR || y > ASOF_MAX_YEAR) return null;
+  // Round-trip the calendar via Date.UTC's own normalization: Date.UTC silently rolls an
+  // out-of-range field into the next unit (Feb 30 -> Mar 2, hour 99 -> +4 days...); reading
+  // the fields back and requiring an EXACT match rejects any date the calendar doesn't have.
+  const calendarMs = Date.UTC(y, mo - 1, d, hh, mi, ss);
+  const check = new Date(calendarMs);
+  if (check.getUTCFullYear() !== y || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d ||
+      check.getUTCHours() !== hh || check.getUTCMinutes() !== mi || check.getUTCSeconds() !== ss) return null;
+  const ms = m[7] ? Number((m[7].slice(1) + "000").slice(0, 3)) : 0; // ".5"->500, ".12"->120, ".123"->123
+  const t = calendarMs + ms;
   if (!Number.isFinite(t) || t > nowMs + ASOF_MAX_SKEW_MS) return null;
   return new Date(t).toISOString();
 }
@@ -105,12 +129,25 @@ export function isStale(asOfIso: string, maxAgeMs: number, nowMs: number): boole
   const t = Date.parse(asOfIso);
   return !Number.isFinite(t) || nowMs - t > maxAgeMs;
 }
-/** No-regression rule: an update may replace the shown datum only if it is not OLDER.
- *  (Equal is accepted: an idempotent refresh.) Reconnects and out-of-order polls can
- *  therefore never roll authoritative state backwards. */
-export function acceptsNewer(currentAsOf: string | null, incomingAsOf: string): boolean {
+/** No-regression rule: an update may replace the shown datum only if it is not OLDER. An
+ *  EQUAL timestamp is accepted only when its datum fingerprint (the bound value the caller
+ *  actually extracted for this node — see dashboard-ir-browser-entry.ts) matches the one
+ *  already shown: an idempotent refresh (same source read, same value) may refresh
+ *  freshness, but two DIFFERENT payloads reported under the same `asOf` are undecidable by
+ *  time alone, and arrival order must not matter — so the rule is total and deterministic:
+ *  whichever payload is already shown keeps winning until a genuinely newer `asOf` arrives.
+ *  A `null` incoming fingerprint (the caller could not extract one) is not a known duplicate
+ *  and is let through, so the caller's own validation decides rather than the view silently
+ *  freezing on a fingerprinting gap. Reconnects and out-of-order polls can therefore never
+ *  roll authoritative state backwards, and never flap between two conflicting same-timestamp
+ *  payloads depending on network timing. */
+export function acceptsNewer(currentAsOf: string | null, incomingAsOf: string, currentFingerprint: string | null, incomingFingerprint: string | null): boolean {
   if (currentAsOf === null) return true;
-  return Date.parse(incomingAsOf) >= Date.parse(currentAsOf);
+  const cur = Date.parse(currentAsOf), inc = Date.parse(incomingAsOf);
+  if (inc > cur) return true;
+  if (inc < cur) return false;
+  if (incomingFingerprint === null) return true;
+  return incomingFingerprint === currentFingerprint;
 }
 
 /**

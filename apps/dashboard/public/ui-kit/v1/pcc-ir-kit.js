@@ -1264,12 +1264,23 @@
     return Math.max(BINDER_LIM.minPollMs, Math.min(ms, BINDER_LIM.maxPollMs));
   }
   var ASOF_MAX_SKEW_MS = 12e4;
+  var ASOF_MIN_YEAR = 2020;
+  var ASOF_MAX_YEAR = 2100;
+  var ASOF_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,3})?Z$/;
   function sourceAsOf(json, nowMs) {
     if (json === null || typeof json !== "object" || Array.isArray(json)) return null;
     if (!Object.prototype.hasOwnProperty.call(json, "asOf")) return null;
     const raw = json.asOf;
     if (typeof raw !== "string") return null;
-    const t = Date.parse(raw);
+    const m = ASOF_RE.exec(raw);
+    if (!m) return null;
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]), hh = Number(m[4]), mi = Number(m[5]), ss = Number(m[6]);
+    if (y < ASOF_MIN_YEAR || y > ASOF_MAX_YEAR) return null;
+    const calendarMs = Date.UTC(y, mo - 1, d, hh, mi, ss);
+    const check = new Date(calendarMs);
+    if (check.getUTCFullYear() !== y || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d || check.getUTCHours() !== hh || check.getUTCMinutes() !== mi || check.getUTCSeconds() !== ss) return null;
+    const ms = m[7] ? Number((m[7].slice(1) + "000").slice(0, 3)) : 0;
+    const t = calendarMs + ms;
     if (!Number.isFinite(t) || t > nowMs + ASOF_MAX_SKEW_MS) return null;
     return new Date(t).toISOString();
   }
@@ -1277,9 +1288,13 @@
     const t = Date.parse(asOfIso);
     return !Number.isFinite(t) || nowMs - t > maxAgeMs;
   }
-  function acceptsNewer(currentAsOf, incomingAsOf) {
+  function acceptsNewer(currentAsOf, incomingAsOf, currentFingerprint, incomingFingerprint) {
     if (currentAsOf === null) return true;
-    return Date.parse(incomingAsOf) >= Date.parse(currentAsOf);
+    const cur = Date.parse(currentAsOf), inc = Date.parse(incomingAsOf);
+    if (inc > cur) return true;
+    if (inc < cur) return false;
+    if (incomingFingerprint === null) return true;
+    return incomingFingerprint === currentFingerprint;
   }
   function startBind(node, deps, onData, onStale, onEnded) {
     const bind = node.bind;
@@ -1546,15 +1561,27 @@
     walk(doc.root);
     return { stats, lists, schemaCards };
   }
+  var MISSING = /* @__PURE__ */ Symbol("missing-field");
+  function selectPath(data, select) {
+    let cur = data;
+    for (const seg of select.split(".")) {
+      if (cur === null || typeof cur !== "object" || Array.isArray(cur) || !Object.prototype.hasOwnProperty.call(cur, seg)) return MISSING;
+      cur = cur[seg];
+    }
+    return cur;
+  }
+  function rowsOf(data) {
+    return Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.items) ? data.items : null;
+  }
   var provStates = /* @__PURE__ */ new Map();
-  function provenanced(node, el2, paint, clear) {
+  function provenanced(node, el2, paint, clear, fingerprint) {
     const prov = provenanceOf(node);
     const host = wrapEl(el2);
     let st = provStates.get(node.id);
     if (!st) {
       const metaReal = document.createElement("div");
       if (el2.parentNode) el2.parentNode.insertBefore(metaReal, el2.nextSibling);
-      st = { meta: metaReal, watermark: null, shown: false, timeKnown: false, expiry: null };
+      st = { meta: metaReal, watermark: null, fingerprint: null, shown: false, timeKnown: false, expiry: null };
       provStates.set(node.id, st);
     }
     const state = st;
@@ -1590,13 +1617,15 @@
       onData: (data) => {
         const now = Date.now();
         const src = sourceAsOf(data, now);
-        if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src))) return;
+        const incomingFingerprint = fingerprint(data);
+        if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src, state.fingerprint, incomingFingerprint))) return;
         const painted = paint(data, src);
         if (painted !== true) {
           failed(painted);
           return;
         }
         state.shown = true;
+        state.fingerprint = incomingFingerprint;
         if (src !== null) {
           state.watermark = src;
           state.timeKnown = true;
@@ -1619,7 +1648,7 @@
       const mark = (nodes, cls) => nodes.forEach((node, i) => {
         const el2 = els(cls)[i];
         if (el2) provenanced(node, el2, () => "no live data source", () => {
-        }).onStale("no live data source");
+        }, () => null).onStale("no live data source");
       });
       mark(stats2, "pcc-stat");
       mark(lists2, "pcc-list");
@@ -1663,17 +1692,19 @@
       const slot = el2?.querySelector(".pcc-value");
       if (!el2 || !slot) return;
       const want = node.bind ? metricSourceType(node.bind.path, node.bind.select) : null;
+      const select = String(node.bind?.select ?? "");
+      const validScalar = (cur) => want === "number" ? typeof cur === "number" && Number.isFinite(cur) : typeof cur === "string" && cur !== "";
       const pv = provenanced(node, el2, (data) => {
-        let cur = data;
-        for (const seg of String(node.bind?.select ?? "").split(".")) {
-          if (cur === null || typeof cur !== "object" || Array.isArray(cur) || !Object.prototype.hasOwnProperty.call(cur, seg)) return "missing field";
-          cur = cur[seg];
-        }
-        if (want === "number" ? !(typeof cur === "number" && Number.isFinite(cur)) : !(typeof cur === "string" && cur !== "")) return "mistyped field";
-        slot.textContent = boundValueText(String(node.bind?.select ?? ""), String(cur));
+        const cur = selectPath(data, select);
+        if (cur === MISSING) return "missing field";
+        if (!validScalar(cur)) return "mistyped field";
+        slot.textContent = boundValueText(select, String(cur));
         return true;
       }, () => {
         slot.textContent = "";
+      }, (data) => {
+        const cur = selectPath(data, select);
+        return cur !== MISSING && validScalar(cur) ? JSON.stringify(cur) : null;
       });
       push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
@@ -1685,6 +1716,9 @@
       const slots = Array.from(el2.querySelectorAll(".pcc-value"));
       const pv = provenanced(node, el2, (data) => bindSchemaCard(schema, data, slots) ? true : "missing required fields", () => {
         for (const sl of slots) sl.textContent = "";
+      }, (data) => {
+        const staging = slots.map(() => ({ textContent: "" }));
+        return bindSchemaCard(schema, data, staging) ? JSON.stringify(staging.map((s) => s.textContent)) : null;
       });
       push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
@@ -1692,7 +1726,7 @@
       const el2 = listEls[i];
       if (!el2) return;
       const pv = provenanced(node, el2, (data, src) => {
-        const rows = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.items) ? data.items : null;
+        const rows = rowsOf(data);
         if (rows === null) return "unexpected response shape";
         if (!listRowsReadable(node, rows)) return "partial collection";
         if (rows.length === 0 && src === null) return "empty result without a source time";
@@ -1702,6 +1736,12 @@
         return true;
       }, () => {
         el2.replaceChildren();
+      }, (data) => {
+        const rows = rowsOf(data);
+        if (rows === null || !listRowsReadable(node, rows)) return null;
+        const staging = document.createElement("div");
+        bindListRows(rdoc, wrapEl(staging), node, rows);
+        return staging.textContent;
       });
       push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
@@ -1791,6 +1831,13 @@
       }
     });
     window.addEventListener("pagehide", stopBinds);
+    window.addEventListener("pageshow", () => {
+      if (disposed) return;
+      if (!document.hidden && liveDoc && liveRoot) {
+        stopBinds();
+        startBinds(liveDoc, liveRoot);
+      }
+    });
     parent.postMessage({ jsonrpc: "2.0", id: CAP.initId, method: "ui/initialize", params: { protocolVersion: CAP.protocol, appInfo: { name: "pcc-dashboard-ir", version: "1" }, appCapabilities: {} } }, "*");
   }
   if (typeof window !== "undefined" && typeof document !== "undefined") boot();

@@ -110,11 +110,13 @@ describe("PX-4 freshness primitives (binder)", () => {
     expect(isStale(new Date(NOW - 180_000).toISOString(), 120_000, NOW)).toBe(true);
     expect(isStale("garbage", 120_000, NOW)).toBe(true);
   });
-  it("acceptsNewer: first datum and newer/equal updates pass; an OLDER one never does", () => {
-    expect(acceptsNewer(null, "2026-09-24T11:00:00.000Z")).toBe(true);
-    expect(acceptsNewer("2026-09-24T11:00:00.000Z", "2026-09-24T11:00:00.000Z")).toBe(true);
-    expect(acceptsNewer("2026-09-24T11:00:00.000Z", "2026-09-24T11:05:00.000Z")).toBe(true);
-    expect(acceptsNewer("2026-09-24T11:05:00.000Z", "2026-09-24T11:00:00.000Z")).toBe(false);
+  it("acceptsNewer: first datum and newer updates pass regardless of payload; an OLDER one never does; an EQUAL timestamp passes only with an identical payload", () => {
+    expect(acceptsNewer(null, "2026-09-24T11:00:00.000Z", null, "fp-a")).toBe(true);
+    expect(acceptsNewer("2026-09-24T11:00:00.000Z", "2026-09-24T11:05:00.000Z", "fp-a", "fp-b")).toBe(true); // newer: payload doesn't matter
+    expect(acceptsNewer("2026-09-24T11:05:00.000Z", "2026-09-24T11:00:00.000Z", "fp-a", "fp-b")).toBe(false); // older: never
+    expect(acceptsNewer("2026-09-24T11:00:00.000Z", "2026-09-24T11:00:00.000Z", "fp-a", "fp-a")).toBe(true); // equal timestamp, IDENTICAL payload: an idempotent refresh
+    expect(acceptsNewer("2026-09-24T11:00:00.000Z", "2026-09-24T11:00:00.000Z", "fp-a", "fp-b")).toBe(false); // equal timestamp, DIFFERENT payload: undecidable by time alone, rejected
+    expect(acceptsNewer("2026-09-24T11:00:00.000Z", "2026-09-24T11:00:00.000Z", "fp-a", null)).toBe(true); // equal timestamp, unfingerprintable incoming payload: let the caller's own validation decide
   });
 });
 
@@ -221,11 +223,19 @@ function scene(replies: Reply[], nowMs: number, opts: { origin?: boolean } = {})
     now = end;
   };
   const setHidden = async (h: boolean) => { hidden = h; w.document.dispatchEvent(new w.Event("visibilitychange")); await settle(); };
+  /** Move the fake wall clock forward WITHOUT firing any due timer (M4: a pageshow recheck
+   *  must be provably synchronous, not just "eventually correct once some timer fires"). */
+  const bumpClock = (ms: number) => { now += ms; };
+  /** Total pending (fake) timers across the scene. One steady binding holds exactly 2 (its
+   *  whole-session cap timer + its next poll tick); a double-started binding would hold up
+   *  to 4 (M4's "doesn't double-start"). A per-request timeout timer is always cleared in
+   *  getJson's own `finally` before this is checked, so it never inflates the count. */
+  const timerCount = () => timers.length;
   const q = (sel: string) => w.document.querySelector(sel) as any;
   const stat = () => q(".pcc-stat");
   const lineOf = (el: any) => el?.nextElementSibling as any;
   const fresh = () => lineOf(stat());
-  return { w, deliver, settle, nextPoll, advance, setHidden, q, stat, lineOf, fresh, close: () => w.close() };
+  return { w, deliver, settle, nextPoll, advance, bumpClock, setHidden, q, stat, lineOf, fresh, fetchCalls: () => call, timerCount, close: () => w.close() };
 }
 const T0 = Date.parse("2026-09-24T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -471,5 +481,93 @@ describe("PX-4 contrast (pcc-design #2540)", () => {
       const rules = view.match(new RegExp("\\." + cls + "[^{]*\\{[^}]*\\}", "g")) ?? [];
       for (const r of rules) expect(r, cls).not.toMatch(/opacity\s*:\s*0?\.\d/);
     }
+  });
+});
+
+describe("astra r2 (#348 @14f2f1c2): reproduced findings 2-5 (verify before fix)", () => {
+  describe("M2: sourceAsOf accepts ONLY canonical UTC, calendar-valid, in-range years", () => {
+    it("rejects a timestamp with no zone (Date.parse would read it as local time)", () => {
+      // nowMs is 25h clear of T0 so the lenient local-time reading (whatever this machine's
+      // TZ offset is, at most +/-14h) can never be rejected by the UNRELATED future-skew rule
+      // instead of the format rule this test actually targets.
+      expect(sourceAsOf({ asOf: "2026-09-24T12:00:00" }, T0 + 25 * 3_600_000)).toBeNull();
+    });
+    it("rejects a non-ISO date format", () => {
+      expect(sourceAsOf({ asOf: "09/24/2026" }, T0)).toBeNull();
+    });
+    it("rejects a normalized-invalid calendar date (2026 is not a leap year; Feb 30 rolls to Mar 2)", () => {
+      expect(sourceAsOf({ asOf: "2026-02-30T12:00:00.000Z" }, T0)).toBeNull();
+    });
+    it("rejects a non-UTC offset (not literally Z)", () => {
+      expect(sourceAsOf({ asOf: "2026-09-24T12:00:00+02:00" }, T0)).toBeNull();
+    });
+    it("rejects a year outside 2020..2100", () => {
+      expect(sourceAsOf({ asOf: "2019-09-24T12:00:00Z" }, T0)).toBeNull();
+      const y2101 = Date.parse("2101-01-01T00:00:00.000Z"); // nowMs == asOf: zero skew, only the year rule can reject this
+      expect(sourceAsOf({ asOf: "2101-01-01T00:00:00.000Z" }, y2101)).toBeNull();
+    });
+    it("still accepts canonical UTC, with or without milliseconds", () => {
+      expect(sourceAsOf({ asOf: "2026-09-24T12:00:00.000Z" }, T0)).toBe("2026-09-24T12:00:00.000Z");
+      expect(sourceAsOf({ asOf: "2026-09-24T12:00:00Z" }, T0)).toBe("2026-09-24T12:00:00.000Z");
+    });
+  });
+
+  describe("M3: an equal-timestamp update is accepted only when its payload matches what is shown", () => {
+    it("the stat keeps 80 when a later poll reports 10 under the SAME asOf", async () => {
+      const s = scene([
+        { status: 200, json: { progress: 80, asOf: iso(T0 - 5_000) } },
+        { status: 200, json: { progress: 10, asOf: iso(T0 - 5_000) } }, // same asOf, DIFFERENT payload
+      ], T0);
+      s.deliver(statManifest); await s.settle();
+      expect(value(s)).toBe("80");
+      await s.nextPoll();
+      expect(value(s)).toBe("80"); // must NOT become "10"
+      expect(s.stat().getAttribute("data-as-of")).toBe(iso(T0 - 5_000));
+      s.close();
+    });
+    it("an equal-timestamp poll with an IDENTICAL payload is accepted (stays correct, never cleared)", async () => {
+      const s = scene([
+        { status: 200, json: { progress: 80, asOf: iso(T0 - 5_000) } },
+        { status: 200, json: { progress: 80, asOf: iso(T0 - 5_000) } }, // same asOf, SAME payload
+      ], T0);
+      s.deliver(statManifest); await s.settle();
+      expect(value(s)).toBe("80");
+      await s.nextPoll();
+      expect(value(s)).toBe("80");
+      expect(s.stat().className).not.toContain("pcc-unavail");
+      s.close();
+    });
+  });
+
+  describe("M4: pageshow re-checks freshness synchronously and restarts bindings exactly once", () => {
+    it("pagehide then pageshow marks a stale datum synchronously (no timers run) and restarts the binding, without double-starting it", async () => {
+      const s = scene([{ status: 200, json: { progress: 5, asOf: iso(T0 - 10_000) } }], T0);
+      s.deliver(statManifest); await s.settle();
+      expect(s.stat().className).not.toContain("pcc-stale");
+      const before = s.fetchCalls();
+      s.w.dispatchEvent(new s.w.Event("pagehide"));
+      s.bumpClock(115_000); // past the metric's 120s maxAgeMs; NO timer fires
+      s.w.dispatchEvent(new s.w.Event("pageshow"));
+      // synchronous assertions: no await/settle between the dispatch above and here
+      expect(s.stat().className).toContain("pcc-stale");
+      expect(s.fresh().textContent).toContain("stale");
+      await s.settle();
+      expect(s.fetchCalls()).toBeGreaterThan(before); // bindings restarted: a new fetch was issued
+      expect(s.timerCount()).toBe(2); // one binding's steady state (session cap + next poll) — not double-started
+      s.close();
+    });
+
+    it("a pageshow with NO preceding pagehide (binding still live) does not add a second one", async () => {
+      const s = scene([{ status: 200, json: { progress: 5, asOf: iso(T0 - 10_000) } }], T0);
+      s.deliver(statManifest); await s.settle();
+      // Steady-state timer count for ONE live binding (session cap + next poll + the
+      // not-yet-stale expiry arm) — captured rather than hardcoded, so this doesn't assume
+      // which of those happen to be armed for this particular manifest/timing.
+      const steady = s.timerCount();
+      s.w.dispatchEvent(new s.w.Event("pageshow")); // no pagehide first — the binding is still running
+      await s.settle();
+      expect(s.timerCount()).toBe(steady); // still exactly one binding's worth, not doubled
+      s.close();
+    });
   });
 });

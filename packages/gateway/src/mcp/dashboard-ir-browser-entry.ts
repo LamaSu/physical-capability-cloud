@@ -187,6 +187,27 @@ function collectBound(doc: IrDoc): { stats: IrNode[]; lists: IrNode[]; schemaCar
   walk(doc.root);
   return { stats, lists, schemaCards };
 }
+// ── Fingerprint helpers (M3: an equal-timestamp duplicate must compare payload, not just
+// arrival order) — pure, side-effect-free re-derivations of "the bound datum" each sink's
+// own paint callback already extracts, kept SEPARATE so acceptsNewer's equal-time rule can
+// be evaluated BEFORE painting (a rejected duplicate must never touch the real DOM). ──────
+const MISSING = Symbol("missing-field");
+/** Same own-property dotted-path walk the stat painter uses; MISSING (not undefined, which a
+ *  payload could legitimately carry as a value) marks an absent/unwalkable path. */
+function selectPath(data: unknown, select: string): unknown | typeof MISSING {
+  let cur: unknown = data;
+  for (const seg of select.split(".")) {
+    if (cur === null || typeof cur !== "object" || Array.isArray(cur) || !Object.prototype.hasOwnProperty.call(cur, seg)) return MISSING;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
+}
+/** Same collection-v1 shape check the list painter uses: a top-level array, or
+ *  `{ items: [...] }`; anything else is not a row set at all. */
+function rowsOf(data: unknown): unknown[] | null {
+  return Array.isArray(data) ? data : (data && typeof data === "object" && Array.isArray((data as { items?: unknown }).items) ? (data as { items: unknown[] }).items : null);
+}
+
 /** PX-4 provenance gate for one bound node (hardened per cross-family review #2524).
  *  - Absence is not evidence: a failed, errored, timed-out, off-schema, partial or unreadable
  *    read CLEARS what was shown and says "unavailable · <why>". Nothing last-known or default
@@ -202,16 +223,16 @@ function collectBound(doc: IrDoc): { stats: IrNode[]; lists: IrNode[]; schemaCar
  *  `paint(data, sourceAsOf)` must validate the complete route-specific payload and paint ONLY
  *  if it fits; otherwise it returns a short fixed reason and leaves the DOM untouched.
  *  `clear()` removes shown values. */
-interface ProvState { meta: HTMLElement; watermark: string | null; shown: boolean; timeKnown: boolean; expiry: ReturnType<typeof setTimeout> | null }
+interface ProvState { meta: HTMLElement; watermark: string | null; fingerprint: string | null; shown: boolean; timeKnown: boolean; expiry: ReturnType<typeof setTimeout> | null }
 const provStates = new Map<string, ProvState>();
-function provenanced(node: IrNode, el: HTMLElement, paint: (data: unknown, src: string | null) => true | string, clear: () => void): { onData: (d: unknown) => void; onStale: (why: string) => void; onEnded: (why: string) => void } {
+function provenanced(node: IrNode, el: HTMLElement, paint: (data: unknown, src: string | null) => true | string, clear: () => void, fingerprint: (data: unknown) => string | null): { onData: (d: unknown) => void; onStale: (why: string) => void; onEnded: (why: string) => void } {
   const prov = provenanceOf(node);
   const host = wrapEl(el) as unknown as RElement;
   let st = provStates.get(node.id);
   if (!st) {
     const metaReal = document.createElement("div");
     if (el.parentNode) el.parentNode.insertBefore(metaReal, el.nextSibling);
-    st = { meta: metaReal, watermark: null, shown: false, timeKnown: false, expiry: null };
+    st = { meta: metaReal, watermark: null, fingerprint: null, shown: false, timeKnown: false, expiry: null };
     provStates.set(node.id, st);
   }
   const state = st;
@@ -239,10 +260,14 @@ function provenanced(node: IrNode, el: HTMLElement, paint: (data: unknown, src: 
     onData: (data) => {
       const now = Date.now();
       const src = sourceAsOf(data, now);
-      if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src))) return; // never roll back
+      const incomingFingerprint = fingerprint(data);
+      // Never roll back; an equal-timestamp duplicate whose payload differs from what is
+      // shown is ALSO rejected — see acceptsNewer (M3: undecidable by time alone).
+      if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src, state.fingerprint, incomingFingerprint))) return;
       const painted = paint(data, src);
       if (painted !== true) { failed(painted); return; } // not data for this route
       state.shown = true;
+      state.fingerprint = incomingFingerprint;
       if (src !== null) { state.watermark = src; state.timeKnown = true; markFresh(); }
       else { disarm(); state.timeKnown = false; applyUnknownTime(host, meta, new Date(now).toISOString()); }
     },
@@ -257,7 +282,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     // rather than sit empty (absence is not evidence).
     const { stats, lists, schemaCards } = collectBound(doc);
     const els = (cls: string) => Array.from(root.querySelectorAll<HTMLElement>("." + cls));
-    const mark = (nodes: IrNode[], cls: string) => nodes.forEach((node, i) => { const el = els(cls)[i]; if (el) provenanced(node, el, () => "no live data source", () => {}).onStale("no live data source"); });
+    const mark = (nodes: IrNode[], cls: string) => nodes.forEach((node, i) => { const el = els(cls)[i]; if (el) provenanced(node, el, () => "no live data source", () => {}, () => null).onStale("no live data source"); });
     mark(stats, "pcc-stat"); mark(lists, "pcc-list"); mark(schemaCards, "pcc-schema-card");
     return;
   }
@@ -296,19 +321,24 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
   stats.forEach((node, i) => {
     const el = statEls[i]; const slot = el?.querySelector<HTMLElement>(".pcc-value"); if (!el || !slot) return;
     const want = node.bind ? metricSourceType(node.bind.path, node.bind.select) : null;
+    const select = String(node.bind?.select ?? "");
+    // Shared by the painter and the fingerprint below, so a fingerprint is non-null exactly
+    // when the paint it describes would have succeeded.
+    const validScalar = (cur: unknown): boolean => (want === "number" ? typeof cur === "number" && Number.isFinite(cur) : typeof cur === "string" && cur !== "");
     const pv = provenanced(node, el, (data) => {
       // The metric's field must be present with its declared type; anything else is not data.
-      let cur: unknown = data;
-      for (const seg of String(node.bind?.select ?? "").split(".")) {
-        if (cur === null || typeof cur !== "object" || Array.isArray(cur) || !Object.prototype.hasOwnProperty.call(cur, seg)) return "missing field";
-        cur = (cur as Record<string, unknown>)[seg];
-      }
-      if (want === "number" ? !(typeof cur === "number" && Number.isFinite(cur)) : !(typeof cur === "string" && cur !== "")) return "mistyped field";
+      const cur = selectPath(data, select);
+      if (cur === MISSING) return "missing field";
+      if (!validScalar(cur)) return "mistyped field";
       // Checked exactly as bindScalar does: a status word is qualified (#3013), any other claim
       // or a status that states an amount is withheld (#344 astra r2 F2).
-      slot.textContent = boundValueText(String(node.bind?.select ?? ""), String(cur));
+      slot.textContent = boundValueText(select, String(cur));
       return true;
-    }, () => { slot.textContent = ""; });
+    }, () => { slot.textContent = ""; }, (data) => {
+      // M3 fingerprint: the scalar itself — the one thing this sink shows.
+      const cur = selectPath(data, select);
+      return cur !== MISSING && validScalar(cur) ? JSON.stringify(cur) : null;
+    });
     push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
   });
   // Fixed-schema cards (capability/run/settlement): PCC owns the labels; each value slot
@@ -318,13 +348,18 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     const el = schemaEls[i]; if (!el) return;
     const schema = node.bind?.schema; if (!schema) return;
     const slots = Array.from(el.querySelectorAll<HTMLElement>(".pcc-value"));
-    const pv = provenanced(node, el, (data) => (bindSchemaCard(schema, data, slots) ? true : "missing required fields"), () => { for (const sl of slots) sl.textContent = ""; });
+    const pv = provenanced(node, el, (data) => (bindSchemaCard(schema, data, slots) ? true : "missing required fields"), () => { for (const sl of slots) sl.textContent = ""; }, (data) => {
+      // M3 fingerprint: "the selected fields" — bindSchemaCard run into THROWAWAY slots
+      // (never the real DOM), so fingerprinting a to-be-rejected duplicate never paints.
+      const staging = slots.map(() => ({ textContent: "" }));
+      return bindSchemaCard(schema, data, staging) ? JSON.stringify(staging.map((s) => s.textContent)) : null;
+    });
     push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
   });
   lists.forEach((node, i) => { const el = listEls[i]; if (!el) return; const pv = provenanced(node, el, (data, src) => {
     // collection-v1 is a top-level array or { items: [...] }. Anything else is NOT an empty
     // list: rendering it as one would claim "none" of something the source never listed.
-    const rows = Array.isArray(data) ? data : (data && typeof data === "object" && Array.isArray((data as { items?: unknown }).items) ? (data as { items: unknown[] }).items : null);
+    const rows = rowsOf(data);
     if (rows === null) return "unexpected response shape";
     // A partial collection (any unreadable row) is not data.
     if (!listRowsReadable(node, rows)) return "partial collection";
@@ -335,7 +370,15 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows);
     el.replaceChildren(...Array.from(staging.childNodes));
     return true;
-  }, () => { el.replaceChildren(); }); push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded)); });
+  }, () => { el.replaceChildren(); }, (data) => {
+    // M3 fingerprint: "the row texts" — the same rows, staged off-DOM (never touching `el`),
+    // read back as their combined text; a readable-but-empty collection fingerprints too.
+    const rows = rowsOf(data);
+    if (rows === null || !listRowsReadable(node, rows)) return null;
+    const staging = document.createElement("div");
+    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows);
+    return staging.textContent;
+  }); push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded)); });
 }
 function stopBinds(): void {
   for (const h of boundHandles) h.stop();
@@ -395,6 +438,15 @@ function boot(): void {
     else if (liveDoc && liveRoot) { stopBinds(); startBinds(liveDoc, liveRoot); }
   });
   window.addEventListener("pagehide", stopBinds);
+  window.addEventListener("pageshow", () => {
+    if (disposed) return; // terminal — a late pageshow after teardown must not restart binds
+    // Re-check every bound datum's freshness synchronously and restart exactly as the
+    // visibility restore does: provenanced() re-arms markFresh() as a side effect of being
+    // re-called for each existing node.id, so this already re-checks staleness before
+    // startBind's own (async) fetch resolves. stopBinds first so a pagehide-then-pageshow
+    // pair can never leave two live bindings running for the same node.
+    if (!document.hidden && liveDoc && liveRoot) { stopBinds(); startBinds(liveDoc, liveRoot); }
+  });
   // Announce the app; the host replies with the ui/initialize result.
   parent.postMessage({ jsonrpc: "2.0", id: CAP.initId, method: "ui/initialize", params: { protocolVersion: CAP.protocol, appInfo: { name: "pcc-dashboard-ir", version: "1" }, appCapabilities: {} } }, "*");
 }
