@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 
 /** Oracle-based metrics (replaces SubnetMetrics) */
 interface OracleMetrics {
@@ -61,3 +62,6 @@ export const useSubnetStore = create<SubnetState>((set) => ({
 
 /** @deprecated Use useSubnetStore */
 export const useOracleStore = useSubnetStore;
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useSubnetStore);

@@ -58,13 +58,19 @@ export interface PasskeyRegistrationDeps {
   /** Base URL for gateway API calls (e.g. VITE_PCC_URL, "" for same-origin). */
   apiBase: string;
   /**
-   * Optional operator binding. When set, the challenge request carries the
-   * Bearer key and the credential is persisted to that operator's api_keys
-   * row on verify. Without it, the challenge is anonymous (verify succeeds
-   * but persisted:false). The gateway enforces the auth match (PR #198).
+   * Optional operator binding. When set, the challenge must carry the
+   * signed-in key, so it goes through `authorizedFetchFn`, and the credential
+   * is persisted to that operator's api_keys row on verify. Without it, the
+   * challenge is anonymous (verify succeeds but persisted:false). The gateway
+   * enforces the auth match (PR #198).
    */
   operatorId?: string;
-  apiKey?: string;
+  /**
+   * The app's authorizedFetch (lib/authorized-fetch.ts), used for the binding
+   * challenge. It attaches the signed-in key, and only for the configured
+   * gateway. This module never sees or builds a key (N50 round 2).
+   */
+  authorizedFetchFn?: (path: string, init: RequestInit) => Promise<Response>;
   /** Injected fetch (window.fetch in prod; a fake in tests). */
   fetchFn: typeof fetch;
   /** Injected startRegistration (from @simplewebauthn/browser in prod). */
@@ -123,23 +129,26 @@ export async function runPasskeyRegistration(
   deps: PasskeyRegistrationDeps,
   randomHandle: string,
 ): Promise<PasskeyRegistrationResult> {
-  const { apiBase, operatorId, apiKey, fetchFn, startRegistration } = deps;
+  const { apiBase, operatorId, authorizedFetchFn, fetchFn, startRegistration } = deps;
 
-  // 1. Challenge — carry Bearer when binding an operator.
-  const challengeHeaders: Record<string, string> = {
-    "content-type": "application/json",
-  };
-  if (operatorId && apiKey) {
-    challengeHeaders["authorization"] = `Bearer ${apiKey}`;
+  // Binding an operator needs the signed-in key, which only the authorized
+  // fetch attaches. Without it, refuse before any request. An anonymous
+  // challenge would silently register an unbound passkey (astra A03c F2).
+  if (operatorId && !authorizedFetchFn) {
+    throw new Error("Binding a passkey to an operator needs the authorized fetch; no request was sent.");
   }
-  const challengeRes = await fetchFn(
-    `${apiBase}/api/onboard/passkey/register-challenge`,
-    {
-      method: "POST",
-      headers: challengeHeaders,
-      body: JSON.stringify(operatorId ? { operatorId } : {}),
-    },
-  );
+
+  // 1. Challenge. Binding an operator needs the signed-in key, which only the
+  //    authorized fetch attaches; an anonymous challenge goes out without one.
+  const challengeInit: RequestInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(operatorId ? { operatorId } : {}),
+  };
+  const challengeRes =
+    operatorId && authorizedFetchFn
+      ? await authorizedFetchFn("/api/onboard/passkey/register-challenge", challengeInit)
+      : await fetchFn(`${apiBase}/api/onboard/passkey/register-challenge`, challengeInit);
   if (!challengeRes.ok) {
     const body = await safeJson(challengeRes);
     throw new Error(

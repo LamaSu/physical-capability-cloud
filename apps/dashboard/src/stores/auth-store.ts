@@ -1,12 +1,19 @@
 import { create } from "zustand";
+import { fetchWithKey } from "../lib/gateway-base.js";
+import { hasStoredApiKey, setStoredApiKey } from "../lib/authorized-fetch.js";
 
-const API = import.meta.env.VITE_PCC_URL ?? "";
-const STORAGE_KEY = "pcc-api-key";
-
+/**
+ * Sign-in state. The API key itself is not here, not in the state and not in
+ * this module: lib/authorized-fetch.ts holds it, and no export anywhere
+ * returns it (N50; astra rounds 2 and 3). This store only knows whether a
+ * key is held.
+ */
 interface AuthState {
   // -- API Key auth (primary gate) --
-  apiKey: string | null;
+  /** Whether an API key is held. The key itself is never in the store. */
   isAuthenticated: boolean;
+  /** Bumped on every sign-in, sign-out or key replacement (adoptApiKey, logout). Never the key. */
+  keyEpoch: number;
   login: (key: string) => Promise<boolean>;
   logout: () => void;
 
@@ -26,68 +33,78 @@ interface AuthState {
   setError: (e: string | null) => void;
 }
 
-export const useAuthStore = create<AuthState>((set) => {
-  // Hydrate API key from localStorage on store creation
-  const storedKey = localStorage.getItem(STORAGE_KEY);
+export const useAuthStore = create<AuthState>((set) => ({
+  // -- API Key auth --
+  isAuthenticated: hasStoredApiKey(),
+  keyEpoch: 0,
 
-  return {
-    // -- API Key auth --
-    apiKey: storedKey,
-    isAuthenticated: !!storedKey,
+  login: async (key: string): Promise<boolean> => {
+    try {
+      // The candidate key goes to the configured gateway and nowhere else.
+      const res = await fetchWithKey("/api/auth/validate", key);
+      if (!res.ok) return false;
+      adoptApiKey(key);
+      return true;
+    } catch {
+      return false;
+    }
+  },
 
-    login: async (key: string): Promise<boolean> => {
-      try {
-        const res = await fetch(`${API}/api/auth/validate`, {
-          headers: { Authorization: `Bearer ${key}` },
-        });
-        if (res.ok) {
-          localStorage.setItem(STORAGE_KEY, key);
-          set({ apiKey: key, isAuthenticated: true });
-          return true;
-        }
-        return false;
-      } catch {
-        return false;
-      }
-    },
+  logout: () => {
+    // One set(), so an identity change is reported once (onIdentityChange).
+    setStoredApiKey(null);
+    set((s) => ({ isAuthenticated: false, keyEpoch: s.keyEpoch + 1, address: null, sessionToken: null, error: null }));
+  },
 
-    logout: () => {
-      localStorage.removeItem(STORAGE_KEY);
-      set({ apiKey: null, isAuthenticated: false, address: null, sessionToken: null, error: null });
-    },
+  // -- Wallet/SIWE auth --
+  address: null,
+  sessionToken: null,
+  isVerifying: false,
+  error: null,
 
-    // -- Wallet/SIWE auth --
-    address: null,
-    sessionToken: null,
-    isVerifying: false,
-    error: null,
-
-    setAddress: (address) => set({ address, error: null }),
-    setSession: (token) => set({ sessionToken: token, isVerifying: false }),
-    setVerifying: (v) => set({ isVerifying: v }),
-    setError: (e) => set({ error: e, isVerifying: false }),
-  };
-});
+  setAddress: (address) => set({ address, error: null }),
+  setSession: (token) => set({ sessionToken: token, isVerifying: false }),
+  setVerifying: (v) => set({ isVerifying: v }),
+  setError: (e) => set({ error: e, isVerifying: false }),
+}));
 
 /**
- * Calls `onChange` whenever the signed-in identity changes: a key signed in or out, a
- * different key, wallet or SIWE session. A cached read must not outlive the identity that
- * made it, so App clears the query cache here (review r3 of #353).
+/**
+ * Hold `key` as the signed-in key, or sign out with null. login() calls it
+ * after the gateway accepts the key; tests call it directly. It is
+ * write-only: writing a key cannot leak one. Every call is an identity change
+ * (keyEpoch), even with the same key: telling "same key" from "another key"
+ * would make this an equality test on the stored key.
+ */
+export function adoptApiKey(key: string | null): void {
+  setStoredApiKey(key);
+  useAuthStore.setState((s) => ({ isAuthenticated: hasStoredApiKey(), keyEpoch: s.keyEpoch + 1 }));
+}
+
+/**
+ * Calls `onChange` whenever the signed-in identity changes: a key signed in or
+ * out, a different key, wallet or SIWE session. A cached read must not outlive
+ * the identity that made it, so App clears the query cache here (review r3 of
+ * #353). The key itself is never in this store (N50), so a key change shows as
+ * keyEpoch.
  */
 export function onIdentityChange(onChange: () => void): () => void {
   return useAuthStore.subscribe((s, prev) => {
-    if (s.apiKey !== prev.apiKey || s.address !== prev.address || s.sessionToken !== prev.sessionToken) onChange();
+    if (s.keyEpoch !== prev.keyEpoch || s.address !== prev.address || s.sessionToken !== prev.sessionToken) onChange();
   });
 }
 
 /**
- * Returns auth headers for API calls.
- * Call outside of React components (in fetch helpers, etc).
+ * Calls `onChange` whenever the signed-in account changes: a key signed in or
+ * out, or a different key, including login() with another key while signed
+ * in. App resets every account-scoped store on it, ends the previous wallet
+ * session, and remounts the signed-in shell (astra 19c, 19d). The account
+ * follows the key, never isAuthenticated. The key is not in this store (N50),
+ * so the change shows as keyEpoch. Zustand calls this inside the set() that
+ * changed it, so it runs before anything renders for the next account.
  */
-export function getAuthHeaders(): Record<string, string> {
-  const { apiKey } = useAuthStore.getState();
-  if (apiKey) {
-    return { Authorization: `Bearer ${apiKey}` };
-  }
-  return {};
+export function onAccountChange(onChange: () => void): () => void {
+  return useAuthStore.subscribe((s, prev) => {
+    if (s.keyEpoch !== prev.keyEpoch) onChange();
+  });
 }

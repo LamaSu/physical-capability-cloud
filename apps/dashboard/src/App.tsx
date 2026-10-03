@@ -1,10 +1,12 @@
-import React, { Suspense, lazy } from "react";
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from "react-router-dom";
+import React, { Suspense, lazy, useSyncExternalStore } from "react";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
+import { AppShell, Sidebar, TopBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
-import { useAuthStore, onIdentityChange } from "./stores/auth-store.js";
+import { useAuthStore, onIdentityChange, onAccountChange } from "./stores/auth-store.js";
+import { resetAccountScopedState } from "./lib/account-scope.js";
+import { endWalletSession } from "./lib/wallet-session.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -13,16 +15,18 @@ import { WalletProvider } from "./providers/WalletProvider.js";
 import { ConnectWallet } from "./components/ConnectWallet.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { ModeToggle } from "./components/ModeToggle.js";
+import { LiveStatusBar } from "./components/LiveStatusBar.js";
 import { Sentry } from "./lib/telemetry.js";
 import { usePageTracking } from "./hooks/use-page-tracking.js";
 import { SpatialApp } from "./SpatialApp.js";
 import { AgentLandingHero } from "./components/AgentLandingHero.js";
+import { FeedbackButton } from "./components/FeedbackButton.js";
+import { APP_HOME, canonicalRedirect, workspaceForPath } from "./lib/workspaces.js";
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded pages (code-split per route)
 // ---------------------------------------------------------------------------
 
-const AgentChatPage = lazy(() => import("./pages/AgentChatPage.js").then(m => ({ default: m.AgentChatPage })));
 const LandingPage = lazy(() => import("./pages/LandingPage.js").then(m => ({ default: m.LandingPage })));
 const StartPage = lazy(() => import("./pages/StartPage.js").then(m => ({ default: m.StartPage })));
 const EarnFromYourWorkPage = lazy(() => import("./pages/EarnFromYourWorkPage.js").then(m => ({ default: m.EarnFromYourWorkPage })));
@@ -88,6 +92,7 @@ const AnalyticsDashboardPage = lazy(() => import("./pages/AnalyticsDashboardPage
 const KernelLeaderboardPage = lazy(() => import("./pages/KernelLeaderboardPage.js").then(m => ({ default: m.KernelLeaderboardPage })));
 const RateSchedulePublishPage = lazy(() => import("./pages/RateSchedulePublishPage.js").then(m => ({ default: m.RateSchedulePublishPage })));
 const RateScheduleViewPage = lazy(() => import("./pages/RateScheduleViewPage.js").then(m => ({ default: m.RateScheduleViewPage })));
+const NotFoundPage = lazy(() => import("./pages/NotFoundPage.js").then(m => ({ default: m.NotFoundPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -118,35 +123,107 @@ const queryClient = new QueryClient({
 // identity changes, so the next identity never sees the previous one's jobs or money.
 onIdentityChange(() => queryClient.clear());
 
+// Everything else the browser holds belongs to the account too (astra 19c,
+// 19d). When the API account changes (a key signed in or out, or another key):
+// 1. Inside the set() that changed the key, before anything renders:
+//    - every account-scoped store goes back to its initial state, and every
+//      store action read under the previous account stops working
+//      (lib/account-scope.ts);
+//    - the previous wallet's address and SIWE session leave the auth store.
+// 2. The signed-in shell unmounts, and stays unmounted while the wallet half
+//    of the identity ends: wagmi disconnects and the gateway destroys its SIWE
+//    cookie (lib/wallet-session.ts). Both live above this boundary, and the
+//    next account's ConnectWallet used to re-adopt them.
+// 3. The shell mounts again under a new key, for the new account. That drops
+//    component state, and gives every query a fresh observer. If the gateway
+//    can't confirm the cookie is gone, the next account doesn't load (fail
+//    closed), and the page offers a retry.
+type AccountTransition = "settled" | "ending" | "failed";
+let account: { epoch: number; transition: AccountTransition } = { epoch: 0, transition: "settled" };
+const accountListeners = new Set<() => void>();
+let teardownRun = 0;
+
+function setAccount(next: typeof account): void {
+  account = next;
+  for (const listener of accountListeners) listener();
+}
+
+function endPreviousWallet(): void {
+  const run = ++teardownRun;
+  setAccount({ ...account, transition: "ending" });
+  void endWalletSession().then((ended) => {
+    if (run !== teardownRun) return; // a later account change owns the transition now
+    setAccount({ epoch: account.epoch + 1, transition: ended ? "settled" : "failed" });
+  });
+}
+
+onAccountChange(() => {
+  resetAccountScopedState();
+  useAuthStore.setState({ address: null, sessionToken: null, isVerifying: false });
+  endPreviousWallet();
+});
+
+/** The account boundary: its epoch keys the shell; while it is in transition the shell isn't mounted. */
+function useAccountBoundary(): typeof account {
+  return useSyncExternalStore(
+    (onChange) => {
+      accountListeners.add(onChange);
+      return () => accountListeners.delete(onChange);
+    },
+    () => account,
+  );
+}
+
+/** Shown between accounts, instead of the shell. */
+function AccountTransitionScreen({ failed }: { failed: boolean }) {
+  return (
+    <div role="status" className="min-h-screen flex items-center justify-center px-6 text-center text-sm text-white/60">
+      {failed ? (
+        <div className="space-y-3 max-w-md">
+          <p>
+            Couldn't confirm that the previous wallet session ended. Nothing of this account loads until it has, so the
+            previous wallet can't act for it.
+          </p>
+          <button
+            onClick={endPreviousWallet}
+            className="px-3 py-1.5 rounded-lg text-xs border border-white/[0.12] text-white/80 hover:bg-white/[0.04]"
+          >
+            Try again
+          </button>
+        </div>
+      ) : (
+        <p>Signing out of the previous account…</p>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
-// Agent Chat Shell — full-height chat, no sidebar
+// Agent workspace (/agent) — the live agent conversation, no sidebar
 // ---------------------------------------------------------------------------
 
 function AgentShell() {
-  const { currentPageTitle, currentPageSubtitle } = useUIStore();
   usePageTracking();
 
   return (
     <div className="flex flex-col h-screen bg-black/90 relative">
       <ParticleBackground />
-      <div className="relative z-10 flex flex-col h-full">
+      <div className="relative z-10 flex flex-col h-full min-h-0">
         {/* Minimal top bar */}
         <div className="flex items-center justify-between px-4 py-2 border-b border-white/[0.06] bg-black/40 backdrop-blur-sm">
-          <div className="flex items-center gap-3">
-            <div className="text-sm font-medium text-white/70">{currentPageTitle}</div>
-            {currentPageSubtitle && (
-              <div className="text-xs text-white/30">{currentPageSubtitle}</div>
-            )}
-          </div>
+          <div className="text-sm font-medium text-white/70">Agent</div>
           <div className="flex items-center gap-2">
+            <FeedbackButton />
             <ModeToggle />
             <ConnectWallet />
           </div>
         </div>
-        {/* Chat content */}
-        <Suspense fallback={<PageLoader />}>
-          <AgentChatPage />
-        </Suspense>
+        {/* The same live conversation as /onboard/chat (POST /api/onboard/chat) */}
+        <div className="flex-1 min-h-0">
+          <Suspense fallback={<PageLoader />}>
+            <OnboardChatPage variant="agent" />
+          </Suspense>
+        </div>
       </div>
     </div>
   );
@@ -198,10 +275,10 @@ function DashboardShell() {
           <TopBar
             title={currentPageTitle}
             subtitle={currentPageSubtitle}
-            actions={<><ModeToggle /><ConnectWallet /><TourRestartButton /></>}
+            actions={<><FeedbackButton /><ModeToggle /><ConnectWallet /><TourRestartButton /></>}
           />
         }
-        statusBar={<StatusBar kernelsOnline={2} activeJobs={3} networkStatus="connected" />}
+        statusBar={<LiveStatusBar />}
       >
         <PageTransition>
           <Suspense fallback={<PageLoader />}>
@@ -273,6 +350,7 @@ function DashboardShell() {
               <Route path="/analytics" element={<AnalyticsDashboardPage />} />
               <Route path="/contributors/schedules/publish" element={<RateSchedulePublishPage />} />
               <Route path="/contributors/schedules/:hash" element={<RateScheduleViewPage />} />
+              <Route path="*" element={<NotFoundPage />} />
             </Routes>
           </Suspense>
         </PageTransition>
@@ -284,45 +362,65 @@ function DashboardShell() {
 }
 
 // ---------------------------------------------------------------------------
-// Shell router — picks agent or dashboard shell based on mode
+// "/" — the landing page
 // ---------------------------------------------------------------------------
 
+/** The path this document was loaded at, before any in-app navigation. */
+const BOOT_PATH = typeof window !== "undefined" ? window.location.pathname : "/";
+
+/**
+ * In production the gateway serves the static landing.html at "/", so an
+ * in-app navigation to "/" does a full page load and shows that same page.
+ * The SPA renders its own landing only when this document itself was loaded
+ * at "/" (the vite dev server, or a host that serves the SPA there), which
+ * also keeps the hand-off from ever looping.
+ */
+function RootLanding() {
+  const handOff = BOOT_PATH !== "/";
+  React.useEffect(() => {
+    if (handOff) window.location.assign("/");
+  }, [handOff]);
+  if (handOff) return <PageLoader />;
+  return (
+    <Suspense fallback={<PageLoader />}>
+      <AgentLandingHero />
+      <LandingPage />
+    </Suspense>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shell router — the URL decides what renders (lib/workspaces.ts)
+// ---------------------------------------------------------------------------
+
+/** Pages that render without an API key. */
+const PUBLIC_PATHS = new Set(["/", "/start", "/whitepaper", "/go", "/earn", "/onboard/chat"]);
+
 function Shell() {
-  const interfaceMode = useUIStore((s) => s.interfaceMode);
   const location = useLocation();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const path = location.pathname;
 
-  // Public pages that don't require auth
-  const publicPaths = ["/", "/start", "/whitepaper", "/go", "/earn", "/onboard/chat"];
-  const isPublicPage = publicPaths.includes(location.pathname);
-
-  // Login page at /login
-  if (location.pathname === "/login") {
-    return isAuthenticated ? (
-      <Suspense fallback={<PageLoader />}><LandingPage /></Suspense>
-    ) : (
-      <LoginPage />
-    );
+  // Non-canonical addresses: /spatial -> /app, old bookmarks /legacy/jobs -> /jobs.
+  const canonical = canonicalRedirect(path);
+  if (canonical) {
+    return <Navigate to={canonical + location.search + location.hash} replace />;
   }
 
-  // Auth gate — redirect to login for non-public pages
-  if (!isAuthenticated && !isPublicPage) {
+  if (path === "/login") {
+    return isAuthenticated ? <Navigate to={APP_HOME} replace /> : <LoginPage />;
+  }
+
+  // Auth gate — non-public pages ask for an API key
+  if (!isAuthenticated && !PUBLIC_PATHS.has(path)) {
     return <LoginPage />;
   }
 
-  // Landing page — agent-first (root)
-  // AgentLandingHero is the eager, above-the-fold hero (onboard-ui aesthetic +
-  // machine-readable agent entrypoints); the existing LandingPage renders below it.
-  if (location.pathname === "/") {
-    return (
-      <Suspense fallback={<PageLoader />}>
-        <AgentLandingHero />
-        <LandingPage />
-      </Suspense>
-    );
+  if (path === "/") {
+    return <RootLanding />;
   }
 
-  if (location.pathname === "/start") {
+  if (path === "/start") {
     return (
       <Suspense fallback={<PageLoader />}>
         <StartPage />
@@ -332,7 +430,7 @@ function Shell() {
 
   // Zero-friction contributor signup. Public — bundled wallet+APIkey+
   // schedule signup via POST /api/contributors/quickstart.
-  if (location.pathname === "/earn") {
+  if (path === "/earn") {
     return (
       <Suspense fallback={<PageLoader />}>
         <EarnFromYourWorkPage />
@@ -340,7 +438,7 @@ function Shell() {
     );
   }
 
-  if (location.pathname === "/whitepaper") {
+  if (path === "/whitepaper") {
     return (
       <Suspense fallback={<PageLoader />}>
         <WhitepaperPage />
@@ -348,7 +446,7 @@ function Shell() {
     );
   }
 
-  if (location.pathname === "/go") {
+  if (path === "/go") {
     return (
       <Suspense fallback={<PageLoader />}>
         <AgentLinkPage />
@@ -359,7 +457,7 @@ function Shell() {
   // Conversational no-code onboarding (coord dc4d1ec8). Public so a layperson
   // can reach it from a marketing link without first signing in. The chat
   // page talks to POST /api/onboard/chat which is itself public on the gateway.
-  if (location.pathname === "/onboard/chat") {
+  if (path === "/onboard/chat") {
     return (
       <Suspense fallback={<PageLoader />}>
         <OnboardChatPage />
@@ -367,7 +465,7 @@ function Shell() {
     );
   }
 
-  if (location.pathname === "/operator/mobile") {
+  if (path === "/operator/mobile") {
     return (
       <Suspense fallback={<PageLoader />}>
         <OperatorMobilePage />
@@ -375,33 +473,20 @@ function Shell() {
     );
   }
 
-  // /app and /app/* — Spatial fallback web dashboard (with agent prompt banner)
-  if (location.pathname === "/app" || location.pathname.startsWith("/app/")) {
-    return <SpatialApp />;
+  // Workspaces. Each has its own address, so a deep link always opens its
+  // page; nothing held in memory overrides the URL.
+  switch (workspaceForPath(path)) {
+    case "spatial":
+      return <SpatialApp />;
+    case "agent":
+      return <AgentShell />;
+    default:
+      return <DashboardShell />;
   }
-
-  // Direct route to spatial interface (legacy compat)
-  if (location.pathname === "/spatial") {
-    return <SpatialApp />;
-  }
-
-  // /legacy/* — Legacy dashboard shell for bookmarked old routes
-  if (location.pathname.startsWith("/legacy/")) {
-    return <DashboardShell />;
-  }
-
-  if (interfaceMode === "spatial") {
-    return <SpatialApp />;
-  }
-
-  if (interfaceMode === "agent") {
-    return <AgentShell />;
-  }
-
-  return <DashboardShell />;
 }
 
 export function App() {
+  const boundary = useAccountBoundary();
   return (
     // Sentry.ErrorBoundary captures errors to Sentry before falling through
     // to the local ErrorBoundary for display. When VITE_SENTRY_DSN is not set,
@@ -411,7 +496,11 @@ export function App() {
         <WalletProvider>
           <QueryClientProvider client={queryClient}>
             <BrowserRouter>
-              <Shell />
+              {boundary.transition === "settled" ? (
+                <Shell key={boundary.epoch} />
+              ) : (
+                <AccountTransitionScreen failed={boundary.transition === "failed"} />
+              )}
             </BrowserRouter>
           </QueryClientProvider>
         </WalletProvider>

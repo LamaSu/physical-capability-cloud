@@ -16,7 +16,7 @@ import { useUIStore } from "../stores/ui-store.js";
 import { useSetupWizardStore } from "../stores/setup-wizard-store.js";
 import { apiPost } from "../lib/api.js";
 import type { ValidateResponse } from "../lib/api.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { gatewayUrl } from "../lib/gateway-base.js";
 
 /* ------------------------------------------------------------------ */
 /*  Step definitions                                                   */
@@ -50,7 +50,9 @@ function StepWelcome() {
 
   React.useEffect(() => {
     setGatewayStatus("checking");
-    fetch("http://localhost:3200/api/capabilities", { headers: { ...getAuthHeaders() } })
+    // Liveness only: /api/health is public, so no key is sent, and it goes to
+    // the configured gateway, never to a hard-coded localhost (N50).
+    fetch(gatewayUrl("/api/health"))
       .then((res) => {
         setGatewayStatus(res.ok ? "online" : "offline");
       })
@@ -103,7 +105,7 @@ function StepWelcome() {
           {gatewayStatus === "online" && (
             <>
               <div className="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse" />
-              <span className="text-xs text-green-400/70">Gateway connected at localhost:3200</span>
+              <span className="text-xs text-green-400/70">Gateway reachable</span>
               <GlowBadge color="green">online</GlowBadge>
             </>
           )}
@@ -469,14 +471,14 @@ function StepComplete() {
     { label: "Explore Capabilities", path: "/discover", icon: "\u2692" },
     { label: "Build a Contract", path: "/build", icon: "\u2696" },
     { label: "Add a Machine", path: "/onboard/wizard", icon: "\u2699" },
-    { label: "View Dashboard", path: "/", icon: "\u25A3" },
+    { label: "View Dashboard", path: "/dashboard", icon: "\u25A3" },
   ];
 
   return (
     <WizardStepContent
       title="Setup Complete"
       subtitle="Your PCCP instance is configured and ready to go."
-      onNext={() => navigate("/")}
+      onNext={() => navigate("/dashboard")}
       nextLabel="Go to Dashboard"
     >
       <div className="space-y-8 max-w-2xl">

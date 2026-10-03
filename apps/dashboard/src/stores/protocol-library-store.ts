@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type { ProtocolTemplate, ProtocolRun, AutomationStatus, TransferAgent } from "@pcc/spec";
 
 interface ProtocolLibraryState {
@@ -40,3 +41,6 @@ export const useProtocolLibraryStore = create<ProtocolLibraryState>((set) => ({
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setFilterTags: (filterTags) => set({ filterTags }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useProtocolLibraryStore);

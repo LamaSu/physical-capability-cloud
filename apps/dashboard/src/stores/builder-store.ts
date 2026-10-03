@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type { CapabilityType, ResolvedBuildOptions, BuilderContract, AssuranceTier } from "@pcc/spec";
 import { ContractBuilder, getRegisteredTypes } from "@pcc/contract-builder";
 
@@ -91,3 +92,6 @@ export const useBuilderStore = create<BuilderState>((set, get) => {
     }),
   };
 });
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useBuilderStore);
