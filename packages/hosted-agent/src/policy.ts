@@ -66,7 +66,6 @@ const WRITE = [
   "pcc_trilobio_build_config", "pcc_trilobio_validate_options", "pcc_trilobio_validate_script",
   "propose_composition", "submit_demand",
   "submit_feedback", "pcc_report", "report_anomaly", "report_protocol_failure", "resolve_anomaly", "emit_telemetry",
-  "send_diagnostics", "send_support_message", "reply_to_support_thread",
   "attach_operator_channel", "update_operator_channel", "test_operator_channels",
   "pcc_contributor_register", "pcc_schedule_publish", "pcc_schedule_evaluate", "pcc_training_manifest_set",
   "save_dashboard", "fork_dashboard", "update_dashboard", "archive_evidence",
@@ -81,7 +80,7 @@ const L2 = [
   "approve_registration", "reject_registration", "activate_registration", "prove_registration",
   "create_kernel", "create_capability", "pcc_dht_announce",
   "marketplace_create_listing", "marketplace_update_listing", "marketplace_delete_listing", "marketplace_place_order",
-  "pcc_job_complete", "update_job_status", "operator_update_job_status", "operator_push_evidence",
+  "pcc_job_complete",
   "pcc_submit_request", "pcc_decompose_request", "pcc_publish_request", "pcc_assign_node_operator",
   "pcc_update_node_status", "pcc_update_request", "pcc_cancel_request", "create_shipment",
   "mint_certificate", "near_intent", "lit_decrypt", "grant_evidence_access", "archive_encrypted_bundle", "revoke_api_key",
@@ -105,6 +104,23 @@ const NEVER = [
   "execute_composition", "pcc_submit_paid_job",
   // device impersonation: calls only the device's own runtime makes
   "kernel_heartbeat", "kernel_announce_capabilities", "operator_heartbeat",
+  // B1/B2 (round 4, 224b): the hosted agent never acts as a device or operator
+  // node. Every /api/operator/* tool is this property, whatever its method --
+  // a GET there is still the operator's own relay channel, not a dashboard
+  // read -- plus update_job_status, which (like operator_update_job_status)
+  // is "used by kernels to report job progress" per its own description, not
+  // the brain. Full audit of agent-package 2.19.1's /api/operator/* and
+  // device-only tools; astra named operator_poll_jobs (was unlisted, so
+  // confirmed-write), operator_push_evidence and operator_update_job_status
+  // (both were l2).
+  "operator_poll_jobs", "operator_push_evidence", "operator_update_job_status", "update_job_status",
+  "get_operator_machines", "get_operator_earnings", "get_operator_certs",
+  "send_diagnostics", "send_support_message", "check_support_replies", "reply_to_support_thread",
+  // the device relay's reads (lane review of round 4): the hosted agent never creates a relay call
+  // (pcc_relay_tool_call is never), so it holds no legitimate relay id or device context to read, and
+  // GET /api/ot2/tool-result/:id returns any call's result by id with no ownership check. Offering them
+  // would only add a cross-tenant read surface. The whole relay surface is device-side.
+  "pcc_get_tool_result", "pcc_get_tool_manifest",
   // credentials through the model, or provisioned by a tool: a key or session token in a tool result lands in the transcript
   // (redeem_invite takes a password and answers with a session token and new wallet material)
   "provision_api_key", "list_api_keys", "redeem_invite",

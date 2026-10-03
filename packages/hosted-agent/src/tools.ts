@@ -52,7 +52,12 @@ const SECRET_STRINGS: readonly RegExp[] = [
   /\bpcc_(live|test)_[A-Za-z0-9_-]{8,}/g,
   /\bsk-ant-[A-Za-z0-9_-]{8,}/g,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  // F1-b (round 4, 224a): the END marker is OPTIONAL — `[\s\S]*?` is lazy, so it
+  // still finds a REAL END marker when one exists (unchanged behavior), but when
+  // one is missing (truncated input, or the cap cut it before applying this
+  // pass) this now matches to the end of the bounded input instead of matching
+  // nothing at all, which is what let a cap-split key body survive whole.
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   // A bare JWT (header.payload.signature), wherever it sits: a session token has this shape.
   /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g,
 ];
@@ -223,11 +228,22 @@ const NOT_ALREADY_REDACTED = `(?!${REDACTED_ESCAPED})`;
  * four alternatives all require a leading quote or digit that `[` is not. A
  * NOT_ALREADY_REDACTED guard is therefore only needed where a value can start
  * with `{`/`[` structurally regardless of quoting — see BRACKET_TRIGGER.
+ *
+ * F1-a (round 4, 224a): each quoted alternative's closing delimiter is now
+ * `(?:<quote>|\\?$)` — the real quote OR (optionally one dangling backslash,
+ * for a value cut mid-escape) then the end of the (already-bounded) input.
+ * `scrubText` truncates BEFORE this pattern ever runs, so a value whose real
+ * closing quote fell past SCRUB_TEXT_LIMIT looks identical to one that was
+ * simply never closed — both now redact from the opening quote through the
+ * end of input, rather than failing to match at all and leaving the raw
+ * value (minus the first character the content class balked at) exposed.
+ * The `$` anchor is unanchored by `m`, so it means end of this whole string,
+ * i.e. end of the capped text — exactly the span that must be assumed secret.
  */
 const VALUE_PART =
-  '(?:\\\\"((?:(?!\\\\").)*)\\\\"' +
-  '|"((?:[^"\\\\]|\\\\.)*)"' +
-  "|'((?:[^'\\\\]|\\\\.)*)'" +
+  '(?:\\\\"((?:(?!\\\\").)*)(?:\\\\"|\\\\?$)' +
+  '|"((?:[^"\\\\]|\\\\.)*)(?:"|\\\\?$)' +
+  "|'((?:[^'\\\\]|\\\\.)*)(?:'|\\\\?$)" +
   "|(-?\\d+(?:\\.\\d+)?)(?![\\w.])" +
   '|([^\\s"\'\\\\&,;)\\]}{[]+))';
 
@@ -272,29 +288,33 @@ function redactAssignmentValue(
 /**
  * R1-b (round 3): after `authorization` or `proxy-authorization` specifically,
  * ANY single scheme word (`[A-Za-z][A-Za-z0-9._-]*` then whitespace) stays
- * visible and only the token after it is redacted — `Authorization: Token xyz`
- * reads as `Authorization: Token [redacted]`, whatever the scheme word is, not
- * just the fixed Basic/Bearer/Digest set. With no scheme word (one token
- * only), that token IS the value. No other name gets this scheme-skipping:
- * `token: abc def` redacts only `abc`, handled by FREE_TEXT_ASSIGNMENT above.
+ * visible — `Authorization: Token xyz` reads as `Authorization: Token
+ * [redacted]`, whatever the scheme word is, not just the fixed
+ * Basic/Bearer/Digest set. With no scheme word (one token only), that token
+ * IS the value.
+ *
+ * F2 (round 4, 224a): everything AFTER the scheme word (or, with none, the
+ * whole rest of the header) is redacted through the end of the LINE (`\r`,
+ * `\n` or end of the bounded input) — not just one VALUE_PART component.
+ * Digest (`username="…", realm="…", response="…"`) and AWS4-HMAC-SHA256
+ * (`Credential=…, SignedHeaders=…, Signature=…`) carry several
+ * comma-separated or quoted credential components; consuming only the first
+ * left the rest — including the actual response/signature — exposed. No
+ * other name gets this treatment: `token: abc def` still redacts only `abc`,
+ * via FREE_TEXT_ASSIGNMENT below, since a non-auth value has no "rest of the
+ * credential" to protect.
  */
 const AUTH_HEADER_NAME = "(?:proxy[ _-]?authorization|authorization)";
 const AUTH_HEADER_ASSIGNMENT = new RegExp(
-  `(?<![A-Za-z0-9])(${AUTH_HEADER_NAME})${SEP_PART}(?:([A-Za-z][A-Za-z0-9._-]*)\\s+)?${VALUE_PART}`,
+  `(?<![A-Za-z0-9])(${AUTH_HEADER_NAME})${SEP_PART}(?:([A-Za-z][A-Za-z0-9._-]*)\\s+)?([^\\r\\n]*)`,
   "gi",
 );
 
-function redactAuthHeader(
-  name: string,
-  sep: string,
-  scheme: string | undefined,
-  vEsc: string | undefined,
-  vDq: string | undefined,
-  vSq: string | undefined,
-  vNum: string | undefined,
-): string {
+function redactAuthHeader(name: string, sep: string, scheme: string | undefined, rest: string): string {
   const lead = scheme ? `${scheme} ` : "";
-  return `${name}${sep}${lead}${wrapRedacted(vEsc, vDq, vSq, vNum)}`;
+  // An empty rest (bare "Authorization:" with nothing after) has nothing to redact;
+  // this also keeps the replacement a true no-op there, rather than inventing a marker.
+  return rest.length === 0 ? `${name}${sep}${lead}` : `${name}${sep}${lead}${REDACTED}`;
 }
 
 /**
@@ -410,16 +430,7 @@ export function scrubText(text: string): string {
   });
   const noAuthHeaders = noCookies.replace(
     AUTH_HEADER_ASSIGNMENT,
-    (
-      _whole: string,
-      name: string,
-      sep: string,
-      scheme: string | undefined,
-      vEsc: string | undefined,
-      vDq: string | undefined,
-      vSq: string | undefined,
-      vNum: string | undefined,
-    ) => redactAuthHeader(name, sep, scheme, vEsc, vDq, vSq, vNum),
+    (_whole: string, name: string, sep: string, scheme: string | undefined, rest: string) => redactAuthHeader(name, sep, scheme, rest),
   );
   const noBrackets = redactBracketedValues(noAuthHeaders);
   return noBrackets.replace(

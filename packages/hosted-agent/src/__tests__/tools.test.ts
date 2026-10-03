@@ -576,6 +576,94 @@ describe("R9 (round 3 addendum 2, LOW): no double brackets", () => {
   });
 });
 
+describe("F1 (round 4, 224a HIGH): an unterminated or cap-split quoted secret value survives", () => {
+  it("F1-a: the reviewer's case — a double-quoted value cut by SCRUB_TEXT_LIMIT loses every 100-char run", () => {
+    const secret = "s".repeat(SCRUB_TEXT_LIMIT);
+    const out = scrubText(`token="${secret}"`);
+    expect(out).not.toContain("s".repeat(100));
+  });
+
+  it("F1-a: the same in each quote style — single-quoted and escaped-double, cap-split", () => {
+    expect(scrubText(`token='${"s".repeat(SCRUB_TEXT_LIMIT)}'`)).not.toContain("s".repeat(100));
+    expect(scrubText(`token=\\"${"s".repeat(SCRUB_TEXT_LIMIT)}\\"`)).not.toContain("s".repeat(100));
+  });
+
+  it("F1-a: an unterminated value with NO cap involved (just a missing closing quote) is still redacted", () => {
+    const out = scrubText('token="abcdefghij');
+    expect(out).not.toContain("abcdefghij");
+    expect(out).toContain(REDACTED);
+  });
+
+  it("F1-a: a value cut mid-escape (a trailing backslash) is still fully redacted", () => {
+    expect(scrubText('token="abcdefghij\\')).not.toContain("abcdefghij");
+  });
+
+  it("F1-a: a properly closed value, or one followed by more text, is unaffected", () => {
+    expect(scrubText('token="abc"')).toBe(`token="${REDACTED}"`);
+    expect(scrubText('token="abc" rest')).toBe(`token="${REDACTED}" rest`);
+  });
+
+  it("F1-b: a cap-split PEM block (its END marker missing or cut off) is redacted to the end of the bounded input", () => {
+    const out = scrubText(`-----BEGIN PRIVATE KEY-----${"s".repeat(SCRUB_TEXT_LIMIT)}`);
+    expect(out).not.toContain("s".repeat(100));
+  });
+
+  it("F1-b: a normal, terminated PEM block is still redacted whole (no regression)", () => {
+    expect(scrubText("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----")).toBe(REDACTED);
+  });
+
+  it("F1-c: a cap-split bracket value stays unterminated-safe (already true; pinned here at the cap)", () => {
+    const out = scrubText(`{"token": {"value": "${"s".repeat(SCRUB_TEXT_LIMIT)}"`);
+    expect(out).not.toContain("s".repeat(100));
+  });
+
+  it("F1: every case stays well under the timing bound at the cap", () => {
+    const cases = [
+      `token="${"s".repeat(SCRUB_TEXT_LIMIT)}`,
+      `-----BEGIN PRIVATE KEY-----${"s".repeat(SCRUB_TEXT_LIMIT)}`,
+      `{"token": {"a": "${"s".repeat(SCRUB_TEXT_LIMIT)}`,
+    ];
+    for (const input of cases) {
+      const t0 = Date.now();
+      scrubText(input);
+      expect(Date.now() - t0).toBeLessThan(200);
+    }
+  });
+});
+
+describe("F2 (round 4, 224a HIGH): structured Authorization credentials keep their later components", () => {
+  it("F2: the reviewer's Digest case — every component is redacted, not just the first", () => {
+    expect(scrubText('Authorization: Digest username="alice", realm="pcc", response="opaqueA4secret"')).not.toContain("opaqueA4secret");
+  });
+
+  it("F2: AWS4-HMAC-SHA256 (comma-separated Credential/SignedHeaders/Signature)", () => {
+    const out = scrubText(
+      "Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20230101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=opaqueA5secret",
+    );
+    expect(out).not.toContain("opaqueA5secret");
+    expect(out).toContain("AWS4-HMAC-SHA256");
+  });
+
+  it("F2: Basic and Bearer give the SAME result as before (single-token schemes unaffected)", () => {
+    expect(scrubText("Authorization: Basic xyz")).toBe(`Authorization: Basic ${REDACTED}`);
+    expect(scrubText("Authorization: Bearer xyz")).toBe(`Authorization: Bearer ${REDACTED}`);
+  });
+
+  it("F2: redaction stops at the line end — a second line survives untouched", () => {
+    expect(scrubText("Authorization: Bearer xyz\nGET /api/foo HTTP/1.1")).toBe(`Authorization: Bearer ${REDACTED}\nGET /api/foo HTTP/1.1`);
+  });
+
+  it("F2: Proxy-Authorization gets the same treatment", () => {
+    expect(scrubText('Proxy-Authorization: Digest username="bob", response="opaqueA6secret"')).not.toContain("opaqueA6secret");
+  });
+
+  it("F2: an Authorization header as the VALUE of a quoted JSON pair is already fully redacted (the quoted-value path, not this one)", () => {
+    const out = scrubText('{"authorization": "Digest username=\\"alice\\", response=\\"opaqueA7secret\\""}');
+    expect(out).not.toContain("opaqueA7secret");
+    expect(out).toBe('{"authorization": "[redacted]"}');
+  });
+});
+
 describe("lane review (round 3): a credential in the URL username position, and escaped-key bracket quoting", () => {
   it("a token used as the URL username (no password) is redacted: the git-over-https form", () => {
     expect(scrubText("git clone https://ghp_opaqueU1secret@github.com/o/r.git failed")).toBe(

@@ -5,7 +5,7 @@ import { BudgetMeter, type BudgetCaps, type MessagesClient } from "../budget.js"
 import type { PinnedPack } from "../pack.js";
 import type { ResolvePrincipal } from "../principal.js";
 import type { ToolTransport } from "../tools.js";
-import { buildServer } from "../server.js";
+import { buildServer, errorCategory } from "../server.js";
 import { HostedSession, type SessionDeps } from "../session.js";
 
 const KEY = "pcc_live_ServerTestKey0001";
@@ -40,6 +40,7 @@ function setup(
     listError?: Error;
     reportError?: Error;
     trustProxy?: number | boolean;
+    toolGate?: Promise<void>;
   } = {},
 ) {
   const replies = [...(o.replies ?? [])];
@@ -57,6 +58,7 @@ function setup(
       return PACK.tools.map((t) => t.def.name);
     },
     callTool: async (n) => {
+      if (o.toolGate) await o.toolGate;
       if (o.failTool) throw new Error(o.failTool);
       calls.push(n);
       return o.toolResult ?? { ok: true };
@@ -206,6 +208,44 @@ describe("the hosted agent's HTTP surface", () => {
     expect((await say(app, id, "hi")).statusCode).toBe(404);
   });
 
+  it("B3 (round 4, 224b MEDIUM): DELETE during an in-flight /session/confirm answers 409, not 200, and closes nothing", async () => {
+    let release!: () => void;
+    const toolGate = new Promise<void>((r) => (release = r));
+    const { app, transport, reports } = setup({ replies: [toolUse("onboard_machine"), text("confirmed")], toolGate });
+    const id = await open(app, KEY);
+    const turn = await say(app, id, "register");
+    const [held] = turn.json().pending as Array<{ token: string }>;
+    const inFlightConfirm = app.inject({ method: "POST", url: "/session/confirm", headers: { "x-hosted-session": id }, payload: { token: held!.token } });
+    await new Promise((r) => setTimeout(r, 20));
+    const busyDelete = await app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(busyDelete.statusCode).toBe(409);
+    expect(busyDelete.json()).toEqual({ error: "session_busy" });
+    expect(transport.closes).toBe(0); // the transport was not closed
+    expect(reports).toHaveLength(0); // no attempt report was emitted
+    release();
+    expect((await inFlightConfirm).statusCode).toBe(200);
+    // cleared when confirm settles: the session is usable (and closeable) again
+    const res = await app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(res.statusCode).toBe(200);
+    expect(transport.closes).toBe(1);
+  });
+
+  it("B3: the busy flag set around /session/confirm is cleared in finally even when the tool call throws", async () => {
+    let release!: () => void;
+    const toolGate = new Promise<void>((r) => (release = r));
+    const { app } = setup({ replies: [toolUse("onboard_machine"), text("confirmed")], toolGate, failTool: "pcc_live_SyntheticToolFailure0007" });
+    const id = await open(app, KEY);
+    const turn = await say(app, id, "register");
+    const [held] = turn.json().pending as Array<{ token: string }>;
+    const inFlightConfirm = app.inject({ method: "POST", url: "/session/confirm", headers: { "x-hosted-session": id }, payload: { token: held!.token } });
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    expect((await inFlightConfirm).statusCode).toBe(502); // the throwing tool call still answers, just as an error
+    // not left stuck busy: a DELETE right after answers 200, not a lingering 409
+    const res = await app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(res.statusCode).toBe(200);
+  });
+
   it("confirm and reject by body token; an unknown token is refused", async () => {
     const { app, calls } = setup({ replies: [toolUse("onboard_machine"), text("confirm?"), toolUse("onboard_machine"), text("confirm?")] });
     const id = await open(app, KEY);
@@ -324,6 +364,65 @@ describe("a failed session open leaks no upstream detail (Q1-B)", () => {
     expect(res.statusCode).toBe(502);
     expect(res.json()).toEqual(generic);
     expect(res.body).not.toContain("pcc_live_");
+  });
+});
+
+describe("F3 (round 4, 224a MEDIUM): every log line carries a closed-set category, never a raw Error.name", () => {
+  it("F3: the reviewer's case at the session-open-failed site — a credential-shaped err.name never reaches the log", async () => {
+    const err = new Error("down");
+    err.name = "pcc_live_opaqueLogSecret";
+    const { app, logs } = setup({ connectError: err });
+    await app.inject({ method: "POST", url: "/session" });
+    expect(logs.join("\n")).not.toContain("pcc_live_");
+    expect(logs.join("\n")).toContain("session-open-failed");
+    expect(JSON.parse(logs[0]!)).toEqual({ event: "session-open-failed", error: "Error" });
+  });
+
+  it("F3: the reviewer's case at the global catch-all (setErrorHandler) site — a report-sink failure propagates there uncaught", async () => {
+    // HostedSession.close() has no catch around deps.report(); DELETE /session has none around
+    // close() either, so this reaches Fastify's own setErrorHandler — the OTHER flagged site.
+    const err = new Error("sink down");
+    err.name = "pcc_live_opaqueLogSecret2";
+    const { app, logs } = setup({ reportError: err });
+    const id = await open(app);
+    const res = await app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(res.statusCode).toBe(502);
+    expect(logs.join("\n")).not.toContain("pcc_live_");
+    const serverErrorLine = logs.find((l) => l.includes("server-error"))!;
+    expect(serverErrorLine).toBeDefined();
+    expect(JSON.parse(serverErrorLine)).toEqual({ event: "server-error", error: "Error" });
+  });
+
+  it("F3: errorCategory returns a CLOSED-SET value, never the name itself — a name equal to a member plus a secret suffix misses and falls to Error", () => {
+    const suffixed = new Error("x");
+    suffixed.name = "ConfigErrorpcc_live_SyntheticSuffix0004";
+    const category = errorCategory(suffixed);
+    expect(category).toBe("Error");
+    expect(category).not.toContain("pcc_live_");
+  });
+
+  it("F3: a genuine closed-set name is recognized exactly", () => {
+    const configLike = new Error("x");
+    configLike.name = "ConfigError";
+    expect(errorCategory(configLike)).toBe("ConfigError");
+    expect(errorCategory(new TypeError("bad"))).toBe("TypeError");
+    expect(errorCategory("not even an object")).toBe("other");
+    expect(errorCategory({ name: "pcc_live_plainobject" })).toBe("other");
+  });
+
+  it("F3: a getter-based name is never invoked unsafely — invoking it cannot leak or throw out of errorCategory", () => {
+    const throwing = new Error("x");
+    Object.defineProperty(throwing, "name", {
+      get() {
+        throw new Error("pcc_live_SyntheticGetterTrap0005");
+      },
+    });
+    expect(() => errorCategory(throwing)).not.toThrow();
+    expect(errorCategory(throwing)).toBe("Error");
+
+    const nonString = new Error("x");
+    Object.defineProperty(nonString, "name", { get: () => ({ toString: () => "pcc_live_SyntheticObjectTrap0006" }) });
+    expect(errorCategory(nonString)).toBe("Error");
   });
 });
 
@@ -643,6 +742,21 @@ describe("an old session cannot escape idle expiry (Q6-A)", () => {
     expect((await app.inject({ method: "GET", url: "/session/pending", headers: { "x-hosted-session": id } })).statusCode).toBe(200);
     release();
     expect((await first).statusCode).toBe(200);
+  });
+
+  it("B3 (round 4, 224b): a confirm still in flight is not expired under its own feet either", async () => {
+    const clock = { t: 1_000 };
+    let release!: () => void;
+    const toolGate = new Promise<void>((r) => (release = r));
+    const { app } = setup({ clock, replies: [toolUse("onboard_machine"), text("confirmed")], toolGate });
+    const id = await open(app, KEY);
+    const [held] = (await say(app, id, "register")).json().pending as Array<{ token: string }>;
+    const inFlightConfirm = confirmCall(app, id, held!.token);
+    await new Promise((r) => setTimeout(r, 20));
+    clock.t += 120_000;
+    expect((await app.inject({ method: "GET", url: "/session/pending", headers: { "x-hosted-session": id } })).statusCode).toBe(200);
+    release();
+    expect((await inFlightConfirm).statusCode).toBe(200);
   });
 });
 

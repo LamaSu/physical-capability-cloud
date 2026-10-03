@@ -24,7 +24,9 @@
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { createHash } from "node:crypto";
+import { BudgetStop } from "./budget.js";
 import { ConfirmationRefused } from "./confirm.js";
+import { PackPinMismatch } from "./pack.js";
 import type { ResolvePrincipal } from "./principal.js";
 import { HostedSession, PackMismatch, type SessionDeps } from "./session.js";
 import { scrubText } from "./tools.js";
@@ -54,6 +56,13 @@ interface Entry {
   lastUsed: number;
   turns: number;
   busy: boolean;
+  /** B3 (round 4, 224b): a COUNT, not a flag shared with `busy` -- Q6-B (an
+   * outcome confirmed over HTTP while a later message is still in flight)
+   * deliberately lets confirm and a message turn run concurrently, so confirm
+   * must never check OR clear the other's `busy`. This only exists so DELETE
+   * can see "a confirm is in flight" too; a count (not a bool) survives two
+   * overlapping confirms without the first's `finally` clearing the second's. */
+  confirming: number;
 }
 
 const SESSION_HEADER = "x-hosted-session";
@@ -81,6 +90,48 @@ function reportedPackShape(reported: string | undefined): { reportedShape: Repor
   return { reportedShape, reportedSha256Prefix };
 }
 
+/** F3 (round 4, 224a): a CLOSED set. `other` is anything that is not even an
+ * Error-shaped object; every Error-shaped value gets at least `"Error"`. */
+export type ErrorCategory = "ConfigError" | "PackMismatch" | "PackPinMismatch" | "BudgetStop" | "TimeoutError" | "AbortError" | "TypeError" | "Error" | "other";
+
+/** Reads `.name` defensively: a try/catch around a potentially throwing
+ * getter, and a type check so a getter that returns a non-string (an object
+ * whose `toString()` carries a secret, say) can never reach a comparison. */
+function safeName(err: unknown): string | undefined {
+  try {
+    const n = (err as { name?: unknown } | null)?.name;
+    return typeof n === "string" ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * F3 (round 4, 224a): every log line carries a category from the CLOSED set
+ * above, never `Error.name` itself — `.name` is mutable, and an upstream or a
+ * caller can set it to anything, including a credential (the reviewer's
+ * reproduction: `err.name = "pcc_live_..."`). Decided by `instanceof` against
+ * this service's own classes (`ConfigError` is the one exception: it lives in
+ * main.ts, which imports server.ts, so importing it back here would cycle —
+ * matched by an EXACT name comparison instead), or the platform's own
+ * `TypeError`/`DOMException`-shaped `TimeoutError`/`AbortError`. The compared
+ * value is NEVER itself returned or logged: a name that merely CONTAINS one
+ * of these words plus a secret suffix matches none of the `===` comparisons
+ * and correctly falls through to the generic `"Error"`.
+ */
+export function errorCategory(err: unknown): ErrorCategory {
+  if (err instanceof PackMismatch) return "PackMismatch";
+  if (err instanceof PackPinMismatch) return "PackPinMismatch";
+  if (err instanceof BudgetStop) return "BudgetStop";
+  if (err instanceof TypeError) return "TypeError";
+  if (!(err instanceof Error)) return "other";
+  const name = safeName(err);
+  if (name === "TimeoutError") return "TimeoutError";
+  if (name === "AbortError") return "AbortError";
+  if (name === "ConfigError") return "ConfigError";
+  return "Error";
+}
+
 export function buildServer(opts: ServerOptions): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024, trustProxy: opts.trustProxy ?? false });
   const sessions = new Map<string, Entry>();
@@ -96,11 +147,11 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
   app.setErrorHandler((err, _req, reply) => {
     const status = (err as { statusCode?: number }).statusCode ?? 500;
     if (status < 500) return reply.send(err);
-    log(JSON.stringify({ event: "server-error", error: err instanceof Error ? err.name : "unknown" }));
+    log(JSON.stringify({ event: "server-error", error: errorCategory(err) }));
     return reply.code(502).send(generic);
   });
 
-  const expired = (entry: Entry): boolean => !entry.busy && entry.lastUsed + idleMs < now();
+  const expired = (entry: Entry): boolean => !entry.busy && entry.confirming === 0 && entry.lastUsed + idleMs < now();
 
   async function sweepIdle(): Promise<void> {
     for (const [id, entry] of sessions) {
@@ -185,11 +236,11 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
         const { reportedShape, reportedSha256Prefix } = reportedPackShape(err.reported);
         log(JSON.stringify({ event: "pack-mismatch", expected: err.expected, reportedShape, reportedSha256Prefix }));
       } else {
-        log(JSON.stringify({ event: "session-open-failed", error: err instanceof Error ? err.name : "unknown" }));
+        log(JSON.stringify({ event: "session-open-failed", error: errorCategory(err) }));
       }
       return reply.code(502).send(generic);
     }
-    sessions.set(session.id, { session, lastUsed: now(), turns: 0, busy: false });
+    sessions.set(session.id, { session, lastUsed: now(), turns: 0, busy: false, confirming: 0 });
     return reply.code(201).send({ session: session.id, signedIn: credential !== null });
   });
 
@@ -225,11 +276,20 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
     if (!entry) return;
     const token = req.body?.token;
     if (typeof token !== "string") return reply.code(400).send({ error: "token_required" });
+    // B3 (round 4, 224b): confirm() awaits the confirmed tool call itself, so this is
+    // in-flight too -- but NOT via `busy`: Q6-B deliberately lets a confirm resolve
+    // while a LATER message turn is still in flight (the outcome then reaches the
+    // model on the turn after). `confirming` only marks the session for DELETE (and
+    // idle-expiry, see `expired`); it never gates or is gated by `busy`.
+    entry.confirming += 1;
     try {
       return { result: await entry.session.confirm(token) };
     } catch (err) {
       if (err instanceof ConfirmationRefused) return reply.code(409).send({ error: err.reason });
       return reply.code(502).send({ error: "action_failed", message: scrubText(err instanceof Error ? err.message : String(err)) });
+    } finally {
+      entry.confirming -= 1;
+      entry.lastUsed = now();
     }
   });
 
@@ -254,7 +314,8 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
     // underneath it would report zero/incomplete tokens and drop the transport out from
     // under tool calls the turn may still attempt. Refuse, close nothing, and leave the
     // session exactly as it was: the caller may retry the DELETE once the turn answers.
-    if (entry.busy) return reply.code(409).send({ error: "session_busy" });
+    // B3 (round 4, 224b): a confirm awaiting its tool call is in flight the same way.
+    if (entry.busy || entry.confirming > 0) return reply.code(409).send({ error: "session_busy" });
     sessions.delete(req.headers[SESSION_HEADER] as string);
     return await entry.session.close();
   });

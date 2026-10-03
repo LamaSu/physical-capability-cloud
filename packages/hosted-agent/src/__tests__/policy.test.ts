@@ -65,10 +65,58 @@ describe("the policy table against the served agent package", () => {
 
   it.each([
     "marketplace_place_order", "distribute_royalties", "create_kernel", "create_capability",
-    "prove_registration", "activate_registration", "pcc_job_complete", "operator_push_evidence", "claim_bounty",
+    "prove_registration", "activate_registration", "pcc_job_complete", "claim_bounty",
     "release_milestone", "revoke_api_key",
   ])("%s is L2 (money, work, authority)", (name) => {
     expect(level(name)).toBe("l2");
+  });
+
+  // B1 (round 4, 224b, CRITICAL) + B2 (HIGH): the property is "the hosted agent
+  // NEVER acts as a device or operator node" -- every /api/operator/* tool
+  // (whatever its method: a GET there is just as much the operator's own
+  // channel as a POST) plus update_job_status, which its own description
+  // marks as "used by kernels to report job progress", not the brain. These
+  // let the agent impersonate the operator's relay client or a device's own
+  // kernel reporting its OWN status/evidence/heartbeat/jobs -- a class astra
+  // named at operator_poll_jobs (was: confirmed-write), operator_push_evidence
+  // and operator_update_job_status (were: l2); the full audit of agent-package
+  // 2.19.1 found eight more of the same shape, unlisted or in WRITE.
+  it.each([
+    "operator_poll_jobs", // GET /api/operator/jobs (B1 CRITICAL: was unlisted -> confirmed-write)
+    "operator_push_evidence", // POST /api/operator/evidence (B2 HIGH: was l2)
+    "operator_update_job_status", // POST /api/operator/job-status (B2 HIGH: was l2)
+    "update_job_status", // PATCH /api/jobs/{jobId}/status (was l2: "used by kernels to report job progress")
+    "get_operator_machines", // GET /api/operator/machines (was unlisted -> confirmed-write)
+    "get_operator_earnings", // GET /api/operator/earnings (was unlisted -> confirmed-write)
+    "get_operator_certs", // GET /api/operator/certifications (was unlisted -> confirmed-write)
+    "send_diagnostics", // POST /api/operator/diagnostics (was write)
+    "send_support_message", // POST /api/operator/support (was write)
+    "check_support_replies", // GET /api/operator/support/mine (was unlisted -> confirmed-write)
+    "reply_to_support_thread", // POST /api/operator/support/{threadId}/reply (was write)
+  ])("%s is never offered: the hosted agent never acts as a device or operator node", (name) => {
+    expect(level(name)).toBe("never");
+  });
+
+  it("B1: operator_poll_jobs is never, and is not left in write/l2 as a second listing", () => {
+    expect(level("operator_poll_jobs")).toBe("never");
+    expect(DEFAULT_TOOL_POLICY.write.has("operator_poll_jobs")).toBe(false);
+    expect(DEFAULT_TOOL_POLICY.l2.has("operator_poll_jobs")).toBe(false);
+  });
+
+  it("B2: operator_push_evidence and operator_update_job_status are never, not l2", () => {
+    expect(level("operator_push_evidence")).toBe("never");
+    expect(level("operator_update_job_status")).toBe("never");
+    expect(DEFAULT_TOOL_POLICY.l2.has("operator_push_evidence")).toBe(false);
+    expect(DEFAULT_TOOL_POLICY.l2.has("operator_update_job_status")).toBe(false);
+  });
+
+  // The device relay's reads are never too (lane review of round 4): the hosted agent never creates a
+  // relay call, so it has no legitimate relay id to poll, and GET /api/ot2/tool-result/:id has no
+  // ownership check. pcc_relay_tool_call, pcc_relay_generic_tool_call, kernel_heartbeat and
+  // operator_heartbeat were already never.
+  it("the device relay's reads (pcc_get_tool_result, pcc_get_tool_manifest) are never offered", () => {
+    expect(level("pcc_get_tool_result")).toBe("never");
+    expect(level("pcc_get_tool_manifest")).toBe("never");
   });
 
   it.each(["setup_register_device", "onboard_machine", "pcc_onboard_session_start", "pcc_report"])(
