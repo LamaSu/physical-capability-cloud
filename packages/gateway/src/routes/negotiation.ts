@@ -21,7 +21,7 @@ import { schema, eq } from "@pcc/store";
 import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
 import { PricingCalculator } from "@pcc/contract-builder";
-import { applyPricingRules, sanitizeText } from "@pcc/kernel";
+import { sanitizeText } from "@pcc/kernel";
 import { ChallengeService } from "@pcc/verifier";
 import type {
   OperatorPolicy,
@@ -39,6 +39,13 @@ import {
   getCapabilityDescriptor,
   checkKernelOffersCapability,
 } from "../services/ad-hoc-pricing.js";
+import {
+  selectRegisteredCapability,
+  computeRegisteredQuote,
+  exactBondCents,
+  overrideOrTierDefault,
+  validChallengeWindowSeconds,
+} from "../services/quote-pricing.js";
 // Liveness gate lives in one shared module so the A2A commit path (a2a-tasks.ts)
 // enforces the identical rule — see session-liveness.ts (N1).
 import { assertSessionLive as assertLive } from "./session-liveness.js";
@@ -154,6 +161,24 @@ export async function negotiationRoutes(app: FastifyInstance) {
     }
 
     // ── Up-front validation (4xx, not 500) ─────────────────────────
+    // N100: when a capabilityId is given, it must be the session's TYPE and on
+    // the session's KERNEL — checked here, through the SAME shared evaluator
+    // /quote uses, BEFORE any insert. Previously only the TYPE was checked (via
+    // getCapabilityDescriptor below), never the KERNEL: a session on kernel A,
+    // given kernel B's capability id of the same type, was quoted at B's price.
+    // Runs before the older checks below so the specific 409 (not a generic
+    // 404 capability_not_buildable) is what the caller sees.
+    if (body.capabilityId) {
+      const sel = selectRegisteredCapability(getRepos().capabilities, {
+        kernelId: body.kernelId,
+        capabilityType: body.capabilityType,
+        capabilityId: body.capabilityId,
+      });
+      if (!sel.ok) {
+        return reply.status(sel.status).send({ error: sel.error, message: sel.message });
+      }
+    }
+
     // Wrong-kernel check: refuse if the chosen kernel doesn't actually
     // offer this capability type. Today the only signal we had was a
     // foreign-key constraint blowing up downstream in 500. Now the
@@ -462,53 +487,55 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
         const policy = (policyRow?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
 
-        // Compute base price. Built-in templates use basePricingHints;
-        // ad-hoc capabilities derive baseCost from the capability row's
-        // pricingModel (the operator's own pricing) — falling back to 10
-        // only when neither source has a number.
-        const template = getTemplate(row.capabilityType);
-        let basePrice: number;
-        let quoteCurrency = "USDC";
-        if (template?.basePricingHints?.basePrice) {
-          basePrice = parseFloat(template.basePricingHints.basePrice);
-          quoteCurrency = template.basePricingHints.currency ?? "USDC";
-        } else {
-          // Ad-hoc path. Look up the capability row to find pricing.
-          const adHoc = getCapabilityDescriptor(
-            row.capabilityType,
-            row.capabilityId ?? undefined,
-          );
-          if (adHoc.kind === "ad-hoc") {
-            basePrice = parseFloat(adHoc.descriptor.basePrice);
-            quoteCurrency = adHoc.descriptor.currency;
-          } else {
-            basePrice = 10;
-          }
+        // N100: the registered price, through the SAME shared evaluator discovery and A2A
+        // use (quote-pricing.ts) — never the template's basePricingHints, never a default
+        // of 10. capabilityId (if the session has one) is checked against both the
+        // session's TYPE and its KERNEL — the N98 gap where a session on kernel A, given
+        // kernel B's capability id of the same type, was quoted at B's price.
+        const sel = selectRegisteredCapability(getRepos().capabilities, {
+          kernelId: row.kernelId,
+          capabilityType: row.capabilityType,
+          capabilityId: row.capabilityId ?? undefined,
+        });
+        if (!sel.ok) {
+          return reply.status(sel.status).send({ error: sel.error, message: sel.message });
         }
 
-        // Apply operator pricing rules
+        // Facts: quantity and material only, as in discovery. This route takes no
+        // authenticated buyer history (userAgentId is the caller's claim) and no start
+        // time, so rush, offpeak and loyalty rules NEVER apply — pricingRulesThatApply
+        // only ever matches minQuantity/material.
         const selections = row.selections as Record<string, unknown>;
-        const quantity = (selections.quantity as number) ?? 1;
-        const { adjustedPrice, adjustments } = applyPricingRules(
-          basePrice * quantity,
-          policy.pricingRules.filter((r) => r.enabled),
-        );
+        const quantityRaw = selections.quantity;
+        const quantity = quantityRaw === undefined ? 1 : quantityRaw;
+        const cq = computeRegisteredQuote({ capability: sel.capability, quantity, material: selections.material, rules: policy.pricingRules });
+        if (!cq.ok) {
+          return reply.status(cq.status).send(cq.body);
+        }
 
-        // Determine assurance tier and smart contract params
+        // Determine assurance tier and smart contract params (unchanged).
         const assuranceTier = (selections.evidenceTier === "full" ? 2 : selections.evidenceTier === "basic" ? 1 : 0);
-        const bondPercent = policy.bondPercentOverride || [0, 5, 15, 25][assuranceTier] || 0;
-        const challengeWindowSeconds = policy.challengeWindowOverride || [0, 3600, 7200, 14400][assuranceTier] || 3600;
+        // Both overrides are validated BEFORE defaulting: 0 or absent means the tier default; any other
+        // value must be valid, or the quote is refused with the session untouched (astra 234 F1).
+        const cw = validChallengeWindowSeconds(
+          overrideOrTierDefault(policy.challengeWindowOverride, [0, 3600, 7200, 14400][assuranceTier] || 3600),
+        );
+        if (!cw.ok) {
+          return reply.status(cw.status).send({ error: cw.error, reason: cw.reason });
+        }
+        const challengeWindowSeconds = cw.seconds;
+        const bond = exactBondCents(cq.totalCents, overrideOrTierDefault(policy.bondPercentOverride, [0, 5, 15, 25][assuranceTier]));
+        if (!bond.ok) {
+          return reply.status(bond.status).send({ error: bond.error, reason: bond.reason });
+        }
 
         const quote = {
-          basePrice: basePrice.toFixed(2),
-          adjustments: adjustments.map((a) => ({
-            ruleId: a.ruleId,
-            label: a.label,
-            impact: a.amount.toFixed(2),
-          })),
-          totalPrice: adjustedPrice.toFixed(2),
-          currency: quoteCurrency,
-          bondAmount: ((adjustedPrice * bondPercent) / 100).toFixed(2),
+          basePrice: cq.basePrice,
+          adjustments: cq.adjustments,
+          totalPrice: cq.totalPrice,
+          currency: cq.currency,
+          ...(cq.unquotedUsage ? { unquotedUsage: cq.unquotedUsage } : {}),
+          bondAmount: bond.bondAmount,
           challengeWindowSeconds,
           // Persist the agreed assurance tier (derived from evidenceTier above)
           // so /review copies it verbatim instead of re-deriving it from the

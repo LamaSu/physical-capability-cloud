@@ -32,11 +32,14 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   });
 }
 import { schema, eq, and, sql } from "@pcc/store";
-import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
 import { PricingCalculator } from "@pcc/contract-builder";
-import { applyPricingRules, sanitizeText } from "@pcc/kernel";
+import { sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
+import {
+  selectRegisteredCapability,
+  computeRegisteredQuote,
+} from "../services/quote-pricing.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
@@ -762,26 +765,33 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         sanitizedSelections[key] = typeof value === "string" ? sanitizeText(value) : value;
       }
 
-      // Auto-compute quote
-      const template = getTemplate(capabilityType);
-      const basePrice = template?.basePricingHints?.basePrice
-        ? parseFloat(template.basePricingHints.basePrice)
-        : 10;
-      const quantity = (sanitizedSelections.quantity as number) ?? 1;
-      const { adjustedPrice, adjustments } = applyPricingRules(
-        basePrice * quantity,
-        policy.pricingRules.filter((r) => r.enabled),
-      );
+      // The quote is the operator's REGISTERED price for the selected capability (N98), through the
+      // SAME shared evaluator negotiation and A2A use (N100): never a template hint, never a default.
+      // Exactly one capability of this type on this kernel (no capabilityId on this route); job
+      // creation (createJobFromSession) then resolves the same one.
+      const sel = selectRegisteredCapability(getRepos().capabilities, { kernelId, capabilityType });
+      if (!sel.ok) {
+        return reply.status(sel.status).send({ error: sel.error, message: sel.message });
+      }
+      const quantityRaw = sanitizedSelections.quantity;
+      const quantity = quantityRaw === undefined ? 1 : quantityRaw;
+      // computeRegisteredQuote runs, in order: registeredQuotePrice (F2 currency / declared-price
+      // checks), quantity (400 invalid_quantity), validatePricingRules (F4 — every rule validated
+      // before any rule is applied, whether enabled or not, all before any side effect: no session
+      // row exists yet), then pricingRulesThatApply + exactQuoteTotal (F1 — bigint end to end).
+      const cq = computeRegisteredQuote({ capability: sel.capability, quantity, material: sanitizedSelections.material, rules: policy.pricingRules });
+      if (!cq.ok) {
+        return reply.status(cq.status).send(cq.body);
+      }
 
       const quote = {
-        basePrice: basePrice.toFixed(2),
-        adjustments: adjustments.map((a) => ({
-          ruleId: a.ruleId,
-          label: a.label,
-          impact: a.amount.toFixed(2),
-        })),
-        totalPrice: adjustedPrice.toFixed(2),
-        currency: template?.basePricingHints?.currency ?? "USDC",
+        basePrice: cq.basePrice,
+        adjustments: cq.adjustments,
+        totalPrice: cq.totalPrice,
+        currency: cq.currency,
+        // Rates the registered pricing declares per unit of usage, which a discovery quote cannot
+        // measure: shown so the buyer sees them, and not charged by this quote.
+        ...(cq.unquotedUsage ? { unquotedUsage: cq.unquotedUsage } : {}),
         bondAmount: "0.00",
         challengeWindowSeconds: 0,
         validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
