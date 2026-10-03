@@ -56,10 +56,16 @@ export async function operatorRoutes(app: FastifyInstance) {
     );
   });
 
-  // Certifications: there is no certification store.
+  // Certifications: registration carries the registrant's own certification claims
+  // (packages/db/src/schema/onboarding.ts machineRegistrations.operator.certifications),
+  // but nothing verifies them. There is no authoritative, verified certification read.
   app.get("/api/operator/certifications", async (_req, reply) => {
     return reply.code(501).send(
-      notAvailable("Operator certifications are not recorded.", "There is no certification store yet.", []),
+      notAvailable(
+        "There is no verified operator-certification read.",
+        "Certifications given at registration are the registrant's own claims, stored with the registration and not verified.",
+        [],
+      ),
     );
   });
 
@@ -251,8 +257,16 @@ export async function operatorRoutes(app: FastifyInstance) {
       kernelId?: string; agentId?: string; capabilityType?: string;
       parameters?: Record<string, unknown>; autoApprove?: boolean;
     };
-    if (!kernelId || !agentId) {
+    if (typeof kernelId !== "string" || !kernelId || typeof agentId !== "string" || !agentId) {
       return reply.status(400).send({ error: "kernelId and agentId required" });
+    }
+    // The body above is only cast, not validated: a wrong-shaped value would otherwise be
+    // persisted unchanged even though the public type requires a string/plain-object.
+    if (capabilityType !== undefined && capabilityType !== null && (typeof capabilityType !== "string" || !capabilityType)) {
+      return reply.status(400).send({ error: "invalid_body", message: "capabilityType must be a non-empty string." });
+    }
+    if (parameters !== undefined && (parameters === null || typeof parameters !== "object" || Array.isArray(parameters))) {
+      return reply.status(400).send({ error: "invalid_body", message: "parameters must be a plain object." });
     }
     try {
       const { db } = getStore();
@@ -293,6 +307,12 @@ export async function operatorRoutes(app: FastifyInstance) {
     for (const [name, value] of [["kernelId", query.kernelId], ["status", query.status]] as const) {
       if (value !== undefined && typeof value !== "string") {
         return reply.code(400).send({ error: "invalid_query", message: `${name} must be given once, as a single value.` });
+      }
+      // An empty or whitespace-only filter is a client error, not an absent filter:
+      // treating it as "no filter" would silently broaden the query past what the caller
+      // asked for.
+      if (typeof value === "string" && value.trim() === "") {
+        return reply.code(400).send({ error: "invalid_query", message: `${name} must not be empty.` });
       }
     }
     const kernelId = query.kernelId as string | undefined;
