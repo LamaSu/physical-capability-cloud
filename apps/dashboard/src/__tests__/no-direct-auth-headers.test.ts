@@ -317,7 +317,7 @@ function bindingsOf(name: string, sf: ts.SourceFile): ts.Expression[] {
       const name = memberName(n);
       const base = unwrapped(n.expression);
       if (name === null) return null;
-      if (base.kind === ts.SyntaxKind.ThisKeyword) return `this.${name}`;
+      if (base.kind === ts.SyntaxKind.ThisKeyword) return `${thisScope(base)}.${name}`;
       return ts.isIdentifier(base) ? `${base.text}.${name}` : null;
     };
     walk(sf, (n) => {
@@ -333,7 +333,7 @@ function bindingsOf(name: string, sf: ts.SourceFile): ts.Expression[] {
       }
       // A class field, under this.f, and a static one under Class.f too (astra A03h F1).
       if (ts.isPropertyDeclaration(n) && n.initializer && (ts.isIdentifier(n.name) || ts.isPrivateIdentifier(n.name))) {
-        add(`this.${n.name.text}`, n.initializer);
+        add(`${thisScope(n)}.${n.name.text}`, n.initializer); // the class's own this, not every class's (astra A03i)
         const cls = n.parent;
         const isStatic = n.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword);
         if (isStatic && ts.isClassLike(cls) && cls.name) add(`${cls.name.text}.${n.name.text}`, n.initializer);
@@ -390,7 +390,7 @@ function mayHoldProtected(e: ts.Expression, sf: ts.SourceFile, seen = new Set<st
 function memberMayHoldProtected(m: ts.PropertyAccessExpression | ts.ElementAccessExpression, sf: ts.SourceFile, seen: Set<string>): boolean {
   const name = memberName(m);
   const base = unwrapped(m.expression);
-  const key = name === null ? null : base.kind === ts.SyntaxKind.ThisKeyword ? `this.${name}` : ts.isIdentifier(base) ? `${base.text}.${name}` : null;
+  const key = name === null ? null : base.kind === ts.SyntaxKind.ThisKeyword ? `${thisScope(base)}.${name}` : ts.isIdentifier(base) ? `${base.text}.${name}` : null;
   if (key && !seen.has(key)) {
     seen.add(key);
     if (bindingsOf(key, sf).some((value) => mayHoldProtected(value, sf, seen))) return true;
@@ -438,15 +438,36 @@ function valuesOf(e: ts.Expression, sf: ts.SourceFile, seen: Set<string>): ts.Ex
   return bindingsOf(u.text, sf).flatMap((value) => valuesOf(value, sf, seen));
 }
 
+/**
+ * Which object `this` is at `n` (astra A03i): the nearest class (its fields,
+ * methods and constructor see its instance; its static members, the class),
+ * or the nearest plain function. Arrow functions don't bind their own.
+ */
+function thisScope(n: ts.Node): string {
+  for (let p = n.parent; p; p = p.parent) {
+    if (ts.isClassLike(p)) return `this@class:${p.pos}`;
+    if (ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p)) return `this@function:${p.pos}`;
+  }
+  return "this@module";
+}
+
+/** Whether `n` is written: an assignment's target, the operand of ++ or --, or deleted (astra A03i). */
+function isWrittenTo(n: ts.Node): boolean {
+  const top = outermost(n);
+  const p = top.parent;
+  if (!p) return false;
+  if (ts.isBinaryExpression(p) && p.left === top && isAssignment(p.operatorToken.kind)) return true;
+  if ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) && (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken)) return true;
+  return ts.isDeleteExpression(p);
+}
+
 /** x.constructor only read for its name, compared, or asked its type: it holds nothing (astra A03g F2). */
 function readsConstructorHarmlessly(n: ts.Node): boolean {
   if (memberName(n) !== "constructor") return false;
   const top = outermost(n);
   const p = top.parent;
   if (!p) return false;
-  if (isMember(p) && p.expression === top && memberName(p) === "name") { // by either access (astra A03h F2)
-    return !(ts.isBinaryExpression(p.parent) && p.parent.left === p && isAssignment(p.parent.operatorToken.kind));
-  }
+  if (isMember(p) && p.expression === top && memberName(p) === "name") return !isWrittenTo(p); // by either access (astra A03h F2), and only read (A03i)
   if (ts.isTypeOfExpression(p)) return true;
   if (!ts.isBinaryExpression(p)) return false;
   const k = p.operatorToken.kind;
