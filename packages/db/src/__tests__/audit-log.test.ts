@@ -71,6 +71,45 @@ describe("AuditLogRepository", () => {
     });
   });
 
+  // ── insertIfAbsent (atomic check-then-insert, #469 round 2 R4a) ────────────
+
+  describe("insertIfAbsent", () => {
+    const match = { eventType: "operator.funnel", resourceType: "kernel", resourceId: "kernel-r4", action: "kernel_created" };
+
+    it("inserts and returns true on the first call", () => {
+      const result = repo.insertIfAbsent(
+        { timestamp: new Date().toISOString(), ...match },
+        match,
+      );
+      expect(result).toBe(true);
+      const rows = repo.query({ eventType: "operator.funnel", resourceId: "kernel-r4" });
+      expect(rows).toHaveLength(1);
+    });
+
+    it("returns false and adds no row on an identical second call", () => {
+      repo.insertIfAbsent({ timestamp: new Date().toISOString(), ...match }, match);
+      const second = repo.insertIfAbsent(
+        { timestamp: new Date().toISOString(), ...match },
+        match,
+      );
+      expect(second).toBe(false);
+      const rows = repo.query({ eventType: "operator.funnel", resourceId: "kernel-r4" });
+      expect(rows).toHaveLength(1);
+    });
+
+    it("inserts independently for a different action on the same (eventType, resourceType, resourceId)", () => {
+      repo.insertIfAbsent({ timestamp: new Date().toISOString(), ...match }, match);
+      const otherMatch = { ...match, action: "device_registered" };
+      const result = repo.insertIfAbsent(
+        { timestamp: new Date().toISOString(), ...otherMatch },
+        otherMatch,
+      );
+      expect(result).toBe(true);
+      const rows = repo.query({ eventType: "operator.funnel", resourceId: "kernel-r4" });
+      expect(rows).toHaveLength(2);
+    });
+  });
+
   // ── query round-trip ──────────────────────────────────────────────────────
 
   describe("query", () => {

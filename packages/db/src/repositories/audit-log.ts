@@ -13,6 +13,37 @@ export class AuditLogRepository implements IAuditLogRepository {
     return this.db.insert(auditLog).values(entry).returning().get();
   }
 
+  /**
+   * Atomic check-then-insert on (eventType, resourceType, resourceId, action).
+   * `behavior: "immediate"` takes the write lock up front (rather than
+   * deferring until the first write statement), so the select-then-insert
+   * below can't interleave with another connection's same transaction
+   * (#469 round 2 R4a). Errors (e.g. SQLITE_BUSY) propagate to the caller.
+   */
+  insertIfAbsent(
+    entry: Omit<AuditLogInsert, "id">,
+    match: { eventType: string; resourceType: string; resourceId: string; action: string },
+  ): boolean {
+    return this.db.transaction((tx) => {
+      const existing = tx
+        .select({ id: auditLog.id })
+        .from(auditLog)
+        .where(
+          and(
+            eq(auditLog.eventType, match.eventType),
+            eq(auditLog.resourceType, match.resourceType),
+            eq(auditLog.resourceId, match.resourceId),
+            eq(auditLog.action, match.action),
+          ),
+        )
+        .limit(1)
+        .get();
+      if (existing) return false;
+      tx.insert(auditLog).values(entry).run();
+      return true;
+    }, { behavior: "immediate" });
+  }
+
   query(opts: {
     eventType?: string;
     actor?: string;
