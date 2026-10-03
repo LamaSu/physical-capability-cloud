@@ -9,6 +9,7 @@
 import type { AssuranceTier, SHA256 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
+import { openEvidenceSession } from "./evidence-session.js";
 import * as Sentry from "@sentry/node";
 
 /** Callback fired at key pipeline phase transitions for external telemetry. */
@@ -43,66 +44,95 @@ export interface JobResult {
   durationMs: number;
 }
 
+export interface JobRunnerOptions {
+  /**
+   * How long a run waits, once it stops accepting evidence, for the events it accepted
+   * to be recorded. Past that it fails: an addEvent may never settle. Default 30 s.
+   */
+  evidenceSettleTimeoutMs?: number;
+}
+
 export class JobRunner {
   private machine: MachineAdapter;
   private sensors: SensorAdapter[];
   private camera: CameraAdapter | null;
   private evidenceEmitter: EvidenceEmitter;
+  private evidenceSettleTimeoutMs: number;
 
   constructor(
     machine: MachineAdapter,
     sensors: SensorAdapter[],
     camera: CameraAdapter | null,
     evidenceEmitter: EvidenceEmitter,
+    options?: JobRunnerOptions,
   ) {
     this.machine = machine;
     this.sensors = sensors;
     this.camera = camera;
     this.evidenceEmitter = evidenceEmitter;
+    this.evidenceSettleTimeoutMs = options?.evidenceSettleTimeoutMs ?? 30_000;
   }
 
   async run(config: JobConfig): Promise<JobResult> {
     const startTime = Date.now();
     const { jobId, stepId, gcodeHash, assuranceTier, onPhase } = config;
 
-    // Register step with evidence emitter
+    // addEvent hashes asynchronously before it stores an event, so each one is
+    // recorded on one chain, in the order it was emitted, and the tier check and the
+    // bundle wait for the chain. An unawaited addEvent could land after both: an
+    // inspection emitted at step 7 was missing from the step-8 check (found in
+    // LO-SE-1 round 2).
+    let recorded: Promise<void> = Promise.resolve();
+    // Set when the run fails, so an event still queued is never written.
+    let sealed = false;
+
+    // This run's evidence window: events reach the chain only while it is open.
+    // A listener per run could not be removed, so it went on recording later and
+    // overlapping jobs' events into this run's step (astra pack 168).
+    const opened = openEvidenceSession(
+      [this.machine, ...this.sensors, ...(this.camera ? [this.camera] : [])],
+      { jobId, stepId },
+      (event) => {
+        recorded = recorded.then(async () => {
+          if (sealed) return;
+          try {
+            await this.evidenceEmitter.addEvent(jobId, stepId, event);
+          } catch (err) {
+            console.error(err);
+          }
+        });
+      },
+    );
+    // Refused before any adapter command, and before registerStep, which would
+    // overwrite the step of a job already running under the same ids.
+    if (!opened.ok) {
+      return {
+        success: false,
+        error: `adapter ${opened.busy.adapterId} is in use by job ${opened.busy.jobId}`,
+        durationMs: Date.now() - startTime,
+      };
+    }
+    const session = opened.session;
     this.evidenceEmitter.registerStep(jobId, stepId, assuranceTier);
 
-    // Wire up evidence listeners. addEvent hashes asynchronously before it stores
-    // an event, so each one is recorded on one chain, in the order it was emitted,
-    // and the tier check and the bundle wait for the chain (allRecorded). An
-    // unawaited addEvent could land after both: an inspection emitted at step 7
-    // was missing from the step-8 check (found in LO-SE-1 round 2).
-    let recorded: Promise<void> = Promise.resolve();
-    const handleEvidence = (event: Parameters<MachineAdapter["onEvidence"]>[0] extends (e: infer E) => void ? E : never) => {
-      recorded = recorded.then(() =>
-        this.evidenceEmitter.addEvent(jobId, stepId, event).then(
-          () => undefined,
-          (err: unknown) => {
-            console.error(err);
-          },
-        ),
-      );
-    };
-    // An event emitted while waiting extends the chain, so wait until it stops growing.
-    const allRecorded = async (): Promise<void> => {
-      let current: Promise<void>;
-      do {
-        current = recorded;
-        await current;
-      } while (current !== recorded);
+    // Wait for the chain, but not forever: an addEvent may never settle.
+    // Resolves false when the timeout comes first.
+    const settle = async (): Promise<boolean> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), this.evidenceSettleTimeoutMs);
+      });
+      try {
+        return await Promise.race([recorded.then(() => true), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
     };
 
-    this.machine.onEvidence(handleEvidence);
-    for (const sensor of this.sensors) {
-      sensor.onEvidence(handleEvidence);
-    }
-    if (this.camera) {
-      this.camera.onEvidence(handleEvidence);
-    }
-
+    let succeeded = false;
+    let settleTimedOut = false;
     try {
-      return await Sentry.startSpan(
+      const result = await Sentry.startSpan(
         {
           name: "job.run",
           op: "job.run",
@@ -181,8 +211,19 @@ export class JobRunner {
             );
           }
 
-          // 8. Check tier requirements are met, over every event emitted so far
-          await allRecorded();
+          // 8. Stop accepting evidence, so the chain stops growing, then wait for it.
+          // An event emitted from here on is dropped, with a warning.
+          session.close();
+          if (!(await settle())) {
+            settleTimedOut = true;
+            return {
+              success: false,
+              error: `evidence recording did not settle within ${this.evidenceSettleTimeoutMs} ms`,
+              durationMs: Date.now() - startTime,
+            };
+          }
+
+          // Check tier requirements are met, over every event the run accepted
           const events = this.evidenceEmitter.getEvents(jobId, stepId);
           const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier);
           if (!check.met) {
@@ -199,8 +240,8 @@ export class JobRunner {
             console.warn(`[job-runner] Tier ${assuranceTier} partially met: ${check.missing.join(", ")}`);
           }
 
-          // 9. Finalize evidence bundle
-          await allRecorded();
+          // 9. Finalize evidence bundle. The chain is closed and settled, so the step
+          // cannot change while the bundle is hashed, signed and copied.
           const bundle = await Sentry.startSpan(
             { name: "job.finalize_bundle", op: "job.phase", attributes: { "job.id": jobId } },
             async () => this.evidenceEmitter.finalizeBundle(jobId, stepId),
@@ -220,9 +261,22 @@ export class JobRunner {
           };
         },
       );
+      succeeded = result.success;
+      return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, error: message, durationMs: Date.now() - startTime };
+    } finally {
+      // Every exit closes the window. A failed run also seals the chain, so a queued
+      // event is never written, and waits, bounded, for the addEvent in flight, so
+      // nothing lands after run() returns. An addEvent still running at the timeout
+      // cannot be recalled: it can only land in this run's step, which no bundle of
+      // this run includes.
+      session.close();
+      if (!succeeded) {
+        sealed = true;
+        if (!settleTimedOut) await settle();
+      }
     }
   }
 
