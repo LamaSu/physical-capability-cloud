@@ -197,6 +197,11 @@ class EvidenceHandler(logging.Handler):
         pending.append(task)
 
         def _done(t: asyncio.Task, *, _device_id: str = device_id) -> None:
+            # A write that failed or was cancelled stays pending until drain()
+            # reports it: finishing before the run reached drain() must not hide
+            # it (R39 r3 review). Only a clean write leaves the bucket here.
+            if t.cancelled() or t.exception() is not None:
+                return
             bucket = self._pending.get(_device_id)
             if bucket and t in bucket:
                 bucket.remove(t)
@@ -211,10 +216,17 @@ class EvidenceHandler(logging.Handler):
         report clean success.
         """
         while True:
-            pending = list(self._pending.get(device_id) or ())
-            if not pending:
+            batch = list(self._pending.get(device_id) or ())
+            if not batch:
                 return
-            results = await asyncio.gather(*pending, return_exceptions=True)
+            results = await asyncio.gather(*batch, return_exceptions=True)
+            # Everything in this batch is now accounted for, a failure included:
+            # it is reported here, once.
+            current = self._pending.get(device_id)
+            if current is not None:
+                for task in batch:
+                    if task in current:
+                        current.remove(task)
             failures = [r for r in results if isinstance(r, BaseException)]
             if failures:
                 raise failures[0]

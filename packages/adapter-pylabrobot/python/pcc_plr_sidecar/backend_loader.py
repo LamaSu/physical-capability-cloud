@@ -125,10 +125,13 @@ class BackendHandle:
     busy: bool = False
     busy_job_id: Optional[str] = None
     idle: asyncio.Event = field(default_factory=lambda: _already_set_event())
+    # Set by BackendLoader.unload: no new run may start, and the handle stays
+    # registered until its machine is stopped (R39 r3 review).
+    closing: bool = False
 
     def try_acquire(self, job_id: str) -> bool:
-        """Take the lease for ``job_id``. False (no state changed) if busy."""
-        if self.busy:
+        """Take the lease for ``job_id``. False (no state changed) if busy or closing."""
+        if self.busy or self.closing:
             return False
         self.busy = True
         self.busy_job_id = job_id
@@ -142,6 +145,10 @@ class BackendHandle:
         self.idle.set()
 
 
+class DeviceBusy(Exception):
+    """A load refused because the device is being built or shut down."""
+
+
 class BackendLoader:
     """Per-deviceId registry of loaded backends.
 
@@ -151,6 +158,9 @@ class BackendLoader:
 
     def __init__(self) -> None:
         self._handles: dict[str, BackendHandle] = {}
+        # Device ids whose machine is being built right now (R39 r3 review): a
+        # second load of the same id waits for nothing and builds nothing.
+        self._loading: set[str] = set()
 
     def has(self, device_id: str) -> bool:
         return device_id in self._handles
@@ -170,9 +180,17 @@ class BackendLoader:
         device_id: str,
         backend_config: dict[str, Any],
     ) -> BackendHandle:
-        """Instantiate the backend + return a handle. Idempotent per deviceId."""
+        """Instantiate the backend + return a handle. Idempotent per deviceId.
+
+        Never two machines for one device: a load while that device is being
+        built, or while its shutdown waits for a run, is refused (R39 r3 review).
+        """
+        if device_id in self._loading:
+            raise DeviceBusy(f"deviceId {device_id} is being loaded")
         if device_id in self._handles:
             existing = self._handles[device_id]
+            if existing.closing:
+                raise DeviceBusy(f"deviceId {device_id} is shutting down")
             if existing.plr_backend != plr_backend:
                 raise ValueError(
                     f"deviceId {device_id} already registered as {existing.plr_backend}; "
@@ -185,9 +203,13 @@ class BackendLoader:
         # R39 CRIT3: does any OTHER handle already in this process make tracking
         # hardware-sensitive? If so, this load may not weaken it.
         other_hardware_loaded = any(h.hardware_capable for h in self._handles.values())
-        machine, metadata, hardware_capable = await _create_machine(
-            plr_backend, backend_config, other_hardware_loaded,
-        )
+        self._loading.add(device_id)
+        try:
+            machine, metadata, hardware_capable = await _create_machine(
+                plr_backend, backend_config, other_hardware_loaded,
+            )
+        finally:
+            self._loading.discard(device_id)
         handle = BackendHandle(
             plr_backend=plr_backend,
             device_id=device_id,
@@ -202,22 +224,31 @@ class BackendLoader:
         return handle
 
     async def unload(self, device_id: str) -> None:
-        h = self._handles.pop(device_id, None)
+        h = self._handles.get(device_id)
         if h is None:
             return
         # R39 CRIT2: shutdown waits for the lease holder cleanly rather than
-        # racing its actuation -- popped from ``_handles`` first so no NEW run
-        # can start against this device while we wait.
-        await h.idle.wait()
-        # PLR backends typically expose .stop() (async). Stub doesn't.
-        stop_fn = getattr(h.machine, "stop", None)
-        if stop_fn:
-            try:
-                result = stop_fn()
-                if hasattr(result, "__await__"):
-                    await result
-            except Exception as e:  # noqa: BLE001
-                log.warning("backend.stop raised on unload: %s", e)
+        # racing its actuation. ``closing`` refuses new runs at once, and the
+        # handle stays registered until its machine is stopped, so a concurrent
+        # load cannot build a second handle to the same hardware (r3 review).
+        if h.closing:
+            await h.idle.wait()  # another shutdown is already stopping it
+            return
+        h.closing = True
+        try:
+            await h.idle.wait()
+            # PLR backends typically expose .stop() (async). Stub doesn't.
+            stop_fn = getattr(h.machine, "stop", None)
+            if stop_fn:
+                try:
+                    result = stop_fn()
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception as e:  # noqa: BLE001
+                    log.warning("backend.stop raised on unload: %s", e)
+        finally:
+            if self._handles.get(device_id) is h:
+                del self._handles[device_id]
 
 
 # ── private — backend instantiation ────────────────────────────────────────
@@ -304,6 +335,17 @@ def _read_layout_file(path: Any) -> Any:
             # The path changed identity between the check and the open -- refuse
             # rather than trust whatever is sitting there now.
             raise ValueError("deckLayoutPath changed between check and read; refusing")
+        # O_NOFOLLOW guards only the LAST component, and lstat follows the
+        # others too, so a directory swapped for a symlink after the check
+        # passes both tests above. On Linux, ask the kernel which file the fd
+        # really opened: it must be exactly the checked one (R39 r3 review).
+        if os.path.isdir("/proc/self/fd"):
+            try:
+                opened = os.readlink(f"/proc/self/fd/{fd}")
+            except OSError as e:
+                raise ValueError("deckLayoutPath could not be verified after opening; refusing") from e
+            if opened != real or os.path.commonpath([base, opened]) != base:
+                raise ValueError("deckLayoutPath changed between check and read; refusing")
         chunks: list[bytes] = []
         remaining = MAX_LAYOUT_BYTES + 1
         while remaining > 0:

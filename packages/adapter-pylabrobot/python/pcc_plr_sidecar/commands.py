@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
-from .backend_loader import is_stub_machine, reassert_tracking
+from .backend_loader import DeviceBusy, is_stub_machine, reassert_tracking
 from .dispatcher import RPC_ERROR_CODES, RpcException
 
 if TYPE_CHECKING:
@@ -66,6 +66,8 @@ class Commands:
 
         try:
             handle = await self.loader.load(plr_backend, device_id, backend_config)
+        except DeviceBusy as e:
+            raise RpcException(RPC_ERROR_CODES["DEVICE_BUSY"], str(e), {"deviceId": device_id}) from e
         except ValueError as e:
             raise RpcException(RPC_ERROR_CODES["INVALID_PARAMS"], str(e)) from e
         except ImportError as e:
@@ -297,6 +299,16 @@ class Commands:
     async def evidence_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
+        # R39 CRIT2 (review): the window belongs to the run holding the device's
+        # lease; a different job may not close it either.
+        if self.loader.has(device_id):
+            handle = self.loader.get(device_id)
+            if handle.busy and handle.busy_job_id != job_id:
+                raise RpcException(
+                    RPC_ERROR_CODES["DEVICE_BUSY"],
+                    f"deviceId {device_id} is busy running job {handle.busy_job_id}",
+                    {"deviceId": device_id, "jobId": job_id, "busyJobId": handle.busy_job_id},
+                )
         window = self.evidence.stop_recording(device_id, job_id)
         return {
             "ok": True,

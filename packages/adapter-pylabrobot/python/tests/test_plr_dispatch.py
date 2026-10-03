@@ -340,6 +340,82 @@ async def test_evidence_start_recording_refuses_a_different_job_while_the_device
     await asyncio.wait_for(task_a, timeout=2.0)
 
 
+async def test_evidence_stop_recording_refuses_a_different_job_while_the_device_is_busy(fake_plr):
+    # R39 r3 review (CRIT2): the window is bound to the lease holder; another job may not close it.
+    import asyncio
+
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
+    task_a = asyncio.create_task(_run(s, out, TRANSFER))  # jobId "job-x"
+    await entered.wait()
+
+    resp = await asyncio.wait_for(
+        call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-b"}, "42"), timeout=2.0,
+    )
+    assert resp.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], resp
+    assert s.evidence.is_recording("lh1"), "job-x's window was closed by job-b"
+
+    release.set()
+    await asyncio.wait_for(task_a, timeout=2.0)
+
+
+async def test_shutdown_waits_for_the_lease_holder_and_no_second_handle_loads_meanwhile(fake_plr):
+    # R39 r3 review (CRIT2): while shutdown waits for a running job, the device's handle stays
+    # in place, so a concurrent backend.init cannot build a second handle to the same hardware.
+    import asyncio
+
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    first = s.loader.get("lh1")
+    entered, release = _block_pick_up_tips_on(first.machine)
+    task_a = asyncio.create_task(_run(s, out, TRANSFER))
+    await entered.wait()
+
+    shutdown = asyncio.create_task(call(s, out, "backend.shutdown", {"deviceId": "lh1"}, "50"))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not shutdown.done(), "shutdown did not wait for the lease holder"
+
+    again = await asyncio.wait_for(call(s, out, "backend.init", {
+        "deviceId": "lh1", "plrBackend": "chatterbox", "backendConfig": {"deckLayout": DECK},
+    }, "51"), timeout=2.0)
+    assert "error" in again, again
+    assert s.loader.has("lh1") and s.loader.get("lh1") is first
+
+    release.set()
+    await asyncio.wait_for(task_a, timeout=2.0)
+    await asyncio.wait_for(shutdown, timeout=2.0)
+    assert not s.loader.has("lh1")
+
+
+async def test_two_concurrent_inits_of_one_device_build_one_machine(fake_plr, monkeypatch):
+    # R39 r3 review (CRIT2): load() awaits the machine's creation; a second init for the same
+    # device in that window must not build a second machine for the same hardware.
+    import asyncio
+    from pcc_plr_sidecar import backend_loader
+
+    real_create = backend_loader._create_machine
+    created = []
+
+    async def slow_create(*args, **kwargs):
+        await asyncio.sleep(0)  # a real backend's setup can yield here
+        result = await real_create(*args, **kwargs)
+        created.append(result[0])
+        return result
+
+    monkeypatch.setattr(backend_loader, "_create_machine", slow_create)
+    s, out = _server()
+    params = {"deviceId": "lh1", "plrBackend": "chatterbox", "backendConfig": {"deckLayout": DECK}}
+    first, second = await asyncio.gather(
+        call(s, out, "backend.init", params, "60"), call(s, out, "backend.init", params, "61"),
+    )
+    assert len(created) == 1, f"{len(created)} machines built for one device"
+    assert sum("error" in r for r in (first, second)) == 1, (first, second)
+    busy = first if "error" in first else second
+    assert busy["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], busy
+
+
 async def test_tips_can_be_dropped_into_a_named_spot(fake_plr):
     s, out = _server()
     await init(s, out, deckLayout=DECK)
@@ -766,6 +842,40 @@ async def test_a_symlink_swapped_in_after_the_boundary_check_is_refused_not_read
     resp = await init(s, out, deckLayoutPath="deck.json")
     assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
     assert _deserialized(fake_plr) == []  # the outside content never reached the deserializer
+
+
+async def test_a_directory_swapped_for_a_symlink_after_the_boundary_check_is_refused_not_read(fake_plr, tmp_path, monkeypatch):
+    # R39 r3 review (MED8): O_NOFOLLOW guards only the LAST component. An intermediate directory
+    # swapped for a symlink after the check must not lead the read outside PCC_PLR_LAYOUT_DIR.
+    import os as os_module
+
+    layouts = tmp_path / "layouts"
+    sub = layouts / "sub"
+    sub.mkdir(parents=True)
+    inside = sub / "deck.json"
+    inside.write_text(json.dumps(DECK))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "deck.json").write_text(json.dumps(dict(DECK, name="leaked-outside-deck", children=[])))
+
+    monkeypatch.setenv("PCC_PLR_LAYOUT_DIR", str(layouts))
+    expected_real = os_module.path.realpath(str(inside))
+    original_realpath = os_module.path.realpath
+    state = {"swapped": False}
+
+    def racy_realpath(p, *a, **kw):
+        result = original_realpath(p, *a, **kw)
+        if not state["swapped"] and result == expected_real:
+            state["swapped"] = True
+            os_module.rename(str(sub), str(tmp_path / "sub-moved"))
+            os_module.symlink(str(elsewhere), str(sub))
+        return result
+
+    monkeypatch.setattr(os_module.path, "realpath", racy_realpath)
+    s, out = _server()
+    resp = await init(s, out, deckLayoutPath="sub/deck.json")
+    assert resp.get("error", {}).get("code") == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert _deserialized(fake_plr) == []
 
 
 # ── astra r1 on #378: PLR's own tracking is on, and liquids are declared ─────

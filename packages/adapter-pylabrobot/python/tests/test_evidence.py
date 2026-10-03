@@ -149,3 +149,21 @@ async def test_emit_event_outside_window_emits_with_null_job_id(captured):
     _, params = sent[0]
     assert params["jobId"] is None
     assert params["type"] == "camera_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_drain_surfaces_a_write_that_failed_before_drain_was_called():
+    # R39 r3 review: a write that fails BEFORE backend.run reaches drain() (the run awaited its
+    # ops in between) must still void the run's success, not vanish with its finished task.
+    async def failing_writer(method, params):
+        raise RuntimeError("stdout pipe broken")
+
+    loop = asyncio.get_running_loop()
+    handler = EvidenceHandler(writer=failing_writer, loop=loop)
+    handler.start_recording("dev-1", "job-1")
+    handler.emit_atomic_op("dev-1", "aspirate", {})
+    for _ in range(5):
+        await asyncio.sleep(0)  # the write runs and fails before anyone drains
+    with pytest.raises(RuntimeError, match="stdout pipe broken"):
+        await handler.drain("dev-1")
+    await handler.drain("dev-1")  # reported once, then consumed
