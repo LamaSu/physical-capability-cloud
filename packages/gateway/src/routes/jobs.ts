@@ -14,6 +14,10 @@ import {
   type JobExecutionRepos,
   type JobRow,
 } from "../readmodels/job-execution.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** The source labels loadJobExecutionSources() calls attempt() with — a closed, code-defined set. */
+const JOB_EXECUTION_SOURCES: readonly string[] = ["capability", "kernel", "evidence", "settlement", "capture_verdicts"];
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -102,7 +106,7 @@ export async function jobRoutes(app: FastifyInstance) {
       store = getStore();
       job = store.repos.jobs.findById(req.params.jobId) as JobRow | undefined;
     } catch (error) {
-      req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: job row read failed");
+      req.log.error({ jobId: declare.id(req.params.jobId), err: error }, lit("job execution read model: job row read failed"));
       return reply.code(503).send({
         error: "read_model_unavailable",
         message: "The job record could not be read. Try again shortly.",
@@ -118,7 +122,7 @@ export async function jobRoutes(app: FastifyInstance) {
       try {
         decision = authorizeJobRead(job, pre.wallet, store.repos as unknown as JobExecutionRepos, store.db);
       } catch (error) {
-        req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: authorization read failed");
+        req.log.error({ jobId: declare.id(req.params.jobId), err: error }, lit("job execution read model: authorization read failed"));
         return reply.code(503).send({
           error: "read_model_unavailable",
           message: "The job record could not be read. Try again shortly.",
@@ -129,7 +133,10 @@ export async function jobRoutes(app: FastifyInstance) {
 
     const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, {
       onReadError: (source, error) =>
-        req.log.warn({ jobId: req.params.jobId, source, err: error }, "job execution read model: source read failed"),
+        req.log.warn(
+          { jobId: declare.id(req.params.jobId), source: declare.code(source, JOB_EXECUTION_SOURCES), err: error },
+          lit("job execution read model: source read failed"),
+        ),
     });
     reply.header("cache-control", "no-store");
     return buildJobExecutionDTO(sources, asOf);
