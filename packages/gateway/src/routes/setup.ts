@@ -705,12 +705,20 @@ export async function setupRoutes(app: FastifyInstance) {
           capabilitiesRegistered: declare.id(capabilities?.length ?? 0),
         }, (req as any).operatorId ?? (req as any).apiKeyId);
         auditService.log({
-          eventType: action === "created" ? "device.registered" : "device.updated",
+          eventType: declare.code(
+            action === "created" ? "device.registered" : "device.updated",
+            ["device.registered", "device.updated"],
+          ),
           actor: (req as any).operatorId ?? (req as any).apiKeyId,
-          resourceType: "device",
-          resourceId: deviceId,
-          action: action === "created" ? "create" : "update",
-          metadata: { kernelId, type, adapterType, model },
+          resourceType: lit("device"),
+          resourceId: declare.id(deviceId),
+          action: declare.code(action === "created" ? "create" : "update", ["create", "update"]),
+          metadata: {
+            kernelId: declare.id(kernelId),
+            type: declare.code(type, VALID_DEVICE_ROLES),
+            adapterType: declare.code(adapterType, VALID_ADAPTER_TYPES),
+            model: declare.id(model),
+          },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });
