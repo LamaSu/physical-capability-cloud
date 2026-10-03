@@ -124,7 +124,7 @@ describe("FC-8 round 3 — real-e2e-verbose.ts run() — success path, every cen
       reportPath: REPORT_PATH,
     });
     const all = allCapturedText(result);
-    expect(all).not.toContain(CANARY);
+    expect(all.toLowerCase()).not.toContain(CANARY.toLowerCase());
     // sanity: the run actually reached the sites under test (not a no-op)
     expect(all).toContain("Provisioned: no");
   }, 30_000);
@@ -145,7 +145,7 @@ describe("FC-8 round 3 — real-e2e-verbose.ts run() — malformed oracle respon
       env: BASE_ENV, fetchImpl, wallet, pub,
       pollSleepMs: 0, pollAttempts: 2, contractsDir: CONTRACTS_DIR, reportPath: REPORT_PATH,
     });
-    expect(allCapturedText(result)).not.toContain(CANARY);
+    expect(allCapturedText(result).toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });
 
@@ -164,7 +164,7 @@ describe("FC-8 round 3 — real-e2e-verbose.ts run() — oracle failure response
       env: BASE_ENV, fetchImpl, wallet, pub,
       pollSleepMs: 0, pollAttempts: 2, contractsDir: CONTRACTS_DIR, reportPath: REPORT_PATH,
     });
-    expect(allCapturedText(result)).not.toContain(CANARY);
+    expect(allCapturedText(result).toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });
 
@@ -185,7 +185,7 @@ describe("FC-8 round 3 — real-e2e-verbose.ts run() — dependency rejection", 
     })).rejects.toThrow();
 
     // Nothing printed before the throw may contain the canary either.
-    expect(allCapturedText()).not.toContain(CANARY);
+    expect(allCapturedText().toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 
   it("[neg] a chain client that throws with a canary-bearing message never leaks it", async () => {
@@ -200,6 +200,6 @@ describe("FC-8 round 3 — real-e2e-verbose.ts run() — dependency rejection", 
       pollSleepMs: 0, pollAttempts: 2, contractsDir: CONTRACTS_DIR, reportPath: REPORT_PATH,
     })).rejects.toThrow();
 
-    expect(allCapturedText()).not.toContain(CANARY);
+    expect(allCapturedText().toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });

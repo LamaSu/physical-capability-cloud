@@ -71,7 +71,7 @@ describe("FC-8 round 3 — real-e2e.ts run() — success path, every census site
       env: BASE_ENV, fetchImpl: makeCanaryFetch(CANARY), wallet, pub,
       pollSleepMs: 0, pollAttempts: 2, contractsDir: CONTRACTS_DIR,
     });
-    expect(allCapturedText(result)).not.toContain(CANARY);
+    expect(allCapturedText(result).toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });
 
@@ -93,7 +93,7 @@ describe("FC-8 round 3 — real-e2e.ts run() — malformed oracle response", () 
       env: BASE_ENV, fetchImpl, wallet, pub,
       pollSleepMs: 0, pollAttempts: 2, contractsDir: CONTRACTS_DIR,
     }).catch(() => {});
-    expect(allCapturedText()).not.toContain(CANARY);
+    expect(allCapturedText().toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });
 
@@ -112,7 +112,7 @@ describe("FC-8 round 3 — real-e2e.ts run() — oracle failure response", () =>
       env: BASE_ENV, fetchImpl, wallet, pub,
       pollSleepMs: 0, pollAttempts: 2, contractsDir: CONTRACTS_DIR,
     });
-    expect(allCapturedText(result)).not.toContain(CANARY);
+    expect(allCapturedText(result).toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });
 
@@ -131,6 +131,6 @@ describe("FC-8 round 3 — real-e2e.ts run() — dependency rejection", () => {
       env: BASE_ENV, fetchImpl, wallet, pub,
       pollSleepMs: 0, pollAttempts: 2, contractsDir: CONTRACTS_DIR,
     })).rejects.toThrow();
-    expect(allCapturedText()).not.toContain(CANARY);
+    expect(allCapturedText().toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });

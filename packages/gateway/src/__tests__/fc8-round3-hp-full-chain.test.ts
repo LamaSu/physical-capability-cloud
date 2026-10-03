@@ -82,8 +82,8 @@ describe("FC-8 round 3 — hp-full-chain-e2e.ts run() — success path, every ce
       contractsDir: CONTRACTS_DIR, reportPath: REPORT_PATH,
     });
     const all = allCapturedText(result);
-    expect(all).not.toContain(CANARY);
-    expect(all).not.toContain(CANARY_PREFIX);
+    expect(all.toLowerCase()).not.toContain(CANARY.toLowerCase());
+    expect(all.toLowerCase()).not.toContain(CANARY_PREFIX.toLowerCase());
   }, 30_000);
 });
 
@@ -102,7 +102,7 @@ describe("FC-8 round 3 — hp-full-chain-e2e.ts run() — malformed oracle respo
       env: BASE_ENV, fetchImpl, wallet, pub,
       contractsDir: CONTRACTS_DIR, reportPath: REPORT_PATH,
     });
-    expect(allCapturedText(result)).not.toContain(CANARY);
+    expect(allCapturedText(result).toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });
 
@@ -121,7 +121,7 @@ describe("FC-8 round 3 — hp-full-chain-e2e.ts run() — oracle failure respons
       env: BASE_ENV, fetchImpl, wallet, pub,
       contractsDir: CONTRACTS_DIR, reportPath: REPORT_PATH,
     });
-    expect(allCapturedText(result)).not.toContain(CANARY);
+    expect(allCapturedText(result).toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });
 
@@ -140,6 +140,6 @@ describe("FC-8 round 3 — hp-full-chain-e2e.ts run() — dependency rejection",
       env: BASE_ENV, fetchImpl, wallet, pub,
       contractsDir: CONTRACTS_DIR, reportPath: REPORT_PATH,
     })).rejects.toThrow();
-    expect(allCapturedText()).not.toContain(CANARY);
+    expect(allCapturedText().toLowerCase()).not.toContain(CANARY.toLowerCase());
   }, 30_000);
 });
