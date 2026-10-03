@@ -494,7 +494,9 @@ export function isReadOnlyAppTool(
 
 /** A mounted Streamable-HTTP MCP surface. `readOnly` gates BOTH tools/list and
  * CallTool dispatch to the isReadOnlyAppTool allowlist AND applies the prod domain
- * gate; the full surface leaves the tool set + dispatch exactly as they were. */
+ * gate to the whole surface. The full surface keeps its tool set and dispatch; the
+ * prod domain gate there covers only its MCP App views (the render tool, ui:// reads
+ * and view links). */
 interface McpSurface {
   mountPath: string;
   readOnly: boolean;
@@ -508,6 +510,33 @@ const READONLY_APP_SURFACE: McpSurface = { mountPath: "/mcp/apps", readOnly: tru
 /** The `/mcp/apps` prod domain gate as a guard message (null = surface available). */
 function appSurfaceGuardMessage(): string | null {
   return isMcpAppSurfaceAvailable() ? null : MCP_APP_SURFACE_UNAVAILABLE_MESSAGE;
+}
+
+/** Tools that exist only to open an MCP App view, with no use without one. While the prod
+ * domain gate is closed, the full surface neither lists nor runs them. A new view-only tool
+ * (such as an IR render tool) belongs here. */
+const VIEW_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([RENDER_DASHBOARD_TOOL_NAME]);
+
+/** `item` without its MCP App view link: `_meta.ui.resourceUri` and the deprecated flat
+ * `_meta["ui/resourceUri"]`. Every other `_meta` key is kept, notably `ui.visibility: ["app"]`,
+ * which must keep hiding state-changing typed ops from the model. Used on the full surface
+ * while the prod domain gate is closed, for tools/list descriptors and CallTool results. */
+export function withoutMcpAppViewLink<T extends object>(item: T): T {
+  const source = item as { _meta?: { [key: string]: unknown } };
+  if (!source._meta) return item;
+  const meta: { [key: string]: unknown } = { ...source._meta };
+  delete meta["ui/resourceUri"];
+  const ui = meta.ui;
+  if (ui !== null && typeof ui === "object" && !Array.isArray(ui)) {
+    const uiRest: { [key: string]: unknown } = { ...(ui as { [key: string]: unknown }) };
+    delete uiRest.resourceUri;
+    if (Object.keys(uiRest).length > 0) meta.ui = uiRest;
+    else delete meta.ui;
+  }
+  const copy: { _meta?: { [key: string]: unknown } } = { ...source };
+  if (Object.keys(meta).length > 0) copy._meta = meta;
+  else delete copy._meta;
+  return copy as T;
 }
 
 /** Throw the JSON-RPC error the read-only app surface returns when it is disabled
@@ -561,7 +590,18 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
       buildRenderDashboardTool(),
       ...typedOperationTools(),
     ];
-    if (!surface.readOnly) return { tools };
+    if (!surface.readOnly) {
+      // The full surface keeps every proxy and typed tool. Its MCP App VIEWS obey the same
+      // prod domain gate as /mcp/apps (D14: no non-storage-isolated view in production): while
+      // the gate is closed, the render tool is not advertised and no tool links a ui:// view,
+      // so a host never tries to load a view the resource reads below would refuse.
+      if (appSurfaceGuardMessage() === null) return { tools };
+      return {
+        tools: tools
+          .filter((tool) => !VIEW_ONLY_TOOL_NAMES.has(tool.name))
+          .map(withoutMcpAppViewLink),
+      };
+    }
     // Read-only app surface: fail-closed prod domain gate FIRST, then advertise
     // ONLY the isReadOnlyAppTool allowlist — the SAME predicate the dispatcher
     // enforces below, so the advertised set and the callable set cannot diverge.
@@ -579,6 +619,12 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
     // the restored contract (unknown tool → isError result, never a thrown
     // protocol error — directive 8) is unit-testable off-transport.
     const args = request.params.arguments ?? {};
+    // A view-only tool opens an MCP App view: same prod domain gate as /mcp/apps (D14).
+    // A tool-level error, like any unavailable tool (directive 8).
+    if (!surface.readOnly && VIEW_ONLY_TOOL_NAMES.has(request.params.name)) {
+      const gated = appSurfaceGuardMessage();
+      if (gated) return errorResult(gated);
+    }
     if (surface.readOnly) {
       // Fail-closed prod domain gate, then the SAME allowlist tools/list uses. A
       // non-allowlisted (mutating) name returns a tool-level isError and NEVER
@@ -591,7 +637,7 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
         );
       }
     }
-    return dispatchToolCall(
+    const result = await dispatchToolCall(
       toolsByName,
       request.params.name,
       args,
@@ -599,14 +645,16 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
       extra.signal,
       surface.readOnly,
     );
+    // While the gate is closed, a full-surface result links no view either (the On-Ramp
+    // tools attach `_meta.ui.resourceUri`); its text and structuredContent are unchanged.
+    if (!surface.readOnly && appSurfaceGuardMessage() !== null) return withoutMcpAppViewLink(result);
+    return result;
   });
 
-  // The full surface registers the UI resources unchanged; the read-only app
-  // surface additionally gates every ui:// read behind the prod domain check.
-  registerMcpAppResources(
-    server,
-    surface.readOnly ? { surfaceGuard: appSurfaceGuardMessage } : undefined,
-  );
+  // Every ui:// read, on BOTH surfaces, is gated behind the prod domain check (D14): the
+  // full /mcp surface serves the same views as /mcp/apps, so it must not serve them where
+  // /mcp/apps may not. Non-production is unchanged (the guard returns null).
+  registerMcpAppResources(server, { surfaceGuard: appSurfaceGuardMessage });
 
   return server;
 }
