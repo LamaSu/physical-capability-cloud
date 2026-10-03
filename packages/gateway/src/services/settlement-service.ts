@@ -103,14 +103,14 @@ export class SettlementService {
         declare.id(bundle.assuranceTier),
       );
       auditService.log({
-        eventType: "settlement.fabricated_refused",
-        resourceType: "job",
-        resourceId: jobId,
-        action: "refuse_settlement",
+        eventType: lit("settlement.fabricated_refused"),
+        resourceType: lit("job"),
+        resourceId: declare.id(jobId),
+        action: lit("refuse_settlement"),
         metadata: {
-          bundleId: bundle.id,
-          assuranceTier: bundle.assuranceTier,
-          bundleHash: bundle.bundleHash,
+          bundleId: declare.id(bundle.id),
+          assuranceTier: declare.id(bundle.assuranceTier),
+          bundleHash: declare.id(bundle.bundleHash),
         },
       });
     }
@@ -324,11 +324,11 @@ export class SettlementService {
                   metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
                 });
                 auditService.log({
-                  eventType: "settlement.story_registered",
-                  resourceType: "job",
-                  resourceId: jobId,
-                  action: "register_derivative",
-                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                  eventType: lit("settlement.story_registered"),
+                  resourceType: lit("job"),
+                  resourceId: declare.id(jobId),
+                  action: lit("register_derivative"),
+                  metadata: { derivativeIpId: declare.id(link.childIpId), parentIpId: declare.id(link.parentIpId) },
                 });
               }
             }
@@ -380,16 +380,16 @@ export class SettlementService {
                       metadata: { released: true, txHash: result.releaseTxHash, contractAddress },
                     });
                     auditService.log({
-                      eventType: "settlement.completed",
-                      resourceType: "job",
-                      resourceId: jobId,
-                      action: "settle",
+                      eventType: lit("settlement.completed"),
+                      resourceType: lit("job"),
+                      resourceId: declare.id(jobId),
+                      action: lit("settle"),
                       metadata: {
-                        cid: result.cid,
-                        bundleHash: bundle.bundleHash,
-                        txHash: result.releaseTxHash,
-                        contractAddress,
-                        autoRelease: true,
+                        cid: declare.id(result.cid),
+                        bundleHash: declare.id(bundle.bundleHash),
+                        txHash: declare.id(result.releaseTxHash),
+                        contractAddress: declare.id(contractAddress),
+                        autoRelease: declare.flag(true),
                       },
                     });
                   }
