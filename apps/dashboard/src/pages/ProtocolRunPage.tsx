@@ -24,9 +24,7 @@ import type {
 } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useProtocolLibraryStore } from "../stores/protocol-library-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
-
-const GATEWAY = "/api";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -147,7 +145,7 @@ export function ProtocolRunPage() {
   // Fetch run
   const { data: runData } = useQuery({
     queryKey: ["protocol-run", runId],
-    queryFn: () => fetch(`${GATEWAY}/protocol-runs/${runId}`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocol-runs/${runId}`).then((r) => r.json()),
     enabled: !!runId,
     refetchInterval: 5000, // Poll for live updates
   });
@@ -155,7 +153,7 @@ export function ProtocolRunPage() {
   // Fetch all runs (for list view when no runId)
   const { data: allRunsData } = useQuery({
     queryKey: ["protocol-runs-all"],
-    queryFn: () => fetch(`${GATEWAY}/protocol-runs`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/protocol-runs").then((r) => r.json()),
     enabled: !runId,
   });
 
@@ -165,7 +163,7 @@ export function ProtocolRunPage() {
 
   const { data: templateData } = useQuery({
     queryKey: ["protocol-template", run?.templateId],
-    queryFn: () => fetch(`${GATEWAY}/protocols/${run?.templateId}`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocols/${run?.templateId}`).then((r) => r.json()),
     enabled: !!run?.templateId,
   });
 
@@ -258,7 +256,7 @@ export function ProtocolRunPage() {
 
   const handleAction = async (action: "pause" | "resume" | "cancel") => {
     if (!run) return;
-    await fetch(`${GATEWAY}/protocol-runs/${run.id}/${action}`, { method: "POST", headers: { ...getAuthHeaders() } });
+    await authorizedFetch(`/api/protocol-runs/${run.id}/${action}`, { method: "POST" });
   };
 
   // ---------------------------------------------------------------------------

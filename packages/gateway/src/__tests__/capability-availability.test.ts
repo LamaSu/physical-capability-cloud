@@ -261,6 +261,18 @@ describe("pack 111 HIGH 1: a key minted by public provisioning for the owner's i
         [{ walletAddress: "0x1111111111111111111111111111111111111111" }, "cap-imp-wallet"],
       ] as const) {
         const prov = await app.inject({ method: "POST", url: "/api/auth/provision", payload: who });
+        if (prov.statusCode >= 400) {
+          // WP-A (#326) refuses the impersonation at provisioning, before any key
+          // exists: an email that already names an identity gets 409
+          // identity_claimed, and an unproven walletAddress gets 401
+          // wallet_not_verified. That closes HIGH 1 one step earlier
+          // (readmodels #4522). Any other refusal fails here.
+          const expected = "email" in who ? [409, "identity_claimed"] : [401, "wallet_not_verified"];
+          expect([prov.statusCode, prov.json().error], JSON.stringify(who)).toEqual(expected);
+          expect(prov.json().api_key).toBeUndefined();
+          expect(stored(capId)).toEqual({});
+          continue;
+        }
         expect(prov.statusCode, JSON.stringify(who)).toBeLessThan(300);
         const key = prov.json().api_key as string;
         const res = await app.inject({
@@ -300,6 +312,26 @@ describe("pack 111 MEDIUM 3: cron and timezone must be real, not just shaped", (
     ]) {
       const res = await put(app, "cap-avail-w", body);
       expect(res.statusCode, JSON.stringify(body)).toBe(400);
+    }
+    await app.close();
+  });
+
+  it("accepts every IANA name the runtime knows, digits included (111b MEDIUM 3 follow-up)", async () => {
+    const app = await buildAuthedApp({ userId: WALLET });
+    for (const timezone of ["GMT0", "EST5EDT", "PST8PDT", "Etc/GMT+5", "America/Argentina/Buenos_Aires"]) {
+      expect(() => new Intl.DateTimeFormat("en-US", { timeZone: timezone }), timezone).not.toThrow();
+      const res = await put(app, "cap-avail-w", { mode: "cron", cron: "0 9 * * 1-5", timezone });
+      expect(res.statusCode, timezone).toBe(200);
+      expect(stored("cap-avail-w")).toMatchObject({ mode: "cron", timezone });
+    }
+    await app.close();
+  });
+
+  it("refuses a UTC offset as a timezone, even where Intl accepts it: it is not an IANA name", async () => {
+    const app = await buildAuthedApp({ userId: WALLET });
+    for (const timezone of ["+05:00", "-08:00", "+0530"]) {
+      const res = await put(app, "cap-avail-w", { mode: "cron", cron: "0 9 * * 1-5", timezone });
+      expect(res.statusCode, timezone).toBe(400);
     }
     await app.close();
   });
