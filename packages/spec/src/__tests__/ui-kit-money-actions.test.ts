@@ -169,6 +169,25 @@ describe("approval window (live)", () => {
     expect(document.body.textContent).not.toMatch(/\bDone\b/);
   });
 
+  it("a successful NON-money approval resolves to a neutral 'resolved' pill, never green (astra r3 F5 on #313)", async () => {
+    // #313's F5: rebindApproval painted the resolved approval green. This head renders it end to end
+    // (its approval foot survives _setFoot), so the neutral outcome is pinned here.
+    installFetch(okGetsAnd({ status: 200 }));
+    boot(man([{ kind: "approval", binding: { path: "/api/jobs/j1" },
+      // non-money only if the write is on the kit's NON_MONEY_WRITES allowlist (every other write is money)
+      approve: { id: "ok", label: "Send feedback", kind: "post", path: "/api/feedback", body: { note: "go" } } }]));
+    await flush();
+    btn("Approve").click(); // the approval window's button label is kit-owned (ruling 4)
+    await flush();
+    const pill = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
+    expect(pill.textContent).toBe("resolved");
+    expect(pill.className).toContain("st-ack");
+    expect(pill.className).not.toContain("st-settled");
+    const status = document.querySelector(".pcc-action-status") as HTMLElement;
+    expect(status.textContent).toContain("Done");
+    expect(status.className).not.toContain("st-settled");
+  });
+
   it("a removed endpoint (410) explains itself instead of a bare status code", async () => {
     installFetch(okGetsAnd({ status: 410 }));
     boot(man([approvalWin]));
