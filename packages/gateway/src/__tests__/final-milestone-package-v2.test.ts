@@ -27,6 +27,7 @@ import {
   PackageNotMintableError,
   assertMintablePackage,
   MintablePackage,
+  isMintablePackage,
   type FinalMilestonePackageV2Body,
   type KernelRegistryReader,
   type KernelRegistrySigner,
@@ -35,11 +36,11 @@ import {
   type OperatorSignatureVerifierInput,
 } from "../settlement/final-milestone-package-v2.js";
 import {
-  packageDigestV2Unchecked,
   canonicalSignatures,
   mintablePackageDigest,
   type PackageSignature,
 } from "../settlement/package-digest-v2.js";
+import { packageDigestV2Unchecked } from "../settlement/package-digest-v2-vectors.js";
 import { COMPROMISED_DEVICE_PUBLIC_KEYS } from "@pcc/spec";
 import { signWithPrivateKeyHex } from "../auth/ed25519.js";
 
@@ -73,7 +74,29 @@ function registryFromMap(map: Record<string, KernelRegistrySigner | null>): Kern
 function challengesReturning(
   record: { nonce: string; tChallengeRef: string; state: string } | null,
 ): ChallengeReader {
-  return { recordFor: async () => record as never };
+  // A double that does NOT model one use: its consume always succeeds, so the many
+  // positive-path tests that share it can each mint. One use is tested with
+  // `oneUseChallenges` below (cross-family E9b).
+  return { recordFor: async () => record as never, consumeIssued: async () => true };
+}
+/**
+ * A challenge store with the contract `consumeIssued` requires: an atomic, one-use
+ * compare-and-set from "issued" to "consumed". JavaScript runs this check-and-set
+ * without interleaving, so it is atomic here; a real store does it in one transaction.
+ */
+function oneUseChallenges(record: { nonce: string; tChallengeRef: string }): ChallengeReader & { consumeCalls: number } {
+  let state = "issued";
+  const store = {
+    consumeCalls: 0,
+    recordFor: async () => ({ ...record, state }) as never,
+    consumeIssued: async (_unit: unknown, expected: { nonce: string; tChallengeRef: string }) => {
+      store.consumeCalls++;
+      if (state !== "issued" || expected.nonce !== record.nonce || expected.tChallengeRef !== record.tChallengeRef) return false;
+      state = "consumed";
+      return true;
+    },
+  };
+  return store as never;
 }
 /**
  * An `OperatorSignatureVerifier` that answers `true` only when the input's
@@ -911,6 +934,7 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
       let attempted = false;
       let mutationThrew = false;
       const mutatingChallenges: ChallengeReader = {
+        consumeIssued: async () => true,
         recordFor: async (unitBinding) => {
           attempted = true;
           try {
@@ -946,6 +970,124 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
       const minted = await assertMintablePackage(MINTABLE, [D2, D1], REGISTRY, CHALLENGES, spyVerifier);
       expect(mutationThrew).toBe(true);
       expect(minted.body.unitBinding.milestoneIndex).toBe(MINTABLE.unitBinding.milestoneIndex);
+    });
+  });
+
+  // ── E9b (astra r2 on 425c0d39): reproductions, asserting the CORRECT behavior ──
+  describe("E9b — the mint seam cannot be manufactured, and a challenge mints once", () => {
+    it("E9b-1 CRITICAL: Reflect.construct cannot build a MintablePackage the digest accepts", () => {
+      // astra's reproduction. At 425c0d39 this built a branded instance and the digest accepted it.
+      expect(() => Reflect.construct(MintablePackage as unknown as Function, [clone(MINTABLE), [D1, D2]])).toThrow(PackageNotMintableError);
+      let forged: unknown;
+      try {
+        forged = Reflect.construct(MintablePackage as unknown as Function, [clone(MINTABLE), [D1, D2]]);
+      } catch {
+        forged = undefined;
+      }
+      expect(() => mintablePackageDigest(forged as MintablePackage)).toThrow(PackageNotMintableError);
+    });
+
+    it("E9b-1 CRITICAL: new (MintablePackage as any)(...) cannot either", () => {
+      let forged: unknown;
+      try {
+        forged = new (MintablePackage as unknown as new (...a: unknown[]) => unknown)(clone(MINTABLE), [D1, D2]);
+      } catch {
+        forged = undefined;
+      }
+      expect(() => mintablePackageDigest(forged as MintablePackage)).toThrow(PackageNotMintableError);
+    });
+
+    it("E9b-1 CRITICAL: replacing MintablePackage.isMintable cannot make a plain object digestible", () => {
+      const original = Object.getOwnPropertyDescriptor(MintablePackage, "isMintable")!;
+      let replaced = false;
+      try {
+        Object.defineProperty(MintablePackage, "isMintable", { value: () => true, configurable: true, writable: true });
+        replaced = true;
+      } catch {
+        // a frozen class refuses the replacement, which is the point
+      }
+      try {
+        const fake = { body: clone(MINTABLE), signatures: [D1, D2] } as unknown as MintablePackage;
+        expect(() => mintablePackageDigest(fake)).toThrow(PackageNotMintableError);
+      } finally {
+        if (replaced) Object.defineProperty(MintablePackage, "isMintable", original);
+      }
+    });
+
+    it("E9b-2 HIGH: two concurrent assertions with one issued challenge mint at most once", async () => {
+      // astra's reader: answers the issued record every time and never consumes it.
+      const issued = {
+        nonce: MINTABLE.challengeBinding.nonce,
+        tChallengeRef: MINTABLE.challengeBinding.tChallengeRef,
+        state: "issued",
+      };
+      const challenges = { recordFor: async () => issued } as unknown as ChallengeReader;
+      const results = await Promise.allSettled([
+        assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, challenges, VERIFIER),
+        assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, challenges, VERIFIER),
+      ]);
+      expect(results.filter((r) => r.status === "fulfilled").length).toBeLessThanOrEqual(1);
+    });
+
+    it("E9b-2 HIGH: a second, sequential assertion with the same challenge does not mint again", async () => {
+      const issued = {
+        nonce: MINTABLE.challengeBinding.nonce,
+        tChallengeRef: MINTABLE.challengeBinding.tChallengeRef,
+        state: "issued",
+      };
+      const challenges = { recordFor: async () => issued } as unknown as ChallengeReader;
+      const first = await assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, challenges, VERIFIER).then(() => "minted", () => "refused");
+      const second = await assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, challenges, VERIFIER).then(() => "minted", () => "refused");
+      expect([first, second].filter((r) => r === "minted").length).toBeLessThanOrEqual(1);
+    });
+
+    it("E9b-2 HIGH: with a one-use store, exactly one of two concurrent assertions mints", async () => {
+      const store = oneUseChallenges(MINTABLE.challengeBinding);
+      const results = await Promise.allSettled([
+        assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, store, VERIFIER),
+        assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, store, VERIFIER),
+      ]);
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const refused = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+      expect(refused.reason).toBeInstanceOf(PackageNotMintableError);
+      expect(String(refused.reason.message)).toMatch(/mints at most once/);
+    });
+
+    it("E9b-2 HIGH: a reader without consumeIssued, or one answering anything but true, refuses", async () => {
+      const issued = { ...MINTABLE.challengeBinding, state: "issued" };
+      const readers: unknown[] = [
+        { recordFor: async () => issued },
+        { recordFor: async () => issued, consumeIssued: async () => false },
+        { recordFor: async () => issued, consumeIssued: async () => 1 },
+        { recordFor: async () => issued, consumeIssued: async () => "true" },
+        { recordFor: async () => issued, consumeIssued: async () => { throw new Error("store down"); } },
+      ];
+      for (const r of readers) {
+        await expect(assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, r as ChallengeReader, VERIFIER)).rejects.toThrow(
+          PackageNotMintableError,
+        );
+      }
+    });
+
+    it("E9b-2 HIGH: the challenge is consumed LAST, so a package refused for another reason does not burn it", async () => {
+      const store = oneUseChallenges(MINTABLE.challengeBinding);
+      // No D1 verifier: refused at the D1 gate, before consumption.
+      await expect(assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, store, null)).rejects.toThrow(PackageNotMintableError);
+      expect(store.consumeCalls).toBe(0);
+      // The same challenge then still mints once.
+      await expect(assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, store, VERIFIER)).resolves.toBeInstanceOf(MintablePackage);
+      expect(store.consumeCalls).toBe(1);
+    });
+
+    it("E9b-1: a genuinely minted package is in the registry; the class and its prototype are frozen", async () => {
+      const minted = await assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, CHALLENGES, VERIFIER);
+      expect(isMintablePackage(minted)).toBe(true);
+      expect(MintablePackage.isMintable(minted)).toBe(true);
+      expect(Object.isFrozen(MintablePackage)).toBe(true);
+      expect(Object.isFrozen(MintablePackage.prototype)).toBe(true);
+      expect(isMintablePackage({ body: minted.body, signatures: minted.signatures })).toBe(false);
+      expect(isMintablePackage(Object.create(MintablePackage.prototype))).toBe(false);
+      expect(() => mintablePackageDigest(minted)).not.toThrow();
     });
   });
 });
@@ -1119,7 +1261,7 @@ describe("read-once: every input field is read exactly once and only the copies 
           counting(MINT_BODY, body, "$"),
           countingArray([counting(D1r, sigCounts, "$d1"), counting(D2r, sigCounts, "$d2")], arrayReads),
           { signerForKernel: async () => wrappedRegistry as KernelRegistrySigner },
-          { recordFor: async () => wrappedRecord as never },
+          { recordFor: async () => wrappedRecord as never, consumeIssued: async () => true },
           VERIFIER_R,
         );
       } catch {
@@ -1155,7 +1297,7 @@ describe("read-once: every input field is read exactly once and only the copies 
       counting(MINT_BODY, {}, "$", flipLaterReads([".unitBinding.escrow", ".producer.kernelId", ".nonce"])),
       [counting(D1r, {}, "$d1", flipSig), counting(D2r, {}, "$d2", flipSig)],
       { signerForKernel: async () => flippedRegistry as KernelRegistrySigner },
-      { recordFor: async () => flippedRecord as never },
+      { recordFor: async () => flippedRecord as never, consumeIssued: async () => true },
       VERIFIER_R,
     );
     expect(flipped).toEqual(first);

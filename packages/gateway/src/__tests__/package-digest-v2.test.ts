@@ -39,7 +39,6 @@ import { createPrivateKey, createPublicKey } from "node:crypto";
 import { toBytes } from "viem";
 import GOLDEN from "./fixtures/g2-settlement-vector-golden.json";
 import {
-  packageDigestV2Unchecked,
   packageDigestV2PreImage,
   canonicalSignatures,
   assertCanonicalizable,
@@ -51,6 +50,7 @@ import {
   PackageNotMintableError,
   type PackageSignature,
 } from "../settlement/package-digest-v2.js";
+import { packageDigestV2Unchecked } from "../settlement/package-digest-v2-vectors.js";
 import {
   PACKAGE_FORMAT,
   PACKAGE_SCHEMA_VERSION,
@@ -546,6 +546,8 @@ describe("mintablePackageDigest — the only money-bound digest (F3)", () => {
       tChallengeRef: MINTABLE_BODY.challengeBinding.tChallengeRef,
       state: "issued" as const,
     }),
+    // One use is pinned in final-milestone-package-v2.test.ts (E9b); this double always consumes.
+    consumeIssued: async () => true,
   };
   // F1 (D1 half): this file only needs a positive control, so this verifier
   // simply answers true — the D1 fail-closed rules themselves are pinned in
@@ -595,16 +597,26 @@ describe("mintablePackageDigest — the only money-bound digest (F3)", () => {
     });
 
     it("refuses a fake even when Symbol.hasInstance is overridden to always answer true", () => {
+      // Since E9b the class is frozen, so the override itself is refused. Either way the
+      // digest does not consult instanceof, so the fake is refused.
       const original = Object.getOwnPropertyDescriptor(MintablePackage, Symbol.hasInstance);
-      Object.defineProperty(MintablePackage, Symbol.hasInstance, { value: () => true, configurable: true });
+      let overridden = false;
+      try {
+        Object.defineProperty(MintablePackage, Symbol.hasInstance, { value: () => true, configurable: true });
+        overridden = true;
+      } catch {
+        // frozen: not extensible
+      }
       try {
         const fake = { body: MINTABLE_BODY, signatures: [D1, D2] } as unknown as MintablePackage;
-        expect(fake instanceof MintablePackage).toBe(true); // instanceof now lies for EVERYTHING
         expect(() => mintablePackageDigest(fake)).toThrow(PackageNotMintableError);
       } finally {
-        if (original) Object.defineProperty(MintablePackage, Symbol.hasInstance, original);
-        else delete (MintablePackage as unknown as Record<symbol, unknown>)[Symbol.hasInstance];
+        if (overridden) {
+          if (original) Object.defineProperty(MintablePackage, Symbol.hasInstance, original);
+          else delete (MintablePackage as unknown as Record<symbol, unknown>)[Symbol.hasInstance];
+        }
       }
+      expect(overridden).toBe(false);
     });
 
     it("MintablePackage.isMintable agrees with a real mint and disagrees with both forgeries and every non-object", async () => {
@@ -627,4 +639,29 @@ describe("packageDigestV2Unchecked — rules the published golden blocks (STOPPE
   // mint guard is the only gate), these cannot be enforced on the digest path.
   it.todo("pins the scheme names to exactly secp256k1-eip712 (D1) and ed25519-raw32 (D2), which fixes the roles of the two entries");
   it.todo("pins the signer width per scheme: D1 = 0x + 40 digits, D2 = 0x + 64 digits");
+});
+
+describe("E9b: the unchecked digest is vectors-only, by construction", () => {
+  it("no production module under packages/gateway/src imports package-digest-v2-vectors", async () => {
+    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) {
+          if (name !== "__tests__" && name !== "node_modules") walk(path);
+          continue;
+        }
+        if (!/\.(ts|tsx|mts|cts|js|mjs)$/.test(name) || /\.test\./.test(name)) continue;
+        if (name === "package-digest-v2-vectors.ts") continue;
+        const text = readFileSync(path, "utf8");
+        if (/(from\s+|import\s*\(\s*)["'][^"']*package-digest-v2-vectors(\.js)?["']/.test(text)) offenders.push(path);
+      }
+    };
+    walk(root);
+    expect(offenders).toEqual([]);
+  });
 });

@@ -697,6 +697,25 @@ export interface ChallengeRecord {
  */
 export interface ChallengeReader {
   recordFor(unitBinding: UnitBinding): ChallengeRecord | null | Promise<ChallengeRecord | null>;
+  /**
+   * ONE USE (cross-family E9b, HIGH). ATOMICALLY move the issued record for exactly
+   * this unit, nonce and tChallengeRef from "issued" to "consumed", and answer
+   * `true` only to the call that made that move. It MUST answer `true` at most once
+   * per issued challenge, across every concurrent and every later call: a
+   * compare-and-set in the authoritative challenge store, never a read followed by
+   * a write. `recordFor` alone cannot give this: two assertions that both read
+   * "issued" would both mint.
+   *
+   * The guard calls it LAST, after every other check has passed (so a package that
+   * is wrong in any other way never burns the challenge), and mints only on exactly
+   * `true`. `false`, any other value, a throw, a rejection, or a reader without this
+   * method all refuse. A minted package that later fails downstream cannot be
+   * re-minted with the same challenge: the issuer issues a fresh one.
+   */
+  consumeIssued(
+    unitBinding: UnitBinding,
+    expected: { nonce: Hex; tChallengeRef: string },
+  ): boolean | Promise<boolean>;
 }
 
 /**
@@ -777,6 +796,24 @@ export interface OperatorSignatureVerifier {
 const captureObjectFreeze = Object.freeze;
 const captureObjectIsFrozen = Object.isFrozen;
 const captureObjectKeys = Object.keys;
+const captureWeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has) as (set: WeakSet<object>, value: object) => boolean;
+const captureWeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add) as (set: WeakSet<object>, value: object) => WeakSet<object>;
+
+/**
+ * E9b (cross-family r2, CRITICAL): every package `assertMintablePackage` has returned,
+ * and nothing else. Module-private: no other module can add to it, so membership is
+ * the runtime proof that a package passed every check. `#brand` alone was not: the
+ * emitted JavaScript constructor is callable (`Reflect.construct`), and it installs
+ * `#brand` on whatever it builds.
+ */
+const MINTED: WeakSet<object> = new WeakSet<object>();
+
+/**
+ * E9b (cross-family r2, CRITICAL): module-private, so only code in this module can
+ * pass it to the constructor. TypeScript's `private constructor` is compile-time
+ * only; this makes the runtime constructor refuse every outside call.
+ */
+const CONSTRUCTION_TOKEN: unique symbol = Symbol("pcc.mintable-package.construction");
 
 /**
  * F2 (evidence-lane round 3, cross-family E9): deep-freeze `value` and every
@@ -815,31 +852,29 @@ function deepFreeze<T>(value: T): T {
  * is never assignable to `MintablePackage`, even though its public shape
  * matches, because it has no `#brand`. (A private CONSTRUCTOR alone would not
  * be enough for this — TypeScript's structural check for classes only treats
- * them as nominal when they carry a private or protected MEMBER.) The private
- * constructor additionally means nothing outside this class can construct one
- * at runtime through normal means.
+ * them as nominal when they carry a private or protected MEMBER.)
  *
- * THE RUNTIME CHECK IS `#brand in x`, NOT `instanceof` (evidence-lane round 3,
- * cross-family E9, finding 1 — the prior doc here overclaimed `instanceof`'s
- * strength; it does not hold). `instanceof` walks the prototype chain, or —
- * if the class defines one — calls `Symbol.hasInstance`; neither requires the
- * private field to have ever been set by THIS class's own constructor. Two
- * routes forge it:
- *   - `Object.create(MintablePackage.prototype)` puts a hand-built object,
- *     carrying its own `body`/`signatures` but no `#brand`, on the right
- *     prototype chain WITHOUT ever running the constructor — it still passes
- *     `instanceof MintablePackage`;
- *   - `Object.defineProperty(MintablePackage, Symbol.hasInstance, { value: ()
- *     => true })` replaces what `instanceof` means for this class, for every
- *     check, everywhere, for anything, including a bare `{}`.
- * Either route let `mintablePackageDigest` hash a package nobody verified.
- * `#brand in x` (exposed as the static `isMintable`, below) is immune to
- * both: it is a direct test for the internal slot that only this class's own
- * constructor installs on an object it built itself — it does not walk a
- * prototype chain and does not consult `Symbol.hasInstance`, so no override
- * reachable from outside this class can forge it. `mintablePackageDigest`
- * (`package-digest-v2.ts`) calls `MintablePackage.isMintable`, never
- * `instanceof`.
+ * THE RUNTIME BOUNDARY IS THE MODULE-PRIVATE REGISTRY (cross-family E9b, CRITICAL).
+ * `private constructor` is compile-time only: the emitted constructor is callable,
+ * and `Reflect.construct(MintablePackage, [body, sigs])` installed a genuine
+ * `#brand` without running a single check. Now:
+ *   - the constructor refuses unless it is handed `CONSTRUCTION_TOKEN`, a
+ *     module-private symbol, so no outside call can build one;
+ *   - `assert` adds each package it returns to `MINTED`, a module-private WeakSet,
+ *     and `isMintablePackage` (what `mintablePackageDigest` calls) asks only that
+ *     set. Even an instance built some other way is not in it;
+ *   - the class and its prototype are frozen, so `isMintable` and `assert` cannot
+ *     be replaced (they could be, before).
+ *
+ * HISTORY of the runtime check (kept so the reasoning is not repeated):
+ *   - `instanceof` was forgeable (evidence-lane round 3): `Object.create(
+ *     MintablePackage.prototype)` passes it without running the constructor, and
+ *     a `Symbol.hasInstance` override redefines it for every check.
+ *   - `#brand in x` replaced it, but `#brand` is installed by the constructor,
+ *     and the emitted constructor was callable from outside (cross-family E9b,
+ *     CRITICAL): `Reflect.construct` built a branded instance with no checks.
+ *   - So the check is now membership in `MINTED` (above), which only `assert`
+ *     writes, with the constructor gated by `CONSTRUCTION_TOKEN`.
  *
  * `body` and `signatures` are DEEP-frozen (evidence-lane round 3, finding 2 —
  * was shallow; see `deepFreeze` above) copies the caller cannot reach (both
@@ -857,25 +892,25 @@ function deepFreeze<T>(value: T): T {
 export class MintablePackage {
   readonly body: FinalMilestonePackageV2Body;
   readonly signatures: readonly PackageSignature[];
-  /** Makes this class nominal and backs `isMintable`'s `#brand in x` runtime check (see class doc). Never read for its value. */
+  /** Makes the class nominal for TypeScript (see the class doc). Never read; the runtime check is `MINTED`. */
   readonly #brand = true;
 
-  private constructor(body: FinalMilestonePackageV2Body, signatures: PackageSignature[]) {
+  private constructor(token: typeof CONSTRUCTION_TOKEN, body: FinalMilestonePackageV2Body, signatures: PackageSignature[]) {
+    if (token !== CONSTRUCTION_TOKEN) {
+      throw new PackageNotMintableError("$", "a MintablePackage is made only by assertMintablePackage");
+    }
     this.body = deepFreeze(body);
     this.signatures = deepFreeze(signatures);
     captureObjectFreeze(this);
   }
 
   /**
-   * F3 (evidence-lane round 3, cross-family E9): the ergonomic private-brand
-   * check, `#brand in x` — see the class doc for why this is the runtime
-   * boundary instead of `instanceof`. `in` throws if its right-hand operand
-   * is not an object, so `typeof x === "object" && x !== null` runs first and
-   * short-circuits, making this return `false` instead of throwing for every
-   * non-object input (a number, a string, `null`, `undefined`, a boolean).
+   * Whether `x` is a package `assertMintablePackage` returned: `isMintablePackage`,
+   * membership in the module-private registry (cross-family E9b). Kept for callers
+   * of the old static; the class is frozen, so it cannot be replaced.
    */
   static isMintable(x: unknown): x is MintablePackage {
-    return typeof x === "object" && x !== null && #brand in x;
+    return isMintablePackage(x);
   }
 
   /**
@@ -1078,8 +1113,44 @@ export class MintablePackage {
       throw new PackageNotMintableError(d1Path, "the operator signature verifier did not return exactly true");
     }
 
-    return new MintablePackage(valid, canonicalSignatures(entries));
+    // E9b (cross-family r2, HIGH): ONE USE. The challenge is consumed atomically, LAST,
+    // after every other check passed, and only the call the store answers `true` mints.
+    // Two assertions that both read "issued" above cannot both get here with `true`.
+    let consumed: unknown;
+    try {
+      consumed = await challenges.consumeIssued(
+        valid.unitBinding,
+        captureObjectFreeze({ nonce: valid.challengeBinding.nonce, tChallengeRef: valid.challengeBinding.tChallengeRef }),
+      );
+    } catch (err) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        `the challenge could not be consumed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (consumed !== true) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        "the challenge was not consumed by this call (already used, or the store refused); a challenge mints at most once",
+      );
+    }
+
+    const minted = new MintablePackage(CONSTRUCTION_TOKEN, valid, canonicalSignatures(entries));
+    captureWeakSetAdd(MINTED, minted);
+    return minted;
   }
+}
+captureObjectFreeze(MintablePackage);
+captureObjectFreeze(MintablePackage.prototype);
+
+/**
+ * Whether `x` is a package `assertMintablePackage` returned (cross-family E9b,
+ * CRITICAL): membership in this module's private registry, never a property of `x`
+ * or of the class. `mintablePackageDigest` calls this. It is an ES module export,
+ * so importers cannot rebind it.
+ */
+export function isMintablePackage(x: unknown): x is MintablePackage {
+  return typeof x === "object" && x !== null && captureWeakSetHas(MINTED, x);
 }
 
 /**
