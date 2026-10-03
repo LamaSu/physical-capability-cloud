@@ -67,7 +67,7 @@ def http(method, url, body=None, headers=None, timeout=30, verify_ssl=True):
         return 0, {"error": str(e)}
 
 
-def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30):
+def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30, headers=None):
     """Make a request to the PCC gateway.
 
     Parameters
@@ -84,9 +84,19 @@ def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30):
         Bearer token.
     timeout : int
         Request timeout.
+    headers : dict | None
+        Extra headers to merge into the request (e.g. "X-PCC-Lease: 1"). The
+        Authorization header is always derived exclusively from `api_key`: any
+        "Authorization" entry here (any case) is dropped, never merged in --
+        callers cannot use `headers` to override or supply auth.
     """
     url = f"{base_url.rstrip('/')}{path}"
-    headers = {}
+    req_headers = {}
+    if headers:
+        for key, value in headers.items():
+            if key.lower() == "authorization":
+                continue
+            req_headers[key] = value
     if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    return http(method, url, body, headers, timeout=timeout)
+        req_headers["Authorization"] = f"Bearer {api_key}"
+    return http(method, url, body, req_headers, timeout=timeout)

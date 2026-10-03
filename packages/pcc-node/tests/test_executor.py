@@ -1,6 +1,7 @@
 """Tests for the executor and device adapters."""
 
 import json
+import time
 from unittest import mock
 
 import pytest
@@ -14,6 +15,16 @@ from pcc_node.executor import (
     execute_and_report,
     run_pending_once,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_fence_dir(tmp_path, monkeypatch):
+    """#400 F3: every test gets its own PCC_NODE_FENCE_DIR, never the real
+    ~/.pcc-node/relay-fence. Also clears PCC_NODE_LEASE_FRESHNESS_S so a
+    developer's/CI's shell env can't make freshness tests flaky."""
+    monkeypatch.setenv("PCC_NODE_FENCE_DIR", str(tmp_path / "relay-fence"))
+    monkeypatch.delenv("PCC_NODE_LEASE_FRESHNESS_S", raising=False)
+    return tmp_path / "relay-fence"
 
 
 class TestOpentronAdapter:
@@ -150,16 +161,21 @@ class TestExecuteAndReport:
         adapter.device_type = "test"
         adapter.execute.return_value = json.dumps({"ok": True})
 
-        call = {"id": "c1", "kernelId": "k1", "toolName": "test_tool", "args": {"x": 1}}
+        call = {
+            "id": "c1", "kernelId": "k1", "toolName": "test_tool", "args": {"x": 1},
+            "claimToken": "tok-1", "_receivedAt": time.monotonic(),
+        }
 
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
-            mock_pcc.return_value = (200, {})
+            mock_pcc.return_value = (200, {"started": True})
             assert execute_and_report(call, [adapter], "http://pcc", "key", "k1") is True
 
         adapter.execute.assert_called_once_with("test_tool", {"x": 1})
-        mock_pcc.assert_called_once()
+        # Lease start, then the result post -- the lease guard runs first.
+        assert mock_pcc.call_count == 2
         post_body = mock_pcc.call_args[1].get("body") or mock_pcc.call_args[0][2]
         assert post_body["callId"] == "c1"
+        assert post_body["result"] == json.dumps({"ok": True})
         assert mock_pcc.call_args[0][:2] == ("POST", "/api/relay/k1/tool-result")
 
     def test_the_polled_kernel_is_required(self):
@@ -193,12 +209,16 @@ class TestExecuteAndReport:
         adapter = mock.Mock()
         adapter.device_type = "test"
         adapter.execute.return_value = json.dumps({"ok": True})
-        call = {"id": "c7", "toolName": "t", "args": {}}
+        call = {
+            "id": "c7", "toolName": "t", "args": {},
+            "claimToken": "tok-7", "_receivedAt": time.monotonic(),
+        }
 
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
-            mock_pcc.return_value = (200, {})
+            mock_pcc.return_value = (200, {"started": True})
             execute_and_report(call, [adapter], "http://pcc", "key", kernel_id="a/b?c#d")
 
+        adapter.execute.assert_called_once_with("t", {})
         assert mock_pcc.call_args[0][:2] == ("POST", "/api/relay/a%2Fb%3Fc%23d/tool-result")
 
     def test_poll_url_encodes_the_kernel_id(self):
@@ -217,10 +237,13 @@ class TestExecuteAndReport:
         adapter2.device_type = "a2"
         adapter2.execute.return_value = json.dumps({"result": "handled"})
 
-        call = {"id": "c2", "kernelId": "k1", "toolName": "x", "toolArgs": {}}
+        call = {
+            "id": "c2", "kernelId": "k1", "toolName": "x", "toolArgs": {},
+            "claimToken": "tok-2", "_receivedAt": time.monotonic(),
+        }
 
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
-            mock_pcc.return_value = (200, {})
+            mock_pcc.return_value = (200, {"started": True})
             execute_and_report(call, [adapter1, adapter2], "http://pcc", "key", "k1")
 
         adapter1.execute.assert_called_once()
@@ -231,12 +254,15 @@ class TestRunPendingOnce:
     """The path from polling to execution binds every call to the polled kernel."""
 
     def _gateway(self, calls):
-        """A fake PCC: GET pending answers `calls`; POST tool-result is recorded."""
+        """A fake PCC: GET pending answers `calls`; POST .../start grants the
+        lease; POST tool-result is recorded."""
         posted = []
 
-        def pcc_request(method, path, body=None, base_url=None, api_key=None):
+        def pcc_request(method, path, body=None, **_kwargs):
             if method == "GET":
                 return 200, {"calls": calls}
+            if path.endswith("/start"):
+                return 200, {"started": True}
             posted.append((path, body))
             return 200, {}
 
@@ -247,9 +273,9 @@ class TestRunPendingOnce:
         adapter.device_type = "test"
         adapter.execute.return_value = json.dumps({"ok": True})
         calls = [
-            {"id": "mine", "kernelId": "k1", "toolName": "t", "args": {"n": 1}},
+            {"id": "mine", "kernelId": "k1", "toolName": "t", "args": {"n": 1}, "claimToken": "tok-mine"},
             {"id": "foreign", "kernelId": "k2", "toolName": "t", "args": {"n": 2}},
-            {"id": "unstated", "toolName": "t", "args": {"n": 3}},
+            {"id": "unstated", "toolName": "t", "args": {"n": 3}, "claimToken": "tok-unstated"},
             "not-a-call",
         ]
         fake, posted = self._gateway(calls)
@@ -268,3 +294,345 @@ class TestRunPendingOnce:
             with pytest.raises(ValueError):
                 run_pending_once([], "http://pcc", "key", "")
         mock_pcc.assert_not_called()
+
+
+class TestExecutionLeaseGuard:
+    """#400 F3: a self-contained fail-closed re-check right before adapter.execute().
+
+    Cross-family review finding (r5, F3, HIGH): the exact-SHA pcc-node checked only
+    that kernelId matched, then called adapter.execute() unconditionally -- never
+    rechecking e-stop/scope/budget/breaker/freshness, and with no execution fencing.
+    adk (#5510) ruled the node-side fix is this guard, reusing #471's claim-token
+    wire shape (claim, then start with the token).
+    """
+
+    def test_reproduction_409_lease_refused_must_block_execution(self):
+        """THE BUG (#400 F3). A claimed call whose lease the gateway refuses (409
+        lease_refused, emergency_stopped) must never reach adapter.execute, and
+        nothing may be reported for it (the gateway already closed the call).
+
+        At HEAD 30e41a3f this FAILS: the unchanged execute_and_report never asks
+        for a lease at all -- it runs the adapter and posts the result regardless.
+        """
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        adapter.execute.return_value = json.dumps({"ok": True})
+
+        call = {
+            "id": "c-repro",
+            "kernelId": "k1",
+            "toolName": "t",
+            "args": {},
+            "claimToken": "tok-repro",
+            "_receivedAt": time.monotonic(),
+        }
+
+        posted = []
+
+        def fake_pcc_request(method, path, body=None, **_kwargs):
+            if path.endswith("/start"):
+                return 409, {"error": "lease_refused", "reason": "emergency_stopped"}
+            posted.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake_pcc_request):
+            result = execute_and_report(call, [adapter], "http://pcc", "key", "k1")
+
+        assert result is False
+        adapter.execute.assert_not_called()
+        assert posted == []
+
+    def test_200_started_true_runs_adapter_once_and_reports_result(self):
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        adapter.execute.return_value = json.dumps({"ok": True})
+
+        call = {
+            "id": "c-ok", "kernelId": "k1", "toolName": "t", "args": {"a": 1},
+            "claimToken": "tok-ok", "_receivedAt": time.monotonic(),
+        }
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            if path.endswith("/start"):
+                assert body == {"claimToken": "tok-ok"}
+                return 200, {"started": True, "callId": "c-ok", "startedAt": "2026-01-01T00:00:00Z"}
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            result = execute_and_report(call, [adapter], "http://pcc", "key", "k1")
+
+        assert result is True
+        adapter.execute.assert_called_once_with("t", {"a": 1})
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": "c-ok", "result": json.dumps({"ok": True})}),
+        ]
+
+    @pytest.mark.parametrize("bad_call", [
+        {"id": "c-missing", "kernelId": "k1", "toolName": "t", "args": {}},
+        {"id": "c-empty", "kernelId": "k1", "toolName": "t", "args": {}, "claimToken": ""},
+        {"id": "c-wrongtype", "kernelId": "k1", "toolName": "t", "args": {}, "claimToken": 12345},
+    ])
+    def test_no_claim_token_refuses_and_reports_no_lease(self, bad_call):
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        bad_call = dict(bad_call, _receivedAt=time.monotonic())
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            result = execute_and_report(bad_call, [adapter], "http://pcc", "key", "k1")
+
+        assert result is False
+        adapter.execute.assert_not_called()
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": bad_call["id"], "error": "not_executed:no_lease"}),
+        ]
+
+    def test_stale_call_refuses_and_reports_stale(self):
+        """More than LEASE_FRESHNESS_S (default 30s) has passed since receipt;
+        fake the monotonic clock rather than actually sleeping."""
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+
+        call = {
+            "id": "c-stale", "kernelId": "k1", "toolName": "t", "args": {},
+            "claimToken": "tok-stale", "_receivedAt": 1000.0,
+        }
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake), \
+                mock.patch("pcc_node.executor.time.monotonic", return_value=1000.0 + 30.000001):
+            result = execute_and_report(call, [adapter], "http://pcc", "key", "k1")
+
+        assert result is False
+        adapter.execute.assert_not_called()
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": "c-stale", "error": "not_executed:stale"}),
+        ]
+
+    @pytest.mark.parametrize("missing_receipt", [
+        {"id": "c-noreceipt-1", "kernelId": "k1", "toolName": "t", "args": {}, "claimToken": "t1"},
+        {"id": "c-noreceipt-2", "kernelId": "k1", "toolName": "t", "args": {}, "claimToken": "t1", "_receivedAt": None},
+        {"id": "c-noreceipt-3", "kernelId": "k1", "toolName": "t", "args": {}, "claimToken": "t1", "_receivedAt": "oops"},
+    ])
+    def test_no_receipt_time_is_stale(self, missing_receipt):
+        """'A call with no receipt time is stale.'"""
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            result = execute_and_report(missing_receipt, [adapter], "http://pcc", "key", "k1")
+
+        assert result is False
+        adapter.execute.assert_not_called()
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": missing_receipt["id"], "error": "not_executed:stale"}),
+        ]
+
+    def test_same_call_id_twice_fences_the_second_attempt(self):
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        adapter.execute.return_value = json.dumps({"ok": True})
+
+        def make_call():
+            return {
+                "id": "c-dupe", "kernelId": "k1", "toolName": "t", "args": {},
+                "claimToken": "tok-dupe", "_receivedAt": time.monotonic(),
+            }
+
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            if path.endswith("/start"):
+                return 200, {"started": True}
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            first = execute_and_report(make_call(), [adapter], "http://pcc", "key", "k1")
+            second = execute_and_report(make_call(), [adapter], "http://pcc", "key", "k1")
+
+        assert first is True
+        assert second is False
+        adapter.execute.assert_called_once()
+        # Only the first attempt is reported; the fenced second attempt is silent.
+        assert len(posts) == 1
+        assert posts[0][2]["callId"] == "c-dupe"
+        assert posts[0][2]["result"] == json.dumps({"ok": True})
+
+    @pytest.mark.parametrize("start_behavior", ["raises", "503_policy_unavailable", "transport_zero"])
+    def test_transport_error_timeout_or_503_reports_lease_unavailable(self, start_behavior):
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+
+        call = {
+            "id": "c-unavail", "kernelId": "k1", "toolName": "t", "args": {},
+            "claimToken": "tok-unavail", "_receivedAt": time.monotonic(),
+        }
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            if path.endswith("/start"):
+                if start_behavior == "raises":
+                    raise TimeoutError("timed out")
+                if start_behavior == "503_policy_unavailable":
+                    return 503, {"error": "policy_unavailable"}
+                return 0, {"error": "Connection refused"}  # transport_zero
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            result = execute_and_report(call, [adapter], "http://pcc", "key", "k1")
+
+        assert result is False
+        adapter.execute.assert_not_called()
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": "c-unavail", "error": "not_executed:lease_unavailable"}),
+        ]
+
+    @pytest.mark.parametrize("start_body", [{"started": False}, {}, {"started": "true"}, {"started": 1}])
+    def test_200_without_started_true_does_not_run(self, start_body):
+        """Spec gap (documented in the report): the wire contract only names
+        200/409/404/503-or-other as report buckets; a malformed 200 isn't
+        listed. We fail closed (never run) AND report "lease_unavailable",
+        bucketing it with "any other status" so the gateway isn't left
+        believing the call may still be open."""
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+
+        call = {
+            "id": "c-notstarted", "kernelId": "k1", "toolName": "t", "args": {},
+            "claimToken": "tok-ns", "_receivedAt": time.monotonic(),
+        }
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            if path.endswith("/start"):
+                return 200, start_body
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            result = execute_and_report(call, [adapter], "http://pcc", "key", "k1")
+
+        assert result is False
+        adapter.execute.assert_not_called()
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": "c-notstarted", "error": "not_executed:lease_unavailable"}),
+        ]
+
+    def test_poll_sends_lease_header(self):
+        sent_headers = {}
+
+        def fake(method, path, body=None, **kwargs):
+            sent_headers.update(kwargs.get("headers") or {})
+            return 200, {"calls": [{"id": "c1", "toolName": "t", "args": {}}]}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            calls = poll_pending_jobs("http://pcc", "key", "k1")
+
+        assert sent_headers == {"X-PCC-Lease": "1"}
+        assert isinstance(calls[0]["_receivedAt"], float)
+
+    def test_receipt_time_never_reaches_any_outgoing_body(self):
+        """The full poll -> execute cycle: _receivedAt must never appear in
+        any body sent to the gateway (poll, lease-start, or tool-result)."""
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        adapter.execute.return_value = json.dumps({"ok": True})
+
+        bodies = []
+
+        def fake(method, path, body=None, **_kwargs):
+            bodies.append(body)
+            if method == "GET":
+                return 200, {"calls": [
+                    {"id": "c1", "toolName": "t", "args": {}, "claimToken": "tok-1"},
+                ]}
+            if path.endswith("/start"):
+                return 200, {"started": True}
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            executed, refused = run_pending_once([adapter], "http://pcc", "key", "k1")
+
+        assert (executed, refused) == (1, 0)
+        assert len(bodies) == 3  # poll (None), lease-start, tool-result
+        for body in bodies:
+            if isinstance(body, dict):
+                assert "_receivedAt" not in body
+
+    def test_fence_dir_that_cannot_be_created_reports_fence_unavailable(self, tmp_path, monkeypatch):
+        """A plain file sitting where the fence dir needs to be: os.makedirs
+        can never succeed there, portably (no permission-bit tricks needed)."""
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+
+        blocked = tmp_path / "blocked-fence-dir"
+        blocked.write_text("a file, not a directory")
+        monkeypatch.setenv("PCC_NODE_FENCE_DIR", str(blocked))
+
+        call = {
+            "id": "c-fence", "kernelId": "k1", "toolName": "t", "args": {},
+            "claimToken": "tok-fence", "_receivedAt": time.monotonic(),
+        }
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            result = execute_and_report(call, [adapter], "http://pcc", "key", "k1")
+
+        assert result is False
+        adapter.execute.assert_not_called()
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": "c-fence", "error": "not_executed:fence_unavailable"}),
+        ]
+
+    @pytest.mark.parametrize("bad_value", ["not-a-number", "0", "-5", "nan", "inf"])
+    def test_invalid_lease_freshness_env_var_fails_closed(self, bad_value, monkeypatch):
+        """Spec gap (documented in the report): PCC_NODE_LEASE_FRESHNESS_S 'must
+        parse as a positive number, else refuse to start the guard: fail
+        closed.' No report string is named for this case; we collapse it into
+        "stale" (the closest existing reason -- an untrustworthy bound means
+        we cannot prove freshness either way, the same as a missing receipt
+        time). inf is treated as invalid too: it would disable the staleness
+        check entirely, which is not fail-closed."""
+        monkeypatch.setenv("PCC_NODE_LEASE_FRESHNESS_S", bad_value)
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+
+        call = {
+            "id": "c-badenv", "kernelId": "k1", "toolName": "t", "args": {},
+            "claimToken": "tok-badenv", "_receivedAt": time.monotonic(),
+        }
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            result = execute_and_report(call, [adapter], "http://pcc", "key", "k1")
+
+        assert result is False
+        adapter.execute.assert_not_called()
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": "c-badenv", "error": "not_executed:stale"}),
+        ]

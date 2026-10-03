@@ -113,3 +113,47 @@ class TestPccRequest:
 
         call_args = mock_http.call_args
         assert call_args[0][1] == "http://pcc/api/test"
+
+
+class TestPccRequestHeaders:
+    """#400 F3: pcc_request gains an optional `headers` keyword (e.g. for
+    X-PCC-Lease: 1 on the poll). Authorization stays exclusively api_key's."""
+
+    def test_headers_keyword_merges_into_request(self):
+        with mock.patch("pcc_node.http_util.http") as mock_http:
+            mock_http.return_value = (200, {})
+            pcc_request("GET", "/api/test", base_url="http://pcc", headers={"X-PCC-Lease": "1"})
+
+        headers = mock_http.call_args[0][3]
+        assert headers["X-PCC-Lease"] == "1"
+
+    def test_headers_keyword_cannot_override_authorization(self):
+        with mock.patch("pcc_node.http_util.http") as mock_http:
+            mock_http.return_value = (200, {})
+            pcc_request(
+                "GET", "/api/test", base_url="http://pcc", api_key="key1",
+                headers={"Authorization": "Bearer evil", "X-Foo": "bar"},
+            )
+
+        headers = mock_http.call_args[0][3]
+        assert headers["Authorization"] == "Bearer key1"
+        assert headers["X-Foo"] == "bar"
+
+    def test_headers_authorization_stripped_case_insensitively_without_api_key(self):
+        """Even with no api_key, headers can never smuggle in an Authorization
+        value -- it is exclusively derived from api_key, full stop."""
+        with mock.patch("pcc_node.http_util.http") as mock_http:
+            mock_http.return_value = (200, {})
+            pcc_request("GET", "/api/test", base_url="http://pcc", headers={"authorization": "Bearer evil"})
+
+        headers = mock_http.call_args[0][3]
+        assert "Authorization" not in headers
+        assert "authorization" not in headers
+
+    def test_existing_callers_without_headers_kwarg_still_work(self):
+        with mock.patch("pcc_node.http_util.http") as mock_http:
+            mock_http.return_value = (200, {})
+            pcc_request("GET", "/api/test", base_url="http://pcc", api_key="key1")
+
+        headers = mock_http.call_args[0][3]
+        assert headers == {"Authorization": "Bearer key1"}
