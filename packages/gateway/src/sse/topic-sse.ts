@@ -7,7 +7,7 @@ import type { StreamTopic } from "@pcc/spec";
 import { streamHub } from "./stream-hub.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
 import { resolveSSEAuth } from "./sse-auth.js";
-import { gateJobRead, gateKernelRead, refuseJobRead, type KernelReadGate } from "../readmodels/job-read-gate.js";
+import { asSent, gateJobRead, gateKernelRead, refuseJobRead, streamEventFilterOf, type KernelReadGate } from "../readmodels/job-read-gate.js";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { batchTracker } from "../services.js";
@@ -36,8 +36,9 @@ export async function topicSSE(app: FastifyInstance) {
     req: { raw: { on: (event: string, cb: () => void) => void }; ip?: string },
     reply: { raw: { writeHead: (status: number, headers: Record<string, string>) => void; write: (data: string) => void } },
     topics: StreamTopic[],
-    lastEventId?: string,
-    origin?: string,
+    lastEventId: string | undefined,
+    origin: string | undefined,
+    keep: (event: unknown) => boolean,
   ) {
     // Strict origin validation — reject unknown origins with default
     const allowOrigin = origin && ALLOWED_SSE_ORIGINS.has(origin)
@@ -56,7 +57,11 @@ export async function topicSSE(app: FastifyInstance) {
     const unsubscribe = streamHub.subscribe(
       topics,
       (event) => {
-        const payload = `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`;
+        // The event is judged as it is sent (review r3 of #403, HIGH): its JSON form, parsed back.
+        // An event naming a job the caller may not read, at any depth, is not written (CRITICAL).
+        const sent = asSent(event.payload);
+        if (!sent || !keep(sent.value)) return;
+        const payload = `id: ${event.id}\nevent: ${event.type}\ndata: ${sent.text}\n\n`;
         try {
           reply.raw.write(payload);
         } catch {
@@ -100,10 +105,16 @@ export async function topicSSE(app: FastifyInstance) {
       trackSSEClose(req.ip);
       return refuseJobRead(reply, gate, { error: "not_found", message: `job '${jobId}' not found` });
     }
+    // Which events the caller may see is fixed when the stream opens (as on the log stream).
+    const events = streamEventFilterOf(req);
+    if (!events.ok) {
+      trackSSEClose(req.ip);
+      return refuseJobRead(reply, events);
+    }
 
     const lastEventId = req.headers["last-event-id"] as string | undefined;
     const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "job", id: jobId }], lastEventId, origin);
+    setupSSE(req, reply, [{ type: "job", id: jobId }], lastEventId, origin, events.keep);
     await new Promise(() => {});
   });
 
@@ -132,9 +143,16 @@ export async function topicSSE(app: FastifyInstance) {
       trackSSEClose(req.ip);
       return refuseJobRead(reply, gate, { error: "not_found", message: `${what} '${id}' not found` });
     }
+    // The kernel's stream carries job-bound readings: each one is also its job's record, so under
+    // TENANT_ENFORCE only the jobs of the caller's tenant reach it (review r3 of #403, CRITICAL).
+    const events = streamEventFilterOf(req);
+    if (!events.ok) {
+      trackSSEClose(req.ip);
+      return refuseJobRead(reply, events);
+    }
     const lastEventId = req.headers["last-event-id"] as string | undefined;
     const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [topic], lastEventId, origin);
+    setupSSE(req, reply, [topic], lastEventId, origin, events.keep);
     await new Promise(() => {});
   };
 

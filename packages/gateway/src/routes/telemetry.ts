@@ -25,7 +25,7 @@ import { streamHub } from "../sse/stream-hub.js";
 import { auditService } from "../services/audit-service.js";
 import type { TelemetryStatus, PipelinePhase } from "../telemetry.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
-import { gateJobRead, jobReadScopeOf, jobRecordFilterOf, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
+import { asSent, gateJobRead, jobReadScopeOf, jobRecordFilterOf, keepAsSent, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
 
 // Active SSE clients for the live log stream, each with the records it may see
 const logStreamClients = new Map<FastifyReply, (record: unknown) => boolean>();
@@ -35,9 +35,13 @@ streamHub.subscribe(
   [{ type: "global", id: "*" }],
   (event) => {
     if (event.type !== "telemetry_event" && event.type !== "log_entry") return;
-    const payload = `event: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`;
+    // Each client's filter judges the event as it is sent (review r3 of #403, HIGH): the text
+    // written is exactly the serialization the filter read back.
+    const sent = asSent(event.payload);
+    if (!sent) return;
+    const payload = `event: ${event.type}\ndata: ${sent.text}\n\n`;
     for (const [client, keep] of logStreamClients) {
-      if (!keep(event.payload)) continue;
+      if (!keep(sent.value)) continue;
       try {
         client.raw.write(payload);
       } catch {
@@ -79,7 +83,11 @@ export async function telemetryRoutes(app: FastifyInstance) {
       const gate = gateJobRead(req, jobId);
       if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
       // A job the caller may not read gets what a job with no telemetry gets.
-      const timeline = gate.ok ? pipelineTelemetry.getTimeline(jobId) : [];
+      // The job's own events, each judged as sent by the record filter too: an event that also
+      // names a job the caller may not read is left out (review r3 of #403, HIGH).
+      const filter = jobRecordFilterOf(req);
+      if (!filter.ok) return refuseJobRead(reply, filter);
+      const timeline = gate.ok ? keepAsSent(pipelineTelemetry.getTimeline(jobId), filter.keep) : [];
       return { jobId, timeline, phases: PIPELINE_PHASES };
     },
   );
@@ -127,17 +135,22 @@ export async function telemetryRoutes(app: FastifyInstance) {
     // Asking for one job's lines is reading that job: the gate runs, and a job the caller may
     // not read has no lines. Without a job, the lines naming a job the caller may not read are
     // left out, before the limit is applied.
+    // A job's lines also pass the record filter (review r3 of #403, HIGH): a line naming the job
+    // at the top and another job inside is the other job's record too.
     let keep: (entry: unknown) => boolean;
     if (q.jobId) {
       const gate = gateJobRead(req, q.jobId);
       if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
-      keep = () => gate.ok;
+      const filter = jobRecordFilterOf(req);
+      if (!filter.ok) return refuseJobRead(reply, filter);
+      keep = (entry) => gate.ok && filter.keep(entry);
     } else {
       const filter = jobRecordFilterOf(req);
       if (!filter.ok) return refuseJobRead(reply, filter);
       keep = filter.keep;
     }
-    const entries = logger
+    // Each line is judged, and returned, as it is sent (review r3 of #403, HIGH).
+    const queried = logger
       .query({
         level: q.level as LogLevel | undefined,
         source: q.source,
@@ -147,9 +160,8 @@ export async function telemetryRoutes(app: FastifyInstance) {
         after: q.after,
         before: q.before,
         limit: Number.POSITIVE_INFINITY,
-      })
-      .filter(keep)
-      .slice(-(q.limit ? parseInt(q.limit, 10) : 200));
+      });
+    const entries = keepAsSent(queried, keep).slice(-(q.limit ? parseInt(q.limit, 10) : 200));
     return {
       entries,
       total: entries.length,
@@ -176,17 +188,21 @@ export async function telemetryRoutes(app: FastifyInstance) {
       Connection: "keep-alive",
     });
 
-    // Send recent history on connect
-    const recent = logger.getRecent(50).filter((entry) => filter.keep(entry));
-    for (const entry of recent) {
-      reply.raw.write(`event: log_entry\ndata: ${JSON.stringify(entry)}\n\n`);
+    // Send recent history on connect, each record judged as it is sent (review r3 of #403, HIGH)
+    for (const entry of logger.getRecent(50)) {
+      const sent = asSent(entry);
+      if (sent && filter.keep(sent.value)) reply.raw.write(`event: log_entry\ndata: ${sent.text}\n\n`);
     }
 
     // Also send recent telemetry events from active jobs
-    for (const summary of pipelineTelemetry.getActiveJobs().filter((active) => filter.keep(active)).slice(0, 5)) {
-      const timeline = pipelineTelemetry.getTimeline(summary.jobId).slice(-10);
-      for (const evt of timeline) {
-        reply.raw.write(`event: telemetry_event\ndata: ${JSON.stringify(evt)}\n\n`);
+    const activeJobs = pipelineTelemetry.getActiveJobs().filter((active) => {
+      const sent = asSent(active);
+      return sent !== undefined && filter.keep(sent.value);
+    });
+    for (const summary of activeJobs.slice(0, 5)) {
+      for (const evt of pipelineTelemetry.getTimeline(summary.jobId).slice(-10)) {
+        const sent = asSent(evt);
+        if (sent && filter.keep(sent.value)) reply.raw.write(`event: telemetry_event\ndata: ${sent.text}\n\n`);
       }
     }
 
