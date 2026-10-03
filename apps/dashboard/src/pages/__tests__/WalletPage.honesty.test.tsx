@@ -376,6 +376,10 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     expect(text()).toContain("ACTIVE");
     expect(text()).not.toContain("REVOKED");
 
+    routes["/api/fiat-ramp/cdp/spend-permission/0xperm"] = { status: 200, body: { revoked: true, permissionId: "0xother" } };
+    await click(button("Revoke"));
+    expect(text(), "a confirmation for another permission doesn't revoke this one").not.toContain("REVOKED");
+
     routes["/api/fiat-ramp/cdp/spend-permission/0xperm"] = { status: 200, body: { revoked: true, permissionId: "0xperm" } };
     await click(button("Revoke"));
     expect(text()).toContain("REVOKED");
@@ -393,6 +397,25 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     await click(button("Create wallet — no card"));
     expect(text()).not.toContain("Usable on PCC now");
     expect(button(/Add funds with a card/)).toBeUndefined();
+  });
+
+  it.each([
+    ["a mock flag that isn't a boolean", { mock: "false" }],
+    ["an unknown network", { network: "ethereum" }],
+    ["an address that isn't one", { walletAddress: "0x2222" }],
+    ["no smart account", { smartAccount: false }],
+  ])("a wallet answer with %s shows no wallet (astra 408a HIGH)", async (_what, change) => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": {
+        status: 200,
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, ...change },
+      },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    expect(text()).not.toContain("Usable on PCC now");
+    expect(text()).toContain("wallet answer was incomplete");
   });
 
   it("a checkout without the provider's identity, or off Coinbase's checkout, is not offered (astra 408a HIGH)", async () => {
@@ -427,14 +450,20 @@ describe("Funded Key tab: shows what the gateway returns", () => {
   });
 
   const WALLET_2 = "0x2222222222222222222222222222222222222222";
+  const OTHER = "0x9999999999999999999999999999999999999999";
   it.each([
-    ["another address", { "0x9999999999999999999999999999999999999999": ["base"] }],
-    ["another network", { [WALLET_2]: ["ethereum"] }],
-    ["a second address too", { [WALLET_2]: ["base"], "0x9999999999999999999999999999999999999999": ["base"] }],
-  ])("a checkout that pays %s is not offered (astra 408a HIGH)", async (_what, destinations) => {
+    ["pays another address", { onrampUrl: coinbaseCheckout(WALLET_2, { [OTHER]: ["base"] }) }],
+    ["pays on another network", { onrampUrl: coinbaseCheckout(WALLET_2, { [WALLET_2]: ["ethereum"] }) }],
+    ["pays a second address too", { onrampUrl: coinbaseCheckout(WALLET_2, { [WALLET_2]: ["base"], [OTHER]: ["base"] }) }],
+    ["isn't on Coinbase's checkout", { onrampUrl: coinbaseCheckout(WALLET_2).replace("https://pay.coinbase.com", "https://pay.coinbase.com.example") }],
+    ["names no provider", { provider: undefined }],
+    ["doesn't say whether it is a mock", { mock: undefined }],
+    ["answers for another wallet", { walletAddress: OTHER }],
+    ["is for another network", { network: "base-sepolia" }],
+  ])("a checkout that %s is not offered (astra 408a HIGH)", async (_what, change) => {
     stubFetch({
       "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false } },
-      "/api/fiat-ramp/coinbase/onramp": { status: 200, body: onrampAnswer(WALLET_2, coinbaseCheckout(WALLET_2, destinations)) },
+      "/api/fiat-ramp/coinbase/onramp": { status: 200, body: { ...onrampAnswer(WALLET_2, coinbaseCheckout(WALLET_2)), ...change } },
     });
     await renderPage();
     await click(button("Funded Key"));
@@ -450,6 +479,10 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     ["an on-chain allowance that disagrees", { allowance: "50" }],
     ["already revoked", { revoked: true }],
     ["another wallet's account", { account: "0x9999999999999999999999999999999999999999" }],
+    ["another period", { periodSec: 3600 }],
+    ["no token", { token: undefined }],
+    ["an expiry before its start", { start: "2026-12-02T00:00:00Z", expiresAt: "2026-12-01T00:00:00Z" }],
+    ["no id", { permissionId: "" }],
   ])("a permission with %s is not shown as issued (astra 408a HIGH)", async (_what, echo) => {
     stubFetch({
       "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false } },
