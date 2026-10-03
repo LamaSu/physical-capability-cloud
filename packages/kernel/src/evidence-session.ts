@@ -39,7 +39,7 @@
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
-import { failureText } from "./failure-text.js";
+import { eventType, failureText } from "./failure-text.js";
 
 /** An event as an adapter emits it, before the emitter ids and hashes it. */
 export type EmittedEvidence = Omit<EvidenceEvent, "id" | "hash">;
@@ -154,8 +154,9 @@ function tapOf(adapter: EvidenceAdapter, device: Device): Tap {
     if (session !== null && !session.closed) {
       session.deliver(event);
     } else {
-      // Not the payload: it is device evidence, not a log line.
-      console.warn(`[evidence-session] dropped a ${event.type} event from adapter ${adapter.id}: no job is recording it`);
+      // Not the payload: it is device evidence, not a log line. Its labels are read without
+      // throwing, so dropping an event never throws into the adapter (astra pack 224).
+      console.warn(`[evidence-session] dropped a ${eventType(event)} event from adapter ${idOf(adapter)}: no job is recording it`);
     }
   });
   // Stored only once registered, so an onEvidence that throws leaves no dead tap behind.
@@ -218,14 +219,15 @@ export function openEvidenceSession(
   // Every check runs before any claim, so a refusal leaves nothing half-open.
   for (const { adapter, device } of claims) {
     const holder = device.holder;
-    if (holder !== null && !holder.closed) return { ok: false, busy: { reason: "adapter", adapterId: adapter.id, jobId: holder.owner.jobId } };
+    // A refusal names the adapter by an id read without throwing, so it stays a refusal (astra pack 224).
+    if (holder !== null && !holder.closed) return { ok: false, busy: { reason: "adapter", adapterId: idOf(adapter), jobId: holder.owner.jobId } };
     if (device.unsettled > 0) {
       // A hook of this adapter that rejected is asked again, so the device can recover.
       const tap = taps.get(adapter);
       // The handler is attached before any id is read, and reads ids without throwing: a hook that
       // rejects is never left unhandled (tracked from astra pack 212).
       if (tap?.hook === "rejected") ask(adapter, tap).catch((err: unknown) => logUnanswered(idOf(adapter))(err));
-      return { ok: false, busy: { reason: "quiescing", adapterId: adapter.id, jobId: holder?.owner.jobId ?? "unknown" } };
+      return { ok: false, busy: { reason: "quiescing", adapterId: idOf(adapter), jobId: holder?.owner.jobId ?? "unknown" } };
     }
   }
   // Every tap first: an onEvidence that throws leaves nothing claimed.

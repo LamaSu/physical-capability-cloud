@@ -487,3 +487,71 @@ describe("an adapter whose id cannot be read never leaves its hook's rejection u
     expect.soft(second.unhandled.length, "unhandled rejections").toBe(0);
   });
 });
+
+describe("an adapter whose id cannot be read still gets an honest busy refusal, and its late event is dropped quietly (astra pack 224)", () => {
+  /** A machine whose id becomes unreadable on demand; its hook rejects (with no text form) while `rejecting`. */
+  function machineWithHostileId(id: string, options: Parameters<typeof testMachine>[1] = {}) {
+    const machine = testMachine(id, options);
+    const state = { hostile: false, rejecting: false };
+    Object.defineProperty(machine, "id", {
+      get: () => {
+        if (state.hostile) throw Object.create(null);
+        return id;
+      },
+    });
+    const hook = machine.quiesceEvidence.bind(machine);
+    machine.quiesceEvidence = () => (state.rejecting ? Promise.reject(Object.create(null)) : hook());
+    return { machine, state };
+  }
+
+  it("a device another run holds: the refusal is busy (adapter), naming the id as unreadable, and charges nothing", async () => {
+    const hold = deferred();
+    const { machine, state } = machineWithHostileId("m-busy-hostile", { holdStart: new Map([[1, hold.promise]]) });
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const first = new JobRunner(machine, [], null, emitter).run({ jobId: "job-busy-A", stepId: STEP, gcodeHash: gcode(96), assuranceTier: 1 });
+    await machine.started(1);
+    state.hostile = true;
+    const second = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-busy-B", stepId: STEP, gcodeHash: gcode(97), assuranceTier: 1 });
+    state.hostile = false;
+    hold.resolve();
+    await first;
+    expect.soft(second.busy, "the refusal").toEqual({ reason: "adapter", adapterId: "(unreadable id)", jobId: "job-busy-A" });
+    expect.soft(second.failure, "charged").toBeUndefined();
+  });
+
+  it("a device whose hook rejected: the refusal is busy (quiescing), naming the id as unreadable", async () => {
+    const { machine, state } = machineWithHostileId("m-quiesce-hostile");
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    state.rejecting = true;
+    const first = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-q-1", stepId: STEP, gcodeHash: gcode(98), assuranceTier: 1 }));
+    expect.soft(first.value?.success, "the first run, whose hook rejected").toBe(false);
+    state.hostile = true;
+    const second = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-q-2", stepId: STEP, gcodeHash: gcode(98), assuranceTier: 1 }));
+    expect.soft(second.value?.busy?.reason, "the refusal").toBe("quiescing");
+    expect.soft(second.value?.busy?.adapterId, "the adapter it names").toBe("(unreadable id)");
+    expect.soft(second.value?.failure, "charged").toBeUndefined();
+    expect.soft(second.unhandled.length, "unhandled rejections").toBe(0);
+  });
+
+  it("a late event, after the job: dropped with a warning even when the id and the event's type cannot be read", async () => {
+    const { machine, state } = machineWithHostileId("m-late-hostile");
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const done = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-late", stepId: STEP, gcodeHash: gcode(99), assuranceTier: 1 });
+    expect.soft(done.success, "the run").toBe(true);
+    state.hostile = true;
+    const late = evidence("execution_progress", "m-late-hostile", "controller") as Record<string, unknown>;
+    Object.defineProperty(late, "type", {
+      get: () => {
+        throw Object.create(null);
+      },
+    });
+    let thrown: unknown = null;
+    try {
+      machine.emit(late as unknown as Emitted);
+    } catch (err) {
+      thrown = err ?? "a throw";
+    }
+    expect.soft(thrown, "the emit").toBeNull();
+    expect.soft(console.warn, "the drop, logged").toHaveBeenCalledWith(expect.stringMatching(/dropped a \(unreadable\) event from adapter \(unreadable id\)/));
+  });
+});
