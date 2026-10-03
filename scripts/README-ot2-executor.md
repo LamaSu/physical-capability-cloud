@@ -91,6 +91,19 @@ Two layers keep it from running twice (steward P0 #4698, readmodels #4558):
    repeating it, and whatever keeps the marker from being written at all (a read-only
    directory, a full disk) fails closed -- the job is not run, and it is picked up again
    once the problem is fixed.
+
+   **Durability.** A marker only survives a power cut if its directory entry reaches the
+   disk. So every state directory the agent creates is fsynced into its parent, and the
+   marker's directory is fsynced after the marker is written. When that can't be done
+   (an I/O error; or Windows, where a directory can't be fsynced this way), the marker is
+   kept, and:
+   - with `OT2_AGENT_SERVER_CONSUME=off`, where the marker is the ONLY record, the job is
+     **not run**: after a power cut the marker could be gone and the approval run again.
+     Fix the state directory and approve the job again;
+   - with the default `required`, the job still runs once the gateway consumes the
+     approval, because the gateway's consume is then the durable record: a consumed
+     approval never appears in the approved listing again. A WARNING says the local
+     marks aren't durable.
 2. **The gateway's consume route, for every other machine.** A marker on this machine
    cannot stop a *different* machine from running the same approval. So, with the default
    `OT2_AGENT_SERVER_CONSUME=required`, winning the local claim is necessary but not

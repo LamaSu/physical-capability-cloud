@@ -596,21 +596,51 @@ def _recorded(value):
 
 
 def _fsync_dir(directory):
-    """Best effort: flush the new directory entry so the mark survives a power cut.
-    Not possible on Windows, where a directory cannot be opened like this."""
-    try:
-        fd = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
+    """Flush a directory's entries to stable storage, so that a file or directory just created
+    in it survives a power cut. Raises OSError when that can't be done. (On Windows a directory
+    can't be opened like this, so it always raises there.) The caller decides whether that is
+    fatal: see claim_job_once's require_durable."""
+    fd = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(fd)
-    except OSError:
-        pass
     finally:
         os.close(fd)
 
 
-def claim_job_once(record):
+def _makedirs_durable(path):
+    """Create `path` and any missing ancestors (mode 0o700), then fsync each new directory's
+    parent so the new entries survive a power cut.
+
+    Every directory is created first, so `path` exists even when a sync then fails. A creation
+    failure raises at once. A sync failure is raised after every sync was attempted, so the
+    caller can still place (and keep) its mark while refusing to rely on it."""
+    missing = []
+    current = path
+    while not os.path.isdir(current):
+        missing.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    created = []
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            if not os.path.isdir(directory):
+                raise
+        created.append(directory)
+    first_error = None
+    for directory in created:
+        try:
+            _fsync_dir(os.path.dirname(directory) or os.curdir)
+        except OSError as err:
+            first_error = first_error or err
+    if first_error is not None:
+        raise first_error
+
+
+def claim_job_once(record, require_durable=True):
     """Mark an approved job as handled and return True: it may go to the agent, this once.
 
     Returns False when it must not run: it is already marked (by this or an earlier process),
@@ -618,8 +648,17 @@ def claim_job_once(record):
 
     The mark is one file in handled_dir(), named by the SHA-256 hex of the key, so no id,
     however hostile, can name a path. O_CREAT | O_EXCL makes the claim atomic: of any number of
-    threads or processes claiming one key, exactly one gets True. No fcntl or msvcrt, so it
-    works the same on POSIX and on Windows."""
+    threads or processes claiming one key, exactly one gets True. No fcntl or msvcrt.
+
+    Durability. The mark only survives a power cut if its directory entry, and every state
+    directory created on the way, reach stable storage. So new directories are fsynced into
+    their parents, and the marker's directory is fsynced after the marker is written. When
+    that can't be done, the mark is kept (it still blocks this machine while it exists). With
+    require_durable (the default, and what OT2_AGENT_SERVER_CONSUME=off uses, where the mark
+    is the ONLY record), the approval is refused: after a power cut the mark could be gone,
+    and the approval run again. Without it (consume "required"), the gateway's consume is the
+    durable record, since a consumed approval is never listed again, so a mark that may not be
+    durable is logged and allowed."""
     key = _job_key(record)
     if key is None:
         log.error("Refusing an approval with no usable id or jobId; it cannot be marked handled, "
@@ -632,13 +671,21 @@ def claim_job_once(record):
         "claimedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }).encode("ascii")  # json.dumps escapes everything outside ASCII
 
+    durability_error = None
     try:
         directory = handled_dir()
-        os.makedirs(directory, mode=0o700, exist_ok=True)
     except OSError as err:
         log.error("Cannot use the handled-job directory (%s), so approval %.80r is NOT run. "
                   "Fix it (OT2_AGENT_STATE_DIR) and the approval is picked up again.", err, key)
         return False
+    try:
+        _makedirs_durable(directory)
+    except OSError as err:
+        if not os.path.isdir(directory):
+            log.error("Cannot use the handled-job directory (%s), so approval %.80r is NOT run. "
+                      "Fix it (OT2_AGENT_STATE_DIR) and the approval is picked up again.", err, key)
+            return False
+        durability_error = err  # the directory exists, but its entry may not survive a power cut
     marker = os.path.join(directory, digest)
     try:
         fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -663,7 +710,21 @@ def claim_job_once(record):
                   "run, and it will not run again unless it is re-approved or the marker is deleted.",
                   key, marker, err)
         return False
-    _fsync_dir(directory)
+    try:
+        _fsync_dir(directory)
+    except OSError as err:
+        durability_error = durability_error or err
+    if durability_error is not None:
+        if require_durable:
+            log.error("Marked approval %.80r handled but could not make the mark durable (%s), so it "
+                      "is NOT run: after a power cut the mark could be gone and the approval run again. "
+                      "The mark is kept; fix the state directory (OT2_AGENT_STATE_DIR) and approve the "
+                      "job again.", key, durability_error)
+            return False
+        if _first_time(("not-durable", directory)):
+            log.warning("Handled-job marks in %s cannot be made durable (%s). The gateway's consume is "
+                        "the durable record in this mode, so jobs still run; with "
+                        "OT2_AGENT_SERVER_CONSUME=off they would not.", directory, durability_error)
     return True
 
 
@@ -899,7 +960,8 @@ def poll_once():
     jobs = poll_for_jobs()
     consume = server_consume_mode() == "required"
     for job in jobs:
-        if not claim_job_once(job):
+        # With consume OFF the local mark is the only record, so it must be durable.
+        if not claim_job_once(job, require_durable=not consume):
             continue
         if consume:
             outcome = consume_on_gateway(job)

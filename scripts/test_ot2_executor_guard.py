@@ -1249,7 +1249,8 @@ class GatewayConsumeTests(DaemonLoopTestCase):
         )
 
     def test_200_without_consumed_true_is_not_dispatched_and_is_released(self):
-        bodies = ({}, {"consumed": "yes"})
+        # #499 r1 MEDIUM: non-dictionary bodies too (a string, a list, None).
+        bodies = ({}, {"consumed": "yes"}, "consumed", ["consumed", True], None)
         for i, body in enumerate(bodies):
             with self.subTest(body=body):
                 approval_id = "gw-200-notrue-{}".format(i)
@@ -1319,3 +1320,105 @@ class GatewayConsumeTests(DaemonLoopTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# One claim of one approval in a separate process, released together with its twin by a "go"
+# file: two live daemons racing on one state directory (#499 r1 MEDIUM).
+RACE_CLAIM = r"""
+import importlib.util, os, sys, time
+sys.path.insert(0, {here!r})
+spec = importlib.util.spec_from_file_location("ot2_agent_race", os.path.join({here!r}, "ot2-agent.py"))
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+deadline = time.time() + 30
+while not os.path.exists({go!r}):
+    if time.time() > deadline:
+        sys.exit(3)
+    time.sleep(0.001)
+print("CLAIM", m.claim_job_once({{"id": "race-1", "jobId": "job-race"}}))
+"""
+
+
+class MarkDurabilityTests(DaemonLoopTestCase):
+    """#499 r1 CRITICAL: a mark that cannot be made durable must not let a job run when the mark is
+    the only record (OT2_AGENT_SERVER_CONSUME=off). File fsync alone does not make the directory
+    entry durable, and new state directories must be synced into their parents."""
+
+    @staticmethod
+    def _directory_fsync_fails():
+        """os.fsync succeeds on files and raises EIO on directories."""
+        real_fsync = os.fsync
+
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, "injected EIO on a directory fsync")
+            return real_fsync(fd)
+
+        return mock.patch("os.fsync", fsync)
+
+    def test_with_consume_off_a_mark_that_cannot_be_made_durable_is_not_dispatched(self):
+        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}), self._directory_fsync_fails():
+            sent = self.drive([[approval(20, id="dur-1")]] * 2)
+        self.assertEqual(sent, [])
+        self.assertEqual(len(self.markers()), 1, "the mark is kept: it still blocks this machine")
+        self.assertTrue(any("durable" in line for line in self.logs if line.startswith("ERROR")), self.logs)
+
+    def test_with_consume_off_a_lost_mark_after_a_power_cut_still_runs_the_approval_at_most_once(self):
+        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}):
+            with self._directory_fsync_fails():
+                first = self.drive([[approval(21, id="dur-2")]])
+            # The power cut: the mark's directory entry never reached the disk.
+            for name in self.markers():
+                os.remove(os.path.join(self.state, name))
+            restarted = fresh_agent()
+            second = self.drive([[approval(21, id="dur-2")]] * 2, module=restarted)
+        self.assertEqual(len(first) + len(second), 1, (first, second))
+
+    def test_with_consume_required_a_non_durable_mark_still_runs_once_because_the_gateway_is_the_record(self):
+        with self._directory_fsync_fails():
+            sent = self.drive([[approval(22, id="dur-3")]] * 2)
+        self.assertEqual(len(sent), 1, sent)
+        self.assertTrue(
+            any("cannot be made durable" in line for line in self.logs if line.startswith("WARNING")), self.logs,
+        )
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc/self/fd to name a directory fd")
+    def test_every_new_state_directory_is_synced_into_its_parent(self):
+        synced = []
+        real_fsync = os.fsync
+
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                synced.append(os.path.realpath(os.readlink("/proc/self/fd/%d" % fd)))
+            return real_fsync(fd)
+
+        self.assertFalse(os.path.exists(self.state))
+        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}), mock.patch("os.fsync", fsync):
+            sent = self.drive([[approval(23, id="dur-4")]])
+        self.assertEqual(len(sent), 1, sent)
+        state = os.path.realpath(self.state)
+        expected = {os.path.dirname(state), state}
+        walk = os.path.dirname(state)
+        while walk != os.path.realpath(self.tmp):
+            walk = os.path.dirname(walk)
+            expected.add(walk)
+        missing = expected - set(synced)
+        self.assertEqual(missing, set(), "directories never synced: {}".format(sorted(missing)))
+
+    def test_two_processes_racing_on_one_approval_claim_it_exactly_once(self):
+        go = os.path.join(self.tmp, "go")
+        script = RACE_CLAIM.format(here=HERE, go=go)
+        env = dict(os.environ, OT2_AGENT_STATE_DIR=self.state)
+        procs = [
+            subprocess.Popen([sys.executable, "-c", script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for _ in range(2)
+        ]
+        time.sleep(0.5)  # both are waiting on the go file
+        with open(go, "w"):
+            pass
+        outputs = []
+        for proc in procs:
+            out, _err = proc.communicate(timeout=60)
+            self.assertEqual(proc.returncode, 0, out)
+            outputs.append(out.decode("ascii", "replace").strip().splitlines()[-1])
+        self.assertEqual(sorted(outputs), ["CLAIM False", "CLAIM True"], outputs)
