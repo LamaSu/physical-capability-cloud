@@ -588,10 +588,17 @@ export class KernelService {
   }
 
   /**
-   * Ping a device adapter for health. `details` is the adapter's status, or, when the adapter
-   * throws, its message with credentials scrubbed: that text leaves the gateway in the health
-   * response, and an error often quotes the URL the device was configured with, userinfo
-   * included (Node's fetch does) (N71).
+   * Ping a device adapter for health. `details` is the adapter's own status, or, when
+   * the adapter throws, a fixed code — never the exception text.
+   *
+   * N71 round 3 (astra pack 83b): round 2 scrubbed the exception message with
+   * redactDiagnostic and returned the rest ("still a usable diagnostic"). Astra showed
+   * that is not a confidentiality boundary: a URL with an apostrophe in its userinfo
+   * defeated the regex (fixed now, redaction.ts), but free text with no URL at all
+   * (`authentication failed: password=...`) was never caught by it either and never
+   * could be by any fixed set of patterns. Astra's remediation: "a fixed public error
+   * code for adapter exceptions instead of arbitrary error text." The real message is
+   * still logged server-side (redacted, defense in depth) — just never returned.
    */
   async checkDeviceHealth(deviceId: string): Promise<{ healthy: boolean; details?: string }> {
     const machine = this.machines.get(deviceId);
@@ -603,10 +610,11 @@ export class KernelService {
       const healthy = status !== "error" && status !== "offline";
       return { healthy, details: status };
     } catch (err) {
-      return {
-        healthy: false,
-        details: err instanceof Error ? redactDiagnostic(err.message) : "unknown_error",
-      };
+      console.warn(
+        `[kernel-service] health check failed for ${deviceId}:`,
+        err instanceof Error ? redactDiagnostic(err.message) : String(err),
+      );
+      return { healthy: false, details: "adapter_error" };
     }
   }
 }

@@ -27,7 +27,6 @@ import {
   type DeviceRegistrationDTO,
 } from "./populators/device.populator.js";
 import { getKernelService } from "../services/kernel-service.js";
-import { redactDiagnostic } from "../redaction.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
@@ -441,6 +440,18 @@ export class JobFacade extends BaseFacade {
   }
 
   /**
+   * The fixed set of `details` values KernelService.checkDeviceHealth can legitimately
+   * return: an adapter's own status, "device_not_found", or the "adapter_error" fallback
+   * for a thrown exception (kernel-service.ts). Anything else — an object, an array, a
+   * number, or a string outside this set — is not a shape checkDeviceHealth promises,
+   * so it is dropped rather than trusted (N71 round 3, astra pack 83b: "the service
+   * contract specifies strings", but a mocked/future caller could return anything).
+   */
+  private static readonly SAFE_HEALTH_DETAILS = new Set([
+    "idle", "busy", "maintenance", "error", "offline", "device_not_found", "adapter_error",
+  ]);
+
+  /**
    * Trigger a health check on a device.
    * Replaces: POST /api/devices/:deviceId/health
    */
@@ -462,11 +473,14 @@ export class JobFacade extends BaseFacade {
         // non-fatal
       }
 
-      // Scrubbed here as well as in the service: this is what leaves the API (N71).
-      return {
-        healthy: result.healthy,
-        details: typeof result.details === "string" ? redactDiagnostic(result.details) : (result.details ?? null),
-      };
+      // Allow-listed here as well as fixed-coded in the service: this is what leaves
+      // the API (N71 round 3, astra pack 83b) — a free-form string would not have been
+      // caught by redactDiagnostic alone (e.g. "password=..." has no URL to scrub).
+      const details =
+        typeof result.details === "string" && JobFacade.SAFE_HEALTH_DETAILS.has(result.details)
+          ? result.details
+          : null;
+      return { healthy: result.healthy, details };
     });
   }
 
