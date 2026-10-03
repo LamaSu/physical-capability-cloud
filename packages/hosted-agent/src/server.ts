@@ -29,7 +29,7 @@ import { ConfirmationRefused } from "./confirm.js";
 import { PackPinMismatch } from "./pack.js";
 import type { ResolvePrincipal } from "./principal.js";
 import { HostedSession, PackMismatch, type SessionDeps } from "./session.js";
-import { scrubText } from "./tools.js";
+import { isToolErrorCategory, type ToolErrorCategory } from "./tools.js";
 
 export interface ServerOptions {
   readonly deps: SessionDeps;
@@ -83,8 +83,9 @@ const VERSION_PLUS_SHA256 = /^[0-9A-Za-z][0-9A-Za-z.-]*\+sha256\.[0-9a-f]{64}$/;
  * closed-set SHAPE label and a sha256 prefix (a digest, not the value), so a
  * secret in `reported` can never reach a log line, whatever it looks like.
  */
-function reportedPackShape(reported: string | undefined): { reportedShape: ReportedPackShape; reportedSha256Prefix: string | null } {
+function reportedPackShape(reported: unknown): { reportedShape: ReportedPackShape; reportedSha256Prefix: string | null } {
   if (reported === undefined) return { reportedShape: "absent", reportedSha256Prefix: null };
+  if (typeof reported !== "string") return { reportedShape: "other", reportedSha256Prefix: null };
   const reportedSha256Prefix = createHash("sha256").update(reported).digest("hex").slice(0, 16);
   const reportedShape: ReportedPackShape = VERSION_PLUS_SHA256.test(reported) ? "version+sha256" : BARE_VERSION.test(reported) ? "bare-version" : "other";
   return { reportedShape, reportedSha256Prefix };
@@ -120,6 +121,16 @@ function safeName(err: unknown): string | undefined {
  * and correctly falls through to the generic `"Error"`.
  */
 export function errorCategory(err: unknown): ErrorCategory {
+  // TOTAL (astra 242): `instanceof` runs a proxy's getPrototypeOf trap, and a hostile value can throw
+  // there. A log line's category is computed without ever letting such a throw escape.
+  try {
+    return errorCategoryUnsafe(err);
+  } catch {
+    return "other";
+  }
+}
+
+function errorCategoryUnsafe(err: unknown): ErrorCategory {
   if (err instanceof PackMismatch) return "PackMismatch";
   if (err instanceof PackPinMismatch) return "PackPinMismatch";
   if (err instanceof BudgetStop) return "BudgetStop";
@@ -132,6 +143,58 @@ export function errorCategory(err: unknown): ErrorCategory {
   return "Error";
 }
 
+/*
+ * astra 242's class, closed at every route: a thrown value is read ONLY inside the total functions
+ * below (a throwing getter, a proxy trap or a revoked proxy can make any read throw, `instanceof`
+ * included), and each returns a member of a closed set, never a string the thrown value supplies.
+ */
+
+/** The log line for a session that failed to open. A pack mismatch carries the pin from this
+ * service's OWN config and only the shape and digest of what the gateway reported. */
+function openFailureLine(err: unknown, expected: string): Record<string, unknown> {
+  try {
+    if (err instanceof PackMismatch) return { event: "pack-mismatch", expected, ...reportedPackShape(err.reported) };
+  } catch {
+    // Not provably a pack mismatch: the generic line below.
+  }
+  return { event: "session-open-failed", error: errorCategory(err) };
+}
+
+/** A refused confirmation's reason, from its closed set; null for any other thrown value. */
+function refusalReason(err: unknown): ConfirmationRefused["reason"] | null {
+  try {
+    if (!(err instanceof ConfirmationRefused)) return null;
+    const reason: unknown = err.reason;
+    return reason === "unknown" || reason === "expired" || reason === "other-session" ? reason : "unknown";
+  } catch {
+    return null;
+  }
+}
+
+/** What a failed confirmed call answers: the closed category its tool caller threw (packTools throws
+ * nothing else), or "tool_failed". Never free text. */
+function confirmedCallFailure(err: unknown): ToolErrorCategory {
+  try {
+    const message: unknown = err instanceof Error ? err.message : undefined;
+    return isToolErrorCategory(message) ? message : "tool_failed";
+  } catch {
+    return "tool_failed";
+  }
+}
+
+/** Fastify's own client errors (a malformed or oversized body, a wrong media type) by status. */
+const CLIENT_ERROR: Readonly<Record<number, string>> = { 413: "payload_too_large", 415: "unsupported_media_type" };
+
+/** A thrown value's client-error status (an integer in 400-499), or null. */
+function clientErrorStatus(err: unknown): number | null {
+  try {
+    const status: unknown = (err as { statusCode?: unknown } | null)?.statusCode;
+    return typeof status === "number" && Number.isInteger(status) && status >= 400 && status < 500 ? status : null;
+  } catch {
+    return null;
+  }
+}
+
 export function buildServer(opts: ServerOptions): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024, trustProxy: opts.trustProxy ?? false });
   const sessions = new Map<string, Entry>();
@@ -142,11 +205,19 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
   const log = opts.log ?? ((line: string) => console.log(line));
   const generic = { error: "agent_unavailable" } as const;
 
-  // No route answers with an upstream message. Client errors (a bad body, one
-  // too large) keep Fastify's own answer; any server error is the generic shape.
-  app.setErrorHandler((err, _req, reply) => {
-    const status = (err as { statusCode?: number }).statusCode ?? 500;
-    if (status < 500) return reply.send(err);
+  // No route answers with a thrown value's text. A client error is Fastify's own, raised while it
+  // reads the request (a malformed or oversized body, a wrong media type), so before any handler
+  // runs: it keeps its status, with a closed body. Whatever a handler throws (a dependency's
+  // failure) is a server error whatever `statusCode` it claims, and gets the generic shape. The
+  // thrown value itself is never serialized, since Fastify's serializer reads `.message`, and a
+  // hostile getter's throw would become the answer.
+  const inHandler = new WeakSet<FastifyRequest>();
+  app.addHook("preHandler", async (req) => {
+    inHandler.add(req);
+  });
+  app.setErrorHandler((err, req, reply) => {
+    const status = inHandler.has(req) ? null : clientErrorStatus(err);
+    if (status !== null) return reply.code(status).send({ error: CLIENT_ERROR[status] ?? "bad_request" });
     log(JSON.stringify({ event: "server-error", error: errorCategory(err) }));
     return reply.code(502).send(generic);
   });
@@ -232,12 +303,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
     } catch (err) {
       // Never an upstream detail: the same shape a failed message answers. What the
       // operator needs is in the log, without the error's message (it may carry a credential).
-      if (err instanceof PackMismatch) {
-        const { reportedShape, reportedSha256Prefix } = reportedPackShape(err.reported);
-        log(JSON.stringify({ event: "pack-mismatch", expected: err.expected, reportedShape, reportedSha256Prefix }));
-      } else {
-        log(JSON.stringify({ event: "session-open-failed", error: errorCategory(err) }));
-      }
+      log(JSON.stringify(openFailureLine(err, `${opts.deps.pack.version}+sha256.${opts.deps.pack.sha256}`)));
       return reply.code(502).send(generic);
     }
     sessions.set(session.id, { session, lastUsed: now(), turns: 0, busy: false, confirming: 0 });
@@ -285,8 +351,9 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
     try {
       return { result: await entry.session.confirm(token) };
     } catch (err) {
-      if (err instanceof ConfirmationRefused) return reply.code(409).send({ error: err.reason });
-      return reply.code(502).send({ error: "action_failed", message: scrubText(err instanceof Error ? err.message : String(err)) });
+      const refused = refusalReason(err);
+      if (refused !== null) return reply.code(409).send({ error: refused });
+      return reply.code(502).send({ error: "action_failed", message: confirmedCallFailure(err) });
     } finally {
       entry.confirming -= 1;
       entry.lastUsed = now();
@@ -302,7 +369,8 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
       entry.session.reject(token);
       return reply.code(204).send();
     } catch (err) {
-      if (err instanceof ConfirmationRefused) return reply.code(409).send({ error: err.reason });
+      const refused = refusalReason(err);
+      if (refused !== null) return reply.code(409).send({ error: refused });
       throw err;
     }
   });

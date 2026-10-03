@@ -1,13 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
-import { BudgetMeter, type BudgetCaps, type MessagesClient } from "../budget.js";
+import { BudgetExceededError } from "@pcc/agent-runtime";
+import { BudgetMeter, BudgetStop, type BudgetCaps, type MessagesClient } from "../budget.js";
+import { ConfirmationRefused } from "../confirm.js";
 import type { PinnedPack } from "../pack.js";
 import type { ResolvePrincipal } from "../principal.js";
-import type { ToolTransport } from "../tools.js";
+import { packTools, type ToolTransport } from "../tools.js";
 import type { ToolPolicy } from "../policy.js";
 import { buildServer, errorCategory } from "../server.js";
-import { HostedSession, type SessionDeps } from "../session.js";
+import { HostedSession, PackMismatch, type SessionDeps } from "../session.js";
 
 const KEY = "pcc_live_ServerTestKey0001";
 const USD = 1_000_000_000;
@@ -60,9 +62,11 @@ function setup(
     maxTokens?: number;
     resolvePrincipal?: ResolvePrincipal;
     reported?: { version: string | undefined };
-    connectError?: Error;
-    listError?: Error;
-    reportError?: Error;
+    connectError?: unknown;
+    listError?: unknown;
+    reportError?: unknown;
+    /** Every tool caller throws this value as-is (the session's tool-builder seam), bypassing packTools' own closing. */
+    callerThrows?: unknown;
     trustProxy?: number | boolean;
     toolGate?: Promise<void>;
   } = {},
@@ -112,6 +116,16 @@ function setup(
     },
     now: () => clock.t,
     policy: TEST_POLICY,
+    packTools:
+      o.callerThrows === undefined
+        ? undefined
+        : (pack, t, served, policy) =>
+            packTools(pack, t, served, policy).map((tool) => ({
+              ...tool,
+              caller: async () => {
+                throw o.callerThrows;
+              },
+            })),
   };
   const app = buildServer({
     deps,
@@ -385,6 +399,19 @@ describe("a failed session open leaks no upstream detail (Q1-B)", () => {
     const headers = { "x-hosted-session": id, "content-type": "application/json" };
     expect((await app.inject({ method: "POST", url: "/session/messages", headers, payload: "{not json" })).statusCode).toBe(400);
     expect((await app.inject({ method: "POST", url: "/session/messages", headers, payload: JSON.stringify({ text: "x".repeat(70_000) }) })).statusCode).toBe(413);
+  });
+
+  it("round 6: a client error answers a closed body, never the parser's own text", async () => {
+    const { app } = setup();
+    const id = await open(app);
+    const headers = { "x-hosted-session": id, "content-type": "application/json" };
+    const bad = await app.inject({ method: "POST", url: "/session/messages", headers, payload: "{not json" });
+    expect(bad.json()).toEqual({ error: "bad_request" });
+    const big = await app.inject({ method: "POST", url: "/session/messages", headers, payload: JSON.stringify({ text: "x".repeat(70_000) }) });
+    expect(big.json()).toEqual({ error: "payload_too_large" });
+    const media = await app.inject({ method: "POST", url: "/session/messages", headers: { "x-hosted-session": id, "content-type": "application/xml" }, payload: "<a/>" });
+    expect(media.statusCode).toBe(415);
+    expect(media.json()).toEqual({ error: "unsupported_media_type" });
   });
 
   it("Q1-B: no other route echoes an upstream message either (closing a session whose report sink fails)", async () => {
@@ -810,5 +837,176 @@ describe("an outcome that arrives during a message reaches the model (Q6-B, over
     expect((await inFlight).statusCode).toBe(200);
     await say(app, id, "thanks");
     expect(JSON.stringify(create.mock.calls.at(-1))).toContain("The user confirmed onboard_machine");
+  });
+});
+
+/**
+ * Round 6 (astra 242, Q7): the closed-error property, tested generically at EVERY sink. Whatever an
+ * injected dependency throws (the connection, the tool listing, the principal resolver, the model
+ * client, a confirmed tool call, the report sink), including values whose accessors, proxy traps or
+ * prototype checks throw secret-bearing errors, and values that claim to be this service's own error
+ * classes with a secret in every field: no HTTP answer, log line, model request or attempt report
+ * carries any of it, and every log line's `error` is a member of the closed set.
+ */
+describe("round 6: whatever an injected dependency throws, only closed values leave (every sink)", () => {
+  const MARK = "Hostile242Fixture";
+  const SECRET = `pcc_live_${MARK}`;
+  const boom = (): never => {
+    throw new Error(SECRET);
+  };
+  const claimant = (proto: object): unknown =>
+    new Proxy(Object.create(proto) as object, { get: (_t, key) => (key === Symbol.toPrimitive ? () => SECRET : SECRET) });
+  const HOSTILE: Array<[string, () => unknown]> = [
+    ["a throwing status getter", () => Object.defineProperty({}, "status", { get: boom })],
+    ["a throwing statusCode getter", () => Object.defineProperty({}, "statusCode", { get: boom })],
+    ["a Proxy whose get trap throws", () => new Proxy({}, { get: boom })],
+    ["a Proxy whose getPrototypeOf trap throws", () => new Proxy(new Error("x"), { getPrototypeOf: boom })],
+    ["a Proxy whose has trap throws", () => new Proxy({}, { has: boom })],
+    ["a Proxy whose ownKeys trap throws", () => new Proxy({}, { ownKeys: boom })],
+    ["an object whose toString throws", () => ({ toString: boom })],
+    ["an object whose Symbol.toPrimitive throws", () => ({ [Symbol.toPrimitive]: boom })],
+    ["a throwing code getter", () => Object.defineProperty({}, "code", { get: boom })],
+    [
+      "a revoked Proxy",
+      () => {
+        const r = Proxy.revocable({}, {});
+        r.revoke();
+        return r.proxy;
+      },
+    ],
+    [
+      "an Error whose message and name getters throw",
+      () => {
+        const e = new Error("x");
+        Object.defineProperty(e, "message", { get: boom });
+        Object.defineProperty(e, "name", { get: boom });
+        return e;
+      },
+    ],
+    ["an Error claiming a client statusCode, with a secret message", () => Object.assign(new Error(SECRET), { statusCode: 400 })],
+    ["a bare string", () => SECRET],
+    ["a PackMismatch claimant with a secret in every field", () => claimant(PackMismatch.prototype)],
+    ["a BudgetStop claimant with a secret in every field", () => claimant(BudgetStop.prototype)],
+    ["a BudgetExceededError claimant with a secret in every field", () => claimant(BudgetExceededError.prototype)],
+    ["a ConfirmationRefused claimant with a secret in every field", () => claimant(ConfirmationRefused.prototype)],
+  ];
+  const CATEGORIES = ["ConfigError", "PackMismatch", "PackPinMismatch", "BudgetStop", "TimeoutError", "AbortError", "TypeError", "Error", "other"];
+
+  function expectClosed(env: { logs: string[]; create: { mock: { calls: unknown[] } }; reports: unknown[] }, ...bodies: string[]): void {
+    for (const body of bodies) expect(body).not.toContain(MARK);
+    for (const line of env.logs) {
+      expect(line).not.toContain(MARK);
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if ("error" in parsed) expect(CATEGORIES).toContain(parsed.error);
+    }
+    expect(JSON.stringify(env.create.mock.calls)).not.toContain(MARK);
+    expect(JSON.stringify(env.reports)).not.toContain(MARK);
+  }
+
+  it.each(HOSTILE)("errorCategory (every log line's category) is total over %s", (_label, make) => {
+    const value = make();
+    let category: unknown;
+    expect(() => {
+      category = errorCategory(value);
+    }).not.toThrow();
+    expect(CATEGORIES).toContain(category);
+  });
+
+  it("a pack mismatch logs the pin from this service's own config, and a non-string reported version only as shape `other`", async () => {
+    const env = setup({ connectError: new PackMismatch("pcc_live_ThrownExpected0242", 42 as unknown as string) });
+    const res = await env.app.inject({ method: "POST", url: "/session" });
+    expect(res.statusCode).toBe(502);
+    expect(env.logs.map((l) => JSON.parse(l))).toEqual([
+      { event: "pack-mismatch", expected: `${PACK.version}+sha256.${PACK.sha256}`, reportedShape: "other", reportedSha256Prefix: null },
+    ]);
+  });
+
+  it.each(HOSTILE)("opening a session: the connection throws %s", async (label, make) => {
+    const env = setup({ connectError: make() });
+    const res = await env.app.inject({ method: "POST", url: "/session" });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: "agent_unavailable" });
+    // The operator's line names the failed open itself, never a generic server error.
+    expect(env.logs.map((l) => (JSON.parse(l) as { event?: unknown }).event)).toEqual([label.startsWith("a PackMismatch claimant") ? "pack-mismatch" : "session-open-failed"]);
+    expectClosed(env, res.body);
+  });
+
+  it.each(HOSTILE)("opening a session: the tool listing throws %s", async (_label, make) => {
+    const env = setup({ listError: make() });
+    const res = await env.app.inject({ method: "POST", url: "/session" });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: "agent_unavailable" });
+    expectClosed(env, res.body);
+  });
+
+  it.each(HOSTILE)("signing in: the principal resolver throws %s", async (_label, make) => {
+    const env = setup({
+      resolvePrincipal: async () => {
+        throw make();
+      },
+    });
+    const res = await env.app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "unauthorized" });
+    expectClosed(env, res.body);
+  });
+
+  it.each(HOSTILE)("a message turn: the model client throws %s", async (_label, make) => {
+    const env = setup({
+      create: async () => {
+        throw make();
+      },
+    });
+    const id = await open(env.app);
+    const res = await say(env.app, id, "hi");
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: "agent_unavailable" });
+    const closed = await env.app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(closed.statusCode).toBe(200);
+    expect((env.reports[0] as { outcome?: unknown }).outcome).toBe("failed");
+    expectClosed(env, res.body, closed.body);
+  });
+
+  it.each(HOSTILE)("a confirmed call: the tool caller throws %s", async (_label, make) => {
+    const env = setup({ replies: [toolUse("onboard_machine"), text("confirm?"), text("ok")], callerThrows: make() });
+    const id = await open(env.app, KEY);
+    const [held] = (await say(env.app, id, "register")).json().pending as Array<{ token: string }>;
+    const res = await confirmCall(env.app, id, held!.token);
+    if (res.statusCode === 409) {
+      expect(["unknown", "expired", "other-session"]).toContain(res.json().error);
+    } else {
+      expect(res.statusCode).toBe(502);
+      expect(res.json()).toEqual({ error: "action_failed", message: "tool_failed" });
+    }
+    const next = await say(env.app, id, "thanks");
+    expectClosed(env, res.body, next.body);
+  });
+
+  // Before any handler runs, only Fastify's own parsers can raise an error in production. A test parser
+  // stands in for one here. Fastify itself evaluates `instanceof Error` on a parser's error before any
+  // error handler runs, so a value whose prototype read throws breaks Fastify there, not this service;
+  // those two shapes are left out of this stage only.
+  const PARSE_STAGE = HOSTILE.filter(([label]) => !label.includes("getPrototypeOf") && !label.includes("revoked"));
+  it.each(PARSE_STAGE)("a request-parsing stage (before any handler) raises %s", async (_label, make) => {
+    const env = setup();
+    env.app.addContentTypeParser("application/x-hostile", (_req, _payload, done) => done(make() as Error, undefined));
+    const id = await open(env.app);
+    const res = await env.app.inject({ method: "POST", url: "/session/messages", headers: { "x-hosted-session": id, "content-type": "application/x-hostile" }, payload: "x" });
+    if (res.statusCode === 400) {
+      expect(res.json()).toEqual({ error: "bad_request" });
+    } else {
+      expect(res.statusCode).toBe(502);
+      expect(res.json()).toEqual({ error: "agent_unavailable" });
+    }
+    expectClosed(env, res.body);
+  });
+
+  it.each(HOSTILE)("ending a session: the report sink throws %s", async (_label, make) => {
+    const env = setup({ reportError: make() });
+    const id = await open(env.app);
+    const res = await env.app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: "agent_unavailable" });
+    expectClosed(env, res.body);
   });
 });

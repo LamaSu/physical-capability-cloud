@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
-import { connectMcp, packTools, projectToolOutput, scrub, scrubText, scrubToolResult, OVERSIZED_STRING, REDACTED, SCRUB_TEXT_LIMIT } from "../tools.js";
+import { connectMcp, isToolErrorCategory, packTools, projectToolOutput, scrub, scrubText, scrubToolResult, OVERSIZED_STRING, REDACTED, SCRUB_TEXT_LIMIT } from "../tools.js";
 import type { PinnedPack } from "../pack.js";
 import { DEFAULT_TOOL_POLICY, type FieldSpec, type OutputSpec, type ToolPolicy } from "../policy.js";
 
@@ -123,10 +123,17 @@ describe("what the model sees is scrubbed", () => {
     expect(JSON.stringify(out)).not.toMatch(/pcc_live_|sk-ant-|Bearer\s/);
   });
 
-  it("a tool error is thrown for the loop to report, scrubbed", async () => {
+  // Round 6 (astra 242): the transport closes its errors at the source. What it throws is exactly one
+  // closed category; the old contract (scrubbed free text) is gone on purpose, and no text survives.
+  it("a tool error is thrown for the loop to report, as a closed category with no text", async () => {
     const t = await connectMcp(base, KEY);
-    await expect(t.callTool("fails", {})).rejects.toThrow(`refused for ${REDACTED}`);
+    const err = await t.callTool("fails", {}).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
     await t.close();
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).toBe("tool_failed");
   });
 
   it("scrub covers PEM blocks, arrays and plain text", () => {
@@ -161,7 +168,7 @@ describe("pack tools", () => {
 });
 
 describe("a failing tool call never carries a secret to the model (Q1-A)", () => {
-  it("Q1-A: a JSON-RPC error from the gateway is thrown scrubbed, through the real MCP client", async () => {
+  it("Q1-A: a JSON-RPC error from the gateway is thrown as a closed category, through the real MCP client", async () => {
     const t = await connectMcp(base, KEY);
     const err = await t.callTool("rpc-error", {}).then(
       () => null,
@@ -169,12 +176,11 @@ describe("a failing tool call never carries a secret to the model (Q1-A)", () =>
     );
     await t.close();
     expect(err).toBeInstanceOf(Error);
-    expect(err!.message).toContain("rejected");
-    expect(err!.message).toContain(REDACTED);
+    expect(err!.message).toBe("tool_failed");
     expect(err!.message).not.toContain("pcc_live_");
   });
 
-  it("Q1-A: an HTTP failure that echoes the caller's credential is thrown scrubbed", async () => {
+  it("Q1-A: an HTTP failure that echoes the caller's credential is thrown as a closed category", async () => {
     const t = await connectMcp(base, KEY);
     const err = await t.callTool("http-error", {}).then(
       () => null,
@@ -182,18 +188,18 @@ describe("a failing tool call never carries a secret to the model (Q1-A)", () =>
     );
     await t.close();
     expect(err).toBeInstanceOf(Error);
-    expect(err!.message).toContain("upstream rejected");
+    expect(err!.message).toBe("tool_failed");
     expect(err!.message).not.toContain(KEY);
     expect(err!.message).not.toContain("pcc_live_");
   });
 
-  it("Q1-A: a handshake the gateway refuses, and a tool listing it refuses, are thrown scrubbed too", async () => {
+  it("Q1-A: a handshake the gateway refuses, and a tool listing it refuses, are thrown as a closed category too", async () => {
     const handshake = await connectMcp(base, "pcc_live_RejectedAtHandshake1").then(
       () => null,
       (e: unknown) => e as Error,
     );
     expect(handshake).toBeInstanceOf(Error);
-    expect(handshake!.message).toContain("forbidden");
+    expect(handshake!.message).toBe("tool_failed");
     expect(handshake!.message).not.toContain("pcc_live_");
 
     const t = await connectMcp(base, "pcc_live_ListingFails0001");
@@ -203,7 +209,7 @@ describe("a failing tool call never carries a secret to the model (Q1-A)", () =>
     );
     await t.close();
     expect(listing).toBeInstanceOf(Error);
-    expect(listing!.message).toContain("listing refused");
+    expect(listing!.message).toBe("tool_failed");
     expect(listing!.message).not.toContain("pcc_live_");
   });
 
@@ -267,6 +273,40 @@ describe("a failing tool call never carries a secret to the model (Q1-A)", () =>
     expect(err!.message).not.toContain("pcc_live_");
     expect(err!.message).toBe("tool_failed");
     expect((err as { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  // astra 242 (HIGH): the conversion to a closed category must be TOTAL. Whatever the transport throws,
+  // including values whose accessors, proxy traps or prototype checks throw secret-bearing errors, the
+  // model sees exactly one closed category and none of the fixture.
+  it.each([
+    ["a throwing status getter", () => Object.defineProperty({}, "status", { get() { throw new Error("pcc_live_abcdefgh12345678"); } })],
+    ["a throwing statusCode getter", () => Object.defineProperty({}, "statusCode", { get() { throw new Error("pcc_live_abcdefgh12345678"); } })],
+    ["a Proxy whose get trap throws", () => new Proxy({}, { get() { throw new Error("pcc_live_abcdefgh12345678"); } })],
+    ["a Proxy whose getPrototypeOf trap throws", () => new Proxy(new Error("x"), { getPrototypeOf() { throw new Error("pcc_live_abcdefgh12345678"); } })],
+    ["a Proxy whose has trap throws", () => new Proxy({}, { has() { throw new Error("pcc_live_abcdefgh12345678"); } })],
+    ["a Proxy whose ownKeys trap throws", () => new Proxy({}, { ownKeys() { throw new Error("pcc_live_abcdefgh12345678"); } })],
+    ["an object whose toString throws", () => ({ toString() { throw new Error("pcc_live_abcdefgh12345678"); } })],
+    ["an object whose Symbol.toPrimitive throws", () => ({ [Symbol.toPrimitive]() { throw new Error("pcc_live_abcdefgh12345678"); } })],
+    ["a throwing code getter", () => Object.defineProperty({}, "code", { get() { throw new Error("pcc_live_abcdefgh12345678"); } })],
+    ["an Error whose message and name getters throw", () => { const e = new Error("x"); Object.defineProperty(e, "message", { get() { throw new Error("pcc_live_abcdefgh12345678"); } }); Object.defineProperty(e, "name", { get() { throw new Error("pcc_live_abcdefgh12345678"); } }); return e; }],
+    ["a revoked Proxy", () => { const r = Proxy.revocable({}, {}); r.revoke(); return r.proxy; }],
+    ["a status whose value is an object with a throwing valueOf", () => ({ status: { valueOf() { throw new Error("pcc_live_abcdefgh12345678"); } } })],
+  ])("astra 242: a hostile thrown value (%s) becomes a closed category, never a secret-bearing error", async (_label, make) => {
+    const [tool] = packTools(pack("list_jobs"), throwing(make()), new Set(["list_jobs"]), PERMISSIVE_POLICY);
+    const err = await tool!.caller({}).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(["tool_failed", "not_found", "unauthorized", "bad_request", "unavailable"]).toContain(err!.message);
+    expect(err!.message).not.toContain("pcc_live_");
+  });
+
+  it("round 6: isToolErrorCategory accepts exactly the five closed categories, by own property only", () => {
+    for (const c of ["tool_failed", "not_found", "unauthorized", "bad_request", "unavailable"]) expect(isToolErrorCategory(c)).toBe(true);
+    for (const v of ["", "tool_failed ", "TOOL_FAILED", "__proto__", "constructor", "toString", "hasOwnProperty", 404, null, undefined, {}, new String("tool_failed")]) {
+      expect(isToolErrorCategory(v)).toBe(false);
+    }
   });
 
   it("Q1-A: a thrown value that is not an Error is scrubbed into a closed category too", async () => {
@@ -342,13 +382,17 @@ describe("the scrubber redacts credential fields and bare tokens (Q3-B)", () => 
     expect(scrubText('HTTP 400: {"token":"opaque-session-value-0123","ok":"fine"}')).toBe(`HTTP 400: {"token":"${REDACTED}","ok":"fine"}`);
     expect(scrubText('{\n  "refresh_token" :  "a\\"b",\n  "name": "kept"\n}')).toBe(`{\n  "refresh_token" :  "${REDACTED}",\n  "name": "kept"\n}`);
     expect(scrubText('{"max_tokens":"5","tokenCount":"3"}')).toBe('{"max_tokens":"5","tokenCount":"3"}');
+    // The fixture's own error body, through the scrubber directly (the transport no longer passes text on).
+    expect(scrubText('PCC API request failed with HTTP 400: {\n  "error": "bad request",\n  "token": "opaque-session-value-0123"\n}')).toBe(
+      `PCC API request failed with HTTP 400: {\n  "error": "bad request",\n  "token": "${REDACTED}"\n}`,
+    );
     const t = await connectMcp(base, KEY);
     const err = await t.callTool("error-with-json-body", {}).then(
       () => null,
       (e: unknown) => e as Error,
     );
     await t.close();
-    expect(err!.message).toContain("bad request");
+    expect(err!.message).toBe("tool_failed");
     expect(err!.message).not.toContain("opaque-session-value-0123");
   });
 

@@ -71,7 +71,7 @@ export const REDACTED = "[redacted]";
  * string inside a JSON result, through with no size cap at all — one long
  * attacker-written field blocks the event loop for every session (about 20
  * minutes at 1 MB, by the lane's extrapolation). Cut here, before any
- * scrubbing pass runs, same principle as `toolError`'s 20_000.
+ * scrubbing pass runs.
  */
 export const SCRUB_TEXT_LIMIT = 200_000;
 const TRUNCATED_MARKER = "…[truncated]";
@@ -536,27 +536,21 @@ export function scrubToolResult(result: { content?: unknown; isError?: unknown }
   return { isError: result.isError === true, value: values.length === 1 ? values[0] : values };
 }
 
-/** The most of a tool's error message the model is shown: enough to act on, never a whole response body. */
-export const TOOL_ERROR_LIMIT = 2_000;
-
-/**
- * A tool failure as the model may see it: the message scrubbed with the same
- * rules as a tool result, then bounded. It is a FRESH Error: no `cause`, none
- * of the transport's own fields, so nothing raw reaches LLMAgent.
- */
-export function toolError(err: unknown): Error {
-  const message =
-    typeof err === "string"
-      ? err
-      : err !== null && typeof err === "object" && typeof (err as { message?: unknown }).message === "string"
-        ? (err as { message: string }).message
-        : "the tool call failed";
-  // Cap the work first, scrub, then cap what is shown: a secret the first cap cut in two is dropped by the last.
-  const scrubbed = scrubText(message.slice(0, 20_000));
-  return new Error(scrubbed.length > TOOL_ERROR_LIMIT ? `${scrubbed.slice(0, TOOL_ERROR_LIMIT)}…` : scrubbed);
-}
-
 export type ToolErrorCategory = "tool_failed" | "not_found" | "unauthorized" | "bad_request" | "unavailable";
+
+/** The closed set as data: a Record over the union, so the compiler refuses a missing member. */
+const TOOL_ERROR_CATEGORY: Readonly<Record<ToolErrorCategory, true>> = {
+  tool_failed: true,
+  not_found: true,
+  unauthorized: true,
+  bad_request: true,
+  unavailable: true,
+};
+
+/** Whether a value is exactly one of the closed categories. Total: it reads nothing but `typeof`. */
+export function isToolErrorCategory(value: unknown): value is ToolErrorCategory {
+  return typeof value === "string" && Object.hasOwn(TOOL_ERROR_CATEGORY, value);
+}
 
 /**
  * P1 (round 5, 239): a tool error reaches the MODEL as one of these five
@@ -566,13 +560,21 @@ export type ToolErrorCategory = "tool_failed" | "not_found" | "unauthorized" | "
  * not, fully controls). No recognizable status is the generic "tool_failed".
  */
 export function toolErrorCategory(err: unknown): ToolErrorCategory {
-  const e = err as { status?: unknown; statusCode?: unknown } | null;
-  const raw = typeof e?.status === "number" ? e.status : typeof e?.statusCode === "number" ? e.statusCode : undefined;
-  if (raw === 404) return "not_found";
-  if (raw === 401 || raw === 403) return "unauthorized";
-  if (raw !== undefined && raw >= 400 && raw < 500) return "bad_request";
-  if (raw !== undefined && raw >= 500) return "unavailable";
-  return "tool_failed";
+  // TOTAL (astra 242): reading a hostile thrown value's `status`/`statusCode` (a throwing getter, a
+  // proxy trap, a revoked proxy) must never throw. Any failure is the generic category.
+  try {
+    const e = err as { status?: unknown; statusCode?: unknown } | null;
+    const status = e?.status;
+    const statusCode = typeof status === "number" ? undefined : e?.statusCode;
+    const raw = typeof status === "number" ? status : typeof statusCode === "number" ? statusCode : undefined;
+    if (raw === 404) return "not_found";
+    if (raw === 401 || raw === 403) return "unauthorized";
+    if (raw !== undefined && raw >= 400 && raw < 500) return "bad_request";
+    if (raw !== undefined && raw >= 500) return "unavailable";
+    return "tool_failed";
+  } catch {
+    return "tool_failed";
+  }
 }
 
 /** P1 (round 5, 239): a string field over this ceiling is DROPPED WHOLE,
@@ -639,12 +641,13 @@ export function projectToolOutput(value: unknown, spec: OutputSpec): unknown {
   return projectFields(value as Record<string, unknown>, spec);
 }
 
-/** Run a transport step; whatever it throws leaves as a scrubbed, bounded Error. */
+/** Run a transport step; whatever it throws leaves as a closed category only (astra 242's class: no
+ * thrown value's text leaves this module, and only the total `toolErrorCategory` reads one). */
 async function sanitized<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (err) {
-    throw toolError(err);
+    throw new Error(toolErrorCategory(err));
   }
 }
 
@@ -683,11 +686,10 @@ export async function connectMcp(gatewayBase: string, credential: string | null)
  * The pinned package's tools that the connected surface serves, each calling
  * through the session's transport.
  *
- * P1 (round 5, 239): every result is run through `scrub` (defense in depth --
- * a transport that does not scrub, an injected one, still cannot put a secret
- * in front of the model) and THEN the tool's typed OutputSpec projection,
- * which is now the actual boundary: an unlisted field, or one of the wrong
- * type, is dropped structurally, never merely redacted. A tool with no
+ * P1 (round 5, 239): every result goes through the tool's typed OutputSpec
+ * projection, which is the boundary: an unlisted field, or one of the wrong
+ * type, is dropped structurally, never merely redacted, and each projected
+ * string is scrubbed in full before its own cap. A tool with no
  * OutputSpec (not, or no longer, allowlisted) projects to nothing -- in
  * practice unreachable, since confirm.ts never offers a caller for a tool
  * `classify()` does not allow, but this fails closed regardless. A thrown

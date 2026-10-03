@@ -13,7 +13,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
 import { LLMAgent, BudgetExceededError, validateToolNames } from "@pcc/agent-runtime";
-import { BudgetStop, meteredClient, type BudgetMeter, type MessagesClient, type ModelPrice } from "./budget.js";
+import { BudgetStop, meteredClient, type BudgetMeter, type BudgetStopReason, type MessagesClient, type ModelPrice } from "./budget.js";
 import { ConfirmationGate, type HeldCall } from "./confirm.js";
 import type { PinnedPack } from "./pack.js";
 import { DEFAULT_TOOL_POLICY, type ToolPolicy } from "./policy.js";
@@ -91,6 +91,41 @@ export interface TurnResult {
 }
 
 const NOTE_LIMIT = 2_000;
+
+/** The closed sets a turn's stop is reported from, as data: a Record over each union, so the
+ * compiler refuses a missing member. */
+const BUDGET_STOP_REASON: Readonly<Record<BudgetStopReason, true>> = {
+  "per-session": true,
+  "per-user-day": true,
+  "per-address-day": true,
+  "per-month": true,
+  disabled: true,
+  overrun: true,
+};
+const STEP_BUDGET: Readonly<Record<BudgetExceededError["budget"], true>> = { maxTurns: true, maxToolCalls: true, maxInputTokens: true };
+
+/**
+ * How a failed turn stopped, read TOTALLY (astra 242's class): `instanceof` and a field read on a
+ * thrown value can each throw, and then the turn simply failed. What it returns is a member of a
+ * closed set, never a string the thrown value supplies; a value outside the set is not a stop.
+ */
+function turnStop(
+  err: unknown,
+): { readonly kind: "budget"; readonly reason: BudgetStopReason } | { readonly kind: "steps"; readonly budget: BudgetExceededError["budget"] } | null {
+  try {
+    if (err instanceof BudgetStop) {
+      const reason: unknown = err.reason;
+      return typeof reason === "string" && Object.hasOwn(BUDGET_STOP_REASON, reason) ? { kind: "budget", reason: reason as BudgetStopReason } : null;
+    }
+    if (err instanceof BudgetExceededError) {
+      const budget: unknown = err.budget;
+      return typeof budget === "string" && Object.hasOwn(STEP_BUDGET, budget) ? { kind: "steps", budget: budget as BudgetExceededError["budget"] } : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 /** The gateway does not run the pinned agent package. The tool names would
  * match, but a name resolves through the gateway's own pack, so no tool is
@@ -196,22 +231,23 @@ export class HostedSession {
       this.turns += 1;
       return { reply: result.text, pending: this.gate.pending(this.id) };
     } catch (err) {
-      if (err instanceof BudgetStop) {
+      const stop = turnStop(err);
+      if (stop?.kind === "budget") {
         this.outcome = "budget_stop";
         return {
           reply:
-            err.reason === "overrun"
+            stop.reason === "overrun"
               ? "The agent is paused for your account until tomorrow (UTC), because an earlier call cost more than it was budgeted for. Nothing more was charged."
               : "This session has reached its spending limit, so the agent has stopped. Nothing was charged beyond it.",
           pending: this.gate.pending(this.id),
-          stopped: err.reason,
+          stopped: stop.reason,
         };
       }
-      if (err instanceof BudgetExceededError) {
+      if (stop?.kind === "steps") {
         return {
           reply: "That request needed more steps than one turn allows. Please ask for a smaller step.",
           pending: this.gate.pending(this.id),
-          stopped: err.budget,
+          stopped: stop.budget,
         };
       }
       this.outcome = "failed";
