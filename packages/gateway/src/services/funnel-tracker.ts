@@ -276,7 +276,7 @@ export function getCohortFunnel(opts: { since?: string } = {}): FunnelCohortRow[
 const funnelTrackerPluginImpl: FastifyPluginAsync = async (app: FastifyInstance) => {
   if (!funnelEnabled()) {
     // Inert: register nothing. Flag is read at boot.
-    app.log?.info?.("[funnel] disabled (set PCC_FUNNEL_ENABLED=true to enable)");
+    app.log?.info?.(lit("[funnel] disabled (set PCC_FUNNEL_ENABLED=true to enable)"));
     return;
   }
 

@@ -663,8 +663,7 @@ export async function setupRoutes(app: FastifyInstance) {
           getKernelService().refreshDeviceFromDb(deviceId);
         } catch (e) {
           // Service may not be initialized in some test paths; ignore.
-          const msg = e instanceof Error ? e.message : String(e);
-          (req as any).log?.warn?.({ err: msg, deviceId }, "kernel-service refresh failed");
+          (req as any).log?.warn?.({ err: e, deviceId: declare.id(deviceId) }, lit("kernel-service refresh failed"));
         }
 
         // Auto-create capability rows for each capability the device contributes to
