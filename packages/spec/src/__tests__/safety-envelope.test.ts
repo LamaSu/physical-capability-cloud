@@ -32,6 +32,7 @@ import type {
 import { KNOWN_UNITS, ParameterDefinitionSchema, PortTypeSchema } from "../csd/composition.js";
 import { CsdEvidenceTierSchema, CsdParameterSchema } from "../csd/schema.js";
 import { canonicalize } from "../util/canonical.js";
+import { compileOperationalEnvelope } from "../onboarding/operational-envelope.js";
 
 // ── Fixtures ────────────────────────────────────────────────────────
 
@@ -923,8 +924,22 @@ describe("review additions: compile carries the confirmed values exactly", () =>
   it("puts the confirmed limits in the #53 params and the composition bounds, value for value", () => {
     const confirmed = confirmSafetyEnvelope(fullyAnsweredInput("liquid-handler-ot2"), confirmDecision());
     const compiled = compileOwn(confirmed);
-    const want = confirmed.envelope.limits.map((l) => ({ metric: l.quantity, unit: l.unit, min: l.min, max: l.max }));
+    // Every OT-2 quantity is set by a declared parameter; run_duration is also the deadline.
+    const want = confirmed.envelope.limits.map((l) => ({
+      metric: l.quantity,
+      unit: l.unit,
+      min: l.min,
+      max: l.max,
+      enforcedBy: l.quantity === "run_duration" ? [{ kind: "dispatch" }, { kind: "deadline" }] : [{ kind: "dispatch" }],
+    }));
     expect(compiled.evidence["envelope-conformance"]?.primitives?.[0]?.params).toEqual({ envelope: want });
+    expect(compiled.evidence["envelope-conformance"]?.description).toBe(
+      `Checks against the operator-confirmed safety envelope ${confirmed.envelopeDigest}: each limit lists the mechanisms that checked it. A dispatch check covers each value when it was sent. Once the confirmed maximum of run_duration has elapsed, the runtime sends the stop; when the device then halts is not observed here.`,
+    );
+    expect(compiled.evidence["envelope-conformance"]?.required).toEqual([
+      "every parameter that sets a quantity was inside its confirmed limit when it was sent",
+      "every command but the stop was sent within the confirmed maximum of run_duration from the job's start, and the stop was sent then if the job had not ended",
+    ]);
     expect(compiled.composition.parameters.map((d) => [d.name, d.minimum, d.maximum])).toEqual(
       confirmed.envelope.limits.map((l) => [l.param, { value: l.min, unit: l.unit }, { value: l.max, unit: l.unit }]),
     );
@@ -1280,12 +1295,12 @@ describe("astra 114b findings", () => {
     expect(confirmedBodyProblems(bad)).toContain("device.deviceId is required");
   });
 
-  it("5 the #53 evidence params carry {metric, unit, min, max} per limit", () => {
+  it("5 the #53 evidence params carry {metric, unit, min, max} per limit, with the mechanisms that enforce it (astra pack 176)", () => {
     const confirmed = ok();
     const compiled = compileOwn(confirmed);
     const params = compiled.evidence["envelope-conformance"]!.primitives![0]!.params!["envelope"] as Array<Record<string, unknown>>;
     const first = confirmed.envelope.limits[0]!;
-    expect(params[0]).toEqual({ metric: first.quantity, unit: first.unit, min: first.min, max: first.max });
+    expect(params[0]).toEqual({ metric: first.quantity, unit: first.unit, min: first.min, max: first.max, enforcedBy: [{ kind: "dispatch" }] });
   });
 
   it("6 two edits naming the same quantity are refused", () => {
@@ -1334,12 +1349,12 @@ describe("astra 114b findings", () => {
     expect(() => compileRegistered(bad)).toThrow(/v1 does not allow unattended operation/);
   });
 
-  it("the map gap: a command map that sets no read_duration gives a command-map question", () => {
+  it("the map gap: a command map that sets no read_duration asks whether it is device-controlled (Addendum 6)", () => {
     const input = fullyAnsweredInput("lab-plate-reader");
     input.commandMap = { commands: COMMAND_MAPS["lab-plate-reader"]!.commands.filter((c) => c.name !== "read") };
     const draft = draftSafetyEnvelope(input);
-    expect(draft.questions.map((q) => q.about)).toContain("command-map");
-    expect(draft.questions.find((q) => q.about === "command-map")?.ask).toMatch(/read_duration/);
+    expect(draft.questions.map((q) => q.about)).toContain("device-controlled:read_duration");
+    expect(draft.questions.find((q) => q.about === "device-controlled:read_duration")?.ask).toMatch(/read_duration.*device-controlled.*still required/);
   });
 
   it("(round 4) the deadline (job_duration) needs no parameter: the runtime enforces it as elapsed time", () => {
@@ -1849,7 +1864,7 @@ describe("astra 153: every shape is closed, so nothing is committed and then ign
     ["e-stop", (b) => (b.eStop.note = "red button"), /eStop holds only its mechanism/],
     ["command map", (b) => (b.commandMap.version = 2), /the command map holds only commands/],
     ["command", (b) => (b.commandMap.commands[0].raw = true), /has keys other than name and params/],
-    ["parameter", (b) => (b.commandMap.commands[0].params[0].scale = 10), /has keys other than name, quantity, unit and unbounded/],
+    ["parameter", (b) => (b.commandMap.commands[0].params[0].scale = 10), /has keys other than name, quantity, unit, allowed and unbounded/],
   ];
   for (const [label, change, reason] of cases) {
     it(`refuses an extra key in the ${label}`, () => {
@@ -1858,4 +1873,226 @@ describe("astra 153: every shape is closed, so nothing is committed and then ign
       expect(() => compileRegistered(b as unknown as SafetyEnvelopeBody)).toThrow(reason);
     });
   }
+});
+
+// ── Addendum 6: dispositions (astra pack 173) ──────────────────────
+
+describe("dispositions (Addendum 6): every template quantity keeps a limit; one no command sets is device-controlled", () => {
+  const HEATED_RUN_ONLY: CommandMapV1 = {
+    commands: [
+      { name: "run", params: [{ name: "seconds", quantity: "read_duration", unit: "s" }] },
+      { name: "stop", params: [] },
+    ],
+  };
+  /** The readings the heated reader's adapter takes: its chamber temperature, and the read duration it is configured to run (both states). */
+  const CHANNELS = {
+    channels: [
+      { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", semantics: "state" as const, maxAgeMs: 5000 },
+      { id: "config.read_seconds", quantity: "read_duration", unit: "s", semantics: "state" as const, maxAgeMs: 1000 },
+    ],
+  };
+  /** `telemetryMap` null: the adapter declares no channel (undefined would take the default). */
+  function heatedReader(commandMap: CommandMapV1 = HEATED_RUN_ONLY, telemetryMap: SafetyEnvelopeInput["telemetryMap"] | null = CHANNELS): SafetyEnvelopeInput {
+    return {
+      deviceClass: "lab-plate-reader",
+      device: { deviceId: "pr-dc", adapterType: "generic-http", adapterVersion: MANIFEST },
+      commandMap,
+      ...(telemetryMap ? { telemetryMap } : {}),
+      intake: {
+        limits: [
+          { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 20, max: 40 },
+          { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 600 },
+          { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 120 },
+        ],
+        eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
+        supervision: "attended",
+        hazards: ["heat"],
+        maxCommandsPerMinute: 20,
+      },
+      references: [],
+    };
+  }
+  const TELEMETRY = { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "chamber.temperature_c" };
+
+  it("the draft asks once per unset quantity, never the deadline, and keeps its limit question", () => {
+    const draft = draftSafetyEnvelope(heatedReader());
+    const abouts = draft.questions.map((q) => q.about);
+    expect(abouts).toContain("device-controlled:incubation_temperature");
+    expect(abouts.filter((a) => a.startsWith("device-controlled:"))).toHaveLength(1);
+    expect(draft.limits.map((l) => l.quantity)).toEqual(["incubation_temperature", "read_duration", "job_duration"]);
+  });
+
+  it("astra 173 CRITICAL 2: a device-controlled quantity keeps its limit in the body, the runtime and the conformance evidence", () => {
+    const c = confirmSafetyEnvelope(heatedReader(), confirmDecision({ deviceControlled: [TELEMETRY] }));
+    expect(c.envelope.deviceControlled).toEqual([TELEMETRY]);
+    expect(c.envelope.limits.map((l) => l.quantity)).toEqual(["incubation_temperature", "read_duration", "job_duration"]);
+    expect(confirmedBodyProblems(c.envelope)).toEqual([]);
+    const csd = compileOwn(c);
+    const conformance = (csd.evidence["envelope-conformance"]!.primitives[0]!.params as { envelope: Array<{ metric: string }> }).envelope.map((e) => e.metric);
+    expect(conformance).toContain("incubation_temperature");
+    // No command sets it, so it is no job input.
+    expect(csd.parameters.map((p) => p.key)).not.toContain("incubationTemperature");
+    // The evidence names the channel that enforces it, never a reading the runtime does not take (astra pack 176).
+    const entries = (csd.evidence["envelope-conformance"]!.primitives[0]!.params as { envelope: Array<{ metric: string; enforcedBy: unknown }> }).envelope;
+    expect(entries.map((e) => [e.metric, e.enforcedBy])).toEqual([
+      ["incubation_temperature", [{ kind: "telemetry", channel: "chamber.temperature_c", semantics: "state", maxAgeMs: 5000 }]],
+      ["read_duration", [{ kind: "dispatch" }, { kind: "telemetry", channel: "config.read_seconds", semantics: "state", maxAgeMs: 1000 }]],
+      ["job_duration", [{ kind: "deadline" }]],
+    ]);
+    // The runtime carries the channels and the binding.
+    const runtime = compileOperationalEnvelope(c, register(c), verifyRegistry);
+    expect(runtime.telemetryChannels).toEqual(CHANNELS.channels);
+    expect(runtime.deviceControlled).toEqual([TELEMETRY]);
+  });
+
+  it("a device-controlled quantity still needs a confirmed limit: no answer, no envelope", () => {
+    const input = heatedReader();
+    input.intake.limits = input.intake.limits.filter((l) => l.quantity !== "incubation_temperature");
+    expect(() => confirmSafetyEnvelope(input, confirmDecision({ deviceControlled: [TELEMETRY] }))).toThrow(/incubation_temperature/);
+  });
+
+  it("without the answer confirm refuses: a quantity no command sets is never dropped", () => {
+    expect(() => confirmSafetyEnvelope(heatedReader(), confirmDecision())).toThrow(EnvelopeRefused);
+  });
+
+  it.each([
+    ["the deadline", [TELEMETRY, { quantity: "job_duration", enforcement: "telemetry", channel: "config.read_seconds" }], /the deadline job_duration/],
+    ["an unknown quantity", [TELEMETRY, { quantity: "spindle_speed", enforcement: "telemetry", channel: "config.read_seconds" }], /"spindle_speed", which is not a quantity of a lab-plate-reader/],
+    ["a quantity twice", [TELEMETRY, TELEMETRY], /twice/],
+    ["a settable quantity", [TELEMETRY, { quantity: "read_duration", enforcement: "telemetry", channel: "config.read_seconds" }], /read_duration, but a declared parameter sets it/],
+    ["an unknown enforcement", [{ ...TELEMETRY, enforcement: "trust" }], /enforcement must be "telemetry"/],
+    // astra pack 176 CRITICAL: a cutoff was an operator's words the registry then signed.
+    ["a cutoff, however it is described", [{ quantity: "incubation_temperature", enforcement: "cutoff", channel: "chamber.temperature_c" }], /an independent cutoff needs a registered interlock attestation/],
+    ["the old prose form", [{ quantity: "incubation_temperature", enforcement: "cutoff", detail: "x" }], /exactly \{quantity, enforcement, channel\}/],
+    ["a channel the adapter does not declare", [{ ...TELEMETRY, channel: "chamber.thermistor" }], /channel "chamber.thermistor" is not a channel of the adapter's telemetry map/],
+    ["a channel that reports another quantity", [{ ...TELEMETRY, channel: "config.read_seconds" }], /channel config.read_seconds reports read_duration, not incubation_temperature/],
+    ["a channel that is not an id", [{ ...TELEMETRY, channel: "Chamber Thermistor" }], /is not a channel of the adapter's telemetry map/],
+    ["an extra key", [{ ...TELEMETRY, limit: "none" }], /exactly \{quantity, enforcement, channel\}/],
+    ["something that is not a list", TELEMETRY as unknown as [], /a list of \{quantity, enforcement, channel\}/],
+  ])("confirm refuses deviceControlled naming %s", (_label, deviceControlled, reason) => {
+    expect(() => confirmSafetyEnvelope(heatedReader(), confirmDecision({ deviceControlled: deviceControlled as never }))).toThrow(reason);
+  });
+
+  it("astra 176: a device that declares no telemetry cannot confirm a device-controlled quantity", () => {
+    expect(() => confirmSafetyEnvelope(heatedReader(HEATED_RUN_ONLY, null), confirmDecision({ deviceControlled: [TELEMETRY] }))).toThrow(
+      /channel "chamber.temperature_c" is not a channel of the adapter's telemetry map/,
+    );
+  });
+
+  it.each([
+    ["an empty map", { channels: [] }, /lists at least one channel/],
+    ["a map with another key", { channels: CHANNELS.channels, notes: "x" }, /exactly \{channels\}/],
+    ["channels out of id order", { channels: [...CHANNELS.channels].reverse() }, /ascending id order/],
+    ["an id twice", { channels: [CHANNELS.channels[0], CHANNELS.channels[0]] }, /ascending id order/],
+    ["an uppercase id", { channels: [{ ...CHANNELS.channels[0], id: "Chamber.temp" }] }, /an id is a lowercase token/],
+    ["an id that starts with a digit", { channels: [{ ...CHANNELS.channels[0], id: "1chamber" }] }, /an id is a lowercase token/],
+    ["an id longer than 64", { channels: [{ ...CHANNELS.channels[0], id: "c".repeat(65) }] }, /an id is a lowercase token/],
+    ["a quantity the class does not bound", { channels: [{ ...CHANNELS.channels[0], quantity: "spindle_speed" }] }, /reports "spindle_speed", which a lab-plate-reader does not bound/],
+    ["the deadline", { channels: [{ id: "job.elapsed_min", quantity: "job_duration", unit: "min", semantics: "state" as const, maxAgeMs: 1000 }] }, /reports the deadline job_duration/],
+    ["another unit", { channels: [{ ...CHANNELS.channels[0], unit: "degF" }] }, /in "degF", not degC/],
+    ["maxAgeMs 0", { channels: [{ ...CHANNELS.channels[0], maxAgeMs: 0 }] }, /maxAgeMs must be a whole number of ms from 1 to 60000/],
+    ["maxAgeMs over a minute", { channels: [{ ...CHANNELS.channels[0], maxAgeMs: 60_001 }] }, /maxAgeMs must be a whole number/],
+    ["a fractional maxAgeMs", { channels: [{ ...CHANNELS.channels[0], maxAgeMs: 1.5 }] }, /maxAgeMs must be a whole number/],
+    ["a channel with another key", { channels: [{ ...CHANNELS.channels[0], detail: "thermistor" }] }, /exactly \{id, quantity, unit, semantics, maxAgeMs\}/],
+    // astra pack 178: a channel reports a state; a counter cannot enforce a minimum at every sample.
+    ["a channel that is an elapsed counter", { channels: [{ ...CHANNELS.channels[0], semantics: "elapsed" }] }, /semantics must be "state"/],
+    ["a channel without semantics", { channels: [{ id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", maxAgeMs: 5000 }] }, /semantics must be "state"/],
+  ])("the draft refuses a telemetry map with %s", (_label, telemetryMap, reason) => {
+    expect(() => draftSafetyEnvelope(heatedReader(HEATED_RUN_ONLY, telemetryMap as never))).toThrow(reason);
+  });
+
+  it("astra 173 CRITICAL 1: a physical parameter mislabeled unbounded cannot remove the limit of the quantity it moves", () => {
+    const mislabeled = heatedReader({
+      commands: [
+        {
+          name: "runPlate",
+          params: [
+            { name: "celsius", unbounded: { reason: "temperature preset", allowed: [20, 200] } },
+            { name: "seconds", quantity: "read_duration", unit: "s" },
+          ],
+        },
+        { name: "stop", params: [] },
+      ],
+    });
+    // The only way to confirm is device-controlled, and the limit stays: 20..40, enforced by telemetry.
+    expect(() => confirmSafetyEnvelope(mislabeled, confirmDecision())).toThrow(/incubation_temperature/);
+    const c = confirmSafetyEnvelope(mislabeled, confirmDecision({ deviceControlled: [TELEMETRY] }));
+    const limit = c.envelope.limits.find((l) => l.quantity === "incubation_temperature")!;
+    expect([limit.min, limit.max]).toEqual([20, 40]);
+  });
+
+  it("an enumerated physical parameter must keep every allowed value inside its limit", () => {
+    const preset = (allowed: number[]): SafetyEnvelopeInput =>
+      heatedReader({
+        commands: [
+          { name: "setIncubation", params: [{ name: "celsius", quantity: "incubation_temperature", unit: "degC", allowed }] },
+          { name: "run", params: [{ name: "seconds", quantity: "read_duration", unit: "s" }] },
+          { name: "stop", params: [] },
+        ],
+      });
+    expect(() => confirmSafetyEnvelope(preset([20, 200]), confirmDecision())).toThrow(/allows 200, outside the incubation_temperature limit 20..40/);
+    expect(() => confirmSafetyEnvelope(preset([10, 25]), confirmDecision())).toThrow(/allows 10, outside the incubation_temperature limit 20..40/);
+    expect(() => draftSafetyEnvelope(preset(["hot" as unknown as number]))).toThrow(/an allowed value of a physical parameter is a finite number/);
+    const c = confirmSafetyEnvelope(preset([25, 37]), confirmDecision());
+    expect(c.envelope.commandMap.commands[0]!.params[0]!.allowed).toEqual([25, 37]);
+    // The runtime receives the allowed values too: it passes only one of them.
+    const runtime = compileOperationalEnvelope(c, register(c), verifyRegistry);
+    expect(runtime.commands[0]!.params[0]).toEqual({ name: "celsius", quantity: "incubation_temperature", unit: "degC", allowed: [25, 37] });
+    expect(() => confirmSafetyEnvelope(preset([25, 25]), confirmDecision())).toThrow(/allowed lists 25 twice/);
+    // astra pack 176 MEDIUM: one set, one committed form.
+    expect(() => confirmSafetyEnvelope(preset([37, 25]), confirmDecision())).toThrow(/its values are listed in ascending order/);
+    const unboundedWithAllowed = heatedReader({
+      commands: [{ name: "run", params: [{ name: "mode", allowed: [1], unbounded: { reason: "x", allowed: [1] } } as never] }, { name: "stop", params: [] }],
+    });
+    expect(() => draftSafetyEnvelope(unboundedWithAllowed)).toThrow(/allowed values belong to a parameter that sets a quantity/);
+  });
+
+  it("astra 176: v1 has no reduced class; every plate reader bounds its incubation temperature", () => {
+    expect(Object.keys(DEVICE_CLASS_TEMPLATES)).toEqual(["lab-plate-reader", "liquid-handler-ot2"]);
+    expect(DEVICE_CLASS_TEMPLATES["lab-plate-reader"]!.requires.map((r) => r.quantity)).toContain("incubation_temperature");
+    expect(() => draftSafetyEnvelope({ ...heatedReader(), deviceClass: "lab-plate-reader-absorbance" })).toThrow(/unknown deviceClass/);
+  });
+
+  it("an envelope whose map sets every quantity commits no deviceControlled, so its digest is what it was", () => {
+    const c = confirmSafetyEnvelope(fullyAnsweredInput("lab-plate-reader"), confirmDecision());
+    expect(Object.keys(c.envelope)).not.toContain("deviceControlled");
+    expect(Object.keys(c.envelope)).not.toContain("telemetryMap");
+  });
+
+  it("a declared channel on a settable quantity is committed and enforced too: every committed channel is", () => {
+    const input = { ...fullyAnsweredInput("lab-plate-reader"), telemetryMap: { channels: [CHANNELS.channels[0]!] } };
+    const c = confirmSafetyEnvelope(input, confirmDecision());
+    expect(c.envelope.telemetryMap).toEqual({ channels: [CHANNELS.channels[0]] });
+    const entries = (compileOwn(c).evidence["envelope-conformance"]!.primitives[0]!.params as { envelope: Array<{ metric: string; enforcedBy: unknown }> }).envelope;
+    expect(entries[0]).toMatchObject({ metric: "incubation_temperature", enforcedBy: [{ kind: "dispatch" }, { kind: "telemetry", channel: "chamber.temperature_c", semantics: "state", maxAgeMs: 5000 }] });
+  });
+
+  describe("a hand-built body is held to the same rules", () => {
+    const good = () => structuredClone(confirmSafetyEnvelope(heatedReader(), confirmDecision({ deviceControlled: [TELEMETRY] })).envelope) as unknown as Record<string, any>;
+    it.each([
+      ["empty but present", (b: Record<string, any>) => (b.deviceControlled = []), /at least one quantity/],
+      ["naming the deadline", (b: Record<string, any>) => b.deviceControlled.push({ quantity: "job_duration", enforcement: "telemetry", channel: "config.read_seconds" }), /deadline/],
+      ["absent while a quantity is unset", (b: Record<string, any>) => delete b.deviceControlled, /no declared parameter sets incubation_temperature/],
+      ["naming a settable quantity", (b: Record<string, any>) => b.deviceControlled.push({ quantity: "read_duration", enforcement: "telemetry", channel: "config.read_seconds" }), /read_duration, but a declared parameter sets it/],
+      ["with its limit removed", (b: Record<string, any>) => b.limits.shift(), /limits must hold exactly one limit per required quantity/],
+      ["with an unknown enforcement", (b: Record<string, any>) => (b.deviceControlled[0].enforcement = "trust"), /enforcement must be/],
+      ["with a cutoff", (b: Record<string, any>) => (b.deviceControlled[0].enforcement = "cutoff"), /an independent cutoff needs a registered interlock attestation/],
+      ["with the old prose form", (b: Record<string, any>) => (b.deviceControlled[0] = { quantity: "incubation_temperature", enforcement: "cutoff", detail: "x" }), /exactly \{quantity, enforcement, channel\}/],
+      ["with an extra key in an entry", (b: Record<string, any>) => (b.deviceControlled[0].limit = "none"), /exactly \{quantity, enforcement, channel\}/],
+      ["naming a channel the map does not declare", (b: Record<string, any>) => (b.deviceControlled[0].channel = "chamber.other"), /not a channel of the adapter's telemetry map/],
+      ["naming a channel of another quantity", (b: Record<string, any>) => (b.deviceControlled[0].channel = "config.read_seconds"), /reports read_duration, not incubation_temperature/],
+      ["with the telemetry map removed", (b: Record<string, any>) => delete b.telemetryMap, /not a channel of the adapter's telemetry map/],
+      ["with its channel retargeted to another quantity", (b: Record<string, any>) => Object.assign(b.telemetryMap.channels[0], { quantity: "read_duration", unit: "s" }), /reports read_duration, not incubation_temperature/],
+      ["with its channel retargeted to another quantity but not its unit", (b: Record<string, any>) => (b.telemetryMap.channels[0].quantity = "read_duration"), /telemetryMap: telemetry channel chamber.temperature_c reports read_duration in "degC", not s/],
+      ["with its channel in another unit", (b: Record<string, any>) => (b.telemetryMap.channels[0].unit = "degF"), /telemetryMap: telemetry channel chamber.temperature_c reports incubation_temperature in "degF"/],
+      ["with channels out of id order", (b: Record<string, any>) => b.telemetryMap.channels.reverse(), /telemetryMap: telemetry channels are listed once each, in ascending id order/],
+      ["with an empty telemetry map", (b: Record<string, any>) => (b.telemetryMap.channels = []), /telemetryMap: the telemetry map, when given, lists at least one channel/],
+      ["with a stale-forever channel", (b: Record<string, any>) => (b.telemetryMap.channels[0].maxAgeMs = 1e12), /maxAgeMs must be a whole number of ms from 1 to 60000/],
+    ])("refused: deviceControlled %s", (_label, change, problem) => {
+      const b = good();
+      change(b);
+      expect(confirmedBodyProblems(b as unknown as SafetyEnvelopeBody).join("; ")).toMatch(problem);
+      expect(() => compileRegistered(b as unknown as SafetyEnvelopeBody)).toThrow(EnvelopeRefused);
+    });
+  });
 });

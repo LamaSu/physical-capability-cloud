@@ -7,6 +7,9 @@
     "114b: the schema now refuses an unknown deviceClass outright (see 'unknown-class-generic-rules-only', moved here from 'valid'), limits must be in the template's exact order and units, an adapter-stop's command must be one of the declared commands, and deadlineQuantity must be the template's own deadline.",
     "153 (round 3): adapterVersion is the adapter's release manifest digest (sha256: + 64 lowercase hex); an unbounded parameter is {reason, allowed}, and a runtime passes only a value in allowed (same type and value); a reference source carries the bound it cites (value) and its unit.",
     "round 4: the template's deadline (deadlineQuantity) needs no command parameter: the runtime enforces it as elapsed time, and a parameter that does set it is checked against the same limit. A list-valued parameter declares unbounded.allowedItems: a runtime passes a non-empty list of distinct items, each in allowedItems (compared by type and value); a single value must be in allowed.",
+    "Addendum 6 (dispositions, astra pack 173): every template quantity keeps a limit. A required quantity that no declared command parameter sets is device-controlled, and its limit stays in the body, the runtime limits and the conformance evidence. The confirmed body commits deviceControlled in template order only when non-empty, so every other envelope's digest is unchanged; the runtime envelope always carries it (possibly empty). A parameter that sets a quantity may list its only values (allowed), each inside the limit.",
+    "Addendum 7 (round 3, astra pack 176): a device-controlled entry is {quantity, enforcement: 'telemetry', channel}. channel must be the id of one of the adapter's declared telemetry channels (body telemetryMap.channels, runtime telemetryChannels) that reports that quantity. Each channel is {id, quantity, unit, maxAgeMs}: a lowercase token id (a letter, then [a-z0-9._-], at most 64), ids strictly ascending; a non-deadline template quantity in that quantity's unit; and maxAgeMs a whole number from 1 to 60000. Every committed channel is enforced: a runtime dispatches a command other than the stop only when each channel's latest reading is a finite number, at most maxAgeMs old, inside its quantity's limit, and it stops a running job when one is not. There is no 'cutoff' and no prose detail. A body omits telemetryMap when the adapter declares no channel; the runtime always carries telemetryChannels (possibly empty). Every value set (allowed, unbounded.allowed, unbounded.allowedItems) lists each value once, in one order: numbers ascending, then strings ascending by UTF-16 code unit. There is no reduced device class: lab-plate-reader-absorbance is gone. The envelope-conformance evidence lists, per limit, enforcedBy: dispatch, telemetry {channel, maxAgeMs} and/or deadline.",
+    "Addendum 8 (round 4, astra pack 178): every telemetry channel is {id, quantity, unit, semantics: 'state', maxAgeMs}. A state is the quantity's current value and must lie inside the limit's [min, max] at every enforcement check; an elapsed counter or a terminal quantity is refused. A duration no command sets binds to the duration the device is configured to run for, so it keeps its real minimum. The evidence's telemetry mechanism carries semantics, and its claim is per enforcement check, never 'for the whole job'.",
     "registration: the registry signs statementDigest = 'sha256:' + lowercase hex(sha256(UTF-8(canonicalize({domain, deviceId, envelopeDigest, registeredAt})))) with Ed25519; the signed message is the UTF-8 of statementDigest itself (LO-EV-1 signingPreimage, 71 bytes). Signatures are not in this file: verify with the registry's key."
   ],
   "digest": {
@@ -199,6 +202,9 @@
                       ],
                       "allowedItems": [
                         "A1",
+                        "A10",
+                        "A11",
+                        "A12",
                         "A2",
                         "A3",
                         "A4",
@@ -207,10 +213,10 @@
                         "A7",
                         "A8",
                         "A9",
-                        "A10",
-                        "A11",
-                        "A12",
                         "B1",
+                        "B10",
+                        "B11",
+                        "B12",
                         "B2",
                         "B3",
                         "B4",
@@ -219,10 +225,10 @@
                         "B7",
                         "B8",
                         "B9",
-                        "B10",
-                        "B11",
-                        "B12",
                         "C1",
+                        "C10",
+                        "C11",
+                        "C12",
                         "C2",
                         "C3",
                         "C4",
@@ -231,10 +237,10 @@
                         "C7",
                         "C8",
                         "C9",
-                        "C10",
-                        "C11",
-                        "C12",
                         "D1",
+                        "D10",
+                        "D11",
+                        "D12",
                         "D2",
                         "D3",
                         "D4",
@@ -243,10 +249,10 @@
                         "D7",
                         "D8",
                         "D9",
-                        "D10",
-                        "D11",
-                        "D12",
                         "E1",
+                        "E10",
+                        "E11",
+                        "E12",
                         "E2",
                         "E3",
                         "E4",
@@ -255,10 +261,10 @@
                         "E7",
                         "E8",
                         "E9",
-                        "E10",
-                        "E11",
-                        "E12",
                         "F1",
+                        "F10",
+                        "F11",
+                        "F12",
                         "F2",
                         "F3",
                         "F4",
@@ -267,10 +273,10 @@
                         "F7",
                         "F8",
                         "F9",
-                        "F10",
-                        "F11",
-                        "F12",
                         "G1",
+                        "G10",
+                        "G11",
+                        "G12",
                         "G2",
                         "G3",
                         "G4",
@@ -279,10 +285,10 @@
                         "G7",
                         "G8",
                         "G9",
-                        "G10",
-                        "G11",
-                        "G12",
                         "H1",
+                        "H10",
+                        "H11",
+                        "H12",
                         "H2",
                         "H3",
                         "H4",
@@ -290,10 +296,7 @@
                         "H6",
                         "H7",
                         "H8",
-                        "H9",
-                        "H10",
-                        "H11",
-                        "H12"
+                        "H9"
                       ],
                       "reason": "which wells to read; a well name sets no physical quantity"
                     }
@@ -391,8 +394,362 @@
           "maxCommandsPerMinute": 30,
           "supervision": "attended"
         },
-        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"setIncubation\",\"params\":[{\"name\":\"celsius\",\"quantity\":\"incubation_temperature\",\"unit\":\"degC\"}]},{\"name\":\"read\",\"params\":[{\"name\":\"seconds\",\"quantity\":\"read_duration\",\"unit\":\"s\"},{\"name\":\"wavelengthNm\",\"unbounded\":{\"allowed\":[405,450,600],\"reason\":\"an optical setting, not a safety quantity\"}},{\"name\":\"plateFormat\",\"unbounded\":{\"allowed\":[\"96-well\"],\"reason\":\"the plate format; this reader takes 96-well plates only\"}},{\"name\":\"wells\",\"unbounded\":{\"allowed\":[\"all\"],\"allowedItems\":[\"A1\",\"A2\",\"A3\",\"A4\",\"A5\",\"A6\",\"A7\",\"A8\",\"A9\",\"A10\",\"A11\",\"A12\",\"B1\",\"B2\",\"B3\",\"B4\",\"B5\",\"B6\",\"B7\",\"B8\",\"B9\",\"B10\",\"B11\",\"B12\",\"C1\",\"C2\",\"C3\",\"C4\",\"C5\",\"C6\",\"C7\",\"C8\",\"C9\",\"C10\",\"C11\",\"C12\",\"D1\",\"D2\",\"D3\",\"D4\",\"D5\",\"D6\",\"D7\",\"D8\",\"D9\",\"D10\",\"D11\",\"D12\",\"E1\",\"E2\",\"E3\",\"E4\",\"E5\",\"E6\",\"E7\",\"E8\",\"E9\",\"E10\",\"E11\",\"E12\",\"F1\",\"F2\",\"F3\",\"F4\",\"F5\",\"F6\",\"F7\",\"F8\",\"F9\",\"F10\",\"F11\",\"F12\",\"G1\",\"G2\",\"G3\",\"G4\",\"G5\",\"G6\",\"G7\",\"G8\",\"G9\",\"G10\",\"G11\",\"G12\",\"H1\",\"H2\",\"H3\",\"H4\",\"H5\",\"H6\",\"H7\",\"H8\",\"H9\",\"H10\",\"H11\",\"H12\"],\"reason\":\"which wells to read; a well name sets no physical quantity\"}}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:1010101010101010101010101010101010101010101010101010101010101010\",\"deviceId\":\"pr-sim-1\"},\"deviceClass\":\"lab-plate-reader\",\"eStop\":{\"mechanism\":\"hardware\"},\"envelopeVersion\":1,\"hazards\":[],\"limits\":[{\"max\":42.5,\"min\":25,\"param\":\"incubationTemperature\",\"proposedBy\":\"reference\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"citation\":{\"doc\":\"Betriebshandbuch\",\"section\":\"§4.2 – Betriebstemperatur\",\"url\":\"https://example.org/manual.pdf\"},\"claim\":\"Inkubation ab 25 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-29\",\"unit\":\"degC\",\"value\":{\"min\":25}},{\"citation\":{\"doc\":\"Datasheet Rev C\",\"section\":\"Table 3\"},\"claim\":\"incubator rated to 42.5 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-28T09:15:00Z\",\"unit\":\"degC\",\"value\":{\"max\":42.5}}],\"unit\":\"degC\"},{\"max\":600,\"min\":1,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":120,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":30,\"supervision\":\"attended\"}}",
-        "envelopeDigest": "0x92f2241c6d208e147f31ca7608ca54a3e9bdbfffc83400b1aa3d216807702be7"
+        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"setIncubation\",\"params\":[{\"name\":\"celsius\",\"quantity\":\"incubation_temperature\",\"unit\":\"degC\"}]},{\"name\":\"read\",\"params\":[{\"name\":\"seconds\",\"quantity\":\"read_duration\",\"unit\":\"s\"},{\"name\":\"wavelengthNm\",\"unbounded\":{\"allowed\":[405,450,600],\"reason\":\"an optical setting, not a safety quantity\"}},{\"name\":\"plateFormat\",\"unbounded\":{\"allowed\":[\"96-well\"],\"reason\":\"the plate format; this reader takes 96-well plates only\"}},{\"name\":\"wells\",\"unbounded\":{\"allowed\":[\"all\"],\"allowedItems\":[\"A1\",\"A10\",\"A11\",\"A12\",\"A2\",\"A3\",\"A4\",\"A5\",\"A6\",\"A7\",\"A8\",\"A9\",\"B1\",\"B10\",\"B11\",\"B12\",\"B2\",\"B3\",\"B4\",\"B5\",\"B6\",\"B7\",\"B8\",\"B9\",\"C1\",\"C10\",\"C11\",\"C12\",\"C2\",\"C3\",\"C4\",\"C5\",\"C6\",\"C7\",\"C8\",\"C9\",\"D1\",\"D10\",\"D11\",\"D12\",\"D2\",\"D3\",\"D4\",\"D5\",\"D6\",\"D7\",\"D8\",\"D9\",\"E1\",\"E10\",\"E11\",\"E12\",\"E2\",\"E3\",\"E4\",\"E5\",\"E6\",\"E7\",\"E8\",\"E9\",\"F1\",\"F10\",\"F11\",\"F12\",\"F2\",\"F3\",\"F4\",\"F5\",\"F6\",\"F7\",\"F8\",\"F9\",\"G1\",\"G10\",\"G11\",\"G12\",\"G2\",\"G3\",\"G4\",\"G5\",\"G6\",\"G7\",\"G8\",\"G9\",\"H1\",\"H10\",\"H11\",\"H12\",\"H2\",\"H3\",\"H4\",\"H5\",\"H6\",\"H7\",\"H8\",\"H9\"],\"reason\":\"which wells to read; a well name sets no physical quantity\"}}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:1010101010101010101010101010101010101010101010101010101010101010\",\"deviceId\":\"pr-sim-1\"},\"deviceClass\":\"lab-plate-reader\",\"eStop\":{\"mechanism\":\"hardware\"},\"envelopeVersion\":1,\"hazards\":[],\"limits\":[{\"max\":42.5,\"min\":25,\"param\":\"incubationTemperature\",\"proposedBy\":\"reference\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"citation\":{\"doc\":\"Betriebshandbuch\",\"section\":\"§4.2 – Betriebstemperatur\",\"url\":\"https://example.org/manual.pdf\"},\"claim\":\"Inkubation ab 25 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-29\",\"unit\":\"degC\",\"value\":{\"min\":25}},{\"citation\":{\"doc\":\"Datasheet Rev C\",\"section\":\"Table 3\"},\"claim\":\"incubator rated to 42.5 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-28T09:15:00Z\",\"unit\":\"degC\",\"value\":{\"max\":42.5}}],\"unit\":\"degC\"},{\"max\":600,\"min\":1,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":120,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":30,\"supervision\":\"attended\"}}",
+        "envelopeDigest": "0x25efda3404b1f9119026784662bdad9c4a7fc6f4c278573e00fdf1cc12c81f3b"
+      },
+      {
+        "name": "plate-reader-sim-pr1",
+        "envelope": {
+          "commandMap": {
+            "commands": [
+              {
+                "name": "runPlate",
+                "params": [
+                  {
+                    "name": "plateFormat",
+                    "unbounded": {
+                      "allowed": [
+                        "96-well"
+                      ],
+                      "reason": "the plate format; this reader takes 96-well plates only"
+                    }
+                  },
+                  {
+                    "name": "wavelengthNm",
+                    "unbounded": {
+                      "allowed": [
+                        405,
+                        450,
+                        600
+                      ],
+                      "reason": "an optical setting, not a safety quantity"
+                    }
+                  },
+                  {
+                    "name": "wells",
+                    "unbounded": {
+                      "allowed": [
+                        "all"
+                      ],
+                      "allowedItems": [
+                        "A1",
+                        "A10",
+                        "A11",
+                        "A12",
+                        "A2",
+                        "A3",
+                        "A4",
+                        "A5",
+                        "A6",
+                        "A7",
+                        "A8",
+                        "A9",
+                        "B1",
+                        "B10",
+                        "B11",
+                        "B12",
+                        "B2",
+                        "B3",
+                        "B4",
+                        "B5",
+                        "B6",
+                        "B7",
+                        "B8",
+                        "B9",
+                        "C1",
+                        "C10",
+                        "C11",
+                        "C12",
+                        "C2",
+                        "C3",
+                        "C4",
+                        "C5",
+                        "C6",
+                        "C7",
+                        "C8",
+                        "C9",
+                        "D1",
+                        "D10",
+                        "D11",
+                        "D12",
+                        "D2",
+                        "D3",
+                        "D4",
+                        "D5",
+                        "D6",
+                        "D7",
+                        "D8",
+                        "D9",
+                        "E1",
+                        "E10",
+                        "E11",
+                        "E12",
+                        "E2",
+                        "E3",
+                        "E4",
+                        "E5",
+                        "E6",
+                        "E7",
+                        "E8",
+                        "E9",
+                        "F1",
+                        "F10",
+                        "F11",
+                        "F12",
+                        "F2",
+                        "F3",
+                        "F4",
+                        "F5",
+                        "F6",
+                        "F7",
+                        "F8",
+                        "F9",
+                        "G1",
+                        "G10",
+                        "G11",
+                        "G12",
+                        "G2",
+                        "G3",
+                        "G4",
+                        "G5",
+                        "G6",
+                        "G7",
+                        "G8",
+                        "G9",
+                        "H1",
+                        "H10",
+                        "H11",
+                        "H12",
+                        "H2",
+                        "H3",
+                        "H4",
+                        "H5",
+                        "H6",
+                        "H7",
+                        "H8",
+                        "H9"
+                      ],
+                      "reason": "which wells to read; a well name sets no physical quantity"
+                    }
+                  }
+                ]
+              },
+              {
+                "name": "stop",
+                "params": []
+              }
+            ]
+          },
+          "confirmation": {
+            "confirmedAt": "2026-09-29T20:00:00Z",
+            "confirmedBy": "operator:fixture"
+          },
+          "device": {
+            "adapterType": "generic-http",
+            "adapterVersion": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+            "deviceId": "sim-pr1",
+            "model": "SIM-PR1",
+            "vendor": "Veriswell Instruments"
+          },
+          "deviceClass": "lab-plate-reader",
+          "deviceControlled": [
+            {
+              "channel": "status.temperature_c",
+              "enforcement": "telemetry",
+              "quantity": "incubation_temperature"
+            },
+            {
+              "channel": "config.run_seconds",
+              "enforcement": "telemetry",
+              "quantity": "read_duration"
+            }
+          ],
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "envelopeVersion": 1,
+          "hazards": [],
+          "limits": [
+            {
+              "max": 40,
+              "min": 15,
+              "param": "incubationTemperature",
+              "proposedBy": "operator",
+              "quantity": "incubation_temperature",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "degC"
+            },
+            {
+              "max": 60,
+              "min": 1,
+              "param": "readDuration",
+              "proposedBy": "operator",
+              "quantity": "read_duration",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "s"
+            },
+            {
+              "max": 30,
+              "min": 1,
+              "param": "jobDuration",
+              "proposedBy": "operator",
+              "quantity": "job_duration",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "min"
+            }
+          ],
+          "maxCommandsPerMinute": 20,
+          "supervision": "attended",
+          "telemetryMap": {
+            "channels": [
+              {
+                "id": "config.run_seconds",
+                "maxAgeMs": 5000,
+                "quantity": "read_duration",
+                "semantics": "state",
+                "unit": "s"
+              },
+              {
+                "id": "status.temperature_c",
+                "maxAgeMs": 5000,
+                "quantity": "incubation_temperature",
+                "semantics": "state",
+                "unit": "degC"
+              }
+            ]
+          }
+        },
+        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"runPlate\",\"params\":[{\"name\":\"plateFormat\",\"unbounded\":{\"allowed\":[\"96-well\"],\"reason\":\"the plate format; this reader takes 96-well plates only\"}},{\"name\":\"wavelengthNm\",\"unbounded\":{\"allowed\":[405,450,600],\"reason\":\"an optical setting, not a safety quantity\"}},{\"name\":\"wells\",\"unbounded\":{\"allowed\":[\"all\"],\"allowedItems\":[\"A1\",\"A10\",\"A11\",\"A12\",\"A2\",\"A3\",\"A4\",\"A5\",\"A6\",\"A7\",\"A8\",\"A9\",\"B1\",\"B10\",\"B11\",\"B12\",\"B2\",\"B3\",\"B4\",\"B5\",\"B6\",\"B7\",\"B8\",\"B9\",\"C1\",\"C10\",\"C11\",\"C12\",\"C2\",\"C3\",\"C4\",\"C5\",\"C6\",\"C7\",\"C8\",\"C9\",\"D1\",\"D10\",\"D11\",\"D12\",\"D2\",\"D3\",\"D4\",\"D5\",\"D6\",\"D7\",\"D8\",\"D9\",\"E1\",\"E10\",\"E11\",\"E12\",\"E2\",\"E3\",\"E4\",\"E5\",\"E6\",\"E7\",\"E8\",\"E9\",\"F1\",\"F10\",\"F11\",\"F12\",\"F2\",\"F3\",\"F4\",\"F5\",\"F6\",\"F7\",\"F8\",\"F9\",\"G1\",\"G10\",\"G11\",\"G12\",\"G2\",\"G3\",\"G4\",\"G5\",\"G6\",\"G7\",\"G8\",\"G9\",\"H1\",\"H10\",\"H11\",\"H12\",\"H2\",\"H3\",\"H4\",\"H5\",\"H6\",\"H7\",\"H8\",\"H9\"],\"reason\":\"which wells to read; a well name sets no physical quantity\"}}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:3131313131313131313131313131313131313131313131313131313131313131\",\"deviceId\":\"sim-pr1\",\"model\":\"SIM-PR1\",\"vendor\":\"Veriswell Instruments\"},\"deviceClass\":\"lab-plate-reader\",\"deviceControlled\":[{\"channel\":\"status.temperature_c\",\"enforcement\":\"telemetry\",\"quantity\":\"incubation_temperature\"},{\"channel\":\"config.run_seconds\",\"enforcement\":\"telemetry\",\"quantity\":\"read_duration\"}],\"eStop\":{\"mechanism\":\"adapter-stop\",\"stopCommand\":\"stop\"},\"envelopeVersion\":1,\"hazards\":[],\"limits\":[{\"max\":40,\"min\":15,\"param\":\"incubationTemperature\",\"proposedBy\":\"operator\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"degC\"},{\"max\":60,\"min\":1,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":30,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":20,\"supervision\":\"attended\",\"telemetryMap\":{\"channels\":[{\"id\":\"config.run_seconds\",\"maxAgeMs\":5000,\"quantity\":\"read_duration\",\"semantics\":\"state\",\"unit\":\"s\"},{\"id\":\"status.temperature_c\",\"maxAgeMs\":5000,\"quantity\":\"incubation_temperature\",\"semantics\":\"state\",\"unit\":\"degC\"}]}}}",
+        "envelopeDigest": "0x9d79fc2205f9443e91c947f7aee8d1ab95894b72ef50eb8d6369bf0c8a6a779c"
+      },
+      {
+        "name": "plate-reader-heated-device-controlled",
+        "envelope": {
+          "commandMap": {
+            "commands": [
+              {
+                "name": "run",
+                "params": []
+              },
+              {
+                "name": "stop",
+                "params": []
+              }
+            ]
+          },
+          "confirmation": {
+            "confirmedAt": "2026-09-29T20:00:00Z",
+            "confirmedBy": "operator:fixture"
+          },
+          "device": {
+            "adapterType": "generic-http",
+            "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+            "deviceId": "pr-heated"
+          },
+          "deviceClass": "lab-plate-reader",
+          "deviceControlled": [
+            {
+              "channel": "chamber.temperature_c",
+              "enforcement": "telemetry",
+              "quantity": "incubation_temperature"
+            },
+            {
+              "channel": "config.read_seconds",
+              "enforcement": "telemetry",
+              "quantity": "read_duration"
+            }
+          ],
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "envelopeVersion": 1,
+          "hazards": [
+            "heat"
+          ],
+          "limits": [
+            {
+              "max": 40,
+              "min": 20,
+              "param": "incubationTemperature",
+              "proposedBy": "operator",
+              "quantity": "incubation_temperature",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "degC"
+            },
+            {
+              "max": 600,
+              "min": 1,
+              "param": "readDuration",
+              "proposedBy": "operator",
+              "quantity": "read_duration",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "s"
+            },
+            {
+              "max": 120,
+              "min": 1,
+              "param": "jobDuration",
+              "proposedBy": "operator",
+              "quantity": "job_duration",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "min"
+            }
+          ],
+          "maxCommandsPerMinute": 20,
+          "supervision": "attended",
+          "telemetryMap": {
+            "channels": [
+              {
+                "id": "chamber.temperature_c",
+                "maxAgeMs": 5000,
+                "quantity": "incubation_temperature",
+                "semantics": "state",
+                "unit": "degC"
+              },
+              {
+                "id": "config.read_seconds",
+                "maxAgeMs": 5000,
+                "quantity": "read_duration",
+                "semantics": "state",
+                "unit": "s"
+              }
+            ]
+          }
+        },
+        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"run\",\"params\":[]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:4141414141414141414141414141414141414141414141414141414141414141\",\"deviceId\":\"pr-heated\"},\"deviceClass\":\"lab-plate-reader\",\"deviceControlled\":[{\"channel\":\"chamber.temperature_c\",\"enforcement\":\"telemetry\",\"quantity\":\"incubation_temperature\"},{\"channel\":\"config.read_seconds\",\"enforcement\":\"telemetry\",\"quantity\":\"read_duration\"}],\"eStop\":{\"mechanism\":\"adapter-stop\",\"stopCommand\":\"stop\"},\"envelopeVersion\":1,\"hazards\":[\"heat\"],\"limits\":[{\"max\":40,\"min\":20,\"param\":\"incubationTemperature\",\"proposedBy\":\"operator\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"degC\"},{\"max\":600,\"min\":1,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":120,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":20,\"supervision\":\"attended\",\"telemetryMap\":{\"channels\":[{\"id\":\"chamber.temperature_c\",\"maxAgeMs\":5000,\"quantity\":\"incubation_temperature\",\"semantics\":\"state\",\"unit\":\"degC\"},{\"id\":\"config.read_seconds\",\"maxAgeMs\":5000,\"quantity\":\"read_duration\",\"semantics\":\"state\",\"unit\":\"s\"}]}}}",
+        "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7"
       }
     ]
   },
@@ -413,11 +770,31 @@
         "name": "plate-reader-reference-proposed",
         "statement": {
           "deviceId": "pr-sim-1",
-          "envelopeDigest": "0x92f2241c6d208e147f31ca7608ca54a3e9bdbfffc83400b1aa3d216807702be7",
+          "envelopeDigest": "0x25efda3404b1f9119026784662bdad9c4a7fc6f4c278573e00fdf1cc12c81f3b",
           "registeredAt": "2026-09-29T20:05:00Z"
         },
-        "preimage": "{\"deviceId\":\"pr-sim-1\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x92f2241c6d208e147f31ca7608ca54a3e9bdbfffc83400b1aa3d216807702be7\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
-        "statementDigest": "sha256:9b7af43c7954ae2465efade45b26d985ae4ec7577d31ae5759a3c5c6a043c0a6"
+        "preimage": "{\"deviceId\":\"pr-sim-1\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x25efda3404b1f9119026784662bdad9c4a7fc6f4c278573e00fdf1cc12c81f3b\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
+        "statementDigest": "sha256:ab626d6281f8b99d811ebd75fc50fc15971e33073687f9c81019937f86862523"
+      },
+      {
+        "name": "plate-reader-sim-pr1",
+        "statement": {
+          "deviceId": "sim-pr1",
+          "envelopeDigest": "0x9d79fc2205f9443e91c947f7aee8d1ab95894b72ef50eb8d6369bf0c8a6a779c",
+          "registeredAt": "2026-09-29T20:05:00Z"
+        },
+        "preimage": "{\"deviceId\":\"sim-pr1\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x9d79fc2205f9443e91c947f7aee8d1ab95894b72ef50eb8d6369bf0c8a6a779c\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
+        "statementDigest": "sha256:98585a0a820f77636377c59381d67624f85db4ab21fc76c87717b1dcdb9daca8"
+      },
+      {
+        "name": "plate-reader-heated-device-controlled",
+        "statement": {
+          "deviceId": "pr-heated",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "registeredAt": "2026-09-29T20:05:00Z"
+        },
+        "preimage": "{\"deviceId\":\"pr-heated\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
+        "statementDigest": "sha256:50c7c9cf47baab6a506aa16d5d67475c49454f4016c090332d2f5aca80aff1da"
       }
     ]
   },
@@ -459,6 +836,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -522,7 +901,7 @@
         "name": "plate-reader-reference-proposed",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x92f2241c6d208e147f31ca7608ca54a3e9bdbfffc83400b1aa3d216807702be7",
+          "envelopeDigest": "0x25efda3404b1f9119026784662bdad9c4a7fc6f4c278573e00fdf1cc12c81f3b",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-sim-1",
           "adapterType": "generic-http",
@@ -548,6 +927,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "setIncubation",
@@ -596,6 +977,9 @@
                     ],
                     "allowedItems": [
                       "A1",
+                      "A10",
+                      "A11",
+                      "A12",
                       "A2",
                       "A3",
                       "A4",
@@ -604,10 +988,10 @@
                       "A7",
                       "A8",
                       "A9",
-                      "A10",
-                      "A11",
-                      "A12",
                       "B1",
+                      "B10",
+                      "B11",
+                      "B12",
                       "B2",
                       "B3",
                       "B4",
@@ -616,10 +1000,10 @@
                       "B7",
                       "B8",
                       "B9",
-                      "B10",
-                      "B11",
-                      "B12",
                       "C1",
+                      "C10",
+                      "C11",
+                      "C12",
                       "C2",
                       "C3",
                       "C4",
@@ -628,10 +1012,10 @@
                       "C7",
                       "C8",
                       "C9",
-                      "C10",
-                      "C11",
-                      "C12",
                       "D1",
+                      "D10",
+                      "D11",
+                      "D12",
                       "D2",
                       "D3",
                       "D4",
@@ -640,10 +1024,10 @@
                       "D7",
                       "D8",
                       "D9",
-                      "D10",
-                      "D11",
-                      "D12",
                       "E1",
+                      "E10",
+                      "E11",
+                      "E12",
                       "E2",
                       "E3",
                       "E4",
@@ -652,10 +1036,10 @@
                       "E7",
                       "E8",
                       "E9",
-                      "E10",
-                      "E11",
-                      "E12",
                       "F1",
+                      "F10",
+                      "F11",
+                      "F12",
                       "F2",
                       "F3",
                       "F4",
@@ -664,10 +1048,10 @@
                       "F7",
                       "F8",
                       "F9",
-                      "F10",
-                      "F11",
-                      "F12",
                       "G1",
+                      "G10",
+                      "G11",
+                      "G12",
                       "G2",
                       "G3",
                       "G4",
@@ -676,10 +1060,10 @@
                       "G7",
                       "G8",
                       "G9",
-                      "G10",
-                      "G11",
-                      "G12",
                       "H1",
+                      "H10",
+                      "H11",
+                      "H12",
                       "H2",
                       "H3",
                       "H4",
@@ -687,10 +1071,7 @@
                       "H6",
                       "H7",
                       "H8",
-                      "H9",
-                      "H10",
-                      "H11",
-                      "H12"
+                      "H9"
                     ]
                   }
                 }
@@ -708,6 +1089,292 @@
           },
           "supervision": "attended",
           "hazards": []
+        }
+      },
+      {
+        "name": "plate-reader-sim-pr1",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x9d79fc2205f9443e91c947f7aee8d1ab95894b72ef50eb8d6369bf0c8a6a779c",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "sim-pr1",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 15,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 60
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 30
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "config.run_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "status.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "status.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.run_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "runPlate",
+              "params": [
+                {
+                  "name": "plateFormat",
+                  "unbounded": {
+                    "reason": "the plate format; this reader takes 96-well plates only",
+                    "allowed": [
+                      "96-well"
+                    ]
+                  }
+                },
+                {
+                  "name": "wavelengthNm",
+                  "unbounded": {
+                    "reason": "an optical setting, not a safety quantity",
+                    "allowed": [
+                      405,
+                      450,
+                      600
+                    ]
+                  }
+                },
+                {
+                  "name": "wells",
+                  "unbounded": {
+                    "reason": "which wells to read; a well name sets no physical quantity",
+                    "allowed": [
+                      "all"
+                    ],
+                    "allowedItems": [
+                      "A1",
+                      "A10",
+                      "A11",
+                      "A12",
+                      "A2",
+                      "A3",
+                      "A4",
+                      "A5",
+                      "A6",
+                      "A7",
+                      "A8",
+                      "A9",
+                      "B1",
+                      "B10",
+                      "B11",
+                      "B12",
+                      "B2",
+                      "B3",
+                      "B4",
+                      "B5",
+                      "B6",
+                      "B7",
+                      "B8",
+                      "B9",
+                      "C1",
+                      "C10",
+                      "C11",
+                      "C12",
+                      "C2",
+                      "C3",
+                      "C4",
+                      "C5",
+                      "C6",
+                      "C7",
+                      "C8",
+                      "C9",
+                      "D1",
+                      "D10",
+                      "D11",
+                      "D12",
+                      "D2",
+                      "D3",
+                      "D4",
+                      "D5",
+                      "D6",
+                      "D7",
+                      "D8",
+                      "D9",
+                      "E1",
+                      "E10",
+                      "E11",
+                      "E12",
+                      "E2",
+                      "E3",
+                      "E4",
+                      "E5",
+                      "E6",
+                      "E7",
+                      "E8",
+                      "E9",
+                      "F1",
+                      "F10",
+                      "F11",
+                      "F12",
+                      "F2",
+                      "F3",
+                      "F4",
+                      "F5",
+                      "F6",
+                      "F7",
+                      "F8",
+                      "F9",
+                      "G1",
+                      "G10",
+                      "G11",
+                      "G12",
+                      "G2",
+                      "G3",
+                      "G4",
+                      "G5",
+                      "G6",
+                      "G7",
+                      "G8",
+                      "G9",
+                      "H1",
+                      "H10",
+                      "H11",
+                      "H12",
+                      "H2",
+                      "H3",
+                      "H4",
+                      "H5",
+                      "H6",
+                      "H7",
+                      "H8",
+                      "H9"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": []
+        }
+      },
+      {
+        "name": "plate-reader-heated-device-controlled",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
         }
       }
     ],
@@ -748,6 +1415,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -846,6 +1515,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -950,6 +1621,8 @@
               "max": 10
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1042,6 +1715,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1142,6 +1817,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1240,6 +1917,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1313,6 +1992,8 @@
           "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1412,6 +2093,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1491,6 +2174,8 @@
               "max": 2
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1588,6 +2273,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1686,6 +2373,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1784,6 +2473,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1881,6 +2572,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1979,6 +2672,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2081,6 +2776,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2179,6 +2876,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2277,6 +2976,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2375,6 +3076,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2473,6 +3176,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2571,6 +3276,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2669,6 +3376,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2767,6 +3476,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2865,6 +3576,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2962,6 +3675,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3059,6 +3774,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3157,6 +3874,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3255,6 +3974,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3349,6 +4070,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "deadlineQuantity": "run_duration",
           "maxCommandsPerMinute": 60,
           "eStop": {
@@ -3401,6 +4124,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3499,6 +4224,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3597,6 +4324,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3694,6 +4423,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3792,6 +4523,8 @@
               "max": 300
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3893,6 +4626,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3991,6 +4726,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4093,6 +4830,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4199,6 +4938,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4308,6 +5049,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4416,6 +5159,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4524,6 +5269,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4629,6 +5376,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4735,6 +5484,8 @@
               "max": 120
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4826,6 +5577,8 @@
               "max": 2
             }
           ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4884,6 +5637,3368 @@
         },
         "paths": [
           "deviceClass"
+        ]
+      },
+      {
+        "name": "device-controlled-missing",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "deviceControlled"
+        ]
+      },
+      {
+        "name": "device-controlled-the-deadline",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [
+            {
+              "quantity": "run_duration",
+              "enforcement": "telemetry",
+              "channel": "run.elapsed_min"
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "deviceControlled"
+        ]
+      },
+      {
+        "name": "device-controlled-unknown-quantity",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [
+            {
+              "quantity": "spindle_speed",
+              "enforcement": "telemetry",
+              "channel": "spindle.rpm"
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "deviceControlled"
+        ]
+      },
+      {
+        "name": "device-controlled-a-settable-quantity",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [
+            {
+              "quantity": "module_temperature",
+              "enforcement": "telemetry",
+              "channel": "module.temperature_c"
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "deviceControlled"
+        ]
+      },
+      {
+        "name": "device-controlled-unknown-enforcement",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "trust",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "deviceControlled.0.enforcement"
+        ]
+      },
+      {
+        "name": "device-controlled-cutoff",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "cutoff",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "deviceControlled.0.enforcement"
+        ]
+      },
+      {
+        "name": "device-controlled-prose-detail",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "cutoff",
+              "detail": "x"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "deviceControlled.0",
+          "deviceControlled.0.channel",
+          "deviceControlled.0.enforcement"
+        ]
+      },
+      {
+        "name": "device-controlled-channel-unresolved",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.other"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled"
+        ]
+      },
+      {
+        "name": "device-controlled-channel-of-another-quantity",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled"
+        ]
+      },
+      {
+        "name": "device-controlled-channel-not-an-id",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "Chamber Thermistor"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "deviceControlled.0.channel"
+        ]
+      },
+      {
+        "name": "device-controlled-extra-key",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c",
+              "limit": "none"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "deviceControlled.0"
+        ]
+      },
+      {
+        "name": "device-controlled-out-of-order",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            },
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled"
+        ]
+      },
+      {
+        "name": "device-controlled-twice",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled"
+        ]
+      },
+      {
+        "name": "device-controlled-omits-an-unset-quantity",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands"
+        ]
+      },
+      {
+        "name": "device-controlled-limit-removed",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "limits",
+          "limits.0.quantity",
+          "limits.1.quantity"
+        ]
+      },
+      {
+        "name": "telemetry-channels-missing",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "deviceControlled": [],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "telemetryChannels"
+        ]
+      },
+      {
+        "name": "telemetry-channels-emptied-while-named",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled"
+        ]
+      },
+      {
+        "name": "telemetry-channels-out-of-order",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels"
+        ]
+      },
+      {
+        "name": "telemetry-channel-twice",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels"
+        ]
+      },
+      {
+        "name": "telemetry-channel-retargeted",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "read_duration",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels"
+        ]
+      },
+      {
+        "name": "telemetry-channel-the-deadline",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "job.elapsed_min",
+              "quantity": "job_duration",
+              "unit": "min",
+              "semantics": "state",
+              "maxAgeMs": 1000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels"
+        ]
+      },
+      {
+        "name": "telemetry-channel-unknown-quantity",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "spindle.rpm",
+              "quantity": "spindle_speed",
+              "unit": "m/s",
+              "semantics": "state",
+              "maxAgeMs": 1000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels"
+        ]
+      },
+      {
+        "name": "telemetry-channel-other-unit",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degF",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels"
+        ]
+      },
+      {
+        "name": "telemetry-channel-max-age-zero",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 0
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels",
+          "telemetryChannels.0.maxAgeMs"
+        ]
+      },
+      {
+        "name": "telemetry-channel-max-age-over-a-minute",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 60001
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels",
+          "telemetryChannels.0.maxAgeMs"
+        ]
+      },
+      {
+        "name": "telemetry-channel-max-age-fraction",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 1.5
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels",
+          "telemetryChannels.0.maxAgeMs"
+        ]
+      },
+      {
+        "name": "telemetry-channel-id-uppercase",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "Chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "commands",
+          "deviceControlled",
+          "telemetryChannels",
+          "telemetryChannels.0.id"
+        ]
+      },
+      {
+        "name": "telemetry-channel-extra-key",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "state",
+              "maxAgeMs": 5000,
+              "detail": "thermistor"
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "telemetryChannels.0"
+        ]
+      },
+      {
+        "name": "telemetry-channel-semantics-elapsed",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "elapsed",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "telemetryChannels.0.semantics"
+        ]
+      },
+      {
+        "name": "telemetry-channel-semantics-missing",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "telemetryChannels.0.semantics"
+        ]
+      },
+      {
+        "name": "enumerated-out-of-order",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC",
+                  "allowed": [
+                    37,
+                    4
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands",
+          "commands.2.params.0.allowed"
+        ]
+      },
+      {
+        "name": "unbounded-allowed-out-of-order",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                },
+                {
+                  "name": "slot",
+                  "unbounded": {
+                    "reason": "a deck slot",
+                    "allowed": [
+                      2,
+                      1
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands",
+          "commands.0.params.1.unbounded.allowed"
+        ]
+      },
+      {
+        "name": "unbounded-strings-before-numbers",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                },
+                {
+                  "name": "slot",
+                  "unbounded": {
+                    "reason": "a deck slot",
+                    "allowed": [
+                      "all",
+                      1
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands",
+          "commands.0.params.1.unbounded.allowed"
+        ]
+      },
+      {
+        "name": "unbounded-allowedItems-out-of-order",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                },
+                {
+                  "name": "wells",
+                  "unbounded": {
+                    "reason": "plate wells",
+                    "allowedItems": [
+                      "A2",
+                      "A10"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands",
+          "commands.0.params.1.unbounded.allowedItems"
+        ]
+      },
+      {
+        "name": "enumerated-value-outside-the-limit",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC",
+                  "allowed": [
+                    4,
+                    120
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands"
+        ]
+      },
+      {
+        "name": "enumerated-value-not-a-number",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC",
+                  "allowed": [
+                    "hot"
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands.2.params.0.allowed.0"
+        ]
+      },
+      {
+        "name": "enumerated-empty",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [],
+          "deviceControlled": [],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC",
+                  "allowed": []
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands",
+          "commands.2.params.0.allowed"
         ]
       }
     ]

@@ -49,8 +49,10 @@
  *   - a device that moves or heats cannot run unattended;
  *   - remote supervision needs a stop the supervisor can trigger remotely, an
  *     adapter stop;
- *   - every template names a deadline quantity (a whole job's duration); the
- *     runtime stops a job that runs past its confirmed maximum.
+ *   - every template names a deadline quantity (a whole job's duration). Once
+ *     a job's elapsed time passes its confirmed maximum, the runtime sends no
+ *     command but the stop, and it sends the stop. When the device then halts
+ *     is the stop path's latency: it is not observed here (astra pack 180).
  *
  * The command surface. The adapter declares every command it can send and,
  * for each parameter, either the template quantity it sets (checked against
@@ -58,9 +60,63 @@
  * values it may carry. There is no free-form parameter, so no opaque payload
  * can carry a physical control. The map and the adapter's manifest digest
  * (`device.adapterVersion`, `sha256:` of the reviewed adapter release) are
- * committed in the digest. Every bounded quantity must be set by some declared
- * parameter, so a strict runtime can refuse any command, parameter or value
- * outside the map, and any adapter whose manifest digest differs.
+ * committed in the digest, so a strict runtime can refuse any command,
+ * parameter or value outside the map, and any adapter whose manifest digest
+ * differs. Every value set in the map (`allowed`, `allowedItems`) lists each
+ * value once, in one order: numbers ascending, then strings ascending by
+ * UTF-16 code unit. One set therefore has one committed form (astra pack 176).
+ *
+ * Device control. Every template quantity keeps a limit. One that no declared
+ * parameter sets is device-controlled: "no command sets it" is not "the
+ * device cannot cause it" (astra pack 173). Its limit is enforced through a
+ * reading the runtime takes. The adapter declares the telemetry channels it
+ * reads (`telemetryMap`, class A like the command map, and committed with
+ * it). Each channel gives the template quantity it reports, in that
+ * quantity's unit, and `maxAgeMs`, how old its latest reading may be and still
+ * count. The operator names the channel that enforces each device-controlled
+ * limit. Confirm and both compilers refuse a name that does not resolve to a
+ * declared channel reporting that quantity. The runtime refuses to dispatch,
+ * and stops a running job, while any committed channel's latest reading is
+ * missing, older than its `maxAgeMs`, or outside its quantity's limit (astra
+ * pack 176). v1 accepts no other enforcement. An independent cutoff (a
+ * thermostat, a fuse) is a physical fact that no signature over a body can
+ * establish: accepting one needs an interlock registered with its own
+ * commissioning attestation, which is operator item 124.
+ *
+ * Every channel reports a STATE (`semantics: "state"`, astra pack 178): the
+ * quantity's current value, which must lie inside the limit's [min, max] at
+ * every enforcement check. A temperature is a state. So is the duration a
+ * device is configured to run for, while it runs. An elapsed-time counter is
+ * not a state: it starts at zero and grows, so its minimum is terminal (met
+ * only when the activity ends). A check of both bounds at every sample cannot
+ * enforce it, and lowering the minimum to 0 to let it pass would erase a real
+ * limit. v1 has no semantics for counters or terminal quantities, so they
+ * cannot be bound (fail closed). A duration no command sets binds to the
+ * channel that reports the duration the device is configured to run for. The
+ * checks are samples: the evidence states that a current reading inside the
+ * limit existed at each enforcement check, never continuous physical
+ * conformance between checks.
+ *
+ * Registration is the authority for what this module cannot observe (astra
+ * pack 178). Before it signs, the registry verifies these points:
+ *   - `adapterVersion` names an approved, immutable release manifest that
+ *     carries exactly this command map and telemetry map;
+ *   - the installed adapter is that release;
+ *   - each channel reads the device signal, quantity and unit it claims, as a
+ *     state;
+ *   - each `maxAgeMs` is safe for that quantity's dynamics and for the stop
+ *     latency (MAX_TELEMETRY_AGE_MS is a ceiling, not an approval);
+ *   - the device's identity, configuration and template fit;
+ *   - commissioning showed that the channels and the stop path work.
+ *
+ * Device-to-template fit. A template names what a class must bound, so the
+ * class decides which quantities are bounded at all. Nothing here can observe
+ * the hardware. The registration's signature is the authority that this
+ * device is of this class, so template registration stays reviewed code.
+ * Since an omitted quantity is unbounded, v1 has no reduced class: no
+ * template leaves out a quantity that a sibling class for the same kind of
+ * device bounds (astra pack 176). A device that can neither set nor report a
+ * quantity of its class cannot be confirmed.
  *
  * "Safety envelope" is this term exactly. It is not `evidence-envelope` (a
  * data-integrity wrapper) or onboard-kit's `workEnvelope` (part dimensions).
@@ -90,7 +146,8 @@
  *   - R5 research findings give `references`, in R5's `{claim, value, unit,
  *     citation, retrievedAt}` shape, each for the template quantity it was
  *     asked about;
- *   - the adapter gives `commandMap` and `device.adapterVersion` (class A).
+ *   - the adapter gives `commandMap`, `telemetryMap` and
+ *     `device.adapterVersion` (class A).
  * All of these are never defaulted.
  */
 
@@ -112,6 +169,7 @@ import {
   includesValue,
   inSet,
   isHex256Digest,
+  isLowerToken,
   isProxy,
   isTaggedSha256,
   joinStrings,
@@ -220,7 +278,8 @@ export interface DeviceIdentity {
   adapterType: string;
   /**
    * The adapter release this envelope commits: `sha256:` + 64 lowercase hex
-   * of its reviewed release manifest (its code and this command map). The
+   * of its reviewed release manifest (its code, this command map and this
+   * telemetry map). The
    * runtime refuses an adapter whose manifest digest differs.
    */
   adapterVersion: string;
@@ -248,6 +307,13 @@ export interface CommandParamSpec {
   /** The template quantity this parameter sets, in `unit`; the runtime checks it against that limit. */
   quantity?: string;
   unit?: Unit;
+  /**
+   * An enumerated PHYSICAL parameter, such as a temperature preset: the only
+   * values it may carry, each inside the confirmed limit of `quantity`. It is
+   * distinct from `unbounded`, which claims the parameter sets no physical
+   * quantity at all (astra pack 173).
+   */
+  allowed?: number[];
   /** A parameter that sets no physical quantity; the runtime passes only the values in `allowed`. */
   unbounded?: UnboundedParam;
 }
@@ -260,6 +326,41 @@ export interface CommandSpec {
 /** Every command the adapter can send (class A: the adapter declares it). */
 export interface CommandMapV1 {
   commands: CommandSpec[];
+}
+
+/**
+ * One reading the adapter takes (class A: the adapter declares it, like its
+ * commands): the template quantity it reports, what kind of value that is,
+ * and how fresh it must be.
+ */
+export interface TelemetryChannelSpec {
+  /** What the runtime asks the adapter for: a lowercase token (a letter, then letters, digits, ".", "_" or "-"), at most 64 long. */
+  id: string;
+  /** The template quantity it reports; never the deadline, which the runtime measures on its own clock. */
+  quantity: string;
+  /** That quantity's unit, so a reading is compared with the limit without conversion. */
+  unit: Unit;
+  /** What the reading is. v1 has one kind, "state": a value that must lie inside the limit at every enforcement check. */
+  semantics: TelemetrySemantics;
+  /** How old the latest reading may be and still count, in ms: a whole number from 1 to MAX_TELEMETRY_AGE_MS. */
+  maxAgeMs: number;
+}
+
+/**
+ * The kinds of reading a channel may report. "state" is the quantity's current
+ * value, checked against both bounds at every enforcement check. A check is a
+ * sample: nothing between two checks is claimed (astra pack 180).
+ * A counter (an elapsed time) or a terminal quantity is not a state and is not
+ * accepted in v1 (astra pack 178).
+ */
+export type TelemetrySemantics = "state";
+
+/** The reading kinds, frozen. */
+export const TELEMETRY_SEMANTICS: readonly TelemetrySemantics[] = deepFreeze(["state"] as TelemetrySemantics[]);
+
+/** Every channel the adapter reads, in ascending `id` order, each once. */
+export interface TelemetryMapV1 {
+  channels: TelemetryChannelSpec[];
 }
 
 export interface SafetyEnvelopeInput {
@@ -278,6 +379,8 @@ export interface SafetyEnvelopeInput {
   references: ReferenceFinding[];
   /** The adapter's declared command surface; missing is a question, never a default. */
   commandMap?: CommandMapV1;
+  /** The adapter's declared telemetry channels. A device-controlled quantity names one of them. */
+  telemetryMap?: TelemetryMapV1;
 }
 
 // ── Templates (the "templates plus rules") ──────────────────────────
@@ -352,6 +455,9 @@ export const DEVICE_CLASS_TEMPLATES: Readonly<Record<string, DeviceClassTemplate
       absorbance: { semanticType: "absorbance-optical-density", required: true },
     },
   },
+  // No reduced class, such as a reader without an incubator: a class that leaves out a
+  // quantity would rest on the class attestation alone (astra pack 176). A reader that
+  // cannot set its plate temperature reports it through a telemetry channel instead.
   "liquid-handler-ot2": {
     id: "liquid-handler-ot2",
     label: "Liquid handler, Opentrons OT-2",
@@ -455,6 +561,8 @@ export interface SafetyEnvelopeDraft {
   supervision: Supervision | null;
   hazards: Hazard[] | null;
   commandMap: CommandMapV1 | null;
+  /** The adapter's declared telemetry channels, or null when it declared none. */
+  telemetryMap: TelemetryMapV1 | null;
   /** Kept for confirmation: an edit may not loosen a cited bound without an explicit override. */
   referenceBounds: ReferenceBound[];
   /** Empty exactly when the draft is ready to confirm. */
@@ -735,6 +843,24 @@ function supervisionPolicyProblem(
 }
 
 /** Why `values` is not a non-empty list of distinct non-blank strings or finite numbers, or null. */
+/**
+ * Whether `a` comes strictly before `b` in the one order a value set is
+ * committed in: numbers ascending, then strings ascending by UTF-16 code
+ * unit (the order canonical JSON sorts keys in). Compared with operators,
+ * never a method. Equal values are not before each other, so a set in this
+ * order lists each value once (astra pack 176).
+ */
+function valueBefore(a: unknown, b: unknown): boolean {
+  if (typeof a === "number") return typeof b === "string" || (typeof b === "number" && a < b);
+  return typeof a === "string" && typeof b === "string" && a < b;
+}
+
+/** Whether every value of `values` comes strictly before the next: the set's one committed form. */
+function inCanonicalOrder(values: readonly unknown[]): boolean {
+  for (let i = 1; i < values.length; i++) if (!valueBefore(values[i - 1], values[i])) return false;
+  return true;
+}
+
 function finiteSetProblem(values: unknown, at: string, name: string): string | null {
   if (!ArrayIsArray(values) || values.length === 0) {
     return `parameter ${at}: ${name} must list the values it may carry; a free-form parameter could carry anything`;
@@ -746,6 +872,9 @@ function finiteSetProblem(values: unknown, at: string, name: string): string | n
     const key = JSONStringify(value);
     if (includesValue(seen, key)) return `parameter ${at}: the ${name} value ${key} is listed twice`;
     append(seen, key);
+  }
+  if (!inCanonicalOrder(values)) {
+    return `parameter ${at}: ${name} is a set with one committed order (numbers ascending, then strings by UTF-16 code unit), so it is listed in that order`;
   }
   return null;
 }
@@ -804,7 +933,9 @@ function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): 
       const param = params[j];
       if (!isRecord(param) || !nonEmpty(param.name)) return `command ${JSONStringify(command.name)} has a parameter without a name`;
       const at = `${command.name}.${param.name}`;
-      if (extraKeys(param, ["name", "quantity", "unit", "unbounded"]).length > 0) return `parameter ${at} has keys other than name, quantity, unit and unbounded`;
+      if (extraKeys(param, ["name", "quantity", "unit", "allowed", "unbounded"]).length > 0) {
+        return `parameter ${at} has keys other than name, quantity, unit, allowed and unbounded`;
+      }
       if (includesValue(paramNames, param.name)) return `parameter ${at} is declared twice`;
       append(paramNames, param.name);
       const mapped = param.quantity !== undefined || param.unit !== undefined;
@@ -815,6 +946,20 @@ function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): 
         const unit = unitOf(template, param.quantity);
         if (unit === undefined) return `parameter ${at} sets ${JSONStringify(param.quantity)}, which this class does not bound`;
         if (param.unit !== unit) return `parameter ${at} sets ${text(param.quantity)} in ${JSONStringify(param.unit)}, not ${unit}`;
+        if (param.allowed !== undefined) {
+          const allowed: unknown = param.allowed;
+          if (!ArrayIsArray(allowed) || allowed.length === 0) return `parameter ${at}: allowed, when given, lists at least one value`;
+          const seen = newList<number>(0);
+          for (let k = 0; k < allowed.length; k++) {
+            const value: unknown = allowed[k];
+            if (!finite(value)) return `parameter ${at}: an allowed value of a physical parameter is a finite number`;
+            if (includesValue(seen, value)) return `parameter ${at}: allowed lists ${text(value)} twice`;
+            append(seen, value);
+          }
+          if (!inCanonicalOrder(allowed)) return `parameter ${at}: allowed is a set with one committed order, so its values are listed in ascending order`;
+        }
+      } else if (param.allowed !== undefined) {
+        return `parameter ${at}: allowed values belong to a parameter that sets a quantity; one that sets none says why (unbounded)`;
       } else {
         const problem = unboundedProblem(param.unbounded, at);
         if (problem) return problem;
@@ -831,17 +976,219 @@ function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): 
  * parameter for it would only invite a dummy one (astra pack 153, HIGH 8).
  */
 function commandMapGaps(commandMap: CommandMapV1, template: DeviceClassTemplate): string[] {
-  const set = newList<string>(0);
-  for (let i = 0; i < commandMap.commands.length; i++) {
-    const params = commandMap.commands[i]!.params;
-    for (let j = 0; j < params.length; j++) if (nonEmpty(params[j]!.quantity)) append(set, params[j]!.quantity as string);
-  }
+  const set = settableQuantities(commandMap);
   const gaps = newList<string>(0);
   for (let i = 0; i < template.requires.length; i++) {
     const quantity = template.requires[i]!.quantity;
     if (quantity !== template.deadline && !includesValue(set, quantity)) append(gaps, quantity);
   }
   return gaps;
+}
+
+/** The template quantities some declared parameter sets, each as often as a parameter sets it. */
+function settableQuantities(commandMap: CommandMapV1): string[] {
+  const set = newList<string>(0);
+  for (let i = 0; i < commandMap.commands.length; i++) {
+    const params = commandMap.commands[i]!.params;
+    for (let j = 0; j < params.length; j++) if (nonEmpty(params[j]!.quantity)) append(set, params[j]!.quantity as string);
+  }
+  return set;
+}
+
+/** No quantities, and no device-controlled entries: what an envelope whose map sets every quantity carries. */
+const NO_QUANTITIES: readonly string[] = deepFreeze(newList<string>(0));
+const NO_DEVICE_CONTROLLED: readonly DeviceControlledQuantity[] = deepFreeze(newList<DeviceControlledQuantity>(0));
+/** No telemetry channels: what an envelope whose adapter declared none carries. */
+const NO_CHANNELS: readonly TelemetryChannelSpec[] = deepFreeze(newList<TelemetryChannelSpec>(0));
+
+const DEVICE_CONTROLLED_KEYS: readonly string[] = deepFreeze(["quantity", "enforcement", "channel"]);
+const TELEMETRY_CHANNEL_KEYS: readonly string[] = deepFreeze(["id", "quantity", "unit", "semantics", "maxAgeMs"]);
+
+/**
+ * The oldest any telemetry reading may be and still count, in ms. A channel may
+ * declare a shorter `maxAgeMs`, never a longer one. This is a structural
+ * ceiling, not a safety approval: registration approves a bound that is safe
+ * for the quantity's dynamics and the stop latency (astra pack 178).
+ */
+export const MAX_TELEMETRY_AGE_MS = 60_000;
+/** The longest telemetry channel id. */
+const CHANNEL_ID_MAX_LENGTH = 64;
+
+/** Whether `value` is a telemetry channel id: a lowercase token (a letter, then letters, digits, ".", "_" or "-"), at most 64 long. */
+export function isTelemetryChannelId(value: unknown): value is string {
+  return isLowerToken(value, CHANNEL_ID_MAX_LENGTH);
+}
+
+/**
+ * Why a list of telemetry channels is malformed for this template, or null.
+ * Each channel is exactly {id, quantity, unit, semantics, maxAgeMs}:
+ *   - an id token, with ids strictly ascending, so each id appears once and
+ *     the list has one committed order;
+ *   - a template quantity other than the deadline (the runtime measures a
+ *     job's elapsed time on its own clock), in that quantity's unit;
+ *   - "state" semantics (astra pack 178);
+ *   - a whole number of ms from 1 to MAX_TELEMETRY_AGE_MS.
+ */
+function telemetryChannelsProblem(channels: unknown, template: DeviceClassTemplate): string | null {
+  if (!ArrayIsArray(channels)) return "the telemetry channels must be a list";
+  let previous: string | null = null;
+  for (let i = 0; i < channels.length; i++) {
+    const channel: unknown = channels[i];
+    if (!isRecord(channel) || extraKeys(channel, TELEMETRY_CHANNEL_KEYS).length > 0) return "each telemetry channel is exactly {id, quantity, unit, semantics, maxAgeMs}";
+    const id: unknown = channel.id;
+    if (!isTelemetryChannelId(id)) {
+      return `telemetry channel ${quoted(id)}: an id is a lowercase token (a letter, then letters, digits, ".", "_" or "-"), at most ${CHANNEL_ID_MAX_LENGTH} long`;
+    }
+    if (previous !== null && !(previous < id)) return `telemetry channels are listed once each, in ascending id order: ${previous} comes before ${id}`;
+    previous = id;
+    const unit = unitOf(template, channel.quantity);
+    if (unit === undefined) return `telemetry channel ${id} reports ${quoted(channel.quantity)}, which a ${template.id} does not bound`;
+    if (channel.quantity === template.deadline) {
+      return `telemetry channel ${id} reports the deadline ${template.deadline}: the runtime measures a job's elapsed time on its own clock`;
+    }
+    if (channel.unit !== unit) {
+      return `telemetry channel ${id} reports ${text(channel.quantity)} in ${JSONStringify(channel.unit)}, not ${unit}: a reading is compared with the limit without conversion`;
+    }
+    if (!includesValue(TELEMETRY_SEMANTICS, channel.semantics)) {
+      return `telemetry channel ${id}: semantics must be "state", a value that must lie inside the limit at every enforcement check; v1 cannot enforce an elapsed counter or a terminal quantity (astra pack 178)`;
+    }
+    const age: unknown = channel.maxAgeMs;
+    if (!NumberIsInteger(age) || (age as number) < 1 || (age as number) > MAX_TELEMETRY_AGE_MS) {
+      return `telemetry channel ${id}: maxAgeMs must be a whole number of ms from 1 to ${MAX_TELEMETRY_AGE_MS}`;
+    }
+  }
+  return null;
+}
+
+/** Why a telemetry map is not {channels} with at least one well-formed channel, or null. */
+function telemetryMapProblem(telemetryMap: unknown, template: DeviceClassTemplate): string | null {
+  if (!isRecord(telemetryMap) || extraKeys(telemetryMap, ["channels"]).length > 0 || !ArrayIsArray(telemetryMap.channels)) {
+    return "the telemetry map is exactly {channels}";
+  }
+  // One committed form: an adapter that reads nothing omits the map.
+  if ((telemetryMap.channels as unknown[]).length === 0) return "the telemetry map, when given, lists at least one channel";
+  return telemetryChannelsProblem(telemetryMap.channels, template);
+}
+
+/** The channels of a telemetry map, or none. */
+function channelsOf(telemetryMap: TelemetryMapV1 | null | undefined): readonly TelemetryChannelSpec[] {
+  return telemetryMap === null || telemetryMap === undefined ? NO_CHANNELS : telemetryMap.channels;
+}
+
+/** The channel of `channels` whose id is `id`, or undefined. */
+function channelNamed(channels: readonly unknown[], id: unknown): Record<string, unknown> | undefined {
+  if (!isTelemetryChannelId(id)) return undefined;
+  for (let i = 0; i < channels.length; i++) {
+    const channel: unknown = channels[i];
+    if (isRecord(channel) && channel.id === id) return channel;
+  }
+  return undefined;
+}
+
+/**
+ * Why a device-controlled entry's enforcement does not resolve, or null. It
+ * must be "telemetry", through a channel of `channels` that reports the
+ * entry's quantity: a reference the runtime reads, never a description.
+ */
+function enforcementProblem(entry: Record<string, unknown>, channels: readonly unknown[]): string | null {
+  const quantity = text(entry.quantity);
+  if (!includesValue(DEVICE_CONTROL_ENFORCEMENTS, entry.enforcement)) {
+    return `${quantity}: enforcement must be "telemetry", through a channel the adapter declares; an independent cutoff needs a registered interlock attestation v1 does not have (operator item 124)`;
+  }
+  const channel = channelNamed(channels, entry.channel);
+  if (channel === undefined) return `${quantity}: channel ${quoted(entry.channel)} is not a channel of the adapter's telemetry map`;
+  if (channel.quantity !== entry.quantity) return `${quantity}: channel ${text(entry.channel)} reports ${text(channel.quantity)}, not ${quantity}`;
+  return null;
+}
+
+/** The quantities a deviceControlled list names, in its order. */
+function controlledQuantities(controlled: readonly DeviceControlledQuantity[]): string[] {
+  return mapList(controlled, (d) => d.quantity);
+}
+
+/** `controlled` in template order, each entry copied field by field. */
+function inTemplateOrder(controlled: readonly DeviceControlledQuantity[], template: DeviceClassTemplate): DeviceControlledQuantity[] {
+  const out = newList<DeviceControlledQuantity>(0);
+  for (let i = 0; i < template.requires.length; i++) {
+    for (let j = 0; j < controlled.length; j++) {
+      const d = controlled[j]!;
+      if (d.quantity === template.requires[i]!.quantity) append(out, { quantity: d.quantity, enforcement: d.enforcement, channel: d.channel });
+    }
+  }
+  return out;
+}
+
+/**
+ * Why a `deviceControlled` list is malformed for this template, or null. Each
+ * entry is exactly {quantity, enforcement, channel}: a required quantity other
+ * than the deadline, named once and in template order, and an enforcement
+ * that resolves in `channels`. A confirmed body carries the list only when
+ * non-empty (one canonical form per decision); the runtime envelope always
+ * carries it, so `allowEmpty` is for the runtime.
+ */
+function deviceControlledProblem(controlled: unknown, template: DeviceClassTemplate, allowEmpty: boolean, channels: readonly unknown[]): string | null {
+  if (!ArrayIsArray(controlled)) return "deviceControlled must be a list";
+  if (controlled.length === 0) return allowEmpty ? null : "deviceControlled, when present, lists at least one quantity";
+  let previous = -1;
+  for (let i = 0; i < controlled.length; i++) {
+    const entry: unknown = controlled[i];
+    if (!isRecord(entry) || extraKeys(entry, DEVICE_CONTROLLED_KEYS).length > 0) return "each deviceControlled entry is exactly {quantity, enforcement, channel}";
+    let at = -1;
+    for (let j = 0; j < template.requires.length; j++) if (template.requires[j]!.quantity === entry.quantity) at = j;
+    if (at < 0) return `deviceControlled names ${quoted(entry.quantity)}, which is not a quantity of a ${template.id}`;
+    if (entry.quantity === template.deadline) {
+      return `deviceControlled names the deadline ${template.deadline}: the runtime stops a job on its elapsed time`;
+    }
+    if (at <= previous) return "deviceControlled lists each quantity once, in template order";
+    previous = at;
+    const enforcement = enforcementProblem(entry, channels);
+    if (enforcement) return enforcement;
+  }
+  return null;
+}
+
+/**
+ * Why the command map's coverage and `deviceControlled` disagree, or null.
+ * Every quantity no declared parameter sets must be confirmed device-controlled,
+ * and a quantity some parameter sets never is: its limit is enforced on that
+ * parameter at dispatch.
+ */
+function coverageProblem(gaps: readonly string[], controlled: readonly string[]): string | null {
+  const unconfirmed = filterList(gaps, (q) => !includesValue(controlled, q));
+  if (unconfirmed.length > 0) {
+    return `no declared parameter sets ${joinStrings(unconfirmed, ", ")}, and the operator has not confirmed it as device-controlled, enforced through a telemetry channel that reports it`;
+  }
+  const settable = filterList(controlled, (q) => !includesValue(gaps, q));
+  if (settable.length > 0) return `deviceControlled names ${joinStrings(settable, ", ")}, but a declared parameter sets it`;
+  return null;
+}
+
+/**
+ * Why an enumerated physical parameter allows a value outside its quantity's
+ * confirmed limit: one problem per value, and empty when every allowed value fits.
+ */
+function enumeratedProblems(commandMap: CommandMapV1, limits: readonly unknown[]): string[] {
+  const problems = newList<string>(0);
+  for (let i = 0; i < commandMap.commands.length; i++) {
+    const command = commandMap.commands[i]!;
+    for (let j = 0; j < command.params.length; j++) {
+      const param = command.params[j]!;
+      if (param.allowed === undefined || param.quantity === undefined) continue;
+      let limit: Record<string, unknown> | undefined;
+      for (let k = 0; k < limits.length; k++) {
+        const candidate: unknown = limits[k];
+        if (isRecord(candidate) && candidate.quantity === param.quantity) limit = candidate;
+      }
+      if (limit === undefined || !finite(limit.min) || !finite(limit.max)) continue;
+      for (let k = 0; k < param.allowed.length; k++) {
+        const value: unknown = param.allowed[k];
+        if (!finite(value) || value < (limit.min as number) || value > (limit.max as number)) {
+          append(problems, `parameter ${command.name}.${param.name} allows ${text(value)}, outside the ${param.quantity} limit ${text(limit.min)}..${text(limit.max)}`);
+        }
+      }
+    }
+  }
+  return problems;
 }
 
 function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate } {
@@ -858,6 +1205,10 @@ function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate
   if (template && input?.commandMap !== undefined) {
     const problem = commandMapProblem(input.commandMap, template);
     if (problem) append(reasons, `commandMap: ${problem}`);
+  }
+  if (template && input?.telemetryMap !== undefined) {
+    const problem = telemetryMapProblem(input.telemetryMap, template);
+    if (problem) append(reasons, `telemetryMap: ${problem}`);
   }
   if (reasons.length > 0 || !template) throw new EnvelopeRefused(reasons);
   return { template };
@@ -1000,12 +1351,17 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
       why: "the runtime refuses anything outside the declared command surface; it cannot be guessed",
     });
   } else {
+    // One question per quantity no declared parameter sets. The operator adds the
+    // parameter that sets it, or confirms it device-controlled and names the channel
+    // that enforces its limit. Its limit stays required either way: "no command sets
+    // it" is not "the device cannot cause it" (astra pack 173).
     const gaps = commandMapGaps(commandMap, template);
-    if (gaps.length > 0) {
+    for (let i = 0; i < gaps.length; i++) {
+      const gap = gaps[i]!;
       append(questions, {
-        about: "command-map",
-        ask: `No declared command parameter sets ${joinStrings(gaps, ", ")}. Which parameters do?`,
-        why: "a limit no parameter maps to is never enforced",
+        about: `device-controlled:${gap}`,
+        ask: `No declared command parameter sets ${gap}. Add the parameter that sets it to the command map, or confirm it as device-controlled and name the channel of the adapter's telemetry map that reports it in ${unitOf(template, gap)!}. The runtime refuses to run while that channel's latest reading is missing, stale or outside the limit. Its limit is still required. A device that can neither set nor report it cannot be confirmed.`,
+        why: "a limit no parameter maps to cannot be checked at dispatch, so a reading the runtime takes must enforce it; it is never dropped",
       });
     }
   }
@@ -1086,6 +1442,7 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
     supervision,
     hazards: givenHazards === undefined ? null : canonicalHazards(givenHazards),
     commandMap,
+    telemetryMap: input.telemetryMap ?? null,
     referenceBounds,
     questions,
     dropped,
@@ -1113,14 +1470,56 @@ export interface EnvelopeDecision {
   maxCommandsPerMinute?: number;
   supervision?: Supervision;
   hazards?: Hazard[];
+  /**
+   * The required quantities no parameter of the confirmed command map sets,
+   * which the device can still cause (its firmware, a fixed program, a stored
+   * method): exactly those quantities, never the deadline. Each keeps its limit
+   * and names the telemetry channel that enforces it (astra packs 173 and 176).
+   */
+  deviceControlled?: DeviceControlledQuantity[];
 }
+
+/**
+ * How a device-controlled quantity's limit is enforced, since no command can
+ * set it. v1 has one kind. An independent cutoff joins it only as an
+ * interlock registered with its own commissioning attestation (operator item
+ * 124), never as an operator's description (astra pack 176).
+ */
+export type DeviceControlEnforcement = "telemetry";
+
+/** The enforcement kinds, frozen. */
+export const DEVICE_CONTROL_ENFORCEMENTS: readonly DeviceControlEnforcement[] = deepFreeze(["telemetry"] as DeviceControlEnforcement[]);
+
+/**
+ * A required quantity no command sets but the device can cause. Its limit is
+ * still required and still enforced, through `channel`: the id of a channel in
+ * the adapter's telemetry map that reports this quantity. The runtime refuses
+ * to dispatch, and stops a running job, while that channel's latest reading is
+ * missing, older than its `maxAgeMs`, or outside the limit. The channel reports
+ * a state (see TELEMETRY_SEMANTICS). A duration binds to the duration the
+ * device is configured to run for, never to an elapsed counter, so its real
+ * minimum stays (astra pack 178). Physical absence is never declared here:
+ * only a template that does not list the quantity makes it absent.
+ */
+export interface DeviceControlledQuantity {
+  quantity: string;
+  enforcement: DeviceControlEnforcement;
+  /** The id of the telemetry channel that reports this quantity. */
+  channel: string;
+}
+
+/** How the runtime enforces one limit, as the envelope-conformance evidence lists it. */
+export type EnforcementMechanism =
+  | { kind: "dispatch" }
+  | { kind: "telemetry"; channel: string; semantics: TelemetrySemantics; maxAgeMs: number }
+  | { kind: "deadline" };
 
 /** The part of a confirmed envelope the digest commits, including who confirmed it and when. */
 export interface SafetyEnvelopeBody {
   envelopeVersion: 1;
   deviceClass: string;
   device: DeviceIdentity;
-  /** In template order, one per required quantity. */
+  /** In template order, one per required quantity: a device-controlled quantity keeps its limit too. */
   limits: EnvelopeLimit[];
   eStop: EStopDeclaration;
   maxCommandsPerMinute: number;
@@ -1128,6 +1527,19 @@ export interface SafetyEnvelopeBody {
   /** In canonical order; empty means the operator said none. */
   hazards: Hazard[];
   commandMap: CommandMapV1;
+  /**
+   * The adapter's declared telemetry channels, in ascending id order. Omitted
+   * when it declared none, so an envelope without telemetry commits exactly
+   * what it did before this field existed.
+   */
+  telemetryMap?: TelemetryMapV1;
+  /**
+   * The required quantities no declared parameter sets, as the operator
+   * confirmed them device-controlled, in template order. Omitted when there are
+   * none, so an envelope whose map sets every quantity commits exactly what it
+   * did before this field existed.
+   */
+  deviceControlled?: DeviceControlledQuantity[];
   confirmation: { confirmedBy: string; confirmedAt: string };
 }
 
@@ -1242,7 +1654,20 @@ function provenanceProblems(limit: Record<string, unknown>, quantity: string, un
   return problems;
 }
 
-const BODY_KEYS: readonly string[] = deepFreeze(["envelopeVersion", "deviceClass", "device", "limits", "eStop", "maxCommandsPerMinute", "supervision", "hazards", "commandMap", "confirmation"]);
+const BODY_KEYS: readonly string[] = deepFreeze([
+  "envelopeVersion",
+  "deviceClass",
+  "device",
+  "limits",
+  "eStop",
+  "maxCommandsPerMinute",
+  "supervision",
+  "hazards",
+  "commandMap",
+  "telemetryMap",
+  "deviceControlled",
+  "confirmation",
+]);
 const LIMIT_KEYS: readonly string[] = deepFreeze(["quantity", "unit", "param", "min", "max", "proposedBy", "sources"]);
 const DEVICE_KEYS: readonly string[] = deepFreeze(["deviceId", "adapterType", "adapterVersion", "vendor", "model"]);
 
@@ -1278,6 +1703,19 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
     append(problems, "confirmedAt must be an ISO-8601 time");
   }
   if (extraKeys(confirmation, ["confirmedBy", "confirmedAt"]).length > 0) append(problems, "confirmation holds only confirmedBy and confirmedAt");
+  // A malformed map resolves no channel, so every reference into it is refused too.
+  let channels: readonly TelemetryChannelSpec[] = NO_CHANNELS;
+  if (hasOwn(envelope, "telemetryMap")) {
+    const telemetry = telemetryMapProblem(envelope.telemetryMap, template);
+    if (telemetry) append(problems, `telemetryMap: ${telemetry}`);
+    else channels = (envelope.telemetryMap as TelemetryMapV1).channels;
+  }
+  let controlled: readonly string[] = NO_QUANTITIES;
+  if (hasOwn(envelope, "deviceControlled")) {
+    const shape = deviceControlledProblem(envelope.deviceControlled, template, false, channels);
+    if (shape) append(problems, shape);
+    else controlled = controlledQuantities(envelope.deviceControlled as DeviceControlledQuantity[]);
+  }
   if (!ArrayIsArray(envelope.limits) || envelope.limits.length !== template.requires.length) {
     append(problems, `limits must hold exactly one limit per required quantity, in template order (${joinStrings(mapList(template.requires, (r) => r.quantity), ", ")})`);
   } else {
@@ -1318,8 +1756,12 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
   const map = commandMapProblem(envelope.commandMap, template);
   if (map) append(problems, `commandMap: ${map}`);
   else {
-    const gaps = commandMapGaps(envelope.commandMap, template);
-    if (gaps.length > 0) append(problems, `commandMap: no declared parameter sets ${joinStrings(gaps, ", ")}`);
+    const coverage = coverageProblem(commandMapGaps(envelope.commandMap, template), controlled);
+    if (coverage) append(problems, `commandMap: ${coverage}`);
+    if (ArrayIsArray(envelope.limits)) {
+      const enumerated = enumeratedProblems(envelope.commandMap, envelope.limits);
+      for (let i = 0; i < enumerated.length; i++) append(problems, `commandMap: ${enumerated[i]!}`);
+    }
   }
   return problems;
 }
@@ -1407,6 +1849,44 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     append(answered, edit.quantity);
   }
 
+  // The quantities the operator confirms device-controlled: no declared parameter sets them, but the
+  // device can still cause them, so each keeps its limit (astra pack 173) and names the channel of the
+  // adapter's telemetry map that enforces it. A name that does not resolve is refused (astra pack 176).
+  // Each answers its coverage question; its limit question still needs an answer.
+  const controlled = newList<DeviceControlledQuantity>(0);
+  const declared: unknown = decision.deviceControlled;
+  if (declared !== undefined) {
+    const gaps = draft.commandMap === null ? newList<string>(0) : commandMapGaps(draft.commandMap, template);
+    const quantities = mapList(template.requires, (r) => r.quantity);
+    const channels = channelsOf(draft.telemetryMap);
+    if (!ArrayIsArray(declared)) append(reasons, "deviceControlled must be a list of {quantity, enforcement, channel}");
+    else {
+      for (let i = 0; i < declared.length; i++) {
+        const entry: unknown = declared[i];
+        if (!isRecord(entry) || extraKeys(entry, DEVICE_CONTROLLED_KEYS).length > 0) {
+          append(reasons, "each deviceControlled entry is exactly {quantity, enforcement, channel}");
+          continue;
+        }
+        const quantity: unknown = entry.quantity;
+        const enforcement = enforcementProblem(entry, channels);
+        if (typeof quantity !== "string" || !includesValue(quantities, quantity)) {
+          append(reasons, `deviceControlled names ${quoted(quantity)}, which is not a quantity of a ${template.id}`);
+        } else if (quantity === template.deadline) {
+          append(reasons, `deviceControlled names the deadline ${quantity}: the runtime stops a job on its elapsed time`);
+        } else if (includesValue(controlledQuantities(controlled), quantity)) {
+          append(reasons, `deviceControlled names ${quantity} twice`);
+        } else if (!includesValue(gaps, quantity)) {
+          append(reasons, `deviceControlled names ${quantity}, but a declared parameter sets it`);
+        } else if (enforcement) {
+          append(reasons, enforcement);
+        } else {
+          append(controlled, { quantity, enforcement: "telemetry", channel: entry.channel as string });
+          append(answered, `device-controlled:${quantity}`);
+        }
+      }
+    }
+  }
+
   const eStop = decision.eStop ?? draft.eStop;
   if (decision.eStop) append(answered, "e-stop");
   const rate = decision.maxCommandsPerMinute ?? draft.maxCommandsPerMinute;
@@ -1448,6 +1928,10 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     supervision: supervision as Supervision,
     hazards: canonicalHazards(hazards),
     commandMap: draft.commandMap,
+    // Only when the adapter declared one: the digest of every envelope without telemetry is unchanged.
+    ...(draft.telemetryMap !== null ? { telemetryMap: draft.telemetryMap } : {}),
+    // In template order, and only when there is one: the digest of every other envelope is unchanged.
+    ...(controlled.length > 0 ? { deviceControlled: inTemplateOrder(controlled, template) } : {}),
     confirmation: { confirmedBy: decision.confirmedBy, confirmedAt: decision.confirmedAt },
   };
   // What confirm returns is the snapshot it hashed: frozen, and exactly what the digest covers.
@@ -1601,7 +2085,7 @@ export function checkCommittedEnvelope(
 export interface CompiledSafetyEnvelope {
   /** Typed job inputs, each bounded by its confirmed range (CSD `parameters`). */
   parameters: CsdParameter[];
-  /** The #53 evidence tier: the job's signals stayed inside the confirmed limits. */
+  /** The #53 evidence tier: the checks the runtime made against the confirmed limits, each by its mechanism. */
   evidence: Record<string, CsdEvidenceTier>;
   /** Composable typed I/O (CSD `composition`): bounded parameters and the device's output ports. */
   composition: { parameters: ParameterDefinition[]; outputPorts: Record<string, PortType> };
@@ -1625,7 +2109,13 @@ export function compileSafetyEnvelope(
   const { body: envelope, digest: committedDigest } = committedSnapshot(confirmed, registration, verifyRegistration);
   const template = templateOf(envelope.deviceClass)!;
 
-  const parameters = mapList(template.requires, (req, i): CsdParameter => {
+  // One job input per command-settable quantity. A device-controlled quantity keeps its limit, in the
+  // conformance evidence below, but no command sets it, so a job cannot ask for it (astra pack 173).
+  const controlled = controlledQuantities(envelope.deviceControlled ?? NO_DEVICE_CONTROLLED);
+  const inputs = newList<number>(0);
+  for (let i = 0; i < template.requires.length; i++) if (!includesValue(controlled, template.requires[i]!.quantity)) append(inputs, i);
+  const parameters = mapList(inputs, (i): CsdParameter => {
+    const req = template.requires[i]!;
     const limit = envelope.limits[i]!;
     return {
       key: req.param,
@@ -1639,7 +2129,8 @@ export function compileSafetyEnvelope(
       unit: limit.unit,
     };
   });
-  const definitions = mapList(template.requires, (req, i): ParameterDefinition => {
+  const definitions = mapList(inputs, (i): ParameterDefinition => {
+    const req = template.requires[i]!;
     const limit = envelope.limits[i]!;
     return {
       name: req.param,
@@ -1651,16 +2142,59 @@ export function compileSafetyEnvelope(
     };
   });
 
+  // Each limit names how the runtime enforces it, so the evidence never claims a reading it does not
+  // take (astra pack 176): "dispatch" when a declared parameter sets the quantity (the value is checked
+  // before it is sent), "telemetry" for each committed channel that reports it, and "deadline" for the
+  // template's deadline (the runtime's elapsed-time stop). Every limit has at least one: the coverage
+  // rule makes each non-deadline quantity settable or device-controlled through a resolving channel.
+  const settable = settableQuantities(envelope.commandMap);
+  const channels = channelsOf(envelope.telemetryMap);
+  const conformance = mapList(envelope.limits, (l) => {
+    const enforcedBy = newList<EnforcementMechanism>(0);
+    if (includesValue(settable, l.quantity)) append(enforcedBy, { kind: "dispatch" });
+    for (let i = 0; i < channels.length; i++) {
+      const channel = channels[i]!;
+      if (channel.quantity === l.quantity) {
+        append(enforcedBy, { kind: "telemetry", channel: channel.id, semantics: channel.semantics, maxAgeMs: channel.maxAgeMs });
+      }
+    }
+    if (l.quantity === template.deadline) append(enforcedBy, { kind: "deadline" });
+    return { metric: l.quantity, unit: l.unit, min: l.min, max: l.max, enforcedBy };
+  });
+  const required = newList<string>(0);
+  if (settable.length > 0) append(required, "every parameter that sets a quantity was inside its confirmed limit when it was sent");
+  // Sampled checks claim what was sampled, never continuous conformance between samples (astra pack 178).
+  if (channels.length > 0) {
+    append(required, "at each enforcement check, every telemetry channel had a reading no older than its maxAgeMs, inside its quantity's limit");
+  }
+  // The deadline guarantee is a stop the runtime sends, not a device that has halted (astra pack 180).
+  append(
+    required,
+    `every command but the stop was sent within the confirmed maximum of ${template.deadline} from the job's start, and the stop was sent then if the job had not ended`,
+  );
+  // The description claims only what the mechanisms check, never conformance between checks or a halt
+  // nobody observed (astra pack 180).
+  const described = newList<string>(0);
+  append(described, `Checks against the operator-confirmed safety envelope ${committedDigest}: each limit lists the mechanisms that checked it.`);
+  if (settable.length > 0) append(described, "A dispatch check covers each value when it was sent.");
+  if (channels.length > 0) {
+    append(
+      described,
+      "A state reading shows what the device reported at an enforcement check, never what happened between checks; for a duration it is the duration the device was configured to run for, so a run's actual elapsed time is bounded only by the deadline stop.",
+    );
+  }
+  append(described, `Once the confirmed maximum of ${template.deadline} has elapsed, the runtime sends the stop; when the device then halts is not observed here.`);
+
   return deepFreeze({
     parameters,
     evidence: {
       "envelope-conformance": {
-        description: `The job's signals stayed inside the operator-confirmed safety envelope ${committedDigest}.`,
-        required: ["telemetry within the confirmed limits"],
+        description: joinStrings(described, " "),
+        required,
         primitives: [
           {
             id: "telemetry.envelope_conformance",
-            params: { envelope: mapList(envelope.limits, (l) => ({ metric: l.quantity, unit: l.unit, min: l.min, max: l.max })) },
+            params: { envelope: conformance },
           },
         ],
       },
@@ -1685,12 +2219,47 @@ export function supervisionPolicy(
   return template ? supervisionPolicyProblem(supervision, eStop, template) : null;
 }
 
-/** Why a command map is malformed or leaves a bounded quantity unset, for a known class; null when it is complete. */
-export function commandMapIssue(commandMap: unknown, deviceClass: string): string | null {
+/**
+ * Why a command map is malformed for a known class, or disagrees with
+ * `deviceControlled` about which required quantities it sets; null when it is complete.
+ */
+export function commandMapIssue(commandMap: unknown, deviceClass: string, deviceControlled: readonly string[] = NO_QUANTITIES): string | null {
   const template = templateOf(deviceClass);
   if (!template) return `unknown deviceClass ${quoted(deviceClass)}`;
   const problem = commandMapProblem(commandMap, template);
   if (problem) return problem;
-  const gaps = commandMapGaps(commandMap as CommandMapV1, template);
-  return gaps.length > 0 ? `no declared parameter sets ${joinStrings(gaps, ", ")}` : null;
+  return coverageProblem(commandMapGaps(commandMap as CommandMapV1, template), deviceControlled);
+}
+
+/**
+ * Why a runtime envelope's `deviceControlled` list is malformed for a known
+ * class, or does not resolve in `channels` (its telemetry channels), or null.
+ * Unlike a confirmed body's, it is always present, and empty when the map
+ * sets every required quantity.
+ */
+export function deviceControlledIssue(deviceControlled: unknown, deviceClass: string, channels: readonly unknown[]): string | null {
+  const template = templateOf(deviceClass);
+  if (!template) return `unknown deviceClass ${quoted(deviceClass)}`;
+  return deviceControlledProblem(deviceControlled, template, true, channels);
+}
+
+/**
+ * Why a runtime envelope's telemetry channels are malformed for a known class,
+ * or null. Unlike a confirmed body's map, the list is always present, and
+ * empty when the adapter declared none.
+ */
+export function telemetryChannelsIssue(channels: unknown, deviceClass: string): string | null {
+  const template = templateOf(deviceClass);
+  if (!template) return `unknown deviceClass ${quoted(deviceClass)}`;
+  return telemetryChannelsProblem(channels, template);
+}
+
+/** Whether a value set is in its one committed order: numbers ascending, then strings by UTF-16 code unit, each once. */
+export function isCanonicalValueSet(values: readonly unknown[]): boolean {
+  return inCanonicalOrder(values);
+}
+
+/** Why an enumerated physical parameter of `commandMap` allows a value outside its limit in `limits`; empty when none does. */
+export function enumeratedLimitIssues(commandMap: CommandMapV1, limits: readonly unknown[]): string[] {
+  return enumeratedProblems(commandMap, limits);
 }

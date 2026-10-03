@@ -15,15 +15,44 @@
  *     the declared unit, inside that limit's [min, max] inclusive. A numeric
  *     string is refused, never coerced (G4). A value in another unit is
  *     refused; v1 defines no conversions. 0 is a bound like any other, never
- *     "no limit" (G1). A parameter declared `unbounded` sets no physical
- *     quantity (the committed map says why). It passes only a single value in its
- *     `allowed` list, or a non-empty list of distinct items each in its
- *     `allowedItems`, compared by type and value; there is no free-form
- *     parameter.
+ *     "no limit" (G1). A parameter that sets a quantity may also list the
+ *     only values it may carry (`allowed`, an enumerated physical parameter
+ *     such as a temperature preset); its value must then be one of them, and
+ *     each is inside the limit. A parameter declared `unbounded` claims it
+ *     sets no physical quantity (the committed map says why). It passes only a
+ *     single value in its `allowed` list, or a non-empty list of distinct items
+ *     each in its `allowedItems`, compared by type and value; there is no
+ *     free-form parameter. Every such set is listed in its one order: numbers
+ *     ascending, then strings ascending by UTF-16 code unit (astra pack 176).
+ *   - `telemetryChannels` are the readings the adapter takes, in ascending id
+ *     order, each the template quantity it reports, in that quantity's unit.
+ *     Each reports a STATE (`semantics: "state"`): the quantity's current
+ *     value, which must lie inside the limit at every enforcement check. A
+ *     configured duration is a state; an elapsed counter is not, and v1
+ *     cannot bind one (astra pack 178). Every channel is enforced. The runtime
+ *     dispatches a command other than the stop only when each channel's
+ *     latest reading is a finite number, taken no more than `maxAgeMs`
+ *     earlier, inside its quantity's limit. While a job runs, the governor
+ *     applies the same check whenever a reading changes or expires, and a
+ *     failure stops the job. An adapter that cannot serve a channel cannot run
+ *     the job. These are sampled checks: they show a current reading inside
+ *     the limit at each check, never continuous conformance between checks.
+ *   - Every template quantity has a limit. `deviceControlled` names the ones
+ *     no declared parameter sets but the device can still cause (firmware, a
+ *     fixed program, a stored method). Each names the channel of
+ *     `telemetryChannels` that reports it and so enforces its limit. Its one
+ *     enforcement is "telemetry". An independent cutoff joins only as an
+ *     interlock registered with its own attestation (operator item 124).
+ *     Only a template that does not list a quantity makes it physically
+ *     absent (astra packs 173 and 176).
  *   - The adapter is the one the envelope commits: a runtime refuses an
  *     adapter whose release manifest digest is not `adapterVersion`.
  *   - At most `maxCommandsPerMinute` commands in any 60-second window, per
- *     device. The stop command is exempt: a stop is always sent.
+ *     device. The stop command is exempt from the rate, the deadline and the
+ *     telemetry readings. A genuine EMERGENCY stop is a separate path, never
+ *     ordinary dispatch: the governor calls the adapter's pre-wired stop
+ *     directly, and escalates to the hardware stop when the adapter's
+ *     identity cannot be trusted (astra pack 174).
  *   - A job that runs past the confirmed maximum of `deadlineQuantity` is
  *     stopped. This is elapsed time, measured by the runtime: no command
  *     parameter needs to set it, though one may (its value is then checked
@@ -65,10 +94,19 @@ import {
   SUPERVISION_MODES,
   checkCommittedEnvelope,
   commandMapIssue,
+  DEVICE_CONTROL_ENFORCEMENTS,
+  deviceControlledIssue,
+  enumeratedLimitIssues,
   isAdapterManifestDigest,
+  isCanonicalValueSet,
   isSafetyEnvelopeDigest,
+  isTelemetryChannelId,
   isTimeUnit,
+  MAX_TELEMETRY_AGE_MS,
   supervisionPolicy,
+  telemetryChannelsIssue,
+  TELEMETRY_SEMANTICS,
+  type CommandMapV1,
   type ConfirmedSafetyEnvelope,
   type RegistrationVerifier,
   type SafetyEnvelopeRegistration,
@@ -89,6 +127,16 @@ import {
 } from "./primordials.js";
 
 const NonBlank = z.string().refine((s) => trim(s).length > 0, { message: "must not be blank" });
+
+/** No quantities, no device-controlled entries and no channels: what an envelope whose map sets every quantity carries. */
+const NO_QUANTITIES: readonly string[] = deepFreeze(newList<string>(0));
+const NO_DEVICE_CONTROLLED: readonly { quantity: string; enforcement: "telemetry"; channel: string }[] = deepFreeze([]);
+const NO_CHANNELS: readonly { id: string; quantity: string; unit: string; semantics: "state"; maxAgeMs: number }[] = deepFreeze([]);
+
+/** A telemetry channel id: a lowercase token, checked without a RegExp. */
+const ChannelId = z.string().refine((s): boolean => isTelemetryChannelId(s), {
+  message: 'must be a lowercase token: a letter, then letters, digits, ".", "_" or "-", at most 64 long',
+});
 
 /** True when no two values are equal by type and value (compared as their JSON). */
 function allDistinct(values: readonly unknown[]): boolean {
@@ -121,7 +169,8 @@ export const OperationalEStopSchema = z.discriminatedUnion("mechanism", [
 const FiniteSet = z
   .array(z.union([NonBlank, z.number().finite()]))
   .min(1)
-  .refine((values) => allDistinct(values), { message: "an allowed value is listed twice" });
+  .refine((values) => allDistinct(values), { message: "an allowed value is listed twice" })
+  .refine((values) => isCanonicalValueSet(values), { message: "a value set is listed in its one order: numbers ascending, then strings by UTF-16 code unit" });
 
 /**
  * A parameter that sets no physical quantity: why, and the only values it may
@@ -146,6 +195,12 @@ export const OperationalCommandSchema = z
           name: NonBlank,
           quantity: NonBlank.optional(),
           unit: UnitSchema.optional(),
+          /** An enumerated physical parameter's only values, ascending, each inside the limit of `quantity`. */
+          allowed: z
+            .array(z.number().finite())
+            .min(1)
+            .refine((values) => isCanonicalValueSet(values), { message: "allowed values are listed once each, in ascending order" })
+            .optional(),
           unbounded: OperationalUnboundedSchema.optional(),
         })
         .strict(),
@@ -170,6 +225,28 @@ export const OperationalEnvelopeV1Schema = z
       .refine((s): boolean => isAdapterManifestDigest(s), { message: "must be sha256: + 64 lowercase hex (the adapter's manifest digest)" }),
     strict: z.literal(true),
     limits: z.array(OperationalLimitSchema).min(1),
+    /** The readings the adapter takes, in ascending id order; every one is enforced. May be empty. */
+    telemetryChannels: z.array(
+      z
+        .object({
+          id: ChannelId,
+          quantity: NonBlank,
+          unit: UnitSchema,
+          /** A state: the quantity's current value, inside the limit at every check (astra pack 178). */
+          semantics: z.enum(TELEMETRY_SEMANTICS as unknown as ["state"]),
+          maxAgeMs: z.number().int().min(1).max(MAX_TELEMETRY_AGE_MS),
+        })
+        .strict(),
+    ),
+    /**
+     * Template quantities no declared parameter sets but the device can cause, in template order, each
+     * keeping its limit and naming the channel that enforces it (astra packs 173 and 176). May be empty.
+     */
+    deviceControlled: z.array(
+      z
+        .object({ quantity: NonBlank, enforcement: z.enum(DEVICE_CONTROL_ENFORCEMENTS as unknown as ["telemetry"]), channel: ChannelId })
+        .strict(),
+    ),
     commands: z.array(OperationalCommandSchema).min(1),
     /** The limit whose max is a whole job's deadline. */
     deadlineQuantity: NonBlank,
@@ -199,7 +276,15 @@ export const OperationalEnvelopeV1Schema = z
         }
       }
     }
-    // Exactly the template's quantities, in its order and units.
+    // `telemetryChannels`: ascending ids, each a non-deadline template quantity in its unit.
+    const channelsProblem = telemetryChannelsIssue(env.telemetryChannels, env.deviceClass);
+    if (channelsProblem) issue(["telemetryChannels"], channelsProblem);
+    // `deviceControlled`: required quantities no command sets, in template order, never the deadline,
+    // each through a channel that resolves (a malformed channel list resolves none).
+    const controlledProblem = deviceControlledIssue(env.deviceControlled, env.deviceClass, channelsProblem ? NO_CHANNELS : env.telemetryChannels);
+    if (controlledProblem) issue(["deviceControlled"], controlledProblem);
+    const controlled = controlledProblem ? NO_QUANTITIES : mapList(env.deviceControlled, (d) => d.quantity);
+    // Exactly the template's quantities, in its order and units: a device-controlled one keeps its limit.
     if (env.limits.length !== template.requires.length) {
       issue(["limits"], `limits must be exactly ${joinStrings(mapList(template.requires, (r) => r.quantity), ", ")}`);
     }
@@ -219,8 +304,12 @@ export const OperationalEnvelopeV1Schema = z
     }
     const policy = supervisionPolicy(env.supervision, env.eStop, env.deviceClass);
     if (policy) issue(["supervision"], policy);
-    const map = commandMapIssue({ commands: env.commands }, env.deviceClass);
+    const map = commandMapIssue({ commands: env.commands }, env.deviceClass, controlled);
     if (map) issue(["commands"], map);
+    else {
+      const enumerated = enumeratedLimitIssues({ commands: env.commands } as CommandMapV1, env.limits);
+      for (let i = 0; i < enumerated.length; i++) issue(["commands"], enumerated[i]!);
+    }
     const deadlines = filterList(env.limits, (l) => l.quantity === env.deadlineQuantity);
     const deadline = deadlines.length > 0 ? deadlines[0] : undefined;
     if (env.deadlineQuantity !== template.deadline) {
@@ -260,6 +349,14 @@ export function compileOperationalEnvelope(
     adapterVersion: envelope.device.adapterVersion,
     strict: true,
     limits: mapList(envelope.limits, (l) => ({ quantity: l.quantity, unit: l.unit, min: l.min, max: l.max })),
+    telemetryChannels: mapList(envelope.telemetryMap?.channels ?? NO_CHANNELS, (c) => ({
+      id: c.id,
+      quantity: c.quantity,
+      unit: c.unit,
+      semantics: c.semantics,
+      maxAgeMs: c.maxAgeMs,
+    })),
+    deviceControlled: mapList(envelope.deviceControlled ?? NO_DEVICE_CONTROLLED, (d) => ({ quantity: d.quantity, enforcement: d.enforcement, channel: d.channel })),
     commands: mapList(envelope.commandMap.commands, (c) => ({
       name: c.name,
       params: mapList(c.params, (p) =>
@@ -272,7 +369,7 @@ export function compileOperationalEnvelope(
                 ...(p.unbounded.allowedItems !== undefined ? { allowedItems: mapList(p.unbounded.allowedItems, (v) => v) } : {}),
               },
             }
-          : { name: p.name, quantity: p.quantity, unit: p.unit },
+          : { name: p.name, quantity: p.quantity, unit: p.unit, ...(p.allowed !== undefined ? { allowed: mapList(p.allowed, (v) => v) } : {}) },
       ),
     })),
     deadlineQuantity: template.deadline,

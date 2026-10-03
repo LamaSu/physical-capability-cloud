@@ -86,13 +86,8 @@ function register(c: ConfirmedSafetyEnvelope): SafetyEnvelopeRegistration {
   return { ...statement, signature: Buffer.from(sign(null, registrationSigningPreimage(statement), REGISTRY.privateKey)).toString("hex") };
 }
 
-type Stage = "draft" | "confirmed" | "csd" | "runtime" | "refusals";
+type Stage = "draft" | "confirmed" | "csd" | "runtime" | "cannotSetConfirmed" | "cannotSetCsd" | "cannotSetRuntime" | "refusals";
 
-/**
- * Everything the module produces from one input, stage by stage; a stage that
- * throws records the error's name. Serialized only after every patch is
- * restored. The untouched run is the reference.
- */
 /**
  * Digests that are well formed except for their digits, and a draft input that
  * carries one, built before any patch is applied (and before CLEAN): the
@@ -105,6 +100,84 @@ const NOT_HEX_INPUT: SafetyEnvelopeInput = (() => {
   return { ...given, device: { ...given.device, adapterVersion: NOT_HEX_MANIFEST } };
 })();
 
+/**
+ * SIM-PR1 (round 3, astra pack 176): a plate reader whose run command sets
+ * neither its plate temperature nor its read duration, so both are
+ * device-controlled, each enforced through a channel its adapter declares.
+ * Built before any patch is applied.
+ */
+const SIM_PR1_INPUT: SafetyEnvelopeInput = {
+  deviceClass: "lab-plate-reader",
+  device: { deviceId: "sim-pr1", adapterType: "generic-http", adapterVersion: MANIFEST },
+  telemetryMap: {
+    channels: [
+      { id: "config.run_seconds", quantity: "read_duration", unit: "s", semantics: "state" as const, maxAgeMs: 5000 },
+      { id: "status.temperature_c", quantity: "incubation_temperature", unit: "degC", semantics: "state" as const, maxAgeMs: 5000 },
+    ],
+  },
+  commandMap: {
+    commands: [
+      {
+        name: "runPlate",
+        params: [
+          { name: "plateFormat", unbounded: { reason: "the plate format", allowed: ["96-well"] } },
+          { name: "wavelengthNm", unbounded: { reason: "an optical setting", allowed: [405, 450, 600] } },
+        ],
+      },
+      { name: "stop", params: [] },
+    ],
+  },
+  intake: {
+    limits: [
+      // max 40 and max 600: the values the replacements below raise, so a raised limit shows.
+      { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 15, max: 40 },
+      { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 600 },
+      { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 30 },
+    ],
+    eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
+    supervision: "attended",
+    hazards: [],
+    maxCommandsPerMinute: 20,
+  },
+  references: [],
+};
+const SIM_PR1_DECISION = {
+  ...DECISION,
+  deviceControlled: [
+    { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "status.temperature_c" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "config.run_seconds" },
+  ],
+};
+/** Round 3 refusals, built before any patch: a channel the map does not declare, a cutoff, and a value set out of order. */
+const UNRESOLVED_DECISION = {
+  ...DECISION,
+  deviceControlled: [
+    { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "status.temperature_k" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "config.run_seconds" },
+  ],
+};
+const CUTOFF_DECISION = {
+  ...DECISION,
+  deviceControlled: [
+    { quantity: "incubation_temperature", enforcement: "cutoff", channel: "status.temperature_c" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "config.run_seconds" },
+  ],
+} as unknown as typeof SIM_PR1_DECISION;
+const UNORDERED_SET_INPUT: SafetyEnvelopeInput = {
+  ...SIM_PR1_INPUT,
+  commandMap: {
+    commands: [
+      { name: "runPlate", params: [{ name: "wavelengthNm", unbounded: { reason: "an optical setting", allowed: [600, 405] } }] },
+      { name: "stop", params: [] },
+    ],
+  },
+};
+
+/**
+ * Everything the module produces from one input, stage by stage; a stage that
+ * throws records the error's name. Serialized only after every patch is
+ * restored. The untouched run is the reference.
+ */
 function runStages(): Record<Stage, unknown> {
   const out = {} as Record<Stage, unknown>;
   const attempt = (stage: Stage, run: () => unknown) => {
@@ -120,6 +193,12 @@ function runStages(): Record<Stage, unknown> {
   const registration = confirmed ? register(confirmed) : undefined;
   attempt("csd", () => compileSafetyEnvelope(confirmed!, registration!, verifyRegistry));
   attempt("runtime", () => compileOperationalEnvelope(confirmed!, registration!, verifyRegistry));
+  // Addendum 6: the device-controlled path through confirm and both compilers.
+  let cannotSet: ConfirmedSafetyEnvelope | undefined;
+  attempt("cannotSetConfirmed", () => (cannotSet = confirmSafetyEnvelope(SIM_PR1_INPUT, SIM_PR1_DECISION)));
+  const cannotSetRegistration = cannotSet ? register(cannotSet) : undefined;
+  attempt("cannotSetCsd", () => compileSafetyEnvelope(cannotSet!, cannotSetRegistration!, verifyRegistry));
+  attempt("cannotSetRuntime", () => compileOperationalEnvelope(cannotSet!, cannotSetRegistration!, verifyRegistry));
   // Refusals too: a replacement that only shows on bad input (an always-true hasOwnProperty, a trim that
   // never blanks) must not turn a refusal into an acceptance or change its reason.
   const refusals: string[] = [];
@@ -136,6 +215,10 @@ function runStages(): Record<Stage, unknown> {
   refusal(() => confirmSafetyEnvelope(input(), { ...DECISION, edits: [{ quantity: "incubation_temperature", min: 20, max: 50 }] }));
   // Digests that are well formed except for their digits: a charCodeAt that reports every unit as "0" must not pass them (astra pack 167).
   refusal(() => draftSafetyEnvelope(NOT_HEX_INPUT));
+  // Round 3 (astra pack 176): an unresolved channel, a cutoff and an unordered set stay refused.
+  refusal(() => confirmSafetyEnvelope(SIM_PR1_INPUT, UNRESOLVED_DECISION));
+  refusal(() => confirmSafetyEnvelope(SIM_PR1_INPUT, CUTOFF_DECISION));
+  refusal(() => draftSafetyEnvelope(UNORDERED_SET_INPUT));
   refusal(() => registrationSigningPreimage({ deviceId: "pr-1", envelopeDigest: NOT_HEX_ENVELOPE_DIGEST, registeredAt: "2026-10-03T00:05:00Z" }));
   if (confirmed && registration) {
     // structuredClone, not a JSON round trip: the test's own code must not run a replaced intrinsic either.
@@ -156,6 +239,9 @@ const CLEAN = (() => {
     confirmed: JSON.stringify(stages.confirmed),
     csd: JSON.stringify(stages.csd),
     runtime: JSON.stringify(stages.runtime),
+    cannotSetConfirmed: JSON.stringify(stages.cannotSetConfirmed),
+    cannotSetCsd: JSON.stringify(stages.cannotSetCsd),
+    cannotSetRuntime: JSON.stringify(stages.cannotSetRuntime),
     refusals: JSON.stringify(stages.refusals),
   };
 })();
@@ -246,6 +332,15 @@ function withPatch<T>(target: object, key: PropertyKey, replacement: unknown, ru
 }
 
 describe("astra 164 CRITICAL: an intrinsic replaced after load cannot change what R8 checks or emits", () => {
+  it("the untouched reference run confirms and compiles every stage, and refuses every refusal: no comparison below is between two failures", () => {
+    for (const stage of ["draft", "confirmed", "csd", "runtime", "cannotSetConfirmed", "cannotSetCsd", "cannotSetRuntime"] as const) {
+      expect(CLEAN[stage], stage).not.toContain('"threw"');
+    }
+    expect(CLEAN.cannotSetRuntime).toContain('"telemetryChannels"');
+    expect(CLEAN.refusals).not.toContain("ACCEPTED");
+    expect(JSON.parse(CLEAN.refusals)).toHaveLength(9);
+  });
+
   it("astra's recipe: with Array.prototype.map replaced, both compilers still emit the signed max 40", () => {
     const confirmed = confirmSafetyEnvelope(input(), DECISION);
     const registration = register(confirmed);
@@ -279,6 +374,10 @@ describe("astra 164 CRITICAL: an intrinsic replaced after load cannot change wha
       expect(JSON.stringify(produced.confirmed)).toBe(CLEAN.confirmed);
       expect(JSON.stringify(produced.csd)).toBe(CLEAN.csd);
       expect(JSON.stringify(produced.refusals)).toBe(CLEAN.refusals);
+      expect(JSON.stringify(produced.cannotSetConfirmed)).toBe(CLEAN.cannotSetConfirmed);
+      expect(JSON.stringify(produced.cannotSetCsd)).toBe(CLEAN.cannotSetCsd);
+      const cannotSetRuntime = JSON.stringify(produced.cannotSetRuntime);
+      if (cannotSetRuntime !== CLEAN.cannotSetRuntime) expect((produced.cannotSetRuntime as { threw?: string }).threw).toBe("EnvelopeRefused");
       // The runtime compile also asks zod (third-party code, which does call ambient methods) to validate the
       // frozen candidate. Zod may refuse under a replacement: that is fail closed. It can never change the value.
       const runtime = JSON.stringify(produced.runtime);
