@@ -9,7 +9,7 @@
 import type { AssuranceTier, SHA256 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
-import { failureText } from "./failure-text.js";
+import { eventType, failureText } from "./failure-text.js";
 import { openEvidenceSession } from "./evidence-session.js";
 import * as Sentry from "@sentry/node";
 
@@ -44,6 +44,25 @@ export interface JobConfig {
    * gateway's pipelineTelemetry service.
    */
   onPhase?: OnPhaseCallback;
+}
+
+/** An adapter's id, read without throwing: undefined when it cannot be read or is not text. */
+function adapterIdOf(adapter: unknown): string | undefined {
+  try {
+    const id: unknown = (adapter as { id?: unknown }).id;
+    return typeof id === "string" ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One release of a run's cleanup: attempted, and logged if it throws, so the next is attempted too (astra pack 212). */
+function release(jobId: string, what: string, step: () => void): void {
+  try {
+    step();
+  } catch (err) {
+    console.error(`[job-runner] job ${jobId}: ${what} failed: ${failureText(err)}`);
+  }
 }
 
 export interface JobResult {
@@ -101,9 +120,28 @@ export class JobRunner {
     this.evidenceQuiesceTimeoutMs = options?.evidenceQuiesceTimeoutMs ?? 15_000;
   }
 
+  /**
+   * Run one job and record its evidence. It always resolves with a JobResult, never rejects,
+   * whatever a collaborator throws: the caller's config and adapter list included, and the
+   * cleanup's own releases (astra packs 209 and 212).
+   */
   async run(config: JobConfig): Promise<JobResult> {
     const startTime = Date.now();
+    try {
+      return await this.runOnce(config, startTime);
+    } catch (err) {
+      return { success: false, error: failureText(err), durationMs: Date.now() - startTime };
+    }
+  }
+
+  private async runOnce(config: JobConfig, startTime: number): Promise<JobResult> {
     const { jobId, stepId, gcodeHash, assuranceTier, onPhase } = config;
+    // The ids key the step and its lease and name the run in every log line, the cleanup's
+    // included: ids that are not text could throw from any of those, so they are refused
+    // before anything is held (astra pack 212).
+    if (typeof jobId !== "string" || typeof stepId !== "string") {
+      return { success: false, error: "the run's job id and step id must be text", durationMs: Date.now() - startTime };
+    }
 
     // addEvent hashes asynchronously before it stores an event, so each one is
     // recorded on one chain, in the order it was emitted, and the tier check and the
@@ -125,14 +163,26 @@ export class JobRunner {
     // Fail closed: without its quiesceEvidence() an adapter cannot say when a job's
     // evidence is complete, and nothing else binds an event to the job (round 3b).
     const adapters = [this.machine, ...this.sensors, ...(this.camera ? [this.camera] : [])];
-    for (const adapter of adapters) {
-      if (typeof (adapter as { quiesceEvidence?: unknown }).quiesceEvidence !== "function") {
-        return {
-          success: false,
-          error: `adapter ${adapter.id} has no quiesceEvidence(), so its evidence cannot be bound to a job`,
-          durationMs: Date.now() - startTime,
-        };
+    // An adapter that throws while it is checked, or while the session opens (its onEvidence),
+    // fails the run with a result, never a rejection. Nothing is held yet: the session takes
+    // its claim only once every adapter is tapped (astra pack 209).
+    const setupFailed = (what: string, err: unknown): JobResult => ({
+      success: false,
+      error: `${what}: ${failureText(err)}`,
+      durationMs: Date.now() - startTime,
+    });
+    try {
+      for (const adapter of adapters) {
+        if (typeof (adapter as { quiesceEvidence?: unknown }).quiesceEvidence !== "function") {
+          return {
+            success: false,
+            error: `adapter ${adapter.id} has no quiesceEvidence(), so its evidence cannot be bound to a job`,
+            durationMs: Date.now() - startTime,
+          };
+        }
       }
+    } catch (err) {
+      return setupFailed("the run's adapters could not be checked", err);
     }
 
     const stepKey = `${jobId}:${stepId}`; // the emitter's own key for the step
@@ -153,21 +203,26 @@ export class JobRunner {
     // This run's evidence window: events reach the chain only while it is open.
     // A listener per run could not be removed, so it went on recording later and
     // overlapping jobs' events into this run's step (astra pack 168).
-    const opened = openEvidenceSession(
-      adapters,
-      { jobId, stepId },
-      (event) => {
-        recorded = recorded.then(async () => {
-          if (sealed) return;
-          try {
-            await this.evidenceEmitter.addEvent(jobId, stepId, event);
-          } catch (err) {
-            unrecorded.first ??= { type: event.type, error: failureText(err) };
-            console.error(err);
-          }
-        });
-      },
-    );
+    let opened: ReturnType<typeof openEvidenceSession>;
+    try {
+      opened = openEvidenceSession(
+        adapters,
+        { jobId, stepId },
+        (event) => {
+          recorded = recorded.then(async () => {
+            if (sealed) return;
+            try {
+              await this.evidenceEmitter.addEvent(jobId, stepId, event);
+            } catch (err) {
+              unrecorded.first ??= { type: eventType(event), error: failureText(err) };
+              console.error(err);
+            }
+          });
+        },
+      );
+    } catch (err) {
+      return setupFailed("the run's evidence session could not open", err);
+    }
     if (!opened.ok) {
       const { reason, adapterId, jobId: holder } = opened.busy;
       return {
@@ -180,7 +235,17 @@ export class JobRunner {
     const session = opened.session;
     const lease = `${jobId}#${++runs}`;
     leases.set(stepKey, lease);
-    this.evidenceEmitter.registerStep(jobId, stepId, assuranceTier);
+    try {
+      this.evidenceEmitter.registerStep(jobId, stepId, assuranceTier);
+    } catch (err) {
+      // Nothing was sent to a device: release what this run took, and fail with a result. Each
+      // release is attempted even if another throws, and the lease is always released (astra
+      // pack 212).
+      release(jobId, "closing the evidence session", () => session.close());
+      release(jobId, "detaching the step", () => this.evidenceEmitter.cleanup(jobId, stepId));
+      if (leases.get(stepKey) === lease) leases.delete(stepKey);
+      return setupFailed("the run's step could not be registered", err);
+    }
 
     // Wait for the chain, but not forever: an addEvent may never settle.
     // Resolves false when the timeout comes first.
@@ -373,12 +438,14 @@ export class JobRunner {
       if (!quiesceAsked) {
         quiesceAsked = true;
         for (const sensor of recording) {
-          // A stop that throws, or rejects, is logged: it cannot abort this cleanup.
-          const failed = (err: unknown) => console.error(`[job-runner] stopping sensor ${sensor.id} after a failed run:`, err);
+          // A stop that throws, or rejects, is logged: it cannot abort this cleanup. The sensor's
+          // id is read without throwing, so the log cannot throw either.
+          const logFailedStop = (err: unknown) =>
+            console.error(`[job-runner] stopping sensor ${adapterIdOf(sensor) ?? "(unreadable id)"} after a failed run:`, err);
           try {
-            Promise.resolve(sensor.stopRecording()).catch(failed);
+            Promise.resolve(sensor.stopRecording()).catch(logFailedStop);
           } catch (err) {
-            failed(err);
+            logFailedStop(err);
           }
         }
         try {
@@ -393,14 +460,19 @@ export class JobRunner {
       // An addEvent still running at that bound cannot be recalled: it holds the step
       // record it looked up before it awaited the hash, so it appends to that detached
       // record, which nothing reads, after run() has returned.
-      session.close();
-      if (!succeeded) {
-        sealed = true;
-        if (!settleTimedOut) await settle();
-        this.evidenceEmitter.cleanup(jobId, stepId);
+      // Each release is attempted even if another throws, and the lease is always released
+      // (astra pack 212). settle() cannot reject: the chain's handler catches every failure.
+      try {
+        release(jobId, "closing the evidence session", () => session.close());
+        if (!succeeded) {
+          sealed = true;
+          if (!settleTimedOut) await settle();
+          release(jobId, "detaching the step", () => this.evidenceEmitter.cleanup(jobId, stepId));
+        }
+      } finally {
+        // Released last, so a later run of this step registers a fresh record.
+        if (leases.get(stepKey) === lease) leases.delete(stepKey);
       }
-      // Released last, so a later run of this step registers a fresh record.
-      if (leases.get(stepKey) === lease) leases.delete(stepKey);
     }
   }
 
