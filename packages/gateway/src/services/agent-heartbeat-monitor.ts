@@ -18,6 +18,7 @@ import type { AnomalyDetectedIntent, SystemAlertIntent } from "@pcc/a2a";
 import { auditService } from "./audit-service.js";
 import { getStore } from "../db.js";
 import { sql } from "@pcc/store";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ── Exported constants ────────────────────────────────────────────────────────
 
@@ -142,7 +143,10 @@ export class AgentHeartbeatMonitor {
       status: "healthy",
       registeredAt: now,
     });
-    console.log(`[heartbeat-monitor] Registered agent: ${card.id} (${card.name})`);
+    // N107b codemod: registerAgent is public (today called only at boot with fixed
+    // internal agent cards, agent-bridge.ts), but a future request-reachable caller
+    // must not leak id/name in the clear, so both are hashed defensively.
+    console.log(lit("[heartbeat-monitor] Registered agent"), declare.id(card.id), declare.id(card.name));
   }
 
   /**
@@ -162,7 +166,9 @@ export class AgentHeartbeatMonitor {
     // Allow recovery from suspicious → healthy
     if (record.status === "suspicious") {
       record.status = "healthy";
-      console.log(`[heartbeat-monitor] Agent ${agentId} recovered (suspicious → healthy)`);
+      // N107b codemod: recordHeartbeat runs synchronously inside POST /api/agents/heartbeat
+      // (routes/agent-heartbeat.ts) — a request path — with agentId straight from the body.
+      console.log(lit("[heartbeat-monitor] Agent recovered (suspicious → healthy)"), declare.id(agentId));
     }
 
     return true;
@@ -173,7 +179,8 @@ export class AgentHeartbeatMonitor {
    */
   unregisterAgent(agentId: string): void {
     this.records.delete(agentId);
-    console.log(`[heartbeat-monitor] Unregistered agent: ${agentId}`);
+    // N107b codemod: no current caller found, but unregisterAgent is public — hash defensively.
+    console.log(lit("[heartbeat-monitor] Unregistered agent"), declare.id(agentId));
   }
 
   /**
