@@ -165,6 +165,18 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
     expect(res.statusCode).toBe(400);
   });
 
+  it("reproduction (r1 of #513, M3): an explicit capabilityType null is refused as 400, and nothing is stored", async () => {
+    const before = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` })).json().approvals.length;
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/operator/approvals",
+      payload: { kernelId: KERNEL, agentId: "agent-m3-captype-null", capabilityType: null },
+    });
+    expect(res.statusCode).toBe(400);
+    const after = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` })).json().approvals.length;
+    expect(after).toBe(before);
+  });
+
   it("reproduction: a rejected capabilityType must not be stored", async () => {
     const before = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` })).json().approvals.length;
     const create = await app.inject({

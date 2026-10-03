@@ -262,7 +262,9 @@ export async function operatorRoutes(app: FastifyInstance) {
     }
     // The body above is only cast, not validated: a wrong-shaped value would otherwise be
     // persisted unchanged even though the public type requires a string/plain-object.
-    if (capabilityType !== undefined && capabilityType !== null && (typeof capabilityType !== "string" || !capabilityType)) {
+    // An explicit null is not a capability type either (cross-family review r1 of #513, M3): only an
+    // absent field means "unspecified".
+    if (capabilityType !== undefined && (typeof capabilityType !== "string" || !capabilityType)) {
       return reply.status(400).send({ error: "invalid_body", message: "capabilityType must be a non-empty string." });
     }
     if (parameters !== undefined && (parameters === null || typeof parameters !== "object" || Array.isArray(parameters))) {
