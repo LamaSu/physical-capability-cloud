@@ -418,6 +418,8 @@ async function buildCases(): Promise<void> {
   RECIPE.asyncPrimitiveFails = asyncPrimitiveFails;
   add("admit: async legs that answer true", await input(p, [pilot], { verifyBundleSignature: async (b) => verifySignature(b), verifyPrimitiveInstance: async () => true }));
   add("reject: a leg answering with a thenable", await input(p, [pilot], { verifyBundleSignature: (() => ({ then: (f: (v: unknown) => void) => f(true) })) as unknown as () => boolean }));
+  add("reject: a leg answering 1, truthy but not true", await input(p, [pilot], { verifyPrimitiveInstance: (() => 1) as unknown as () => boolean }));
+  add("reject: an async leg answering \"true\", truthy but not true", await input(p, [pilot], { verifyPrimitiveInstance: (async () => "true") as unknown as () => Promise<boolean> }));
   add("reject: evidence from another job", await input(p, [await toBundle(PILOT.map((d) => ({ ...d, jobId: "job-other" })), p)]));
   add("reject: evidence from another kernel", await input(p, [await toBundle(PILOT.map((d) => ({ ...d, kernelId: "kernel-other" })), p)]));
   const altered = await toBundle(PILOT, p);
@@ -568,6 +570,10 @@ async function buildCases(): Promise<void> {
   const holdPilot = await toBundle(PILOT, holdL);
   add("hold: a bundle left out of the pin", await input(holdL, [holdPilot], { pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, [holdPilot.bundleHash, (await toBundle(FAILURE, holdL)).bundleHash]) }));
   add("hold: no bundles", await input(holdL, []));
+  // A malformed pin is invalid authority: it rejects even under onMissingData "hold" (a widened pin check would hold).
+  const notAPinHold = await input(holdL, [holdPilot], { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
+  add("reject: a malformed pin under onMissingData hold", notAPinHold);
+  RECIPE.notAPinHold = notAPinHold;
   CASES = cases;
   const BINDING_REJECTS = [
     "reject: evidence from another job",
@@ -923,6 +929,7 @@ const RECIPES: Scenario[] = [
     items: async () => [
       await admissionRow("a sampleId that is not a digest", RECIPE.frame),
       await admissionRow("a pin that is not a digest", RECIPE.notAPin),
+      await admissionRow("a malformed pin under onMissingData hold", RECIPE.notAPinHold),
     ],
   },
   {
