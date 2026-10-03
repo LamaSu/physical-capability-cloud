@@ -33,32 +33,65 @@
  * Every member of EVIDENCE_EVENT_TYPES is ruled on below, including the ones
  * that prove no outcome level, so a new event type cannot join the vocabulary
  * without someone deciding its level (a test enforces the partition).
+ *
+ * Nothing that runs after this module loads can change a level, a
+ * contradiction or a verdict it returns (#363 round 9, steward #5186; the
+ * realm-mutation class of astra packs 162-171). It calls only intrinsics
+ * captured at load (util/primordials.ts), plain loops and operators: never a
+ * method looked up on a prototype or a global at the time of the call, never
+ * the iterator protocol, never `in` or a RegExp. Its exported lists are frozen
+ * where they are defined, and its sets are null-prototype records built from
+ * them at load. It reads an event's own data properties only, so a value
+ * written on Object.prototype (a `passed`, a `deviceId`, a `simulated`) is
+ * never taken for the event's, and an accessor is never run. `isFabricated`,
+ * the one canonical predicate, is asked about the event's own data: a null-
+ * prototype view of its source and payload. A Set passed in or returned
+ * (`executingDeviceIds`, `evidenceLevelOf`) is read and built with
+ * Set.prototype's methods as they were at load, so it must be a native Set.
+ * The boundary: a realm whose intrinsics were replaced before @pcc/spec
+ * loaded is out of scope, since no in-process check can tell.
  */
 
 import type { EvidenceEvent, EvidenceEventType } from "../types/evidence.js";
 import { isFabricated } from "./is-fabricated.js";
+import {
+  append,
+  hasOwn,
+  inSet,
+  newList,
+  ObjectCreate,
+  ObjectFreeze,
+  ObjectGetOwnPropertyDescriptor,
+  ownDataValue,
+  ReflectOwnKeys,
+  SetCtor,
+  SetPrototypeAdd,
+  SetPrototypeHas,
+  SetPrototypeSize,
+  stringSet,
+} from "../util/primordials.js";
 
 /** Frozen: profile validation reads it (as ACCEPTANCE_LEVELS), so nothing may add a level after load (astra pack 170). */
-export const EVIDENCE_LEVELS = Object.freeze(["submitted", "device_reported", "inspected_output"] as const);
+export const EVIDENCE_LEVELS = ObjectFreeze(["submitted", "device_reported", "inspected_output"] as const);
 
 export type EvidenceLevel = (typeof EVIDENCE_LEVELS)[number];
 
 /** The device took the work; its outcome is not observed. */
-export const SUBMITTED_EVENT_TYPES = [
+export const SUBMITTED_EVENT_TYPES = ObjectFreeze([
   "gcode_received",
   "gcode_loaded",
   "method_loaded",
   "execution_progress",
   "courier_pickup_confirmed",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
 /** The device that did the work reports it finished. */
-export const DEVICE_REPORTED_EVENT_TYPES = [
+export const DEVICE_REPORTED_EVENT_TYPES = ObjectFreeze([
   "execution_completed",
   "digital_task_completed",
   "batch_session_completed",
   "courier_delivery_confirmed",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
 /**
  * An observation or measurement of the output. It is inspected_output only
@@ -67,12 +100,12 @@ export const DEVICE_REPORTED_EVENT_TYPES = [
  * and so is an observation whose independence cannot be shown (no executing
  * device in the events): both are device_reported.
  */
-export const INSPECTION_EVENT_TYPES = [
+export const INSPECTION_EVENT_TYPES = ObjectFreeze([
   "cv_inspection_result",
   "photo_comparison_result",
   "instrument_result",
   "batch_sample_result",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
 /**
  * Event types that prove no outcome level on their own: input commitments,
@@ -85,7 +118,7 @@ export const INSPECTION_EVENT_TYPES = [
  * The custody, capture-protocol and touchstone events are here until a CSD
  * needs one of them as outcome evidence and composition rules on its level.
  */
-export const NO_OUTCOME_LEVEL_EVENT_TYPES = [
+export const NO_OUTCOME_LEVEL_EVENT_TYPES = ObjectFreeze([
   "gcode_hash_verified",
   "execution_started",
   "execution_failed",
@@ -129,13 +162,13 @@ export const NO_OUTCOME_LEVEL_EVENT_TYPES = [
   "capture_liveness_result",
   "capture_multi_sensor_fusion",
   "capture_anchor_committed",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
 /**
  * Event types whose source device is doing the job. An inspection from one of
  * these devices is that device reporting on its own output.
  */
-export const EXECUTION_EVENT_TYPES = [
+export const EXECUTION_EVENT_TYPES = ObjectFreeze([
   "gcode_received",
   "gcode_hash_verified",
   "gcode_loaded",
@@ -149,16 +182,18 @@ export const EXECUTION_EVENT_TYPES = [
   "batch_session_completed",
   "digital_task_started",
   "digital_task_completed",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
-const SUBMITTED = new Set<string>(SUBMITTED_EVENT_TYPES);
-const DEVICE_REPORTED = new Set<string>(DEVICE_REPORTED_EVENT_TYPES);
-const INSPECTION = new Set<string>(INSPECTION_EVENT_TYPES);
-const EXECUTION = new Set<string>(EXECUTION_EVENT_TYPES);
+/** The lists as null-prototype records, built when this module loads: membership consults no prototype and no Set method. */
+const SUBMITTED = stringSet(SUBMITTED_EVENT_TYPES);
+const DEVICE_REPORTED = stringSet(DEVICE_REPORTED_EVENT_TYPES);
+const INSPECTION = stringSet(INSPECTION_EVENT_TYPES);
+const EXECUTION = stringSet(EXECUTION_EVENT_TYPES);
 
-/** Position in EVIDENCE_LEVELS; higher is stronger. */
+/** Position in EVIDENCE_LEVELS; higher is stronger. -1 for anything else, as `indexOf` answered. */
 export function evidenceLevelRank(level: EvidenceLevel): number {
-  return EVIDENCE_LEVELS.indexOf(level);
+  for (let i = 0; i < EVIDENCE_LEVELS.length; i++) if (EVIDENCE_LEVELS[i] === level) return i;
+  return -1;
 }
 
 /** True when `reached` is at least as strong as `required`. Null meets nothing. */
@@ -166,39 +201,69 @@ export function meetsEvidenceLevel(reached: EvidenceLevel | null, required: Evid
   return reached !== null && evidenceLevelRank(reached) >= evidenceLevelRank(required);
 }
 
-function deviceIdOf(event: EvidenceEvent): string | null {
-  const source: unknown = event.source;
+/** A null-prototype copy of `o`'s own string-keyed data properties, one level deep; undefined when `o` is not an object. */
+function ownView(o: unknown): Record<string, unknown> | undefined {
+  if (typeof o !== "object" || o === null) return undefined;
+  const view = ObjectCreate(null) as Record<string, unknown>;
+  const keys = ReflectOwnKeys(o);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i]!;
+    if (typeof key !== "string") continue;
+    const descriptor = ObjectGetOwnPropertyDescriptor(o, key);
+    if (descriptor !== undefined && hasOwn(descriptor, "value")) view[key] = descriptor.value;
+  }
+  return view;
+}
+
+/**
+ * `isFabricated` (is-fabricated.ts, the one canonical predicate), asked about
+ * the event's own data only: a view of its source and payload with no
+ * prototype, so Object.prototype.simulated or .mock, written after load,
+ * neither fabricates a genuine event nor hides a contradiction.
+ */
+function fabricated(event: unknown): boolean {
+  const view = ObjectCreate(null) as Record<string, unknown>;
+  view.source = ownView(ownDataValue(event, "source"));
+  view.payload = ownView(ownDataValue(event, "payload"));
+  return isFabricated(view as unknown as EvidenceEvent);
+}
+
+function deviceIdOf(event: unknown): string | null {
+  const source = ownDataValue(event, "source");
   if (typeof source !== "object" || source === null) return null;
-  const id = (source as { deviceId?: unknown }).deviceId;
+  const id = ownDataValue(source, "deviceId");
   return typeof id === "string" && id.length > 0 ? id : null;
 }
 
-/** The devices that executed the job, read from a bundle's own events. */
+/** The devices that executed the job, read from a bundle's own events. A native Set, built with Set.prototype.add as it was at load. */
 export function executingDeviceIds(events: readonly EvidenceEvent[]): ReadonlySet<string> {
-  const ids = new Set<string>();
-  for (const event of events) {
-    if (!EXECUTION.has(event.type) || isFabricated(event)) continue;
+  const ids = new SetCtor<string>();
+  for (let i = 0; i < events.length; i++) {
+    const event = ownDataValue(events, i);
+    if (!inSet(EXECUTION, ownDataValue(event, "type")) || fabricated(event)) continue;
     const id = deviceIdOf(event);
-    if (id !== null) ids.add(id);
+    if (id !== null) SetPrototypeAdd(ids, id);
   }
   return ids;
 }
 
 /**
  * The level one event proves, or null. `executing` is the set of devices that
- * executed the job (`executingDeviceIds` of the same bundle).
+ * executed the job (`executingDeviceIds` of the same bundle), a native Set:
+ * it is read with Set.prototype's methods as they were at load.
  */
 export function evidenceLevelOf(
   event: EvidenceEvent,
   executing: ReadonlySet<string>,
 ): EvidenceLevel | null {
-  if (isFabricated(event)) return null;
+  if (fabricated(event)) return null;
   const deviceId = deviceIdOf(event);
   if (deviceId === null) return null;
-  if (SUBMITTED.has(event.type)) return "submitted";
-  if (DEVICE_REPORTED.has(event.type)) return "device_reported";
-  if (INSPECTION.has(event.type)) {
-    return executing.size > 0 && !executing.has(deviceId) ? "inspected_output" : "device_reported";
+  const type = ownDataValue(event, "type");
+  if (inSet(SUBMITTED, type)) return "submitted";
+  if (inSet(DEVICE_REPORTED, type)) return "device_reported";
+  if (inSet(INSPECTION, type)) {
+    return SetPrototypeSize(executing) > 0 && !SetPrototypeHas(executing, deviceId) ? "inspected_output" : "device_reported";
   }
   return null;
 }
@@ -211,8 +276,8 @@ export function evidenceLevelOf(
 export function evidenceLevelOfBundle(events: readonly EvidenceEvent[]): EvidenceLevel | null {
   const executing = executingDeviceIds(events);
   let best: EvidenceLevel | null = null;
-  for (const event of events) {
-    const level = evidenceLevelOf(event, executing);
+  for (let i = 0; i < events.length; i++) {
+    const level = evidenceLevelOf(ownDataValue(events, i) as EvidenceEvent, executing);
     if (level !== null && (best === null || evidenceLevelRank(level) > evidenceLevelRank(best))) {
       best = level;
     }
@@ -229,8 +294,8 @@ export type ContradictionKind = "completion-and-failure" | "completion-and-faile
  * claims no verdict (and a pass/fail on values belongs to a profile tolerance).
  */
 export function inspectionFailed(event: EvidenceEvent): boolean {
-  if (!INSPECTION.has(event.type)) return false;
-  const passed = (event.payload as Record<string, unknown> | undefined)?.passed;
+  if (!inSet(INSPECTION, ownDataValue(event, "type"))) return false;
+  const passed = ownDataValue(ownDataValue(event, "payload"), "passed");
   return passed !== undefined && passed !== true;
 }
 
@@ -246,11 +311,20 @@ export function inspectionFailed(event: EvidenceEvent): boolean {
  * derives here (J4), and profile admission reads the same predicate.
  */
 export function deriveContradictions(events: readonly EvidenceEvent[]): ContradictionKind[] {
-  const genuine = events.filter((e) => !isFabricated(e));
-  const completed = genuine.some((e) => DEVICE_REPORTED.has(e.type));
-  if (!completed) return [];
-  const kinds: ContradictionKind[] = [];
-  if (genuine.some((e) => e.type === "execution_failed")) kinds.push("completion-and-failure");
-  if (genuine.some(inspectionFailed)) kinds.push("completion-and-failed-inspection");
+  let completed = false;
+  let failed = false;
+  let failedInspection = false;
+  for (let i = 0; i < events.length; i++) {
+    const event = ownDataValue(events, i);
+    if (fabricated(event)) continue;
+    const type = ownDataValue(event, "type");
+    if (inSet(DEVICE_REPORTED, type)) completed = true;
+    if (type === "execution_failed") failed = true;
+    if (inspectionFailed(event as EvidenceEvent)) failedInspection = true;
+  }
+  const kinds = newList<ContradictionKind>(0);
+  if (!completed) return kinds;
+  if (failed) append(kinds, "completion-and-failure");
+  if (failedInspection) append(kinds, "completion-and-failed-inspection");
   return kinds;
 }
