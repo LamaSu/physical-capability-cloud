@@ -65,7 +65,7 @@ class Commands:
             )
 
         try:
-            handle = await self.loader.load(plr_backend, device_id, backend_config)
+            handle, created = await self.loader.load_for_init(plr_backend, device_id, backend_config)
         except DeviceBusy as e:
             raise RpcException(RPC_ERROR_CODES["DEVICE_BUSY"], str(e), {"deviceId": device_id}) from e
         except ValueError as e:
@@ -79,22 +79,34 @@ class Commands:
 
         # PLR backends typically expose .setup() as a coroutine. The stub
         # backend follows the same shape. Skip if already done.
+        # R39 r4: setup runs under the device's lease. A handle this call
+        # created already holds it; otherwise take it, or refuse when a run,
+        # another setup or a shutdown holds it.
         if not handle.setup_done:
-            setup_fn = getattr(handle.machine, "setup", None)
-            if setup_fn:
-                try:
-                    meta = setup_fn()
-                    if asyncio.iscoroutine(meta):
-                        meta = await meta
-                    if isinstance(meta, dict):
-                        handle.metadata.update(meta)
-                except Exception as e:  # noqa: BLE001
-                    raise RpcException(
-                        RPC_ERROR_CODES["HARDWARE_UNREACHABLE"],
-                        f"backend setup failed: {e}",
-                        {"plrException": type(e).__name__},
-                    ) from e
-            handle.setup_done = True
+            if not created and not handle.begin_setup():
+                raise RpcException(
+                    RPC_ERROR_CODES["DEVICE_BUSY"],
+                    f"deviceId {device_id} is busy",
+                    {"deviceId": device_id},
+                )
+            try:
+                setup_fn = getattr(handle.machine, "setup", None)
+                if setup_fn:
+                    try:
+                        meta = setup_fn()
+                        if asyncio.iscoroutine(meta):
+                            meta = await meta
+                        if isinstance(meta, dict):
+                            handle.metadata.update(meta)
+                    except Exception as e:  # noqa: BLE001
+                        raise RpcException(
+                            RPC_ERROR_CODES["HARDWARE_UNREACHABLE"],
+                            f"backend setup failed: {e}",
+                            {"plrException": type(e).__name__},
+                        ) from e
+                handle.setup_done = True
+            finally:
+                handle.end_setup()
 
         # Optional deck snapshot for Tier-0 evidence
         deck_snapshot = _try_deck_snapshot(handle.machine)
@@ -126,8 +138,19 @@ class Commands:
                 {"deviceId": device_id, "jobId": job_id, "busyJobId": handle.busy_job_id},
             )
         try:
-            if not self.evidence.is_recording(device_id):
-                # Auto-start recording window if the TS adapter didn't pre-arm it.
+            if not handle.setup_done:
+                raise RpcException(
+                    RPC_ERROR_CODES["NON_RETRYABLE"],
+                    f"deviceId {device_id} has not finished setup; call backend.init first",
+                    {"deviceId": device_id, "jobId": job_id},
+                )
+            window = self.evidence.get_window(device_id)
+            if window is None or window.job_id != job_id:
+                # Auto-start this job's window if the TS adapter didn't pre-arm it.
+                # R39 r4: a window left for ANOTHER job is replaced, never reused,
+                # so this run's evidence is never labelled with another job id.
+                if window is not None:
+                    log.warning("replacing job %s's recording window on %s for job %s", window.job_id, device_id, job_id)
                 self.evidence.start_recording(device_id, job_id)
 
             started_at = time.monotonic()

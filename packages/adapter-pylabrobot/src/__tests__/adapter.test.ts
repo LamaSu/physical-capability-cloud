@@ -249,6 +249,43 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     expect(unsaid.mock).toBe(true);
   });
 
+  it("a second start while a run is in flight is refused at once and leaves the first run's evidence alone (R39 r4)", async () => {
+    const { adapter, transport, sidecar } = makeAdapterWithTransport();
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+
+    const first = adapter.execute({ type: "start", payload: { jobId: "j-first" } });
+    await tick();
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox" });
+    await tick();
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true });
+    await tick();
+    const firstRun = transport.lastSent() as { id: string; method: string };
+    expect(firstRun.method).toBe("backend.run");
+
+    // A second start arrives while j-first's backend.run is in flight.
+    const sentBefore = transport.sent.length;
+    const second = adapter.execute({ type: "start", payload: { jobId: "j-second" } });
+    const refused = await Promise.race([second, new Promise((r) => setTimeout(() => r("still waiting"), 200))]);
+    expect(refused).not.toBe("still waiting");
+    expect((refused as { success: boolean }).success).toBe(false);
+    expect(transport.sent.length).toBe(sentBefore); // it sent nothing to the sidecar
+
+    // j-first's evidence still lands in j-first's recording window.
+    transport.notify("evidence", {
+      type: "aspirate", deviceId: "dev-ot2-test", jobId: "j-first",
+      timestamp: new Date().toISOString(), payload: { well: "A1", volume_uL: 50 },
+    });
+    transport.respondSuccess(firstRun.id, { ok: true, jobId: "j-first", opCount: 1, durationMs: 10 });
+    await tick();
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true });
+    const done = await first;
+    expect(done.success).toBe(true);
+    const inWindow = events.filter((e) => e.type === "instrument_result" && !(e.payload as Record<string, unknown>).outsideRecordingWindow);
+    expect(inWindow.length).toBe(1);
+  });
+
   it("backend.run failure surfaces as execute() failure + execution_failed event", async () => {
     const { adapter, transport, sidecar } = makeAdapterWithTransport();
     await sidecar.start();

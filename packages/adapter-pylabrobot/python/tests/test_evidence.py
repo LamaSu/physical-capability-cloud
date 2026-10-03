@@ -167,3 +167,24 @@ async def test_drain_surfaces_a_write_that_failed_before_drain_was_called():
     with pytest.raises(RuntimeError, match="stdout pipe broken"):
         await handler.drain("dev-1")
     await handler.drain("dev-1")  # reported once, then consumed
+
+
+@pytest.mark.asyncio
+async def test_drain_waits_for_a_write_queued_from_another_thread():
+    # R39 r4 (HIGH5): a write a worker thread queued with call_soon_threadsafe is drained too,
+    # even though its task does not exist yet when drain() starts.
+    import threading
+
+    written = []
+
+    async def writer(method, params):
+        written.append(params)
+
+    loop = asyncio.get_running_loop()
+    handler = EvidenceHandler(writer=writer, loop=loop)
+    handler.start_recording("dev-1", "job-1")
+    worker = threading.Thread(target=lambda: handler.emit_event("dev-1", "log_line", {"line": "x"}))
+    worker.start()
+    worker.join()  # the event loop is blocked here: the queued callback has not run
+    await handler.drain("dev-1")
+    assert len(written) == 1, written

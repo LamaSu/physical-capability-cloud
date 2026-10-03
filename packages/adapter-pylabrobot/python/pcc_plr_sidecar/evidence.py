@@ -8,6 +8,7 @@ job to attribute them to).
 
 from __future__ import annotations
 import asyncio
+import threading
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -50,6 +51,10 @@ class EvidenceHandler(logging.Handler):
         # rendezvous backend.run uses before it reports success -- completion
         # must never outrun (or silently drop) the evidence it claims.
         self._pending: dict[str, list[asyncio.Task]] = {}
+        # R39 r4: writes another thread queued with call_soon_threadsafe whose
+        # task does not exist yet, per device. drain() waits for them too.
+        self._queued: dict[str, int] = {}
+        self._queued_lock = threading.Lock()
         self.setFormatter(logging.Formatter("%(message)s"))
 
     # ── recording window lifecycle ─────────────────────────────────────────
@@ -64,8 +69,11 @@ class EvidenceHandler(logging.Handler):
         return window
 
     def stop_recording(self, device_id: str, job_id: str) -> Optional[RecordingWindow]:
-        window = self._windows.pop(device_id, None)
-        return window
+        """Close ``job_id``'s window. Another job's window is left open (R39 r4)."""
+        window = self._windows.get(device_id)
+        if window is None or window.job_id != job_id:
+            return None
+        return self._windows.pop(device_id)
 
     def is_recording(self, device_id: str) -> bool:
         return device_id in self._windows
@@ -181,11 +189,26 @@ class EvidenceHandler(logging.Handler):
         if running_loop is self._loop:
             self._create_and_track(method, params, device_id)
         else:
+            # Count it now, in the calling thread, so a drain() that starts
+            # before the loop runs the callback still waits for it (R39 r4).
+            if device_id is not None:
+                with self._queued_lock:
+                    self._queued[device_id] = self._queued.get(device_id, 0) + 1
             try:
-                self._loop.call_soon_threadsafe(self._create_and_track, method, params, device_id)
+                self._loop.call_soon_threadsafe(self._create_queued, method, params, device_id)
             except RuntimeError:
                 # Loop is closed — drop silently.
-                pass
+                if device_id is not None:
+                    with self._queued_lock:
+                        self._queued[device_id] -= 1
+
+    def _create_queued(
+        self, method: str, params: dict[str, Any], device_id: Optional[str],
+    ) -> None:
+        if device_id is not None:
+            with self._queued_lock:
+                self._queued[device_id] -= 1
+        self._create_and_track(method, params, device_id)
 
     def _create_and_track(
         self, method: str, params: dict[str, Any], device_id: Optional[str],
@@ -217,8 +240,15 @@ class EvidenceHandler(logging.Handler):
         """
         while True:
             batch = list(self._pending.get(device_id) or ())
+            with self._queued_lock:
+                queued = self._queued.get(device_id, 0)
             if not batch:
-                return
+                if not queued:
+                    return
+                # Writes queued from another thread whose tasks don't exist
+                # yet: let the loop run their callbacks, then look again.
+                await asyncio.sleep(0)
+                continue
             results = await asyncio.gather(*batch, return_exceptions=True)
             # Everything in this batch is now accounted for, a failure included:
             # it is reported here, once.

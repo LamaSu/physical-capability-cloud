@@ -11,6 +11,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _private_endpoint_locks(tmp_path, monkeypatch):
+    """Each test gets its own PCC_PLR_LOCK_DIR (R39 r4). A test's Server is
+    dropped without a shutdown, so its OT-2 endpoint lock would otherwise
+    outlive it and refuse the next test's init of the same endpoint."""
+    monkeypatch.setenv("PCC_PLR_LOCK_DIR", str(tmp_path / "plr-endpoint-locks"))
+
+
+@pytest.fixture(autouse=True)
 def _reset_loggers():
     """Clear pylabrobot / pcc_plr_sidecar.run handlers between tests."""
     yield

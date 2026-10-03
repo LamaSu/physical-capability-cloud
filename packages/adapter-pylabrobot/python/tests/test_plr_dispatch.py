@@ -416,6 +416,102 @@ async def test_two_concurrent_inits_of_one_device_build_one_machine(fake_plr, mo
     assert busy["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], busy
 
 
+async def test_shutdown_during_setup_waits_and_no_second_machine_is_built(fake_plr, monkeypatch):
+    # R39 r4 (CRIT2): setup is under the lease too. Shutdown waits for it, and a re-init while
+    # setup is in flight builds no second machine.
+    import asyncio
+    from pcc_plr_sidecar import backend_loader
+
+    real_create = backend_loader._create_machine
+    machines = []
+    setup_entered, setup_release = asyncio.Event(), asyncio.Event()
+
+    async def create(*args, **kwargs):
+        result = await real_create(*args, **kwargs)
+        machine = result[0]
+        machines.append(machine)
+        if len(machines) == 1:
+            original_setup = machine.setup
+
+            async def blocked_setup(*a, **kw):
+                setup_entered.set()
+                await setup_release.wait()
+                r = original_setup(*a, **kw)
+                return (await r) if asyncio.iscoroutine(r) else r
+
+            machine.setup = blocked_setup
+        return result
+
+    monkeypatch.setattr(backend_loader, "_create_machine", create)
+    s, out = _server()
+    params = {"deviceId": "lh1", "plrBackend": "chatterbox", "backendConfig": {"deckLayout": DECK}}
+    first = asyncio.create_task(call(s, out, "backend.init", params, "70"))
+    await asyncio.wait_for(setup_entered.wait(), timeout=2.0)
+    shutdown = asyncio.create_task(call(s, out, "backend.shutdown", {"deviceId": "lh1"}, "71"))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not shutdown.done(), "shutdown stopped the machine while its setup was in flight"
+    again = await asyncio.wait_for(call(s, out, "backend.init", params, "72"), timeout=2.0)
+    assert "error" in again, again
+    assert len(machines) == 1, f"{len(machines)} machines for one device"
+    setup_release.set()
+    await asyncio.wait_for(first, timeout=2.0)
+    await asyncio.wait_for(shutdown, timeout=2.0)
+
+
+@pytest.mark.parametrize("second_url", ["10.0.0.5", "http://10.0.0.5:31950"])
+async def test_two_device_ids_cannot_bind_one_ot2_endpoint(fake_plr, tmp_path, monkeypatch, second_url):
+    # R39 r4 (CRIT2): exclusivity is the physical endpoint, not the caller's deviceId.
+    monkeypatch.setenv("PCC_PLR_LOCK_DIR", str(tmp_path / "locks"))
+    s, out = _server()
+    a = await call(s, out, "backend.init", {"deviceId": "ot-a", "plrBackend": "ot2", "backendConfig": {
+        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}}, "80")
+    assert "error" not in a, a
+    b = await call(s, out, "backend.init", {"deviceId": "ot-b", "plrBackend": "ot2", "backendConfig": {
+        "ot2Url": second_url, "deckLayout": dict(DECK, type="OTDeck")}}, "81")
+    assert b.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], b
+
+
+async def test_two_sidecars_cannot_drive_one_ot2_until_the_first_lets_go(fake_plr, tmp_path, monkeypatch):
+    # R39 r4 (CRIT2): two sidecars (two Servers, each its own loader) on one host share an OS lock
+    # per OT-2 endpoint.
+    monkeypatch.setenv("PCC_PLR_LOCK_DIR", str(tmp_path / "locks"))
+    s1, out1 = _server()
+    s2, out2 = _server()
+    cfg = {"ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}
+    a = await call(s1, out1, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "82")
+    assert "error" not in a, a
+    b = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "83")
+    assert b.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], b
+    await call(s1, out1, "backend.shutdown", {"deviceId": "ot"}, "84")
+    c = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "85")
+    assert "error" not in c, c
+
+
+async def test_a_run_never_records_its_evidence_under_another_jobs_window(fake_plr):
+    # R39 r4 (CRIT2 evidence): a window pre-armed for job A is not reused by job B's run.
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-a"}, "90")
+    out.lines.clear()
+    await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "91", "method": "backend.run", "params": {
+        "deviceId": "lh1", "jobId": "job-x", "protocolSource": "inline-ops", "protocolInline": TRANSFER}}))
+    await asyncio_sleep_for_notifications()
+    notes = [m for m in out.messages() if "id" not in m]
+    labelled = {m["params"].get("jobId") for m in notes if isinstance(m.get("params"), dict)}
+    assert notes and labelled == {"job-x"}, labelled
+
+
+async def test_stop_recording_never_closes_another_jobs_window(fake_plr):
+    # R39 r4 (CRIT2 evidence): stopRecording closes only its own job's window.
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-a"}, "92")
+    await call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-b"}, "93")
+    window = s.evidence.get_window("lh1")
+    assert window is not None and window.job_id == "job-a", window
+
+
 async def test_tips_can_be_dropped_into_a_named_spot(fake_plr):
     s, out = _server()
     await init(s, out, deckLayout=DECK)
@@ -876,6 +972,15 @@ async def test_a_directory_swapped_for_a_symlink_after_the_boundary_check_is_ref
     resp = await init(s, out, deckLayoutPath="sub/deck.json")
     assert resp.get("error", {}).get("code") == RPC_ERROR_CODES["INVALID_PARAMS"], resp
     assert _deserialized(fake_plr) == []
+
+
+async def test_the_directory_swap_is_refused_where_there_is_no_proc(fake_plr, tmp_path, monkeypatch):
+    # R39 r4 (MED8): the same intermediate-directory swap, on a platform without /proc/self/fd.
+    import os as os_module
+
+    real_isdir = os_module.path.isdir
+    monkeypatch.setattr(os_module.path, "isdir", lambda p: False if str(p).startswith("/proc") else real_isdir(p))
+    await test_a_directory_swapped_for_a_symlink_after_the_boundary_check_is_refused_not_read(fake_plr, tmp_path, monkeypatch)
 
 
 # ── astra r1 on #378: PLR's own tracking is on, and liquids are declared ─────

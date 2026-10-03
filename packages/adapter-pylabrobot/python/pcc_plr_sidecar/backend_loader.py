@@ -47,11 +47,13 @@ is ``"stub"``, never as a fallback, and every result it gives says
 
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import os
 import stat
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -128,10 +130,16 @@ class BackendHandle:
     # Set by BackendLoader.unload: no new run may start, and the handle stays
     # registered until its machine is stopped (R39 r3 review).
     closing: bool = False
+    # R39 r4: the backend's setup() is under the same lease as a run. While it
+    # is in flight no run starts, no second setup starts, and shutdown waits.
+    setting_up: bool = False
+    # R39 r4: the OS lock on the physical endpoint this handle drives (ot2), or
+    # None for a simulator or the stub. Released when the handle is unloaded.
+    endpoint_lock: Any = None
 
     def try_acquire(self, job_id: str) -> bool:
-        """Take the lease for ``job_id``. False (no state changed) if busy or closing."""
-        if self.busy or self.closing:
+        """Take the lease for ``job_id``. False (no state changed) if busy, setting up or closing."""
+        if self.busy or self.closing or self.setting_up:
             return False
         self.busy = True
         self.busy_job_id = job_id
@@ -142,11 +150,83 @@ class BackendHandle:
         """Release the lease. Safe to call even if never acquired."""
         self.busy = False
         self.busy_job_id = None
-        self.idle.set()
+        if not self.setting_up:
+            self.idle.set()
+
+    def begin_setup(self) -> bool:
+        """Hold the lease for setup(). False (no state changed) if anything else holds it."""
+        if self.busy or self.closing or self.setting_up:
+            return False
+        self.setting_up = True
+        self.idle.clear()
+        return True
+
+    def end_setup(self) -> None:
+        self.setting_up = False
+        if not self.busy:
+            self.idle.set()
 
 
 class DeviceBusy(Exception):
-    """A load refused because the device is being built or shut down."""
+    """A load refused because the device is being built, set up, shut down, or
+    its physical endpoint is already driven elsewhere."""
+
+
+def _hardware_endpoint(plr_backend: str, config: dict[str, Any]) -> Optional[str]:
+    """The physical endpoint a hardware-capable backend drives, normalized, or
+    None for a simulator or the stub. Two spellings of one OT-2 are one endpoint."""
+    if plr_backend.strip().lower() != "ot2":
+        return None
+    url = config.get("ot2Url")
+    if not isinstance(url, str) or not url:
+        return None  # _create_ot2 refuses a missing ot2Url
+    host, port = _parse_ot2_url(url)
+    return f"ot2://{host.lower()}:{port}"
+
+
+class EndpointLock:
+    """An exclusive OS lock on one physical endpoint, held for a handle's life
+    (R39 r4). ``flock`` locks belong to an open file description, so a second
+    device id in this sidecar, or a second sidecar on this host, cannot take it
+    while it is held, and a crashed process releases it with its fds. The lock
+    files live in ``PCC_PLR_LOCK_DIR`` (default: a private directory under the
+    system temp directory). Two hosts driving one robot are outside it: the
+    robot-server's own single current run is the guard there."""
+
+    def __init__(self, fd: int, endpoint: str) -> None:
+        self._fd: Optional[int] = fd
+        self.endpoint = endpoint
+
+    @classmethod
+    def acquire(cls, endpoint: str) -> "EndpointLock":
+        try:
+            import fcntl
+        except ImportError as e:  # Windows: no flock -> refuse to drive hardware
+            raise DeviceBusy(f"this platform cannot lock {endpoint}; refusing to drive it") from e
+        root = os.environ.get("PCC_PLR_LOCK_DIR") or os.path.join(tempfile.gettempdir(), "pcc-plr-endpoint-locks")
+        name = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:32] + ".lock"
+        try:
+            os.makedirs(root, mode=0o700, exist_ok=True)
+            fd = os.open(os.path.join(root, name), os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as e:
+            raise DeviceBusy(f"cannot lock {endpoint} ({e.strerror}); refusing to drive it") from e
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            os.close(fd)
+            raise DeviceBusy(f"{endpoint} is already driven by another device or sidecar") from e
+        return cls(fd, endpoint)
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        fd, self._fd = self._fd, None
+        try:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 class BackendLoader:
@@ -180,11 +260,32 @@ class BackendLoader:
         device_id: str,
         backend_config: dict[str, Any],
     ) -> BackendHandle:
-        """Instantiate the backend + return a handle. Idempotent per deviceId.
+        """Instantiate the backend + return a handle. Idempotent per deviceId."""
+        handle, _created = await self._load(plr_backend, device_id, backend_config, hold_for_setup=False)
+        return handle
 
-        Never two machines for one device: a load while that device is being
-        built, or while its shutdown waits for a run, is refused (R39 r3 review).
-        """
+    async def load_for_init(
+        self,
+        plr_backend: str,
+        device_id: str,
+        backend_config: dict[str, Any],
+    ) -> tuple[BackendHandle, bool]:
+        """Like load, for backend.init: returns (handle, created). A handle this
+        call created is registered already holding its setup lease (R39 r4), so
+        no run, init or shutdown can slip in before setup() starts."""
+        return await self._load(plr_backend, device_id, backend_config, hold_for_setup=True)
+
+    async def _load(
+        self,
+        plr_backend: str,
+        device_id: str,
+        backend_config: dict[str, Any],
+        *,
+        hold_for_setup: bool,
+    ) -> tuple[BackendHandle, bool]:
+        """Never two machines for one device: a load while that device is being
+        built, or while its shutdown waits for a run, is refused (R39 r3 review);
+        and never two handles for one physical endpoint (R39 r4)."""
         if device_id in self._loading:
             raise DeviceBusy(f"deviceId {device_id} is being loaded")
         if device_id in self._handles:
@@ -196,18 +297,26 @@ class BackendLoader:
                     f"deviceId {device_id} already registered as {existing.plr_backend}; "
                     f"requested {plr_backend}",
                 )
-            return existing
+            return existing, False
 
         log.info("loading backend %s for device %s", plr_backend, device_id)
         mode = EXECUTION_MODES.get(plr_backend.strip().lower(), "unverified")
         # R39 CRIT3: does any OTHER handle already in this process make tracking
         # hardware-sensitive? If so, this load may not weaken it.
         other_hardware_loaded = any(h.hardware_capable for h in self._handles.values())
+        endpoint = _hardware_endpoint(plr_backend, backend_config)
         self._loading.add(device_id)
+        lock: Optional[EndpointLock] = None
         try:
+            # R39 r4: the physical endpoint first, before anything is built for it.
+            lock = EndpointLock.acquire(endpoint) if endpoint else None
             machine, metadata, hardware_capable = await _create_machine(
                 plr_backend, backend_config, other_hardware_loaded,
             )
+        except BaseException:
+            if lock is not None:
+                lock.release()
+            raise
         finally:
             self._loading.discard(device_id)
         handle = BackendHandle(
@@ -219,9 +328,12 @@ class BackendLoader:
             metadata={"loaded_via": "BackendLoader.load", "executionMode": mode, **metadata},
             execution_mode=mode,
             max_volume_ul=_max_volume(backend_config),
+            endpoint_lock=lock,
         )
+        if hold_for_setup:
+            handle.begin_setup()
         self._handles[device_id] = handle
-        return handle
+        return handle, True
 
     async def unload(self, device_id: str) -> None:
         h = self._handles.get(device_id)
@@ -247,6 +359,8 @@ class BackendLoader:
                 except Exception as e:  # noqa: BLE001
                     log.warning("backend.stop raised on unload: %s", e)
         finally:
+            if h.endpoint_lock is not None:
+                h.endpoint_lock.release()
             if self._handles.get(device_id) is h:
                 del self._handles[device_id]
 
@@ -293,16 +407,52 @@ def _max_volume(config: dict[str, Any]) -> float:
     return float(value)
 
 
+def _open_inside(base: str, real: str) -> int:
+    """Open ``real`` for reading by walking from ``base`` one component at a time,
+    each opened relative to the directory above it with ``O_NOFOLLOW`` (R39 r4,
+    MED8). A component swapped for a symlink after the boundary check, at any
+    depth, fails the walk instead of leading it outside ``base``, on any POSIX
+    system, with no reliance on ``/proc``. A platform that cannot open relative
+    to a directory fd (Windows) refuses layout files: pass ``deckLayout`` inline.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None or os.open not in os.supports_dir_fd:
+        raise ValueError("deckLayoutPath is not supported on this platform; pass deckLayout inline")
+    parts = [part for part in os.path.relpath(real, base).split(os.sep) if part not in ("", ".")]
+    if not parts or ".." in parts:
+        raise ValueError("deckLayoutPath must name a file inside PCC_PLR_LAYOUT_DIR")
+    try:
+        dir_fd = os.open(base, os.O_RDONLY | directory)
+    except OSError as e:
+        raise ValueError("PCC_PLR_LAYOUT_DIR could not be opened") from e
+    try:
+        for name in parts[:-1]:
+            try:
+                next_fd = os.open(name, os.O_RDONLY | directory | nofollow, dir_fd=dir_fd)
+            except FileNotFoundError as e:
+                raise ValueError("deckLayoutPath must name an existing .json file") from e
+            except OSError as e:
+                raise ValueError("deckLayoutPath changed between check and read; refusing") from e
+            os.close(dir_fd)
+            dir_fd = next_fd
+        try:
+            return os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=dir_fd)
+        except OSError as e:
+            raise ValueError("deckLayoutPath must name an existing .json file") from e
+    finally:
+        os.close(dir_fd)
+
+
 def _read_layout_file(path: Any) -> Any:
     """Read ``deckLayoutPath``: a .json file inside PCC_PLR_LAYOUT_DIR, at most 5 MB.
 
-    R39 MED8: the path is resolved, boundary-checked, and then opened exactly
-    once with ``O_NOFOLLOW`` -- a symlink swapped in at that path after the
-    check (but before the read) is refused rather than silently followed
-    outside ``PCC_PLR_LAYOUT_DIR``. The opened fd's identity (an open fd is
-    immutable once obtained) is then verified against an ``lstat`` of the
-    checked path before anything is read from it. Everything is read from
-    that one fd — never a second, separate open of the path.
+    R39 MED8: the path is resolved and boundary-checked, then opened exactly
+    once by walking from the layout directory one component at a time with
+    ``O_NOFOLLOW`` (:func:`_open_inside`), so a symlink swapped in at any depth
+    after the check is refused rather than followed outside
+    ``PCC_PLR_LAYOUT_DIR``. Everything is read from that one fd, never a second
+    open of the path.
     """
     if not isinstance(path, str) or not path:
         raise ValueError("deckLayoutPath must be a non-empty string")
@@ -318,34 +468,11 @@ def _read_layout_file(path: Any) -> Any:
     if not real.endswith(".json"):
         raise ValueError("deckLayoutPath must name an existing .json file")
 
-    nofollow = getattr(os, "O_NOFOLLOW", 0)  # unavailable on Windows; best-effort there
-    try:
-        fd = os.open(real, os.O_RDONLY | nofollow)
-    except OSError as e:
-        raise ValueError("deckLayoutPath must name an existing .json file") from e
+    fd = _open_inside(base, real)
     try:
         fd_stat = os.fstat(fd)
         if not stat.S_ISREG(fd_stat.st_mode):
             raise ValueError("deckLayoutPath must name a regular file")
-        try:
-            path_stat = os.lstat(real)
-        except OSError as e:
-            raise ValueError("deckLayoutPath must name an existing .json file") from e
-        if (fd_stat.st_dev, fd_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
-            # The path changed identity between the check and the open -- refuse
-            # rather than trust whatever is sitting there now.
-            raise ValueError("deckLayoutPath changed between check and read; refusing")
-        # O_NOFOLLOW guards only the LAST component, and lstat follows the
-        # others too, so a directory swapped for a symlink after the check
-        # passes both tests above. On Linux, ask the kernel which file the fd
-        # really opened: it must be exactly the checked one (R39 r3 review).
-        if os.path.isdir("/proc/self/fd"):
-            try:
-                opened = os.readlink(f"/proc/self/fd/{fd}")
-            except OSError as e:
-                raise ValueError("deckLayoutPath could not be verified after opening; refusing") from e
-            if opened != real or os.path.commonpath([base, opened]) != base:
-                raise ValueError("deckLayoutPath changed between check and read; refusing")
         chunks: list[bytes] = []
         remaining = MAX_LAYOUT_BYTES + 1
         while remaining > 0:

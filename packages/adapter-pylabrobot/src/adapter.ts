@@ -281,6 +281,16 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   private async handleStart(
     payload: Record<string, unknown> | undefined,
   ): Promise<MachineCommandResult> {
+    // R39 r4: one run at a time per adapter. A second start while one is in
+    // flight is refused here, before it touches the first run's collector or
+    // sends anything to the sidecar.
+    if (this.currentJobId !== null) {
+      return {
+        success: false,
+        message: `device ${this.id} is busy running job ${this.currentJobId}`,
+        data: { code: RPC_ERROR_CODES.DEVICE_BUSY, busyJobId: this.currentJobId },
+      };
+    }
     const merged = { ...this.pendingProtocol, ...(payload ?? {}) };
     const jobId = String(merged.jobId ?? `job-${Date.now()}`);
     const collector = this.makeCollector();
@@ -336,8 +346,10 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       } catch {
         // tolerate
       }
-      this.currentCollector = null;
-      this.currentJobId = null;
+      if (this.currentJobId === jobId) {
+        this.currentCollector = null;
+        this.currentJobId = null;
+      }
       this.pendingProtocol = {};
       return {
         success: true,
@@ -356,8 +368,10 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         rpcCode: err instanceof SidecarError ? err.code : undefined,
         rpcData: err instanceof SidecarError ? err.data : undefined,
       });
-      this.currentCollector = null;
-      this.currentJobId = null;
+      if (this.currentJobId === jobId) {
+        this.currentCollector = null;
+        this.currentJobId = null;
+      }
       this.pendingProtocol = {};
       try {
         await this.sidecar?.call(
@@ -562,7 +576,10 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   }
 
   private handleEvidenceNotification(params: EvidenceNotificationParams): void {
-    if (this.currentCollector) {
+    // R39 r4: only the running job's evidence goes into its collector. A
+    // notification the sidecar labelled with another job id is forwarded as
+    // outside the recording window, never credited to this run.
+    if (this.currentCollector && (params.jobId === undefined || params.jobId === this.currentJobId)) {
       this.currentCollector.ingestSidecarNotification(params);
       return;
     }
