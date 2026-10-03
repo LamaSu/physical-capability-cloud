@@ -247,7 +247,7 @@ class TestRound3(unittest.TestCase):
                 self.assertNotIn("curl", line)
                 self.assertRegex(line, r"(?i)don't|never", line)
         self.assertNotIn("testnet-mock", verify)
-        self.assertIn("/api/jobs/submit", between(verify, "## 1.", "## 2."))
+        self.assertIn("/api/jobs/submit", between(verify, "## 2.", "## 3."))  # the buyer section (renumbered in round 4)
         phases = {p["id"]: p for p in self.book["phases"]}
         self.assertNotRegex(json.dumps(phases["verify"]), r"(?i)quote equals|at the human's price")
         self.assertNotIn("verify.price-mismatch", self.index["events"])
@@ -284,6 +284,36 @@ class TestRound3(unittest.TestCase):
         provision = between(phase_text("00-prerequisites.md"), "/api/auth/provision", "**Check:**")
         self.assertNotRegex(provision, r'-d "\{')
         self.assertIn("--data-binary @.pcc/", provision)
+
+
+
+class TestRound4(unittest.TestCase):
+    """Verdict 115d on #464: each of these failed at 7b155b24."""
+
+    CHECK = 'print("CLEAR" if stored'
+
+    def test_the_stop_is_read_before_anything_runs(self):
+        # C1: phase 6 ran the device before its first policy read.
+        verify = phase_text("06-verify.md")
+        first_check = verify.index(self.CHECK)
+        self.assertLess(first_check, verify.index("/api/jobs/submit"))
+        self.assertLess(first_check, verify.index("POST $DEV/runs"))
+        run_step = between(verify, "5. **Read the stop, then run.**", "6. **")
+        self.assertLess(run_step.index("CLEAR"), run_step.index("POST $DEV/runs"))
+        self.assertRegex(between(phase_text("07-operate.md"), "5. **", "6. **"), r"immediately before the run")
+
+    def test_the_gateway_cannot_run_the_test_job_itself(self):
+        # C2: /api/jobs/submit starts the job at once on the gateway's own local kernel.
+        submit = between(phase_text("06-verify.md"), "## 2.", "## 3.")
+        self.assertLess(submit.index("/api/setup/detect"), submit.index('"$BASE/api/jobs/submit"'))
+        self.assertIn("adapterType", submit)
+        self.assertRegex(submit, r"get\('deviceId'\) is None")
+        self.assertNotRegex(submit, r"(?i)creates a queued job for your kernel and nothing else")
+
+    def test_the_drill_claims_only_what_it_shows(self):
+        # The current gateway queues a job for a stopped kernel; nothing may say it refuses one.
+        for path, text in text_files():
+            self.assertNotRegex(text, r"(?i)gateway (should )?refuse[sd]? (it|a new job|new jobs)", path.name)
 
 
 if __name__ == "__main__":

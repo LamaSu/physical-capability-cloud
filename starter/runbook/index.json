@@ -141,7 +141,7 @@
       "trigger": "The test job never shows up in GET /api/operator/jobs for your kernel.",
       "do": "Check that the submit answered with a jobId and that the job names your kernel, then report it. Don't fall back to /api/setup/test-job: it runs on a built-in mock device.",
       "file": "06-verify.md",
-      "section": "2. Run it the way the operating loop will (phase 7), once, by hand",
+      "section": "3. Run it the way the operating loop will (phase 7), once, by hand",
       "report": {
         "phase": "verify",
         "outcome": "blocked"
@@ -163,7 +163,7 @@
       "trigger": "The device reports busy or estopped when a job is due to run.",
       "do": "Don't run it, and don't queue over it. Try again later, and report it if it stays busy.",
       "file": "06-verify.md",
-      "section": "2. Run it the way the operating loop will (phase 7), once, by hand",
+      "section": "3. Run it the way the operating loop will (phase 7), once, by hand",
       "report": null
     },
     "verify.estop-drill-failed": {
@@ -171,7 +171,7 @@
       "trigger": "During the drill the gateway accepted a new job for the stopped kernel, or the device did not stop.",
       "do": "Stop onboarding and report exactly what happened. Clear the stop only after the human confirms the device is safe.",
       "file": "06-verify.md",
-      "section": "3. Emergency-stop drill",
+      "section": "1. Read the stop, and drill it, before anything runs",
       "report": {
         "phase": "verify",
         "outcome": "failed"
@@ -226,12 +226,34 @@
         "outcome": "abandoned"
       }
     },
+    "verify.gateway-runs-it": {
+      "phase": "verify",
+      "trigger": "GET /api/setup/detect lists a real (non-mock) device under kernelService.devices, or POST /api/jobs/submit answered with a deviceId or a status other than queued.",
+      "do": "Don't submit, or don't run what was submitted: the gateway could start the job on its own devices, before any check. Report what it showed.",
+      "file": "06-verify.md",
+      "section": "2. Be your own test buyer, with no money involved",
+      "report": {
+        "phase": "verify",
+        "outcome": "blocked"
+      }
+    },
+    "verify.stop-not-clear": {
+      "phase": "verify",
+      "trigger": "The stop does not read CLEAR after the drill's resume, before submitting, or immediately before the run.",
+      "do": "Don't submit and don't run. Report what the policy read showed.",
+      "file": "06-verify.md",
+      "section": "1. Read the stop, and drill it, before anything runs",
+      "report": {
+        "phase": "verify",
+        "outcome": "blocked"
+      }
+    },
     "verify.money-attached": {
       "phase": "verify",
       "trigger": "The test job's GET /api/jobs/<jobId>/settlement shows a session or an escrow.",
       "do": "Don't run it: it is not a test job. Report what the settlement showed.",
       "file": "06-verify.md",
-      "section": "1. Be your own test buyer, with no money involved",
+      "section": "2. Be your own test buyer, with no money involved",
       "report": {
         "phase": "verify",
         "outcome": "blocked"
@@ -242,7 +264,7 @@
       "trigger": "POST /api/operator/evidence answered without \"stored\": true for this jobId (HTTP 200 included).",
       "do": "Send status failed with reason evidence_not_stored, never completed, and report what the receipt said.",
       "file": "06-verify.md",
-      "section": "2. Run it the way the operating loop will (phase 7), once, by hand",
+      "section": "3. Run it the way the operating loop will (phase 7), once, by hand",
       "report": {
         "phase": "verify",
         "outcome": "failed"

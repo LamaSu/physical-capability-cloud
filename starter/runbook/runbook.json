@@ -82,15 +82,15 @@
     {
       "id": "verify",
       "file": "06-verify.md",
-      "goal": "A test job with no money attached ran on the real device, its evidence was stored for that job, and its final status was computed from the run and the receipt; the emergency-stop drill exercised the gateway's refusal, the device's own stop and the stored-policy read.",
+      "goal": "The emergency stop reads correctly, and a test job queued for this node with no money attached ran on the real device after a CLEAR read; its evidence was stored for that job, and its final status was computed from the run and the receipt.",
       "doneWhen": [
-        "the test job was created by POST /api/jobs/submit, and its settlement shows no session and no escrow",
-        "a test job reached your node and ran on the device (the device's own log shows it)",
-        "its final status was computed, not typed: completed only for a succeeded run whose receipt says stored: true for that job with a bundleId",
-        "while the kernel was stopped the gateway refused a new job, and the device stopped on its own command",
-        "the stop read STOPPED, then CLEAR, from a stored policy"
+        "the stop read STOPPED during the drill, then CLEAR from a stored policy, and the device stopped on its own command",
+        "before submitting, GET /api/setup/detect listed no real device the gateway runs itself, and the stop read CLEAR",
+        "the test job was created by POST /api/jobs/submit, answered queued with no deviceId, and its settlement shows no session and no escrow",
+        "the stop read CLEAR immediately before the run, and the test job ran on the device (the device's own log shows it)",
+        "its final status was computed, not typed: completed only for a succeeded run whose receipt says stored: true for that job with a bundleId"
       ],
-      "asksHuman": ["permission to run one test job on the device (no money moves)", "permission for one emergency-stop drill"],
+      "asksHuman": ["permission for one emergency-stop drill", "permission to run one test job on the device (no money moves)"],
       "next": "operate"
     },
     {
