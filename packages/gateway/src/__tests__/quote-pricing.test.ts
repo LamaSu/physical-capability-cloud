@@ -105,7 +105,7 @@ describe("quote-pricing: validatePricingRules — F4", () => {
 
   it("a well-formed rule round-trips with its canonical fields", () => {
     const r = validatePricingRules([okRule]);
-    expect(r).toEqual({ ok: true, rules: [{ id: "r1", label: "L", enabled: true, condition: {}, impact: { mode: "percent", value: "10" } }] });
+    expect(r).toEqual({ ok: true, rules: [{ id: "r1", type: "custom", label: "L", enabled: true, condition: {}, impact: { mode: "percent", value: "10" } }] });
   });
 
   it.each([
@@ -113,6 +113,11 @@ describe("quote-pricing: validatePricingRules — F4", () => {
     ["not a plain object (array)", [[]], "not-an-object"],
     ["missing id", [{ ...okRule, id: undefined }], "invalid-id"],
     ["empty id", [{ ...okRule, id: "" }], "invalid-id"],
+    // #498 r3 F6: `type` is required by the PricingRule contract.
+    ["missing type (astra 218 F6)", [{ ...okRule, type: undefined }], "invalid-type"],
+    ["empty type", [{ ...okRule, type: "" }], "invalid-type"],
+    ["type not a string", [{ ...okRule, type: 7 }], "invalid-type"],
+    ["type null", [{ ...okRule, type: null }], "invalid-type"],
     ["missing label", [{ ...okRule, label: undefined }], "invalid-label"],
     ["enabled not boolean", [{ ...okRule, enabled: "yes" }], "invalid-enabled"],
     ["condition: false", [{ ...okRule, condition: false }], "invalid-condition"],
@@ -128,6 +133,8 @@ describe("quote-pricing: validatePricingRules — F4", () => {
     ["impact.value NaN-ish", [{ ...okRule, impact: { mode: "percent", value: "abc" } }], "invalid-impact-value"],
     ["impact.value exponential", [{ ...okRule, impact: { mode: "percent", value: "1e3" } }], "invalid-impact-value"],
     ["impact.value more than 6 decimals", [{ ...okRule, impact: { mode: "percent", value: "1.1234567" } }], "invalid-impact-value"],
+    // #498 r3 F6 (same property): the contract types impact.value as a string.
+    ["impact.value a JSON number", [{ ...okRule, impact: { mode: "flat", value: 100 } }], "invalid-impact-value"],
   ])("rejects a malformed rule: %s", (_label, rules, expectedReason) => {
     const r = validatePricingRules(rules);
     expect(r.ok).toBe(false);
@@ -137,9 +144,16 @@ describe("quote-pricing: validatePricingRules — F4", () => {
     }
   });
 
+  it("astra 218 F6: the reviewer's rule (no type, flat +100) is refused with invalid-type, and the same rule with a type passes", () => {
+    const reviewer = { id: "missing-type", label: "invalid", enabled: true, condition: {}, impact: { mode: "flat", value: "100.00" } };
+    expect(validatePricingRules([reviewer])).toEqual({ ok: false, ruleIndex: 0, ruleId: "missing-type", reason: "invalid-type" });
+    const typed = validatePricingRules([{ ...reviewer, type: "custom" }]);
+    expect(typed.ok && typed.rules[0]!.type).toBe("custom");
+  });
+
   it("an unknown condition key is ALLOWED (not a validation error)", () => {
     const r = validatePricingRules([{ ...okRule, condition: { futureFact: "x" } }]);
-    expect(r).toEqual({ ok: true, rules: [{ id: "r1", label: "L", enabled: true, condition: { futureFact: "x" }, impact: { mode: "percent", value: "10" } }] });
+    expect(r).toEqual({ ok: true, rules: [{ id: "r1", type: "custom", label: "L", enabled: true, condition: { futureFact: "x" }, impact: { mode: "percent", value: "10" } }] });
   });
 
   it("reports the ruleIndex of the SECOND rule when the first is well-formed", () => {
@@ -155,7 +169,7 @@ describe("quote-pricing: validatePricingRules — F4", () => {
 
 describe("quote-pricing: pricingRulesThatApply — the every->some mutant must die here", () => {
   const rule = (condition: Record<string, unknown>): ValidRule => ({
-    id: "r", label: "L", enabled: true, condition, impact: { mode: "percent", value: "-10" },
+    id: "r", type: "custom", label: "L", enabled: true, condition, impact: { mode: "percent", value: "-10" },
   });
 
   it("a rule with two condition keys applies ONLY when BOTH hold (conjunctive, not disjunctive)", () => {
@@ -203,29 +217,29 @@ describe("quote-pricing: exactQuoteTotal — F1 exact arithmetic (no Number for 
   });
 
   it("a tie rounds half up: 1 cent + 50% = 1.5 cents -> 2 cents", () => {
-    const { totalCents } = exactQuoteTotal(1n, [{ id: "t", label: "t", enabled: true, condition: {}, impact: { mode: "percent", value: "50" } }]);
+    const { totalCents } = exactQuoteTotal(1n, [{ id: "t", type: "custom", label: "t", enabled: true, condition: {}, impact: { mode: "percent", value: "50" } }]);
     expect(totalCents).toBe(2n);
   });
 
   it("a negative tie rounds half AWAY FROM ZERO: 1 cent - 50% = 0.5 cents -> total 1 cent, impact -1 cent", () => {
-    const { totalCents, adjustments } = exactQuoteTotal(1n, [{ id: "t", label: "t", enabled: true, condition: {}, impact: { mode: "percent", value: "-50" } }]);
+    const { totalCents, adjustments } = exactQuoteTotal(1n, [{ id: "t", type: "custom", label: "t", enabled: true, condition: {}, impact: { mode: "percent", value: "-50" } }]);
     expect(totalCents).toBe(1n);
     expect(adjustments).toEqual([{ ruleId: "t", label: "t", impact: "-0.01" }]);
   });
 
   it("floors at zero when rules would push the total negative", () => {
-    const { totalCents } = exactQuoteTotal(1000n, [{ id: "t", label: "t", enabled: true, condition: {}, impact: { mode: "percent", value: "-150" } }]);
+    const { totalCents } = exactQuoteTotal(1000n, [{ id: "t", type: "custom", label: "t", enabled: true, condition: {}, impact: { mode: "percent", value: "-150" } }]);
     expect(totalCents).toBe(0n);
   });
 
   it("a flat rule with 6 decimals loses no precision: 10.00 + 0.123456 -> half-up 10.12", () => {
-    const { totalCents, adjustments } = exactQuoteTotal(1000n, [{ id: "f", label: "f", enabled: true, condition: {}, impact: { mode: "flat", value: "0.123456" } }]);
+    const { totalCents, adjustments } = exactQuoteTotal(1000n, [{ id: "f", type: "custom", label: "f", enabled: true, condition: {}, impact: { mode: "flat", value: "0.123456" } }]);
     expect(totalCents).toBe(1012n);
     expect(adjustments).toEqual([{ ruleId: "f", label: "f", impact: "0.12" }]);
   });
 
   it("a flat negative rule rounds its own display half away from zero independent of the total", () => {
-    const { adjustments } = exactQuoteTotal(1000n, [{ id: "f", label: "f", enabled: true, condition: {}, impact: { mode: "flat", value: "-0.005" } }]);
+    const { adjustments } = exactQuoteTotal(1000n, [{ id: "f", type: "custom", label: "f", enabled: true, condition: {}, impact: { mode: "flat", value: "-0.005" } }]);
     // -0.005 is an exact tie at the cent boundary -> half away from zero -> -0.01 (never -0.00).
     expect(adjustments).toEqual([{ ruleId: "f", label: "f", impact: "-0.01" }]);
   });

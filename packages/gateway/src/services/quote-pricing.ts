@@ -62,10 +62,11 @@ function centsToDecimalSigned(cents: bigint): string {
 }
 
 /** Parse a pricing-rule impact value exactly: no `Number(x) * 1e6` — the decimal
- * string is split and padded so the scale-by-10^6 is always exact BigInt math. */
-function parseExactValue(v: unknown): { text: string; scaled: bigint } | null {
-  const text = typeof v === "number" ? (Number.isFinite(v) ? String(v) : "") : typeof v === "string" ? v : "";
-  if (!RULE_VALUE_PATTERN.test(text)) return null;
+ * string is split and padded so the scale-by-10^6 is always exact BigInt math. The
+ * PricingRule contract types the value as a STRING (#498 r3 F6), so a JSON number is
+ * not a value. */
+function parseExactValue(text: unknown): { text: string; scaled: bigint } | null {
+  if (typeof text !== "string" || !RULE_VALUE_PATTERN.test(text)) return null;
   const neg = text.startsWith("-");
   const unsigned = neg ? text.slice(1) : text;
   const [whole, frac = ""] = unsigned.split(".");
@@ -132,6 +133,8 @@ export function registeredQuotePrice(pricing: unknown): RegisteredQuotePrice {
  * original canonical text (re-parsed by exactQuoteTotal when applied). */
 export interface ValidRule {
   id: string;
+  /** PricingRule.type: required by the contract (#498 r3 F6), an open string union. */
+  type: string;
   label: string;
   enabled: boolean;
   condition: Record<string, unknown>;
@@ -166,6 +169,9 @@ export function validatePricingRules(rules: unknown): PricingRulesValidation {
 
     if (!isPlainObject(r)) return fail("not-an-object");
     if (typeof r.id !== "string" || r.id.length === 0) return fail("invalid-id");
+    // #498 r3 F6: `type` is required by the PricingRule contract. A rule without it is malformed
+    // policy data, so it is refused like any other malformed rule and never applied as money.
+    if (typeof r.type !== "string" || r.type.length === 0) return fail("invalid-type");
     if (typeof r.label !== "string") return fail("invalid-label");
     if (r.enabled !== true && r.enabled !== false) return fail("invalid-enabled");
     const condition = r.condition;
@@ -191,7 +197,7 @@ export function validatePricingRules(rules: unknown): PricingRulesValidation {
     const parsedValue = parseExactValue(impact.value);
     if (parsedValue === null) return fail("invalid-impact-value");
 
-    validated.push({ id: r.id, label: r.label, enabled: r.enabled, condition, impact: { mode: impact.mode, value: parsedValue.text } });
+    validated.push({ id: r.id, type: r.type, label: r.label, enabled: r.enabled, condition, impact: { mode: impact.mode, value: parsedValue.text } });
   }
   return { ok: true, rules: validated };
 }

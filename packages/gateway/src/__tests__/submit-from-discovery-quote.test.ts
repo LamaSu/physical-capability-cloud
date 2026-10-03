@@ -509,3 +509,64 @@ describe("N98 r2 (#498): F5 discriminating tests", () => {
     expect(rowCounts()).toEqual(before);
   });
 });
+
+// ---------------------------------------------------------------------------
+// N98 round 3 (#498, astra 218 F6 HIGH): every PricingRule field must conform to the published
+// contract (packages/spec/src/types/operator-policy.ts PricingRule) before a rule can move money.
+// Written first and run against unmodified 51a74a5c to record the failure lines.
+// ---------------------------------------------------------------------------
+
+describe("N98 r3 (#498): F6 a rule that breaks the PricingRule contract is refused, never applied", () => {
+  let app: FastifyInstance;
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.mocked(getKernelService).mockImplementation(() => {
+      throw new Error("[kernel-service] Not initialised (test default: no local kernel)");
+    });
+    app = await buildApp();
+  });
+  afterEach(async () => { await app.close(); closeStore(); });
+
+  it("reviewer's repro: a rule with no `type` is refused with invalid-type (51a74a5c quotes and funds 125.00)", async () => {
+    registerCapability("cap-f6-type", "lab.absorbance", { currency: "USDC", baseCost: "25.00", minimum: "0.01" });
+    setPricingRules([{ id: "missing-type", label: "invalid", enabled: true, condition: {}, impact: { mode: "flat", value: "100.00" } }]);
+    const before = rowCounts();
+    const res = await submit(app, "lab.absorbance");
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect([body.error, body.ruleIndex, body.ruleId, body.reason]).toEqual(["operator_pricing_policy_invalid", 0, "missing-type", "invalid-type"]);
+    expect(rowCounts()).toEqual(before);
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["a number", 7],
+    ["null", null],
+  ])("a rule whose `type` is %s is refused with invalid-type", async (_label, badType) => {
+    registerCapability("cap-f6-type-bad", "lab.absorbance", { currency: "USDC", baseCost: "25.00", minimum: "0.01" });
+    setPricingRules([{ id: "bad-type", type: badType, label: "invalid", enabled: true, condition: {}, impact: { mode: "flat", value: "100.00" } }]);
+    const before = rowCounts();
+    const res = await submit(app, "lab.absorbance");
+    expect(res.statusCode).toBe(422);
+    expect(res.json().reason).toBe("invalid-type");
+    expect(rowCounts()).toEqual(before);
+  });
+
+  it("the same property: an impact.value given as a JSON number (the contract says string) is refused, never applied", async () => {
+    registerCapability("cap-f6-num", "lab.absorbance", { currency: "USDC", baseCost: "25.00", minimum: "0.01" });
+    setPricingRules([{ id: "num-value", type: "custom", label: "flat 100", enabled: true, condition: {}, impact: { mode: "flat", value: 100 } }]);
+    const before = rowCounts();
+    const res = await submit(app, "lab.absorbance");
+    expect(res.statusCode).toBe(422);
+    expect([res.json().ruleId, res.json().reason]).toEqual(["num-value", "invalid-impact-value"]);
+    expect(rowCounts()).toEqual(before);
+  });
+
+  it("a contract-conforming rule with the same values is still applied (the check is not a blanket refusal)", async () => {
+    registerCapability("cap-f6-ok", "lab.absorbance", { currency: "USDC", baseCost: "25.00", minimum: "0.01" });
+    setPricingRules([{ id: "ok-flat", type: "custom", label: "flat 100", enabled: true, condition: {}, impact: { mode: "flat", value: "100.00" } }]);
+    const res = await submit(app, "lab.absorbance");
+    expect(res.statusCode).toBeLessThan(300);
+    expect(res.json().quote.totalPrice).toBe("125.00");
+  });
+});
