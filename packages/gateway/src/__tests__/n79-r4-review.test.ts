@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { getAddress } from "viem";
+import { getAddress, keccak256, toBytes } from "viem";
 import type { EvidenceBundle } from "@pcc/spec";
 import { classifyMoneyStatus } from "@pcc/spec";
 
@@ -153,6 +153,9 @@ function pointEscrowAtChain(jobId: string, address: string, version: "v2" | "v3"
   return address;
 }
 
+// Fixture correction (round 5, the R5-H2b identity check): index i's chain stepId mirrors this
+// suite's own `step-${i+1}` convention via the same hash production writes on-chain
+// (`keccak256(toBytes(ms.stepId))`, paid-job-flow.ts). Fixture-only — no assertion in this file changed.
 /** The chain's view of a V2 escrow with one milestone per status given, each with its challenge window closed. */
 function chainState(address: string, statuses: number[]) {
   return {
@@ -164,8 +167,8 @@ function chainState(address: string, statuses: number[]) {
     funded: true,
     totalAmount: "10",
     milestoneCount: statuses.length,
-    milestones: statuses.map((status) => ({
-      stepId: `0x${"11".repeat(32)}`,
+    milestones: statuses.map((status, i) => ({
+      stepId: keccak256(toBytes(`step-${i + 1}`)),
       operator: addr(0),
       amount: "10",
       operatorBond: "0",

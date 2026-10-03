@@ -24,7 +24,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { getAddress } from "viem";
+import { getAddress, keccak256, toBytes } from "viem";
 
 // Test-controlled pauses inside /complete, so another write can land mid-flight.
 const gates = vi.hoisted(() => ({
@@ -176,8 +176,16 @@ function pointEscrowAtChain(jobId: string, address: string, version: "v2" | "v3"
   return address;
 }
 
+// Fixture correction (round 5, the R5-H2b identity check): index i's chain stepId mirrors the
+// REAL local milestone row's `stepId` at that index via the same hash production writes on-chain
+// (`keccak256(toBytes(ms.stepId))`, paid-job-flow.ts) — read from the store rather than assumed, because this
+// file's jobs come from the REAL route (`submitPaidJob`), whose stepId is `step-${randomUUID}`, not a fixed
+// `step-N` convention. Falls back to the `step-${i+1}` convention only when no escrow is found at `address` yet
+// (none of this file's current tests hit that fallback). Fixture-only — no assertion in this file changed.
 /** The chain's view of a V2 escrow with one milestone per status given, each with its challenge window closed. */
 function chainState(address: string, statuses: number[]) {
+  const escrowRow = getRepos().escrows.findByContractAddress(address) ?? getRepos().escrows.findByContractAddress(address.toLowerCase());
+  const localStepIds = escrowRow ? getRepos().escrows.findMilestonesByEscrow(escrowRow.id).map((m) => m.stepId) : [];
   return {
     address,
     payer: addr(0xaa),
@@ -187,8 +195,8 @@ function chainState(address: string, statuses: number[]) {
     funded: true,
     totalAmount: "10",
     milestoneCount: statuses.length,
-    milestones: statuses.map((status) => ({
-      stepId: `0x${"11".repeat(32)}`,
+    milestones: statuses.map((status, i) => ({
+      stepId: keccak256(toBytes(localStepIds[i] ?? `step-${i + 1}`)),
       operator: addr(0),
       amount: "10",
       operatorBond: "0",

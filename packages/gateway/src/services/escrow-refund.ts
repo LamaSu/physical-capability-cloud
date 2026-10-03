@@ -62,7 +62,7 @@
  * that is not given back or completed, for the keeper alone, whose DB row can lag the chain. A refund is skipped while ANY
  * lease is live on the escrow, even if its row no longer reads `completing`.
  */
-import { getAddress, isAddress } from "viem";
+import { getAddress, isAddress, keccak256, toBytes, type Hex } from "viem";
 import { getRepos, getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 // The words this module writes live in @pcc/spec, so the job read (readmodels) reads the same ones.
@@ -400,22 +400,54 @@ export function recordMilestoneReleased(milestoneIndex: number, claim: Settlemen
  * truth at once and a later refund finds `milestone_past_funding` instead of giving back money that moved. It writes only
  * the milestone row: it never touches the escrow row or the lease. {@link recordMilestoneReleased} mid-loop would hand the
  * claim back (restore `prior`), and the final compare-and-set to `completed` would then miss.
+ *
+ * N79 round 5 (R5-H2, astra 126e Q3 HIGH): THROWS when `milestoneIndex` has no local row — it used to silently
+ * return, which meant a chain index past the local array's end (cardinality drift) recorded nothing AND reported no
+ * failure, so the caller's `unrecordedRelease`-style tracking never engaged. The caller (the keeper's `recordRow`)
+ * already wraps this in try/catch for exactly this reason.
+ *
+ * N79 round 5 follow-up (R5-H2b, astra 126e Q3 HIGH, identity): `chainStepId`, when given, must equal
+ * `keccak256(toBytes(localRow.stepId))` — the same mapping production writes on-chain (paid-job-flow.ts, V2 and
+ * V3 `addMilestone`). A mismatch is an identity drift (same index, different obligation) and THROWS exactly like
+ * a missing row: same count is not the same milestone.
  */
-export function recordMilestoneRowReleased(escrowId: string, milestoneIndex: number): void {
+export function recordMilestoneRowReleased(escrowId: string, milestoneIndex: number, chainStepId?: Hex): void {
   const repos = getRepos();
   const milestone = repos.escrows.findMilestonesByEscrow(escrowId)[milestoneIndex];
-  if (milestone && milestone.status !== "released") repos.escrows.updateMilestoneStatus(milestone.id, "released");
+  if (!milestone) {
+    throw new Error(`no local milestone row at index ${milestoneIndex} for escrow ${escrowId} (chain/local cardinality drift)`);
+  }
+  if (chainStepId !== undefined && keccak256(toBytes(milestone.stepId)).toLowerCase() !== chainStepId.toLowerCase()) {
+    throw new Error(`local milestone row at index ${milestoneIndex} for escrow ${escrowId} does not match the chain's stepId (identity drift)`);
+  }
+  if (milestone.status !== "released") repos.escrows.updateMilestoneStatus(milestone.id, "released");
 }
 
 /**
  * Record that EVERY milestone of the escrow was released on-chain (the keeper, once the chain reads all Released): every
  * milestone row reads `released`, and the escrow, for the claim that holds the lease, becomes `completed`. Returns
  * whether the escrow row was completed. Same rules as {@link recordMilestoneReleased}: never over a refund.
+ *
+ * N79 round 5 (R5-H2, astra 126e Q3 HIGH; identity follow-up R5-H2b): `chain`, when given, must agree with the
+ * escrow's CURRENT local milestone rows both in COUNT and, per index, in IDENTITY — `keccak256(toBytes(stepId))`
+ * equal to the chain's ordered `stepIds[i]` — or this refuses (returns `false`, writes nothing) instead of marking
+ * every local row released. A DB with extra, unpaid milestone rows must never have all of them stamped `released`
+ * just because the chain's set happened to be fully released (cardinality); nor may a same-count DB whose rows
+ * are not the SAME obligations the chain confirmed (identity). The keeper (which reads the chain) passes it; other
+ * callers with no chain-confirmed set to check against (e.g. `/complete`'s own completion path) omit it and keep
+ * their existing behavior exactly.
  */
-export function recordEscrowReleased(claim: SettlementClaim): boolean {
+export function recordEscrowReleased(claim: SettlementClaim, chain?: { stepIds: readonly Hex[] }): boolean {
   const repos = getRepos();
   return storeDb().transaction(() => {
-    for (const m of repos.escrows.findMilestonesByEscrow(claim.escrowId)) {
+    const milestones = repos.escrows.findMilestonesByEscrow(claim.escrowId);
+    if (chain !== undefined) {
+      if (milestones.length !== chain.stepIds.length) return false;
+      for (let i = 0; i < milestones.length; i++) {
+        if (keccak256(toBytes(milestones[i]!.stepId)).toLowerCase() !== chain.stepIds[i]!.toLowerCase()) return false;
+      }
+    }
+    for (const m of milestones) {
       if (m.status !== "released") repos.escrows.updateMilestoneStatus(m.id, "released");
     }
     if (settlementLeases.get(claim.escrowId) !== claim.token) return false;

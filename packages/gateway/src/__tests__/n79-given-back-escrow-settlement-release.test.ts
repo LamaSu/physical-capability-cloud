@@ -132,24 +132,29 @@ describe("N79: the job-level release refuses an escrow that was given back", () 
     }
   });
 
-  it("the NAMED escrow was given back, even though the job's own is live, and named in lowercase: refused", async () => {
+  // N79 round 5 (R5-M1, astra 126e Q1 MEDIUM): a job with its own LIVE escrow, given a DIFFERENT escrow's address
+  // explicitly (even one that happens to be given back), is a target MISMATCH — caught before the given-back
+  // check ever runs, since the given-back check now runs only against the already-resolved, already-validated row.
+  it("the NAMED escrow is given back AND is not the job's own live escrow, named in lowercase: escrow_mismatch, not escrow_refunded", async () => {
     const LIVE = addr(0xa003);
     const GIVEN_BACK = addr(0xa004);
     seedJobWithEscrow("job-n79-rel-live", LIVE, "funded");
     seedJobWithEscrow("job-n79-rel-other", GIVEN_BACK, "refund_pending");
     const lower = GIVEN_BACK.toLowerCase();
     const r = await getSettlementService().releaseMilestone("job-n79-rel-live", 0, attestationFor(lower), lower);
-    expect(r).toEqual(expect.objectContaining({ status: "failed", error: "escrow_refunded" }));
+    expect(r).toEqual(expect.objectContaining({ status: "failed", error: "escrow_mismatch" }));
     expect(release).not.toHaveBeenCalled();
   });
 
-  it("the job's OWN escrow was given back, even though the named escrow is live: refused, the job is not settled", async () => {
+  // The mirror case: the job's OWN escrow is given back, but the caller names a DIFFERENT, live escrow — still a
+  // mismatch (the named target is not the job's own row), not a given-back refusal.
+  it("the job's OWN escrow was given back, but a DIFFERENT live escrow is named: escrow_mismatch, not escrow_refunded", async () => {
     const GIVEN_BACK = addr(0xa007);
     const LIVE = addr(0xa008);
     seedJobWithEscrow("job-n79-rel-own", GIVEN_BACK, "refund_pending");
     seedJobWithEscrow("job-n79-rel-bystander", LIVE, "funded");
     const r = await getSettlementService().releaseMilestone("job-n79-rel-own", 0, attestationFor(LIVE), LIVE);
-    expect(r).toEqual(expect.objectContaining({ status: "failed", error: "escrow_refunded" }));
+    expect(r).toEqual(expect.objectContaining({ status: "failed", error: "escrow_mismatch" }));
     expect(release).not.toHaveBeenCalled();
     expect(getRepos().jobs.findById("job-n79-rel-own")?.status).toBe("failed");
   });

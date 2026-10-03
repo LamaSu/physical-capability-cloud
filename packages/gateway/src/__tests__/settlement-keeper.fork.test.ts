@@ -84,7 +84,15 @@ const FIXTURE_ARTIFACT = resolve(
   "../../../contracts/out/SettlementKeeperForkFixture.sol/SettlementKeeperForkFixture.json",
 );
 
-/** Insert an escrow row (and its one milestone row) into the real in-memory store, as paid-job-flow writes them. */
+/**
+ * Insert an escrow row (and its one milestone row) into the real in-memory store, as paid-job-flow writes them.
+ *
+ * Fixture correction (round 5, the R5-H2b identity check): the local row's `stepId` must be
+ * the exact string the fixture CONTRACT hashed on-chain for its one milestone — `"step-keeper-fork-001"`
+ * (SettlementKeeperForkFixture.sol: `stepId = keccak256("step-keeper-fork-001")`) — not an arbitrary local
+ * convention, since this test reads the REAL chain rather than a synthetic one. Fixture-only — no assertion in
+ * this file changed.
+ */
 function seedEscrow(id: string, contractAddress: string, status: string): void {
   const now = new Date().toISOString();
   getRepos().escrows.insert({
@@ -99,7 +107,7 @@ function seedEscrow(id: string, contractAddress: string, status: string): void {
     deadline: new Date(Date.now() + 86_400_000).toISOString(),
     version: "v2",
   });
-  getRepos().escrows.insertMilestone({ id: `ms-${id}`, escrowId: id, stepId: "step-1", amount: "100", status: "funded", bondAmount: "0" });
+  getRepos().escrows.insertMilestone({ id: `ms-${id}`, escrowId: id, stepId: "step-keeper-fork-001", amount: "100", status: "funded", bondAmount: "0" });
 }
 
 /** What the store says about an escrow: its row status and every milestone row status. */

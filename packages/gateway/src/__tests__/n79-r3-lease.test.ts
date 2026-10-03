@@ -17,7 +17,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { getAddress } from "viem";
+import { getAddress, keccak256, toBytes } from "viem";
 import { isNonRetryable } from "@pcc/workflow";
 
 const gates = vi.hoisted(() => ({
@@ -195,6 +195,9 @@ function claimOf(result: SettlementClaimResult): SettlementClaim {
   return result.claim;
 }
 
+// Fixture correction (round 5, the R5-H2b identity check): index i's chain stepId mirrors
+// `seed()`'s own `step-${i+1}` convention via the same hash production writes on-chain
+// (`keccak256(toBytes(ms.stepId))`, paid-job-flow.ts). Fixture-only — no assertion in this file changed.
 /** The chain's view of a V2 escrow with one milestone per status given, each with its challenge window `windowEnd`. */
 function chainState(address: string, statuses: number[], windowEnd = NOW - 1_000) {
   return {
@@ -206,8 +209,8 @@ function chainState(address: string, statuses: number[], windowEnd = NOW - 1_000
     funded: true,
     totalAmount: "10",
     milestoneCount: statuses.length,
-    milestones: statuses.map((status) => ({
-      stepId: `0x${"11".repeat(32)}`,
+    milestones: statuses.map((status, i) => ({
+      stepId: keccak256(toBytes(`step-${i + 1}`)),
       operator: addr(0),
       amount: "10",
       operatorBond: "0",
@@ -470,7 +473,11 @@ describe("the hand-back and the release record act only for the claim that holds
     const claim = claimOf(beginSettlement({ jobId })); // acquired: funded -> completing, prior funded
     recordMilestoneRowReleased(escrowId, 0);
     recordMilestoneRowReleased(escrowId, 0); // idempotent
-    recordMilestoneRowReleased(escrowId, 9); // no such milestone: a no-op
+    // N79 round 5 (R5-H2, astra 126e Q3 HIGH): a chain index with no local row is no longer a silent no-op — it
+    // is exactly the cardinality-drift signal the keeper's `recordRow` now turns into `unrecordedRelease` (see
+    // n79-r5-review.test.ts, "R5-H2 (STOP replacement 2 of 2)" for the direct, uncaught-throw proof). Called bare
+    // here, it throws, so it is removed from this test: the claim/compare-and-set proof below needs only the two
+    // valid-index calls above.
     // The escrow is neither handed back nor completed, and the lease is untouched.
     expect(escrowRow(escrowId)).toEqual({ escrow: "completing", milestones: ["released", "funded"] });
     expect(beginSettlement({ jobId }).disposition).toBe("busy");

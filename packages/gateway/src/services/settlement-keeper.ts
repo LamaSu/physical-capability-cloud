@@ -76,7 +76,7 @@
  * global store; production passes getRepos(), so they are the same store.
  */
 
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import type { IRepositories } from "@pcc/store";
 import { ESCROW_REFUND_STATUS } from "@pcc/spec";
 import {
@@ -311,6 +311,10 @@ export async function runKeeperSweep(
     // set, the `finally` below leaves the escrow durably as the claim found it (still `completing`) instead of
     // reconciling or handing it back. The index of the first such failure, for the escrow-level log line.
     let unrecordedRelease: number | undefined;
+    // The chain's ordered stepIds, once a read has succeeded — passed to `recordEscrowReleased` below (R5-H2,
+    // identity follow-up R5-H2b) so it can refuse to complete an escrow whose local rows have since drifted from
+    // what was actually read, in COUNT or in per-index IDENTITY.
+    let chainStepIds: Hex[] | undefined;
 
     /**
      * Mark one milestone's row `released` at once, the moment the chain shows it paid (a drive that settled, or a pre-read
@@ -319,11 +323,12 @@ export async function runKeeperSweep(
      * drive). A partly paid escrow's rows then tell the truth, and a later refund stops at `milestone_past_funding`.
      * Best-effort, like the reconcile: the money already moved, and the next sweep repeats it — EXCEPT that a
      * failure here now also blocks the hand-back/reconcile below (R4-H3): the money moved regardless of whether
-     * this row write succeeded.
+     * this row write succeeded. `chainStepId` (R5-H2b) is the chain's stepId for this SAME index — identity, not
+     * only cardinality.
      */
-    const recordRow = (idx: number): void => {
+    const recordRow = (idx: number, chainStepId: Hex): void => {
       try {
-        recordMilestoneRowReleased(escrow.id, idx);
+        recordMilestoneRowReleased(escrow.id, idx, chainStepId);
       } catch (err) {
         logger?.warn?.(
           `[settlement-keeper] could not record ${escrow.id}#${idx} as released: ${err instanceof Error ? err.message : String(err)}`,
@@ -351,7 +356,12 @@ export async function runKeeperSweep(
         );
       }
       if (onChain) {
+        // N79 round 5 (R5-H2 cardinality, R5-H2b identity, astra 126e Q3 HIGH): the mapping is validated where
+        // milestone rows are WRITTEN (escrow-refund.ts), so every write path is covered, not only this one. The
+        // keeper passes the chain's ordered stepIds; `recordMilestoneRowReleased` and `recordEscrowReleased`
+        // refuse on a cardinality OR an identity mismatch (a same-index row that is not the same obligation).
         allReleased = onChain.milestones.length > 0;
+        chainStepIds = onChain.milestones.map((cm) => cm.stepId as Hex); // OnChainMilestone types stepId as a plain string; at runtime it is always 0x-hex.
 
         for (let idx = 0; idx < onChain.milestones.length; idx++) {
           const m: OnChainMilestoneV2 = onChain.milestones[idx];
@@ -369,7 +379,7 @@ export async function runKeeperSweep(
 
           if (m.status === MilestoneStatusV2.Released) {
             record({ disposition: "already_released" });
-            recordRow(idx);
+            recordRow(idx, m.stepId as Hex);
             continue;
           }
           if (isTerminalOtherStatus(m.status)) {
@@ -402,7 +412,7 @@ export async function runKeeperSweep(
             if (drive.settled) {
               result.released += 1;
               record({ disposition: "released", driveOutcome: drive.outcome });
-              recordRow(idx);
+              recordRow(idx, m.stepId as Hex);
             } else if (drive.outcome === "terminal_other") {
               // A dispute/slash landed between our read and the drive — the crank's
               // confirming read caught it. Surface, do not count as released.
@@ -443,7 +453,10 @@ export async function runKeeperSweep(
       // as the claim found it (still `completing`) — NOT reconciled (its row state does not actually say every
       // milestone released) and NOT handed back (that would reopen money that already moved to a refund). Only the
       // lease ends, so the next V2 sweep (or any other claim) adopts the still-`completing` row and recounts from
-      // chain truth. `settlement_record_failed` was already logged by `recordRow` above.
+      // chain truth. `settlement_record_failed` was already logged by `recordRow` above. R5-H2's cardinality
+      // defense (a chain-has-more drift) comes through this SAME flag: `recordMilestoneRowReleased` now throws
+      // when the chain's index has no local row, which `recordRow` turns into `unrecordedRelease` exactly like any
+      // other failed record. A local-has-more drift is instead caught below, in `recordEscrowReleased` itself.
       if (unrecordedRelease !== undefined) {
         endSettlement(claim);
       } else {
@@ -453,7 +466,7 @@ export async function runKeeperSweep(
         // (to the payer, if its job ended meanwhile). Jobs are left to the existing settle paths + Step-3 projection.
         try {
           if (allReleased) {
-            if (recordEscrowReleased(claim)) result.reconciledCompleted += 1;
+            if (recordEscrowReleased(claim, chainStepIds ? { stepIds: chainStepIds } : undefined)) result.reconciledCompleted += 1;
           } else {
             releaseEscrowFromSettlement(claim, claim.jobId);
           }
