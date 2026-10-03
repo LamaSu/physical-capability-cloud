@@ -404,9 +404,8 @@ const RULES: Rule[] = [
         if (ts.isIdentifier(target)) return target.text === "fetch";
         if (GLOBAL_WRITES_ALLOWED.has(target.getText(sf).replace(/\s+/g, ""))) return false;
         const root = rootOf(target);
-        if (ts.isIdentifier(root) && (WRITE_ROOTS.has(root.text) || BUILTINS.has(root.text))) return true;
-        // X.prototype.y = …: a built-in's behaviour replaced for everyone.
-        return ts.isPropertyAccessExpression(target) && /(?:^|\.)prototype\./.test(target.getText(sf).replace(/\s+/g, ""));
+        // A global's property, or a built-in's (Headers.prototype.set = …): replaced for every request.
+        return ts.isIdentifier(root) && (WRITE_ROOTS.has(root.text) || BUILTINS.has(root.text));
       }),
     fix: "Don't replace fetch, a global's property or a prototype's method, and don't hold, pass or store navigator, document, a built-in or its prototype: the key passes through them.",
   },
@@ -652,6 +651,7 @@ describe("the rules catch each known way around them (self-test)", () => {
       'const proto = Object.getPrototypeOf(new Headers());\nObject.defineProperty(proto, "set", { value: observe });',
       'const proto = new Headers().__proto__;',
       'const doc = document;\nconst el = doc.createElement("div");', // harmless here, but an alias all the same: read document directly
+      "const env = { navigator };",
     ]) {
       expect(caught(code), code).toContain("global-write");
     }
