@@ -96,6 +96,15 @@ def violations(source, filename="<src>"):
     # Names used as the object of an attribute access (os in os.path.join), and called expressions.
     attribute_bases = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    # getattr/hasattr(module, "constant") names one attribute, like module.constant does, so it
+    # is judged as that attribute; a computed name still counts as the module used as a value.
+    constant_lookups = {
+        id(n.args[0]): n.args[1].value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("getattr", "hasattr")
+        and len(n.args) >= 2 and isinstance(n.args[0], ast.Name) and n.args[0].id in modules
+        and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str)
+    }
 
     def target(func):
         """(module, attr) a call resolves to, if it is one we track."""
@@ -109,7 +118,11 @@ def violations(source, filename="<src>"):
         # A module object used as a value (assigned, passed, vars(os)) hides its calls.
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             if node.id in modules and id(node) not in attribute_bases:
-                bad(node, f"module {modules[node.id]} used as a value")
+                module, attr = modules[node.id], constant_lookups.get(id(node))
+                if attr is None:
+                    bad(node, f"module {module} used as a value")
+                elif attr in REFUSED.get(module, ()) or attr.startswith("__") or (module, attr) in ALLOWED_STARTS:
+                    bad(node, f"{module}.{attr} through getattr")
             elif node.id == "__builtins__":
                 bad(node, "__builtins__")
         # Any reference to a refused attribute, called or not (invoke = os.system).
@@ -247,6 +260,8 @@ EVASIONS = {
     "starter passed as a value": "import subprocess\nloop.run_in_executor(None, subprocess.run, argv)",
     "executable=/bin/sh": "import subprocess\nsubprocess.run(['ignored', '-c', payload], executable='/bin/sh')",
     "executable= variable": "import subprocess as sp\nsp.Popen(['ls'], executable=exe)",
+    "getattr of a starter": "import subprocess\ngetattr(subprocess, 'run')(x, shell=True)",
+    "getattr of a dunder": "import os\ngetattr(os, '__dict__')['system']('id')",
 }
 SAFE = {
     "fixed argv": "import subprocess\nsubprocess.run(['v4l2-ctl', '--device', dev, '--all'], capture_output=True)",
@@ -254,6 +269,9 @@ SAFE = {
     "fixed exec": "import asyncio\nasyncio.create_subprocess_exec('ffmpeg', '-i', dev)",
     "yaml.safe_load": "import yaml\nyaml.safe_load(text)",
     "constant ** without shell": "import subprocess\nsubprocess.run(['git', 'status'], **{'check': True})",
+    # A constant, harmless attribute through getattr: #447's ui_server.py and #454 use these.
+    "constant getattr": "import os\nflags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0)",
+    "constant hasattr": "import os\nsupported = hasattr(os, 'O_CLOEXEC')",
 }
 
 
