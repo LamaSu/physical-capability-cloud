@@ -115,4 +115,20 @@ describe("N111 — GET /api/jobs paging", () => {
     expect(result.data.limit).toBe(50);
     expect(result.data.hasMore).toBe(10 + result.data.items.length < result.data.total);
   });
+
+  it("the facade enforces the route's bounds for every caller: limit an integer in 1..200, offset an integer >= 0", async () => {
+    // Cross-family review r1 of #535, MEDIUM: a typed non-HTTP caller could pass limit 0 or 201.
+    const facade = getJobFacade();
+    const page = async (offset: number, limit: number) => {
+      const result = await facade.list({}, {}, { offset, limit });
+      if (!result.success) throw new Error("list failed");
+      return result.data;
+    };
+    expect((await page(0, 201)).limit).toBe(200);
+    expect((await page(0, 1e9)).limit).toBe(200);
+    const zero = await page(0, 0);
+    expect([zero.limit, zero.items.length]).toEqual([1, 1]);
+    const fractional = await page(10.7, 5.9);
+    expect([fractional.offset, fractional.limit, fractional.items.length]).toEqual([10, 5, 5]);
+  });
 });

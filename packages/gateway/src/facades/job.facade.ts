@@ -106,15 +106,26 @@ const TYPE_ALIASES: Record<string, string[]> = {
  * `list()` is called from several places (routes/jobs.ts, routes/setup.ts,
  * routes/status.ts, routes/operator-relay.ts) and not all of them validate
  * their input the way routes/jobs.ts's querystring schema now does — so this
- * is the last line of defense. Anything that isn't a finite, non-negative
- * integer (a string, a float, NaN, a negative number) falls back to
- * `fallback` instead of being used in `offset + limit` arithmetic, which is
- * exactly how N111 happened: string concatenation standing in for addition.
+ * is the last line of defense. A value that is not a finite number (a
+ * non-numeric string, NaN) falls back to the default instead of being used in
+ * `offset + limit` arithmetic, which is exactly how N111 happened: string
+ * concatenation standing in for addition. A number is truncated to an integer
+ * and clamped to the same bounds GET /api/jobs enforces (cross-family review
+ * r1 of #535, MEDIUM): offset >= 0, limit 1..JOB_PAGE_MAX_LIMIT.
  */
-function toSafeOffsetOrLimit(value: unknown, fallback: number): number {
+export const JOB_PAGE_MAX_LIMIT = 200;
+
+function toFiniteInteger(value: unknown): number | undefined {
   const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n) || n < 0) return fallback;
-  return Math.trunc(n);
+  return Number.isFinite(n) ? Math.trunc(n) : undefined;
+}
+
+function pageOffsetOf(value: unknown): number {
+  return Math.max(0, toFiniteInteger(value) ?? 0);
+}
+
+function pageLimitOf(value: unknown): number {
+  return Math.min(JOB_PAGE_MAX_LIMIT, Math.max(1, toFiniteInteger(value) ?? 50));
 }
 
 // ── Facade ─────────────────────────────────────────────────────────────────
@@ -146,10 +157,11 @@ export class JobFacade extends BaseFacade {
       // N111 — defensive coercion: the route's querystring schema already
       // guarantees real numbers, but this facade is called from other
       // places too (setup.ts, status.ts, operator-relay.ts), so don't trust
-      // the caller. toSafeOffsetOrLimit() forces integer-only arithmetic
-      // regardless of what's passed (string, float, NaN, negative, etc.).
-      const offset = toSafeOffsetOrLimit(pagination?.offset, 0);
-      const limit = toSafeOffsetOrLimit(pagination?.limit, 50);
+      // the caller. pageOffsetOf() and pageLimitOf() force integer arithmetic
+      // within the route's bounds, whatever is passed (string, float, NaN,
+      // negative, zero, or a limit over JOB_PAGE_MAX_LIMIT).
+      const offset = pageOffsetOf(pagination?.offset);
+      const limit = pageLimitOf(pagination?.limit);
 
       const opts = filters?.tenantId ? { tenantId: filters.tenantId } : undefined;
       let jobs;
