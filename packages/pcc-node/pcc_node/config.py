@@ -22,8 +22,8 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
 _WINDOWS_REFUSAL = (
-    "pcc-node 0.1.1 does not keep an API key in a config file on Windows: it cannot yet make the "
-    "file private there. Run the node on Linux or macOS (WSL works)."
+    "pcc-node 0.1.1 does not use a config file on Windows: it cannot yet make the file private there, "
+    "and a config decides where your API key is sent. Run the node on Linux or macOS (WSL works)."
 )
 
 
@@ -121,12 +121,12 @@ def save_config(config: NodeConfig, path: str = "./pcc-node.json") -> str:
     at *path*, is replaced rather than written through, and a failed write
     leaves the old config (or nothing) instead of a partial file.
 
-    On Windows a config that holds a key is refused with ConfigFileError: the
-    file cannot yet be made private there (verdict 105c, finding 3).
+    On Windows every config is refused with ConfigFileError: the file cannot
+    yet be made private there (verdicts 105c and 105d, finding 3).
     """
-    data = config.to_dict()
-    if not _POSIX and _holds_a_key(data):
+    if not _POSIX:
         raise ConfigFileError(_WINDOWS_REFUSAL)
+    data = config.to_dict()
     abs_path = os.path.abspath(path)
     directory = os.path.dirname(abs_path)
     tmp_path = os.path.join(directory, f".{os.path.basename(abs_path)}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
@@ -162,9 +162,13 @@ def load_config_data(path: str = "./pcc-node.json") -> dict:
     read is restricted to 0600 before use, and the operator is told to rotate
     the key (verdict 105b, finding 7).
 
-    On Windows a config that holds a key is refused (verdict 105c, finding 3).
+    On Windows every config is refused, before the file is opened: even a
+    keyless one names the gateway a key given on the command line is sent to,
+    and another account could rewrite it (verdict 105d).
     ConfigFileError says why a config was refused; the key is never printed.
     """
+    if not _POSIX:
+        raise ConfigFileError(_WINDOWS_REFUSAL)
     abs_path = os.path.abspath(path)
     try:
         fd = os.open(abs_path, os.O_RDONLY | _NOFOLLOW | _CLOEXEC)
@@ -180,10 +184,6 @@ def load_config_data(path: str = "./pcc-node.json") -> dict:
         data = json.load(f)
         if not isinstance(data, dict):
             raise ConfigFileError(f"{abs_path} is not a pcc-node config: it is not a JSON object")
-        if not _POSIX:
-            if _holds_a_key(data):
-                raise ConfigFileError(_WINDOWS_REFUSAL)
-            return data
         if st.st_uid != os.getuid():
             raise ConfigFileError(f"{abs_path} is owned by another account (uid {st.st_uid})")
         mode = st.st_mode & 0o777
