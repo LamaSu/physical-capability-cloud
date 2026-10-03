@@ -2570,7 +2570,7 @@
     },
     {
       "name": "get_operator_dashboard",
-      "description": "Operator dashboard overview: machines, earnings summary, and maintenance alerts.",
+      "description": "Not available: no route answers GET /api/operator on this gateway. The operator's real kernels, devices and in-flight jobs are at GET /api/agent/me.",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -2583,7 +2583,7 @@
     },
     {
       "name": "get_operator_machines",
-      "description": "List all machines registered under the operator account with utilization and uptime stats.",
+      "description": "Answers 501 not_available: operator machines with utilization and uptime are not recorded on this gateway. The operator's real kernels, devices and in-flight jobs are at GET /api/agent/me.",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -2596,7 +2596,7 @@
     },
     {
       "name": "get_operator_earnings",
-      "description": "Get operator earnings breakdown over a time period. Includes daily earnings and cumulative totals.",
+      "description": "Answers 501 not_available: operator earnings history is not recorded on this gateway. Per-job payment state is at GET /api/jobs/:jobId/execution.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2620,7 +2620,7 @@
     },
     {
       "name": "get_operator_certs",
-      "description": "List operator certifications (OSHA, safety training, PCC network certs) with validity status.",
+      "description": "Answers 501 not_available: operator certifications are not recorded on this gateway (there is no certification store; certifications typed at registration are the operator's own claim and are not checked).",
       "input_schema": {
         "type": "object",
         "properties": {},
