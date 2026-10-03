@@ -93,6 +93,18 @@ type Stage = "draft" | "confirmed" | "csd" | "runtime" | "refusals";
  * throws records the error's name. Serialized only after every patch is
  * restored. The untouched run is the reference.
  */
+/**
+ * Digests that are well formed except for their digits, and a draft input that
+ * carries one, built before any patch is applied (and before CLEAN): the
+ * test's own code must not run a replaced intrinsic (astra pack 167).
+ */
+const NOT_HEX_MANIFEST = `sha256:${"z".repeat(64)}`;
+const NOT_HEX_ENVELOPE_DIGEST = `0x${"z".repeat(64)}` as `0x${string}`;
+const NOT_HEX_INPUT: SafetyEnvelopeInput = (() => {
+  const given = input();
+  return { ...given, device: { ...given.device, adapterVersion: NOT_HEX_MANIFEST } };
+})();
+
 function runStages(): Record<Stage, unknown> {
   const out = {} as Record<Stage, unknown>;
   const attempt = (stage: Stage, run: () => unknown) => {
@@ -122,6 +134,9 @@ function runStages(): Record<Stage, unknown> {
   refusal(() => draftSafetyEnvelope({ ...input(), deviceClass: "toString" }));
   refusal(() => confirmSafetyEnvelope(input(), { ...DECISION, confirmedBy: "  " }));
   refusal(() => confirmSafetyEnvelope(input(), { ...DECISION, edits: [{ quantity: "incubation_temperature", min: 20, max: 50 }] }));
+  // Digests that are well formed except for their digits: a charCodeAt that reports every unit as "0" must not pass them (astra pack 167).
+  refusal(() => draftSafetyEnvelope(NOT_HEX_INPUT));
+  refusal(() => registrationSigningPreimage({ deviceId: "pr-1", envelopeDigest: NOT_HEX_ENVELOPE_DIGEST, registeredAt: "2026-10-03T00:05:00Z" }));
   if (confirmed && registration) {
     // structuredClone, not a JSON round trip: the test's own code must not run a replaced intrinsic either.
     const tampered = structuredClone(confirmed) as unknown as { envelope: { limits: Array<Record<string, unknown>> } };
@@ -427,6 +442,36 @@ describe("the R8 modules call no ambient method (source scan)", () => {
     [/\b(canonicalize|signingPreimage|parseEd25519SignatureHex|createHash)\s*\(/, "a shared helper that uses ambient methods"],
   ];
 
+  /**
+   * Banned in every R8 module, primordials.ts included, with no exemption: a
+   * RegExp object's matcher can be replaced after load by
+   * RegExp.prototype.compile, even when the object is frozen (astra pack 167).
+   * A slash that follows an operator or punctuation starts a regex literal; a
+   * division follows an operand.
+   */
+  const NO_REGEXP: Array<[RegExp, string]> = [
+    [/\bRegExp\b/, "a RegExp"],
+    [/\.(regex|test|exec|match|matchAll|search)\(/, "a regex method"],
+    [/(^|[=(,:!&|?;{}[<>+\-*%~^]|\breturn|\btypeof)\s*\/(?![/*])/, "a regex literal"],
+  ];
+
+  for (const file of ["primordials.ts", "safety-envelope.ts", "operational-envelope.ts"]) {
+    it(`${file} checks no format with a RegExp`, () => {
+      const code = codeOnly(readFileSync(fileURLToPath(new URL(`../onboarding/${file}`, import.meta.url)), "utf8"));
+      const found: string[] = [];
+      code.split("\n").forEach((line, n) => {
+        for (const [pattern, what] of NO_REGEXP) if (pattern.test(line)) found.push(`${file}:${n + 1} ${what}: ${line.trim()}`);
+      });
+      expect(found).toEqual([]);
+    });
+  }
+
+  it("the regex-literal ban sees a literal after = ( , : return and =>, and not a division", () => {
+    const literal = NO_REGEXP[2]![0];
+    for (const line of ["const P = /^a$/;", "f(/x/)", "g(a, /x/)", "{ k: /x/ }", "return /x/.source;", "const f = () => /x/;"]) expect(literal.test(line), line).toBe(true);
+    for (const line of ["const half = total / 2;", "const r = (a + b) / c;", "x = list[0] / y;"]) expect(literal.test(line), line).toBe(false);
+  });
+
   for (const file of ["safety-envelope.ts", "operational-envelope.ts"]) {
     it(`${file} uses only the captured intrinsics`, () => {
       const code = codeOnly(readFileSync(fileURLToPath(new URL(`../onboarding/${file}`, import.meta.url)), "utf8"));
@@ -435,7 +480,7 @@ describe("the R8 modules call no ambient method (source scan)", () => {
       for (const [pattern, what] of BANNED) {
         lines.forEach((line, n) => {
           // Zod schema construction runs once, at load; its own method names are not ambient calls of ours.
-          if (/^\s*(\.|z\.|export const|const \w+ = z)/.test(line) && /\b(z\.|\.(refine|strict|optional|min|regex|superRefine|enum|literal|union|array|number|string|object|int|finite|discriminatedUnion)\()/.test(line)) return;
+          if (/^\s*(\.|z\.|export const|const \w+ = z)/.test(line) && /\b(z\.|\.(refine|strict|optional|min|superRefine|enum|literal|union|array|number|string|object|int|finite|discriminatedUnion)\()/.test(line)) return;
           if (pattern.test(line)) found.push(`${file}:${n + 1} ${what}: ${line.trim()}`);
         });
       }

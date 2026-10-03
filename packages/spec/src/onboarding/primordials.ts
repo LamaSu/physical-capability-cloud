@@ -54,7 +54,6 @@ const ObjectPrototypeHasOwnProperty = uncurryThis(Object.prototype.hasOwnPropert
 const StringPrototypeTrim = uncurryThis(String.prototype.trim);
 const StringPrototypeToLowerCase = uncurryThis(String.prototype.toLowerCase);
 const StringPrototypeCharCodeAt = uncurryThis(String.prototype.charCodeAt);
-const RegExpPrototypeExec = uncurryThis(RegExp.prototype.exec);
 
 /** The SHA-256 the digests use: node:crypto's Hash, its methods captured at load. */
 const createHashAtLoad = createHash;
@@ -159,8 +158,32 @@ export function toLowerCase(s: string): string {
   return StringPrototypeToLowerCase(s);
 }
 
-export function regexMatches(re: RegExp, s: string): boolean {
-  return RegExpPrototypeExec(re, s) !== null;
+/**
+ * `prefix` and then exactly `hexLength` lowercase hex digits, checked code unit
+ * by code unit. There is no RegExp: RegExp.prototype.compile replaces a RegExp
+ * object's matcher in place after load, and it does so even when the object is
+ * frozen (astra pack 167).
+ */
+function isPrefixedLowerHex(value: unknown, prefix: string, hexLength: number): value is string {
+  if (typeof value !== "string" || value.length !== prefix.length + hexLength) return false;
+  for (let i = 0; i < prefix.length; i++) {
+    if (StringPrototypeCharCodeAt(value, i) !== StringPrototypeCharCodeAt(prefix, i)) return false;
+  }
+  for (let i = prefix.length; i < value.length; i++) {
+    const unit = StringPrototypeCharCodeAt(value, i);
+    if (!((unit >= 0x30 && unit <= 0x39) || (unit >= 0x61 && unit <= 0x66))) return false;
+  }
+  return true;
+}
+
+/** `sha256:` + 64 lowercase hex: LO-EV-1's tagged digest form, also an adapter's manifest digest. */
+export function isTaggedSha256(value: unknown): value is string {
+  return isPrefixedLowerHex(value, "sha256:", 64);
+}
+
+/** `0x` + 64 lowercase hex: the commitment family's digest form. */
+export function isHex256Digest(value: unknown): value is string {
+  return isPrefixedLowerHex(value, "0x", 64);
 }
 
 /** A value as text for a message, never calling a method on it. */
