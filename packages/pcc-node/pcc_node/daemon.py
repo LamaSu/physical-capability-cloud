@@ -6,8 +6,7 @@ Combines all node subsystems into a single long-running process:
   3. Register kernel with PCC gateway (HTTP POST)
   4. Announce capabilities (signed)
   5. Start HTTP polling loop:
-     - Poll /api/operator/jobs every N seconds, only while the kernel's
-       emergency stop is clear (estop.py)
+     - Poll /api/operator/jobs every N seconds
      - Execute each job via JobExecutor
      - Push evidence bundle back to gateway
      - Re-announce capabilities every 60s (heartbeat)
@@ -24,7 +23,6 @@ from .camera import push_camera_frame, detect_camera_device
 from .config import NodeConfig
 from .crypto import load_or_create_keys
 from .discovery import discover_network, device_to_adapter_config
-from .estop import EStopGuard
 from .job_executor import JobExecutor
 from .register import register_kernel, announce_capabilities
 from .ws_client import PCCGatewayClient
@@ -238,7 +236,6 @@ def run_daemon(config: NodeConfig):
     )
 
     job_executor = JobExecutor(devices=all_devices, gateway_client=gateway_client)
-    estop = EStopGuard(config.pcc_base, config.pcc_api_key, config.kernel_id, all_devices)
 
     # ------------------------------------------------------------------
     # 6. Probe camera
@@ -294,8 +291,8 @@ def run_daemon(config: NodeConfig):
 
     while running:
         try:
-            # Poll for queued jobs, unless an emergency stop is set or unreadable
-            jobs = gateway_client.poll_for_jobs() if estop.check() else []
+            # Poll for queued jobs
+            jobs = gateway_client.poll_for_jobs()
 
             for job in jobs:
                 job_id = job.get("id", "?")
