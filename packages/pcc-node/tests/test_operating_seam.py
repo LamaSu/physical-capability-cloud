@@ -126,8 +126,7 @@ class LoopWithAdapterRuntimeTests(unittest.TestCase):
         self.runtime = runtime_mod.AdapterRuntime.from_profile(_binding(url), *self.keys)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.lock = HostDeviceLock(url, identity_path="/identity", identity_field="serial",
-                                   directory=os.path.join(self.tmp.name, "device-locks"))
+        self.lock = HostDeviceLock(url, serial="SEAM-PR-1", directory=os.path.join(self.tmp.name, "device-locks"))
         self.addCleanup(self.lock.close)
 
     def _port(self, selections):

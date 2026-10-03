@@ -17,8 +17,9 @@ The invariants, in order:
   4a. readiness             -- DeviceRuntime.is_idle()
   4b. emergency stop        -- Gate.allows_jobs(), re-read just before the device call
   4b'. the claim's lease    -- lease_alive(), re-read just before the device call
-  4c. one-shot record       -- DeviceLock.consume(job): never run a job twice
+  4c. the run record        -- DeviceLock.reserve(job), then mark_start_sent(job)
   5. run exactly one op     -- DeviceRuntime.run()   <- only step that touches hardware
+  5b. the record's end      -- DeviceLock.mark_terminal(job), only for a known outcome
   6. report + complete      -- JobPort.report / JobPort.complete
 
 On ANY refusal (steps 0-4c), run_once returns without ever calling
@@ -32,10 +33,13 @@ each job's claim to one node. Checking that
 the device is idle and then running it are two steps, so two loops (threads or
 processes) could both see it idle. The hold closes that: it is taken before the
 idle check and kept until run() returns, and every loop on the host that drives
-the device takes the same hold: it is keyed by the identity the device reports
-about itself, not by its URL. The one-shot record, keyed by the job's id alone,
-is made durable before the device is driven, so a job is never run twice on
-this host, under any claim, even after a crash.
+the device takes the same hold: it is keyed by the device's registered serial,
+which the device must confirm, not by its URL. The run record, keyed by the
+job's id alone, moves through reserved, start_sent and terminal, each made
+durable before the step it guards (steward #5981). A job whose start may have
+reached the device (start_sent, no terminal) is never replayed: it needs device
+reconciliation or a human. A terminal job never runs again. A safe retry is a
+new job.
 Two HOSTS pointed at one device are outside what a host can enforce; see
 devicelock.py for that boundary.
 
@@ -227,8 +231,17 @@ class DeviceLock(Protocol):
 
     def release(self) -> None: ...
 
-    def consume(self, job_key: str) -> bool:
-        """Record durably that this job runs now: True the first time, False ever after."""
+    def reserve(self, job_key: str) -> str:
+        """Durably take the job: "reserved" (nothing sent yet), "start_sent" (an earlier attempt
+        may have reached the device) or "terminal" (it ran to a known end)."""
+        ...
+
+    def mark_start_sent(self, job_key: str) -> None:
+        """Durably record, just before the device is driven, that the job's start is being sent."""
+        ...
+
+    def mark_terminal(self, job_key: str, outcome: str) -> None:
+        """Durably record that the job's run ended with a known outcome."""
         ...
 
 
@@ -272,13 +285,30 @@ def _probe(lock: Any) -> bool:
     return False
 
 
-def _consume(lock: Any, key: str) -> Optional[bool]:
-    """True: recorded now. False: this job was already run. None: no record could be made."""
+def _reserve(lock: Any, key: str) -> Optional[str]:
+    """The job's state on this host after reserving it, or None if the record failed."""
     try:
-        first = lock.consume(key)
+        state = lock.reserve(key)
     except Exception:
         return None
-    return True if first is True else False
+    return state if state in ("reserved", "start_sent", "terminal") else None
+
+
+def _start_sent(lock: Any, key: str) -> bool:
+    """Durably mark the start as being sent. False if that can't be recorded: then nothing is sent."""
+    try:
+        lock.mark_start_sent(key)
+    except Exception:
+        return False
+    return True
+
+
+def _terminal(lock: Any, key: str, outcome: str) -> None:
+    """Mark a known outcome. If it can't be recorded, the job stays start_sent: reconciled, never replayed."""
+    try:
+        lock.mark_terminal(key, outcome)
+    except Exception:
+        pass
 
 
 def _lease_alive(job: Any) -> bool:
@@ -449,16 +479,26 @@ def _run_once(profile: Any, runtime: Any, jobs: Any, job: Any, *, gate: Any, loc
             # lost while the params were resolved is no longer this node's to run.
             refusal = "lease_lost"
         else:
-            # Step 4c: the one-shot record, made durable before the device moves.
-            first = _consume(lock, key)
-            if first is None:
+            # Step 4c: the run record, made durable before the device moves (steward #5981).
+            state = _reserve(lock, key)
+            if state is None:
                 refusal = "run_record_unavailable"
-            elif not first:
+            elif state == "terminal":
                 refusal = "job_already_run"
+            elif state == "start_sent":
+                # An earlier attempt may have reached the device. Never replayed: device
+                # reconciliation or a human resolves it, and a safe retry is a new job.
+                refusal = "job_needs_reconciliation"
+            elif not _start_sent(lock, key):
+                refusal = "run_record_unavailable"
             else:
                 # Step 5: run exactly one operation. Only now does the device move.
                 # The job goes to the runtime as the claim it is.
                 ok, evidence, error = _run(runtime, job, operation, params)
+                # Step 5b: a known outcome closes the record. A run whose device state is
+                # unknown leaves it at start_sent, so it is never replayed.
+                if ok or not (isinstance(error, str) and error.endswith(DEVICE_STATE_UNKNOWN)):
+                    _terminal(lock, key, "ok" if ok else (error if isinstance(error, str) and error else "run_failed"))
     finally:
         _release(lock)
     if refusal is not None:

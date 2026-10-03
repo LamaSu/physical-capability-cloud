@@ -150,13 +150,13 @@ OPEN = FakeGate(True)
 
 
 class FakeLock:
-    """The device hold and one-shot record: holds unless told otherwise; records each job key once."""
+    """The device hold and the run record: holds unless told otherwise; keeps each job's state."""
 
-    def __init__(self, *, holds=True, raise_on=None):
+    def __init__(self, *, holds=True, raise_on=None, states=None):
         self.holds = holds
-        self.raise_on = raise_on  # "acquire" or "consume": that call raises
+        self.raise_on = raise_on  # "acquire", "reserve", "start_sent" or "terminal": that call raises
         self.held = False
-        self.consumed = set()
+        self.states = dict(states or {})  # job key -> "reserved" | "start_sent" | "terminal"
         self.calls = []
 
     def acquire(self):
@@ -172,14 +172,27 @@ class FakeLock:
         self.calls.append("release")
         self.held = False
 
-    def consume(self, key):
-        self.calls.append("consume")
-        if self.raise_on == "consume":
+    def reserve(self, key):
+        self.calls.append("reserve")
+        if self.raise_on == "reserve":
             raise OSError("record not durable")
-        if key in self.consumed:
-            return False
-        self.consumed.add(key)
-        return True
+        state = self.states.get(key)
+        if state in ("start_sent", "terminal"):
+            return state
+        self.states[key] = "reserved"
+        return "reserved"
+
+    def mark_start_sent(self, key):
+        self.calls.append("start_sent")
+        if self.raise_on == "start_sent":
+            raise OSError("record not durable")
+        self.states[key] = "start_sent"
+
+    def mark_terminal(self, key, outcome):
+        self.calls.append("terminal")
+        if self.raise_on == "terminal":
+            raise OSError("record not durable")
+        self.states[key] = "terminal"
 
 
 class ProtocolShapeTests(unittest.TestCase):
@@ -763,8 +776,7 @@ class OneDeviceOneRunTests(unittest.TestCase):
         self.addCleanup(self.identity.close)
 
     def _lock(self):
-        lock = HostDeviceLock(self.identity.url, identity_path="/identity", identity_field="serial",
-                              directory=self.lock_dir)
+        lock = HostDeviceLock(self.identity.url, serial="PR-0001", directory=self.lock_dir)
         self.addCleanup(lock.close)
         return lock
 
@@ -830,7 +842,43 @@ class OneDeviceOneRunTests(unittest.TestCase):
                                      job, gate=OPEN, lock=lock))
         self.assertEqual(starts, ["T1"])  # one physical start, at most
         self.assertTrue(outcomes[0].device_state_unknown)
-        self.assertEqual((outcomes[1].ran, outcomes[1].reason), (False, "job_already_run"))
+        self.assertEqual((outcomes[1].ran, outcomes[1].reason), (False, "job_needs_reconciliation"))
+        # The record outlives the process: a restarted node refuses it the same way.
+        job = SimpleNamespace(job_id="J", operation="runPlate", claim_token="T3", lease_alive=lambda: True)
+        later = run_once(self.profile, Ambiguous(idle=True), FakeJobPort(params_by_job={"J": valid_params()}), job,
+                         gate=OPEN, lock=self._lock())
+        self.assertEqual((later.reason, starts), ("job_needs_reconciliation", ["T1"]))
+
+    def test_a_job_reserved_but_never_sent_may_run(self):
+        # A crash between reserve and start_sent sent nothing to the device: going on is safe.
+        lock = FakeLock(states={"job:r": "reserved"})
+        runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+        outcome = run_once(self.profile, runtime, FakeJobPort(params_by_job={"r": valid_params()}), claimed("r"),
+                           gate=OPEN, lock=lock)
+        self.assertTrue(outcome.passed, outcome.reason)
+        self.assertEqual((len(runtime.run_calls), lock.states["job:r"]), (1, "terminal"))
+
+    def test_a_known_failure_closes_the_record_so_the_job_never_runs_again(self):
+        lock = FakeLock()
+        failing = FakeRuntime(idle=True, result=RuntimeResult(ok=False, error="device_refused:409"))
+        first = run_once(self.profile, failing, FakeJobPort(params_by_job={"f": valid_params()}), claimed("f"),
+                         gate=OPEN, lock=lock)
+        self.assertEqual((first.reason, lock.states["job:f"]), ("device_refused:409", "terminal"))
+        again = run_once(self.profile, failing, FakeJobPort(params_by_job={"f": valid_params()}), claimed("f", token="t2"),
+                         gate=OPEN, lock=lock)
+        self.assertEqual(again.reason, "job_already_run")
+        self.assertEqual(len(failing.run_calls), 1)
+
+    def test_a_terminal_that_cannot_be_recorded_leaves_the_job_for_reconciliation(self):
+        lock = FakeLock(raise_on="terminal")
+        runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+        run_once(self.profile, runtime, FakeJobPort(params_by_job={"t": valid_params()}), claimed("t"), gate=OPEN, lock=lock)
+        self.assertEqual(lock.states["job:t"], "start_sent")
+        lock.raise_on = None
+        again = run_once(self.profile, runtime, FakeJobPort(params_by_job={"t": valid_params()}), claimed("t", token="t2"),
+                         gate=OPEN, lock=lock)
+        self.assertEqual(again.reason, "job_needs_reconciliation")
+        self.assertEqual(len(runtime.run_calls), 1)
 
     def test_a_device_held_elsewhere_is_refused_untouched(self):
         jobs = FakeJobPort(params_by_job={"h": valid_params()})
@@ -841,7 +889,8 @@ class OneDeviceOneRunTests(unittest.TestCase):
         self.assertEqual(jobs.complete_calls, [("h", False, "device_locked")])
 
     def test_a_lock_that_fails_refuses_and_lets_go(self):
-        for raise_on, reason in (("acquire", "device_lock_unavailable"), ("consume", "run_record_unavailable")):
+        for raise_on, reason in (("acquire", "device_lock_unavailable"), ("reserve", "run_record_unavailable"),
+                                 ("start_sent", "run_record_unavailable")):
             lock = FakeLock(raise_on=raise_on)
             runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
             outcome = run_once(self.profile, runtime, FakeJobPort(params_by_job={"f": valid_params()}),
@@ -862,9 +911,17 @@ class OneDeviceOneRunTests(unittest.TestCase):
                 log.append("release")
                 super().release()
 
-            def consume(self, key):
-                log.append("consume")
-                return super().consume(key)
+            def reserve(self, key):
+                log.append("reserve")
+                return super().reserve(key)
+
+            def mark_start_sent(self, key):
+                log.append("start_sent")
+                super().mark_start_sent(key)
+
+            def mark_terminal(self, key, outcome):
+                log.append("terminal")
+                super().mark_terminal(key, outcome)
 
         class LoggingRuntime(FakeRuntime):
             def is_idle(self):
@@ -878,7 +935,7 @@ class OneDeviceOneRunTests(unittest.TestCase):
         gate = SimpleNamespace(allows_jobs=lambda: log.append("gate") or True)
         run_once(self.profile, LoggingRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1})),
                  FakeJobPort(params_by_job={"o": valid_params()}), claimed("o", "runPlate"), gate=gate, lock=LoggingLock())
-        self.assertEqual(log, ["acquire", "is_idle", "gate", "consume", "run", "release"])
+        self.assertEqual(log, ["acquire", "is_idle", "gate", "reserve", "start_sent", "run", "terminal", "release"])
 
     def test_run_loop_claims_nothing_while_another_loop_holds_the_device(self):
         jobs = FakeJobPort(claim_queue=[claimed("w", "runPlate")], params_by_job={"w": valid_params()})
@@ -1131,7 +1188,7 @@ class ExclusiveClaimTests(unittest.TestCase):
         outcome, runtime, jobs = self._run(job, lock=lock)
         self.assertEqual((outcome.ran, outcome.reason), (False, "lease_lost"))
         self.assertEqual(runtime.run_calls, [])
-        self.assertEqual(lock.consumed, set())  # no one-shot record for a job that never ran
+        self.assertEqual(lock.states, {})  # no record for a job that never ran
         self.assertFalse(lock.held)
 
 

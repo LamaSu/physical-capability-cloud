@@ -202,10 +202,10 @@ OPEN = _OpenGate()
 
 
 class _FreeLock:
-    """A device hold that is always free, with a one-shot record (the e2e device is private to this test)."""
+    """A device hold that is always free, with an in-memory run record (the e2e device is private to this test)."""
 
     def __init__(self):
-        self.consumed = set()
+        self.states = {}
 
     def acquire(self):
         return True
@@ -213,11 +213,14 @@ class _FreeLock:
     def release(self):
         pass
 
-    def consume(self, key):
-        if key in self.consumed:
-            return False
-        self.consumed.add(key)
-        return True
+    def reserve(self, key):
+        return self.states.setdefault(key, "reserved")
+
+    def mark_start_sent(self, key):
+        self.states[key] = "start_sent"
+
+    def mark_terminal(self, key, outcome):
+        self.states[key] = "terminal"
 
 
 def _get(base, path):
