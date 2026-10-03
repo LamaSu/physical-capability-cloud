@@ -42,11 +42,22 @@
  * against whatever `operatorForUnit` answers, and refuses on `null`, a throw or a rejected
  * promise exactly like it refuses a wrong address (rule 5 below).
  *
+ * CANONICAL INPUT ONLY (cross-family E13 F1): before anything is encoded, every field is checked
+ * against the ratified body's own spellings, the same rules `final-milestone-package-v2.ts`
+ * applies before it calls this verifier: chainId and milestoneIndex are canonical decimal strings
+ * (no sign, no leading zero, no white space, no 0x/0o/0b, all of which `BigInt` would read),
+ * and escrow and the bytes32 fields are lowercase hex. So a spelling the body refuses is refused
+ * here too, even when it would encode the same bytes, and the principal id cannot embed one.
+ *
+ * BOUNDED LOOKUP (cross-family E13 F2): `operatorForUnit` gets an AbortSignal and at most
+ * `operatorLookupTimeoutMs` (default 10 s). A lookup that has not settled by then is aborted and
+ * refused, so a chain read that never answers cannot hold the mint guard open.
+ *
  * FAILS CLOSED, NEVER THROWS: every rule below is a refusal (`verifyOperatorSignature` answers
  * `false`), never an exception. A hostile or malformed `input` of any shape, an
- * `operatorForUnit` that throws or rejects, a non-canonical chain-id string that cannot become
- * a `BigInt` — all of these collapse to one answer, `false`, caught by the single outer
- * try/catch in `verifyOperatorSignature`. The guard (`assertMintablePackage`) already converts
+ * `operatorForUnit` that throws, rejects or does not settle in time, a value no rule admits —
+ * all of these collapse to one answer, `false`, caught by the single outer try/catch in
+ * `verifyOperatorSignature`. The guard (`assertMintablePackage`) already converts
  * a thrown error from this interface into `PackageNotMintableError`, but this implementation
  * does not rely on that safety net — it is designed to never throw in the first place.
  */
@@ -89,18 +100,44 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
  *  hex digit — is refused outright here, never normalized (rule 1). */
 const SIG_65_LOWERCASE = /^0x[0-9a-f]{130}$/;
 
+/** The ratified body's own spellings (`final-milestone-package-v2.ts`: DECIMAL, ADDR, HEX32), checked
+ *  again here so the verifier is safe on its own (E13 F1). */
+const CANONICAL_DECIMAL = /^(0|[1-9][0-9]*)$/;
+const LOWERCASE_ADDRESS = /^0x[0-9a-f]{40}$/;
+const LOWERCASE_BYTES32 = /^0x[0-9a-f]{64}$/;
+
+/** The default bound on `operatorForUnit` (E13 F2): a pinned-block `operator()` read answers well inside it. */
+export const DEFAULT_OPERATOR_LOOKUP_TIMEOUT_MS = 10_000;
+
+const TIMED_OUT: unique symbol = Symbol("operatorForUnit did not settle in time");
+
+/** The injected chain read, and how long it may take. */
+export interface Eip712OperatorVerifierDeps {
+  /**
+   * The AUTHORITATIVE operator for the unit: the escrow clone's `operator()`, read at one pinned
+   * block after the clone is bound (see the module doc). `null` means unknown, so the verifier
+   * refuses. `options.signal` is aborted when the lookup's bound passes; a lookup should stop then.
+   */
+  operatorForUnit(unitBinding: UnitBinding, options: { signal: AbortSignal }): Promise<string | null> | string | null;
+  /** How long `operatorForUnit` may take, in milliseconds: a positive safe integer. Default 10 000. */
+  operatorLookupTimeoutMs?: number;
+}
+
 /**
  * Builds the production D1 verifier. `deps.operatorForUnit` is the injected chain read (see the
  * module doc above): given a package's `unitBinding`, it answers the unit's authoritative
  * operator address, or `null` if that is not known — in which case this verifier refuses.
  */
-export function createEip712OperatorVerifier(deps: {
-  operatorForUnit(unitBinding: UnitBinding): Promise<string | null> | string | null;
-}): OperatorSignatureVerifier {
+export function createEip712OperatorVerifier(deps: Eip712OperatorVerifierDeps): OperatorSignatureVerifier {
+  const timeoutMs = deps.operatorLookupTimeoutMs ?? DEFAULT_OPERATOR_LOOKUP_TIMEOUT_MS;
+  if (typeof timeoutMs !== "number" || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("operatorLookupTimeoutMs must be a positive safe integer of milliseconds");
+  }
+  const operatorForUnit = deps.operatorForUnit;
   return {
     async verifyOperatorSignature(input: OperatorSignatureVerifierInput): Promise<boolean> {
       try {
-        return await verify(input, deps.operatorForUnit);
+        return await verify(input, operatorForUnit, timeoutMs);
       } catch {
         // Never throw: a hostile or malformed input (bad hex, a non-decimal chain id, a
         // mis-sized bytes32, `operatorForUnit` throwing or its promise rejecting) all collapse
@@ -111,9 +148,50 @@ export function createEip712OperatorVerifier(deps: {
   };
 }
 
-type OperatorForUnit = (unitBinding: UnitBinding) => Promise<string | null> | string | null;
+type OperatorForUnit = Eip712OperatorVerifierDeps["operatorForUnit"];
 
-async function verify(input: OperatorSignatureVerifierInput, operatorForUnit: OperatorForUnit): Promise<boolean> {
+/** `operatorForUnit`'s answer, or TIMED_OUT once `timeoutMs` passes; its signal is aborted then (E13 F2). */
+async function lookupOperator(
+  operatorForUnit: OperatorForUnit,
+  unitBinding: UnitBinding,
+  timeoutMs: number,
+): Promise<unknown> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(TIMED_OUT);
+    }, timeoutMs);
+  });
+  try {
+    // A synchronous throw becomes a rejection, which the outer try/catch turns into false.
+    const lookup = Promise.resolve().then(() => operatorForUnit(unitBinding, { signal: controller.signal }));
+    return await Promise.race([lookup, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Every field the digest or the principal id uses, in the ratified body's own spelling (E13 F1). */
+function isCanonicalBinding(input: OperatorSignatureVerifierInput): boolean {
+  const ub = input.unitBinding;
+  if (ub === null || typeof ub !== "object") return false;
+  const decimals = [ub.chainId, ub.milestoneIndex];
+  const words = [ub.settlementUnitId, ub.jobIdHash, ub.stepId, ub.compositionRoot, ub.acceptedEnvelopeHash, input.packageBodyHash];
+  return (
+    decimals.every((v) => typeof v === "string" && CANONICAL_DECIMAL.test(v)) &&
+    typeof ub.escrow === "string" &&
+    LOWERCASE_ADDRESS.test(ub.escrow) &&
+    words.every((v) => typeof v === "string" && LOWERCASE_BYTES32.test(v))
+  );
+}
+
+async function verify(
+  input: OperatorSignatureVerifierInput,
+  operatorForUnit: OperatorForUnit,
+  timeoutMs: number,
+): Promise<boolean> {
   // Rule 1: exactly 65 bytes, r || s || v, as 0x + 130 lowercase hex. v in {27,28} (0/1, the raw
   // recovery id, is refused even where it would recover the operator — see the v-raw-recid-*
   // golden vectors). 0 < r < n. 0 < s <= n/2 (low-s/canonical only; the 64-byte EIP-2098 compact
@@ -132,6 +210,8 @@ async function verify(input: OperatorSignatureVerifierInput, operatorForUnit: Op
   // Rule 2: the digest is EIP-712 over the ratified struct and domain, built ONLY from the
   // validated `input.unitBinding` and `input.packageBodyHash` — chainId and milestoneIndex are
   // the body's decimal strings, encoded here as uint256; escrow doubles as verifyingContract.
+  // Each field must first be in the ratified body's own spelling (E13 F1).
+  if (!isCanonicalBinding(input)) return false;
   const ub = input.unitBinding;
   const chainId = BigInt(ub.chainId);
   const domain = {
@@ -168,7 +248,8 @@ async function verify(input: OperatorSignatureVerifierInput, operatorForUnit: Op
   // Rule 5: the recovered address must equal the injected, AUTHORITATIVE operator. `null`, a
   // throw or a rejected promise from `operatorForUnit` all refuse the same way a wrong address
   // does (a throw/rejection is caught by the outer try/catch in `verifyOperatorSignature`).
-  const authoritative = await operatorForUnit(ub);
+  const authoritative = await lookupOperator(operatorForUnit, ub, timeoutMs);
+  if (authoritative === TIMED_OUT) return false;
   if (typeof authoritative !== "string" || recovered.toLowerCase() !== authoritative.toLowerCase()) {
     return false;
   }
