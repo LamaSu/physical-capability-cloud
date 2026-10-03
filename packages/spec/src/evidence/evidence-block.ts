@@ -26,7 +26,17 @@
  *                           kernel-signed bundle holding every outcome-bearing event
  *                           (terminal events and inspections), so nothing can be left out
  *                           by choosing which bundle to commit (LO-EV-9 header; bus #3543)
- *   sessionKeyAuthDigest    0x + sha256(canonicalize(SessionKeyAuthorization))
+ *   sessionKeyAuthDigest    keccak256(abi.encode(AUTH_DOMAIN, sessionKeyGrantHash, bytes
+ *                           parentSignature, bytes32 parentPublicKeyRaw32, uint8 scheme, uint32
+ *                           keyVersion)), where sessionKeyGrantHash = keccak256(GRANT_DOMAIN ||
+ *                           canonicalSessionKeyBytes(sessionKey)) (RATIFIED D3, oracle #1030,
+ *                           byte-exact with the evidence lane's golden
+ *                           `sessionkey-grant-golden-vector.cjs` on #270): the grant body the
+ *                           parent signs EXCLUDES parentSignature (it is the signature over that
+ *                           body) and the auth digest BINDS the full proof over it — the
+ *                           signature, the parent's raw32 public key, the scheme and the key
+ *                           version (rotation) — so neither the signed content nor the bound
+ *                           proof can be substituted independently of the other
  *   attestationSetRoot      keccak256(abi.encode(ATTSET_DOMAIN, fundedProgramHash,
  *                           sortedRoleDigests)) (RATIFIED D4, oracle #1030/#1289, byte-exact
  *                           with the evidence lane's golden `attestation-set-root-golden-vector.cjs`
@@ -86,8 +96,10 @@
  * can do the same to a field the caller never supplied. So every exported function that takes an
  * object or an array (`computeSettlementUnitId`, `computeUnitContextDigest`,
  * `computeAttestationRoleDigest`, `computeAttestationSetRoot`, `computeEvidenceBlockHash`,
- * `sessionKeyAuthSnapshot` and `computeSessionKeyAuthDigest`, and `computeKernelSignedEventsRoot` for
- * the events) first runs ONE guard over the whole input, `assertNoCodeRunningInput`, an iterative walk
+ * `sessionKeyAuthSnapshot`, `computeSessionKeyGrantHash` and `computeSessionKeyAuthDigest` (both
+ * for the authorization and, the latter only, for its separate `context` argument), and
+ * `computeKernelSignedEventsRoot` for the events) first runs ONE guard over the whole input,
+ * `assertNoCodeRunningInput`, an iterative walk
  * that touches only what cannot run code, and refuses, before any value is read:
  *   - a Proxy at any depth (live or revoked), and an accessor anywhere, in a member that is read or
  *     not;
@@ -232,6 +244,15 @@ const hashDigest = call.bind(getOwnPropertyDescriptor(hashPrototype, "digest")!.
 // three existing domain constants below are): captured the same way as the hash methods above.
 const TextEncoderConstructor = TextEncoder;
 const textEncoderEncode = call.bind(TextEncoder.prototype.encode) as unknown as (encoder: TextEncoder, text: string) => Uint8Array;
+// `JSON.stringify` is captured the same way: D3's sessionKeyGrantHash preimage is
+// `utf8(JSON.stringify(sessionKeyGrantBody(value)))`, over a plain object THIS module builds from
+// already-validated primitives (never the caller's own object), so the call itself runs no code of
+// the caller — but capturing the reference, instead of an ambient `JSON.stringify` lookup at call
+// time, keeps it immune to a global JSON replaced after load, like every other reference above.
+const jsonStringify = JSON.stringify;
+/** The largest value a Solidity `uint32` holds: 2**32 - 1. Declared here (not only where the D4
+ * attestation fields first use it) so the D3 session-auth-digest context can reference it too. */
+const UINT32_MAX = 0xffffffff;
 
 export type Bytes32Hex = `0x${string}`;
 
@@ -1129,9 +1150,206 @@ export function sessionKeyAuthSnapshot(auth: SessionKeyAuthorization): SessionKe
   return freeze({ value, digest: sha256Canonical(value) });
 }
 
-/** The sessionKeyAuthDigest: 0x + sha256(canonicalize(frozen snapshot of the authorization)). */
-export function computeSessionKeyAuthDigest(auth: SessionKeyAuthorization): Bytes32Hex {
-  return sessionKeyAuthSnapshot(auth).digest;
+/**
+ * D3 domain separators (oracle #1030, Evidence Commitment Profile v1 §3), each `keccak256(utf8(...))`,
+ * taken once when the module loads like every other domain constant here. Not exported: nothing
+ * outside this module's own digests needs them by name.
+ */
+const GRANT_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:session-key-grant:v1");
+const AUTH_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:session-key-auth:v1");
+
+/**
+ * The one session-key scheme this module accepts today (D3, Evidence Commitment Profile v1 §2,
+ * oracle #1030): Ed25519, scheme id 1. Any other value is refused rather than guessed at — the same
+ * discipline as `AttestationRoleSigners.kind`.
+ */
+export type SessionKeyScheme = "ed25519";
+const SESSION_KEY_SCHEME_ED25519 = 1;
+
+/** The scheme id D3 binds for `scheme`, or a refusal naming `field`. */
+function checkedSchemeId(field: string, value: unknown): number {
+  if (value !== "ed25519") {
+    throw new EvidenceBlockInputError(field, 'expected "ed25519" (the only session-key scheme this module accepts)');
+  }
+  return SESSION_KEY_SCHEME_ED25519;
+}
+
+/**
+ * What `computeSessionKeyAuthDigest` binds beyond the authorization itself (D3): the parent's raw
+ * 32-byte Ed25519 public key, the scheme and the key version. None of these live on
+ * `SessionKeyAuthorization` — the grant the parent signs excludes them, and excludes
+ * `parentSignature` itself (see `sessionKeyGrantBody`) — so the full verification identity is bound
+ * only here, over the grant hash, never into the grant the signature itself covers.
+ */
+export interface SessionKeyAuthDigestContext {
+  readonly parentPublicKey: Bytes32Hex;
+  readonly keyVersion: number;
+  readonly scheme: SessionKeyScheme;
+}
+
+/**
+ * Exactly the fields the D3 golden's `canonicalSessionKeyBytes` reads (evidence lane
+ * `sessionkey-grant-golden-vector.cjs` on #270, re-deriving production's
+ * `packages/verifier/src/workflow/ephemeral-identity.ts:65-85`), in the EXPLICIT insertion order
+ * `JSON.stringify` must see: sessionId, parentAgentId, publicKey, issuedAt, expiresAt,
+ * scope{allowedActions, contractIds, maxSignatures}, [derivationPath]. `parentSignature` is
+ * EXCLUDED: it is the signature OVER this body, bound separately into the auth digest
+ * (`computeSessionKeyAuthDigest`), never into the grant it signs. `value` is
+ * `sessionKeyAuthSnapshot`'s own frozen copy — already validated and read from its own data
+ * descriptors — so building this plain object literal from it and handing the literal to the
+ * captured `jsonStringify` runs no code of the caller: every leaf here is a string, a validated
+ * safe integer, or a nested object/array of those, never the caller's own value.
+ */
+function sessionKeyGrantBody(value: FrozenSessionKeyAuthorization): Record<string, unknown> {
+  return {
+    sessionId: value.sessionId,
+    parentAgentId: value.parentAgentId,
+    publicKey: value.publicKey,
+    issuedAt: value.issuedAt,
+    expiresAt: value.expiresAt,
+    scope: {
+      allowedActions: value.scope.allowedActions,
+      contractIds: value.scope.contractIds,
+      maxSignatures: value.scope.maxSignatures,
+    },
+    ...(value.derivationPath === undefined ? {} : { derivationPath: value.derivationPath }),
+  };
+}
+
+/**
+ * keccak256(domainWord || data): the one place this module hashes a 32-byte domain word
+ * concatenated with a VARIABLE-length byte string that has no length prefix and no 32-byte
+ * padding — NOT abi.encode (`keccakWords` and `keccakAbiWithTrailingArray` only ever concatenate
+ * whole 32-byte words). This is the D3 sessionKeyGrantHash formula (oracle #1030):
+ * `keccak256(GRANT_DOMAIN || canonicalSessionKeyBytes(sessionKey))`, byte-exact with the production
+ * signer's preimage (the parent signs exactly these bytes).
+ */
+function keccakDomainPrefixedBytes(domainWord: Uint8Array, data: Uint8Array): Bytes32Hex {
+  const buf = new Uint8ArrayConstructor(32 + data.length);
+  for (let i = 0; i < 32; i++) buf[i] = domainWord[i]!;
+  for (let i = 0; i < data.length; i++) buf[32 + i] = data[i]!;
+  return `0x${bytesToHex(keccak_256(buf), 32)}`;
+}
+
+/**
+ * sessionKeyGrantHash = keccak256(GRANT_DOMAIN || canonicalSessionKeyBytes(sessionKey)) (RATIFIED
+ * D3, oracle #1030; byte-exact with the evidence lane's golden `sessionkey-grant-golden-vector.cjs`
+ * on #270): `canonicalSessionKeyBytes` is `utf8(JSON.stringify(sessionKeyGrantBody(value)))`, the
+ * exact bytes the production parent signs. `jsonStringify` and `textEncoderEncode` are captures
+ * taken at module load (the latter is the same capture D4 added for `keccakUtf8`), so no global
+ * replaced after load changes this preimage.
+ */
+function sessionKeyGrantHashOf(value: FrozenSessionKeyAuthorization): Bytes32Hex {
+  const json = jsonStringify(sessionKeyGrantBody(value));
+  const bytes = textEncoderEncode(new TextEncoderConstructor(), json);
+  return keccakDomainPrefixedBytes(bytes32Word("GRANT_DOMAIN", GRANT_DOMAIN), bytes);
+}
+
+/**
+ * The sessionKeyGrantHash alone (RATIFIED D3, oracle #1030; byte-exact with the evidence lane's
+ * golden `sessionkey-grant-golden-vector.cjs` on #270): what the parent signs over. Exported
+ * because the grant and the auth are independently useful: a verifier checks the parentSignature
+ * against THIS value before it ever sees a `SessionKeyAuthDigestContext`. The authorization is
+ * admitted and snapshotted exactly as every other entry point (E7c): a Proxy at any depth, an
+ * accessor anywhere or a non-plain prototype is refused before anything is read.
+ */
+export function computeSessionKeyGrantHash(auth: SessionKeyAuthorization): Bytes32Hex {
+  return sessionKeyGrantHashOf(sessionKeyAuthSnapshot(auth).value);
+}
+
+/**
+ * `data` split into 32-byte words, the last right-padded with zero bytes: what `abi.encode` writes
+ * in the tail for a `bytes` parameter after its length word. `(length - 1) >> 5` is
+ * `floor((length - 1) / 32)`, i.e. `ceil(length / 32) - 1` for `length > 0` (a bit shift, not
+ * `Math.ceil`: no ambient lookup). Built with `appendTo`, like every other word list in this module.
+ */
+function paddedDataWords(data: Uint8Array): Uint8Array[] {
+  const length = data.length;
+  const wordCount = length === 0 ? 0 : ((length - 1) >> 5) + 1;
+  const words: Uint8Array[] = [];
+  for (let w = 0; w < wordCount; w++) {
+    const word = new Uint8ArrayConstructor(32);
+    const base = w * 32;
+    const remaining = length - base;
+    const count = remaining < 32 ? remaining : 32;
+    for (let j = 0; j < count; j++) word[j] = data[base + j]!;
+    appendTo(words, word);
+  }
+  return words;
+}
+
+/**
+ * keccak256(abi.encode(bytes32, bytes32, bytes, bytes32, uint8, uint32)): the exact parameter shape
+ * the D3 sessionKeyAuthDigest formula encodes (AUTH_DOMAIN, sessionKeyGrantHash, parentSignature,
+ * parentPublicKeyRaw32, scheme, keyVersion) — two static words, ONE dynamic `bytes` parameter, then
+ * three more static words. The six-slot head holds the first two static words directly, an offset
+ * word (the one slot `parentSignatureBytes` occupies, head slot index 2) pointing past the head to
+ * the tail, then the last three static words; the tail holds the dynamic bytes' length and its
+ * data, right-padded to a 32-byte boundary (`paddedDataWords`). This is the one parameter shape
+ * this formula ever encodes; built from `appendTo`/`uintWord`/`keccakWords`, like every other digest
+ * in this module: no Array.prototype method is looked up.
+ */
+function keccakAbiSessionKeyAuth(
+  authDomain: Uint8Array,
+  sessionKeyGrantHash: Uint8Array,
+  parentSignatureBytes: Uint8Array,
+  parentPublicKey: Uint8Array,
+  scheme: Uint8Array,
+  keyVersion: Uint8Array,
+): Bytes32Hex {
+  const HEAD_SLOTS = 6;
+  const words: Uint8Array[] = [];
+  appendTo(words, authDomain);
+  appendTo(words, sessionKeyGrantHash);
+  appendTo(words, uintWord("parentSignature.offset", HEAD_SLOTS * 32, 256));
+  appendTo(words, parentPublicKey);
+  appendTo(words, scheme);
+  appendTo(words, keyVersion);
+  appendTo(words, uintWord("parentSignature.length", parentSignatureBytes.length, 256));
+  const dataWords = paddedDataWords(parentSignatureBytes);
+  for (let i = 0; i < dataWords.length; i++) appendTo(words, dataWords[i]!);
+  return keccakWords(words);
+}
+
+/**
+ * The sessionKeyAuthDigest (RATIFIED D3, oracle #1030; byte-exact with the evidence lane's golden
+ * `sessionkey-grant-golden-vector.cjs` on #270):
+ *   sessionKeyAuthDigest = keccak256(abi.encode(AUTH_DOMAIN, sessionKeyGrantHash,
+ *                            bytes parentSignature, bytes32 parentPublicKeyRaw32, uint8 scheme,
+ *                            uint32 keyVersion))
+ * `SessionKeyAuthorization` alone lacks the parent's raw32 public key, the scheme and the key
+ * version — none of them are signed into the grant — so `context` carries them; `parentSignature`
+ * itself IS on the authorization (EXCLUDED from the grant bytes, BOUND here as `bytes`, so a
+ * substituted signature over the same grant gives a different digest: proof substitution is
+ * refused, not merely unsigned). The authorization is admitted and snapshotted exactly as
+ * `computeSessionKeyGrantHash` does (one validation, shared by both); `context` is admitted the
+ * same way every object input is (E7c): a Proxy, an accessor or a non-plain prototype anywhere is
+ * refused before anything is read, then each field is read once from its own data descriptor.
+ */
+export function computeSessionKeyAuthDigest(auth: SessionKeyAuthorization, context: SessionKeyAuthDigestContext): Bytes32Hex {
+  const { value } = sessionKeyAuthSnapshot(auth);
+  const sessionKeyGrantHash = sessionKeyGrantHashOf(value);
+
+  if (context === null || typeof context !== "object") {
+    throw new EvidenceBlockInputError("context", "expected a session-key auth digest context object");
+  }
+  admit(context, "context");
+  const parentPublicKey = requireBytes32Hex("context.parentPublicKey", fieldOf(context, "parentPublicKey"));
+  const keyVersion = boundedInt("context.keyVersion", fieldOf(context, "keyVersion"), 0, UINT32_MAX);
+  const scheme = checkedSchemeId("context.scheme", fieldOf(context, "scheme"));
+
+  const signatureByteLength = SESSION_PARENT_SIGNATURE_HEX_LENGTH / 2;
+  const parentSignatureBytes = new Uint8ArrayConstructor(signatureByteLength);
+  hexIntoBytes(value.parentSignature, 0, signatureByteLength, parentSignatureBytes, 0);
+
+  return keccakAbiSessionKeyAuth(
+    bytes32Word("AUTH_DOMAIN", AUTH_DOMAIN),
+    bytes32Word("sessionKeyGrantHash", sessionKeyGrantHash),
+    parentSignatureBytes,
+    bytes32Word("context.parentPublicKey", parentPublicKey),
+    uintWord("context.scheme", scheme, 8),
+    uintWord("context.keyVersion", keyVersion, 32),
+  );
 }
 
 /**
@@ -1181,9 +1399,6 @@ function requireBytes32Hex(field: string, value: unknown): Bytes32Hex {
   // just above is exactly what the brand means, so asserting it here is sound, not just convenient.
   return value as Bytes32Hex;
 }
-
-/** The largest value a Solidity `uint32` holds: 2**32 - 1. */
-const UINT32_MAX = 0xffffffff;
 
 /**
  * D4 domain separators (oracle #1030, Evidence Commitment Profile v1 §3), each `keccak256(utf8(...))`,
