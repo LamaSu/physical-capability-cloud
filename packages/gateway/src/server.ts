@@ -5,6 +5,10 @@ initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 initPostHog();
+import { closeConsole, gatewayLoggerOptions } from "./observability/closed-sinks.js";
+import { openRequestScope, routeTemplateOf, TELEMETRY_KEY_EPHEMERAL, trackRouteTemplates } from "./observability/closed-schema.js";
+// Request-path console output leaves under the closed observability schema (N107b).
+closeConsole();
 import { randomBytes } from "node:crypto";
 
 import Fastify from "fastify";
@@ -181,10 +185,23 @@ export async function createGateway(port = 3200) {
   initKernelService();
 
   const app = Fastify({
-    logger: true,
+    // Every log line leaves under the closed observability schema (N107b): the request as its
+    // method, route template and client hash, never a URL, header or body value.
+    logger: gatewayLoggerOptions(),
+    // A caller never names the request id that every log line carries (Fastify 4 reads it from a
+    // request-id header by default).
+    requestIdHeader: false,
     bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
+
+  // The closed schema's vocabulary of routes (every template the app declares), and the request
+  // scope that closes request-path console output. Both before any route or plugin.
+  trackRouteTemplates(app);
+  app.addHook("onRequest", openRequestScope);
+  if (TELEMETRY_KEY_EPHEMERAL) {
+    app.log.warn("[observability] PCC_TELEMETRY_KEY is not set: telemetry hashes use a per-process key and do not correlate across restarts.");
+  }
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
@@ -220,7 +237,7 @@ export async function createGateway(port = 3200) {
     // For 5xx errors, report to Sentry before responding
     const statusCode = error.statusCode ?? 500;
     if (statusCode >= 500) {
-      Sentry.captureException(error, { extra: { url: request.url, method: request.method } });
+      Sentry.captureException(error, { extra: { route: routeTemplateOf(request), method: request.method } });
     }
     const body: Record<string, unknown> = {
       error: statusCode >= 500 ? "internal_error" : "request_error",
@@ -404,7 +421,7 @@ export async function createGateway(port = 3200) {
         action: method.toLowerCase(),
         metadata: {
           method,
-          url: request.url,
+          route: routeTemplateOf(request),
           statusCode: reply.statusCode,
           duration_ms: Math.round(reply.elapsedTime ?? 0),
         },

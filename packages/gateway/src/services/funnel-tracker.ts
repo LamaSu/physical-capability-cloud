@@ -31,6 +31,7 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastif
 import { trace } from "@opentelemetry/api";
 import { auditService } from "./audit-service.js";
 import { identifyAgent, trackServerEvent } from "./posthog-service.js";
+import { keyedHash, registerClosedValues } from "../observability/closed-schema.js";
 
 // ── Stages ───────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,10 @@ export const ONBOARDING_STAGES: OnboardingStage[] = [
   "submit",
   "settle",
 ];
+
+// The funnel's PostHog event names are built from the stages: closed names the observability
+// schema keeps as text (N107b).
+registerClosedValues(ONBOARDING_STAGES.map((stage) => `onboarding_${stage}`));
 
 /** auditService eventType used for every funnel stage row. */
 export const FUNNEL_AUDIT_EVENT = "agent.funnel";
@@ -198,8 +203,10 @@ export interface FunnelStageRow {
 export function getFunnelForTraceId(traceId: string): FunnelStageRow[] {
   const rows = auditService.query({ eventType: FUNNEL_AUDIT_EVENT, limit: 10000 });
   const out: FunnelStageRow[] = [];
+  // The audit log keeps the trace id as its keyed hash (N107b): compare the same way.
+  const traceKey = keyedHash(traceId);
   for (const r of rows) {
-    if (r.resourceId !== traceId) continue;
+    if (r.resourceId !== traceKey) continue;
     const meta = (r.metadata ?? {}) as Record<string, unknown>;
     out.push({
       stage: (r.action as OnboardingStage) ?? (meta.stage as OnboardingStage),
