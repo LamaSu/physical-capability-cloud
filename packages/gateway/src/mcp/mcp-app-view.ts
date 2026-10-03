@@ -1279,7 +1279,7 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
 .pcc-fresh{font-size:12px}
 .pcc-stale,.pcc-unavail,.pcc-time-unknown{border-left:3px solid currentColor;padding-left:6px}
 .pcc-absent{font-style:italic}
-.pcc-empty{font-style:italic}
+.pcc-empty,.pcc-window{font-style:italic}
 </style>
 </head>
 <body>

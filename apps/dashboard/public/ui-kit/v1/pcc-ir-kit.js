@@ -376,9 +376,15 @@
     return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : REPORTED_PREFIX + value;
   }
   var LIST_PROFILES = {
-    "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+    // job.facade.ts:128 `const limit = pagination?.limit ?? 50;`. routes/jobs.ts:43 answers only
+    // `{ jobs }` — no cross-page total in the envelope, so no `paged.total`.
+    "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], paged: { defaultLimit: 50 } },
+    // routes/kernels.ts:61 answers `{ kernels }`, unpaginated — no `paged` entry at all.
     "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount"], status: ["status"] },
-    "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"] }
+    // routes/capabilities.ts:303 query schema `limit: { minimum: 1, maximum: 200, default: 50 }`.
+    // capability.facade.ts:253 answers `{ items, total, offset, limit, hasMore }` — `total` is this
+    // route's own property.
+    "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"], paged: { defaultLimit: 50, total: "total" } }
   };
   function listRowsOf(path, data) {
     const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path].rows : void 0;
@@ -1109,7 +1115,8 @@
     unavail: "pcc-unavail",
     empty: "pcc-empty",
     timeUnknown: "pcc-time-unknown",
-    absent: "pcc-absent"
+    absent: "pcc-absent",
+    window: "pcc-window"
   };
   var STATE_CLASSES = ["pcc-stale", "pcc-unavail", "pcc-time-unknown"];
   function withState(host, cls) {
@@ -1394,11 +1401,71 @@
         return { ok: false };
     }
   }
-  function bindListRows(doc, listEl, node, rows) {
+  var WINDOW_FILTER_VALUE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+  var WINDOW_OFFSET_STR_RE = /^(0|[1-9]\d{0,8})$/;
+  var WINDOW_LIMIT_STR_RE = /^[1-9]\d{0,8}$/;
+  var isSafeIntValue = (v) => typeof v === "number" && Number.isSafeInteger(v);
+  function filterTerm(key, v) {
+    if (typeof v === "string" && WINDOW_FILTER_VALUE_RE.test(v)) return key + "=" + v;
+    if (isSafeIntValue(v)) return key + "=" + String(v);
+    if (typeof v === "boolean") return key + "=" + (v ? "true" : "false");
+    return key + "=(value not shown)";
+  }
+  function windowOffset(q) {
+    if (!q || !Object.prototype.hasOwnProperty.call(q, "offset")) return 0;
+    const v = q.offset;
+    if (isSafeIntValue(v) && v >= 0) return v;
+    if (typeof v === "string" && WINDOW_OFFSET_STR_RE.test(v)) return Number(v);
+    return "unknown";
+  }
+  function windowLimit(q) {
+    if (!q || !Object.prototype.hasOwnProperty.call(q, "limit")) return null;
+    const v = q.limit;
+    if (isSafeIntValue(v) && v >= 1) return v;
+    if (typeof v === "string" && WINDOW_LIMIT_STR_RE.test(v)) return Number(v);
+    return "unknown";
+  }
+  function listWindow(node, data, returned) {
+    const rawQuery = node.bind?.query;
+    const q = rawQuery !== null && typeof rawQuery === "object" && !Array.isArray(rawQuery) ? rawQuery : void 0;
+    const path = typeof node.bind?.path === "string" ? node.bind.path : void 0;
+    const filterKeys = q ? Object.keys(q).filter((k) => k !== "offset" && k !== "limit").sort() : [];
+    const offset = windowOffset(q);
+    const limit = windowLimit(q);
+    const empty = filterKeys.length === 0 && offset === 0 ? "none" : "no rows in this window";
+    const parts = [];
+    if (filterKeys.length > 0) {
+      const qq = q;
+      parts.push("filtered by this view: " + filterKeys.map((k) => filterTerm(k, qq[k])).join(", "));
+    }
+    if (offset === "unknown") parts.push("offset not shown");
+    else if (offset > 0) parts.push("from row " + String(offset + 1));
+    const prof = path !== void 0 ? LIST_PROFILES[path] : void 0;
+    if (prof?.paged) {
+      const paged = prof.paged;
+      if (paged.total !== void 0) {
+        const totalRaw = readOwnPath(data, paged.total);
+        if (offset !== "unknown" && isSafeIntValue(totalRaw) && totalRaw >= offset + returned) {
+          if (totalRaw > offset + returned) parts.push("showing " + String(returned) + " of " + String(totalRaw));
+        } else {
+          parts.push("total not shown");
+        }
+      } else {
+        const eff = typeof limit === "number" ? limit : limit === null ? paged.defaultLimit : "unknown";
+        if (eff === "unknown" ? returned > 0 : returned >= eff) parts.push("first " + String(returned) + "; more may exist");
+      }
+    }
+    const capLimit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
+    const shown = Math.min(returned, capLimit);
+    if (shown < returned) parts.push("showing first " + String(shown) + " of " + String(returned) + " returned");
+    return { empty, note: parts.length > 0 ? parts.join(" \xB7 ") : null };
+  }
+  function bindListRows(doc, listEl, node, rows, data) {
     const rowTitle = String(node.props?.rowTitle ?? "");
     const rowMeta = Array.isArray(node.props?.rowMeta) ? node.props.rowMeta : [];
     const statusFrom = typeof node.props?.statusFrom === "string" ? node.props.statusFrom : "";
     const limit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
+    const win = listWindow(node, data, rows.length);
     const isStatusKind = (field) => LIST_FIELD_KINDS[field] === "status";
     let shown = 0;
     for (const row of rows) {
@@ -1447,7 +1514,8 @@
       listEl.appendChild(line);
       shown++;
     }
-    if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, "none"));
+    if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, win.empty));
+    if (win.note !== null) listEl.appendChild(el(doc, CLS.window, win.note));
     return shown;
   }
   function listRowsReadable(node, rows) {
@@ -2009,7 +2077,7 @@
         if (!listRowsReadable(node, rows)) return "partial collection";
         if (rows.length === 0 && src === null) return "empty result without a source time";
         const staging = document.createElement("div");
-        bindListRows(rdoc, wrapEl(staging), node, rows);
+        bindListRows(rdoc, wrapEl(staging), node, rows, data);
         return () => el2.replaceChildren(...Array.from(staging.childNodes));
       }, () => {
         el2.replaceChildren();
@@ -2018,7 +2086,7 @@
         if (rows === null) return null;
         if (!listRowsReadable(node, rows)) return null;
         const staging = document.createElement("div");
-        bindListRows(rdoc, wrapEl(staging), node, rows);
+        bindListRows(rdoc, wrapEl(staging), node, rows, data);
         return JSON.stringify(shapeOf(staging));
       });
       push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));

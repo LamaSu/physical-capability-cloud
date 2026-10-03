@@ -333,10 +333,29 @@ export function reportedFieldText(field: string, value: string): string {
 // carries `location: {lat, lng}`, never a `.label`) — dead surface, never exercised by a real
 // producer. Also removed from LIST_FIELD_KINDS (below) and LIST_FIELD_LABELS (dashboard-ir-
 // renderer.ts).
-export const LIST_PROFILES: Readonly<Record<string, { rows: string; title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
-  "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+// ── The server page, for the list WINDOW disclosure (N110) ──────────────────────────────
+// A list route may be server-paginated; `paged` is OPTIONAL and PCC-owned (never manifest-chosen):
+// it names the facade's own default page size (so the view's disclosure never guesses a number
+// that can drift from the real producer — pinned by a test, dashboard-ir-list-window.test.ts) and,
+// when the route's envelope reports a cross-page total, the OWN property key that holds it.
+export interface ListPagedProfile {
+  /** The facade's own default `limit` when the manifest/query omits one. */
+  defaultLimit: number;
+  /** The response envelope's OWN property holding the total row count across all pages, when the
+   *  route reports one. Absent routes have no way to say "more may exist" from a total — the
+   *  disclosure falls back to comparing `returned` against the effective limit instead. */
+  total?: string;
+}
+export const LIST_PROFILES: Readonly<Record<string, { rows: string; title: readonly string[]; meta: readonly string[]; status: readonly string[]; paged?: ListPagedProfile }>> = {
+  // job.facade.ts:128 `const limit = pagination?.limit ?? 50;`. routes/jobs.ts:43 answers only
+  // `{ jobs }` — no cross-page total in the envelope, so no `paged.total`.
+  "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], paged: { defaultLimit: 50 } },
+  // routes/kernels.ts:61 answers `{ kernels }`, unpaginated — no `paged` entry at all.
   "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount"], status: ["status"] },
-  "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"] },
+  // routes/capabilities.ts:303 query schema `limit: { minimum: 1, maximum: 200, default: 50 }`.
+  // capability.facade.ts:253 answers `{ items, total, offset, limit, hasMore }` — `total` is this
+  // route's own property.
+  "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"], paged: { defaultLimit: 50, total: "total" } },
 };
 /** The rows of a list response, read ONLY by the route's PCC-owned rows key (an own property;
  * never a manifest selector, never a bare top-level array — astra r5 F3). Returns **null** when
