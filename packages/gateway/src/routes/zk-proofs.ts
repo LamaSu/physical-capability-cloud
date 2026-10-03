@@ -5,6 +5,7 @@ import { OracleVerificationBridge, StarknetProofAnchoringService, configFromEnv 
 import { getRepos } from "../db.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // Singleton oracle verification bridge — config driven by env vars.
 // Set ORACLE_MOCK=false to activate live UMA/Chainlink verification.
@@ -215,11 +216,11 @@ export async function zkProofRoutes(app: FastifyInstance) {
         const depth = body.treeDepth ?? 0;
         try {
           const anchor = await starknetService.anchorMerkleRoot(body.merkleRoot, depth);
-          trackServerEvent("zk_proof_anchored", {
-            type: "merkle_root",
-            merkleRoot: body.merkleRoot,
-            txHash: anchor.txHash,
-            mock: starknetService.isMock(),
+          trackServerEvent(lit("zk_proof_anchored"), {
+            type: lit("merkle_root"),
+            merkleRoot: declare.id(body.merkleRoot),
+            txHash: declare.id(anchor.txHash),
+            mock: declare.flag(starknetService.isMock()),
           }, (req as any).operatorId);
           auditService.log({
             eventType: "zk.proof_anchored",
@@ -258,11 +259,11 @@ export async function zkProofRoutes(app: FastifyInstance) {
 
       try {
         const anchor = await starknetService.anchorProof(proof);
-        trackServerEvent("zk_proof_anchored", {
-          type: "proof",
-          proofId: body.proofId,
-          txHash: anchor.txHash,
-          mock: starknetService.isMock(),
+        trackServerEvent(lit("zk_proof_anchored"), {
+          type: lit("proof"),
+          proofId: declare.id(body.proofId),
+          txHash: declare.id(anchor.txHash),
+          mock: declare.flag(starknetService.isMock()),
         }, (req as any).operatorId);
         auditService.log({
           eventType: "zk.proof_anchored",
