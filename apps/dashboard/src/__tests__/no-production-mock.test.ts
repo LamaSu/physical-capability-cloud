@@ -104,6 +104,105 @@ const SERVER_FABRICATED: Record<string, string> = {
     "packages/gateway/src/routes/logistics.ts returns hard-coded providers, shipments and quotes (carrier #2264, steward N-b)",
 };
 
+/**
+ * Pages no test renders yet (astra 408a). A fixture written as a bare object
+ * literal matches no pattern above, so the per-page tests are the backstop:
+ * every page module needs a test that imports it. These pages predate the
+ * rule. The list only shrinks: a new page must come with its test, and a
+ * listed page that gains one (or is deleted) must leave the list.
+ */
+const UNTESTED_PAGES: Record<string, string> = {
+  "pages/AgentChatPage.tsx": "no page test yet",
+  "pages/AgentPackagePage.tsx": "no page test yet",
+  "pages/AnalyticsDashboardPage.tsx": "no page test yet",
+  "pages/BatchBoardPage.tsx": "no page test yet",
+  "pages/BatchTrackingPage.tsx": "no page test yet",
+  "pages/BuilderPage.tsx": "no page test yet",
+  "pages/DePINDashboardPage.tsx": "fixtures, owned by RETIRE (PRODUCT-BOARD s4): economics #394 deletes the page",
+  "pages/DeviceBuilderPage.tsx": "no page test yet",
+  "pages/EvidenceExplorerPage.tsx": "fixtures, owned by readmodels c255d7dc: EvidenceSummary read model",
+  "pages/IPDashboardPage.tsx": "fixtures, owned by economics df42dbe5",
+  "pages/IPDetailPage.tsx": "fixtures, owned by economics df42dbe5",
+  "pages/IPRevenuePage.tsx": "fixtures, owned by economics df42dbe5",
+  "pages/InstallationDetailPage.tsx": "fixtures, owned by logistics N-b (carrier #2264)",
+  "pages/JobDetailPage.tsx": "no page test yet",
+  "pages/LandingPage.tsx": "no page test yet",
+  "pages/LoginPage.tsx": "no page test yet",
+  "pages/LogisticsHubPage.tsx": "server-fabricated: see SERVER_FABRICATED",
+  "pages/NegotiationSessionPage.tsx": "no page test yet",
+  "pages/OnboardChatPage.tsx": "no page test yet",
+  "pages/OnboardKitPage.tsx": "no page test yet",
+  "pages/OnboardWizardPage.tsx": "no page test yet",
+  "pages/OperatorDashboardPage.tsx": "fixtures, owned by operator-ux f0734fab",
+  "pages/OperatorMachineDetailPage.tsx": "fixtures, owned by operator-ux f0734fab",
+  "pages/OperatorMobilePage.tsx": "fixtures, owned by operator-ux f0734fab",
+  "pages/OrchestratorDetailPage.tsx": "no page test yet",
+  "pages/OrchestratorPage.tsx": "no page test yet",
+  "pages/ProtocolBuilderPage.tsx": "no page test yet",
+  "pages/ProtocolDetailPage.tsx": "no page test yet",
+  "pages/ProtocolLibraryPage.tsx": "no page test yet",
+  "pages/ProtocolRunPage.tsx": "no page test yet",
+  "pages/RateSchedulePublishPage.tsx": "no page test yet",
+  "pages/RateScheduleViewPage.tsx": "no page test yet",
+  "pages/RevenueClaimsPage.tsx": "fixtures, owned by economics df42dbe5",
+  "pages/SWFDashboardPage.tsx": "fixtures, owned by RETIRE (PRODUCT-BOARD s4): economics #394 deletes the page",
+  "pages/SWFGovernancePage.tsx": "fixtures, owned by RETIRE (PRODUCT-BOARD s4): economics #394 deletes the page",
+  "pages/SensorDashboardPage.tsx": "no page test yet",
+  "pages/SettlementPage.tsx": "fixtures, owned by readmodels c255d7dc: settlement read model, no mock fallback",
+  "pages/ShipmentDetailPage.tsx": "fixtures, owned by logistics N-b (carrier #2264)",
+  "pages/SpaceBookingsPage.tsx": "fixtures, owned by logistics N-b (carrier #2264)",
+  "pages/StartPage.tsx": "fixtures, owned by adk 4f6668ed: registers against kernel_dev_001 / adapter 'mock'",
+  "pages/WhitepaperPage.tsx": "no page test yet",
+  "pages/WorkflowPage.tsx": "no page test yet",
+  "pages/onboard/Step1_MachineIdentity.tsx": "no page test yet",
+  "pages/onboard/Step2_Documentation.tsx": "fixtures, owned by adk 4f6668ed",
+  "pages/onboard/Step3_Capabilities.tsx": "no page test yet",
+  "pages/onboard/Step4_PhysicalSpace.tsx": "fixtures, owned by adk 4f6668ed",
+  "pages/onboard/Step5_Pricing.tsx": "fixtures, owned by adk 4f6668ed",
+  "pages/onboard/Step6_Operator.tsx": "fixtures, owned by adk 4f6668ed",
+  "pages/onboard/Step7_Review.tsx": "fixtures, owned by adk 4f6668ed: registers adapterType 'mock' (the EXPERIENCE-COMPLETE blocker)",
+};
+
+/** Every page module: the .tsx files under pages/, tests aside. */
+function pageModules(): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) {
+        if (name !== "__tests__") walk(full);
+      } else if (name.endsWith(".tsx") && !name.endsWith(".test.tsx")) {
+        out.push(relPath(full));
+      }
+    }
+  };
+  walk(join(SRC, "pages"));
+  return out.sort();
+}
+
+/** The source of every test in apps/dashboard/src. */
+function testSources(): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (/\.test\.(ts|tsx)$/.test(name)) out.push(readFileSync(full, "utf-8"));
+    }
+  };
+  walk(SRC);
+  return out;
+}
+
+/** The pages no test imports: none of `tests` names the page's module in an import path. */
+function pagesWithoutHonestyTest(pages: string[], tests: string[]): string[] {
+  return pages.filter((page) => {
+    const base = page.split("/").pop()!.replace(/\.tsx$/, "");
+    const imported = new RegExp(`['"](?:\\.{1,2}/)+(?:[\\w-]+/)*${base}(?:\\.js|\\.tsx)?['"]`);
+    return !tests.some((test) => imported.test(test));
+  });
+}
+
 function productionFiles(dir: string): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir)) {
@@ -194,6 +293,24 @@ describe("no production mock (ratchet)", () => {
     expect(PATTERNS.some(([, rx]) => new RegExp(rx.source, rx.flags).test('const rows = [{ name: "Sample machine", price: 25 }];'))).toBe(false);
     // So every page must have an honesty test, or be listed, with a reason, as not yet tested.
     expect(pagesWithoutHonestyTest(["pages/NewSamplePage.tsx"], [])).toEqual(["pages/NewSamplePage.tsx"]);
+  });
+
+  it("every page has a test that renders it, or is listed as not yet tested (astra 408a)", () => {
+    const missing = pagesWithoutHonestyTest(pageModules(), testSources()).filter((page) => !(page in UNTESTED_PAGES));
+    expect(missing, "Add a page test (pages/__tests__/<Page>.honesty.test.tsx) that imports the page").toEqual([]);
+  });
+
+  it("the untested list only shrinks: every listed page still exists and still has no test", () => {
+    const untested = new Set(pagesWithoutHonestyTest(pageModules(), testSources()));
+    const stale = Object.keys(UNTESTED_PAGES).filter((page) => !untested.has(page));
+    expect(stale, "These pages have a test now, or are gone: delete their UNTESTED_PAGES entries").toEqual([]);
+  });
+
+  it("an import of the page itself counts, and a page with a similar name doesn't (self-test)", () => {
+    // Made-up pages: this file is itself a test, so naming a real page here would count as its test.
+    const pages = ["pages/ProbePage.tsx", "pages/probe/ProbeStep.tsx"];
+    expect(pagesWithoutHonestyTest(pages, ['import { ProbePage } from "../ProbePage.js";', 'import { ProbeStep } from "../../pages/probe/ProbeStep.js";'])).toEqual([]);
+    expect(pagesWithoutHonestyTest(pages, ['import { OtherProbePage } from "../OtherProbePage.js";'])).toEqual(pages);
   });
 
   it("the scanner detects each pattern (self-test)", () => {
