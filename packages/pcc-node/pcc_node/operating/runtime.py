@@ -26,11 +26,15 @@ only part that touches the device, and it keeps these promises:
    them. A run id of "." or ".." is refused before it can change a path.
 5. **The result says whether the device may be running.** Once any byte of the
    start request has left the node, every failure is labelled
-   ``<reason>:device_state_unknown``: a lost connection, a 5xx, a timeout, a
-   cancel, a lost lease, an unusable run id. Only an answer of 3xx or 4xx is a
-   refusal (``device_refused:<status>``). A stop before anything was sent is
-   ``<reason>:not_started``, and a device that could not be reached is
-   ``device_unreachable``.
+   ``<reason>:device_state_unknown``: a lost connection, any answer that is not
+   2xx (a 303 can follow a processed POST, a 409 can name a run that exists), a
+   timeout, a cancel, a lost lease, an unusable run id, or any error while
+   following the run (verdict 117c). A clean refusal (``device_refused:<status>``)
+   is only a 4xx the operation's binding declares in ``request.refusals``: the
+   device's own promise that it sends that answer before any side effect. A stop
+   before anything was sent is ``<reason>:not_started``, and a device that could
+   not be reached is ``device_unreachable``. A cancel or a lost lease that
+   interrupts the log fetch, after the run finished, is ``<reason>:run_finished``.
 6. **Each job is its own log chain**, starting at GENESIS, so every job's
    evidence verifies on its own.
 
@@ -131,6 +135,7 @@ class OperationBinding:
     log_path: Optional[str] = None
     poll_interval_s: float = 1.0
     timeout_s: float = 600.0
+    refusals: Tuple[int, ...] = ()
 
     @classmethod
     def from_dict(cls, name: str, d: Dict[str, Any]) -> "OperationBinding":
@@ -157,6 +162,11 @@ class OperationBinding:
         if not isinstance(run_id_field, str) or not isinstance(state_field, str):
             raise BindingError(f"{where}: runId and poll.field must be strings")
         log_path = (d.get("log") or {}).get("path")
+        refusals = request.get("refusals", [])
+        if (not isinstance(refusals, list) or len(set(refusals)) != len(refusals)
+                or not all(isinstance(c, int) and not isinstance(c, bool) and 400 <= c <= 499 for c in refusals)):
+            raise BindingError(f"{where}.request.refusals must list distinct 4xx statuses the device sends "
+                               "before any side effect")
         return cls(
             method=method,
             path=_check_path(request.get("path"), f"{where}.request.path"),
@@ -169,6 +179,7 @@ class OperationBinding:
             log_path=None if log_path is None else _check_path(log_path, f"{where}.log.path", run_id=True),
             poll_interval_s=interval,
             timeout_s=timeout,
+            refusals=tuple(refusals),
         )
 
 
@@ -593,24 +604,42 @@ class AdapterRuntime:
             return _request(method, self._base + path, payload, deadline=deadline, clock=self._clock,
                             stop=stop, max_bytes=max_bytes, headers=headers)
 
+        try:
+            json.dumps(body)
+        except (TypeError, ValueError):
+            return RunResult(False, error="param_not_json:not_started")
         key = idempotency_key(claim.job_id, claim.kernel_id, claim.claim_token)
         try:
             started = call(binding.method, binding.path, body, headers={"Idempotency-Key": key})
         except _Abort as halt:
             return RunResult(False, error=_label(halt.reason, halt.sent))
+        except Exception:  # whatever went wrong, the request may have left the node
+            log.exception("start request failed unexpectedly")
+            return RunResult(False, error="internal_error:device_state_unknown")
         if not started.sent:
             return RunResult(False, error="device_unreachable")
-        if 300 <= started.status < 500:
-            return RunResult(False, error=f"device_refused:{started.status}")  # the device answered no
+        if started.status in binding.refusals:
+            return RunResult(False, error=f"device_refused:{started.status}")  # declared: sent before any side effect
         if not 200 <= started.status < 300:
             what = "connection_lost" if started.status == 0 else f"device_error:{started.status}"
             return RunResult(False, error=f"{what}:device_state_unknown")
+        try:
+            return self._follow(binding, operation, started, claim, call, stop, deadline)
+        except Exception:  # the device was started: a bug here must not hide that
+            log.exception("following the run failed unexpectedly")
+            output = started.body if isinstance(started.body, dict) else None
+            return RunResult(False, output=output, error="internal_error:device_state_unknown")
+
+    def _follow(self, binding: OperationBinding, operation: str, started: _Answer, claim: Any,
+                call: Callable[..., _Answer], stop: Stop, deadline: float) -> RunResult:
+        """Everything after a start the device accepted: its run id, the polls, the log, the evidence."""
         run_id = started.body.get(binding.run_id_field) if isinstance(started.body, dict) else None
         if not isinstance(run_id, (str, int)) or isinstance(run_id, bool) or str(run_id) == "":
             return RunResult(False, error="no_run_id:device_state_unknown")  # it started, and cannot be followed
         run_id = str(run_id)
-        if run_id in (".", "..") or len(run_id) > 256:
-            return RunResult(False, error="bad_run_id:device_state_unknown")  # "." and ".." would change the path
+        if run_id in (".", "..") or len(run_id) > 256 or not portable(run_id):
+            # "." and ".." would change the path; an id that is not valid Unicode cannot be quoted
+            return RunResult(False, error="bad_run_id:device_state_unknown")
         segment = quote(run_id, safe="")  # the device's id stays one path segment
 
         record: Any = started.body
@@ -638,7 +667,11 @@ class AdapterRuntime:
                 if fetched.status == 200 and fetched.body is not None:
                     log_text = fetched.body if isinstance(fetched.body, str) else canonicalize(fetched.body)
             except _Abort as halt:
-                log.warning("run %s: log not fetched (%s)", run_id, halt.reason)
+                if halt.reason in ("cancelled", "lease_lost"):
+                    # Control was lost after the run finished: say so, never report success (verdict 117c).
+                    return RunResult(False, output=record, evidence=self._evidence(operation, run_id, record, None, claim),
+                                     error=f"{halt.reason}:run_finished")
+                log.warning("run %s: log not fetched (%s)", run_id, halt.reason)  # the log is optional
         if not portable(record):
             return RunResult(False, output=record, error="record_not_portable")
         evidence = self._evidence(operation, run_id, record, log_text, claim)
@@ -647,19 +680,23 @@ class AdapterRuntime:
         return RunResult(False, output=record, evidence=evidence, error=f"run_{state}")
 
     def _wait(self, seconds: float, deadline: float, stop: Stop) -> None:
-        """The pause between polls, cut short by a cancel, a lost lease or the deadline."""
-        if self._sleep is not None:
-            self._sleep(seconds)
-            return
+        """The pause between polls, in slices, cut short by a cancel, a lost lease or the deadline.
+
+        An injected ``sleep`` is called for one slice at a time too, so it cannot carry a run past
+        any of them (verdict 117c).
+        """
+        nap = self._sleep or time.sleep
         end = self._clock() + seconds
         while True:
             reason = _stop_reason(deadline, self._clock, stop)
             if reason:
                 raise _Abort(reason, True)
-            left = end - self._clock()
+            left = min(end, deadline) - self._clock()
             if left <= 0:
+                if self._clock() >= deadline:
+                    raise _Abort("timeout", True)
                 return
-            time.sleep(min(_WATCH_S, left))
+            nap(min(_WATCH_S, left))
 
     def _evidence(self, operation: str, run_id: str, record: Any, log_text: Optional[str], claim: Any) -> Optional[dict]:
         """The device's own account of the run, as signed log-chain entries bound to the claim.

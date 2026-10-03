@@ -66,13 +66,13 @@ class Gateway:
         if method == "POST" and path.endswith("/claim/renew"):
             if not self.renew_ok:
                 return 409, {"error": "lease_expired"}
-            return 200, {"renewed": True, "leaseExpiresAt": _iso(self.lease_s)}
+            return 200, {"renewed": True, "leaseExpiresAt": _iso(self.lease_s), "leaseSeconds": self.lease_s}
         if method == "POST" and path.endswith("/claim"):
             if self.claim_answer is not None:
                 return self.claim_answer
             job_id = path.split("/")[4]
             return 200, {"claimed": True, "jobId": job_id, "claimToken": f"tok-{job_id}",
-                         "leaseExpiresAt": _iso(self.lease_s)}
+                         "leaseExpiresAt": _iso(self.lease_s), "leaseSeconds": self.lease_s}
         if method == "POST" and path == "/api/operator/evidence":
             return 200, {"stored": True, "jobId": body["jobId"]}
         if method == "POST" and path == "/api/operator/job-status":
@@ -213,9 +213,11 @@ def test_a_claim_without_a_lease_is_never_run():
                        "metadata": {"reason": "claim_lease_unusable"}}]
 
 
-@pytest.mark.parametrize("lease", ["2020-01-01T00:00:00Z", "2026-10-03T00:00:00", "tomorrow", 1234567890])
-def test_a_lease_already_over_or_unreadable_is_unusable(lease):
-    gw = Gateway(claim_answer=(200, {"claimed": True, "jobId": "j-1", "claimToken": "tok-j-1", "leaseExpiresAt": lease}))
+@pytest.mark.parametrize("seconds", [0, -1, "60", None, float("nan"), float("inf"), 10 ** 6, True, 0.4])
+def test_a_lease_too_short_or_unreadable_is_unusable(seconds):
+    # 117c: the lease is leaseSeconds, counted from the send; an absolute expiry alone is not enough.
+    gw = Gateway(claim_answer=(200, {"claimed": True, "jobId": "j-1", "claimToken": "tok-j-1",
+                                     "leaseExpiresAt": _iso(600), "leaseSeconds": seconds}))
     assert _port(gw, _keys()).claim_next(KERNEL) is None
 
 

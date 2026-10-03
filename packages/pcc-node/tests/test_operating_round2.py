@@ -77,9 +77,10 @@ class Gateway:
                 if job_id in self.claimed:
                     return 409, {"error": "job_not_claimable", "status": "in_progress"}
                 self.claimed[job_id] = f"tok-{job_id}"
-            return 200, {"claimed": True, "jobId": job_id, "claimToken": f"tok-{job_id}", "leaseExpiresAt": _iso(60)}
+            return 200, {"claimed": True, "jobId": job_id, "claimToken": f"tok-{job_id}", "leaseExpiresAt": _iso(60),
+                         "leaseSeconds": 60}
         if method == "POST" and path.endswith("/claim/renew"):
-            return 200, {"renewed": True, "leaseExpiresAt": _iso(60)}
+            return 200, {"renewed": True, "leaseExpiresAt": _iso(60), "leaseSeconds": 60}
         if method == "POST" and path == STATUS:
             if body.get("status") == "in_progress" and self.failing_claims:
                 self.failing_claims -= 1

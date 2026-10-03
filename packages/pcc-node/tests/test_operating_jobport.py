@@ -63,7 +63,8 @@ STATUS = "/api/operator/job-status"
 UPDATED = (200, {"updated": True})
 CLAIM_J1 = "/api/operator/jobs/j-1/claim"
 LEASE = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
-CLAIMED_J1 = (200, {"claimed": True, "jobId": "j-1", "claimToken": "tok-1", "leaseExpiresAt": LEASE})
+CLAIMED_J1 = (200, {"claimed": True, "jobId": "j-1", "claimToken": "tok-1", "leaseExpiresAt": LEASE,
+                    "leaseSeconds": 600})
 
 
 class TestSigningIsMandatory:

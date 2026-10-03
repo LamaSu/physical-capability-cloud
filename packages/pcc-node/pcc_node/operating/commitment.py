@@ -5,10 +5,16 @@ operation, the device's record and its run id. So evidence made under one claim 
 signed for another, and the gateway can check the claim against the token hash it keeps. The
 start request carries an idempotency key derived from the same claim, never the token itself.
 
-A record must be portable JSON: text that any JSON parser reads back exactly. That excludes
-NaN and the infinities (not JSON at all), integers past 2^53 - 1 (a JavaScript parser rounds
-them), and strings that are not valid Unicode (unpaired surrogates cannot be UTF-8 encoded, so
-they cannot be hashed the same way twice). A device that reports such a value gets no evidence.
+A record must be portable JSON: what any JSON parser reads back as the same values. That
+excludes NaN and the infinities (not JSON at all), integers past 2^53 - 1 (a JavaScript parser
+rounds them), negative zero (its canonical text is "0", so it would read back as 0, and a record
+holding 0 would carry the same commitment), and strings that are not valid Unicode (unpaired
+surrogates cannot be UTF-8 encoded, so they cannot be hashed the same way twice). A device that
+reports such a value gets no evidence.
+
+Numbers are JSON numbers: 1.0 and 1 are the same value, with the same canonical text "1" (verdict
+117c). recordCanonical is the node's canonical text: hash it as given. Another language may
+render the same numbers differently, so a verifier must never re-render it.
 """
 
 import hashlib
@@ -59,7 +65,7 @@ def portable(value: Any, depth: int = 0) -> bool:
     if isinstance(value, int):
         return -MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER
     if isinstance(value, float):
-        return math.isfinite(value)
+        return math.isfinite(value) and not (value == 0.0 and math.copysign(1.0, value) < 0)
     if isinstance(value, str):
         return _unicode(value)
     if isinstance(value, list):

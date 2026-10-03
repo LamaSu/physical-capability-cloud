@@ -5,20 +5,26 @@ this port. It uses only the node's own routes, with the operator's API key:
 
 - ``claim_next``: ``GET /api/operator/jobs?kernelId=…&status=queued``, then the
   gateway's atomic claim, ``POST /api/operator/jobs/:id/claim``. That is a
-  compare-and-set from ``queued`` which answers 200 with a ``claimToken`` and a
-  ``leaseExpiresAt`` exactly once, and 409 to everyone else, so two nodes can
+  compare-and-set from ``queued`` which answers 200 with a ``claimToken`` and the
+  lease (``leaseSeconds``) exactly once, and 409 to everyone else, so two nodes can
   never both run one job (verdict 117). Until the gateway serves that route,
   nothing is claimed.
-- **The lease** (verdict 117b): the gateway's lease ends a claim, and at its
-  expiry the job fails (``lease_expired``) rather than going back to the queue,
-  since a node that lost its lease may still be driving the device. A claimed
-  job carries a :class:`Lease` that renews itself in the background
-  (``POST /api/operator/jobs/:id/claim/renew``) at half its remaining time. The
-  node treats the lease as over a margin before the gateway's expiry (clocks
-  differ), and at once when a renewal is refused. ``ClaimedJob.lease_alive()``
-  is what the runtime checks before and throughout a run. A claim with no
-  usable lease is never run: it is failed at once (``claim_lease_unusable``)
-  instead of stranding the job.
+- **The lease** (verdicts 117b and 117c): the gateway's lease ends a claim, and
+  at its expiry the job fails (``lease_expired``) rather than going back to the
+  queue, since a node that lost its lease may still be driving the device. A
+  claimed job carries a :class:`Lease` that renews itself in the background
+  (``POST /api/operator/jobs/:id/claim/renew``) at half its remaining time.
+  The node reads the lease's length, ``leaseSeconds``, from the claim and each
+  renewal, and counts it on its own monotonic clock from when it *sent* that
+  request. That is never later than the gateway's own start, so no clock skew
+  can stretch it, and ``leaseExpiresAt`` is not used. It treats the lease as
+  over a margin early (a quarter of it, at most 5 s), and at once when a
+  renewal is refused. A renewal that answers after the lease lapsed is
+  discarded: a lapsed lease stays lapsed. ``ClaimedJob.lease_alive()`` is what
+  the runtime checks before and throughout a run. A claim with no usable lease
+  (no ``leaseSeconds``, or too short to run in) is never run. It is failed
+  (``claim_lease_unusable``), and until the gateway applies that, the port owes
+  it and retries on each ``claim_next`` (``owed_failures()``).
 - ``resolve_params``: on the current gateway a polled job carries no parameters
   (board G6). The buyer's selections live in the job's negotiation session:
   ``GET /api/jobs/:id/settlement`` gives ``session.id``, then
@@ -48,10 +54,10 @@ the job id the bundle must bind.
 """
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Set, Tuple
 from urllib.parse import quote
 
@@ -81,37 +87,35 @@ _PAYLOAD_KEYS = frozenset({"entryId", "entryHash", "previousHash", "source", "ca
 _SIGNATURE_KEYS = frozenset({"signer", "algorithm", "value"})
 
 
-def _parse_expiry(value: Any) -> Optional[float]:
-    """leaseExpiresAt as a POSIX time, or None. It must name its time zone."""
-    if not isinstance(value, str) or len(value) > 64:
+def _parse_lease_seconds(value: Any) -> Optional[float]:
+    """leaseSeconds, the lease length the gateway applied, or None: a finite number in (0, 86400]."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
-    try:
-        when = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if when.tzinfo is None:
-        return None
-    return when.timestamp()
+    seconds = float(value)
+    return seconds if math.isfinite(seconds) and 0 < seconds <= 86400 else None
+
+
+Renewal = Tuple[str, Optional[float], Optional[float]]
 
 
 class Lease:
-    """A claim's lease: alive until a margin before the gateway's expiry, renewed in the background.
+    """A claim's lease: alive until a margin before it ends on the node's monotonic clock, renewed in the background.
 
-    ``renew()`` returns ``("ok", expires_at)`` (a POSIX time), ``("refused", None)`` when the
-    gateway says the lease is gone, or ``("error", None)`` for anything transient, which is
-    retried until the lease runs out. A lease that lapsed or was refused stays over.
+    The lease runs ``lease_seconds`` from ``sent_at``, the monotonic time the claim (or renewal)
+    request was sent. ``renew()`` returns ``("ok", lease_seconds, sent_at)``, ``("refused", None,
+    None)`` when the gateway says the lease is gone, or ``("error", None, None)`` for anything
+    transient, which is retried until the lease runs out. A lease that lapsed or was refused
+    stays over, even if a renewal sent before the lapse answers after it.
     """
 
-    def __init__(self, job_id: str, expires_at: float, renew: Callable[[], Tuple[str, Optional[float]]], *,
-                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
-                 max_hold_s: float = _MAX_HOLD_S) -> None:
+    def __init__(self, job_id: str, lease_seconds: Optional[float], sent_at: float, renew: Callable[[], Renewal], *,
+                 clock: Callable[[], float] = time.monotonic, max_hold_s: float = _MAX_HOLD_S) -> None:
         self._renew = renew
-        self._clock, self._wall = clock, wall
+        self._clock = clock
         self._lock = threading.Lock()
         self._release = threading.Event()
         self._hold_until = clock() + max_hold_s
-        deadline = self._local_deadline(expires_at)
+        deadline = self._local_deadline(lease_seconds, sent_at)
         self._dead = deadline is None
         self._deadline = deadline if deadline is not None else clock()
         if not self._dead:
@@ -121,14 +125,13 @@ class Lease:
         """Whether the gateway's lease left the node any time to run in."""
         return not self._dead
 
-    def _local_deadline(self, expires_at: Optional[float]) -> Optional[float]:
-        if expires_at is None:
+    def _local_deadline(self, lease_seconds: Optional[float], sent_at: Optional[float]) -> Optional[float]:
+        if lease_seconds is None or sent_at is None:
             return None
-        remaining = expires_at - self._wall()
-        window = remaining - min(_LEASE_MARGIN_MAX_S, remaining * _LEASE_MARGIN_FRACTION)
-        if window <= _LEASE_MIN_WINDOW_S:
+        deadline = sent_at + lease_seconds - min(_LEASE_MARGIN_MAX_S, lease_seconds * _LEASE_MARGIN_FRACTION)
+        if deadline - self._clock() <= _LEASE_MIN_WINDOW_S:
             return None
-        return self._clock() + window
+        return deadline
 
     def alive(self) -> bool:
         with self._lock:
@@ -155,17 +158,18 @@ class Lease:
             if self._release.wait(wait):
                 return
             try:
-                outcome, expires_at = self._renew()
+                outcome, lease_seconds, sent_at = self._renew()
             except Exception:  # a renewal that cannot run is a transient failure
-                outcome, expires_at = "error", None
+                outcome, lease_seconds, sent_at = "error", None, None
             with self._lock:
-                if self._dead:
+                if self._dead or self._clock() >= self._deadline:
+                    self._dead = True  # the lease lapsed while the renewal was out: it stays lapsed
                     return
                 if outcome == "refused":
                     self._dead = True
                     return
                 if outcome == "ok":
-                    deadline = self._local_deadline(expires_at)
+                    deadline = self._local_deadline(lease_seconds, sent_at)
                     if deadline is None:
                         self._dead = True
                         return
@@ -257,6 +261,18 @@ class GatewayJobPort:
         self._seen: Set[str] = set()
         self._stored: Dict[str, bool] = {}
         self._failure: Dict[str, str] = {}
+        # Claims this node failed (claim_lease_unusable) that the gateway has not applied yet: job -> token.
+        self._owed: Dict[str, str] = {}
+
+    def owed_failures(self) -> Tuple[str, ...]:
+        """Jobs this node must fail but the gateway has not yet applied: retried on each claim_next."""
+        return tuple(self._owed)
+
+    def _settle_owed(self) -> None:
+        for job_id, token in list(self._owed.items()):
+            accepted, status = self._post_status(job_id, token, "failed", "claim_lease_unusable")
+            if accepted or status == 409:  # applied, or the claim is gone (the gateway ended it)
+                del self._owed[job_id]
 
     def _call(self, method: str, path: str, body: Optional[dict] = None) -> Tuple[int, Any]:
         return self._request(method, path, body, base_url=self._base, api_key=self._api_key)
@@ -266,6 +282,7 @@ class GatewayJobPort:
         if kernel_id != self._kernel_id:
             log.warning("asked to claim for kernel %s, but this port serves %s", kernel_id, self._kernel_id)
             return None
+        self._settle_owed()
         status, body = self._call("GET", f"/api/operator/jobs?kernelId={quote(kernel_id, safe='')}&status={quote(self._status, safe='')}")
         if status != 200 or not isinstance(body, dict) or not isinstance(body.get("jobs"), list):
             return None
@@ -281,6 +298,7 @@ class GatewayJobPort:
             if operation is None:
                 log.info("job %s: no operation for capability type %r; leaving it", job_id, cap_type)
                 continue
+            sent_at = time.monotonic()  # the lease is counted from here, never from the gateway's clock
             status, claimed = self._call("POST", f"/api/operator/jobs/{quote(job_id, safe='')}/claim",
                                          {"kernelId": self._kernel_id})
             if not isinstance(claimed, dict):
@@ -293,28 +311,31 @@ class GatewayJobPort:
                 continue
             # Seen only once claimed: a refused or failed claim is tried again next time.
             self._seen.add(job_id)
-            lease = Lease(job_id, _parse_expiry(claimed.get("leaseExpiresAt")),
+            lease = Lease(job_id, _parse_lease_seconds(claimed.get("leaseSeconds")), sent_at,
                           lambda job_id=job_id, token=token: self._renew(job_id, token))
             if not lease.usable():
-                # The gateway gave this node the job, but no lease it can keep: never run it,
-                # and fail it now rather than strand it in_progress.
+                # The gateway gave this node the job, but no lease it can keep: never run it, and
+                # fail it rather than strand it in_progress. Until that is applied, it is owed.
                 log.warning("job %s: claimed without a usable lease; failing it", job_id)
-                self._post_status(job_id, token, "failed", "claim_lease_unusable")
+                accepted, failed_status = self._post_status(job_id, token, "failed", "claim_lease_unusable")
+                if not accepted and failed_status != 409:
+                    self._owed[job_id] = token
                 continue
             return ClaimedJob(job_id=job_id, operation=operation, capability_type=cap_type, claim_token=token,
                               kernel_id=self._kernel_id, lease=lease)
         return None
 
-    def _renew(self, job_id: str, token: str) -> Tuple[str, Optional[float]]:
+    def _renew(self, job_id: str, token: str) -> Renewal:
+        sent_at = time.monotonic()
         status, answer = self._call("POST", f"/api/operator/jobs/{quote(job_id, safe='')}/claim/renew",
                                     {"claimToken": token})
         if status == 409 or (status == 200 and isinstance(answer, dict) and answer.get("renewed") is False):
-            return "refused", None
+            return "refused", None, None
         if status == 200 and isinstance(answer, dict):
-            expires_at = _parse_expiry(answer.get("leaseExpiresAt"))
-            if expires_at is not None:
-                return "ok", expires_at
-        return "error", None
+            lease_seconds = _parse_lease_seconds(answer.get("leaseSeconds"))
+            if lease_seconds is not None:
+                return "ok", lease_seconds, sent_at
+        return "error", None, None
 
     def resolve_params(self, job: ClaimedJob) -> Optional[Dict[str, Any]]:
         """The buyer's selections from the job's negotiation session, or None."""
@@ -428,7 +449,7 @@ class GatewayJobPort:
             return ReportAck(stored=False, reason="evidence_not_stored")
         return ReportAck(stored=True)
 
-    def _post_status(self, job_id: str, token: str, final: str, reason: Optional[str]) -> bool:
+    def _post_status(self, job_id: str, token: str, final: str, reason: Optional[str]) -> Tuple[bool, int]:
         body: Dict[str, Any] = {"jobId": job_id, "kernelId": self._kernel_id, "status": final, "claimToken": token}
         if reason:
             body["metadata"] = {"reason": reason}
@@ -436,7 +457,7 @@ class GatewayJobPort:
         accepted = status == 200 and isinstance(answer, dict) and answer.get("updated") is True
         if not accepted:
             log.warning("job %s: final status %s not applied (HTTP %s)", job_id, final, status)
-        return accepted
+        return accepted, status
 
     def complete(self, job: ClaimedJob, *, passed: bool, reason: Optional[str]) -> CompleteAck:
         """Finish the job the node's way, say whether the gateway applied it, and end the lease.
@@ -447,7 +468,7 @@ class GatewayJobPort:
             passed, reason = False, self._failure.get(job.job_id, "evidence_not_stored")
         final = "completed" if passed else "failed"
         try:
-            accepted = self._post_status(job.job_id, job.claim_token, final, reason)
+            accepted, _ = self._post_status(job.job_id, job.claim_token, final, reason)
         finally:
             if job.lease is not None:
                 job.lease.release()

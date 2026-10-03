@@ -157,7 +157,8 @@ class TestAJobNeverChoosesTheRequest:
             device.redirect_to = other.url + "/runs"
             runtime, _ = _runtime(device.url)
             result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]}, claim=CLAIM)
-            assert (result.ok, result.error) == (False, "device_refused:302")
+            # 117c: a 3xx after the start was sent may follow a run that started.
+            assert (result.ok, result.error) == (False, "device_error:302:device_state_unknown")
             assert other.requests == []
         finally:
             other.close()
@@ -261,9 +262,13 @@ class TestEvidence:
             d.close()
 
     def test_a_refused_start_has_no_evidence(self):
+        # A refusal is clean only when the binding declares it (117c): here the device promises 409.
         d = FakeDevice(start_status=409)
         try:
-            runtime, _ = _runtime(d.url)
+            pub, sec = _keys()
+            profile = _profile(d.url)
+            profile["operations"]["read_absorbance"]["request"]["refusals"] = [409]
+            runtime = AdapterRuntime.from_profile(profile, pub, sec)
             result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]}, claim=CLAIM)
             assert (result.ok, result.error, result.evidence) == (False, "device_refused:409", None)
         finally:
