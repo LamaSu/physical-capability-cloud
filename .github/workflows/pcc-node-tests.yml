@@ -8,9 +8,9 @@
 #
 # This runs every test on the oldest Python pcc-node supports (3.9, its requires-python)
 # and on 3.12, with the optional dependencies the tests exercise installed at pinned
-# versions, and fails if ANY test is skipped: a skip here would be a safety test that
-# silently stopped running. There is deliberately no path filter, so a required check
-# never waits on a run that was never started.
+# versions. It fails if ANY test is skipped, deselected, xfailed or xpassed: each would be
+# a safety test that silently stopped counting. There is deliberately no path filter, so
+# a required check never waits on a run that was never started.
 
 name: pcc-node tests
 
@@ -27,7 +27,7 @@ permissions:
 jobs:
   pcc-node-tests:
     name: pcc-node tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -54,11 +54,11 @@ jobs:
       - name: Install the pinned test dependencies
         run: python -m pip install --quiet "click==$CLICK_VERSION" "pynacl==1.5.0" "cryptography==41.0.7" "pytest==8.3.5"
 
-      - name: The whole suite, failing on any skip
+      - name: The whole suite, failing unless every test ran and passed
         run: |
           set -o pipefail
-          python -m pytest -q -p no:cacheprovider -rs 2>&1 | tee "$RUNNER_TEMP/pcc-node-pytest.log"
-          if tail -n 3 "$RUNNER_TEMP/pcc-node-pytest.log" | grep -E -q '[0-9]+ skipped'; then
-            echo "::error::pcc-node tests were skipped; every test must run in this job"
+          python -m pytest -q -p no:cacheprovider -rsxX 2>&1 | tee "$RUNNER_TEMP/pcc-node-pytest.log"
+          if tail -n 3 "$RUNNER_TEMP/pcc-node-pytest.log" | grep -E -q '[0-9]+ (skipped|deselected|xfailed|xpassed|error)'; then
+            echo "::error::a pcc-node test was skipped, deselected, xfailed, xpassed or errored; every test must run and pass in this job"
             exit 1
           fi
