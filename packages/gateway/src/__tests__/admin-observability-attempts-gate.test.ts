@@ -131,8 +131,7 @@ describe("GET /api/admin/observability/attempts — F4: real production gate cha
           });
           expect(res.statusCode).toBe(403);
           expect(res.json().error).toBe("insufficient_scope");
-          // The default table's /api/admin/** rule decided, not the fallback default-deny.
-          expect(res.json().message).toMatch(/^This endpoint requires one of the following scopes: admin\./);
+          expect(res.json().message).toBe("Admin routes need the admin scope.");
         } finally {
           await app.close();
         }
