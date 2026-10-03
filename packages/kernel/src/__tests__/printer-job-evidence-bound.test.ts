@@ -24,14 +24,20 @@
  * Every test runs on the fake clock, with hashing moved onto microtasks (as in
  * job-runner-evidence-handoff.test.ts), so the clock alone decides when a print moves on.
  *
- * Astra pack 192 (on a436e592), HIGH 1: an event the print accepted but could not record (its
- * hash or its addEvent failed) was logged and skipped, and the print still signed a bundle
- * without it. Such an event now fails the print.
+ * Astra pack 192 (on a436e592) found two HIGHs in that fix, both pinned below:
+ *   - HIGH 1: an event the print accepted but could not record (its hash or its addEvent failed)
+ *     was logged and skipped, and the print still signed a bundle without it;
+ *   - HIGH 2: every event was queued for recording before it was bound to the print's device job,
+ *     so an event that named no job was signed into the print's bundle (B2a pinned that), and an
+ *     event of another job was recorded before the print failed.
+ * Now only events bound to the print's device job are recorded; an event that names no job is
+ * excluded, with a warning; and an event the print could not record fails it.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvidenceBundle, EvidenceEvent, EvidenceSource } from "@pcc/spec";
 
+import { IppAdapter, type IppAdapterConfig } from "../adapters/ipp-adapter.js";
 import { OutstandingWork } from "../adapters/outstanding-work.js";
 import type { MachineAdapter, MachineCommand, MachineCommandResult } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
@@ -630,7 +636,10 @@ describe("B1 (P2's cause): another device job inside the print's window fails it
 });
 
 describe("B2 (P2's cause): only the print's own device job ends it", () => {
-  it("a completion that names no device job does not end the print; its own does, and the completion names that job", async () => {
+  // This test pinned that such a completion was recorded into the print's signed bundle
+  // ("execution_completed#undefined"). Astra pack 192 HIGH 2 calls that a defect: only events bound
+  // to the print's device job are recorded, so it is now excluded from the print's evidence too.
+  it("a completion that names no device job neither ends the print nor enters its evidence; its own does, and the completion names that job", async () => {
     const printer = testPrinter("bound-b2a");
     const { emitter } = recordingEmitter();
     const run = runPrintJob({ adapter: printer, emitter, jobId: "print-b2a", jobName: "a.pdf", totalPages: 1 });
@@ -645,7 +654,7 @@ describe("B2 (P2's cause): only the print's own device job ends it", () => {
     expect.soft(endedByIt, "ended by a completion that names no device job").toBe(false);
     expect.soft(result.success, "the print succeeded").toBe(true);
     expect.soft(result.completion, "its completion").toMatchObject({ printerJobId: 100, pageCount: 1 });
-    expect(tags(result.bundle?.events ?? []), "the print's bundle").toEqual(["execution_started#100", "execution_completed#undefined", "execution_completed#100"]);
+    expect(tags(result.bundle?.events ?? []), "the print's bundle").toEqual(["execution_started#100", "execution_completed#100"]);
   });
 
   it("its own completion, emitted inside start before the print knows its device job, ends it", async () => {
@@ -695,7 +704,7 @@ describe("B2 (P2's cause): only the print's own device job ends it", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Astra pack 192: an event the print could not record fails it
+// Astra pack 192: an event the print could not record fails it, and only bound events are recorded
 // ---------------------------------------------------------------------------
 
 /** Make the emitter fail to record every event of `type`: its addEvent rejects, or throws. */
@@ -711,6 +720,12 @@ function failToRecord(emitter: EvidenceEmitter, how: "rejects" | "throws", type:
 /** The error of a print that could not record an event of its own (JobRunner's wording). */
 function unrecorded(type: string, error: string): string {
   return `a ${type} event of this job could not be recorded (${error}), so its evidence is incomplete`;
+}
+
+/** Watch what a print asks its emitter to record: "type#jobId" of each event, in order. */
+function recordsOf(emitter: EvidenceEmitter): () => string[] {
+  const addEvent = vi.spyOn(emitter, "addEvent");
+  return () => tags(addEvent.mock.calls.map((call) => call[2]));
 }
 
 describe("astra pack 192 HIGH 1: an event the print bound but could not record fails it", () => {
@@ -774,6 +789,152 @@ describe("astra pack 192 HIGH 1: an event the print bound but could not record f
 
     expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: unrecorded("execution_completed", "hash rejected late"), durationMs: expect.any(Number) });
     expect(bundles, "bundles finalized").toEqual([]);
+  });
+});
+
+describe("astra pack 192 HIGH 2: only events bound to the print's device job are recorded", () => {
+  it("an execution_failed that names no device job, after the print started (astra's reproduction), is excluded with a warning: never recorded, never deciding; the print's own completion ends it, and its bundle holds only its job's events", async () => {
+    const printer = testPrinter("jobless-h2a");
+    const { emitter, bundles } = recordingEmitter();
+    const records = recordsOf(emitter);
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-h2a", jobName: "a.pdf", totalPages: 1 });
+    const state = watch(run);
+    await drive(printer.started(1));
+    printer.emit(printer.event("execution_failed", { state: "aborted" })); // names no device job
+    await vi.advanceTimersByTimeAsync(100);
+    const endedByIt = state.settled;
+    printer.complete(100);
+    const result = await drive(run);
+
+    expect.soft(endedByIt, "ended by the failure that names no device job").toBe(false);
+    expect.soft(result.success, "the print succeeded").toBe(true);
+    expect.soft(tags(result.bundle?.events ?? []), "the print's bundle").toEqual(["execution_started#100", "execution_completed#100"]);
+    expect.soft(bundles.length, "bundles finalized").toBe(1);
+    expect.soft(records(), "events the print recorded").toEqual(["execution_started#100", "execution_completed#100"]);
+    expect(console.warn, "the exclusion, logged").toHaveBeenCalledWith(expect.stringContaining("print print-h2a excluded an event that names no device job (execution_failed"));
+  });
+
+  it("events emitted inside start wait until start names the device job, then are admitted in the order they arrived: its own recorded, one that names no job excluded", async () => {
+    const printer = testPrinter("early-h2b", {
+      start: (p, _n, job) => {
+        const accepted = accept(p, job); // the job's execution_started
+        p.emit(p.event("execution_progress", { state: "warming-up" })); // a device-level report: no job
+        p.emit(p.event("execution_progress", { jobId: job, completedSheets: 0 }));
+        return accepted;
+      },
+    });
+    const { emitter } = recordingEmitter();
+    const records = recordsOf(emitter);
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-h2b", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.complete(100);
+    const result = await drive(run);
+
+    expect.soft(result.success, "the print succeeded").toBe(true);
+    expect.soft(tags(result.bundle?.events ?? []), "the print's bundle").toEqual(["execution_started#100", "execution_progress#100", "execution_completed#100"]);
+    expect(records(), "events the print recorded").toEqual(["execution_started#100", "execution_progress#100", "execution_completed#100"]);
+  });
+
+  const FOREIGN: Array<{ when: string; start: (printer: TestPrinter, job: number) => MachineCommandResult; then: (printer: TestPrinter) => void; job: number }> = [
+    { when: "after the print started", start: accept, then: (p) => p.emit(p.event("execution_progress", { jobId: 555 })), job: 555 },
+    {
+      when: "inside start, before the print knows its job",
+      start: (p, job) => {
+        p.emit(p.event("execution_completed", { jobId: 99, totalPages: 4 })); // a stale report of the printer's previous job
+        return accept(p, job);
+      },
+      then: () => {},
+      job: 99,
+    },
+  ];
+
+  it.each(FOREIGN)("an event of another device job, $when, is never recorded, and the print fails closed", async ({ when, start, then, job }) => {
+    const printer = testPrinter(`foreign-h2c-${when.replace(/\W+/g, "-")}`, { start: (p, _n, j) => start(p, j) });
+    const { emitter, bundles } = recordingEmitter();
+    const records = recordsOf(emitter);
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-h2c", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    then(printer);
+    const result = await drive(run);
+
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: expect.stringContaining(`device job ${job}`), durationMs: expect.any(Number) });
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+    expect(records(), "events the print recorded").toEqual(["execution_started#100"]);
+  });
+
+  it('binding is strict: an event that names the print\'s device job as another type ("100" for 100) is another job\'s, never recorded, and the print fails closed', async () => {
+    const printer = testPrinter("strict-h2d");
+    const { emitter, bundles } = recordingEmitter();
+    const addEvent = vi.spyOn(emitter, "addEvent");
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-h2d", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.emit(printer.event("execution_completed", { jobId: "100", totalPages: 1 }));
+    const result = await drive(run);
+
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: expect.stringContaining("something else is driving the printer"), durationMs: expect.any(Number) });
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+    expect(addEvent.mock.calls.map((call) => call[2].payload.jobId), "the device jobs of the events the print recorded").toEqual([100]);
+  });
+});
+
+/**
+ * An IppAdapter in real mode over a fake IPP transport (the optional `ipp` package is not installed
+ * here). Print-Job names device job `job`; each Get-Job-Attributes poll answers the next of `polls`
+ * (RFC 8011 job-state: 5 processing, 8 aborted, 9 completed).
+ */
+function realModeIpp(id: string, job: number, polls: Array<{ state: number; sheets?: number }>): IppAdapter {
+  // Built in mock mode, so it never imports `ipp`; it runs in real mode from here on.
+  const config: IppAdapterConfig = { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: true, pollIntervalMs: 100 };
+  const adapter = new IppAdapter(id, config);
+  config.mockMode = false;
+  const answers = [...polls];
+  class Printer {
+    execute(operation: string, _msg: unknown, _data: unknown, callback: (err: Error | null, res: Record<string, unknown>) => void): void {
+      if (operation === "Print-Job") {
+        callback(null, { "job-attributes-tag": { "job-id": job } });
+        return;
+      }
+      const next = answers.shift() ?? { state: 5 };
+      callback(null, { "job-attributes-tag": { "job-state": next.state, "job-impressions-completed": next.sheets } });
+    }
+  }
+  Object.assign(adapter as unknown as Record<string, unknown>, { ippClient: { Printer }, ippAvailable: true });
+  return adapter;
+}
+
+describe("IppAdapter names its device job on every event, so a print excludes none of them (astra pack 192 HIGH 2)", () => {
+  it("real mode, over a fake IPP transport: the job's start, progress and completion are all bound and signed", async () => {
+    const adapter = realModeIpp("ipp-real-h2", 42, [{ state: 5, sheets: 1 }, { state: 9 }]);
+    const { emitter } = recordingEmitter();
+    const result = await drive(runPrintJob({ adapter, emitter, jobId: "print-real", jobName: "a.pdf", totalPages: 1, documentData: "%PDF-1.4" }));
+    await adapter.dispose();
+
+    expect.soft(result.success, "the print succeeded").toBe(true);
+    expect.soft(result.completion?.printerJobId, "the print's printer job").toBe(42);
+    expect.soft(tags(result.bundle?.events ?? []), "the print's bundle").toEqual(["execution_started#42", "execution_progress#42", "execution_completed#42"]);
+    expect(console.warn, "an exclusion").not.toHaveBeenCalledWith(expect.stringContaining("names no device job"));
+  });
+
+  it("real mode: a job the printer aborted ends the print on its own execution_failed", async () => {
+    const adapter = realModeIpp("ipp-real-h2-aborted", 43, [{ state: 8 }]);
+    const { emitter, bundles } = recordingEmitter();
+    const result = await drive(runPrintJob({ adapter, emitter, jobId: "print-real-aborted", jobName: "a.pdf", totalPages: 1, documentData: "%PDF-1.4" }));
+    await adapter.dispose();
+
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: 'printer reported failure: {"jobId":43,"state":"aborted"}', durationMs: expect.any(Number) });
+    expect(bundles, "bundles finalized").toEqual([]);
+  });
+
+  it("mock mode: every event the adapter emits for a print is in its bundle, and none is excluded", async () => {
+    const kernel = createIppPrintKernel({ kernelId: KERNEL_ID, deviceId: "ipp-mock-h2", mockMode: true, seed: SEED });
+    const emitted: Emitted[] = [];
+    kernel.adapter.onEvidence((event) => emitted.push(event));
+    const result = await drive(kernel.print({ jobId: "print-mock-h2", jobName: "a.pdf", totalPages: 2 }));
+    await kernel.dispose();
+
+    expect.soft(tags(emitted), "what the adapter emitted").toEqual(["execution_started#1000", "execution_progress#1000", "execution_progress#1000", "execution_completed#1000"]);
+    expect.soft(tags(result.bundle?.events ?? []), "the print's bundle").toEqual(tags(emitted));
+    expect(console.warn, "an exclusion").not.toHaveBeenCalledWith(expect.stringContaining("names no device job"));
   });
 });
 

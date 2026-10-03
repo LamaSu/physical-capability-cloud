@@ -42,17 +42,22 @@
  *     and before registerStep.
  *   - Step lease: a print of a (jobId, stepId) already running on the emitter is refused
  *     as busy, "step" (step-lease.ts, shared with JobRunner).
- *   - Device job: start names the printer's own job (`data.jobId`). Only that job's
- *     execution_completed or execution_failed ends the print. An event in the window that
- *     names another device job means something else is driving the printer: the print
- *     fails closed and finalizes nothing. An event that names no device job is recorded
- *     but never ends the print: it cannot be told apart from another job's.
- *   - Recording: an event the print accepted but could not record (its hash or its addEvent
- *     failed) fails the print once its chain has settled, and nothing is finalized: the
- *     bundle would lack that event. The same rule as JobRunner's.
+ *   - Device job: start names the printer's own job (`data.jobId`). An event is bound to the
+ *     print when its `payload.jobId` strictly equals that id. It is bound before it is
+ *     recorded, and only bound events are recorded (astra pack 192). An event that arrives
+ *     before start returns (the IPP mock emits execution_started inside start) waits,
+ *     unrecorded, until the id is known, and is then admitted in the order it arrived:
+ *       - bound: recorded. The job's execution_completed or execution_failed ends the print;
+ *       - it names another device job: something else is driving the printer. The event is
+ *         never recorded; the print fails closed and finalizes nothing;
+ *       - it names no device job (payload.jobId absent or null): it says nothing about this
+ *         print, so it is excluded, with a warning. It is never recorded and never decides.
+ *   - Recording: a bound event the print could not record (its hash or its addEvent failed)
+ *     fails the print once its chain has settled, and nothing is finalized: the bundle would
+ *     lack that event. The same rule as JobRunner's.
  *   - Quiesce, close, then finalize: once its device job has ended, the print waits, still
  *     recording, for the adapter's quiesceEvidence() (bounded), then stops accepting
- *     evidence, waits (bounded) for every accepted event to be recorded, and finalizes.
+ *     evidence, waits (bounded) for every bound event to be recorded, and finalizes.
  *   - Every exit quiesces (bounded) and closes the session. A failed print also seals its
  *     chain, detaches its step (emitter.cleanup) and returns no events. The step lease is
  *     released last. A printer whose hook is still pending stays quiescing until it answers.
@@ -135,7 +140,11 @@ export function makeKernelEd25519Signer(seed?: Uint8Array): KernelEd25519Signer 
 export interface PrintJobOptions {
   /**
    * The device to drive: an IppAdapter, or any MachineAdapter whose start names its device
-   * job as `data.jobId` and whose events carry it as `payload.jobId`.
+   * job as `data.jobId`, and whose events of that job carry the same value, compared
+   * strictly, as `payload.jobId`. Only those events are recorded into the print's evidence.
+   * An event that names another job is never recorded, and fails the print closed. One that
+   * names no job is excluded, with a warning, and never ends the print. A start that names
+   * no job fails the print.
    */
   adapter: MachineAdapter;
   /** Evidence collector; construct it with a real signFn to get real signatures. */
@@ -259,18 +268,19 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
     return failure(`step ${stepId} of job ${jobId} is already running`, { reason: "step", jobId, stepId });
   }
 
-  // Each event the window accepts is recorded on one chain, in the order it arrived, and
-  // the bundle waits for the chain. Set when the print fails, so an event still queued is
-  // never written.
+  // Each event bound to the print's device job is recorded on one chain, in the order it
+  // arrived, and the bundle waits for the chain. Set when the print fails, so an event still
+  // queued is never written.
   let recorded: Promise<void> = Promise.resolve();
   let sealed = false;
-  // The first event the print accepted but could not record (its hash or its write failed).
-  // Its chain then lacks that event, so once the chain has settled the print fails: success
-  // would sign an incomplete record (astra pack 192). As JobRunner's.
+  // The first event the print bound but could not record (its hash or its write failed). Its
+  // chain then lacks that event, so once the chain has settled the print fails: success would
+  // sign an incomplete record (astra pack 192). As JobRunner's.
   const unrecorded: { first: { type: string; error: string } | null } = { first: null };
 
   // This print's device job, and what the printer reported about it in the window. The id
-  // is known once start returns it; what arrives before (inside start) waits in `early`.
+  // is known once start returns it; what arrives before (inside start) waits in `early`,
+  // unrecorded, and is admitted in the order it arrived once the id is known.
   const deviceJob: {
     id?: string | number;
     early: EmittedEvidence[];
@@ -287,17 +297,46 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
     decide = resolve;
   });
 
-  /** Bind an event of the window to the print's device job, whose id is known. */
-  const bind = (event: EmittedEvidence): void => {
+  /** Record an event bound to the print's device job, on the chain. */
+  const record = (event: EmittedEvidence): void => {
+    // NEVER mutate device evidence — the bundle hash must reflect what the device said.
+    // Store it as-is.
+    recorded = recorded.then(async () => {
+      if (sealed) return;
+      try {
+        await emitter.addEvent(jobId, stepId, event);
+      } catch (err) {
+        unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
+        console.error(err);
+      }
+    });
+  };
+
+  /**
+   * Admit an event of the window once the print's device job id is known. It is bound before
+   * it is recorded: only an event whose payload.jobId strictly equals the id is recorded, and
+   * only such an event can end the print (astra pack 192).
+   */
+  const admit = (event: EmittedEvidence): void => {
     const named = (event.payload as Record<string, unknown> | undefined)?.jobId;
-    // Recorded, but never decides the print: it cannot be told apart from another job's.
-    if (named === undefined || named === null) return;
+    if (named === undefined || named === null) {
+      // It names no device job, so it says nothing about this print: excluded, never recorded
+      // and never deciding. Failing the print on it would fail every print on a printer that
+      // emits device-level events. Not the payload: it is device evidence, not a log line.
+      console.warn(
+        `[printer-job] print ${jobId} excluded an event that names no device job (${event.type}, from adapter ${adapter.id}): ` +
+          `it cannot be bound to device job ${String(deviceJob.id)}`,
+      );
+      return;
+    }
     if (named !== deviceJob.id) {
       // Another device job in this print's window: something else is driving the printer.
+      // Never recorded: the print fails closed.
       deviceJob.foreign ??= event;
       decide();
       return;
     }
+    record(event);
     if (event.type === "execution_progress") {
       const tp = (event.payload as Record<string, unknown> | undefined)?.totalPages;
       if (typeof tp === "number") deviceJob.pages = tp;
@@ -321,23 +360,13 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
     );
   };
 
-  // This print's evidence window: events reach the chain only while it is open. A listener
+  // This print's evidence window: events reach the print only while it is open. A listener
   // per print could not be removed, so it went on recording later and overlapping prints'
-  // events into this print's step (P1, P3).
+  // events into this print's step (P1, P3). Nothing is recorded here: an event waits until
+  // the device job is known, and is then admitted (bound, and recorded only if it is bound).
   const opened = openEvidenceSession([adapter], { jobId, stepId }, (event) => {
-    // NEVER mutate device evidence — the bundle hash must reflect what the device said.
-    // Store it as-is.
-    recorded = recorded.then(async () => {
-      if (sealed) return;
-      try {
-        await emitter.addEvent(jobId, stepId, event);
-      } catch (err) {
-        unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
-        console.error(err);
-      }
-    });
     if (deviceJob.id === undefined) deviceJob.early.push(event);
-    else bind(event);
+    else admit(event);
   });
   if (!opened.ok) {
     const { reason, adapterId, jobId: holder } = opened.busy;
@@ -390,7 +419,7 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
       return failure(`the printer accepted print ${jobId} but named no device job (data.jobId), so its evidence cannot be bound to it`);
     }
     deviceJob.id = id;
-    for (const event of deviceJob.early.splice(0)) bind(event);
+    for (const event of deviceJob.early.splice(0)) admit(event);
 
     // Wait for the device job's own terminal event, or another job's event. No polling —
     // the adapter drives it.
@@ -431,8 +460,8 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
       settleTimedOut = true;
       return failure(`evidence recording did not settle within ${evidenceSettleTimeoutMs} ms`);
     }
-    // The chain has settled. An event it could not record is missing from it, so the print
-    // fails and nothing is finalized.
+    // The chain has settled. A bound event it could not record is missing from it, so the
+    // print fails and nothing is finalized.
     const lost = unrecorded.first;
     if (lost !== null) {
       return failure(`a ${lost.type} event of this job could not be recorded (${lost.error}), so its evidence is incomplete`);
@@ -483,9 +512,9 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
   } finally {
     // Every exit quiesces before it releases, as in JobRunner. A print that ended before its
     // device job did (a refused or failed start, a timeout, another job's event) waits,
-    // bounded, for the adapter's word that its work is done; events that arrive meanwhile
-    // still reach this print's (soon detached) step. A hook still pending at the bound keeps
-    // the printer quiescing until it resolves.
+    // bounded, for the adapter's word that its work is done; events of its device job that
+    // arrive meanwhile still reach this print's (soon detached) step. A hook still pending at
+    // the bound keeps the printer quiescing until it resolves.
     if (!quiesceAsked) {
       quiesceAsked = true;
       try {
