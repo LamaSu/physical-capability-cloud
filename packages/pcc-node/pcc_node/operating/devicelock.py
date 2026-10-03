@@ -9,8 +9,9 @@ HostDeviceLock provides it for every process on one host:
   #5981, as #378 does for the OT-2). A URL is not an identity: localhost and 127.0.0.1, a
   CNAME or a second network interface all reach one device. So the hold is keyed by the
   device's registered serial, and the device must confirm it in ONE fixed place, the PCC
-  device identity contract: ``GET /identity`` answering ``{"serial": "<its serial>"}``
-  (astra 565/573 F2). Nothing about where the serial is read can vary per binding, so two
+  device identity contract: ``GET /identity`` at the device's ROOT answering
+  ``{"serial": "<its serial>"}`` (astra 565/573/580 F2). The device URL must be only
+  ``scheme://host:port``, the rule the runtime already enforces, so no path prefix can move it. Nothing about where the serial is read can vary per binding, so two
   bindings of one device can't select two different values and hold it twice. When the lock
   is built, the device must report exactly the registered serial, or there is no lock and
   the loop can't start.
@@ -55,7 +56,10 @@ import threading
 import urllib.error
 import urllib.request
 from typing import Optional
-from urllib.parse import urlsplit
+
+# The device URL rule the runtime already enforces (astra 580 F2: reuse, never reinvent):
+# scheme://host:port and nothing else, so no path, query or fragment can move /identity.
+from .runtime import _check_base_url
 
 DEFAULT_DIRECTORY = os.path.join(os.path.expanduser("~"), ".pcc-node", "device-locks")
 _RECORDS = "jobs"
@@ -85,10 +89,13 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedire
 
 
 def _device_base(url: str) -> str:
-    parts = urlsplit(url) if isinstance(url, str) else None
-    if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
-        raise ValueError(f"not a device URL: {url!r}")
-    return url.rstrip("/")
+    """The device's origin, ``scheme://host:port``, by the runtime's own rule (runtime._check_base_url).
+
+    A URL with a path (even ``/a``), a query, a fragment, credentials, or no explicit port is
+    refused (BindingError, a ValueError), so the identity is always read at the device's root
+    ``/identity``: a binding can't move it.
+    """
+    return _check_base_url(url)
 
 
 def _printable(value: str) -> bool:

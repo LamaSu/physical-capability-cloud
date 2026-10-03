@@ -68,6 +68,42 @@ class DeviceIdentityTests(_Base):
         with self.assertRaises(DeviceLockError):
             self._lock(elsewhere.url)
 
+    def test_a_url_path_cannot_move_the_identity(self):
+        # astra 580 F2's reproduction, closed: one device answering /a/identity and /b/identity
+        # with two serials. Neither prefixed URL can build a lock, so it can't be held twice.
+        device = IdentityServer("SER-ROOT", routes={"/a/identity": "SER-A", "/b/identity": "SER-B"})
+        self.addCleanup(device.close)
+        for prefix, serial in (("/a", "SER-A"), ("/b", "SER-B")):
+            with self.assertRaises(ValueError, msg=prefix):
+                HostDeviceLock(device.url + prefix, serial=serial, directory=self.dir)
+        first, second = self._lock(device.url, serial="SER-ROOT"), self._lock(device.url + "/", serial="SER-ROOT")
+        self.assertTrue(first.acquire())
+        self.assertFalse(second.acquire())
+        first.release()
+
+    def test_a_device_url_is_only_scheme_host_and_port(self):
+        port = self.device.port
+        for url in ("http://127.0.0.1:%d/a" % port, "http://127.0.0.1:%d/?x=1" % port, "http://127.0.0.1:%d/#f" % port,
+                    "http://user@127.0.0.1:%d" % port, "http://127.0.0.1", "ftp://127.0.0.1:%d" % port, "", None):
+            with self.assertRaises(ValueError, msg=repr(url)):
+                HostDeviceLock(url, serial="PR-0001", directory=self.dir)
+            with self.assertRaises(ValueError, msg=repr(url)):
+                read_device_identity(url)
+
+    def test_the_lock_accepts_exactly_the_device_urls_the_runtime_accepts(self):
+        from pcc_node.operating import devicelock, runtime
+        for url in ("http://127.0.0.1:8765", "http://127.0.0.1:8765/", "https://robot.local:443", "http://[::1]:8765",
+                    "http://127.0.0.1:8765/a", "http://127.0.0.1", "http://u:p@127.0.0.1:8765", "http://127.0.0.1:8765?q"):
+            try:
+                expected = runtime._check_base_url(url)
+            except ValueError:
+                expected = None
+            try:
+                actual = devicelock._device_base(url)
+            except ValueError:
+                actual = None
+            self.assertEqual(actual, expected, url)
+
     def test_two_urls_for_one_device_share_one_hold(self):
         # astra 565 F2's reproduction: localhost and 127.0.0.1 reach the same device.
         by_name = self._lock("http://localhost:%d" % self.device.port)

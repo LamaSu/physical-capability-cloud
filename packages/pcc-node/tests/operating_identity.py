@@ -9,9 +9,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class IdentityServer:
-    def __init__(self, serial="PR-0001", *, path="/identity"):
+    def __init__(self, serial="PR-0001", *, path="/identity", routes=None):
         self.serial = serial
         self.path = path
+        self.routes = dict(routes or {})  # more paths on the same device: path -> serial
         self.raw = None  # bytes to answer instead of {"serial": ...}
         self.status = 200
         self.redirect_to = None
@@ -24,7 +25,9 @@ class IdentityServer:
 
             def do_GET(self):  # noqa: N802
                 owner.requests += 1
-                if self.path != owner.path:
+                if self.path in owner.routes:
+                    body, status = json.dumps({"serial": owner.routes[self.path]}).encode("utf-8"), 200
+                elif self.path != owner.path:
                     body, status = b'{"error": "not_found"}', 404
                 elif owner.redirect_to is not None:
                     self.send_response(302)
