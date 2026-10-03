@@ -585,10 +585,11 @@ curl -X POST https://capability.network/api/wizard/sessions/$SESSION_ID/complete
 For operators who prefer CLI:
 ```bash
 pip install "pcc-node[crypto]>=0.1.1"
+# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
-This auto-detects hardware, generates Ed25519 keys, provisions an API key, registers the kernel, announces capabilities, and starts a daemon. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+This auto-detects hardware, generates Ed25519 keys, provisions an API key, registers the kernel, and starts a daemon that keeps the kernel online. From 0.1.1 the daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
 
 ---
 
@@ -999,6 +1000,7 @@ curl -N -H "Authorization: Bearer $PCC_KEY" \
 
 ```bash
 pip install "pcc-node[crypto]>=0.1.1"
+# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
@@ -1006,8 +1008,8 @@ This single command:
 1. Auto-detects connected hardware (printers, lab equipment, cameras)
 2. Generates Ed25519 signing keys
 3. Provisions an API key from the gateway
-4. Registers a kernel and announces capabilities
-5. Starts a daemon that processes jobs and emits evidence
+4. Registers a kernel
+5. Starts a daemon that keeps the kernel online. From 0.1.1 it takes no jobs: they run through the operating agent's typed operations
 
 ### Commands
 

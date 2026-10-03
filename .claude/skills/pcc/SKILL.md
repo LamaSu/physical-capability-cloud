@@ -269,7 +269,10 @@ courier," they're offering capability, not buying it. Provision a key, then
 `POST /api/kernels` to register their site and `POST /api/capabilities` to
 publish what it offers. `pip install "pcc-node[crypto]>=0.1.1" && pcc-node start` does
 hardware auto-detection, key provisioning, and kernel registration in one
-command for operators who'd rather run a CLI than call the API directly.
+command for operators who'd rather run a CLI than call the API directly. Until
+0.1.1 is on PyPI, install `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"`.
+From 0.1.1 the node keeps the kernel online but takes no jobs itself: jobs run
+through the operating agent's typed operations.
 
 ## When NOT to use PCC
 
