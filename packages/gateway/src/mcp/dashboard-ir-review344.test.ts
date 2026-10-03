@@ -249,9 +249,10 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
     bindListRows(fdoc, listEl, node, [{ id: "j3", kernelId: "k1", status: "released" }, { id: "j4", kernelId: "k1", status: "running" }]);
     const texts = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(texts).toEqual([
-      // row texts now carry PCC-owned field labels (astra r3 H2 structural framing)
-      ["ID:", "j3", "Kernel:", "k1", "Status:", "released" + RECORD_STATUS_NOTE, "Status:", "released" + RECORD_STATUS_NOTE],
-      ["ID:", "j4", "Kernel:", "k1", "Status:", "running", "Status:", "running"],
+      // row texts now carry PCC-owned field labels (astra r3 H2 structural framing); ids are attributed
+      // (steward #5149: an identifier's grammar cannot exclude prose, so it reads "reported: ...")
+      ["ID:", REPORTED_PREFIX + "j3", "Kernel:", REPORTED_PREFIX + "k1", "Status:", "released" + RECORD_STATUS_NOTE, "Status:", "released" + RECORD_STATUS_NOTE],
+      ["ID:", REPORTED_PREFIX + "j4", "Kernel:", REPORTED_PREFIX + "k1", "Status:", "running", "Status:", "running"],
     ]);
   });
 
@@ -487,7 +488,7 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     ]);
     const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
     bindSchemaCard("capability-summary-v1", { name: "Refunded in full", type: "arm", pricing: { baseCost: "12.50", currency: "USDC" }, assuranceTiers: [1, 2], available: true }, slots);
-    expect(slots.map((x) => x.textContent)).toEqual([WITHHELD_FIELD, "arm", "12.50", "USDC", "1, 2", "Yes"]);
+    expect(slots.map((x) => x.textContent)).toEqual([WITHHELD_FIELD, REPORTED_PREFIX + "arm", "12.50", "USDC", "1, 2", "Yes"]); // a capType is attributed (steward #5149)
     // astra r3 M3 / #348 r2b F1: "type" is a mistyped capType ("1,000 USDC" fails the closed
     // identifier grammar) and "assuranceTiers" is a mistyped tiers array ("Paid" is not an
     // integer) \u2014 the card now fails CLOSED on every slot instead of selectively masking just the
@@ -717,8 +718,8 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     bindListRows(fdoc, listEl, node, [{ id: "j-1", status: "settled" }, { id: "j-2", status: "weirdWord" }]);
     const texts = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(texts).toEqual([
-      ["ID:", "j-1", "Status:", "settled" + RECORD_STATUS_NOTE],
-      ["ID:", "j-2", "Status:", "weirdWord" + RECORD_CLAIM_NOTE],
+      ["ID:", REPORTED_PREFIX + "j-1", "Status:", "settled" + RECORD_STATUS_NOTE], // ids are attributed (steward #5149)
+      ["ID:", REPORTED_PREFIX + "j-2", "Status:", "weirdWord" + RECORD_CLAIM_NOTE],
     ]);
   });
 
@@ -786,7 +787,7 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     bindListRows(fdoc, listEl, node, [{ id: "j-1", createdAt: "2026-09-24T10:00:00Z" }, { id: "j-2", createdAt: "yesterday" }]);
     const rows = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(rows).toEqual([
-      ["ID:", "j-1", "Created:", "2026-09-24T10:00:00Z"],
+      ["ID:", REPORTED_PREFIX + "j-1", "Created:", "2026-09-24T10:00:00Z"], // ids are attributed (steward #5149)
       ["ID:", UNAVAILABLE, "Created:", UNAVAILABLE],
     ]);
   });
@@ -918,9 +919,11 @@ describe("genui review of #344 r6 (@d9add4d3): an identifier cannot spell a clai
     expect(identifierText("id", "payment-a-b-c-d-e-f-received")).toBe(WITHHELD_FIELD);
     expect(identifierText("type", "fundsOfTheRemoteOperatorWereFullyReleased")).toBe(WITHHELD_FIELD); // camelCase too
   });
-  it("real identifiers pass unchanged (no false positive on a single money noun or a hex segment)", () => {
+  it("real identifiers are attributed, never withheld (no false positive on a single money noun or a hex segment)", () => {
+    // steward #5149 (fix the property, not the detector): an identifier is attributed like free text;
+    // the window-free pair check only withholds, as defense in depth.
     for (const id of ["job-3f2a9c1e-fee", "job-3f2a9c1e-ada", "cap-kernel-nyc-fdm", "kernel-nyc", "liquid-transfer", "analytical-balance", "cnc-3axis"]) {
-      expect(identifierText("id", id), id).toBe(id);
+      expect(identifierText("id", id), id).toBe(REPORTED_PREFIX + id);
     }
   });
 });

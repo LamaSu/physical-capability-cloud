@@ -72,7 +72,8 @@ bindListRows(doc, listEl, listNode, [
   { id: "j2" },
 ]);
 const rowTexts = flat(listEl).map((x: any) => x.textContent).filter(Boolean);
-ok("valid rows rendered (j1 with meta+status, j2 title-only)", rowTexts.includes("j1") && rowTexts.includes("k9") && rowTexts.includes("done") && rowTexts.includes("j2"));
+// ids are attributed (steward #5149: an identifier's grammar cannot exclude prose, so it reads "reported: ...")
+ok("valid rows rendered (j1 with meta+status, j2 title-only)", rowTexts.includes("reported: j1") && rowTexts.includes("reported: k9") && rowTexts.includes("done") && rowTexts.includes("reported: j2"));
 ok("malformed rows dropped (no phantom output)", listEl.children.length === 2);
 ok("non-selector field ('secret') NEVER rendered", !rowTexts.includes("LEAK"));
 
@@ -153,7 +154,8 @@ const slots = (n: number) => Array.from({ length: n }, () => ({ textContent: "" 
   bindSchemaCard("capability-summary-v1", { name: "FDM", type: "t", pricing: { baseCost: "1", currency: "USDC" }, assuranceTiers: [0], available: true, paid: true, verified: true, evil: "<b>x</b>" }, s);
   const all = s.map((x) => x.textContent).join("|");
   // astra r5 F1: name is now attributed text — a benign value renders "reported: FDM", not bare.
-  ok("GATE2 only the 6 fixed capability fields rendered", all === "reported: FDM|t|1|USDC|0|Yes");
+  // ...and the capability type is attributed too (steward #5149: an identifier's grammar cannot exclude prose).
+  ok("GATE2 only the 6 fixed capability fields rendered", all === "reported: FDM|reported: t|1|USDC|0|Yes");
   ok("GATE2 off-schema paid/verified/HTML NEVER rendered", !all.includes("true") && !all.includes("<b>"));
 }
 // GATE 3 — missing/malformed canonical fields → honest unavailable (—), not a partial card.
@@ -169,7 +171,8 @@ const slots = (n: number) => Array.from({ length: n }, () => ({ textContent: "" 
   const s = slots(6);
   bindSchemaCard("capability-summary-v1", { name: "FDM", type: "3d-printing", pricing: { baseCost: "2.00", currency: "USDC" }, assuranceTiers: [0, 1, 2], available: true, secret: "LEAK" }, s);
   // astra r5 F1: name is now attributed text — a benign value renders "reported: FDM", not bare.
-  ok("GATE5 name/type/pricing.baseCost/currency read from fixed keys", s[0].textContent === "reported: FDM" && s[1].textContent === "3d-printing" && s[2].textContent === "2.00" && s[3].textContent === "USDC");
+  // ...and the capability type is attributed too (steward #5149).
+  ok("GATE5 name/type/pricing.baseCost/currency read from fixed keys", s[0].textContent === "reported: FDM" && s[1].textContent === "reported: 3d-printing" && s[2].textContent === "2.00" && s[3].textContent === "USDC");
   ok("GATE5 assuranceTiers array joined", s[4].textContent === "0, 1, 2");
   ok("GATE5 boolean available normalized to Yes", s[5].textContent === "Yes");
   ok("GATE5 off-schema `secret` NEVER rendered", !s.some((x) => x.textContent.includes("LEAK")));

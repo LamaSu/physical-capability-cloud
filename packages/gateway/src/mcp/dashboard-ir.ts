@@ -210,11 +210,13 @@ function wordsIn(f: string, checks: readonly WordCheck[]): boolean {
 const scriptIn = (f: string): boolean => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_RE.test(f.replace(/ /g, ""));
 
 /** Does the text state an amount (a currency next to a number)? */
-// An IDENTIFIER (an id, a capability type) is shown as is, never attributed, so it gets the pair
-// check WITHOUT a word window (genui review of #344 r6): a money noun or currency and a generic claim
-// word ANYWHERE in it withholds it. So a sentence spelled as an id
-// ("payment-from-the-remote-operator-received") is withheld whatever its length. A single money noun
-// alone is not, because real lab types use them ("liquid-transfer", "analytical-balance").
+// An IDENTIFIER (an id, a capability type) is server- or operator-chosen, and its grammar cannot
+// exclude prose (a hyphenated sentence fits it). So it is ATTRIBUTED like free text (steward #5149: fix
+// the property, not the detector): every displayed server value is either validated against a closed
+// grammar or vocabulary that excludes prose, or shown as "reported: ...".
+// Defense in depth: the pair check runs WITHOUT a word window here. A money noun or currency and a
+// generic claim word ANYWHERE in it withholds it ("payment-from-the-remote-operator-received"). A single
+// money noun alone does not, because real lab types use them ("liquid-transfer", "analytical-balance").
 const IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
 const IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
 export function identifierText(field: string, value: string): string {
@@ -222,7 +224,7 @@ export function identifierText(field: string, value: string): string {
   const t = boundValueText(field, value);
   if (t === WITHHELD_FIELD) return t;
   for (const v of views(foldForClaims(value))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
-  return t;
+  return REPORTED_PREFIX + value;
 }
 export function statesAmount(text: string): boolean { return AMOUNT_RE.test(foldForClaims(text)); }
 /** Does the text state an amount or a payment or verification status? */

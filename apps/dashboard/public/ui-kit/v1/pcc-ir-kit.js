@@ -266,7 +266,7 @@
     const t = boundValueText(field, value);
     if (t === WITHHELD_FIELD) return t;
     for (const v of views(foldForClaims(value))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
-    return t;
+    return REPORTED_PREFIX + value;
   }
   function statesAmount(text) {
     return AMOUNT_RE.test(foldForClaims(text));
@@ -1314,7 +1314,6 @@
     const statusFrom = typeof node.props?.statusFrom === "string" ? node.props.statusFrom : "";
     const limit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
     const isStatusKind = (field) => LIST_FIELD_KINDS[field] === "status";
-    const isTextKind = (field) => LIST_FIELD_KINDS[field] === "text";
     let shown = 0;
     for (const row of rows) {
       if (shown >= limit) break;
@@ -1336,7 +1335,11 @@
         const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
         const statusRaw = allCells.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r) => r !== null);
         const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
-        const joinTextOf = (c) => isTextKind(c.field) ? rawOf(c) ?? texts.get(c) : texts.get(c);
+        const isAttributedKind = (field) => {
+          const k = LIST_FIELD_KINDS[field];
+          return k === "text" || k === "id" || k === "capType";
+        };
+        const joinTextOf = (c) => isAttributedKind(c.field) ? rawOf(c) ?? texts.get(c) : texts.get(c);
         const joined = [...nonStatusDisplayed.map(joinTextOf), ...statusRaw];
         const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map(joinTextOf).join(" "));
         const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));

@@ -386,7 +386,6 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
   // Hard DOM-node cap whatever the manifest says: omitting `limit` must not lift it.
   const limit = Math.min(typeof node.props?.limit === "number" ? node.props!.limit : LIST_ROW_CAP, LIST_ROW_CAP);
   const isStatusKind = (field: string): boolean => LIST_FIELD_KINDS[field] === "status";
-  const isTextKind = (field: string): boolean => LIST_FIELD_KINDS[field] === "text";
   type Cell = { field: string; read: ListFieldRead };
   let shown = 0;
   for (const row of rows) {
@@ -428,7 +427,10 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
       const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
       const statusRaw = allCells.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r): r is string => r !== null);
       const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
-      const joinTextOf = (c: Cell): string => (isTextKind(c.field) ? rawOf(c) ?? texts.get(c)! : texts.get(c)!);
+      // Every ATTRIBUTED kind (text, id, capType) joins by its RAW value, never the "reported: " display,
+      // so the inserted word cannot widen the pair window and hide a claim split across fields.
+      const isAttributedKind = (field: string): boolean => { const k = LIST_FIELD_KINDS[field]; return k === "text" || k === "id" || k === "capType"; };
+      const joinTextOf = (c: Cell): string => (isAttributedKind(c.field) ? rawOf(c) ?? texts.get(c)! : texts.get(c)!);
       const joined = [...nonStatusDisplayed.map(joinTextOf), ...statusRaw];
       const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map(joinTextOf).join(" "));
       const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
