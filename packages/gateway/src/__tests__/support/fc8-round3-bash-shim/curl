@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# FC-8 round 3 (astra pack 61b census closure) test fixture: a PATH-shim
+# `curl` for smoke-digital-verifier.sh's dynamic test. Inspects args for the
+# target path and returns a canned (optionally canary-bearing) JSON body on
+# stdout — never touches the network. See fc8-round3-smoke-digital-verifier.test.ts.
+CANARY="${FC8_CANARY:?FC8_CANARY must be set}"
+ARGS="$*"
+
+case "$ARGS" in
+  *"/api/health"*)
+    echo "{\"status\":\"ok\",\"note\":\"diag-$CANARY\"}" ;;
+  *"/api/setup/status"*)
+    echo "{\"overall\":\"$CANARY\"}" ;;
+  *"/verify"*)
+    echo "{\"result\":{\"verified\":\"true\",\"reason\":\"ok\"}}" ;;
+  *"/health"*)
+    echo "{\"status\":\"ok\",\"note\":\"diag-$CANARY\"}" ;;
+  *"/api/auth/provision"*)
+    echo "{\"api_key\":\"pcc_test_deadbeefdeadbeefdeadbeefdeadbeef\"}" ;;
+  *"/api/capabilities/types"*)
+    echo "{\"types\":[1,2,3]}" ;;
+  *"/api/status/integrations"*)
+    echo "{\"litProtocol\":{\"configured\":\"$CANARY\"},\"starknet\":{\"configured\":\"$CANARY\"}}" ;;
+  *"/api/auth/validate"*)
+    echo "{\"valid\":\"false\"}" ;;
+  *"/api/kernels"*)
+    echo "{\"kernels\":[1,2]}" ;;
+  *)
+    echo "{}" ;;
+esac
+exit 0
