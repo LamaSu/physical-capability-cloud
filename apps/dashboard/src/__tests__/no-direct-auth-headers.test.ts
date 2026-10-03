@@ -534,9 +534,8 @@ const RULES: Rule[] = [
         if (identityRead(n)) return true;
         // And whatever a name came to hold, no mutation API or property write may change a protected object through it.
         if (changesProtectedObject(n, sf) && !(ts.isBinaryExpression(n) && GLOBAL_WRITES_ALLOWED.has(n.left.getText(sf).replace(/\s+/g, "")))) return true;
-        // fetch itself, replaced by name. (A property of a global or a built-in, Headers.prototype.set = …, is the
-        // mutation-target check's above: its roots are the same objects, followed through aliases too.)
-        return ts.isBinaryExpression(n) && isAssignment(n.operatorToken.kind) && ts.isIdentifier(n.left) && n.left.text === "fetch";
+        // (fetch = spy is a held fetch, above; Headers.prototype.set = … is the mutation-target check's.)
+        return false;
       }),
     fix: "Don't replace fetch, a global's property or a prototype's method, and don't hold, pass or store navigator, document, a built-in or its prototype: the key passes through them.",
   },
