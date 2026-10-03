@@ -38,6 +38,7 @@ import { verifyRegistrationResponse } from "@simplewebauthn/server";
 type RegistrationResponseJSON = Parameters<typeof verifyRegistrationResponse>[0]["response"];
 import { getRepos } from "../db.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
+import { lit } from "../observability/closed-schema.js";
 
 /**
  * Allowlist of PCC-known rpId + origin values. Client-supplied values must
@@ -198,7 +199,7 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
           expiresAt: now + CHALLENGE_TTL_MS,
         });
       } catch (err) {
-        req.log?.error(err, "passkey session insert failed");
+        req.log?.error({ err }, lit("passkey session insert failed"));
         return reply.status(500).send({
           error: "session_insert_failed",
           message: err instanceof Error ? err.message : String(err),
@@ -319,7 +320,7 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
             persisted = true;
           }
         } catch (err) {
-          req.log?.warn(err, "passkey credential persist failed");
+          req.log?.warn({ err }, lit("passkey credential persist failed"));
         }
       }
 
