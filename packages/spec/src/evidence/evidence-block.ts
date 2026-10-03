@@ -27,10 +27,17 @@
  *                           (terminal events and inspections), so nothing can be left out
  *                           by choosing which bundle to commit (LO-EV-9 header; bus #3543)
  *   sessionKeyAuthDigest    0x + sha256(canonicalize(SessionKeyAuthorization))
- *   attestationSetRoot      0x + sha256(canonicalize(sorted role digests)); each role
- *                           digest binds roleId, the quorum config, the job and the
+ *   attestationSetRoot      keccak256(abi.encode(ATTSET_DOMAIN, fundedProgramHash,
+ *                           sortedRoleDigests)) (RATIFIED D4, oracle #1030/#1289, byte-exact
+ *                           with the evidence lane's golden `attestation-set-root-golden-vector.cjs`
+ *                           on #270); each role digest binds roleId, its registry-snapshot
+ *                           signers policy, the quorum config, the funded program and the
  *                           role's sorted attestation hashes, so attestations cannot be
- *                           relabelled to another role or a weaker quorum
+ *                           relabelled to another role, rebound to another program or
+ *                           committed under a weaker quorum or a swapped signer snapshot. A
+ *                           role with no attestations yet and a funded program that names no
+ *                           roles at all both still have a root (oracle #4836): neither is
+ *                           refused
  *   workProductRoot         `computeWorkProductHash` (WorkProduct.productHash)
  *   programHash             the committed program hash (`computeVerificationProgramHash`)
  *
@@ -44,13 +51,15 @@
  * must be lowercased by the caller), and integers are non-negative bigints,
  * safe integers or decimal strings (negative zero is refused: pass 0).
  *
- * The attestation set is validated before it is hashed (E7 F2): the job id and
- * every roleId are 1-128 printable ASCII characters with no whitespace; a set has
- * at least one role and roleIds are distinct; a role has at least one attestation;
- * minPositive and total are safe integers with 1 <= minPositive <= total; minScore
- * is a safe integer in [0, 100]; attestation hashes are distinct and no more than
- * `total`. Duplicates are refused, never silently de-duplicated. The #270 mirror
- * pins no empty set, so an empty set is refused.
+ * The attestation set is validated before it is hashed (E7 F2, D4 round 3): fundedProgramHash
+ * and a signers registry snapshotHash are 0x + 64 lowercase hex; a roleId and a signers
+ * registryId are each 1-128 printable ASCII characters with no whitespace; roleIds are
+ * distinct within a set; the only signers kind this module accepts is "registry" (any other
+ * kind is refused); minPositive, total and minScore are safe integers in uint32 range, with
+ * 1 <= minPositive <= total and minScore in [0, 100]; attestation hashes are distinct within
+ * a role and no more than `total`. Duplicates are refused, never silently de-duplicated. The
+ * RATIFIED D4 formula (oracle #1030, #1289, #4836) defines the empty case: a role with no
+ * attestations yet and a funded program that names no roles are both valid, never refused.
  *
  * The bundle's events are snapshotted before they are hashed (E7b): each event goes through
  * `canonicalSnapshot` (#359), which reads own property descriptors only, so no getter and no
@@ -218,6 +227,11 @@ const stringSlice = call.bind(String.prototype.slice) as unknown as (text: strin
 const hashPrototype = getPrototypeOf(createHashFunction("sha256")) as object;
 const hashUpdate = call.bind(getOwnPropertyDescriptor(hashPrototype, "update")!.value) as unknown as (hash: unknown, data: string) => unknown;
 const hashDigest = call.bind(getOwnPropertyDescriptor(hashPrototype, "digest")!.value) as unknown as (hash: unknown, encoding: string) => string;
+// `new TextEncoder().encode(s)` looks the constructor and `.encode` up on the global and its prototype at
+// call time (D4's roleId/registryId domain tags are encoded per call, not only once at module load, as the
+// three existing domain constants below are): captured the same way as the hash methods above.
+const TextEncoderConstructor = TextEncoder;
+const textEncoderEncode = call.bind(TextEncoder.prototype.encode) as unknown as (encoder: TextEncoder, text: string) => Uint8Array;
 
 export type Bytes32Hex = `0x${string}`;
 
@@ -332,7 +346,7 @@ function bytesToHex(bytes: Uint8Array, length: number): string {
 }
 
 function keccakUtf8(s: string): Bytes32Hex {
-  return `0x${bytesToHex(keccak_256(new TextEncoder().encode(s)), 32)}`;
+  return `0x${bytesToHex(keccak_256(textEncoderEncode(new TextEncoderConstructor(), s)), 32)}`;
 }
 
 export const EVIDENCE_BLOCK_DOMAIN_V2: Bytes32Hex = keccakUtf8("PCC:vnext:evidence-block:v2");
@@ -392,6 +406,28 @@ function keccakWords(words: Uint8Array[]): Bytes32Hex {
     for (let j = 0; j < 32; j++) buf[w * 32 + j] = word[j]!;
   }
   return `0x${bytesToHex(keccak_256(buf), 32)}`;
+}
+
+/**
+ * keccak256(abi.encode(...)) for a parameter list whose head is `staticWords` (each already a
+ * validated 32-byte word) followed by exactly one trailing dynamic `bytes32[]` parameter,
+ * `elements` (already validated and in the order to commit, e.g. already sorted): the static
+ * head words, then the array's head-slot offset (32 * the number of head slots, the one slot its
+ * pointer occupies — `staticWords.length + 1`), then the array's length, then its elements. This
+ * is the one dynamic-type shape this module ever encodes (the attestation role digest and the
+ * attestation set root, D4), and matches what Solidity's `abi.encode` lays out for a parameter
+ * list whose only dynamic type is a trailing array. Built with `appendTo` and `keccakWords`, the
+ * same captured-intrinsic pieces every other digest in this module uses: no Array.prototype
+ * method is looked up.
+ */
+function keccakAbiWithTrailingArray(staticWords: readonly Uint8Array[], elements: readonly Uint8Array[]): Bytes32Hex {
+  const headSlots = staticWords.length + 1;
+  const words: Uint8Array[] = [];
+  for (let i = 0; i < staticWords.length; i++) appendTo(words, staticWords[i]!);
+  appendTo(words, uintWord("offset", headSlots * 32, 256));
+  appendTo(words, uintWord("length", elements.length, 256));
+  for (let i = 0; i < elements.length; i++) appendTo(words, elements[i]!);
+  return keccakWords(words);
 }
 
 function sha256Canonical(value: unknown): Bytes32Hex {
@@ -1098,16 +1134,29 @@ export function computeSessionKeyAuthDigest(auth: SessionKeyAuthorization): Byte
   return sessionKeyAuthSnapshot(auth).digest;
 }
 
+/**
+ * The registry-snapshot signers policy a role is pinned to (D4: REGISTRY-SNAPSHOT role policy, not
+ * inline signers). `kind` is the only discriminant this module accepts today; any other value is
+ * refused rather than guessed at.
+ */
+export interface AttestationRoleSigners {
+  kind: "registry";
+  registryId: string;
+  snapshotHash: Bytes32Hex;
+}
+
 export interface AttestationQuorumRole {
   roleId: string;
+  /** The role's signer policy, pinned to a registry snapshot committed at funding (D4). */
+  signers: AttestationRoleSigners;
   minPositive: number;
   total: number;
   minScore: number;
-  /** Hashes of the role's attestations (0x + 64 lowercase hex). */
+  /** Hashes of the role's attestations (0x + 64 lowercase hex). Empty is valid: a quorum not yet met. */
   attestationHashes: string[];
 }
 
-/** 1-128 printable ASCII characters, no whitespace (`isToken`): the pinned form of a roleId and of the attestation job id. */
+/** 1-128 printable ASCII characters, no whitespace (`isToken`): the pinned form of a roleId and of a registryId. */
 function requireToken(field: string, value: unknown): string {
   if (!isToken(value)) {
     throw new EvidenceBlockInputError(field, "expected 1-128 printable ASCII characters with no whitespace");
@@ -1123,9 +1172,57 @@ function boundedInt(field: string, value: unknown, min: number, max: number): nu
   return value;
 }
 
+/** 0x + 64 lowercase hex, typed as the branded `Bytes32Hex` on success (a funded program hash or a snapshot hash). */
+function requireBytes32Hex(field: string, value: unknown): Bytes32Hex {
+  if (!isPrefixedLowerHex(value, 64)) {
+    throw new EvidenceBlockInputError(field, "expected 0x + 64 lowercase hex");
+  }
+  // isPrefixedLowerHex's guard narrows to `string`, not the branded template-literal type; the check
+  // just above is exactly what the brand means, so asserting it here is sound, not just convenient.
+  return value as Bytes32Hex;
+}
+
+/** The largest value a Solidity `uint32` holds: 2**32 - 1. */
+const UINT32_MAX = 0xffffffff;
+
+/**
+ * D4 domain separators (oracle #1030, Evidence Commitment Profile v1 §3), each `keccak256(utf8(...))`,
+ * taken once when the module loads like every other domain constant here. Not exported: nothing
+ * outside this module's own digests needs them by name.
+ */
+const ROLE_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:attestation-role:v1");
+const ATTSET_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:attestation-set:v1");
+
+/** A role's signers policy as validated, frozen plain data. */
+interface AttestationRoleSignersSnapshot {
+  readonly kind: "registry";
+  readonly registryId: string;
+  readonly snapshotHash: Bytes32Hex;
+}
+
+/**
+ * Validate a role's signers policy and copy it into frozen plain data. `input` has already passed
+ * through the entry point's `admit` (no Proxy, no accessor, a plain prototype, at any depth), so
+ * every field is read exactly once from its own data descriptor. Only `kind: "registry"` exists
+ * today (D4); any other kind is refused rather than guessed at.
+ */
+function snapshotRoleSigners(path: string, input: unknown): AttestationRoleSignersSnapshot {
+  if (input === null || typeof input !== "object") {
+    throw new EvidenceBlockInputError(path, "expected a signers object");
+  }
+  const kind = fieldOf(input, "kind");
+  if (kind !== "registry") {
+    throw new EvidenceBlockInputError(`${path}.kind`, 'expected "registry" (the only signers kind this module accepts)');
+  }
+  const registryId = requireToken(`${path}.registryId`, fieldOf(input, "registryId"));
+  const snapshotHash = requireBytes32Hex(`${path}.snapshotHash`, fieldOf(input, "snapshotHash"));
+  return freeze({ kind: "registry", registryId, snapshotHash });
+}
+
 /** A role as validated, frozen plain data. */
 interface AttestationRoleSnapshot {
   readonly roleId: string;
+  readonly signers: AttestationRoleSignersSnapshot;
   readonly minPositive: number;
   readonly total: number;
   readonly minScore: number;
@@ -1136,21 +1233,25 @@ interface AttestationRoleSnapshot {
  * Validate one role and copy it into frozen plain data. The role has already been admitted by
  * the entry point (`admit`: no Proxy, no accessor, a plain prototype, at any depth), so every field
  * and every array element is read exactly once from its own data descriptor, never with a [[Get]],
- * and nothing is inherited from a prototype: only the copy is validated and hashed.
+ * and nothing is inherited from a prototype: only the copy is validated and hashed. A role with no
+ * attestation hashes yet is valid (D4, oracle #4836): a quorum that has not been met is still a
+ * role the funded program names.
  */
 function snapshotAttestationRole(path: string, input: unknown): AttestationRoleSnapshot {
   if (input === null || typeof input !== "object") {
     throw new EvidenceBlockInputError(path, "expected a role object");
   }
   const roleIdRaw = fieldOf(input, "roleId");
+  const signersRaw = fieldOf(input, "signers");
   const minPositiveRaw = fieldOf(input, "minPositive");
   const totalRaw = fieldOf(input, "total");
   const minScoreRaw = fieldOf(input, "minScore");
   const hashesRaw = fieldOf(input, "attestationHashes");
 
   const roleId = requireToken(`${path}.roleId`, roleIdRaw);
-  const total = boundedInt(`${path}.total`, totalRaw, 1, MAX_SAFE_INTEGER);
-  const minPositive = boundedInt(`${path}.minPositive`, minPositiveRaw, 1, MAX_SAFE_INTEGER);
+  const signers = snapshotRoleSigners(`${path}.signers`, signersRaw);
+  const total = boundedInt(`${path}.total`, totalRaw, 1, UINT32_MAX);
+  const minPositive = boundedInt(`${path}.minPositive`, minPositiveRaw, 1, UINT32_MAX);
   if (minPositive > total) {
     throw new EvidenceBlockInputError(`${path}.minPositive`, "must not exceed total");
   }
@@ -1160,8 +1261,8 @@ function snapshotAttestationRole(path: string, input: unknown): AttestationRoleS
     throw new EvidenceBlockInputError(`${path}.attestationHashes`, "expected an array of attestation hashes");
   }
   const count = ownDataValue(hashesRaw, "length");
-  if (typeof count !== "number" || !isSafeInteger(count) || count < 1) {
-    throw new EvidenceBlockInputError(`${path}.attestationHashes`, "expected at least one attestation hash");
+  if (typeof count !== "number" || !isSafeInteger(count) || count < 0) {
+    throw new EvidenceBlockInputError(`${path}.attestationHashes`, "expected an array of attestation hashes");
   }
   if (count > total) {
     throw new EvidenceBlockInputError(`${path}.attestationHashes`, "more attestation hashes than total");
@@ -1183,17 +1284,21 @@ function snapshotAttestationRole(path: string, input: unknown): AttestationRoleS
     }
     setAdd(distinct, hash);
   }
-  return freeze({ roleId, minPositive, total, minScore, attestationHashes: freeze(attestationHashes) });
+  return freeze({ roleId, signers, minPositive, total, minScore, attestationHashes: freeze(attestationHashes) });
 }
 
-/** Validate and snapshot a whole role set, already admitted by the entry point: at least one role, distinct roleIds. */
+/**
+ * Validate and snapshot a whole role set, already admitted by the entry point: distinct roleIds.
+ * An empty set is valid (D4, oracle #4836): a funded program that names no attestation roles
+ * still has a root, bound to that program.
+ */
 function snapshotAttestationRoles(input: unknown): readonly AttestationRoleSnapshot[] {
   if (isProxy(input) || !isArray(input)) {
     throw new EvidenceBlockInputError("roles", "expected an array of roles");
   }
   const count = ownDataValue(input, "length");
-  if (typeof count !== "number" || !isSafeInteger(count) || count < 1) {
-    throw new EvidenceBlockInputError("roles", "expected at least one role (the mirror defines no empty attestation set)");
+  if (typeof count !== "number" || !isSafeInteger(count) || count < 0) {
+    throw new EvidenceBlockInputError("roles", "expected an array of roles");
   }
   const roles: AttestationRoleSnapshot[] = [];
   const seen = new SetConstructor<string>();
@@ -1210,42 +1315,77 @@ function snapshotAttestationRoles(input: unknown): readonly AttestationRoleSnaps
   return freeze(roles);
 }
 
-function roleDigestOf(job: string, role: AttestationRoleSnapshot): Bytes32Hex {
-  return sha256Canonical({
-    roleId: role.roleId,
-    minPositive: role.minPositive,
-    total: role.total,
-    minScore: role.minScore,
-    job,
-    hashes: sortedCopy(role.attestationHashes),
-  });
+/**
+ * `keccak256(abi.encode(bytes32 K(registryId), bytes32 snapshotHash))`: the signers policy bound
+ * into the role digest, so a role cannot silently swap its registry or its pinned snapshot.
+ */
+function roleSignersDigestOf(signers: AttestationRoleSignersSnapshot): Bytes32Hex {
+  return keccakWords([
+    bytes32Word("signers.registryId", keccakUtf8(signers.registryId)),
+    bytes32Word("signers.snapshotHash", signers.snapshotHash),
+  ]);
 }
 
 /**
- * One role's digest: binds roleId, its quorum config, the job and its sorted attestations.
- * The role is admitted first (`assertNoCodeRunningInput`: no Proxy at any depth, no accessor
- * anywhere, a plain prototype), then validated and snapshotted from its own data descriptors; only
- * the snapshot is hashed.
+ * `keccak256(abi.encode(ROLE_DOMAIN, K(roleId), roleSignersDigest, uint32 minPositive, uint32 total,
+ * uint32 minScore, fundedProgramHash, sortedAttestationHashes))` (RATIFIED D4, oracle #1030):
+ * attestation hashes are sorted as lowercase-0x-hex strings before they are encoded, so membership
+ * binds the digest, not the order they were given in.
  */
-export function computeAttestationRoleDigest(job: string, role: AttestationQuorumRole): Bytes32Hex {
-  const checkedJob = requireToken("job", job);
+function roleDigestOf(fundedProgramHash: Bytes32Hex, role: AttestationRoleSnapshot): Bytes32Hex {
+  const sortedHashes = sortedCopy(role.attestationHashes);
+  const hashWords: Uint8Array[] = [];
+  for (let i = 0; i < sortedHashes.length; i++) appendTo(hashWords, bytes32Word(`attestationHashes[${i}]`, sortedHashes[i]));
+  return keccakAbiWithTrailingArray(
+    [
+      bytes32Word("ROLE_DOMAIN", ROLE_DOMAIN),
+      bytes32Word("roleId", keccakUtf8(role.roleId)),
+      bytes32Word("roleSignersDigest", roleSignersDigestOf(role.signers)),
+      uintWord("minPositive", role.minPositive, 32),
+      uintWord("total", role.total, 32),
+      uintWord("minScore", role.minScore, 32),
+      bytes32Word("fundedProgramHash", fundedProgramHash),
+    ],
+    hashWords,
+  );
+}
+
+/**
+ * One role's digest (RATIFIED D4, oracle #1030; byte-exact with the evidence lane's golden
+ * `attestation-set-root-golden-vector.cjs` on #270): binds roleId, its registry-snapshot signers
+ * policy, its quorum config, the funded program and its sorted attestations. The role is admitted
+ * first (`assertNoCodeRunningInput`: no Proxy at any depth, no accessor anywhere, a plain
+ * prototype), then validated and snapshotted from its own data descriptors; only the snapshot is
+ * hashed. A role with no attestation hashes yet is valid.
+ */
+export function computeAttestationRoleDigest(fundedProgramHash: Bytes32Hex, role: AttestationQuorumRole): Bytes32Hex {
+  const checkedFundedProgramHash = requireBytes32Hex("fundedProgramHash", fundedProgramHash);
   admit(role, "role");
-  return roleDigestOf(checkedJob, snapshotAttestationRole("role", role));
+  return roleDigestOf(checkedFundedProgramHash, snapshotAttestationRole("role", role));
 }
 
 /**
- * The attestation set root: sha256 of the sorted role digests. The whole set is admitted first (as
+ * The attestation set root (RATIFIED D4, oracle #1030; byte-exact with the evidence lane's golden):
+ * `keccak256(abi.encode(ATTSET_DOMAIN, fundedProgramHash, sortedRoleDigests))`, the role digests
+ * sorted as lowercase-0x-hex strings before they are encoded. The whole set is admitted first (as
  * for `computeAttestationRoleDigest`), then validated and snapshotted before anything is hashed:
- * duplicate roleIds, duplicate attestation hashes, an empty set, an empty role and an invalid
- * quorum are refused, never silently de-duplicated.
+ * duplicate roleIds, duplicate attestation hashes within a role and an invalid quorum are refused,
+ * never silently de-duplicated. An empty role set and a role with no attestations yet are both
+ * valid (oracle #4836): the root still binds fundedProgramHash, over an empty array.
  */
-export function computeAttestationSetRoot(job: string, roles: readonly AttestationQuorumRole[]): Bytes32Hex {
-  const checkedJob = requireToken("job", job);
+export function computeAttestationSetRoot(fundedProgramHash: Bytes32Hex, roles: readonly AttestationQuorumRole[]): Bytes32Hex {
+  const checkedFundedProgramHash = requireBytes32Hex("fundedProgramHash", fundedProgramHash);
   admit(roles, "roles");
   const snapshot = snapshotAttestationRoles(roles);
   const digests: string[] = [];
-  for (let i = 0; i < snapshot.length; i++) appendTo(digests, roleDigestOf(checkedJob, snapshot[i]!));
-  return sha256Canonical(sortedCopy(digests));
+  for (let i = 0; i < snapshot.length; i++) appendTo(digests, roleDigestOf(checkedFundedProgramHash, snapshot[i]!));
+  const sortedDigests = sortedCopy(digests);
+  const digestWords: Uint8Array[] = [];
+  for (let i = 0; i < sortedDigests.length; i++) appendTo(digestWords, bytes32Word(`roleDigests[${i}]`, sortedDigests[i]));
+  return keccakAbiWithTrailingArray(
+    [bytes32Word("ATTSET_DOMAIN", ATTSET_DOMAIN), bytes32Word("fundedProgramHash", checkedFundedProgramHash)],
+    digestWords,
+  );
 }
 
 // ── The block ────────────────────────────────────────────────────────────────
