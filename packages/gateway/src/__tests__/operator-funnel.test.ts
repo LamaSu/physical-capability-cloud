@@ -121,7 +121,7 @@ import {
   OPERATOR_STAGES,
   OPERATOR_FUNNEL_AUDIT_EVENT,
 } from "../services/funnel-tracker.js";
-import { isRealAdapterHealthy } from "../facades/job.facade.js";
+import { isRealAdapterHealthy, sameDeviceRevision } from "../facades/job.facade.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { setupRoutes } from "../routes/setup.js";
 import { capabilityRoutes } from "../routes/capabilities.js";
@@ -355,6 +355,56 @@ describe("isRealAdapterHealthy", () => {
     for (const adapterType of ["octoprint", "modbus", "opcua", "sila", "ipp"]) {
       expect(isRealAdapterHealthy(true, adapterType)).toBe(true);
     }
+  });
+});
+
+// ── Unit: sameDeviceRevision gating function (#469 round 2 R1/R3) ───────
+//
+// Isolated pure-function cases for each of the four compared fields. This
+// matters because every HTTP-level re-registration (routes/setup.ts) always
+// bumps lastUpdated, so an integration test that moves a device to another
+// kernel or swaps its adapterConfig can't, by itself, prove that the
+// kernelId/adapterType/adapterConfig comparisons are still wired up — a
+// mutant that dropped one of those three checks could hide behind the
+// lastUpdated mismatch. These cases hold lastUpdated (and everything else)
+// fixed and vary exactly one field at a time.
+
+describe("sameDeviceRevision", () => {
+  const base = {
+    kernelId: "kernel-nyc",
+    adapterType: "octoprint",
+    adapterConfig: '{"url":"http://192.168.1.50:5000"}',
+    lastUpdated: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("is true when both snapshots are identical", () => {
+    expect(sameDeviceRevision({ ...base }, { ...base })).toBe(true);
+  });
+
+  it("is false when either snapshot is missing", () => {
+    expect(sameDeviceRevision(undefined, { ...base })).toBe(false);
+    expect(sameDeviceRevision({ ...base }, undefined)).toBe(false);
+    expect(sameDeviceRevision(undefined, undefined)).toBe(false);
+  });
+
+  it("is false when ONLY kernelId differs", () => {
+    expect(sameDeviceRevision({ ...base }, { ...base, kernelId: "kernel-la" })).toBe(false);
+  });
+
+  it("is false when ONLY adapterType differs", () => {
+    expect(sameDeviceRevision({ ...base }, { ...base, adapterType: "modbus" })).toBe(false);
+  });
+
+  it("is false when ONLY adapterConfig differs", () => {
+    expect(
+      sameDeviceRevision({ ...base }, { ...base, adapterConfig: '{"url":"http://203.0.113.9:5000"}' }),
+    ).toBe(false);
+  });
+
+  it("is false when ONLY lastUpdated differs", () => {
+    expect(
+      sameDeviceRevision({ ...base }, { ...base, lastUpdated: "2026-01-02T00:00:00.000Z" }),
+    ).toBe(false);
   });
 });
 
