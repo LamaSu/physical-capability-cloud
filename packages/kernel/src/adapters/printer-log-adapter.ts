@@ -188,6 +188,13 @@ export class PrinterLogAdapter implements SensorAdapter {
   private readonly polls = new Set<Promise<void>>();
   /** The first timer poll of this recording that failed: its chain may lack lines. */
   private pollFailure: string | null = null;
+  /**
+   * Set when this recording's summary is emitted, before any listener runs: a recording has one
+   * summary. A failure after it (a listener or the reset that throws) fails that stop, but the
+   * state then becomes idle, never stopFailed, so no retried stop can poll again or emit a
+   * second summary (astra pack 202). Cleared by a new recording.
+   */
+  private summaryEmitted = false;
   /** The start in flight: a start of the same job meanwhile is the same start, and a stop waits for it. */
   private starting: Promise<void> | null = null;
   /** The stop in flight: a second stop meanwhile is the same stop. */
@@ -278,15 +285,16 @@ export class PrinterLogAdapter implements SensorAdapter {
     this.state = "starting";
     this.jobId = jobId;
     this.pollFailure = null;
+    this.summaryEmitted = false;
     this.chainLength = 0;
     this.latestEntryHash = null;
 
-    // Reset the chain so each job starts fresh
-    this.logCaptureService.reset();
-
-    // Poll immediately, then on interval. A first poll that fails starts nothing (astra
-    // pack 186); a stop that waited for it refuses, and leaves the state idle itself.
+    // Reset the chain so each job starts fresh, then poll immediately, then on interval. A
+    // reset or a first poll that fails starts nothing (astra packs 186 and 202): the state
+    // returns to idle, never left starting. A stop that waited for it refuses, and leaves the
+    // state idle itself.
     try {
+      this.logCaptureService.reset();
       await this.poll(jobId);
     } catch (err) {
       if (this.now() === "starting") {
@@ -388,14 +396,18 @@ export class PrinterLogAdapter implements SensorAdapter {
     return this.stopOnce();
   }
 
-  /** The stop, in state stopping: to idle once the summary is emitted, or to stopFailed. */
+  /**
+   * The stop, in state stopping: to idle once the summary is emitted, or to stopFailed. A stop
+   * that fails after its summary was emitted ends idle too: the recording has had its one
+   * summary (astra pack 202).
+   */
   private async stopOnce(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
     try {
       const summary = await this.finishRecording();
       if (this.now() === "stopping") this.state = "idle";
       return summary;
     } catch (err) {
-      if (this.now() === "stopping") this.state = "stopFailed";
+      if (this.now() === "stopping") this.state = this.summaryEmitted ? "idle" : "stopFailed";
       throw err;
     } finally {
       // Ended once the summary is emitted, or once stopping failed: nothing more is
@@ -441,6 +453,11 @@ export class PrinterLogAdapter implements SensorAdapter {
     }
 
     const chain = this.logCaptureService.getChain();
+    // getChain is a collaborator call, and may re-enter: disposed from inside it, there is no
+    // summary either (astra pack 202).
+    if (this.now() === "disposed") {
+      throw new Error(`[printer-log-adapter] ${this.id}: disposed while job ${this.jobId ?? "unknown"} was stopping, so it has no summary`);
+    }
     const chainLength = chain.length;
     const headHash = chain.length > 0 ? chain[chain.length - 1]!.entryHash : null;
     const tailHash = chain.length > 0 ? chain[0]!.previousHash : null;
@@ -462,13 +479,27 @@ export class PrinterLogAdapter implements SensorAdapter {
       },
     };
 
-    this.emit(summaryEvent);
+    // One summary per recording (astra pack 202): marked before any listener runs. A listener
+    // or the reset that throws from here fails this stop, after every listener has had the
+    // summary and the recording's state is cleared, and the stop then ends idle (stopOnce).
+    this.summaryEmitted = true;
+    let failure: { err: unknown } | null = null;
+    try {
+      this.emit(summaryEvent);
+    } catch (err) {
+      failure = { err };
+    }
 
     // Reset state
-    this.logCaptureService.reset();
     this.chainLength = 0;
     this.latestEntryHash = null;
     this.jobId = null;
+    try {
+      this.logCaptureService.reset();
+    } catch (err) {
+      failure ??= { err };
+    }
+    if (failure !== null) throw failure.err;
 
     return summaryEvent;
   }
@@ -572,9 +603,20 @@ export class PrinterLogAdapter implements SensorAdapter {
     return this.state;
   }
 
+  /**
+   * Delivers `event` to every listener, even when one throws, then throws the first error, so
+   * the poll or the stop that emitted it fails (astra pack 202: a summary listener that threw
+   * left later listeners without the summary).
+   */
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
+    let failure: { err: unknown } | null = null;
     for (const listener of this.listeners) {
-      listener(event);
+      try {
+        listener(event);
+      } catch (err) {
+        failure ??= { err };
+      }
     }
+    if (failure !== null) throw failure.err;
   }
 }
