@@ -47,6 +47,9 @@
  *     names another device job means something else is driving the printer: the print
  *     fails closed and finalizes nothing. An event that names no device job is recorded
  *     but never ends the print: it cannot be told apart from another job's.
+ *   - Recording: an event the print accepted but could not record (its hash or its addEvent
+ *     failed) fails the print once its chain has settled, and nothing is finalized: the
+ *     bundle would lack that event. The same rule as JobRunner's.
  *   - Quiesce, close, then finalize: once its device job has ended, the print waits, still
  *     recording, for the adapter's quiesceEvidence() (bounded), then stops accepting
  *     evidence, waits (bounded) for every accepted event to be recorded, and finalizes.
@@ -215,8 +218,8 @@ export interface PrintJobResult {
  * Event-driven: it waits for the device's own `execution_completed` (or
  * `execution_failed`) for this print's device job rather than fabricating a completion,
  * so a bundle only exists when the device actually reported this print done. The
- * evidence binding (session, step lease, device job, quiesce) is described at the top of
- * this file.
+ * evidence binding (session, step lease, device job, recording, quiesce) is described at
+ * the top of this file.
  */
 export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult> {
   const {
@@ -261,6 +264,10 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
   // never written.
   let recorded: Promise<void> = Promise.resolve();
   let sealed = false;
+  // The first event the print accepted but could not record (its hash or its write failed).
+  // Its chain then lacks that event, so once the chain has settled the print fails: success
+  // would sign an incomplete record (astra pack 192). As JobRunner's.
+  const unrecorded: { first: { type: string; error: string } | null } = { first: null };
 
   // This print's device job, and what the printer reported about it in the window. The id
   // is known once start returns it; what arrives before (inside start) waits in `early`.
@@ -325,6 +332,7 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
       try {
         await emitter.addEvent(jobId, stepId, event);
       } catch (err) {
+        unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
         console.error(err);
       }
     });
@@ -422,6 +430,12 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
     if (!(await settle())) {
       settleTimedOut = true;
       return failure(`evidence recording did not settle within ${evidenceSettleTimeoutMs} ms`);
+    }
+    // The chain has settled. An event it could not record is missing from it, so the print
+    // fails and nothing is finalized.
+    const lost = unrecorded.first;
+    if (lost !== null) {
+      return failure(`a ${lost.type} event of this job could not be recorded (${lost.error}), so its evidence is incomplete`);
     }
 
     // Finalise + sign — the one and only signing step, identical to every other device

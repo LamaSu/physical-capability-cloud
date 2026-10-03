@@ -23,6 +23,10 @@
  *
  * Every test runs on the fake clock, with hashing moved onto microtasks (as in
  * job-runner-evidence-handoff.test.ts), so the clock alone decides when a print moves on.
+ *
+ * Astra pack 192 (on a436e592), HIGH 1: an event the print accepted but could not record (its
+ * hash or its addEvent failed) was logged and skipped, and the print still signed a bundle
+ * without it. Such an event now fails the print.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -691,6 +695,89 @@ describe("B2 (P2's cause): only the print's own device job ends it", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Astra pack 192: an event the print could not record fails it
+// ---------------------------------------------------------------------------
+
+/** Make the emitter fail to record every event of `type`: its addEvent rejects, or throws. */
+function failToRecord(emitter: EvidenceEmitter, how: "rejects" | "throws", type: Emitted["type"], message: string): void {
+  const record = emitter.addEvent.bind(emitter);
+  vi.spyOn(emitter, "addEvent").mockImplementation((jobId, stepId, event) => {
+    if (event.type !== type) return record(jobId, stepId, event);
+    if (how === "throws") throw new Error(message);
+    return Promise.reject(new Error(message));
+  });
+}
+
+/** The error of a print that could not record an event of its own (JobRunner's wording). */
+function unrecorded(type: string, error: string): string {
+  return `a ${type} event of this job could not be recorded (${error}), so its evidence is incomplete`;
+}
+
+describe("astra pack 192 HIGH 1: an event the print bound but could not record fails it", () => {
+  it.each([
+    {
+      how: "its hash rejects, astra's reproduction",
+      id: "hash",
+      lose: () => {
+        hashing.gate = (event) => ((event as Emitted).type === "execution_completed" ? Promise.reject(new Error("hashEvent rejected")) : undefined);
+      },
+      error: "hashEvent rejected",
+    },
+    { how: "addEvent rejects", id: "rejects", lose: (emitter: EvidenceEmitter) => failToRecord(emitter, "rejects", "execution_completed", "storage full"), error: "storage full" },
+    { how: "addEvent throws", id: "throws", lose: (emitter: EvidenceEmitter) => failToRecord(emitter, "throws", "execution_completed", "storage full"), error: "storage full" },
+  ])("a completion whose recording fails ($how) fails the print: no bundle, no events, and its step is detached", async ({ id, lose, error }) => {
+    const printer = testPrinter(`unrecorded-h1a-${id}`);
+    const { emitter, bundles } = recordingEmitter();
+    lose(emitter);
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-h1a", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.complete(100);
+    const result = await drive(run);
+
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: unrecorded("execution_completed", error), durationMs: expect.any(Number) });
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+    expect(tags(emitter.getEvents("print-h1a", "print-h1a")), "its step once it returned").toEqual([]);
+  });
+
+  it("names the first event it could not record", async () => {
+    hashing.gate = (event) => {
+      const { type } = event as Emitted;
+      if (type === "execution_started") return Promise.reject(new Error("the start's hash rejected"));
+      if (type === "execution_completed") return Promise.reject(new Error("the completion's hash rejected"));
+      return undefined;
+    };
+    const printer = testPrinter("unrecorded-h1b");
+    const { emitter, bundles } = recordingEmitter();
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-h1b", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.emit(printer.event("execution_progress", { jobId: 100, completedSheets: 1 })); // recorded
+    printer.complete(100);
+    const result = await drive(run);
+
+    expect.soft(result.error, "the print's error").toBe(unrecorded("execution_started", "the start's hash rejected"));
+    expect(bundles, "bundles finalized").toEqual([]);
+  });
+
+  it("waits for the chain: a completion whose recording fails only after the print stopped accepting evidence still fails it", async () => {
+    // The completion's hash rejects 1 s after it was emitted. The printer answers its hook at
+    // once, so by then the window is closed and the print is waiting for its chain to settle.
+    hashing.gate = (event) =>
+      (event as Emitted).type === "execution_completed"
+        ? new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error("hash rejected late")), 1_000))
+        : undefined;
+    const printer = testPrinter("unrecorded-h1c");
+    const { emitter, bundles } = recordingEmitter();
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-h1c", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.complete(100);
+    const result = await drive(run);
+
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: unrecorded("execution_completed", "hash rejected late"), durationMs: expect.any(Number) });
+    expect(bundles, "bundles finalized").toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The fix's own rules
 // ---------------------------------------------------------------------------
 
@@ -723,6 +810,19 @@ describe("every exit releases the printer, the step key and the step", () => {
       first: accept,
       then: (p) => p.emit(p.event("execution_progress", { jobId: 555 })),
       error: expect.stringContaining("device job 555"),
+    },
+    {
+      exit: "an event of the print cannot be recorded",
+      first: accept,
+      then: (p) => {
+        // Only device job 100's completion: the retry's job records normally.
+        hashing.gate = (event) => {
+          const e = event as Emitted;
+          return e.type === "execution_completed" && e.payload.jobId === 100 ? Promise.reject(new Error("hashEvent rejected")) : undefined;
+        };
+        p.complete(100);
+      },
+      error: "a execution_completed event of this job could not be recorded (hashEvent rejected), so its evidence is incomplete",
     },
   ];
 
