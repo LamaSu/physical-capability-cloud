@@ -10,7 +10,9 @@ const STORAGE_KEY = "pcc-api-key";
  *   (authorizedFetch);
  * - the egress guard, which compares outgoing requests against it.
  * Other modules can replace it (setStoredApiKey, used by the auth store) and
- * ask whether one is held (hasStoredApiKey). Neither reads it back out.
+ * ask whether one is held (hasStoredApiKey). Neither reads it back out. Every
+ * replacement is reported to onStoredKeyChange's listeners, without the key:
+ * the auth store makes each one an identity change (astra A03d N1).
  * __tests__/no-direct-auth-headers.test.ts and lib/__tests__/key-boundary-r4
  * hold this module to that.
  *
@@ -39,10 +41,19 @@ function writeStorage(key: string | null): void {
   }
 }
 
-/** Hold `key` as the signed-in key, or clear it with null. Write-only: nothing reads it back. */
+const keyListeners = new Set<() => void>();
+
+/** Hold `key` as the signed-in key, or clear it with null. Write-only: nothing reads it back. Tells onStoredKeyChange's listeners. */
 export function setStoredApiKey(key: string | null): void {
   storedApiKey = key || null;
   writeStorage(storedApiKey);
+  for (const listener of keyListeners) listener();
+}
+
+/** Calls `onChange` after every change of the stored key, whoever makes it. It is told that the key changed, never what it is. */
+export function onStoredKeyChange(onChange: () => void): () => void {
+  keyListeners.add(onChange);
+  return () => keyListeners.delete(onChange);
 }
 
 /** Whether a signed-in key is held. Never the key itself. */

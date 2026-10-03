@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { fetchWithKey } from "../lib/gateway-base.js";
-import { hasStoredApiKey, setStoredApiKey } from "../lib/authorized-fetch.js";
+import { hasStoredApiKey, onStoredKeyChange, setStoredApiKey } from "../lib/authorized-fetch.js";
 
 /**
  * Sign-in state. The API key itself is not here, not in the state and not in
@@ -12,7 +12,7 @@ interface AuthState {
   // -- API Key auth (primary gate) --
   /** Whether an API key is held. The key itself is never in the store. */
   isAuthenticated: boolean;
-  /** Bumped on every sign-in, sign-out or key replacement (adoptApiKey, logout). Never the key. */
+  /** Bumped on every change of the stored key, whoever makes it (onStoredKeyChange). Never the key. */
   keyEpoch: number;
   login: (key: string) => Promise<boolean>;
   logout: () => void;
@@ -51,9 +51,9 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
-    // One set(), so an identity change is reported once (onIdentityChange).
+    // The key change below clears the wallet fields in the same set(), so the
+    // identity change is reported once (onIdentityChange).
     setStoredApiKey(null);
-    set((s) => ({ isAuthenticated: false, keyEpoch: s.keyEpoch + 1, address: null, sessionToken: null, error: null }));
   },
 
   // -- Wallet/SIWE auth --
@@ -68,17 +68,31 @@ export const useAuthStore = create<AuthState>((set) => ({
   setError: (e) => set({ error: e, isVerifying: false }),
 }));
 
-/**
+// Every change of the stored key is an identity change, whoever makes it
+// (astra A03d N1). setStoredApiKey() is exported, so a module that called it
+// directly used to replace the key behind onIdentityChange: reads cached
+// under the previous key survived while authorizedFetch sent the new one. Now
+// the key's owner reports each change, and this one set() follows it: the
+// epoch moves, isAuthenticated follows the key, and a sign-out clears the
+// wallet session's fields with it. Every change counts, even to the same key:
+// telling "same key" from "another key" would make this an equality test on
+// the stored key.
+onStoredKeyChange(() => {
+  const signedIn = hasStoredApiKey();
+  useAuthStore.setState((s) => ({
+    isAuthenticated: signedIn,
+    keyEpoch: s.keyEpoch + 1,
+    ...(signedIn ? {} : { address: null, sessionToken: null, error: null }),
+  }));
+});
+
 /**
  * Hold `key` as the signed-in key, or sign out with null. login() calls it
  * after the gateway accepts the key; tests call it directly. It is
- * write-only: writing a key cannot leak one. Every call is an identity change
- * (keyEpoch), even with the same key: telling "same key" from "another key"
- * would make this an equality test on the stored key.
+ * write-only: writing a key cannot leak one.
  */
 export function adoptApiKey(key: string | null): void {
   setStoredApiKey(key);
-  useAuthStore.setState((s) => ({ isAuthenticated: hasStoredApiKey(), keyEpoch: s.keyEpoch + 1 }));
 }
 
 /**

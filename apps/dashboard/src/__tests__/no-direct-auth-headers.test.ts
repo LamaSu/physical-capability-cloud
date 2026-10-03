@@ -1,12 +1,13 @@
 /**
  * The API key reaches a request in exactly one place, and no module but its
- * owner holds it (N50; sol #2857; astra rounds 2 and 3).
+ * owner holds it (N50; sol #2857; astra rounds 2, 3 and 4).
  *
  * The boundary (lib/gateway-base.ts, rules 1-3):
  * - lib/authorized-fetch.ts holds the key in a module-private variable and
- *   persists it. It exports setStoredApiKey, hasStoredApiKey, authorizedFetch
- *   and installGatewayKeyGuard, and none of them returns the key (checked
- *   here, and at run time in lib/__tests__/key-boundary-r4.test.ts).
+ *   persists it. It exports setStoredApiKey, hasStoredApiKey,
+ *   onStoredKeyChange, authorizedFetch and installGatewayKeyGuard, and none of
+ *   them returns the key (checked here, and at run time in
+ *   lib/__tests__/key-boundary-r4.test.ts).
  * - fetchWithKey() in lib/gateway-base.ts is the only code that puts a key on
  *   a request, and only toward the gateway.
  *
@@ -29,20 +30,36 @@
  *      not code, so they need no exemption.
  *   5. At run time the store's state holds no key, and the key's owner and
  *      the store export exactly the functions named above.
- * The self-tests run the rules over astra's round-3 bypasses and over a
- * quickstart line moved into code, and each must be caught.
+ *   6. Syntax rules (astra round 4), read from the parsed file, so strings,
+ *      comments and JSX text are never taken for code, and a string built
+ *      from literals is judged by what it spells. The global object is only
+ *      read by named member (window.x) or asked its type; never aliased,
+ *      passed, cast, indexed or used to reach another window. No Reflect,
+ *      no window handles (defaultView, contentWindow, opener), no new
+ *      Image(), no string run as code (Function, .constructor(), string
+ *      timers) or modules imported by pattern (import.meta.glob). No module
+ *      writes fetch, a property of window, navigator or document, or a
+ *      prototype's method, except navigation and Google Analytics' bootstrap.
+ * The self-tests run the rules over astra's round-3 and round-4 bypasses and
+ * over a quickstart line moved into code, and each must be caught.
  *
- * These rules keep our own modules off the key: they are a lint, not a
- * sandbox. Hostile script on this origin (an XSS, a compromised dependency)
- * can still read localStorage, or replace a built-in the key passes through.
- * Only an HttpOnly gateway session would put the key out of JavaScript's
- * reach, and that is a gateway change awaiting the operator.
+ * What this is, and isn't. It holds our own modules, written in good faith,
+ * to one path for the key: a mistake, or a shortcut, fails the build. It is a
+ * lint, not a sandbox. Code written to get past it can: a name computed at
+ * run time (atob, a lookup table) is invisible to any static check, and a
+ * hostile script on this origin (an XSS, a compromised dependency) isn't in
+ * this tree at all. Against those, the key is as safe as localStorage, which
+ * is to say readable. Only an HttpOnly gateway session would put it out of
+ * JavaScript's reach: a gateway change awaiting the operator's decision (bus
+ * #4459). The runtime egress guard (lib/gateway-base.ts) is defence in depth
+ * for fetch and sendBeacon, not a boundary.
  */
 
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
+import ts from "typescript";
 import * as keyOwner from "../lib/authorized-fetch.js";
 import * as store from "../stores/auth-store.js";
 import claudeQuickstart from "../pages/agent-link/pcc-agent.js.txt?raw";
@@ -112,9 +129,92 @@ interface Rule {
   id: string;
   /** The modules whose job this is. */
   owners: string[];
-  /** Whether a trimmed, non-comment line breaks the rule. */
-  breaks: (line: string) => boolean;
+  /** Whether a trimmed, non-comment line breaks the rule (line rules). */
+  breaks?: (line: string) => boolean;
+  /** The nodes that break the rule (syntax rules, below). */
+  find?: (sf: ts.SourceFile) => ts.Node[];
   fix: string;
+}
+
+// ---------------------------------------------------------------------------
+// Syntax rules (astra A03d F1). A line can't tell code from a string, and a
+// name can be split across a "+". These read the file as TypeScript parses
+// it: comments, string contents and JSX text are never taken for code, and a
+// string built from literals is judged by what it spells.
+// ---------------------------------------------------------------------------
+
+/** The global object, by its three names. */
+const GLOBAL_NAMES = new Set(["window", "globalThis", "self"]);
+/** Objects whose properties our modules read but never replace. */
+const WRITE_ROOTS = new Set([...GLOBAL_NAMES, "navigator", "document"]);
+/** Writes that replace nothing a key passes through: navigation, and Google Analytics' bootstrap (lib/telemetry.ts). */
+const GLOBAL_WRITES_ALLOWED = new Set(["window.location.href", "window.dataLayer", "window.gtag"]);
+/** Properties that hand back a window. */
+const WINDOW_HANDLES = new Set(["defaultView", "contentWindow", "opener"]);
+const GLOBAL_WINDOW_PROPS = new Set(["top", "parent", "frames", "opener", "self", "window", "globalThis"]);
+
+function walk(node: ts.Node, visit: (n: ts.Node) => void): void {
+  visit(node);
+  ts.forEachChild(node, (child) => walk(child, visit));
+}
+
+function nodes(sf: ts.SourceFile, test: (n: ts.Node) => boolean): ts.Node[] {
+  const out: ts.Node[] = [];
+  walk(sf, (n) => {
+    if (test(n)) out.push(n);
+  });
+  return out;
+}
+
+/** An identifier that names something here, rather than a member or a key: x.window, { self: 1 }, interface { window: … }. */
+function isNameOnly(id: ts.Identifier): boolean {
+  const p = id.parent;
+  if (ts.isPropertyAccessExpression(p) && p.name === id) return true;
+  if (ts.isQualifiedName(p) && p.right === id) return true;
+  if ((ts.isPropertyAssignment(p) || ts.isPropertySignature(p) || ts.isPropertyDeclaration(p) || ts.isMethodDeclaration(p) || ts.isMethodSignature(p)) && p.name === id) return true;
+  if ((ts.isJsxAttribute(p) || ts.isEnumMember(p) || ts.isGetAccessor(p) || ts.isSetAccessor(p)) && p.name === id) return true;
+  return false;
+}
+
+/** What a string expression spells, when it is built only from literals: "local" + "Storage", `pcc-${"api"}-key`. */
+function spelled(n: ts.Node): string | null {
+  if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) return n.text;
+  if (ts.isParenthesizedExpression(n)) return spelled(n.expression);
+  if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const l = spelled(n.left);
+    const r = l === null ? null : spelled(n.right);
+    return l !== null && r !== null ? l + r : null;
+  }
+  if (ts.isTemplateExpression(n)) {
+    let text = n.head.text;
+    for (const span of n.templateSpans) {
+      const part = spelled(span.expression);
+      if (part === null) return null;
+      text += part + span.literal.text;
+    }
+    return text;
+  }
+  return null;
+}
+
+/** The identifier an access chain starts from: window in window.a.b or window["a"].b. */
+function rootOf(n: ts.Node): ts.Node {
+  let e = n;
+  while (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) || ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
+  return e;
+}
+
+const isAssignment = (k: ts.SyntaxKind) => k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
+
+/** A use of the global object other than reading a named member (window.x) or asking its type (typeof window). */
+function globalAliases(sf: ts.SourceFile): ts.Node[] {
+  return nodes(sf, (n) => {
+    if (!ts.isIdentifier(n) || !GLOBAL_NAMES.has(n.text) || isNameOnly(n)) return false;
+    const p = n.parent;
+    if (ts.isPropertyAccessExpression(p) && p.expression === n && !GLOBAL_WINDOW_PROPS.has(p.name.text)) return false;
+    if (ts.isTypeOfExpression(p) || ts.isTypeQueryNode(p) || (ts.isQualifiedName(p) && p.left === n)) return false;
+    return true; // aliased, passed, cast, spread, indexed, compared, or a window handle (window.top) …
+  });
 }
 
 const RULES: Rule[] = [
@@ -166,6 +266,74 @@ const RULES: Rule[] = [
     breaks: (l) => OTHER_EGRESS.test(l),
     fix: "Use fetch, which the egress guard covers.",
   },
+  // Syntax rules (astra A03d F1).
+  {
+    id: "global-alias",
+    owners: [BOUNDARY],
+    find: globalAliases,
+    fix: "Read a named member (window.innerWidth). Don't alias, pass, cast or index the global object, or reach another window (window.top).",
+  },
+  {
+    id: "window-handle",
+    owners: [],
+    find: (sf) => nodes(sf, (n) => ts.isPropertyAccessExpression(n) && WINDOW_HANDLES.has(n.name.text)),
+    fix: "Don't reach a window through a document, a frame or an opener.",
+  },
+  {
+    id: "reflect",
+    owners: [],
+    find: (sf) => nodes(sf, (n) => ts.isIdentifier(n) && n.text === "Reflect" && !isNameOnly(n)),
+    fix: "Name the property you read.",
+  },
+  {
+    id: "spelled-name",
+    owners: [KEY_OWNER],
+    find: (sf) =>
+      nodes(sf, (n) => {
+        if (n.parent && ts.isBinaryExpression(n.parent) && n.parent.operatorToken.kind === ts.SyntaxKind.PlusToken && spelled(n.parent) !== null) return false; // judged whole
+        const text = spelled(n);
+        return text !== null && /pcc-api-key|(?:local|session)Storage/.test(text);
+      }),
+    fix: "Only lib/authorized-fetch.ts names the key's slot; name web storage as the identifier, with a literal slot.",
+  },
+  {
+    id: "global-write",
+    owners: [BOUNDARY],
+    find: (sf) =>
+      nodes(sf, (n) => {
+        if (!ts.isBinaryExpression(n) || !isAssignment(n.operatorToken.kind)) return false;
+        const target = n.left;
+        if (ts.isIdentifier(target)) return target.text === "fetch";
+        if (GLOBAL_WRITES_ALLOWED.has(target.getText(sf).replace(/\s+/g, ""))) return false;
+        const root = rootOf(target);
+        if (ts.isIdentifier(root) && WRITE_ROOTS.has(root.text)) return true;
+        // X.prototype.y = …: a built-in's behaviour replaced for everyone.
+        return ts.isPropertyAccessExpression(target) && /(?:^|\.)prototype\./.test(target.getText(sf).replace(/\s+/g, ""));
+      }),
+    fix: "Don't replace fetch, a global's property or a prototype's method: the key passes through them.",
+  },
+  {
+    id: "image-egress",
+    owners: [],
+    find: (sf) => nodes(sf, (n) => ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "Image"),
+    fix: "Load images with an element the page renders; don't send requests through new Image().",
+  },
+  {
+    id: "code-from-string",
+    owners: [],
+    find: (sf) =>
+      nodes(sf, (n) => {
+        if (ts.isPropertyAccessExpression(n) && ts.isMetaProperty(n.expression) && /^glob/.test(n.name.text)) return true; // import.meta.glob imports modules whole
+        if (!ts.isCallExpression(n) && !ts.isNewExpression(n)) return false;
+        const callee = n.expression;
+        if (ts.isIdentifier(callee) && callee.text === "Function") return true;
+        if (ts.isPropertyAccessExpression(callee) && callee.name.text === "constructor") return true;
+        const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
+        const first = n.arguments?.[0];
+        return (name === "setTimeout" || name === "setInterval") && first !== undefined && spelled(first) !== null;
+      }),
+    fix: "Don't run a string as code, or import modules by pattern.",
+  },
 ];
 
 interface Hit {
@@ -175,15 +343,40 @@ interface Hit {
   text: string;
 }
 
+function kindOf(rel: string): ts.ScriptKind {
+  if (rel.endsWith(".tsx")) return ts.ScriptKind.TSX;
+  if (rel.endsWith(".jsx")) return ts.ScriptKind.JSX;
+  return /\.[mc]?js$/.test(rel) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
+}
+
+const parsed = new Map<Source, ts.SourceFile>();
+function syntaxOf(f: Source): ts.SourceFile {
+  let sf = parsed.get(f);
+  if (!sf) {
+    sf = ts.createSourceFile(f.rel, f.lines.join("\n"), ts.ScriptTarget.Latest, true, kindOf(f.rel));
+    parsed.set(f, sf);
+  }
+  return sf;
+}
+
 function violations(files: Source[], rules: Rule[] = RULES): Hit[] {
   return rules.flatMap((rule) =>
     files
       .filter((f) => !rule.owners.includes(f.rel))
-      .flatMap((f) =>
-        f.lines
+      .flatMap((f) => {
+        if (rule.find) {
+          const sf = syntaxOf(f);
+          return rule.find(sf).map((node) => ({
+            rule: rule.id,
+            file: f.rel,
+            n: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
+            text: node.getText(sf).replace(/\s+/g, " ").trim(),
+          }));
+        }
+        return f.lines
           .map((line, i) => ({ rule: rule.id, file: f.rel, n: i + 1, text: line.trim() }))
-          .filter(({ text }) => !isComment(text) && rule.breaks(text)),
-      ),
+          .filter(({ text }) => !isComment(text) && rule.breaks!(text));
+      }),
   );
 }
 
@@ -201,7 +394,7 @@ describe("only lib/authorized-fetch.ts holds the API key, and only fetchWithKey 
   }
 
   it("the key's owner and the auth store export exactly the boundary's functions", () => {
-    expect(Object.keys(keyOwner).sort()).toEqual(["authorizedFetch", "hasStoredApiKey", "installGatewayKeyGuard", "setStoredApiKey"]);
+    expect(Object.keys(keyOwner).sort()).toEqual(["authorizedFetch", "hasStoredApiKey", "installGatewayKeyGuard", "onStoredKeyChange", "setStoredApiKey"]);
     expect(Object.keys(store).sort()).toEqual(["adoptApiKey", "onIdentityChange", "useAuthStore"]);
   });
 
@@ -270,6 +463,45 @@ describe("the rules catch each known way around them (self-test)", () => {
       'Object.defineProperty(window, "fetch", { value: spy });',
     ]) {
       expect(caught(line), line).not.toEqual([]);
+    }
+  });
+
+  it("each syntax rule catches its kind (astra A03d F1)", () => {
+    const cases: Array<[string, string]> = [
+      ["global-alias", "const s = self;"],
+      ["global-alias", "Object.assign(window, { fetch: spy });"],
+      ["global-alias", "const { localStorage: s } = window;"],
+      ["global-alias", "const t = window.top;"],
+      ["global-alias", "const d = (globalThis as any).document;"],
+      ["window-handle", "const w = document.defaultView;"],
+      ["window-handle", "const w = frame.contentWindow;"],
+      ["reflect", "const v = Reflect.get(obj, name);"],
+      ["spelled-name", 'const n = "session" + "Storage";'],
+      ["spelled-name", "const n = `pcc-${\"api\"}-key`;"],
+      ["global-write", "navigator.sendBeacon = spy;"],
+      ["global-write", "Headers.prototype.set = spy;"],
+      ["global-write", 'window["fetch"] = spy;'],
+      ["image-egress", "const img = new Image(1, 1);"],
+      ["code-from-string", 'const g = Function("return this")();'],
+      ["code-from-string", '(() => 0).constructor("return this")();'],
+      ["code-from-string", 'setTimeout("steal()", 0);'],
+      ["code-from-string", 'const mods = import.meta.glob("../lib/*.ts", { eager: true });'],
+    ];
+    for (const [rule, line] of cases) expect(caught(line), line).toContain(rule);
+  });
+
+  it("the syntax rules let through what the app does", () => {
+    for (const [code, rel] of [
+      ['window.location.href = "/";', "pages/Probe.ts"],
+      ['if (typeof window !== "undefined") window.addEventListener("storage", onChange);', "pages/Probe.ts"],
+      ["const w = window.innerWidth;", "pages/Probe.ts"],
+      ["type W = typeof window;", "pages/Probe.ts"],
+      ['const tip = "A challenge window opens; self-attested at tier 0.";', "pages/Probe.ts"],
+      ["const el = <p>The challenge window opens, then funds release.</p>;", "pages/Probe.tsx"],
+      ["const frame = trace.frames[0];", "pages/Probe.ts"],
+      ["setTimeout(() => setOpen(false), 300);", "pages/Probe.ts"],
+    ]) {
+      expect(caught(code, rel), code).toEqual([]);
     }
   });
 
