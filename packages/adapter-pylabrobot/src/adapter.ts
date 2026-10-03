@@ -233,12 +233,13 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
 
   /**
    * Resolves once no command or status call is in flight and every mock completion has
-   * been emitted; at once when none is. A real run is one `start` call: it returns after
-   * backend.run and evidence.stopRecording have answered, and the sidecar writes a run's
-   * evidence notifications to stdout before those answers, so every notification of the run
-   * has been forwarded by then. What the sidecar sends outside any call (a crash's
-   * execution_failed, a notification outside a recording window) is not work this adapter
-   * was given, and this does not wait for it.
+   * been emitted; at once when none is. A real run is one `start` call, which returns only
+   * after the sidecar has answered evidence.stopRecording. The sidecar sends that answer
+   * only after writing every notification it scheduled for the job (a barrier, astra pack
+   * 186), so each one has been forwarded by then. A notification of a job that is not
+   * recording now is late, and is dropped, never forwarded. What the sidecar sends bound to
+   * no job (a notification outside any recording window) is not work this adapter was
+   * given, and this does not wait for it.
    */
   quiesceEvidence(): Promise<void> {
     return this.work.idle();
@@ -320,27 +321,22 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         runParams as unknown as Record<string, unknown>,
         this.config.runTimeoutMs ?? 3_600_000,
       );
+      // The run's notifications can still be on their way: the barrier first, so each has
+      // reached the collector before it emits execution_completed and stops.
+      await this.stopSidecarRecording(jobId);
       const bufferedEvents = collector.stopRecording(jobId, {
         opCount: result.opCount,
         durationMs: result.durationMs,
         summary: result.summary,
       });
+      this.currentCollector = null;
+      this.currentJobId = null;
+      this.pendingProtocol = {};
+      // Recycled only after the barrier, which the old sidecar must answer.
       this.completedJobs += 1;
       if (this.completedJobs >= (this.config.restartAfterJobs ?? 100)) {
         await this.recycleSidecar();
       }
-      try {
-        await this.sidecar?.call(
-          RPC_METHODS.EVIDENCE_STOP_RECORDING,
-          { deviceId: this.id, jobId },
-          5_000,
-        );
-      } catch {
-        // tolerate
-      }
-      this.currentCollector = null;
-      this.currentJobId = null;
-      this.pendingProtocol = {};
       return {
         success: true,
         message: `run complete — ${result.opCount} ops in ${result.durationMs}ms`,
@@ -353,6 +349,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       };
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
+      await this.stopSidecarRecording(jobId);
       collector.failRecording(jobId, reason, {
         rpcCode: err instanceof SidecarError ? err.code : undefined,
         rpcData: err instanceof SidecarError ? err.data : undefined,
@@ -360,15 +357,6 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       this.currentCollector = null;
       this.currentJobId = null;
       this.pendingProtocol = {};
-      try {
-        await this.sidecar?.call(
-          RPC_METHODS.EVIDENCE_STOP_RECORDING,
-          { deviceId: this.id, jobId },
-          5_000,
-        );
-      } catch {
-        // tolerate
-      }
       return {
         success: false,
         message: reason,
@@ -565,12 +553,38 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     return collector;
   }
 
+  /**
+   * Close the sidecar's recording window, a barrier: the sidecar answers only after writing
+   * every notification it scheduled for the job. Tolerated if it fails (an older sidecar, a
+   * crash, a timeout): the job's notifications that arrive later are then dropped.
+   */
+  private async stopSidecarRecording(jobId: string): Promise<void> {
+    try {
+      await this.sidecar?.call(
+        RPC_METHODS.EVIDENCE_STOP_RECORDING,
+        { deviceId: this.id, jobId },
+        5_000,
+      );
+    } catch {
+      // tolerate
+    }
+  }
+
   private handleEvidenceNotification(params: EvidenceNotificationParams): void {
+    // A notification bound to a job other than the one recording now is late: that job's
+    // window is closed, and its hook may have answered. Forwarded, it would be recorded
+    // under whichever job holds the device now, so it is dropped (astra pack 186).
+    if (params.jobId != null && params.jobId !== this.currentJobId) {
+      console.warn(
+        `[pylabrobot-adapter] ${this.id}: dropped a late ${params.type} notification of job ${String(params.jobId)}: that job is not recording`,
+      );
+      return;
+    }
     if (this.currentCollector) {
       this.currentCollector.ingestSidecarNotification(params);
       return;
     }
-    // Outside a recording window — still forward the event but with a flag
+    // Outside a recording window, and bound to no job — still forward the event, flagged
     this.forwardEvent({
       type: "instrument_result",
       timestamp: params.timestamp ?? new Date().toISOString(),

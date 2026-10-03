@@ -223,3 +223,36 @@ async def test_calibrate_unsupported_returns_NOT_SUPPORTED(server):
     }))
     msgs = out.pop_messages()
     assert msgs[0]["error"]["code"] == RPC_ERROR_CODES["NOT_SUPPORTED"]
+
+
+def _line_names(msgs: list[dict]) -> list[str]:
+    """A response by its id, a notification by its evidence type."""
+    return [m["id"] if "id" in m else m["params"]["type"] for m in msgs]
+
+
+def test_stop_recording_answers_only_after_every_notification_scheduled_before_it():
+    """astra pack 186 (HIGH): notifications are written by detached tasks. Without a barrier
+    the answer to evidence.stopRecording can precede the job's own notifications, which then
+    reach the TS adapter after its quiesceEvidence() has resolved. A plain test (asyncio.run),
+    so it runs without pytest-asyncio."""
+
+    async def scenario() -> tuple[list[str], list[str]]:
+        out = CapturingStdout()
+        s = Server(stdout=out)
+        await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "1", "method": "backend.init", "params": {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}}}))
+        await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "2", "method": "evidence.startRecording", "params": {"deviceId": "dev-1", "jobId": "job-1"}}))
+        await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "3", "method": "backend.run", "params": {
+            "deviceId": "dev-1", "jobId": "job-1", "protocolSource": "inline-ops",
+            "protocolInline": [{"op": "aspirate", "well": "A1"}, {"op": "dispense", "well": "B1"}],
+        }}))
+        # The TS adapter stops the recording as soon as the run has answered.
+        await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "4", "method": "evidence.stopRecording", "params": {"deviceId": "dev-1", "jobId": "job-1"}}))
+        by_answer = _line_names(out.pop_messages())
+        await asyncio.sleep(0.05)
+        after = _line_names(out.pop_messages())
+        return by_answer, after
+
+    by_answer, after = asyncio.run(scenario())
+    assert after == [], f"written after evidence.stopRecording answered: {after} (lines until then: {by_answer})"
+    assert by_answer.index("4") > by_answer.index("aspirate")
+    assert by_answer.index("4") > by_answer.index("dispense")

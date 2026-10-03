@@ -13,6 +13,19 @@ async function tick(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
 
+/** Answer the sidecar call the adapter sent last, as a sidecar that succeeds would; return its method. */
+function answerLast(transport: InMemoryTransport, deviceId: string, jobId: string): string {
+  const sent = transport.lastSent() as { id: string; method: string };
+  const results: Record<string, unknown> = {
+    "backend.init": { ok: true, deviceId, plrBackend: "chatterbox" },
+    "evidence.startRecording": { ok: true },
+    "backend.run": { ok: true, jobId, opCount: 1, durationMs: 10 },
+    "evidence.stopRecording": { ok: true },
+  };
+  transport.respondSuccess(sent.id, results[sent.method]);
+  return sent.method;
+}
+
 /** Ask the adapter to quiesce; note whether it resolved, and the events it had emitted by then. */
 function ask(adapter: PyLabRobotAdapter, events: AdapterEvidenceEvent[]): { resolved: boolean; seen?: string[] } {
   const state: { resolved: boolean; seen?: string[] } = { resolved: false };
@@ -88,5 +101,64 @@ describe("PyLabRobotAdapter.quiesceEvidence", () => {
     await expect(statusP).resolves.toBe("idle");
     await tick();
     expect(hook).toMatchObject({ resolved: true, seen: ["device_birth"] });
+  });
+});
+
+describe("astra pack 186 HIGH: a job-bound notification after its job's window is never forwarded", () => {
+  it("(sidecar) astra's recipe: an aspirate of job j-q that arrives after evidence.stopRecording answered, and after the hook resolved, is dropped", async () => {
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-late", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+
+    const startP = adapter.execute({ type: "start", payload: { jobId: "j-q" } });
+    const hook = ask(adapter, events);
+    for (const method of ["backend.init", "evidence.startRecording", "backend.run", "evidence.stopRecording"]) {
+      await tick();
+      expect(answerLast(transport, "dev-q-late", "j-q")).toBe(method);
+    }
+    await startP;
+    await tick();
+    expect(hook.resolved).toBe(true);
+
+    const atResolution = events.map((e) => e.type);
+    transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-late", jobId: "j-q", timestamp: new Date().toISOString(), payload: { well: "A1" } });
+    await tick();
+    expect(events.map((e) => e.type), "events emitted after the hook resolved").toEqual(atResolution);
+  });
+
+  it("(sidecar) a late notification of job A that arrives while job B is recording is never recorded under B", async () => {
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-ab", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+
+    const runA = adapter.execute({ type: "start", payload: { jobId: "j-a" } });
+    for (const method of ["backend.init", "evidence.startRecording", "backend.run", "evidence.stopRecording"]) {
+      await tick();
+      expect(answerLast(transport, "dev-q-ab", "j-a")).toBe(method);
+    }
+    await runA;
+
+    const runB = adapter.execute({ type: "start", payload: { jobId: "j-b" } });
+    const fromB = events.length;
+    await tick();
+    expect(answerLast(transport, "dev-q-ab", "j-b")).toBe("evidence.startRecording");
+    await tick();
+    transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-ab", jobId: "j-a", timestamp: new Date().toISOString(), payload: { well: "A1", of: "job A" } });
+    await tick();
+    for (const method of ["backend.run", "evidence.stopRecording"]) {
+      expect(answerLast(transport, "dev-q-ab", "j-b")).toBe(method);
+      await tick();
+    }
+    await runB;
+
+    const duringB = events.slice(fromB);
+    expect(duringB.map((e) => e.type), "B's events").toEqual(["execution_started", "execution_completed"]);
+    expect(duringB.map((e) => e.payload), "B's payloads").not.toContainEqual(expect.objectContaining({ of: "job A" }));
   });
 });
