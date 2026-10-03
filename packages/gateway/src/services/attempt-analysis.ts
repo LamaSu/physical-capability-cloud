@@ -262,10 +262,23 @@ function parseDevice(x: unknown): AttemptDevice | null {
   return { make: strField(o, "make"), model: strField(o, "model"), class: strField(o, "class") };
 }
 
+/**
+ * attempt.v1 harness names (contract §1). Anything else reads as "other", as the
+ * sink stores it, so a name that reaches the posted digest is always one of these
+ * whoever wrote the record.
+ */
+const KNOWN_HARNESS_NAMES: ReadonlySet<string> = new Set<string>(["claude-code", "codex", "pcc-hosted", "other"]);
+
 function parseHarness(x: unknown): AttemptHarness | null {
   const o = asRecord(x);
   if (!o) return null;
-  return { name: strField(o, "name"), version: strField(o, "version"), model: strField(o, "model"), label: strField(o, "label") };
+  const name = strField(o, "name");
+  return {
+    name: name === null || KNOWN_HARNESS_NAMES.has(name) ? name : "other",
+    version: strField(o, "version"),
+    model: strField(o, "model"),
+    label: strField(o, "label"),
+  };
 }
 
 function parsePack(x: unknown): AttemptPack | null {
