@@ -85,6 +85,27 @@ export function redactUrl(text: string): string {
   );
 }
 
+/**
+ * A request URL with the value of every query parameter dropped, whatever its name: the path and
+ * the parameter names stay. For the request's own URL in a log line or an error report, where no
+ * value is needed and a name list could miss one (an OAuth code, a one-time link's token).
+ */
+export function withoutQueryValues(url: string): string {
+  const q = url.indexOf("?");
+  if (q === -1) return url;
+  const hash = url.indexOf("#", q);
+  const query = url.slice(q + 1, hash === -1 ? undefined : hash);
+  const dropped = query
+    .split("&")
+    .map((pair) => {
+      const eq = pair.indexOf("=");
+      if (eq !== -1) return `${pair.slice(0, eq)}=${REDACTED}`;
+      return pair === "" ? pair : REDACTED; // a bare value has no name to keep
+    })
+    .join("&");
+  return url.slice(0, q + 1) + dropped + (hash === -1 ? "" : redactUrl(url.slice(hash)));
+}
+
 function redactString(text: string, depth: number, onPath: WeakSet<object>): string {
   const head = text.trimStart()[0];
   if ((head === "{" || head === "[") && text.length <= MAX_JSON_STRING) {
@@ -182,8 +203,8 @@ interface LoggedRequest {
 
 /**
  * The gateway's Fastify logger options: pino at level info, a request serializer that logs the
- * redacted URL and no header, and every line redacted as a whole before it is written, whatever
- * logged it (an error's message or stack, a route's own url field).
+ * request's URL with every query value dropped and no header, and every line redacted as a whole
+ * before it is written, whatever logged it (an error's message or stack, a route's own url field).
  */
 export function gatewayLoggerOptions() {
   return {
@@ -191,7 +212,7 @@ export function gatewayLoggerOptions() {
     serializers: {
       req: (req: LoggedRequest) => ({
         method: req.method,
-        url: typeof req.url === "string" ? redactUrl(req.url) : req.url,
+        url: typeof req.url === "string" ? withoutQueryValues(req.url) : req.url,
         hostname: req.hostname,
         remoteAddress: req.ip,
         remotePort: req.socket?.remotePort,

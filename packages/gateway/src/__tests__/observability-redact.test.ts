@@ -7,7 +7,7 @@
 import { describe, it, expect } from "vitest";
 import { Writable } from "node:stream";
 import Fastify from "fastify";
-import { REDACTED, gatewayLoggerOptions, redactCredentials, redactUrl } from "../observability-redact.js";
+import { REDACTED, gatewayLoggerOptions, redactCredentials, redactUrl, withoutQueryValues } from "../observability-redact.js";
 
 // Built at runtime, so no literal here looks like a secret.
 const secret = (name: string) => ["r5", name, "9b8c7d6e"].join("-");
@@ -78,6 +78,25 @@ describe("redactCredentials: the whole record", () => {
     cyclic.self = cyclic;
     expect(JSON.stringify(redactCredentials(deep))).not.toContain(s);
     expect(() => redactCredentials(cyclic)).not.toThrow();
+  });
+});
+
+describe("withoutQueryValues: the request's own URL keeps no query value, whatever its name", () => {
+  it("drops every value, a bare one included, and keeps the path, the names and a credential-free fragment", () => {
+    const s = secret("q");
+    expect(withoutQueryValues(`/api/auth/callback?code=${s}&state=${s}&page=2`)).toBe(
+      `/api/auth/callback?code=${REDACTED}&state=${REDACTED}&page=${REDACTED}`,
+    );
+    expect(withoutQueryValues(`/sse/stream/job/j1?${s}`)).toBe(`/sse/stream/job/j1?${REDACTED}`);
+    expect(withoutQueryValues(`/p?a=1#access_token=${s}`)).toBe(`/p?a=${REDACTED}#access_token=${REDACTED}`);
+    expect(withoutQueryValues("/api/evidence/sha256:abc")).toBe("/api/evidence/sha256:abc");
+  });
+
+  it("the request log's req serializer uses it", () => {
+    const s = secret("r");
+    const logged = gatewayLoggerOptions().serializers.req({ method: "GET", url: `/api/auth/callback?code=${s}` });
+    expect(JSON.stringify(logged)).not.toContain(s);
+    expect(logged.url).toBe(`/api/auth/callback?code=${REDACTED}`);
   });
 });
 

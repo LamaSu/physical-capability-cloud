@@ -1,6 +1,6 @@
 import { initSentry, Sentry } from "./sentry.js";
 import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
-import { gatewayLoggerOptions, redactUrl } from "./observability-redact.js";
+import { gatewayLoggerOptions, redactUrl, withoutQueryValues } from "./observability-redact.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
 
@@ -222,7 +222,7 @@ export async function createGateway(port = 3200) {
     // For 5xx errors, report to Sentry before responding
     const statusCode = error.statusCode ?? 500;
     if (statusCode >= 500) {
-      Sentry.captureException(error, { extra: { url: redactUrl(request.url), method: request.method } });
+      Sentry.captureException(error, { extra: { url: withoutQueryValues(request.url), method: request.method } });
     }
     const body: Record<string, unknown> = {
       error: statusCode >= 500 ? "internal_error" : "request_error",
