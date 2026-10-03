@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { SUMMIT_HTML } from "./summit-page.js";
+import { adminTokenMatches } from "../auth/admin-key.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
 // One JSONL line per submission — churn-proof: optional fields ride in `details`,
@@ -74,10 +75,10 @@ function rid(prefix: string): string {
 
 // Admin review is gated by a shared token (X-Admin-Token === WAITLIST_ADMIN_TOKEN),
 // independent of the API-key scope system so it works even mounted before apiGate.
+// Compared in CONSTANT TIME (auth/admin-key.ts adminTokenMatches, WP-A fold F7);
+// fails closed when the env var is unset or blank.
 function adminOk(req: FastifyRequest, reply: FastifyReply): boolean {
-  const token = process.env.WAITLIST_ADMIN_TOKEN;
-  const provided = (req.headers["x-admin-token"] as string | undefined) ?? "";
-  if (!token || provided !== token) {
+  if (!adminTokenMatches(req)) {
     reply.code(403).send({ error: "forbidden", message: "Admin token required (X-Admin-Token)." });
     return false;
   }

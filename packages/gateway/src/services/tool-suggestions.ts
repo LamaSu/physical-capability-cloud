@@ -106,7 +106,7 @@ const PLATFORM_TOOLS: SuggestedTool[] = [
     description: "Get fiat on-ramp options to fund your agent wallet with a credit card",
     category: "platform",
     recommended: true,
-    endpoint: { method: "POST", path: "/api/fiat-ramp/onramp/session" },
+    endpoint: { method: "POST", path: "/api/fiat-ramp/coinbase/onramp" },
     inputSchema: { type: "object", properties: { walletAddress: { type: "string", description: "Your wallet address" }, amount: { type: "number", description: "Amount in USD" }, currency: { type: "string", description: "Currency code", enum: ["USD", "EUR", "GBP"] } }, required: ["walletAddress", "amount"] },
   },
   {

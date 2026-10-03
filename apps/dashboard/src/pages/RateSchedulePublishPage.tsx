@@ -292,10 +292,10 @@ export function validateRows(rows: SegmentRow[]): RowValidation {
 // ---------------------------------------------------------------------------
 // Onramp helper — inline "Add USDC" button for the wallet address row.
 //
-// Calls POST /api/fiat-ramp/onramp/session with the wallet address as the
-// destination. On a Stripe-keyed gateway this returns a checkout URL; on a
-// mock-keyed gateway (no STRIPE_SECRET_KEY) it returns a stub that we surface
-// as an inline tip rather than a broken link.
+// Calls POST /api/fiat-ramp/coinbase/onramp with the wallet address. A configured
+// gateway returns an onrampUrl to open. An unconfigured one answers 503
+// not_configured (or, with PCC_DEMO_ROUTES on, a response marked mock), and the
+// button says so instead of opening a link that cannot fund anything.
 // ---------------------------------------------------------------------------
 
 const ADDRESS_RE_INLINE = /^0x[a-fA-F0-9]{40}$/;
@@ -310,15 +310,16 @@ function OnrampButton({ walletAddress }: { walletAddress: string }) {
     setBusy(true);
     setTip(null);
     try {
-      const res = await apiPost<{ url?: string; sessionUrl?: string; clientSecret?: string }>(
-        "/api/fiat-ramp/onramp/session",
-        { destinationAddress: walletAddress, amountUsd: 20, currency: "USDC" },
-      );
-      const url = res.url ?? res.sessionUrl;
-      if (url) {
-        window.open(url, "_blank", "noopener,noreferrer");
+      // apiPost adds the /api prefix itself.
+      const res = await apiPost<{ onrampUrl?: string; mock?: boolean }>("/fiat-ramp/coinbase/onramp", {
+        walletAddress,
+        amount: 20,
+        currency: "USD",
+      });
+      if (res.onrampUrl && !res.mock) {
+        window.open(res.onrampUrl, "_blank", "noopener,noreferrer");
       } else {
-        setTip("Onramp is in mock mode (no STRIPE_SECRET_KEY on gateway). Real onramp activates in production.");
+        setTip("Card top-up is simulated on this gateway: no funding link is available.");
       }
     } catch (err) {
       setTip(err instanceof Error ? err.message : "onramp request failed");

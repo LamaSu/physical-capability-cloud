@@ -7,6 +7,7 @@
  * - Signature = HMAC-SHA256(timestamp + method + path + body, secret)
  */
 import { createHmac } from "node:crypto";
+import type { RampSessionMode } from "@pcc/spec";
 
 export interface YellowcardConfig {
   apiKey: string;
@@ -57,6 +58,12 @@ export class YellowcardClient {
     this.config = config;
     this.baseUrl =
       config.environment === "production" ? PRODUCTION_URL : SANDBOX_URL;
+  }
+
+  /** What sessions built on this client are: simulated in mock mode, else the environment it calls. */
+  get sessionMode(): RampSessionMode {
+    if (this.config.mock) return "simulated";
+    return this.baseUrl === PRODUCTION_URL ? "production" : "sandbox";
   }
 
   /** Generate HMAC auth headers */

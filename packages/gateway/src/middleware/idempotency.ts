@@ -15,6 +15,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { authPath } from "./route-path.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -111,7 +112,12 @@ async function idempotencyGateImpl(app: FastifyInstance): Promise<void> {
     const method = req.method.toUpperCase();
     if (method === "GET" || method === "HEAD" || method === "OPTIONS" || method === "DELETE") return;
 
-    const path = req.url.split("?")[0];
+    // Dedup on the route Fastify MATCHED, not the raw request line: find-my-way
+    // percent-decodes before matching, so `/api/capabilities/%71uote` runs the
+    // same handler as `/api/capabilities/quote` — keyed on the raw string it was
+    // neither deduped nor mismatch-checked, i.e. a replayed Idempotency-Key
+    // re-executed the paid handler (MUST-CLOSE 10).
+    const path = authPath(req);
     const routeKey = `${method} ${path}`;
 
     // Not a payment-gated route — pass through
@@ -160,7 +166,7 @@ async function idempotencyGateImpl(app: FastifyInstance): Promise<void> {
     const method = req.method.toUpperCase();
     if (method === "GET" || method === "HEAD" || method === "OPTIONS" || method === "DELETE") return payload;
 
-    const path = req.url.split("?")[0];
+    const path = authPath(req); // same key as the onRequest hook
     const routeKey = `${method} ${path}`;
     if (!IDEMPOTENCY_ROUTES.has(routeKey)) return payload;
 

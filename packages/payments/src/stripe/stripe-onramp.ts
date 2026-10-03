@@ -8,7 +8,7 @@
  * Mock: returns simulated sessions for testing without Stripe keys.
  */
 import type { Address, Id } from "@pcc/spec";
-import type { FiatRampSession } from "@pcc/spec";
+import type { FiatRampSession, RampSessionMode } from "@pcc/spec";
 
 export interface StripeOnrampConfig {
   secretKey: string;
@@ -19,6 +19,8 @@ export interface StripeOnrampConfig {
 }
 
 export interface CreateOnrampSessionParams {
+  /** The gateway principal creating the session (recorded on it, never sent to the provider). */
+  createdBy?: string;
   /** User's wallet address on Base */
   walletAddress: Address;
   /** Amount in USD to convert */
@@ -54,6 +56,12 @@ export class StripeOnrampClient {
 
   get publishableKey(): string {
     return this.config.publishableKey;
+  }
+
+  /** What this client's sessions are: simulated in mock mode, else the key's environment. */
+  get sessionMode(): RampSessionMode {
+    if (this.config.mock) return "simulated";
+    return this.config.secretKey.startsWith("sk_live_") ? "production" : "sandbox";
   }
 
   /** Create an onramp session for a user to buy crypto */
@@ -96,11 +104,13 @@ export class StripeOnrampClient {
       provider: "stripe",
       direction: "onramp",
       status: "created",
+      mode: this.sessionMode,
       fiatCurrency: "USD",
       fiatAmount: params.sourceAmount ?? "0",
       cryptoCurrency: params.destinationCurrency ?? "usdc",
       cryptoNetwork: params.destinationNetwork ?? "base",
       walletAddress: params.walletAddress,
+      createdBy: params.createdBy,
       externalId: data.id as string,
       escrowId: params.escrowId,
       createdAt: new Date().toISOString(),
@@ -123,11 +133,13 @@ export class StripeOnrampClient {
       provider: "stripe",
       direction: "onramp",
       status: "created",
+      mode: this.sessionMode,
       fiatCurrency: "USD",
       fiatAmount: params.sourceAmount ?? "0",
       cryptoCurrency: params.destinationCurrency ?? "usdc",
       cryptoNetwork: params.destinationNetwork ?? "base",
       walletAddress: params.walletAddress,
+      createdBy: params.createdBy,
       externalId: id,
       escrowId: params.escrowId,
       createdAt: new Date().toISOString(),

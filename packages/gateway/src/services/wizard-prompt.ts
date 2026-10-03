@@ -185,8 +185,9 @@ PUT ${baseUrl}/api/kernels/[kernelId]/agent-package/configure
 Ask: "Want to set up your wallet so you can get paid? The easiest way is a credit card."
 
 \`\`\`
-POST ${baseUrl}/api/fiat-ramp/onramp/session
+POST ${baseUrl}/api/fiat-ramp/coinbase/onramp
 { "walletAddress": "[operator address]", "amount": 50, "currency": "USD" }
+(returns an onrampUrl to open; answers 503 not_configured if this gateway has no Coinbase app id)
 \`\`\`
 
 Or: "You can also accept payments directly to your crypto wallet (USDC on Base)."

@@ -14,6 +14,8 @@ import type { FiatRampSession } from "@pcc/spec";
 import type { YellowcardClient } from "./yellowcard-client.js";
 
 export interface OnrampParams {
+  /** The gateway principal creating the session (recorded on it, never sent to the provider). */
+  createdBy?: string;
   /** Amount in local fiat currency */
   fiatAmount: string;
   /** Fiat currency (NGN, KES, ZAR, BRL, MXN, etc.) */
@@ -105,12 +107,14 @@ export class YellowcardOnramp {
       provider: "yellowcard",
       direction: "onramp",
       status: "pending_payment",
+      mode: this.client.sessionMode,
       fiatCurrency: params.fiatCurrency,
       fiatAmount: params.fiatAmount,
       cryptoCurrency: params.cryptoCurrency ?? "USDC",
       cryptoNetwork: params.cryptoNetwork ?? "TRC20",
       cryptoAmount: String(settlementInfo?.cryptoAmount ?? ""),
       walletAddress: params.walletAddress,
+      createdBy: params.createdBy,
       externalId: data.id as string,
       escrowId: params.escrowId,
       rate: String(data.rate ?? ""),

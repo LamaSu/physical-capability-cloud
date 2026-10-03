@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { redactSecrets } from "../redaction.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { adminTokenMatches } from "../auth/admin-key.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
 // Migrate to a table later if volume warrants it.
@@ -104,11 +105,10 @@ function rid(prefix: string): string {
 // Admin review is gated by a shared token (X-Admin-Token === WAITLIST_ADMIN_TOKEN),
 // independent of the API-key scope system. Mirrors routes/waitlist.ts adminOk so
 // the two admin surfaces share one operator token. Fails closed when the env var
-// is unset.
+// is unset or blank. Compared in CONSTANT TIME (auth/admin-key.ts
+// adminTokenMatches, WP-A fold F7) — it used to be a short-circuiting `!==`.
 function adminOk(req: FastifyRequest, reply: FastifyReply): boolean {
-  const token = process.env.WAITLIST_ADMIN_TOKEN;
-  const provided = (req.headers["x-admin-token"] as string | undefined) ?? "";
-  if (!token || provided !== token) {
+  if (!adminTokenMatches(req)) {
     reply.code(403).send({ error: "forbidden", message: "Admin token required (X-Admin-Token)." });
     return false;
   }

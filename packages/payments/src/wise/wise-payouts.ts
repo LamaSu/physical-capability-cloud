@@ -22,6 +22,8 @@ export interface PayoutRecipient {
 }
 
 export interface PayoutRequest {
+  /** The gateway principal creating the payout (recorded on its session, never sent to Wise). */
+  createdBy?: string;
   /** PCC profile ID on Wise */
   profileId: number;
   /** Amount in source currency (USD) */
@@ -93,12 +95,14 @@ export class WisePayoutService {
       provider: "wise",
       direction: "offramp",
       status: "processing",
+      mode: this.client.sessionMode,
       fiatCurrency: params.recipient.currency,
       fiatAmount: String(quote.targetAmount),
       cryptoCurrency: "USDC",
       cryptoNetwork: "base",
       cryptoAmount: String(params.sourceAmount),
       walletAddress: "0x0000000000000000000000000000000000000000" as Address,
+      createdBy: params.createdBy,
       externalId: String(transfer.id),
       escrowId: params.escrowId,
       rate: String(quote.rate),

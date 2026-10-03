@@ -15,12 +15,21 @@ export type RampSessionStatus =
   | "failed"
   | "expired";
 
+/**
+ * What produced a ramp session, recorded on the session itself so a stored record never loses
+ * it: `simulated` (a mock client; nothing reached a provider), `sandbox` (a provider's test
+ * environment; no real money moves), `production` (a live provider; real money).
+ */
+export type RampSessionMode = "simulated" | "sandbox" | "production";
+
 /** A fiat ramp session (on-ramp or off-ramp) */
 export interface FiatRampSession {
   id: Id;
   provider: FiatRampProvider;
   direction: RampDirection;
   status: RampSessionStatus;
+  /** What produced this session, set by the client that created it (see RampSessionMode). */
+  mode: RampSessionMode;
   /** Fiat side */
   fiatCurrency: string;
   fiatAmount: Amount;
@@ -30,6 +39,11 @@ export interface FiatRampSession {
   cryptoAmount?: Amount;
   /** Wallet address for crypto delivery/source */
   walletAddress: Address;
+  /**
+   * The gateway principal that created this session (API key operator id or SIWE
+   * address), when known. The session listing matches it as well as the wallet.
+   */
+  createdBy?: string;
   /** External provider session/reference ID */
   externalId?: string;
   /** Linked PCC escrow ID (if funding an escrow) */

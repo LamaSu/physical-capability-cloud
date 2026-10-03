@@ -283,31 +283,33 @@ export class NanoClawAgent extends KernelAgent {
       execute: async () => {
         const gatewayUrl = this.nanoConfig.gatewayUrl ?? "https://pcc-gateway-production.up.railway.app";
         return {
-          message: "Fund your agent wallet via credit card or bank transfer",
+          message:
+            "Fund your agent wallet via card or mobile money. An unconfigured provider answers 503 " +
+            "not_configured; GET /api/fiat-ramp/status says which are live.",
           methods: [
             {
-              provider: "Stripe",
-              type: "credit-card",
-              endpoint: `${gatewayUrl}/api/fiat-ramp/onramp/session`,
+              provider: "Coinbase Onramp",
+              type: "card",
+              endpoint: `${gatewayUrl}/api/fiat-ramp/coinbase/onramp`,
               currencies: ["USD", "EUR", "GBP"],
-              note: "Visa/Mastercard/AMEX → USDC on Base",
+              note: "Card or Coinbase account → USDC on Base (returns onrampUrl)",
             },
             {
               provider: "Yellowcard",
               type: "mobile-money",
-              endpoint: `${gatewayUrl}/api/fiat-ramp/onramp/yellowcard`,
+              endpoint: `${gatewayUrl}/api/fiat-ramp/yellowcard/deposit`,
               currencies: ["NGN", "GHS", "KES", "ZAR", "UGX", "TZS", "RWF", "XOF"],
-              note: "Mobile money and bank transfer in 34 emerging market countries",
+              note: "Mobile money and bank transfer; needs a channelId from /api/fiat-ramp/yellowcard/channels",
             },
             {
               provider: "Wise",
-              type: "bank-transfer",
-              endpoint: `${gatewayUrl}/api/fiat-ramp/payout`,
+              type: "bank-payout",
+              endpoint: `${gatewayUrl}/api/fiat-ramp/wise/payout`,
               currencies: ["USD", "EUR", "GBP", "JPY", "CAD", "AUD"],
-              note: "Enterprise bank payouts in 40+ currencies",
+              note: "Outbound bank payouts, not wallet funding",
             },
           ],
-          quickStart: `POST ${gatewayUrl}/api/fiat-ramp/onramp/session { walletAddress: "0x...", amount: 50, currency: "USD" }`,
+          quickStart: `POST ${gatewayUrl}/api/fiat-ramp/coinbase/onramp { walletAddress: "0x...", amount: 50, currency: "USD" }`,
         };
       },
     });

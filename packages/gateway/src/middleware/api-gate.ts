@@ -3,153 +3,229 @@
  *
  * Requires either a valid API key or SIWE session for all /api/* routes,
  * except explicitly public routes (health, auth, feedback, landing page assets).
+ *
+ * ── The public allowlist is METHOD-AWARE (WP-A fold F5) ─────────────
+ * Every public entry declares the methods it opens; any other method on the
+ * same path falls through to authentication. It used to be method-blind for
+ * PUBLIC_PREFIXES / PUBLIC_EXACT and three of the regexes, so an allowlist
+ * comment saying "listing is public" also made the WRITES on that path public:
+ * POST /api/capabilities (an unauthenticated capability upsert on any kernel),
+ * POST/PUT/DELETE /api/marketplace/listings(/:id) and POST
+ * /api/marketplace/orders all skipped apiGate (refvertical #2586, coord-watch
+ * #2608). Now:
+ *   - reads are public only for GET (HEAD follows GET — same handler, no body);
+ *   - a write is public only when it is listed below as PUBLIC-BY-DESIGN, each
+ *     with a one-line justification, and EXACT (never a prefix);
+ *   - OPTIONS is never listed: @fastify/cors answers preflight in its own
+ *     onRequest hook before this gate runs.
+ * __tests__/apigate-public-methods.test.ts pins the ENTIRE public (method,
+ * path) set as a snapshot, so any widening shows up as a visible diff.
+ *
+ * ── Retired write surfaces are DENIED for every caller (N43) ────────
+ * /api/marketplace/* is being retired (kits #2523). Its listing and order
+ * writes mutate an in-memory mock with no ownership (PUT/DELETE edit ANY
+ * listing), so a key does not make them safe. The steward ruled (#2637):
+ * default-deny those writes at the gate and build no ownership logic for a
+ * surface that is going away. Every non-GET under the prefix is 410 — keyed or
+ * not, including write routes added later — except the exact public-by-design
+ * computation below (POST /api/marketplace/roi). Reads stay public.
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { authPath } from "./route-path.js";
 
-/** Routes that don't require any auth */
-const PUBLIC_PREFIXES = [
-  "/api/health",
-  "/api/auth/provision",        // Key provisioning is public
-  "/api/auth/validate",         // Key validation is public (checks key itself)
-  "/api/waitlist",              // Public beta waitlist — signup (POST) + count (GET).
-                                // apiGate is non-encapsulated, so registration order does
-                                // NOT exempt routes; public paths must be allowlisted here.
-  "/api/beta-apply",            // Public beta-tester application (POST).
-  "/api/feedback",              // Public feedback sink (POST) — cold agents have no key.
-                                // GET /api/feedback stays a no-op (route removed); the
-                                // admin export below carries its own X-Admin-Token gate.
-  "/api/admin/feedback",        // Admin feedback export — gated by X-Admin-Token (adminOk),
-                                // NOT the API-key system, so it must bypass apiGate here.
-                                // Mirrors the waitlist admin-token pattern.
-  "/api/onboard/identify-device", // Device identification is public (install.html landing)
-  "/api/onboard/check/",        // Invite code validation is public
-  "/api/onboard/chat",          // Layperson conversational onboarding (coord dc4d1ec8)
-                                // Public so anyone with a browser can register a capability
-                                // without first holding an API key. Rate-limited by the
-                                // global rate-limiter + an 8-turn-per-request hard cap.
-  // REMOVED: "/api/onboard/registrations" — prefix match was too broad, exposed admin
-  // endpoints (approve/reject/activate) without auth. Now uses exact match below.
-  "/api/dht/",                  // DHT discovery is public (distributed capability queries)
-  "/api/marketplace/",          // Marketplace browsing is public (see what's available)
-  "/.well-known/",
-  "/docs",                      // Docs hub + Swagger UI (/docs/api) are public
+type PublicMethod = "GET" | "POST";
+
+/** One public allowlist entry. `why` is required; for a write it is the justification. */
+interface PublicRoute {
+  methods: readonly PublicMethod[];
+  match: "prefix" | "exact" | "regex";
+  /** prefix / exact: a path string; regex: an anchored RegExp. */
+  path: string | RegExp;
+  why: string;
+}
+
+const GET: readonly PublicMethod[] = ["GET"];
+const POST: readonly PublicMethod[] = ["POST"];
+
+// ── Public READS (GET) ──────────────────────────────────────────────
+// Prefix entries are GET-only now: a prefix can only ever open reads.
+const PUBLIC_READ_PREFIXES: PublicRoute[] = [
+  { methods: GET, match: "prefix", path: "/api/health", why: "liveness / health probes" },
+  { methods: GET, match: "prefix", path: "/api/auth/validate", why: "key validation checks the presented key itself" },
+  // apiGate is non-encapsulated, so registration order does NOT exempt routes;
+  // public paths must be allowlisted here.
+  { methods: GET, match: "prefix", path: "/api/waitlist", why: "public waitlist count (GET /api/waitlist/count)" },
+  // Admin feedback export — gated by X-Admin-Token (adminOk), NOT the API-key
+  // system, so it must bypass apiGate here. Mirrors the waitlist admin-token pattern.
+  { methods: GET, match: "prefix", path: "/api/admin/feedback", why: "admin export authenticated by X-Admin-Token in the route" },
+  { methods: GET, match: "prefix", path: "/api/onboard/check/", why: "invite-code validation" },
+  { methods: GET, match: "prefix", path: "/api/onboard/chat", why: "onboarding-chat health + transcript reads" },
+  { methods: GET, match: "prefix", path: "/api/dht/", why: "DHT discovery is public (distributed capability queries)" },
+  { methods: GET, match: "prefix", path: "/api/marketplace/", why: "marketplace browsing is public (see what's available)" },
+  { methods: GET, match: "prefix", path: "/.well-known/", why: "discovery documents" },
+  { methods: GET, match: "prefix", path: "/docs", why: "docs hub + Swagger UI (/docs/api)" },
 ];
 
-const PUBLIC_EXACT = [
-  "/api/capabilities/types",   // Discovery is public (see what's available)
-  "/api/capabilities",         // Capability listing is public
-  "/api/agents/status",        // Network status is public
-  "/api/onboard/registrations", // EXACT match only — GET listing is public, but
-                                // sub-paths like /approve, /reject, /activate require auth
-  "/api/orchestrator/templates", // Template directory is public for unauth landing-page discovery
-  "/api/capabilities/templates/match", // Heuristic template-matcher is public for landing-page picker
-  "/openapi.json",             // OpenAPI 3.x spec is public (APIs.guru, Smithery, mcp.so)
-  "/api/courier-jobs/open",       // Open courier-jobs feed — driver agents poll without API key (legacy shim)
-  "/api/courier-jobs/jobs/open",  // v0.2 compat alias for the open feed (legacy shim)
-  "/api/courier-jobs/healthz",    // Courier-jobs liveness — public for monitoring (legacy shim)
-  "/api/job-offers/open",         // Generic open-offers feed — operator agents poll without API key (PRIMARY)
-  "/api/job-offers/healthz",      // Job-offers liveness — public for monitoring (PRIMARY)
-  // ── SIWE login bootstrap ────────────────────────────────────────────────
-  // These MUST be public: SIWE login is how you get a key, so requiring a key
-  // to reach them is a bootstrap deadlock. Verified 401 on production
-  // 2026-08-27 — SIWE login (and the SIWE-gated provisioning built on it) was
-  // dead on arrival because neither was allowlisted. Listed EXACT, not as a
-  // prefix: verify carries its own per-IP rate limit (canSiweVerify, 30/min),
-  // and an exact entry can't let a "/api/auth/verify-*" sibling leak public.
-  "/api/auth/nonce",              // SIWE challenge — public by design (a nonce is a public challenge)
-  "/api/auth/verify",             // SIWE signature verify → session; the login endpoint, must be reachable without a key
-];
-
-// Capability detail routes are public — discovery, widget embedding, etc.
-// Covers: /api/capabilities/:id, /api/capabilities/:id/button, /api/capabilities/:id/td
-const PUBLIC_CAPABILITY_DETAIL_RE = /^\/api\/capabilities\/[^/]+(?:\/button|\/td)?$/;
-
-// T2.7 — operator rating reads are public (reputation surface). The POST
-// /rate route remains auth-gated because it falls outside this regex.
-const PUBLIC_OPERATOR_RATINGS_RE = /^\/api\/operators\/[^/]+\/ratings$/;
-
-// Per-kernel A2A agent card is part of the federated discovery surface —
-// /.well-known/agent-descriptions lists it. Must be reachable unauthed by
-// any remote A2A agent.
-const PUBLIC_KERNEL_AGENT_CARD_RE = /^\/api\/kernels\/[^/]+\/agent-card\.json$/;
-
-// Generic /api/job-offers/:id GET is public so operator agents can fetch
-// offer detail without holding a gateway API key. POST/PATCH/DELETE on the
-// same path stays auth-gated by the route handler (requirePoster). The
-// regex matches /api/job-offers/<anything-without-slash> — excluding the
-// /open and /healthz exact entries above (those are matched first).
-const PUBLIC_JOB_OFFERS_DETAIL_RE = /^\/api\/job-offers\/[^/]+$/;
-
-// Same for /api/courier-jobs/:id (legacy shim — preserve v0.2's public-GET
-// behavior).
-const PUBLIC_COURIER_JOBS_DETAIL_RE = /^\/api\/courier-jobs\/(?:jobs\/)?[^/]+$/;
-
-// On-Ramp §5.3 / acceptance #8 — UI-artifact discovery + recall are public
-// reads: GET /api/artifacts (public listing) and GET /api/artifacts/:idOrSlug
-// (recall by id or slug). A shared /a/:slug link and cross-agent discovery
-// must work for an anonymous caller. Only GET is public: the single-segment
-// regex excludes /api/artifacts/:id/fork, and the method guard below keeps
-// POST/PUT/DELETE (save/modify/retire/fork) Bearer-gated. The route handler
-// still runs its own visibility check, so a `private` artifact 403s an
-// anonymous caller — the public path never leaks private content.
-const PUBLIC_ARTIFACTS_READ_RE = /^\/api\/artifacts(?:\/[^/]+)?$/;
-
-// D2 compiler-ABI: the registry snapshot + its historical-by-digest recall are
-// public reads (the snapshot IS the public compiler ABI; no auth to read).
-// Matches GET /api/compose/registry-snapshot and
-// /api/compose/registry-snapshot/:registryDigest. GET-only — there is no
-// mutation surface, and the sibling /api/compose/:id stays auth-gated (its
-// second segment is never the literal "registry-snapshot").
-const PUBLIC_REGISTRY_SNAPSHOT_RE = /^\/api\/compose\/registry-snapshot(?:\/[^/]+)?$/;
-
-// Carrier tracking webhook (EasyPost -> PCC). EasyPost cannot present a PCC
-// API key, so gating this path on one would 401 every genuine delivery before
-// the route's HMAC check ever ran — the exact defect that got the unsigned
-// Stripe/Yellowcard webhooks retired ("being behind an API key is NOT provider
-// authentication"). This path's authentication IS the verified X-Hmac-Signature
-// in routes/carrier.ts (fails closed 503 with no secret, 401 on mismatch).
-// POST only; nothing else under /api/carrier/ is public. sol #297 finding 15.
-const PUBLIC_CARRIER_WEBHOOK_PATH = "/api/carrier/webhook/easypost";
-
-// Lob letter webhook (Lob -> PCC). Same argument as the carrier webhook above:
-// Lob's servers cannot present a PCC API key, so gating this path on one would
-// 401 every genuine letter event before routes/lob.ts's timestamp-bound HMAC
-// verification ever ran — the webhook/evidence leg was structurally dead on any
-// apiGate-fronted deployment (carrier audit L1). POST only; nothing else under
-// /api/lob/ is public.
-const PUBLIC_LOB_WEBHOOK_PATH = "/api/lob/webhook";
-
-function isPublicRoute(url: string, method?: string): boolean {
-  const path = url.split("?")[0];
-  if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
-  if (PUBLIC_EXACT.includes(path)) return true;
-  if (method === "POST" && path === PUBLIC_CARRIER_WEBHOOK_PATH) return true;
-  if (method === "POST" && path === PUBLIC_LOB_WEBHOOK_PATH) return true;
+const PUBLIC_READ_EXACT: PublicRoute[] = [
+  { methods: GET, match: "exact", path: "/api/capabilities/types", why: "discovery is public (see what's available)" },
+  { methods: GET, match: "exact", path: "/api/capabilities", why: "capability LISTING is public (creating one is not)" },
+  { methods: GET, match: "exact", path: "/api/agents/status", why: "network status is public" },
+  // EXACT match only — the GET listing is public, but sub-paths like /approve,
+  // /reject, /activate require auth.
+  { methods: GET, match: "exact", path: "/api/onboard/registrations", why: "public registration listing" },
+  { methods: GET, match: "exact", path: "/api/orchestrator/templates", why: "template directory for unauth landing-page discovery" },
+  { methods: GET, match: "exact", path: "/openapi.json", why: "OpenAPI 3.x spec (APIs.guru, Smithery, mcp.so)" },
+  { methods: GET, match: "exact", path: "/api/courier-jobs/open", why: "open courier-jobs feed — driver agents poll without a key (legacy shim)" },
+  { methods: GET, match: "exact", path: "/api/courier-jobs/jobs/open", why: "v0.2 compat alias for the open feed (legacy shim)" },
+  { methods: GET, match: "exact", path: "/api/courier-jobs/healthz", why: "courier-jobs liveness for monitoring (legacy shim)" },
+  { methods: GET, match: "exact", path: "/api/job-offers/open", why: "open-offers feed — operator agents poll without a key" },
+  { methods: GET, match: "exact", path: "/api/job-offers/healthz", why: "job-offers liveness for monitoring" },
   // Kernel discovery is public; identity-bearing creation/upsert is not.
-  if (method === "GET" && path === "/api/kernels") return true;
-  if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
-  if (PUBLIC_OPERATOR_RATINGS_RE.test(path)) return true;
-  if (PUBLIC_KERNEL_AGENT_CARD_RE.test(path)) return true;
-  // Only GET on the offer/job detail routes is public.
-  if (method === "GET" && PUBLIC_JOB_OFFERS_DETAIL_RE.test(path)) return true;
-  if (method === "GET" && PUBLIC_COURIER_JOBS_DETAIL_RE.test(path)) return true;
-  // Only GET on artifact discovery/recall is public; mutations stay gated.
-  if (method === "GET" && PUBLIC_ARTIFACTS_READ_RE.test(path)) return true;
-  // D2 compiler-ABI registry snapshot + historical recall — public GET reads.
-  if (method === "GET" && PUBLIC_REGISTRY_SNAPSHOT_RE.test(path)) return true;
-  return false;
+  { methods: GET, match: "exact", path: "/api/kernels", why: "kernel discovery (registration stays authenticated)" },
+];
+
+const PUBLIC_READ_REGEX: PublicRoute[] = [
+  // /api/capabilities/:id, /:id/button, /:id/td — discovery, widget embedding.
+  { methods: GET, match: "regex", path: /^\/api\/capabilities\/[^/]+(?:\/button|\/td)?$/, why: "capability detail / button / thing-description reads" },
+  // T2.7 — operator rating reads (reputation surface). POST /rate is a
+  // different path and stays gated.
+  { methods: GET, match: "regex", path: /^\/api\/operators\/[^/]+\/ratings$/, why: "operator rating reads (reputation surface)" },
+  // Per-kernel A2A agent card — listed by /.well-known/agent-descriptions and
+  // fetched unauthenticated by any remote A2A agent.
+  { methods: GET, match: "regex", path: /^\/api\/kernels\/[^/]+\/agent-card\.json$/, why: "per-kernel A2A agent card (federated discovery)" },
+  // Offer / job detail so operator agents can read without a key; POST/PATCH/
+  // DELETE on the same path stay gated (the route also checks requirePoster).
+  // (/open and /healthz also match this single-segment regex; both are GET
+  // reads listed exactly above as well.)
+  { methods: GET, match: "regex", path: /^\/api\/job-offers\/[^/]+$/, why: "job-offer detail reads" },
+  { methods: GET, match: "regex", path: /^\/api\/courier-jobs\/(?:jobs\/)?[^/]+$/, why: "courier-job detail reads (legacy v0.2 public GET)" },
+  // On-Ramp §5.3 — UI-artifact discovery + recall. The route still runs its own
+  // visibility check, so a private artifact 403s an anonymous caller.
+  { methods: GET, match: "regex", path: /^\/api\/artifacts(?:\/[^/]+)?$/, why: "UI-artifact discovery + recall (route enforces visibility)" },
+  // D2 compiler-ABI registry snapshot + historical recall. The sibling
+  // /api/compose/:id stays gated (its second segment is never this literal).
+  { methods: GET, match: "regex", path: /^\/api\/compose\/registry-snapshot(?:\/[^/]+)?$/, why: "public compiler-ABI registry snapshot" },
+];
+
+// ── PUBLIC-BY-DESIGN routes that are not plain GET reads ────────────
+// Each is EXACT, each says why a key-less caller must reach it. Adding a line
+// here widens the unauthenticated surface — the snapshot test will show it.
+const PUBLIC_BY_DESIGN: PublicRoute[] = [
+  { methods: POST, match: "exact", path: "/api/auth/provision", why: "self-service key provisioning — this is how a caller GETS a key" },
+  // SIWE login bootstrap: requiring a key to reach it is a bootstrap deadlock
+  // (verified 401 on production 2026-08-27). EXACT so no /api/auth/verify-*
+  // sibling can leak public; verify carries its own per-IP rate limit.
+  { methods: GET, match: "exact", path: "/api/auth/nonce", why: "SIWE challenge — issues a single-use nonce (server state, rate-limited); login needs it before any key exists" },
+  { methods: POST, match: "exact", path: "/api/auth/verify", why: "SIWE signature verify -> session; the login endpoint itself" },
+  { methods: POST, match: "exact", path: "/api/waitlist", why: "public beta waitlist signup (email only, rate-limited)" },
+  { methods: POST, match: "exact", path: "/api/beta-apply", why: "public beta-tester application" },
+  { methods: POST, match: "exact", path: "/api/feedback", why: "public feedback sink — cold agents have no key (honeypot + per-IP limit)" },
+  { methods: POST, match: "exact", path: "/api/feedback/agent-report", why: "keyless agent friction report (pcc_report tool)" },
+  // coord dc4d1ec8: public so anyone with a browser can register a capability
+  // without first holding a key. Rate-limited + an 8-turn-per-request cap.
+  { methods: POST, match: "exact", path: "/api/onboard/chat", why: "layperson conversational onboarding (rate-limited, turn-capped)" },
+  { methods: POST, match: "exact", path: "/api/onboard/identify-device", why: "device identification for the install.html landing page" },
+  { methods: POST, match: "exact", path: "/api/capabilities/templates/match", why: "heuristic template matcher for the landing-page picker (pure computation)" },
+  { methods: POST, match: "exact", path: "/api/capabilities/graph-search", why: "graph search — a read-only query carried in a POST body" },
+  { methods: POST, match: "exact", path: "/api/marketplace/roi", why: "ROI calculator (pure computation, stores nothing)" },
+  { methods: POST, match: "exact", path: "/api/dht/announce", why: "DHT announce authenticates itself (401s in routes/dht-ws.ts)" },
+  // EasyPost / Lob cannot present a PCC key; their authentication IS the
+  // verified HMAC in the route (fails closed 503 with no secret, 401 on
+  // mismatch) — "being behind an API key is NOT provider authentication".
+  { methods: POST, match: "exact", path: "/api/carrier/webhook/easypost", why: "carrier webhook — X-Hmac-Signature verified in routes/carrier.ts (sol #297 f15)" },
+  { methods: POST, match: "exact", path: "/api/lob/webhook", why: "Lob webhook — timestamp-bound HMAC verified in routes/lob.ts" },
+];
+
+/** The ENTIRE public allowlist. Nothing outside this table skips apiGate. */
+const PUBLIC_ROUTES: readonly PublicRoute[] = [
+  ...PUBLIC_READ_PREFIXES,
+  ...PUBLIC_READ_EXACT,
+  ...PUBLIC_READ_REGEX,
+  ...PUBLIC_BY_DESIGN,
+];
+
+function pathMatches(entry: PublicRoute, path: string): boolean {
+  if (entry.match === "regex") return (entry.path as RegExp).test(path);
+  if (entry.match === "exact") return path === entry.path;
+  return path.startsWith(entry.path as string);
+}
+
+/**
+ * True when (method, path) is on the public allowlist. HEAD is treated as GET
+ * (Fastify serves HEAD with the GET handler). A method an entry does not list
+ * is NOT public — it falls through to authentication. Exported for tests.
+ */
+export function isPublicRoute(url: string, method?: string): boolean {
+  const path = url.split("?")[0];
+  const m = (method ?? "").toUpperCase();
+  const effective = m === "HEAD" ? "GET" : m;
+  return PUBLIC_ROUTES.some(
+    (entry) => (entry.methods as readonly string[]).includes(effective) && pathMatches(entry, path),
+  );
+}
+
+/** Prefixes whose writes are retired: denied for every caller (N43, steward #2637). */
+const RETIRED_WRITE_PREFIXES: readonly string[] = ["/api/marketplace/"];
+
+/**
+ * True when (method, path) is a write on a retired surface. GET/HEAD/OPTIONS
+ * are never retired writes; an exact public-by-design entry on the prefix
+ * (POST /api/marketplace/roi, pure computation) stays reachable. Exported for tests.
+ */
+export function isRetiredWrite(url: string, method?: string): boolean {
+  const path = url.split("?")[0];
+  const m = (method ?? "").toUpperCase();
+  if (m === "GET" || m === "HEAD" || m === "OPTIONS") return false;
+  if (!RETIRED_WRITE_PREFIXES.some((prefix) => path.startsWith(prefix))) return false;
+  return !isPublicRoute(path, m);
+}
+
+/**
+ * The public allowlist as stable lines — "<METHOD> <match> <path>" — for the
+ * snapshot test (a regex renders as its source). Not used at runtime.
+ */
+export function publicRouteSnapshot(): string[] {
+  return PUBLIC_ROUTES.flatMap((entry) =>
+    entry.methods.map(
+      (method) =>
+        `${method} ${entry.match} ${entry.match === "regex" ? (entry.path as RegExp).source : (entry.path as string)}`,
+    ),
+  );
+}
+
+/** Every public entry that opens a non-GET method, with its justification. */
+export function publicWriteJustifications(): Array<{ method: string; path: string; why: string }> {
+  return PUBLIC_ROUTES.flatMap((entry) =>
+    entry.methods
+      .filter((m) => m !== "GET")
+      .map((method) => ({ method, path: String(entry.path), why: entry.why })),
+  );
 }
 
 async function apiGateImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // Decide on the route Fastify MATCHED, not the raw request line — otherwise a
+    // percent-encoded path (/api/%73ettlement/flush reaching the money handler
+    // unauthenticated, or /api/auth/%6eonce 401ing a public endpoint) evades this
+    // gate while still running the real handler (sol #309 H1). See authPath.
+    const path = authPath(req);
+
     // Only gate /api/* routes
-    if (!req.url.startsWith("/api/")) return;
+    if (!path.startsWith("/api/")) return;
+
+    // Retired write surfaces: denied before authentication, so no key opens them.
+    if (isRetiredWrite(path, req.method)) {
+      return reply.status(410).send({
+        error: "marketplace_writes_retired",
+        message: "Marketplace listing and order writes are retired. Reads remain available.",
+      });
+    }
 
     // Skip public routes
-    if (isPublicRoute(req.url, req.method)) return;
+    if (isPublicRoute(path, req.method)) return;
 
     // Try API key first (most common for agents)
     const apiKey = resolveApiKey(req);

@@ -4,17 +4,28 @@
  * Wires Stripe (US/EU on-ramp), Yellowcard (emerging market on/off-ramp),
  * and Wise (enterprise fiat payouts) into PCC's settlement flow.
  *
- * All providers run in mock mode unless env vars are set:
- *   STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY
- *   YELLOWCARD_API_KEY, YELLOWCARD_SECRET_KEY
- *   WISE_API_TOKEN, WISE_PROFILE_ID
+ * A provider is live only with its COMPLETE configuration (see providerConfig); anything
+ * less is mock, and a mock provider answers 503 not_configured unless PCC_DEMO_ROUTES is on
+ * (never in production). The gate, the client and the response label all read one
+ * configuration snapshot:
+ *   STRIPE_SECRET_KEY + STRIPE_PUBLISHABLE_KEY
+ *   YELLOWCARD_API_KEY + YELLOWCARD_SECRET_KEY   (YELLOWCARD_ENVIRONMENT, default sandbox)
+ *   WISE_API_TOKEN + WISE_PROFILE_ID             (WISE_ENVIRONMENT, default sandbox)
+ *   COINBASE_APP_ID                              (its checkout also needs a live CDP)
+ *   CDP_API_KEY_ID + CDP_API_KEY_SECRET + CDP_WALLET_SECRET
+ *     CDP_NETWORK: base (production) or base-sepolia (sandbox, the default); any other
+ *     value is not live. CDP_ONRAMP_APP_ID: needed by /cdp/provision's checkout.
+ *
+ * The legacy Stripe prepaid credits and the unsigned provider webhooks are retired: 410 in
+ * every environment, whatever PCC_LEGACY_FIAT_WEBHOOKS says.
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { isAddress, type Address } from "viem";
+import { hasValidAdminKey } from "../auth/admin-key.js";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 import {
   StripeOnrampClient,
-  StripeCreditService,
   YellowcardClient,
   YellowcardOfframp,
   YellowcardOnramp,
@@ -23,14 +34,101 @@ import {
   CdpWalletClient,
   CdpOnrampClient,
   CdpSpendPermissionService,
+  CDP_MOCK_ADDRESS_PREFIX,
+  isCdpMockAddress,
 } from "@pcc/payments";
 
 // ---------------------------------------------------------------------------
-// Service singletons (lazy-init)
+// Provider configuration: read ONCE, shared by the gate and the client
+// ---------------------------------------------------------------------------
+//
+// coord-watch #2934: the gate used to read the CURRENT env while each client cached its
+// mock setting at first use, so the two could disagree. A key set after a mock client was
+// built made the gate say "live" while the mock ran, with no disclosure; the reverse labelled
+// a real provider call as demo. Now each provider's configuration is snapshotted once, and
+// both the gate (providerMode) and the client constructor read that snapshot. A partial
+// configuration is mock, never a live client with a made-up secret.
+
+type RampProvider = "coinbase" | "stripe" | "yellowcard" | "wise" | "cdp";
+type RampEnvironment = "production" | "sandbox";
+
+interface RampProviderConfig {
+  /** True only with every required setting present. */
+  readonly live: boolean;
+  /** Where a live provider operates; null when not live. A sandbox moves no real money. */
+  readonly environment: RampEnvironment | null;
+  /** The settings the provider runs with, captured once (only read when live). */
+  readonly values: Readonly<Record<string, string>>;
+}
+
+const NOT_LIVE: RampProviderConfig = Object.freeze({ live: false, environment: null, values: Object.freeze({}) });
+
+/** The networks a CDP client runs on. CDP_NETWORK unset means base-sepolia. */
+const CDP_NETWORKS: readonly string[] = ["base", "base-sepolia"];
+
+const REQUIRED: Readonly<Record<RampProvider, readonly string[]>> = {
+  coinbase: ["COINBASE_APP_ID"],
+  stripe: ["STRIPE_SECRET_KEY", "STRIPE_PUBLISHABLE_KEY"],
+  yellowcard: ["YELLOWCARD_API_KEY", "YELLOWCARD_SECRET_KEY"],
+  wise: ["WISE_API_TOKEN", "WISE_PROFILE_ID"],
+  cdp: ["CDP_API_KEY_ID", "CDP_API_KEY_SECRET", "CDP_WALLET_SECRET"],
+};
+
+function readProviderConfig(p: RampProvider): RampProviderConfig {
+  const values: Record<string, string> = {};
+  for (const k of REQUIRED[p]) {
+    const v = process.env[k];
+    if (typeof v === "string" && v.trim() !== "") values[k] = v.trim();
+  }
+  const live = REQUIRED[p].every((k) => k in values);
+  if (!live) return NOT_LIVE;
+  let environment: RampEnvironment;
+  switch (p) {
+    case "stripe":
+      environment = values.STRIPE_SECRET_KEY!.startsWith("sk_live_") ? "production" : "sandbox";
+      break;
+    case "yellowcard":
+      environment = process.env.YELLOWCARD_ENVIRONMENT === "production" ? "production" : "sandbox";
+      break;
+    case "wise":
+      environment = process.env.WISE_ENVIRONMENT === "production" ? "production" : "sandbox";
+      break;
+    case "cdp": {
+      // The network and the onramp app id are part of the snapshot: the CDP clients are built
+      // from it and the response label reads it, so a later env change can move neither
+      // (cross-family review r2, finding A). An unknown network is not live.
+      const network = process.env.CDP_NETWORK?.trim() || "base-sepolia";
+      if (!CDP_NETWORKS.includes(network)) return NOT_LIVE;
+      values.CDP_NETWORK = network;
+      const appId = process.env.CDP_ONRAMP_APP_ID?.trim();
+      if (appId) values.CDP_ONRAMP_APP_ID = appId;
+      environment = network === "base" ? "production" : "sandbox";
+      break;
+    }
+    case "coinbase":
+      environment = "production";
+      break;
+  }
+  return Object.freeze({ live: true, environment, values: Object.freeze(values) });
+}
+
+const providerConfigs = new Map<RampProvider, RampProviderConfig>();
+
+/** The provider's configuration snapshot: read on first use, then fixed for the process. */
+function providerConfig(p: RampProvider): RampProviderConfig {
+  let c = providerConfigs.get(p);
+  if (!c) {
+    c = readProviderConfig(p);
+    providerConfigs.set(p, c);
+  }
+  return c;
+}
+
+// ---------------------------------------------------------------------------
+// Service singletons (lazy-init), built from the same snapshot
 // ---------------------------------------------------------------------------
 
 let stripeOnramp: StripeOnrampClient | undefined;
-let stripeCredits: StripeCreditService | undefined;
 let ycClient: YellowcardClient | undefined;
 let ycOfframp: YellowcardOfframp | undefined;
 let ycOnramp: YellowcardOnramp | undefined;
@@ -39,25 +137,14 @@ let wisePayout: WisePayoutService | undefined;
 
 function getStripeOnramp(): StripeOnrampClient {
   if (!stripeOnramp) {
-    const mock = !process.env.STRIPE_SECRET_KEY;
+    const cfg = providerConfig("stripe");
     stripeOnramp = new StripeOnrampClient({
-      secretKey: process.env.STRIPE_SECRET_KEY ?? "sk_test_mock",
-      publishableKey: process.env.STRIPE_PUBLISHABLE_KEY ?? "pk_test_mock",
-      webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
-      mock,
+      secretKey: cfg.live ? cfg.values.STRIPE_SECRET_KEY! : "sk_test_mock",
+      publishableKey: cfg.live ? cfg.values.STRIPE_PUBLISHABLE_KEY! : "pk_test_mock",
+      mock: !cfg.live,
     });
   }
   return stripeOnramp;
-}
-
-function getStripeCredits(): StripeCreditService {
-  if (!stripeCredits) {
-    stripeCredits = new StripeCreditService({
-      secretKey: process.env.STRIPE_SECRET_KEY ?? "sk_test_mock",
-      mock: !process.env.STRIPE_SECRET_KEY,
-    });
-  }
-  return stripeCredits;
 }
 
 // ── Legacy Stripe prepaid-credits + unsigned provider webhooks: RETIRED (audit PR2) ──
@@ -66,30 +153,22 @@ function getStripeCredits(): StripeCreditService {
 // webhooks verify NO provider signature, so any AUTHENTICATED PCC caller could POST a
 // forged event and mint credits / advance a funding session. Being behind an API key is
 // NOT provider authentication. Funding is moving to direct USDC into a user-controlled
-// wallet (the onramp flow), so this path is being removed rather than hardened.
-// Default: 410 Gone. PCC_LEGACY_FIAT_WEBHOOKS=true re-enables the legacy, UNSIGNED,
-// in-memory, dev/testnet-ONLY behavior — never enable in production (it is still unsigned).
-function legacyFiatCreditsEnabled(): boolean {
-  // Never in production. The fiatRampRoutes startup guard hard-fails boot if the flag is
-  // set under NODE_ENV=production; this is the matching per-request floor (defense in depth).
-  return (
-    process.env.PCC_LEGACY_FIAT_WEBHOOKS === "true" &&
-    process.env.NODE_ENV !== "production"
-  );
-}
+// wallet (the onramp flow), so this path is removed rather than hardened.
+// 410 Gone in every environment. PCC_LEGACY_FIAT_WEBHOOKS used to re-enable the unsigned,
+// simulated credits outside production, a second demo switch beside PCC_DEMO_ROUTES
+// (cross-family review r2, finding D); it is now ignored, with a startup warning.
 const RETIRED_FIAT_CREDITS_MSG =
   "Retired: the Stripe prepaid-credits path and the unsigned provider webhooks are " +
-  "removed. Fund jobs directly in USDC via the onramp flow. (Legacy dev-only behavior " +
-  "is available behind PCC_LEGACY_FIAT_WEBHOOKS=true; never enable in production.)";
+  "removed. Fund jobs directly in USDC via the onramp flow.";
 
 function getYellowcard(): { client: YellowcardClient; offramp: YellowcardOfframp; onramp: YellowcardOnramp } {
   if (!ycClient) {
-    const mock = !process.env.YELLOWCARD_API_KEY;
+    const cfg = providerConfig("yellowcard");
     ycClient = new YellowcardClient({
-      apiKey: process.env.YELLOWCARD_API_KEY ?? "yc_mock_key",
-      secretKey: process.env.YELLOWCARD_SECRET_KEY ?? "yc_mock_secret",
-      environment: (process.env.YELLOWCARD_ENVIRONMENT as "sandbox" | "production") ?? "sandbox",
-      mock,
+      apiKey: cfg.live ? cfg.values.YELLOWCARD_API_KEY! : "yc_mock_key",
+      secretKey: cfg.live ? cfg.values.YELLOWCARD_SECRET_KEY! : "yc_mock_secret",
+      environment: cfg.environment ?? "sandbox",
+      mock: !cfg.live,
     });
     ycOfframp = new YellowcardOfframp(ycClient);
     ycOnramp = new YellowcardOnramp(ycClient);
@@ -99,16 +178,22 @@ function getYellowcard(): { client: YellowcardClient; offramp: YellowcardOfframp
 
 function getWise(): { client: WiseClient; payout: WisePayoutService } {
   if (!wiseClient) {
-    const mock = !process.env.WISE_API_TOKEN;
+    const cfg = providerConfig("wise");
     wiseClient = new WiseClient({
-      apiToken: process.env.WISE_API_TOKEN ?? "wise_mock_token",
-      profileId: process.env.WISE_PROFILE_ID,
-      environment: (process.env.WISE_ENVIRONMENT as "sandbox" | "production") ?? "sandbox",
-      mock,
+      apiToken: cfg.live ? cfg.values.WISE_API_TOKEN! : "wise_mock_token",
+      profileId: cfg.live ? cfg.values.WISE_PROFILE_ID : undefined,
+      environment: cfg.environment ?? "sandbox",
+      mock: !cfg.live,
     });
     wisePayout = new WisePayoutService(wiseClient);
   }
   return { client: wiseClient, payout: wisePayout! };
+}
+
+/** The Wise profile a live payout uses; a demo payout runs on the mock client (profile 0). */
+function wiseProfileId(): number {
+  const cfg = providerConfig("wise");
+  return cfg.live ? parseInt(cfg.values.WISE_PROFILE_ID!, 10) : 0;
 }
 
 let cdpWallet: CdpWalletClient | undefined;
@@ -121,12 +206,16 @@ function getCdp(): {
   spendPerm: CdpSpendPermissionService;
 } {
   if (!cdpWallet) {
+    const pc = providerConfig("cdp");
+    // Everything below comes from the snapshot the gate and the label read: the mode, the
+    // credentials, the network and the onramp app id. Nothing is read from env here.
     const cfg = {
-      apiKeyId: process.env.CDP_API_KEY_ID,
-      apiKeySecret: process.env.CDP_API_KEY_SECRET,
-      walletSecret: process.env.CDP_WALLET_SECRET,
-      network: (process.env.CDP_NETWORK as "base-sepolia" | "base") ?? "base-sepolia",
-      onrampAppId: process.env.CDP_ONRAMP_APP_ID,
+      apiKeyId: pc.live ? pc.values.CDP_API_KEY_ID : undefined,
+      apiKeySecret: pc.live ? pc.values.CDP_API_KEY_SECRET : undefined,
+      walletSecret: pc.live ? pc.values.CDP_WALLET_SECRET : undefined,
+      network: (pc.live ? pc.values.CDP_NETWORK : "base-sepolia") as "base-sepolia" | "base",
+      onrampAppId: pc.live ? pc.values.CDP_ONRAMP_APP_ID : undefined,
+      mock: !pc.live,
     };
     cdpWallet = new CdpWalletClient(cfg);
     cdpOnramp = new CdpOnrampClient(cfg);
@@ -135,23 +224,262 @@ function getCdp(): {
   return { wallet: cdpWallet, onramp: cdpOnramp!, spendPerm: cdpSpendPerm! };
 }
 
+// ── Mock-wallet truthfulness (WP-A fold F6, shell #2499) ────────────────────
+// With no CDP credentials the wallet client is in MOCK mode and createWallet()
+// returns an address NO key controls. Money sent there is unrecoverable. So:
+//   - a mock wallet is never called "usable" (explicit mock:true + an honest note);
+//   - a real-money Coinbase onramp URL is never built while the CDP wallet
+//     client is mock (503), nor for an address minted in mock mode (409
+//     wallet_not_custodial) — isCdpMockAddress recognizes those by construction,
+//     so an address minted during a mock period stays refused after real
+//     credentials arrive.
+
+// ── A demo answer carries no payment instruction ────────────────────────────
+// The mock Yellowcard client answers with real-looking literals: a TRC20 deposit address
+// for a withdrawal and a bank account ("PAGA 4550440202") for a deposit. Under the
+// mock/demo flags they are still instructions someone could pay into, so a demo answer
+// replaces them with null and says nothing was issued (as the Coinbase demo already
+// builds no checkout URL). A demo balance is null, not a 0 USDC read.
+const DEMO_NO_INSTRUCTION =
+  "Demo mode: nothing was issued by a provider, so there is nothing to pay into or send to.";
+
+const MOCK_WALLET_NOTE =
+  "MOCK wallet: this gateway has no CDP credentials, so this address is a " +
+  "placeholder that NO key controls. Do not send funds to it — anything sent " +
+  "is unrecoverable. Configure CDP_API_KEY_ID / CDP_API_KEY_SECRET / " +
+  "CDP_WALLET_SECRET for a real wallet.";
+
+type OnrampRefusal = { status: 400 | 409 | 503; body: { error: string; message: string } };
+
+/** Why a real-money onramp must NOT be built for `walletAddress`, or null. */
+function onrampRefusal(walletAddress: string): OnrampRefusal | null {
+  if (!isAddress(walletAddress)) {
+    return {
+      status: 400,
+      body: { error: "invalid_wallet_address", message: "walletAddress must be a valid EVM address" },
+    };
+  }
+  if (getCdp().wallet.isMock) {
+    return {
+      status: 503,
+      body: {
+        error: "cdp_wallet_mock",
+        message:
+          "Onramp is disabled while the CDP wallet client is in MOCK mode (no CDP " +
+          "credentials): wallets this gateway issues are then placeholders no key " +
+          "controls, so it will not build a real-money checkout.",
+      },
+    };
+  }
+  if (isCdpMockAddress(walletAddress)) {
+    return {
+      status: 409,
+      body: {
+        error: "wallet_not_custodial",
+        message:
+          "This address was issued by this gateway in MOCK mode; no key controls " +
+          "it, so funds sent there would be unrecoverable. Create a real wallet " +
+          "(POST /api/fiat-ramp/cdp/wallet) and fund that instead.",
+      },
+    };
+  }
+  return null;
+}
+
+/**
+ * Why a LIVE /cdp/provision must not run, or null. Its checkout sells real USDC on Base
+ * mainnet, so it needs the base network and the project's onramp app id (the client used to
+ * build the URL with an empty app id, and for a sandbox wallet under a sandbox label).
+ * Checked before the wallet is created, so a refusal creates nothing.
+ */
+function provisionRefusal(): { status: 503; body: Record<string, unknown> } | null {
+  const cfg = providerConfig("cdp");
+  if (cfg.values.CDP_NETWORK !== "base") {
+    return {
+      status: 503,
+      body: {
+        error: "onramp_not_on_sandbox",
+        provider: "cdp",
+        environment: cfg.environment,
+        message:
+          `This gateway's CDP network is ${cfg.values.CDP_NETWORK}, a sandbox. Coinbase Onramp sells real USDC ` +
+          "on Base mainnet, so no checkout is built for a sandbox wallet, and nothing was created. " +
+          "POST /api/fiat-ramp/cdp/wallet creates a wallet alone.",
+      },
+    };
+  }
+  if (!cfg.values.CDP_ONRAMP_APP_ID) {
+    return {
+      status: 503,
+      body: {
+        error: "not_configured",
+        provider: "cdp",
+        missing: "CDP_ONRAMP_APP_ID",
+        message: "No Coinbase Onramp app id is configured, so no checkout can be built, and nothing was created.",
+      },
+    };
+  }
+  return null;
+}
+
+// ── Wallet creators: spend authority belongs to the wallet's creator ─────────
+// The CDP project can sign for EVERY wallet this gateway created, so a spend permission
+// issued over any of them is real money authority. Only the principal that created the
+// wallet (or an X-Admin-Key holder) may issue one. The record is per process, like the
+// ramp sessions: after a restart it is empty and issuing fails closed (admin only) until
+// ownership is stored durably, which needs a table (parked for the operator).
+const walletCreators = new Map<string, string>();
+
+function recordWalletCreator(wallet: string, principal: string | undefined): void {
+  if (principal) walletCreators.set(wallet.toLowerCase(), canonicalPrincipal(principal));
+}
+
+function createdWallet(principal: string | undefined, wallet: string): boolean {
+  return principal !== undefined && walletCreators.get(wallet.toLowerCase()) === canonicalPrincipal(principal);
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
+// ── Provider gate (board N48 / N34) ─────────────────────────────────
+//
+// Every provider route below used to answer like the real provider even when that
+// provider was not configured: Yellowcard deposit/withdraw instructions and payout
+// addresses, Wise COMPLETED payouts under profile 12345, Stripe cos_mock_ sessions, a
+// Coinbase URL with a made-up app id, a 0 USDC balance for any address. Only
+// GET /status admitted it. Now an unconfigured provider fails closed (503
+// not_configured) unless PCC_DEMO_ROUTES is on, and then every response says mock/demo.
+
+/**
+ * "live" when the provider's configuration snapshot is complete; "demo" when it is not but
+ * PCC_DEMO_ROUTES is on (never in production); otherwise sends 503 not_configured and returns
+ * null (the caller must return). The client the route then uses is built from the SAME
+ * snapshot, so "live" always runs the real client and "demo" always runs the mock.
+ */
+function providerMode(reply: FastifyReply, p: RampProvider): "live" | "demo" | null {
+  if (providerConfig(p).live) return "live";
+  if (isDemoRoutesOn()) return "demo";
+  void reply.status(503).send({
+    error: "not_configured",
+    provider: p,
+    message: `The ${p} provider is not configured on this gateway, so nothing was created or quoted.`,
+  });
+  return null;
+}
+
+/**
+ * A demo answer never carries a wallet address (cross-family review r3, A06a, CRITICAL): a mock
+ * wallet's address is valid EVM hex that NO key controls, so anything sent to it is gone, whatever
+ * flags the answer carries. Demo answers name a mock wallet by a reference that is not an address;
+ * the two map one-to-one through the mock address's random tail (see isCdpMockAddress).
+ */
+const DEMO_WALLET_REF_RE = /^demo-wallet-([0-9a-f]{16})$/;
+
+function demoWalletRefOf(mockAddress: string): string {
+  return `demo-wallet-${mockAddress.slice(-16).toLowerCase()}`;
+}
+
+function mockAddressOfRef(ref: unknown): `0x${string}` | null {
+  const m = typeof ref === "string" ? DEMO_WALLET_REF_RE.exec(ref) : null;
+  return m ? (`${CDP_MOCK_ADDRESS_PREFIX}${m[1]}` as `0x${string}`) : null;
+}
+
+/** Every mock-minted address in a demo answer, at any depth, becomes its demo reference. */
+function scrubMockAddresses(value: unknown): unknown {
+  if (typeof value === "string") return isCdpMockAddress(value) ? demoWalletRefOf(value) : value;
+  if (Array.isArray(value)) return value.map(scrubMockAddresses);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubMockAddresses(v)]));
+  }
+  return value;
+}
+
+/**
+ * Marks a provider response with what produced it: in demo, mock/demo; live, the
+ * provider's environment, so a sandbox answer is never mistaken for real money moving.
+ */
+function markRamp<T extends object>(mode: "live" | "demo", p: RampProvider, body: T) {
+  if (mode === "demo") return markDemo("demo", scrubMockAddresses(body) as T);
+  const environment = providerConfig(p).environment;
+  return environment === "sandbox" ? { ...body, environment, sandbox: true as const } : { ...body, environment };
+}
+
+/** The caller as the API gate resolved it: the key's operator id or the SIWE address. */
+function principalOf(req: { operatorId?: unknown; userId?: unknown }): string | undefined {
+  const p = (req as any).operatorId ?? (req as any).userId;
+  return typeof p === "string" && p.trim() !== "" ? p : undefined;
+}
+
+/**
+ * A principal's canonical, typed form. A wallet address is compared case-insensitively
+ * (addresses are); any other id (an API key's operator id, an email) EXACTLY, because nothing
+ * defines those as case-insensitive (cross-family review r2, finding B: lowercasing them let
+ * "OperatorA" and "operatora" read each other's sessions).
+ */
+function canonicalPrincipal(p: string): string {
+  return isAddress(p, { strict: false }) ? `wallet:${p.toLowerCase()}` : `id:${p}`;
+}
+
+/**
+ * A provider's state for GET /status, from the snapshot, never from current env. `configured`:
+ * its own settings are complete. `available`: its routes answer 200 (live, or simulated with
+ * demos on). `mock`: they do not reach the real provider.
+ */
+function providerStatus(p: RampProvider) {
+  const cfg = providerConfig(p);
+  return { configured: cfg.live, available: cfg.live || isDemoRoutesOn(), mock: !cfg.live, environment: cfg.environment };
+}
+
+/**
+ * Coinbase's checkout also needs a live CDP wallet client (onrampRefusal answers 503
+ * cdp_wallet_mock without one), so its readiness is the operation's, not only its app id's
+ * (cross-family review r2, finding C). `configured` still says whether the app id is set.
+ */
+function coinbaseStatus() {
+  const cb = providerConfig("coinbase");
+  const cdpLive = providerConfig("cdp").live;
+  const live = cb.live && cdpLive;
+  return {
+    configured: cb.live,
+    available: cdpLive && (cb.live || isDemoRoutesOn()),
+    mock: !live,
+    environment: live ? cb.environment : null,
+    requires: ["cdp"],
+  };
+}
+
+/** CDP's state, with each operation's readiness: a live provision also needs provisionRefusal to pass. */
+function cdpStatus() {
+  const cfg = providerConfig("cdp");
+  const available = cfg.live || isDemoRoutesOn();
+  return {
+    ...providerStatus("cdp"),
+    network: cfg.live ? cfg.values.CDP_NETWORK! : null,
+    operations: {
+      wallet: available,
+      provision: cfg.live ? provisionRefusal() === null : isDemoRoutesOn(),
+      "spend-permission": available,
+    },
+  };
+}
+
 export async function fiatRampRoutes(app: FastifyInstance) {
-  // Production must NEVER re-enable the retired unsigned webhooks / prepaid-credits path.
-  // The dev-only escape hatch is ENFORCED here (not merely documented): fail startup if
-  // PCC_LEGACY_FIAT_WEBHOOKS is set under NODE_ENV=production.
-  if (
-    process.env.NODE_ENV === "production" &&
-    process.env.PCC_LEGACY_FIAT_WEBHOOKS === "true"
-  ) {
-    throw new Error(
-      "PCC_LEGACY_FIAT_WEBHOOKS=true is forbidden in production: the legacy Stripe " +
-        "prepaid-credits path and the unsigned provider webhooks are retired and must " +
-        "never be re-enabled in prod (they verify no provider signature). Unset it.",
+  // The legacy flag re-enables nothing any more, in any environment; say so rather than
+  // failing startup over a variable with no effect.
+  if (process.env.PCC_LEGACY_FIAT_WEBHOOKS !== undefined) {
+    app.log.warn(
+      "PCC_LEGACY_FIAT_WEBHOOKS is ignored: the Stripe prepaid credits and the unsigned provider webhooks are retired (410).",
     );
+  }
+
+  if (process.env.NODE_ENV === "production" && process.env.PCC_DEMO_ROUTES === "true") {
+    app.log.warn("PCC_DEMO_ROUTES=true is ignored in production: providers answer 503 not_configured, never simulated.");
+  }
+
+  const cdpNetwork = process.env.CDP_NETWORK?.trim();
+  if (cdpNetwork && !CDP_NETWORKS.includes(cdpNetwork)) {
+    app.log.warn(`CDP_NETWORK=${cdpNetwork} is not base or base-sepolia, so CDP is not configured (503 not_configured).`);
   }
 
   // ── Status ────────────────────────────────────────────────────────
@@ -159,29 +487,20 @@ export async function fiatRampRoutes(app: FastifyInstance) {
   app.get("/api/fiat-ramp/status", async () => {
     return {
       providers: {
+        // Each entry reads the same configuration snapshot the provider's routes use.
         coinbase: {
-          available: true,
-          mock: !process.env.COINBASE_APP_ID,
+          ...coinbaseStatus(),
           capabilities: ["onramp"],
           note: "Primary on-ramp. No merchant account needed. User pays via Coinbase or credit card → USDC on Base.",
         },
-        stripe: {
-          available: true,
-          mock: !process.env.STRIPE_SECRET_KEY,
-          capabilities: ["onramp", "credits"],
-        },
-        yellowcard: {
-          available: true,
-          mock: !process.env.YELLOWCARD_API_KEY,
-          capabilities: ["onramp", "offramp"],
-        },
-        wise: {
-          available: true,
-          mock: !process.env.WISE_API_TOKEN,
-          capabilities: ["payout"],
-        },
+        stripe: { ...providerStatus("stripe"), capabilities: ["onramp"] },
+        yellowcard: { ...providerStatus("yellowcard"), capabilities: ["onramp", "offramp"] },
+        wise: { ...providerStatus("wise"), capabilities: ["payout"] },
+        cdp: { ...cdpStatus(), capabilities: ["wallet", "provision", "spend-permission"] },
       },
       recommended: "coinbase",
+      /** When false, an unconfigured provider answers 503 not_configured instead of simulating. */
+      demoRoutes: isDemoRoutesOn(),
     };
   });
 
@@ -194,74 +513,151 @@ export async function fiatRampRoutes(app: FastifyInstance) {
   // gasless USDC on Base via the paymaster (receive payments, hold an identity,
   // operate). No card, no gas. They fund it later (only when they want to SPEND).
   // Pair with POST /api/auth/provision for an API key.
-  app.post("/api/fiat-ramp/cdp/wallet", async () => {
+  app.post("/api/fiat-ramp/cdp/wallet", async (req, reply) => {
+    const mode = providerMode(reply, "cdp");
+    if (!mode) return reply;
     const { wallet } = getCdp();
     const w = await wallet.createWallet();
-    return {
+    recordWalletCreator(w.address, principalOf(req));
+    if (wallet.isMock) {
+      // Never "usable": no key controls a mock address (F6). Reached only in demo mode. The
+      // answer names it by a reference, never by an address (A06a r3).
+      return markRamp(mode, "cdp", {
+        walletAddress: null,
+        demoWalletRef: demoWalletRefOf(w.address),
+        network: w.network,
+        smartAccount: w.smartAccount,
+        mock: true,
+        usableNow: false,
+        note: MOCK_WALLET_NOTE,
+      });
+    }
+    return markRamp(mode, "cdp", {
       walletAddress: w.address,
       network: w.network,
       smartAccount: w.smartAccount,
-      mock: wallet.isMock,
+      mock: false,
       usableNow: true,
       note:
         "Usable on PCC now — gasless on Base, no card, no gas. Pair with POST /api/auth/provision " +
         "for an API key. Fund with a card later (POST /api/fiat-ramp/coinbase/onramp) only to pay for jobs.",
-    };
+    });
   });
 
-  app.post("/api/fiat-ramp/cdp/provision", async (req) => {
+  app.post("/api/fiat-ramp/cdp/provision", async (req, reply) => {
+    const mode = providerMode(reply, "cdp");
+    if (!mode) return reply;
+    if (mode === "live") {
+      const refusal = provisionRefusal();
+      if (refusal) return reply.status(refusal.status).send(refusal.body);
+    }
     const body = (req.body ?? {}) as { presetAmountUSD?: number };
     const { wallet, onramp } = getCdp();
     const w = await wallet.createWallet();
+    recordWalletCreator(w.address, principalOf(req));
+    if (mode === "demo") {
+      // Demo: a mock wallet no key controls, and no checkout at all (the mock client's URL
+      // pointed at pay.coinbase.com).
+      return markRamp(mode, "cdp", {
+        walletAddress: null,
+        demoWalletRef: demoWalletRefOf(w.address),
+        network: w.network,
+        smartAccount: w.smartAccount,
+        onrampUrl: null,
+        sessionId: null,
+        mock: true,
+        usableNow: false,
+        instructions: MOCK_WALLET_NOTE + " Demo mode: no checkout URL was built, so nothing can be paid or funded.",
+      });
+    }
     const session = await onramp.createSession({
       destinationAddress: w.address,
       presetAmountUSD: body.presetAmountUSD,
     });
-    return {
+    return markRamp(mode, "cdp", {
       walletAddress: w.address,
       network: w.network,
       smartAccount: w.smartAccount,
       onrampUrl: session.onrampUrl,
       sessionId: session.sessionId,
-      mock: wallet.isMock,
+      mock: false,
       instructions:
         "Open onrampUrl, pay once by card → USDC lands in the smart wallet on Base (gasless). " +
         "Then POST /api/fiat-ramp/cdp/spend-permission to give your agent a scoped, revocable spending key.",
-    };
+    });
   });
 
-  app.get("/api/fiat-ramp/cdp/wallet/:address/balance", async (req) => {
+  app.get("/api/fiat-ramp/cdp/wallet/:address/balance", async (req, reply) => {
+    // A simulated balance (0 USDC for any address) reads as "this wallet is empty", so a
+    // demo answer reads nothing: usdc is null.
+    const mode = providerMode(reply, "cdp");
+    if (!mode) return reply;
     const { address } = req.params as { address: string };
-    return getCdp().wallet.getBalance(address as `0x${string}`);
+    if (mode === "demo") {
+      return markRamp(mode, "cdp", { address, usdc: null, network: null, note: "Demo mode: no balance was read." });
+    }
+    return markRamp(mode, "cdp", await getCdp().wallet.getBalance(address as `0x${string}`));
   });
 
   app.post("/api/fiat-ramp/cdp/spend-permission", async (req, reply) => {
+    const mode = providerMode(reply, "cdp");
+    if (!mode) return reply;
     const body = req.body as
       | {
           walletAddress?: string;
+          walletRef?: string;
           spender?: string;
           allowanceUSDC?: number;
           periodSec?: number;
           expiresAt?: string;
         }
       | undefined;
-    if (!body?.walletAddress || !body?.spender || body.allowanceUSDC == null) {
+    // A demo wallet has no address a caller could hold (A06a r3): demo mode takes its reference.
+    const demo = mode === "demo";
+    const walletKey = demo ? body?.walletRef : body?.walletAddress;
+    if (!walletKey || !body?.spender || body.allowanceUSDC == null) {
       return reply
         .status(400)
-        .send({ error: "walletAddress, spender, allowanceUSDC required" });
+        .send({ error: demo ? "walletRef, spender, allowanceUSDC required" : "walletAddress, spender, allowanceUSDC required" });
     }
-    return getCdp().spendPerm.issue({
-      account: body.walletAddress as `0x${string}`,
-      spender: body.spender as `0x${string}`,
-      allowanceUSDC: body.allowanceUSDC,
-      periodSec: body.periodSec ?? 86_400,
-      expiresAt: body.expiresAt,
-    });
+    const account = demo ? mockAddressOfRef(walletKey) : isAddress(String(walletKey)) ? (String(walletKey) as `0x${string}`) : null;
+    if (!account || !isAddress(String(body.spender))) {
+      return reply.status(400).send(
+        demo
+          ? { error: "invalid_wallet_ref", message: "In demo mode pass walletRef (the demoWalletRef that POST /cdp/wallet or /cdp/provision returned) and a valid EVM spender" }
+          : { error: "invalid_address", message: "walletAddress and spender must be valid EVM addresses" },
+      );
+    }
+    if (typeof body.allowanceUSDC !== "number" || !Number.isFinite(body.allowanceUSDC) || body.allowanceUSDC <= 0) {
+      return reply.status(400).send({ error: "invalid_allowance", message: "allowanceUSDC must be a positive number" });
+    }
+    if (body.periodSec !== undefined && (!Number.isInteger(body.periodSec) || body.periodSec <= 0)) {
+      return reply.status(400).send({ error: "invalid_period", message: "periodSec must be a positive whole number of seconds" });
+    }
+    // Spend authority over a wallet: its creator's, or an admin's. Anyone else gets the
+    // same answer as for a wallet that does not exist.
+    if (!hasValidAdminKey(req.headers["x-admin-key"]) && !createdWallet(principalOf(req), account)) {
+      return reply.status(404).send({
+        error: "wallet_not_found",
+        message: "No wallet you created on this gateway has that address, so nothing was issued.",
+      });
+    }
+    return markRamp(mode, "cdp",
+      await getCdp().spendPerm.issue({
+        account,
+        spender: body.spender as `0x${string}`,
+        allowanceUSDC: body.allowanceUSDC,
+        periodSec: body.periodSec ?? 86_400,
+        expiresAt: body.expiresAt,
+      }),
+    );
   });
 
-  app.delete("/api/fiat-ramp/cdp/spend-permission/:id", async (req) => {
+  app.delete("/api/fiat-ramp/cdp/spend-permission/:id", async (req, reply) => {
+    const mode = providerMode(reply, "cdp");
+    if (!mode) return reply;
     const { id } = req.params as { id: string };
-    return getCdp().spendPerm.revoke(id);
+    return markRamp(mode, "cdp", await getCdp().spendPerm.revoke(id));
   });
 
   // ── Coinbase Onramp (PRIMARY — no merchant account needed) ──────
@@ -288,11 +684,30 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!body?.walletAddress) {
       return reply.status(400).send({ error: "walletAddress is required" });
     }
+    const mode = providerMode(reply, "coinbase");
+    if (!mode) return reply;
+    // Never build a real-money checkout for an address no key controls (F6), demo or not.
+    const refusal = onrampRefusal(String(body.walletAddress));
+    if (refusal) return reply.status(refusal.status).send(refusal.body);
 
-    const appId = process.env.COINBASE_APP_ID ?? "pcc-hackathon";
     const asset = body.asset ?? "USDC";
     const network = body.network ?? "base";
     const fiatCurrency = body.currency ?? "USD";
+    if (mode === "demo") {
+      // Demo: no Coinbase app is configured, so no checkout URL is built at all (it used to
+      // carry a made-up app id). The response says what a live gateway would return.
+      return markRamp(mode, "coinbase", {
+        provider: "coinbase",
+        onrampUrl: null,
+        walletAddress: body.walletAddress,
+        asset,
+        network,
+        fiatCurrency,
+        amount: body.amount ?? null,
+        note: "Demo mode: no Coinbase app is configured, so no checkout URL was built and nothing can be funded.",
+      });
+    }
+    const appId = providerConfig("coinbase").values.COINBASE_APP_ID!;
 
     // Build Coinbase Onramp URL
     // Docs: https://docs.cdp.coinbase.com/onramp/docs/api-initializing
@@ -312,7 +727,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
 
     const onrampUrl = `https://pay.coinbase.com/buy/select-asset?${params.toString()}`;
 
-    return {
+    return markRamp(mode, "coinbase", {
       provider: "coinbase",
       onrampUrl,
       walletAddress: body.walletAddress,
@@ -321,15 +736,13 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       fiatCurrency,
       amount: body.amount ?? null,
       instructions: "Open the URL to fund your wallet. Pay with credit card, debit card, or Coinbase account. USDC arrives on Base in ~1 minute.",
-      mock: !process.env.COINBASE_APP_ID,
-      note: process.env.COINBASE_APP_ID
-        ? "Live Coinbase Onramp"
-        : "Using default app ID. Set COINBASE_APP_ID env var for production. Get one at https://portal.cdp.coinbase.com",
-    };
+      mock: false,
+      note: "Live Coinbase Onramp",
+    });
   });
 
   /** GET /api/fiat-ramp/coinbase/onramp-url — Quick URL generator (GET for easy linking) */
-  app.get("/api/fiat-ramp/coinbase/onramp-url", async (req) => {
+  app.get("/api/fiat-ramp/coinbase/onramp-url", async (req, reply) => {
     const { wallet, amount, currency } = req.query as {
       wallet?: string;
       amount?: string;
@@ -342,8 +755,20 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         example: "/api/fiat-ramp/coinbase/onramp-url?wallet=0x...&amount=50&currency=USD",
       };
     }
+    const mode = providerMode(reply, "coinbase");
+    if (!mode) return reply;
+    // Same rule as POST /coinbase/onramp — this builds the same real-money URL (F6).
+    const refusal = onrampRefusal(String(wallet));
+    if (refusal) return reply.status(refusal.status).send(refusal.body);
 
-    const appId = process.env.COINBASE_APP_ID ?? "pcc-hackathon";
+    if (mode === "demo") {
+      return markRamp(mode, "coinbase", {
+        url: null,
+        wallet,
+        note: "Demo mode: no Coinbase app is configured, so no checkout URL was built.",
+      });
+    }
+    const appId = providerConfig("coinbase").values.COINBASE_APP_ID!;
     const params = new URLSearchParams();
     params.set("appId", appId);
     params.set("defaultAsset", "USDC");
@@ -353,10 +778,10 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (amount) params.set("presetFiatAmount", amount);
     if (currency) params.set("fiatCurrency", currency);
 
-    return {
+    return markRamp(mode, "coinbase", {
       url: `https://pay.coinbase.com/buy/select-asset?${params.toString()}`,
       wallet,
-    };
+    });
   });
 
   // ── Stripe: Crypto On-Ramp ────────────────────────────────────────
@@ -376,6 +801,8 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!body?.walletAddress || !isAddress(body.walletAddress as string)) {
       return reply.status(400).send({ error: "Valid walletAddress is required" });
     }
+    const mode = providerMode(reply, "stripe");
+    if (!mode) return reply;
 
     try {
       const client = getStripeOnramp();
@@ -387,13 +814,14 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         destinationNetwork: body.destinationNetwork as string | undefined,
         customerEmail: body.customerEmail as string | undefined,
         escrowId: body.escrowId as string | undefined,
+        createdBy: principalOf(req),
       });
 
-      return {
+      return markRamp(mode, "stripe", {
         session,
         publishableKey: client.publishableKey,
         provider: "stripe",
-      };
+      });
     } catch (err) {
       return reply.status(502).send({
         error: "stripe_onramp_failed",
@@ -402,67 +830,32 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     }
   });
 
-  // ── Stripe: Prepaid Credits ───────────────────────────────────────
+  // ── Stripe: Prepaid Credits (RETIRED, 410 in every environment) ─────
 
-  app.post<{
-    Body: { amountUsd: number };
-  }>("/api/fiat-ramp/stripe/credits/deposit", async (req, reply) => {
-    if (!legacyFiatCreditsEnabled()) {
-      return reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
-    }
-    // IDOR fix: derive userId from session, not body (red team #10).
-    // Previously anyone could fund any other user's credit balance on their behalf
-    // (or more dangerously, trigger a deposit session with stolen userId).
-    const userId = (req as any).operatorId ?? (req as any).userId;
-    if (!userId) {
-      return reply.status(401).send({ error: "authentication_required" });
-    }
-
-    const body = req.body as Record<string, unknown> | undefined;
-    if (typeof body?.amountUsd !== "number" || body.amountUsd <= 0) {
-      return reply.status(400).send({ error: "amountUsd (positive number) is required" });
-    }
-
-    try {
-      const credits = getStripeCredits();
-      const result = await credits.createDepositSession(userId, body.amountUsd);
-      return { ...result, provider: "stripe" };
-    } catch (err) {
-      return reply.status(502).send({
-        error: "stripe_credits_failed",
-        message: "Failed to create credit deposit",
-      });
-    }
-  });
-
-  app.get<{
-    Params: { userId: string };
-  }>("/api/fiat-ramp/stripe/credits/:userId", async (req, reply) => {
-    if (!legacyFiatCreditsEnabled()) {
-      return reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
-    }
-    const credits = getStripeCredits();
-    const balance = credits.getBalance(req.params.userId);
-    if (!balance) {
-      return reply.status(404).send({ error: "No credit balance found" });
-    }
-    return balance;
-  });
+  const retired = async (_req: unknown, reply: FastifyReply) =>
+    reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
+  app.post("/api/fiat-ramp/stripe/credits/deposit", retired);
+  app.get("/api/fiat-ramp/stripe/credits/:userId", retired);
 
   // ── Yellowcard: Channels & Rates ──────────────────────────────────
 
   app.get<{
     Querystring: { country?: string };
-  }>("/api/fiat-ramp/yellowcard/channels", async (_req) => {
+  }>("/api/fiat-ramp/yellowcard/channels", async (_req, reply) => {
+    const mode = providerMode(reply, "yellowcard");
+    if (!mode) return reply;
     const { client } = getYellowcard();
     const channels = await client.getChannels(_req.query.country);
-    return { channels };
+    return markRamp(mode, "yellowcard", { channels });
   });
 
-  app.get("/api/fiat-ramp/yellowcard/rates", async () => {
+  app.get("/api/fiat-ramp/yellowcard/rates", async (_req, reply) => {
+    // A literal rate table is not a quote.
+    const mode = providerMode(reply, "yellowcard");
+    if (!mode) return reply;
     const { client } = getYellowcard();
     const rates = await client.getRates();
-    return { rates };
+    return markRamp(mode, "yellowcard", { rates });
   });
 
   // ── Yellowcard: Off-Ramp (operator withdrawal) ────────────────────
@@ -499,6 +892,9 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!body?.walletAddress || !body?.amountUsd || !body?.fiatCurrency || !body?.channelId || !body?.destination || !body?.sender) {
       return reply.status(400).send({ error: "Missing required fields" });
     }
+    // Checked before the sender's identity details reach any client.
+    const mode = providerMode(reply, "yellowcard");
+    if (!mode) return reply;
 
     try {
       const { offramp } = getYellowcard();
@@ -527,9 +923,13 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         cryptoCurrency: body.cryptoCurrency as string | undefined,
         cryptoNetwork: body.cryptoNetwork as string | undefined,
         escrowId: body.escrowId as string | undefined,
+        createdBy: principalOf(req),
       });
 
-      return { ...result, provider: "yellowcard" };
+      if (mode === "demo") {
+        return markRamp(mode, "yellowcard", { ...result, depositAddress: null, provider: "yellowcard", note: DEMO_NO_INSTRUCTION });
+      }
+      return markRamp(mode, "yellowcard", { ...result, provider: "yellowcard" });
     } catch (err) {
       return reply.status(502).send({
         error: "yellowcard_withdraw_failed",
@@ -565,6 +965,8 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!body?.fiatAmount || !body?.fiatCurrency || !body?.channelId || !body?.recipient || !body?.walletAddress) {
       return reply.status(400).send({ error: "Missing required fields" });
     }
+    const mode = providerMode(reply, "yellowcard");
+    if (!mode) return reply;
 
     try {
       const { onramp } = getYellowcard();
@@ -586,9 +988,13 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         cryptoCurrency: body.cryptoCurrency as string | undefined,
         cryptoNetwork: body.cryptoNetwork as string | undefined,
         escrowId: body.escrowId as string | undefined,
+        createdBy: principalOf(req),
       });
 
-      return { ...result, provider: "yellowcard" };
+      if (mode === "demo") {
+        return markRamp(mode, "yellowcard", { ...result, bankInfo: null, provider: "yellowcard", note: DEMO_NO_INSTRUCTION });
+      }
+      return markRamp(mode, "yellowcard", { ...result, provider: "yellowcard" });
     } catch (err) {
       return reply.status(502).send({
         error: "yellowcard_deposit_failed",
@@ -617,10 +1023,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!body?.sourceAmount || !body?.recipient || !body?.reference) {
       return reply.status(400).send({ error: "sourceAmount, recipient, and reference are required" });
     }
+    const mode = providerMode(reply, "wise");
+    if (!mode) return reply;
 
     try {
       const { payout } = getWise();
-      const profileId = parseInt(process.env.WISE_PROFILE_ID ?? "12345", 10);
+      const profileId = wiseProfileId();
       const result = await payout.sendPayout({
         profileId,
         sourceAmount: body.sourceAmount as number,
@@ -633,9 +1041,10 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         },
         reference: body.reference as string,
         escrowId: body.escrowId as string | undefined,
+        createdBy: principalOf(req),
       });
 
-      return { ...result, provider: "wise" };
+      return markRamp(mode, "wise", { ...result, provider: "wise" });
     } catch (err) {
       return reply.status(502).send({
         error: "wise_payout_failed",
@@ -667,10 +1076,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!Array.isArray(payouts) || payouts.length === 0) {
       return reply.status(400).send({ error: "payouts array is required" });
     }
+    const mode = providerMode(reply, "wise");
+    if (!mode) return reply;
 
     try {
       const { payout } = getWise();
-      const profileId = parseInt(process.env.WISE_PROFILE_ID ?? "12345", 10);
+      const profileId = wiseProfileId();
       const requests = payouts.map((p: unknown) => {
         const item = p as Record<string, unknown>;
         return {
@@ -685,11 +1096,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
           },
           reference: item.reference as string,
           escrowId: item.escrowId as string | undefined,
+          createdBy: principalOf(req),
         };
       });
 
       const result = await payout.sendBatch(requests);
-      return { ...result, provider: "wise" };
+      return markRamp(mode, "wise", { ...result, provider: "wise" });
     } catch (err) {
       return reply.status(502).send({
         error: "wise_batch_failed",
@@ -698,59 +1110,31 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     }
   });
 
-  // ── Webhooks ──────────────────────────────────────────────────────
+  // ── Webhooks (RETIRED, 410 in every environment) ──────────────────
+  // Unsigned: any authenticated caller could forge a Stripe event and mint credits, or
+  // advance a funding session. Yellow Card stays off until its inbound X-YC-Signature
+  // (base64 HMAC-SHA256 of the raw body, per the Yellow Card docs) is verified against a
+  // real signed sample.
 
-  app.post("/api/fiat-ramp/webhook/stripe", async (req, reply) => {
-    // RETIRED (audit PR2): unsigned webhook — any authenticated caller could forge a
-    // Stripe event and mint credits. 410 unless the legacy dev-only flag is set.
-    if (!legacyFiatCreditsEnabled()) {
-      return reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
-    }
-    const body = req.body as { type?: string; data?: { object?: Record<string, unknown> } } | undefined;
-    if (!body?.type || !body?.data?.object) {
-      return { received: false };
-    }
-
-    const client = getStripeOnramp();
-    const session = client.handleWebhook(body.type, body.data.object);
-    if (session) return { received: true, session };
-
-    const credits = getStripeCredits();
-    if (body.type === "checkout.session.completed") {
-      const balance = credits.handleCheckoutWebhook(body.data.object);
-      if (balance) return { received: true, balance };
-    }
-
-    return { received: true };
-  });
-
-  app.post("/api/fiat-ramp/webhook/yellowcard", async (req, reply) => {
-    // RETIRED (audit PR2): unsigned webhook. Yellow Card also stays disabled until its
-    // inbound X-YC-Signature (base64 HMAC-SHA256 of the raw body, per the Yellow Card
-    // docs) is verified against a real signed sample. 410 unless the legacy flag is set.
-    if (!legacyFiatCreditsEnabled()) {
-      return reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
-    }
-    const body = req.body as { event?: string; data?: Record<string, unknown> } | undefined;
-    if (!body?.event || !body?.data) {
-      return { received: false };
-    }
-
-    const { offramp, onramp } = getYellowcard();
-    const offSession = offramp.handleWebhook(body.event, body.data);
-    if (offSession) return { received: true, session: offSession };
-
-    const onSession = onramp.handleWebhook(body.event, body.data);
-    if (onSession) return { received: true, session: onSession };
-
-    return { received: true };
-  });
+  app.post("/api/fiat-ramp/webhook/stripe", retired);
+  app.post("/api/fiat-ramp/webhook/yellowcard", retired);
 
   // ── Session Listing ───────────────────────────────────────────────
 
+  // Owner-scoped (board N48). This listing used to return EVERY account's ramp sessions,
+  // wallet addresses and amounts included, to any key. A caller sees the sessions it
+  // created and those that pay into or out of its own wallet (when its principal is a
+  // wallet address); an admin (X-Admin-Key) sees all. Every session carries `mode`
+  // (simulated, sandbox or production), recorded by the client that created it, so a
+  // stored record keeps its provenance in a mixed listing.
   app.get<{
     Querystring: { provider?: string };
-  }>("/api/fiat-ramp/sessions", async (req) => {
+  }>("/api/fiat-ramp/sessions", async (req, reply) => {
+    const admin = hasValidAdminKey(req.headers["x-admin-key"]);
+    const principal = principalOf(req);
+    if (!admin && !principal) {
+      return reply.status(401).send({ error: "authentication_required" });
+    }
     const provider = req.query.provider;
     const sessions = [];
 
@@ -766,7 +1150,21 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       sessions.push(...getWise().payout.listSessions());
     }
 
-    return { sessions };
+    if (admin) return { sessions, scope: "all" };
+    // A session is the caller's when the caller created it (canonical principals: a wallet
+    // case-insensitively, any other id exactly), or when it pays into or out of the caller's
+    // wallet.
+    const me = canonicalPrincipal(principal!);
+    const wallet = me.startsWith("wallet:") ? me.slice("wallet:".length) : null;
+    return {
+      sessions: sessions.filter(
+        (s) =>
+          (typeof s.createdBy === "string" && s.createdBy !== "" && canonicalPrincipal(s.createdBy) === me) ||
+          (wallet !== null && String(s.walletAddress ?? "").toLowerCase() === wallet),
+      ),
+      scope: "caller",
+      matchedBy: wallet ? ["created_by", "wallet"] : ["created_by"],
+    };
   });
 
   // ── Testnet USDC Faucet (FREE — no fees, no KYC, no merchant) ───
@@ -825,40 +1223,63 @@ export async function fiatRampRoutes(app: FastifyInstance) {
           data: mintData,
         });
 
+        // A returned hash means the transaction was SUBMITTED, not that it minted.
         return {
           success: true,
           provider: "faucet",
+          submitted: true,
+          confirmed: false,
           walletAddress: body.walletAddress,
           amount: `${amount}.00`,
           currency: "mUSDC",
           network: "sepolia",
           txHash,
           tokenContract: MOCK_USDC,
-          note: "Testnet USDC minted. Free, no fees. Transaction confirming on Sepolia.",
+          note: "Testnet mint transaction submitted; it is not confirmed here. Check the wallet's balance on Sepolia.",
         };
       } catch (err) {
-        // Fall through to mock if on-chain fails
-        console.warn("[faucet] On-chain mint failed, using mock:", err instanceof Error ? err.message : err);
+        // A failed mint is a failure. It used to fall through to a mock "success" with a
+        // made-up transaction hash.
+        console.warn("[faucet] On-chain mint failed:", err instanceof Error ? err.message : err);
+        // A transport failure can come after the transaction reached the network, so the
+        // outcome is unknown: never "nothing was minted", never a made-up success.
+        return reply.status(502).send({
+          success: false,
+          error: "mint_failed",
+          submitted: "unknown",
+          message:
+            "The mint could not be confirmed: the transaction may or may not have been sent. " +
+            "Check the wallet's balance before retrying.",
+        });
       }
     }
 
-    // Mock mode — no private key, just acknowledge
+    if (!isDemoRoutesOn()) {
+      return reply.status(503).send({
+        success: false,
+        error: "not_configured",
+        message: "The faucet has no minting key on this gateway, so nothing was minted.",
+      });
+    }
+    // Demo only: nothing is minted, and the response says so. No transaction hash exists.
     return {
-      success: true,
+      success: false,
       provider: "faucet",
       mock: true,
+      demo: true,
+      minted: false,
       walletAddress: body.walletAddress,
       amount: `${amount}.00`,
       currency: "mUSDC",
       network: "sepolia",
-      txHash: `0x${"f".repeat(64)}`,
+      txHash: null,
       tokenContract: MOCK_USDC,
-      note: "Mock faucet (no DEPLOYER_PRIVATE_KEY set). Set the env var to mint real testnet USDC.",
+      note: "Demo faucet: nothing was minted.",
     };
   });
 
   /** GET /api/faucet/usdc — Quick drip via query params */
-  app.get("/api/faucet/usdc", async (req) => {
+  app.get("/api/faucet/usdc", async (req, reply) => {
     const { wallet, amount } = req.query as { wallet?: string; amount?: string };
 
     if (!wallet) {
@@ -872,20 +1293,13 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       };
     }
 
-    // Redirect to POST handler logic
-    const amountNum = parseInt(amount ?? "100", 10);
-    const MOCK_USDC = "0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb";
-
-    return {
-      success: true,
-      provider: "faucet",
-      mock: !process.env.DEPLOYER_PRIVATE_KEY,
-      walletAddress: wallet,
-      amount: `${amountNum}.00`,
-      currency: "mUSDC",
-      network: "sepolia",
-      tokenContract: MOCK_USDC,
-      note: "Use POST /api/faucet/usdc for real on-chain minting. GET is for quick testing.",
-    };
+    // GET never mints, so it never reports a drip. It used to answer success with an
+    // amount for any wallet.
+    void amount;
+    return reply.status(405).send({
+      success: false,
+      error: "use_post",
+      message: "GET does not mint. POST /api/faucet/usdc with { walletAddress, amount } to mint.",
+    });
   });
 }

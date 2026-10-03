@@ -464,6 +464,21 @@ export class JobOffersStore {
     return n;
   }
 
+  /**
+   * True when ANY offer (any status) was posted by `operatorId`, compared
+   * trimmed + case-insensitively. Used by identity binding (WP-A fold F3): an
+   * id that already posts offers is claimed and cannot be re-claimed through
+   * unverified self-service. Read-only.
+   */
+  hasOfferPostedBy(operatorId: string): boolean {
+    const needle = operatorId.trim().toLowerCase();
+    if (!needle) return false;
+    for (const o of this.offers.values()) {
+      if (typeof o.posterDid === "string" && o.posterDid.trim().toLowerCase() === needle) return true;
+    }
+    return false;
+  }
+
   /** Look up an offer by idempotency key (if any). */
   getByIdempotencyKey(key: string): JobOffer | undefined {
     const id = this.idempotencyIndex.get(key);

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { CdpConfig, CdpNetwork, CdpWallet } from "./types.js";
 
 /**
@@ -110,8 +110,24 @@ export class CdpWalletClient {
   }
 }
 
-/** Deterministic-shape mock EVM address (20 bytes). */
+/**
+ * Every address the client mints in MOCK mode starts with this prefix: twelve
+ * zero bytes, then eight random bytes. A mock wallet is an address NO key
+ * controls, so money sent to it is unrecoverable — it must be recognizable by
+ * construction, forever, without a lookup table. (The previous mock address was
+ * random hex with only a UUID version/variant nibble as a weak tell, so a
+ * gateway could not tell a mock wallet from a real one.) A real CDP smart
+ * account landing in this range is a 2^-96 event; a false positive only ever
+ * REFUSES an onramp, which is the safe direction.
+ */
+export const CDP_MOCK_ADDRESS_PREFIX = "0x000000000000000000000000";
+
+/** True when `address` was minted by a mock-mode CdpWalletClient (see prefix). */
+export function isCdpMockAddress(address: string): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(address) && address.toLowerCase().startsWith(CDP_MOCK_ADDRESS_PREFIX);
+}
+
+/** Mock EVM address (20 bytes), recognizable via isCdpMockAddress. */
 function mockAddress(): `0x${string}` {
-  const hex = (randomUUID() + randomUUID()).replace(/-/g, "");
-  return ("0x" + hex.slice(0, 40)) as `0x${string}`;
+  return (CDP_MOCK_ADDRESS_PREFIX + randomBytes(8).toString("hex")) as `0x${string}`;
 }
