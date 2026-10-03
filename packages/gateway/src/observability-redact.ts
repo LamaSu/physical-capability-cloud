@@ -6,6 +6,7 @@
  *
  *   - URLs. In every string, every URL-like token (a URL, a path, or a bare query or fragment) keeps
  *     its path and its parameter NAMES, and drops every query and fragment VALUE, whatever the name.
+ *     An encoded separator (%3F, %23, %26, %3D) counts as the separator.
  *   - Form-encoded strings (a query string, a form body) drop every value.
  *   - Bodies. A request body (Sentry's request.data, any "body" field) and Sentry's request cookies
  *     are dropped whole. The SDK is also told not to collect them (sentry.ts).
@@ -80,6 +81,15 @@ const TOKEN = /[^\s"'`<>\\]+/g;
 const URL_START = /^(?:[a-z][a-z0-9+.-]*:\/\/|\/|[?#])/i;
 /** A whole string that is form-encoded: name=value pairs joined by "&", nothing else. */
 const FORM = /^[^\s=&?#]+=[^\s&]*(?:&[^\s=&?#]*(?:=[^\s&]*)?)*$/;
+/**
+ * An encoded separator counts as the separator (cross-family review r6 of #441, MEDIUM 3): %3F and
+ * %23 start a query or fragment, and %26 and %3D split its pairs, in any case. So
+ * "/cb%3Fzq1%3D..." drops its value as "/cb?zq1=..." does. Where a rule reads separators, it reads
+ * them decoded, and its output shows them decoded.
+ */
+const ENCODED_SEPARATOR = /%(3f|23|26|3d)/gi;
+const SEPARATORS: Readonly<Record<string, string>> = { "3f": "?", "23": "#", "26": "&", "3d": "=" };
+const decodeSeparators = (text: string) => text.replace(ENCODED_SEPARATOR, (_match, hex: string) => SEPARATORS[hex.toLowerCase()]!);
 
 const decodedName = (name: string) => {
   try {
@@ -115,9 +125,10 @@ function dropValues(params: string): string {
  * and the parameter names stay. A fragment is treated as a query (an OAuth implicit grant puts its
  * token there), and a URL with a fragment and no query is covered too.
  */
-export function withoutQueryValues(url: string): string {
+export function withoutQueryValues(raw: string): string {
+  const url = decodeSeparators(raw);
   const cut = url.search(/[?#]/);
-  if (cut === -1) return url;
+  if (cut === -1) return raw;
   const hash = url.indexOf("#", cut);
   let out = url.slice(0, cut);
   if (url[cut] === "?") out += `?${dropValues(url.slice(cut + 1, hash === -1 ? undefined : hash))}`;
@@ -127,12 +138,14 @@ export function withoutQueryValues(url: string): string {
 
 /** Text with every URL-like token's query and fragment values dropped; a form-encoded string drops every value. */
 function withoutUrlValues(text: string): string {
-  if (FORM.test(text.trim())) return dropValues(text);
-  return text.replace(TOKEN, (token) => {
+  const whole = decodeSeparators(text.trim());
+  if (FORM.test(whole)) return dropValues(whole);
+  return text.replace(TOKEN, (raw) => {
+    const token = decodeSeparators(raw);
     const cut = token.search(/[?#]/);
-    if (cut === -1) return token;
+    if (cut === -1) return raw;
     // A URL, or any token whose query or fragment holds a name=value pair ("callback?code=...").
-    return URL_START.test(token) || token.slice(cut).includes("=") ? withoutQueryValues(token) : token;
+    return URL_START.test(token) || token.slice(cut).includes("=") ? withoutQueryValues(token) : raw;
   });
 }
 
