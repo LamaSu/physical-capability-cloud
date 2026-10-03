@@ -235,7 +235,11 @@ describe("demo mode (?demo=1)", () => {
 // ── Funded Key tab (live) ────────────────────────────────────────────────────
 
 /** The checkout URL POST /api/fiat-ramp/coinbase/onramp builds for `wallet` (packages/gateway/src/routes/fiat-ramp.ts). */
-function coinbaseCheckout(wallet: string, destinations: Record<string, string[]> = { [wallet]: ["base"] }): string {
+function coinbaseCheckout(
+  wallet: string,
+  destinations: Record<string, string[]> = { [wallet]: ["base"] },
+  overrides: Record<string, string | null> = {},
+): string {
   const params = new URLSearchParams({
     appId: "app-123",
     defaultAsset: "USDC",
@@ -244,6 +248,10 @@ function coinbaseCheckout(wallet: string, destinations: Record<string, string[]>
     addresses: JSON.stringify(destinations),
     assets: JSON.stringify(["USDC"]),
   });
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v === null) params.delete(k);
+    else params.set(k, v);
+  }
   return `https://pay.coinbase.com/buy/select-asset?${params.toString()}`;
 }
 
@@ -531,6 +539,56 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     await click(button("Issue scoped key"));
     expect(text()).toContain("Enter the agent's address");
     expect(requests(stub)).toEqual(["POST /api/fiat-ramp/cdp/wallet"]);
+  });
+
+  it.each([
+    ["says it isn't usable yet", { usableNow: false }],
+    ["doesn't say whether it is usable", { usableNow: undefined }],
+  ])("a wallet answer that %s is never called usable, and gets no card funding (astra 408d HIGH)", async (_what, change) => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false, usableNow: true, ...change } },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    expect(text()).not.toContain("Usable on PCC now");
+    expect(button(/Add funds with a card/)).toBeUndefined();
+  });
+
+  it.each([
+    ["is locked to another asset", { defaultAsset: "BTC", assets: JSON.stringify(["BTC"]) }],
+    ["defaults to another asset", { defaultAsset: "ETH" }],
+    ["lets the buyer pick another asset too", { assets: JSON.stringify(["USDC", "BTC"]) }],
+    ["has no asset lock", { assets: null }],
+    ["defaults to another network", { defaultNetwork: "ethereum" }],
+  ])("a checkout whose URL %s is not offered (astra 408d HIGH)", async (_what, overrides) => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false, usableNow: true } },
+      "/api/fiat-ramp/coinbase/onramp": { status: 200, body: onrampAnswer(WALLET_2, coinbaseCheckout(WALLET_2, undefined, overrides)) },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    await click(button(/Add funds with a card/));
+    expect([...container.querySelectorAll("a")].some((a) => a.textContent?.includes("Open card checkout"))).toBe(false);
+  });
+
+  it("a permission that starts in the future reads PENDING, never ACTIVE (astra 408d HIGH)", async () => {
+    const day = 24 * 3600 * 1000;
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false, usableNow: true } },
+      "/api/fiat-ramp/cdp/spend-permission": {
+        status: 200,
+        body: permissionAnswer({ start: new Date(Date.now() + day).toISOString(), expiresAt: new Date(Date.now() + 2 * day).toISOString() }),
+      },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    typeInto(container.querySelector('input[placeholder="Agent address (0x…)"]'), "0x4444444444444444444444444444444444444444");
+    await click(button("Issue scoped key"));
+    expect(text()).toContain("PENDING");
+    expect(text()).not.toContain("ACTIVE");
   });
 
   it("a gateway error is shown with its reason, and no wallet appears", async () => {

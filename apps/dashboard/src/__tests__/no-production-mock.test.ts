@@ -313,6 +313,21 @@ describe("no production mock (ratchet)", () => {
     expect(pagesWithoutHonestyTest(pages, ['import { OtherProbePage } from "../OtherProbePage.js";'])).toEqual(pages);
   });
 
+  it("an import that renders nothing, or a test that asserts nothing, doesn't count (astra 408d MEDIUM)", () => {
+    for (const test of [
+      'import "../ProbePage.js";',
+      'import { ProbePage } from "../ProbePage.js";\nconst unused = ProbePage;',
+      'import { ProbePage } from "../ProbePage.js";\nrender(<ProbePage />);',
+    ]) {
+      expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test]), test).toEqual(["pages/ProbePage.tsx"]);
+    }
+  });
+
+  it("one page's test doesn't cover a page with the same name in another directory (astra 408d MEDIUM)", () => {
+    const test = 'import { ProbePage } from "../ProbePage.js";\nit("x", () => {\n  render(<ProbePage />);\n  expect(text()).toContain("unavailable");\n});';
+    expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx", "pages/probe/ProbePage.tsx"], [test])).toEqual(["pages/probe/ProbePage.tsx"]);
+  });
+
   it("the scanner detects each pattern (self-test)", () => {
     const sample = [
       "const MOCK_TREASURY = {};",
