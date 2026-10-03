@@ -16,13 +16,20 @@
  *      now exercised through the real crank);
  *   3. a Disputed escrow is reported terminal_other (settled=false) and NEVER released.
  *
+ * N79 round 3: the keeper owns an escrow while it drives it (a lease taken through the
+ * ownership module, escrow-refund.ts), and that module works on the gateway's real store. So
+ * this test runs the keeper over the REAL in-memory store (`getRepos()`), with the escrow and
+ * milestone rows inserted there: the claim, the completion record and the hand-back all run
+ * for real. The assertions read the rows back (escrow `completed`, milestones `released`).
+ *
  * Env note: escrow-client.ts captures PCC_GATEWAY_PRIVATE_KEY / PCC_NETWORK at
  * module load, so all gateway modules are DYNAMICALLY imported inside beforeAll,
  * AFTER the anvil env is set. Nothing gateway-side is imported statically.
  *
- * Requires `anvil` on PATH and a built fixture artifact (forge build). When either
- * is absent the suite skips with a clear message rather than hard-failing (CI hosts
- * without Foundry). AGENT_NAME: keeper-opus
+ * Requires `anvil` (on PATH, or ANVIL_BIN) and a built fixture artifact (forge build
+ * --no-dynamic-test-linking in packages/contracts). When either is absent the suite
+ * skips with a clear message rather than hard-failing (CI hosts without Foundry).
+ * AGENT_NAME: keeper-opus
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -77,21 +84,38 @@ const FIXTURE_ARTIFACT = resolve(
   "../../../contracts/out/SettlementKeeperForkFixture.sol/SettlementKeeperForkFixture.json",
 );
 
-// A fake repos whose escrows.findAll() feeds the keeper one escrow row; updateStatus is captured.
-function makeRepos(rows: { id: string; contractAddress: string; status: string; version?: string | null }[]) {
-  const updates: { id: string; status: string }[] = [];
-  const repos = {
-    escrows: {
-      findAll: () => rows,
-      updateStatus: (id: string, status: string) => {
-        updates.push({ id, status });
-        const r = rows.find((x) => x.id === id);
-        if (r) r.status = status;
-        return r;
-      },
-    },
-  } as any;
-  return { repos, updates };
+/**
+ * Insert an escrow row (and its one milestone row) into the real in-memory store, as paid-job-flow writes them.
+ *
+ * Fixture correction (round 5, the R5-H2b identity check): the local row's `stepId` must be
+ * the exact string the fixture CONTRACT hashed on-chain for its one milestone — `"step-keeper-fork-001"`
+ * (SettlementKeeperForkFixture.sol: `stepId = keccak256("step-keeper-fork-001")`) — not an arbitrary local
+ * convention, since this test reads the REAL chain rather than a synthetic one. Fixture-only — no assertion in
+ * this file changed.
+ */
+function seedEscrow(id: string, contractAddress: string, status: string): void {
+  const now = new Date().toISOString();
+  getRepos().escrows.insert({
+    id,
+    cwmId: `cwm-${id}`,
+    contractAddress,
+    payer: "0x0000000000000000000000000000000000000001",
+    totalAmount: "100",
+    currency: "USDC",
+    status,
+    createdAt: now,
+    deadline: new Date(Date.now() + 86_400_000).toISOString(),
+    version: "v2",
+  });
+  getRepos().escrows.insertMilestone({ id: `ms-${id}`, escrowId: id, stepId: "step-keeper-fork-001", amount: "100", status: "funded", bondAmount: "0" });
+}
+
+/** What the store says about an escrow: its row status and every milestone row status. */
+function rows(id: string): { escrow: string; milestones: string[] } {
+  return {
+    escrow: getRepos().escrows.findById(id)!.status,
+    milestones: getRepos().escrows.findMilestonesByEscrow(id).map((m) => m.status),
+  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -111,6 +135,11 @@ let driveSettlement: typeof import("../services/settlement-crank.js").driveSettl
 let runKeeperSweep: typeof import("../services/settlement-keeper.js").runKeeperSweep;
 let getMilestoneV2: typeof import("../contracts/escrow-client.js").getMilestoneV2;
 let MilestoneStatusV2: typeof import("../contracts/escrow-client.js").MilestoneStatusV2;
+let initStore: typeof import("../db.js").initStore;
+let closeStore: typeof import("../db.js").closeStore;
+let getRepos: typeof import("../db.js").getRepos;
+let beginSettlement: typeof import("../services/escrow-refund.js").beginSettlement;
+let endSettlement: typeof import("../services/escrow-refund.js").endSettlement;
 
 // Deployed fixtures.
 let releaseEscrow: Address;
@@ -194,6 +223,9 @@ beforeAll(async () => {
   ({ driveSettlement } = await import("../services/settlement-crank.js"));
   ({ runKeeperSweep } = await import("../services/settlement-keeper.js"));
   ({ getMilestoneV2, MilestoneStatusV2 } = await import("../contracts/escrow-client.js"));
+  ({ initStore, closeStore, getRepos } = await import("../db.js"));
+  ({ beginSettlement, endSettlement } = await import("../services/escrow-refund.js"));
+  initStore({ seed: false }); // the real in-memory store (PCC_DB_PATH=:memory: from vitest.setup.ts)
 
   // Deploy both fixtures against the single anvil instance.
   const rel = await deployFixture(false);
@@ -209,6 +241,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   if (anvil && !anvil.killed) anvil.kill("SIGKILL");
+  if (available) closeStore();
 });
 
 describe("settlement keeper — live anvil fork", () => {
@@ -246,10 +279,8 @@ describe("settlement keeper — live anvil fork", () => {
     await testClient.mine({ blocks: 1 });
 
     const now = await chainNow();
-    const { repos, updates } = makeRepos([
-      { id: "esc-release", contractAddress: releaseEscrow, status: "funded", version: "v2" },
-    ]);
-    const sweep1 = await runKeeperSweep(repos, { nowSeconds: now });
+    seedEscrow("esc-release", releaseEscrow, "funded");
+    const sweep1 = await runKeeperSweep(getRepos(), { nowSeconds: now });
 
     expect(sweep1.released).toBe(1);
     expect(sweep1.milestones[0].disposition).toBe("released");
@@ -257,15 +288,18 @@ describe("settlement keeper — live anvil fork", () => {
     m = await getMilestoneV2(0, releaseEscrow);
     expect(m.status).toBe(MilestoneStatusV2.Released);
     expect(await usdcBalance(releaseUsdc, releaseEscrow)).toBe(0n);
-    // Escrow row reconciled to completed (sole milestone released).
-    expect(updates).toContainEqual({ id: "esc-release", status: "completed" });
+    // Escrow row reconciled to completed (sole milestone released), and its milestone row says released.
+    expect(rows("esc-release")).toEqual({ escrow: "completed", milestones: ["released"] });
+    expect(sweep1.reconciledCompleted).toBe(1);
+    // The keeper's lease ended with the sweep: the completed escrow is closed, not busy.
+    expect(beginSettlement({ escrowId: "esc-release" }).disposition).toBe("blocked");
 
-    // ── Idempotency: re-running the keeper does NOT double-release. ──
+    // ── Idempotency: re-running the keeper does NOT double-release. The DB row lags the chain again
+    //    (as after a crash before the reconcile), so the keeper reads the escrow once more. ──
     const opBalanceAfter1 = await usdcBalance(releaseUsdc, releaseEscrow); // 0
-    const { repos: repos2 } = makeRepos([
-      { id: "esc-release", contractAddress: releaseEscrow, status: "funded", version: "v2" },
-    ]);
-    const sweep2 = await runKeeperSweep(repos2, { nowSeconds: await chainNow() });
+    getRepos().escrows.updateStatus("esc-release", "funded");
+    getRepos().escrows.updateMilestoneStatus("ms-esc-release", "funded");
+    const sweep2 = await runKeeperSweep(getRepos(), { nowSeconds: await chainNow() });
 
     expect(sweep2.released).toBe(0); // nothing new to release
     expect(sweep2.milestones[0].disposition).toBe("already_released");
@@ -273,6 +307,8 @@ describe("settlement keeper — live anvil fork", () => {
     expect(await usdcBalance(releaseUsdc, releaseEscrow)).toBe(opBalanceAfter1);
     m = await getMilestoneV2(0, releaseEscrow);
     expect(m.status).toBe(MilestoneStatusV2.Released);
+    // ...and the lagging row is reconciled to what the chain says.
+    expect(rows("esc-release")).toEqual({ escrow: "completed", milestones: ["released"] });
   }, 60_000);
 
   it("does NOT settle a Disputed escrow — reports terminal_other, leaves funds escrowed", async () => {
@@ -284,17 +320,18 @@ describe("settlement keeper — live anvil fork", () => {
     const escrowedBefore = await usdcBalance(disputeUsdc, disputeEscrow);
 
     const now = await chainNow();
-    const { repos, updates } = makeRepos([
-      { id: "esc-dispute", contractAddress: disputeEscrow, status: "active", version: "v2" },
-    ]);
-    const sweep = await runKeeperSweep(repos, { nowSeconds: now });
+    seedEscrow("esc-dispute", disputeEscrow, "active");
+    const sweep = await runKeeperSweep(getRepos(), { nowSeconds: now });
 
     expect(sweep.released).toBe(0);
     expect(sweep.terminalOther).toBe(1);
     expect(sweep.milestones[0].disposition).toBe("terminal_other");
     expect(sweep.milestones[0].reason).toBe("disputed");
-    // Never reconciled to completed; money still frozen in the escrow.
-    expect(updates).toHaveLength(0);
+    // Never reconciled to completed; money still frozen in the escrow. Rows untouched, and no lease left behind.
+    expect(rows("esc-dispute")).toEqual({ escrow: "active", milestones: ["funded"] });
+    const probe = beginSettlement({ escrowId: "esc-dispute" });
+    expect(probe.disposition).toBe("acquired"); // not busy: the sweep left no lease
+    if ("claim" in probe) endSettlement(probe.claim);
     m = await getMilestoneV2(0, disputeEscrow);
     expect(m.status).toBe(MilestoneStatusV2.Disputed);
     // Escrow still holds funds (amount + the challenger bond) — nothing released.

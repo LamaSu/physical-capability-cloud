@@ -22,6 +22,14 @@ import {
   encodeApproveAndReleaseV3,
 } from "../contracts/escrow-client.js";
 import { getRepos } from "../db.js";
+import {
+  beginSettlement,
+  endSettlement,
+  NON_RELEASABLE_ESCROW_STATUSES,
+  recordMilestoneReleased,
+  releaseEscrowFromSettlement,
+  type SettlementClaim,
+} from "../services/escrow-refund.js";
 
 /**
  * Look up an escrow row by its on-chain contract address. The single DB query
@@ -46,6 +54,59 @@ function findEscrowRow(contractAddress: string) {
     if (row) return row;
   }
   return undefined;
+}
+
+/**
+ * Record a release that went through. It happened on-chain, so a failed bookkeeping write is never raised and never
+ * reported as a failed release; but it is not hidden either (astra round 3, F5): it is logged as an error and the caller
+ * is told (`false`), so the response can say `recorded: false, reconcile: "required"`. The claim is NOT handed back
+ * after a confirmed release: the escrow stays owned, so no refund can land on funds that moved. Nothing here heals a V1
+ * or V3 escrow left that way; the keeper reconciles V2 only. Returns whether the release was recorded.
+ */
+function recordRelease(milestoneIndex: number, claim: SettlementClaim | undefined, result: unknown): boolean {
+  if (!claim) return true; // an escrow the gateway does not know has no row to record on
+  try {
+    recordMilestoneReleased(milestoneIndex, claim);
+    return true;
+  } catch (err) {
+    const tx = (result ?? {}) as { transactionHash?: string; txHash?: string };
+    console.error("[escrow] settlement_record_failed", {
+      escrowId: claim.escrowId,
+      milestoneIndex,
+      txHash: tx.transactionHash ?? tx.txHash,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+/**
+ * N79: an escrow the gateway has given back (its job failed or was cancelled: `refund_pending` on a chain escrow,
+ * `refunded` once the refund is done) is never moved toward a release. The evidence, attestation and release routes
+ * call this first, on every path (V1, V2, V3). A dispute stays open: V2 refunds only through resolveDispute.
+ * Replies 409 and returns true when it refuses. Fails closed: when the escrow registry cannot be read, replies 503
+ * and sends nothing.
+ */
+function refuseGivenBackEscrow(reply: FastifyReply, contractAddress: string): boolean {
+  let row: ReturnType<typeof findEscrowRow>;
+  try {
+    row = findEscrowRow(contractAddress);
+  } catch {
+    reply.status(503).send({
+      error: "escrow_registry_unavailable",
+      message: "The escrow registry could not be read, so nothing was sent. Try again shortly.",
+    });
+    return true;
+  }
+  if (row && NON_RELEASABLE_ESCROW_STATUSES.has(row.status)) {
+    reply.status(409).send({
+      error: "escrow_refunded",
+      message: "This escrow was given back; it can no longer be released.",
+      escrowStatus: row.status,
+    });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -359,60 +420,103 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
-      // V2 (EAS) path: release takes ONLY the milestone index — the binding
-      // attestation was supplied at submitAttestation time (by UID), so no
-      // attestation struct is re-passed here (unlike V1). Challenge window must
-      // have expired (the contract enforces this and reverts otherwise).
-      if (useEasV2()) {
-        if (!escrowWriteEnabled()) {
-          return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
-        }
-        try {
-          const version = resolveEscrowVersion(address);
-          const result =
-            version === "v3"
-              ? await releaseMilestoneV3(idx, address as Address)
-              : await releaseMilestoneV2(idx, address as Address);
-          return {
-            ...result,
-            action: "release",
-            escrow: address,
-            milestoneIndex: idx,
-            path: version === "v3" ? "eas-v3-mode-b" : "eas-v2",
-          };
-        } catch (err) {
-          return reply.status(502).send({ error: "chain_write_failed", message: err instanceof Error ? err.message : String(err) });
-        }
-      }
-      const body = req.body as { attestation?: OracleAttestation } | undefined;
-      if (!body?.attestation || !body.attestation.escrowAddress) {
-        return reply.status(400).send({
-          error: "attestation_required",
-          message:
-            "An oracle-signed attestation struct is required in the request body.",
+      if (refuseGivenBackEscrow(reply, address)) return reply; // N79: given back, never released
+      // N79: this release owns the escrow while the chain call is out (a lease, taken synchronously, before any await),
+      // so no refund lands underneath it and no second settlement acts on it. An escrow another settlement holds, or
+      // one that is not releasable, is refused before anything is sent. An address the gateway does not know has
+      // nothing to protect. Any exit that did not release hands the escrow back (and reconciles a refund if the
+      // escrow's job ended meanwhile); the lease always ends with the request.
+      const begun = beginSettlement({ contractAddress: address });
+      if (begun.disposition === "busy") {
+        return reply.status(409).send({
+          error: "settlement_in_progress",
+          message: "Another settlement is acting on this escrow; try again once it finishes.",
+          escrowStatus: begun.escrowStatus,
         });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
-      const activityResult = await releaseMilestoneActivity.invoke({
-        workflowRunId: `escrow:${address}`,
-        activityId: `release:${address}:${idx}`,
-        input: [
-          address as Address,
-          idx,
-          body.attestation,
-          actorId,
-          req.ip,
-          req.headers["user-agent"],
-        ] as const,
-        actorId,
-        clientKey: req.headers["idempotency-key"] as string | undefined,
-        httpMethod: "POST",
-        httpPath: `/api/escrow/chain/${address}/release/${idx}`,
-      });
-      if (!activityResult.ok) {
-        return sendActivityError(reply, activityResult.error);
+      if (begun.disposition === "blocked") {
+        return reply.status(409).send({
+          error: "escrow_not_releasable",
+          message: "This escrow is not in a state it can be released from.",
+          escrowStatus: begun.escrowStatus,
+        });
       }
-      return activityResult.value;
+      const claim = "claim" in begun ? begun.claim : undefined;
+      let released = false;
+      try {
+        // V2 (EAS) path: release takes ONLY the milestone index — the binding
+        // attestation was supplied at submitAttestation time (by UID), so no
+        // attestation struct is re-passed here (unlike V1). Challenge window must
+        // have expired (the contract enforces this and reverts otherwise).
+        if (useEasV2()) {
+          if (!escrowWriteEnabled()) {
+            return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
+          }
+          try {
+            const version = resolveEscrowVersion(address);
+            const result =
+              version === "v3"
+                ? await releaseMilestoneV3(idx, address as Address)
+                : await releaseMilestoneV2(idx, address as Address);
+            released = true;
+            const recorded = recordRelease(idx, claim, result);
+            return {
+              ...result,
+              action: "release",
+              escrow: address,
+              milestoneIndex: idx,
+              path: version === "v3" ? "eas-v3-mode-b" : "eas-v2",
+              ...(recorded ? {} : { recorded: false, reconcile: "required" }),
+            };
+          } catch (err) {
+            return reply.status(502).send({ error: "chain_write_failed", message: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        const body = req.body as { attestation?: OracleAttestation } | undefined;
+        if (!body?.attestation || !body.attestation.escrowAddress) {
+          return reply.status(400).send({
+            error: "attestation_required",
+            message:
+              "An oracle-signed attestation struct is required in the request body.",
+          });
+        }
+        const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+        const activityResult = await releaseMilestoneActivity.invoke({
+          workflowRunId: `escrow:${address}`,
+          activityId: `release:${address}:${idx}`,
+          input: [
+            address as Address,
+            idx,
+            body.attestation,
+            actorId,
+            req.ip,
+            req.headers["user-agent"],
+          ] as const,
+          actorId,
+          clientKey: req.headers["idempotency-key"] as string | undefined,
+          httpMethod: "POST",
+          httpPath: `/api/escrow/chain/${address}/release/${idx}`,
+        });
+        if (!activityResult.ok) {
+          return sendActivityError(reply, activityResult.error);
+        }
+        released = true;
+        if (recordRelease(idx, claim, activityResult.value)) return activityResult.value;
+        return {
+          ...(typeof activityResult.value === "object" && activityResult.value !== null ? activityResult.value : { result: activityResult.value }),
+          recorded: false,
+          reconcile: "required",
+        };
+      } finally {
+        if (claim && !released) {
+          try {
+            releaseEscrowFromSettlement(claim, claim.jobId);
+          } catch {
+            // best-effort
+          }
+        }
+        endSettlement(claim);
+      }
     },
   );
 
@@ -501,6 +605,7 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      if (refuseGivenBackEscrow(reply, address)) return reply; // N79: given back, never released
       const body = req.body as { evidenceBundleHash?: string } | undefined;
       if (!body?.evidenceBundleHash) {
         return reply.status(400).send({ error: "evidenceBundleHash is required" });
@@ -555,6 +660,7 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      if (refuseGivenBackEscrow(reply, address)) return reply; // N79: given back, never released
       // V2 (EAS) path: the body carries an EAS UID (bytes32) instead of the full
       // oracle attestation struct. The contract validates the UID against EAS
       // on-chain. Accept `easUid` (preferred) or legacy `attestationHash`.

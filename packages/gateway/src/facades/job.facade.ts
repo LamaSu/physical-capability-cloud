@@ -23,6 +23,7 @@ import {
   populateJobList,
 } from "./populators/job.populator.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { setJobStatusWithRefund } from "../services/escrow-refund.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
@@ -188,7 +189,8 @@ export class JobFacade extends BaseFacade {
     progress?: number,
   ): Promise<Result<JobDTO>> {
     return this.execute("updateStatus", async () => {
-      const updated = this.repos.jobs.updateStatus(jobId, status, progress);
+      // N79: a `failed`/`cancelled` job gives its escrow back in the same transaction as this write.
+      const { job: updated } = setJobStatusWithRefund(jobId, status, progress);
       if (!updated) {
         throw new NotFoundError("job", jobId);
       }
@@ -309,7 +311,7 @@ export class JobFacade extends BaseFacade {
       } catch (error) {
         // Roll back DB record
         try {
-          this.repos.jobs.updateStatus(jobId, "failed");
+          setJobStatusWithRefund(jobId, "failed");
         } catch {
           // best-effort rollback
         }

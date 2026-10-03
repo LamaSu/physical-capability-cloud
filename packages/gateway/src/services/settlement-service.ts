@@ -13,9 +13,18 @@
 
 import type { EvidenceBundle } from "@pcc/spec";
 import { isFabricated } from "@pcc/spec";
+import { isAddress, getAddress } from "viem";
 import type { Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos } from "../db.js";
+import {
+  beginSettlement,
+  endSettlement,
+  escrowForJob,
+  givenBackEscrow,
+  recordMilestoneReleased,
+  releaseEscrowFromSettlement,
+} from "./escrow-refund.js";
 import {
   submitEvidence as onChainSubmitEvidence,
   releaseMilestone as onChainReleaseMilestone,
@@ -38,6 +47,13 @@ export interface SettlementResult {
   releaseTxHash?: string;
   settled: boolean;
   error?: string;
+  /**
+   * N79 round 4 (R4-M3, astra 126b Q5 MEDIUM): set (to `false`), with `reconcile`, only when auto-release's
+   * underlying {@link ReleaseResult} came back CONFIRMED on-chain but its bookkeeping failed. `settled` stays
+   * chain truth either way; this says the DB still needs reconciling. Absent on a normal settlement.
+   */
+  recorded?: false;
+  reconcile?: "required";
 }
 
 export interface ReleaseResult {
@@ -45,6 +61,13 @@ export interface ReleaseResult {
   txHash: string;
   status: "released" | "failed";
   error?: string;
+  /**
+   * Set (to `false`) only when the release is CONFIRMED on-chain but recording it in the database failed (N79 round 3,
+   * F5). The escrow stays owned (`completing`), `reconcile: "required"` says it needs reconciling, and the failure is
+   * logged. Absent on a normal release.
+   */
+  recorded?: false;
+  reconcile?: "required";
 }
 
 export interface ProcessEvidenceOptions {
@@ -77,6 +100,13 @@ export class SettlementService {
     options: ProcessEvidenceOptions = {},
   ): Promise<SettlementResult> {
     const { milestoneIndex = 0, contractAddress, autoRelease = false, attestation } = options;
+
+    // N79 round 5 (R5-H1, astra 126e Q2 HIGH): true ONLY once this bundle's row is confirmed to hold exactly what
+    // this call submits — inserted fresh, or found as an exact re-delivery. Any failure before that (a primary-key
+    // collision with a DIFFERENT bundle's content, an insert that fails and cannot even be re-read, a store that
+    // will not open) leaves it false. Gates the on-chain submit, the job pointer write and auto-release together:
+    // a job must never be pointed at, or settled on, evidence this call did not verifiably persist.
+    let bundlePersisted = false;
 
     const result: SettlementResult = {
       jobId,
@@ -191,18 +221,52 @@ export class SettlementService {
               try {
                 const repos = getRepos();
 
-                repos.evidence.insert({
-                  id: bundle.id,
-                  jobId: bundle.jobId,
-                  stepId: bundle.stepId,
-                  kernelId: bundle.kernelId,
-                  assuranceTier: bundle.assuranceTier,
-                  bundleHash: bundle.bundleHash,
-                  kernelSignature: bundle.kernelSignature,
-                  createdAt: bundle.createdAt,
-                });
+                try {
+                  repos.evidence.insert({
+                    id: bundle.id,
+                    jobId: bundle.jobId,
+                    stepId: bundle.stepId,
+                    kernelId: bundle.kernelId,
+                    assuranceTier: bundle.assuranceTier,
+                    bundleHash: bundle.bundleHash,
+                    kernelSignature: bundle.kernelSignature,
+                    createdAt: bundle.createdAt,
+                  });
+                  bundlePersisted = true;
+                } catch (insertErr) {
+                  // N79 round 5 (R5-H1, astra 126e Q2 HIGH): the insert can throw because `bundle.id` already
+                  // exists — most often an EXACT re-delivery of the same bundle (idempotent: a retried call, a
+                  // duplicate network delivery), which must proceed exactly as a fresh insert would. Anything else
+                  // under that same id — a different job/step/kernel/tier, or (loudest) a DIFFERENT hash — is a
+                  // genuine conflict: this call's evidence was NOT persisted, so it must not be submitted on-chain
+                  // or pointed at by the job. A row that cannot even be re-read throws to the outer catch below:
+                  // a bare persistence failure, same consequence.
+                  const existing = repos.evidence.findById(bundle.id);
+                  const exactReDelivery =
+                    existing !== undefined &&
+                    existing.jobId === bundle.jobId &&
+                    existing.stepId === bundle.stepId &&
+                    existing.kernelId === bundle.kernelId &&
+                    existing.assuranceTier === bundle.assuranceTier &&
+                    existing.bundleHash === bundle.bundleHash;
+                  if (exactReDelivery) {
+                    bundlePersisted = true;
+                    console.warn(`[settlement] Evidence bundle ${bundle.id} already persisted identically — idempotent re-delivery, proceeding.`);
+                  } else {
+                    result.error = existing ? "evidence_bundle_conflict" : "evidence_persistence_failed";
+                    console.warn(
+                      `[settlement] DB persistence failed for bundle ${bundle.id}: ${
+                        existing
+                          ? `an existing row under this id does not match this bundle (job/step/kernel/tier/hash) — refusing to settle on it`
+                          : insertErr instanceof Error
+                            ? insertErr.message
+                            : String(insertErr)
+                      }`,
+                    );
+                  }
+                }
 
-                if (bundle.events.length > 0) {
+                if (bundlePersisted && bundle.events.length > 0) {
                   repos.evidence.insertEvents(
                     bundle.events.map((ev) => ({
                       id: ev.id,
@@ -216,12 +280,18 @@ export class SettlementService {
                   );
                 }
 
+                // This generic step marker is unconditional, as it always was: it commits the job to nothing
+                // (unlike Step 3's `evidence_submitted` + `evidenceBundleId`, which IS gated on `bundlePersisted`
+                // below). Left exactly as every other caller's status reads it today.
                 repos.jobs.updateStatus(jobId, "evidence_stored");
-                traceCollector.endSpan({ traceId: localTraceId, spanId: dbSpanId, status: "ok" });
+                traceCollector.endSpan({ traceId: localTraceId, spanId: dbSpanId, status: bundlePersisted ? "ok" : "error" });
               } catch (err) {
                 console.warn("[settlement] DB persistence failed:", err instanceof Error ? err.message : err);
                 traceCollector.endSpan({ traceId: localTraceId, spanId: dbSpanId, status: "error" });
-                // Non-fatal — the bundle is still valid
+                // Non-fatal for the call, but (R5-H1) a bundle row never confirmed above is unverified evidence:
+                // `bundlePersisted` stays false, so it is neither submitted on-chain nor pointed at. A failure
+                // AFTER the row was confirmed (its events, the step marker) leaves that row valid, as before.
+                if (!bundlePersisted && !result.error) result.error = "evidence_persistence_failed";
               }
             },
           );
@@ -251,7 +321,12 @@ export class SettlementService {
               },
             },
             async () => {
-              if (isWriteEnabled() && contractAddress && !fabricatedBlocksSettlement) {
+              // N79 round 5 (R5-H1, astra 126e Q2 HIGH): `bundlePersisted` gates this whole step. A bundle this
+              // call could not confirm as persisted (a genuine DB failure, or a PK collision with DIFFERENT
+              // content under the same id) is never submitted on-chain, and the job is never pointed at it —
+              // settling on evidence this call did not actually record would be exactly the hole R4-H2 closed for
+              // the latest-row fallback, reopened through a different door.
+              if (bundlePersisted && isWriteEnabled() && contractAddress && !fabricatedBlocksSettlement) {
                 try {
                   const addr = contractAddress as Address;
                   const bundleHashHex = bundle.bundleHash.startsWith("0x")
@@ -263,7 +338,23 @@ export class SettlementService {
 
                   try {
                     const repos = getRepos();
-                    repos.jobs.updateStatus(jobId, "evidence_submitted");
+                    // N79 round 4 (R4-H2, astra 126b Q4 HIGH): record the EXACT bundle this call just submitted, in
+                    // the SAME write that marks the job evidence_submitted. Resume requires this id (below) and no
+                    // longer falls back to "whatever evidence row is latest" — a relay row appended after this call
+                    // must never become the hash a resume settles on.
+                    // N79 round 5 (R5-H1): defence in depth — re-verify, right before this write, that the row
+                    // under `bundle.id` still holds THIS bundle's hash. `bundlePersisted` already gated getting
+                    // here; this re-check is the last line against any theoretical change to that row in between.
+                    const storedRow = repos.evidence.findById(bundle.id);
+                    if (!storedRow || storedRow.bundleHash !== bundle.bundleHash) {
+                      bundlePersisted = false;
+                      result.error = "evidence_bundle_conflict";
+                      console.error(
+                        `[settlement] Refusing to point job ${jobId} at bundle ${bundle.id}: the stored row's hash no longer matches what was just submitted on-chain.`,
+                      );
+                    } else {
+                      repos.jobs.update(jobId, { evidenceBundleId: bundle.id, status: "evidence_submitted" });
+                    }
                   } catch {
                     // DB update non-fatal
                   }
@@ -363,7 +454,9 @@ export class SettlementService {
               },
             },
             async () => {
-              if (autoRelease && isWriteEnabled() && contractAddress && attestation && !fabricatedBlocksSettlement) {
+              // N79 round 5 (R5-H1): the same gate as the evidence submit above — auto-release pays out against
+              // THIS call's evidence, so it must not fire when that evidence was never confirmed persisted either.
+              if (bundlePersisted && autoRelease && isWriteEnabled() && contractAddress && attestation && !fabricatedBlocksSettlement) {
                 try {
                   const releaseResult = await this.releaseMilestone(
                     jobId,
@@ -374,8 +467,21 @@ export class SettlementService {
                   if (releaseResult.status === "released") {
                     result.releaseTxHash = releaseResult.txHash;
                     result.settled = true;
+                    // N79 round 4 (R4-M3, astra 126b Q5 MEDIUM): a confirmed-on-chain release whose DB bookkeeping
+                    // failed (F5) sets `recorded: false` / `reconcile: "required"` on the release result. Auto-release
+                    // used to check only `status === "released"` and report an unqualified settled success, hiding
+                    // that the escrow still needs reconciling. `settled` stays chain truth either way.
+                    if (releaseResult.recorded === false) {
+                      result.recorded = false;
+                      result.reconcile = releaseResult.reconcile;
+                    }
                     pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
-                      metadata: { released: true, txHash: result.releaseTxHash, contractAddress },
+                      metadata: {
+                        released: true,
+                        txHash: result.releaseTxHash,
+                        contractAddress,
+                        ...(result.recorded === false ? { recorded: false, reconcile: result.reconcile } : {}),
+                      },
                     });
                     auditService.log({
                       eventType: "settlement.completed",
@@ -388,6 +494,7 @@ export class SettlementService {
                         txHash: result.releaseTxHash,
                         contractAddress,
                         autoRelease: true,
+                        ...(result.recorded === false ? { recorded: false, reconcile: result.reconcile } : {}),
                       },
                     });
                   }
@@ -436,6 +543,10 @@ export class SettlementService {
     attestation: OracleAttestation,
     contractAddress?: string,
   ): Promise<ReleaseResult> {
+    // write_disabled is checked FIRST, unconditionally — it needs no escrow data, and it is the one error the
+    // release activity's retry policy does NOT retry (nonRetryableErrorPatterns). Running any resolution before it
+    // risks surfacing a DIFFERENT, retryable error (no_contract_address) for a request that can never succeed
+    // regardless of how many times it is retried, and burning the activity's retry budget on it.
     if (!isWriteEnabled()) {
       return {
         jobId,
@@ -445,18 +556,70 @@ export class SettlementService {
       };
     }
 
+    // N79 round 4 (R4-H1, astra 126b Q1 HIGH); reordered round 5 (R5-M1, astra 126e Q1 MEDIUM): resolve ONE escrow
+    // BEFORE checking anything else about it. The target is the caller's contractAddress, else the JOB's own
+    // escrow's address, else the env default. When the job has its own escrow, the target must name THAT exact
+    // row: a caller supplying a different escrow's address (or a stale env default, for a job whose escrow is a
+    // per-job V2 clone) is refused here, before the chain and before any lease. Without this, the service could
+    // lease the job's own escrow while releasing, and recording the release against, a completely different one.
+    //
+    // R5-M1: this resolution + mismatch check now runs BEFORE the given-back check below. It used to run after: an
+    // UNRELATED refunded env default, or an explicitly-named refunded escrow that was not even the job's own, was
+    // checked for "given back" before the job's actual target was ever resolved — wrongly refusing a job A whose
+    // OWN escrow was perfectly fine, with the wrong error (`escrow_refunded` instead of `escrow_mismatch`, or
+    // instead of no refusal at all).
+    const jobRow = escrowForJob(jobId);
     if (!contractAddress) {
-      const defaultAddr = process.env.ESCROW_CONTRACT_ADDRESS;
-      if (!defaultAddr) {
-        return {
-          jobId,
-          txHash: "",
-          status: "failed",
-          error: "no_contract_address",
-        };
-      }
-      contractAddress = defaultAddr;
+      contractAddress = jobRow?.contractAddress ?? process.env.ESCROW_CONTRACT_ADDRESS;
     }
+    if (!contractAddress) {
+      return {
+        jobId,
+        txHash: "",
+        status: "failed",
+        error: "no_contract_address",
+      };
+    }
+    if (jobRow) {
+      let targetIsJobsOwnEscrow = false;
+      try {
+        targetIsJobsOwnEscrow =
+          contractAddress === jobRow.contractAddress ||
+          (isAddress(contractAddress) &&
+            isAddress(jobRow.contractAddress) &&
+            getAddress(contractAddress) === getAddress(jobRow.contractAddress));
+      } catch {
+        targetIsJobsOwnEscrow = false;
+      }
+      if (!targetIsJobsOwnEscrow) {
+        return { jobId, txHash: "", status: "failed", error: "escrow_mismatch" };
+      }
+    }
+
+    // N79 (round 5, R5-M1): never release an escrow the gateway has given back, and never report its job settled.
+    // Checked against ONLY the resolved row above — the job's own escrow when it has one (by `jobId`, the same
+    // lookup `jobRow` already used), or the address-resolved row when it does not (by `contractAddress`) — never
+    // both independently, which is what let an unrelated given-back row (the env default, or an explicitly-named
+    // mismatched escrow) wrongly refuse a release of a perfectly fine, already-validated target.
+    if (givenBackEscrow(jobRow ? { jobId } : { contractAddress })) {
+      return { jobId, txHash: "", status: "failed", error: "escrow_refunded" };
+    }
+
+    // N79: this release owns the resolved escrow from here, synchronously after the checks above and before any await (a
+    // lease: no refund lands while the chain call is out, and no second settlement acts on the escrow meanwhile; astra
+    // rounds 2 and 3). Claimed by ITS OWN id when the job has an escrow — never by address alone, which is what let a
+    // release lease one row and act on another — otherwise by the resolved address. An escrow another settlement
+    // holds, or one that is not releasable, is refused before the chain is touched.
+    const begun = jobRow ? beginSettlement({ escrowId: jobRow.id }) : beginSettlement({ contractAddress });
+    if (begun.disposition === "busy") {
+      return { jobId, txHash: "", status: "failed", error: "settlement_in_progress" };
+    }
+    if (begun.disposition === "blocked") {
+      return { jobId, txHash: "", status: "failed", error: `escrow_not_releasable:${begun.escrowStatus}` };
+    }
+    const claim = "claim" in begun ? begun.claim : undefined;
+    let released = false;
+    let recordFailed = false;
 
     try {
       const writeResult = await onChainReleaseMilestone(
@@ -464,6 +627,23 @@ export class SettlementService {
         attestation,
         contractAddress as Address,
       );
+      released = true;
+
+      if (claim) {
+        try {
+          recordMilestoneReleased(milestoneIndex, claim);
+        } catch (recordErr) {
+          // The release happened on-chain, so it is not reported as failed, and the claim is NOT handed back (the escrow
+          // stays owned: no refund can land on funds that moved). But the caller is told it was not recorded (F5).
+          recordFailed = true;
+          console.error("[escrow] settlement_record_failed", {
+            escrowId: claim.escrowId,
+            milestoneIndex,
+            txHash: writeResult.transactionHash,
+            error: recordErr instanceof Error ? recordErr.message : String(recordErr),
+          });
+        }
+      }
 
       try {
         const repos = getRepos();
@@ -502,6 +682,7 @@ export class SettlementService {
         jobId,
         txHash: writeResult.transactionHash,
         status: "released",
+        ...(recordFailed ? { recorded: false as const, reconcile: "required" as const } : {}),
       };
     } catch (err) {
       return {
@@ -510,6 +691,17 @@ export class SettlementService {
         status: "failed",
         error: err instanceof Error ? err.message : "release_failed",
       };
+    } finally {
+      // Nothing was released: hand the escrow back, and give it to the payer if the job ended meanwhile. The lease
+      // always ends with the call.
+      if (claim && !released) {
+        try {
+          releaseEscrowFromSettlement(claim, claim.jobId);
+        } catch {
+          // best-effort
+        }
+      }
+      endSettlement(claim);
     }
   }
 }

@@ -72,4 +72,5 @@ export type EscrowStatus =
   | "released"     // payment sent to operator
   | "disputed"     // under arbitration
   | "refunded"     // returned to user
+  | "refund_pending" // refund decided; the on-chain refund is not executed yet (N79)
   | "slashed";     // bond slashed

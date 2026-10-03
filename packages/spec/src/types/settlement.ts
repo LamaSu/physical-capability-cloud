@@ -57,12 +57,27 @@ export interface Escrow {
   /** Per-step milestones */
   milestones: EscrowMilestone[];
   /** Overall status */
-  status: "created" | "funded" | "active" | "completing" | "completed" | "disputed" | "refunded";
+  status: "created" | "funded" | "active" | "completing" | "completed" | "disputed" | "refunded" | "refund_pending";
   /** Creation time */
   createdAt: Timestamp;
   /** Deadline for entire workflow */
   deadline: Timestamp;
 }
+
+/**
+ * N79: the words an escrow and its milestones carry once a job has ended without completing (failed, cancelled,
+ * timed out) and its escrow is given back. The escrow row and every milestone row carry the same word; a job read
+ * uses the milestone row's word.
+ *   - `refunded`: the refund is done. Mock settlement completes it at once.
+ *   - `refund_pending`: a chain escrow's refund is decided but not yet executed on-chain.
+ * Neither is ever released.
+ */
+export const ESCROW_REFUND_STATUS = {
+  /** A chain escrow whose refund is decided but not yet executed on-chain. */
+  PENDING: "refund_pending",
+  /** The refund is done. */
+  DONE: "refunded",
+} as const satisfies Record<string, EscrowStatus & Escrow["status"]>;
 
 /** A dispute filed against a milestone */
 export interface Dispute {

@@ -207,6 +207,9 @@ export async function settlementRoutes(app: FastifyInstance) {
       status: result.status,
       jobId: result.jobId,
       milestoneIndex,
+      // N79 round 3, F5: the release is confirmed on-chain but recording it failed; the caller must be told, not left to
+      // read a plain success. Absent on a normal release.
+      ...(result.recorded === false ? { recorded: false, reconcile: "required" } : {}),
     };
   });
 
