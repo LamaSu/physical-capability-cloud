@@ -98,6 +98,25 @@ const TYPE_ALIASES: Record<string, string[]> = {
   "assay": ["assay", "plate-reader", "absorbance", "fluorescence", "screening"],
 };
 
+// ── Pagination coercion ─────────────────────────────────────────────────────
+
+/**
+ * Coerce an offset/limit value to a safe non-negative integer (N111).
+ *
+ * `list()` is called from several places (routes/jobs.ts, routes/setup.ts,
+ * routes/status.ts, routes/operator-relay.ts) and not all of them validate
+ * their input the way routes/jobs.ts's querystring schema now does — so this
+ * is the last line of defense. Anything that isn't a finite, non-negative
+ * integer (a string, a float, NaN, a negative number) falls back to
+ * `fallback` instead of being used in `offset + limit` arithmetic, which is
+ * exactly how N111 happened: string concatenation standing in for addition.
+ */
+function toSafeOffsetOrLimit(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.trunc(n);
+}
+
 // ── Facade ─────────────────────────────────────────────────────────────────
 
 export class JobFacade extends BaseFacade {
@@ -124,8 +143,13 @@ export class JobFacade extends BaseFacade {
   ): Promise<Result<PaginatedResult<JobDTO>>> {
     return this.execute("list", async () => {
       const context = this.defaultContext(ctx);
-      const offset = pagination?.offset ?? 0;
-      const limit = pagination?.limit ?? 50;
+      // N111 — defensive coercion: the route's querystring schema already
+      // guarantees real numbers, but this facade is called from other
+      // places too (setup.ts, status.ts, operator-relay.ts), so don't trust
+      // the caller. toSafeOffsetOrLimit() forces integer-only arithmetic
+      // regardless of what's passed (string, float, NaN, negative, etc.).
+      const offset = toSafeOffsetOrLimit(pagination?.offset, 0);
+      const limit = toSafeOffsetOrLimit(pagination?.limit, 50);
 
       const opts = filters?.tenantId ? { tenantId: filters.tenantId } : undefined;
       let jobs;
