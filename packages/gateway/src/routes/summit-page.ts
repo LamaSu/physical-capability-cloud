@@ -128,10 +128,28 @@ a{color:var(--grn);text-decoration:none}
     var p=$("pitch").value.trim(); if(p)data.useCase=p;
     var inv=$("invite").value.trim(); if(inv)data.inviteCode=inv;
   }
-  // Fire-and-forget progressive save — always sends the full accumulated record.
+  // Progressive save: always sends the full accumulated record. This lead's token is
+  // made HERE, once per page, and sent with EVERY save, the first included (astra,
+  // pack 53: NEW-3 and new defect 1). So no save waits for a reply: a retry after a
+  // LOST reply and the final save on pagehide continue the SAME lead. The server keys a
+  // lead by (leadId, token) and never needs to have issued the token itself.
+  // Without crypto (a very old browser) there is no token yet, and the page falls back
+  // to the round-7 protocol: saves are serialized until the first reply issues one.
+  function newToken(){
+    try{var b=new Uint8Array(18);crypto.getRandomValues(b);var s="";for(var i=0;i<b.length;i++)s+=("0"+b[i].toString(16)).slice(-2);return s;}catch(e){return null;}
+  }
+  var clientToken=newToken();if(clientToken)data.leadToken=clientToken;
+  var firstSave=null,saveAgain=false;
+  function post(){
+    return fetch("/api/waitlist",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data),keepalive:true}).then(function(r){return r.json();}).then(function(d){if(!data.leadToken&&d&&typeof d.leadToken==="string")data.leadToken=d.leadToken;});
+  }
   function save(){
     if(!data.email)return;
-    try{fetch("/api/waitlist",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data),keepalive:true}).catch(function(){});}catch(e){}
+    if(data.leadToken){try{post().catch(function(){});}catch(e){}return;}
+    if(firstSave){saveAgain=true;return;}
+    try{
+      firstSave=post().catch(function(){}).then(function(){firstSave=null;if(saveAgain){saveAgain=false;save();}});
+    }catch(e){firstSave=null;}
   }
   // Capture even if they navigate away or background the tab mid-flow.
   window.addEventListener("pagehide",function(){collect();save();});

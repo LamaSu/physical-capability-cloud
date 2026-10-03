@@ -6,19 +6,29 @@
  * the operator shares.
  *
  *   POST /api/operator/diagnostics       — upload encrypted diagnostic bundle
- *   GET  /api/operator/diagnostics       — list recent diagnostic uploads (admin)
+ *   GET  /api/operator/diagnostics       — list uploads (own; every upload with the admin secret)
  *   GET  /api/operator/diagnostics/:id   — get a specific upload by ID
  *   POST /api/operator/diagnostics/decrypt — decrypt a bundle with retrieval code
+ *
+ * Ownership (WP-A; astra, pack 47): an upload belongs to the identity that uploaded
+ * it (apiGate's attached identity), recorded at upload. The kernelId in the body is a
+ * label the caller asserts, never ownership: the list used to match the caller's
+ * identity against it, and GET /:id and POST /decrypt checked nothing. Only the
+ * uploader, or the admin secret, lists, fetches or decrypts an upload; anyone else
+ * gets the same 404 as for an unknown id, before any decryption work.
  */
 
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
+import { adminOrCaller, callerIdentity, mayAccess } from "../auth/admin-secret-gate.js";
 
 // In-memory store (backed by audit log for persistence across restarts).
 // For a production system you'd use the DB, but this keeps it simple
 // and avoids schema migrations.
 interface DiagnosticUpload {
   id: string;
+  /** The identity that uploaded it: its owner (see the header). */
+  operatorId: string;
   kernelId: string;
   encrypted: {
     ciphertext_b64: string;
@@ -82,6 +92,11 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
       collectedAt?: string;
     };
   }>("/api/operator/diagnostics", async (req, reply) => {
+    // The upload belongs to the caller's identity; with none attached there is no owner (rule 7).
+    const owner = callerIdentity(req);
+    if (owner === null) {
+      return reply.code(401).send({ error: "authentication_required" });
+    }
     const {
       kernelId,
       encrypted,
@@ -125,6 +140,7 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
 
     const upload: DiagnosticUpload = {
       id: uploadId,
+      operatorId: owner,
       kernelId: kernelId ?? "unknown",
       encrypted: encrypted as DiagnosticUpload["encrypted"],
       bundleHash: bundleHash ?? "",
@@ -157,17 +173,21 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
    * List recent diagnostic uploads (metadata only, no encrypted payloads).
    * Intended for admin/support use.
    */
-  app.get("/api/operator/diagnostics", async (req, _reply) => {
+  app.get("/api/operator/diagnostics", async (req, reply) => {
     pruneExpired();
 
-    // Scope to caller's kernels — prevent cross-operator log enumeration (R5 NEW-02)
-    const callerId = (req as any).operatorId ?? (req as any).userId;
-    const { isBrokerOperator } = await import("../middleware/security-hardening.js");
-    const isAdmin = callerId ? isBrokerOperator(callerId) : false;
+    // The admin view (every upload, with IPs) needs the admin SECRET. It used to be
+    // granted to any caller whose operatorId was on BROKER_OPERATORS, an identity a
+    // legacy key can carry (N2, WP-A round 6). A wrong secret is refused, never
+    // downgraded. Without it the caller sees only the uploads IT made, and a request
+    // with no attached identity is 401: the old filter let it see every upload (rule 7).
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
+    const isAdmin = who.admin;
 
-    const filtered = isAdmin
-      ? uploads
-      : uploads.filter((u) => !callerId || u.kernelId === callerId || (u as any).operatorId === callerId);
+    // Scoped by the recorded uploader, never by the caller-asserted kernelId (astra,
+    // pack 47: the old filter equated the caller's identity with a stored kernel ID).
+    const filtered = uploads.filter((u) => mayAccess(who, u.operatorId));
 
     return {
       uploads: filtered.map((u) => ({
@@ -197,10 +217,13 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
   app.get<{
     Params: { id: string };
   }>("/api/operator/diagnostics/:id", async (req, reply) => {
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
     pruneExpired();
 
     const upload = uploads.find((u) => u.id === req.params.id);
-    if (!upload) {
+    // Another identity's upload answers exactly like an unknown id.
+    if (!upload || !mayAccess(who, upload.operatorId)) {
       return reply.code(404).send({ error: "diagnostic upload not found or expired" });
     }
 
@@ -232,6 +255,8 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
   app.post<{
     Body: { uploadId?: string; retrievalCode?: string };
   }>("/api/operator/diagnostics/decrypt", async (req, reply) => {
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
     const { uploadId, retrievalCode } = req.body ?? {};
 
     if (!uploadId || !retrievalCode) {
@@ -240,8 +265,10 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
 
     pruneExpired();
 
+    // Checked BEFORE any key derivation: a retrieval code opens only the caller's own
+    // uploads (support decrypts with the admin secret).
     const upload = uploads.find((u) => u.id === uploadId);
-    if (!upload) {
+    if (!upload || !mayAccess(who, upload.operatorId)) {
       return reply.code(404).send({ error: "diagnostic upload not found or expired" });
     }
 

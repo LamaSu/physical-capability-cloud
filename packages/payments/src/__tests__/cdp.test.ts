@@ -3,6 +3,8 @@ import {
   CdpWalletClient,
   CdpOnrampClient,
   CdpSpendPermissionService,
+  CDP_MOCK_ADDRESS_PREFIX,
+  isCdpMockAddress,
 } from "../cdp/index.js";
 
 describe("CDP funded-key on-ramp (mock mode)", () => {
@@ -62,5 +64,28 @@ describe("CDP funded-key on-ramp (mock mode)", () => {
     expect(list[0]!.account.toLowerCase()).toBe(acct.toLowerCase());
     // a different account sees nothing
     expect((await svc.list("0x6666666666666666666666666666666666666666")).length).toBe(0);
+  });
+});
+
+// WP-A fold F6 (shell #2499): a mock wallet is an address NO key controls, so it
+// must be recognizable by construction — a gateway refuses to build a real-money
+// onramp for it, even after real credentials are configured.
+describe("CDP mock wallets are recognizable (fold F6)", () => {
+  it("every mock-minted address carries the mock prefix and is distinct", async () => {
+    const c = new CdpWalletClient();
+    const a = await c.createWallet();
+    const b = await c.createWallet();
+    expect(a.address.startsWith(CDP_MOCK_ADDRESS_PREFIX)).toBe(true);
+    expect(isCdpMockAddress(a.address)).toBe(true);
+    expect(isCdpMockAddress(b.address)).toBe(true);
+    expect(a.address).not.toBe(b.address);
+    expect(a.address).toMatch(/^0x[0-9a-f]{40}$/);
+  });
+
+  it("isCdpMockAddress is false for ordinary and malformed addresses", () => {
+    expect(isCdpMockAddress("0x9f8e7d6c5b4a39281706f5e4d3c2b1a098765432")).toBe(false);
+    expect(isCdpMockAddress("0x1111111111111111111111111111111111111111")).toBe(false);
+    expect(isCdpMockAddress("0x000000000000000000000000")).toBe(false); // too short
+    expect(isCdpMockAddress("not-an-address")).toBe(false);
   });
 });

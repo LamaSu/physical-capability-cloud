@@ -59,6 +59,7 @@ const PUBLIC_V4 = "93.184.216.34";
 
 /** Env vars this file touches; saved before and restored after every test. */
 const ENV_KEYS = [SENTINEL_ENV, "PCC_CHANNEL_CREDENTIALS", "NODE_ENV"] as const;
+const SSRF_TEST_PRINCIPAL = "n84-ssrf-test-principal";
 let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -127,6 +128,12 @@ describe("N84 repro (default code path, real listener on 127.0.0.1)", () => {
 
   beforeEach(async () => {
     app = Fastify({ logger: false });
+    // #326's N84 creator binding: every channel route needs an authenticated caller (the outer API gate's
+    // identity in production). One fixed principal stands in for it, so the same caller attaches, lists,
+    // patches and sends; what these tests pin (the outbound guard) does not depend on who it is.
+    app.addHook("onRequest", async (req) => {
+      (req as unknown as { operatorId?: string }).operatorId = SSRF_TEST_PRINCIPAL;
+    });
     await app.register(operatorChannelsRoutes);
     await app.ready();
   });
@@ -622,6 +629,12 @@ describe("attach-time refusal (HTTP route and programmatic attach)", () => {
 
   beforeEach(async () => {
     app = Fastify({ logger: false });
+    // #326's N84 creator binding: every channel route needs an authenticated caller (the outer API gate's
+    // identity in production). One fixed principal stands in for it, so the same caller attaches, lists,
+    // patches and sends; what these tests pin (the outbound guard) does not depend on who it is.
+    app.addHook("onRequest", async (req) => {
+      (req as unknown as { operatorId?: string }).operatorId = SSRF_TEST_PRINCIPAL;
+    });
     await app.register(operatorChannelsRoutes);
     await app.ready();
   });
@@ -679,13 +692,15 @@ describe("attach-time refusal (HTTP route and programmatic attach)", () => {
 
   it("[neg] PATCH to a non-webhook channel's transport cannot smuggle a stored private URL into a webhook", async () => {
     const slug = "n84-patch-transport";
-    // an sms channel never dials its endpoint, so the URL field is not checked at attach
+    // an sms channel never dials its endpoint, so the URL field is not checked at attach. It is attached
+    // AS the test principal (#326's N84: a creatorless record is the admin's alone, and its PATCH would be
+    // a 404 before the URL rule is ever reached).
     const ch = attachChannel(slug, {
       label: "sms",
       transport: "sms",
       describe: "sms channel carrying a stray url field",
       endpoint: { phoneE164: "+14155551234", url: "https://10.0.0.5/print" },
-    });
+    }, SSRF_TEST_PRINCIPAL);
     const res = await app.inject({
       method: "PATCH",
       url: `/api/operators/channels/${ch.id}`,
@@ -1585,6 +1600,12 @@ describe("credentialRef allowlist (PCC_CHANNEL_CREDENTIALS)", () => {
       transport: t.transport,
     });
     app = Fastify({ logger: false });
+    // #326's N84 creator binding: every channel route needs an authenticated caller (the outer API gate's
+    // identity in production). One fixed principal stands in for it, so the same caller attaches, lists,
+    // patches and sends; what these tests pin (the outbound guard) does not depend on who it is.
+    app.addHook("onRequest", async (req) => {
+      (req as unknown as { operatorId?: string }).operatorId = SSRF_TEST_PRINCIPAL;
+    });
     await app.register(operatorChannelsRoutes);
     await app.ready();
   });
@@ -1794,10 +1815,10 @@ describe("credentialRef allowlist (PCC_CHANNEL_CREDENTIALS)", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("credential_ref_not_allowed");
+    // #326's N84: a caller with no channel of its own under the slug gets 404 from the test send (the
+    // answer for a slug with no channels at all), so nothing can be signed or sent.
     const sent = await sendTest("n84-oracle-public");
-    expect(sent.json().results).toEqual([
-      { channelId: "", transport: "manual", delivered: true, ref: "no-channels-attached" },
-    ]);
+    expect(sent.statusCode).toBe(404);
     expect(calls).toHaveLength(0);
   });
 

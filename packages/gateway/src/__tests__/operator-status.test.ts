@@ -24,6 +24,10 @@ import { schema } from "@pcc/store";
 const { shopKernels, capabilities } = schema;
 
 const TEST_OP = "0xtest-operator-status";
+// N84: the view lists the CALLER's channels, so these requests carry the operator's identity, as apiGate
+// attaches it to a request. OTHER is a second identity that attaches channels under the same slug.
+const OTHER = "someone-else@status.test";
+const ADMIN = "status-test-admin-secret-0123456789";
 
 function seedKernel(id: string, name: string): void {
   const { db } = getStore();
@@ -70,11 +74,20 @@ function seedCapability(
 
 describe("GET /api/operators/:slug/status", () => {
   let app: FastifyInstance;
+  const savedAdmin = process.env.PCC_ADMIN_KEY;
 
   beforeAll(async () => {
     process.env.PCC_DB_PATH = ":memory:";
+    process.env.PCC_ADMIN_KEY = ADMIN;
     initStore({ seed: true });
     app = Fastify({ logger: false });
+    app.decorateRequest("operatorId", null);
+    app.decorateRequest("userId", null);
+    app.addHook("onRequest", async (req) => {
+      const r = req as unknown as { operatorId: string | null; userId: string | null };
+      r.operatorId = TEST_OP;
+      r.userId = TEST_OP;
+    });
     await app.register(operatorStatusRoutes);
     await app.ready();
   });
@@ -82,6 +95,8 @@ describe("GET /api/operators/:slug/status", () => {
   afterAll(async () => {
     await app.close();
     closeStore();
+    if (savedAdmin === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdmin;
   });
 
   beforeEach(() => {
@@ -121,7 +136,7 @@ describe("GET /api/operators/:slug/status", () => {
       // N84: webhook targets must be public https URLs; loopback and private
       // addresses are refused at attach time (see n84-channel-ssrf.test.ts).
       endpoint: { url: "https://printer.example.com:9100" },
-    });
+    }, TEST_OP);
     const res = await app.inject({
       method: "GET",
       url: `/api/operators/${TEST_OP}/status`,
@@ -149,7 +164,7 @@ describe("GET /api/operators/:slug/status", () => {
       label: "x",
       transport: "manual",
       describe: "dashboard only",
-    });
+    }, TEST_OP);
     const res = await app.inject({
       method: "GET",
       url: `/api/operators/${TEST_OP}/status`,
@@ -176,7 +191,7 @@ describe("GET /api/operators/:slug/status", () => {
       transport: "sms",
       describe: "SMS to owner E.164",
       endpoint: { phoneE164: "+14155551234" },
-    });
+    }, TEST_OP);
     const res = await app.inject({
       method: "GET",
       url: `/api/operators/${TEST_OP}/status`,
@@ -200,7 +215,7 @@ describe("GET /api/operators/:slug/status", () => {
       describe: "currently off for maintenance",
       enabled: false,
       endpoint: { url: "https://printer.example.com:9100" },
-    });
+    }, TEST_OP);
     const res = await app.inject({
       method: "GET",
       url: `/api/operators/${TEST_OP}/status`,
@@ -221,7 +236,7 @@ describe("GET /api/operators/:slug/status", () => {
       label: "x",
       transport: "manual",
       describe: "dashboard",
-    });
+    }, TEST_OP);
     const res = await app.inject({
       method: "GET",
       url: `/api/operators/${TEST_OP}/status`,
@@ -231,11 +246,79 @@ describe("GET /api/operators/:slug/status", () => {
     expect(body.agentCardUrls.every((u: string) => u.includes("/agent-card.json"))).toBe(true);
   });
 
-  it("response is cacheable (15s)", async () => {
+  it("[neg] the per-caller status response is never stored, not even in a private cache (astra pack 146, MEDIUM)", async () => {
     const res = await app.inject({
       method: "GET",
       url: `/api/operators/${TEST_OP}/status`,
     });
-    expect(res.headers["cache-control"]).toBe("public, max-age=15");
+    // The body is computed from the CALLER's identity (own channels only; admin sees all). A private
+    // cache that may keep it for 15 s without varying on credentials would serve identity A's (or the
+    // admin's) channels to identity B in the same browser after a session switch. So: no-store, and
+    // never a max-age that would make it reusable (this pinned "private, max-age=15" before).
+    const cc = String(res.headers["cache-control"] ?? "");
+    expect(cc).toMatch(/\bno-store\b/);
+    expect(cc).toMatch(/\bprivate\b/);
+    expect(cc).not.toMatch(/max-age=[1-9]/);
+    expect(cc).not.toMatch(/\bpublic\b/);
+  });
+
+  // ── N84: the channels in this view are the caller's own ───────────────────
+
+  it("no identity is 401 (a bare app, no apiGate in front)", async () => {
+    const anon = Fastify({ logger: false });
+    anon.decorateRequest("operatorId", null);
+    anon.decorateRequest("userId", null);
+    await anon.register(operatorStatusRoutes);
+    await anon.ready();
+    attachChannel(TEST_OP, { label: "Mine", transport: "manual", describe: "dashboard only" }, TEST_OP);
+    const res = await anon.inject({ method: "GET", url: `/api/operators/${TEST_OP}/status` });
+    expect(res.statusCode).toBe(401);
+    expect(res.body).not.toContain("Mine");
+    await anon.close();
+  });
+
+  it("a WRONG admin secret is 403, even with the operator's own identity", async () => {
+    attachChannel(TEST_OP, { label: "Mine", transport: "manual", describe: "dashboard only" }, TEST_OP);
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/operators/${TEST_OP}/status`,
+      headers: { "x-admin-key": "not-the-secret" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.body).not.toContain("Mine");
+  });
+
+  it("lists only the caller's own channels, and counts and slots come from them; the admin secret sees all", async () => {
+    seedKernel("kernel-n84-1", "Kernel N84");
+    seedCapability("cap-n84-1", "kernel-n84-1", "fdm", { availability: { mode: "always" } });
+    attachChannel(TEST_OP, { label: "Mine", transport: "manual", describe: "dashboard only" }, TEST_OP);
+    attachChannel(TEST_OP, { label: "TheirsOn", transport: "manual", describe: "dashboard only" }, OTHER);
+    attachChannel(TEST_OP, { label: "TheirsOff", transport: "manual", describe: "dashboard only", enabled: false }, OTHER);
+    attachChannel(TEST_OP, { label: "Legacy", transport: "manual", describe: "dashboard only" }, null);
+
+    const mine = (await app.inject({ method: "GET", url: `/api/operators/${TEST_OP}/status` })).json();
+    expect(mine.channels.map((c: { label: string }) => c.label)).toEqual(["Mine"]);
+    expect(mine.totals.channelCount).toBe(1);
+    expect(mine.totals.enabledChannelCount).toBe(1);
+    expect(mine.status).toBe("ready");
+    expect(JSON.stringify(mine)).not.toMatch(/TheirsOn|TheirsOff|Legacy/);
+
+    const all = (
+      await app.inject({ method: "GET", url: `/api/operators/${TEST_OP}/status`, headers: { "x-admin-key": ADMIN } })
+    ).json();
+    expect(all.channels.map((c: { label: string }) => c.label).sort()).toEqual(["Legacy", "Mine", "TheirsOff", "TheirsOn"]);
+    expect(all.totals.channelCount).toBe(4);
+    expect(all.totals.enabledChannelCount).toBe(3);
+  });
+
+  it("a caller with no channel of its own is told no channel is attached, whatever others have attached", async () => {
+    attachChannel(TEST_OP, { label: "TheirsOn", transport: "manual", describe: "dashboard only" }, OTHER);
+    const res = await app.inject({ method: "GET", url: `/api/operators/${TEST_OP}/status` });
+    const body = res.json();
+    expect(body.channels).toEqual([]);
+    expect(body.totals.channelCount).toBe(0);
+    expect(body.status).toBe("unconfigured");
+    expect(body.missing.some((m: string) => m.includes("channel (slot 3)"))).toBe(true);
+    expect(res.body).not.toContain("TheirsOn");
   });
 });

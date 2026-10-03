@@ -19,11 +19,26 @@
  * in oracle-client-mock-honesty.test.ts).
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+
+// N46 authority (WP-A): completing a job or resuming its settlement is the job's
+// operator's or the admin's. These fixtures act as the admin, presenting the
+// admin secret on those calls.
+const RELEASE_ADMIN_SECRET = "release-fixture-admin-secret";
+const RELEASE_ADMIN_HEADERS = { "x-admin-key": RELEASE_ADMIN_SECRET };
+const savedReleaseAdminKey = process.env.PCC_ADMIN_KEY;
+beforeAll(() => {
+  process.env.PCC_ADMIN_KEY = RELEASE_ADMIN_SECRET;
+});
+afterAll(() => {
+  if (savedReleaseAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = savedReleaseAdminKey;
+});
+
 
 vi.mock("@pcc/kernel/evidence-storage-factory", () => ({
   createEvidenceStorage: vi.fn().mockResolvedValue({
@@ -155,7 +170,7 @@ describe("completion attests at the job's real assurance tier (finding #3 / A-3)
   }
 
   function complete(jobId: string) {
-    return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: RELEASE_ADMIN_HEADERS, payload: {} });
   }
 
   it("stores the evidence bundle at the negotiated tier 2 (not the hardcoded 0)", async () => {

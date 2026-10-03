@@ -33,15 +33,20 @@
  *   5. A2A surface:   per-kernel agent-card URLs reachable (always; this is
  *                     PCC-side, not operator-side)
  *
- * The endpoint is PUBLIC — operator slug is non-secret, and status doesn't
- * expose any credential. (Channel credentialRef values are vault references,
- * not secrets — safe to surface.)
+ * The operator slug is non-secret, but the CHANNELS in this view are not
+ * (N84): a channel belongs to the identity that attached it, and carries its
+ * endpoint (a URL, an address) and its credentialRef. So this view lists only
+ * the caller's own channels (the admin secret lists all), and the channel
+ * counts, the readiness and `missing` are computed from that same list: it
+ * says nothing about anyone else's channels under the slug. No identity is 401;
+ * a wrong admin secret is 403. The response varies by caller, so it is private.
  */
 
 import type { FastifyInstance } from "fastify";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
-import { getChannelsByOperator } from "./operator-channels.js";
+import { adminOrCaller } from "../auth/admin-secret-gate.js";
+import { channelsVisibleTo } from "./operator-channels.js";
 
 const GATEWAY_URL = process.env.PCC_GATEWAY_URL ?? "https://capability.network";
 
@@ -86,6 +91,8 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
   app.get<{ Params: { slug: string } }>(
     "/api/operators/:slug/status",
     async (req, reply) => {
+      const who = adminOrCaller(req, reply);
+      if (!who) return reply;
       const slug = req.params.slug;
       const { shopKernels, capabilities } = schema;
 
@@ -155,7 +162,8 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
         caps = [];
       }
 
-      const channels = getChannelsByOperator(slug);
+      // N84: only the channels this caller may see; every count and slot below is computed from them.
+      const channels = channelsVisibleTo(slug, who);
       const enabledChannels = channels.filter((c) => c.enabled);
 
       const humanLaneCount = caps.filter((c) => c.sla != null).length;
@@ -221,7 +229,8 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
 
       return reply
         .status(200)
-        .header("cache-control", "public, max-age=15")
+        // N84: the channels in the body are the caller's own, so no shared cache may keep or serve it.
+        .header("cache-control", "private, no-store") // per-caller body (own channels; admin sees all): never stored, so a session switch in one browser cannot reuse it (astra pack 146)
         .send(body);
     },
   );

@@ -20,9 +20,12 @@ let feedbackFile: string;
 let adminObservabilityRoutes: typeof import("../routes/admin-observability.js").adminObservabilityRoutes;
 
 const ADMIN = "op-admin";
+// WP-A (#326, round 5): admin observability views are gated by the admin SECRET
+// (requireAdminSecret over X-Admin-Key), never by an asserted operatorId on an allowlist.
+const ADMIN_SECRET = "attempts-view-admin-secret";
 const SID_A = "aa000000-0000-4000-8000-00000000000a";
 const SID_B = "bb000000-0000-4000-8000-00000000000b";
-const envKeys = ["NODE_ENV", "PCC_OBSERVABILITY_ADMINS", "PCC_OBSERVABILITY_DEV_OPEN", "PCC_ATTEMPT_SCAN_MAX_BYTES"] as const;
+const envKeys = ["NODE_ENV", "PCC_ADMIN_KEY", "PCC_OBSERVABILITY_ADMINS", "PCC_OBSERVABILITY_DEV_OPEN", "PCC_ATTEMPT_SCAN_MAX_BYTES"] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
@@ -67,14 +70,19 @@ function writeSink(lines: Array<Record<string, unknown> | string>): void {
   writeFileSync(feedbackFile, lines.map((l) => (typeof l === "string" ? l : JSON.stringify(l))).join("\n") + "\n", "utf8");
 }
 
-async function get(app: FastifyInstance, query = "") {
-  return app.inject({ method: "GET", url: `/api/admin/observability/attempts${query}` });
+async function get(app: FastifyInstance, query = "", secret: string | null = ADMIN_SECRET) {
+  return app.inject({
+    method: "GET",
+    url: `/api/admin/observability/attempts${query}`,
+    headers: secret === null ? {} : { "x-admin-key": secret },
+  });
 }
 
 beforeEach(() => {
   for (const k of envKeys) savedEnv[k] = process.env[k];
   process.env.NODE_ENV = "production";
   process.env.PCC_OBSERVABILITY_ADMINS = ADMIN;
+  process.env.PCC_ADMIN_KEY = ADMIN_SECRET;
   delete process.env.PCC_OBSERVABILITY_DEV_OPEN;
   delete process.env.PCC_ATTEMPT_SCAN_MAX_BYTES;
   rmSync(feedbackFile, { force: true });
@@ -88,21 +96,22 @@ afterEach(() => {
 });
 
 describe("GET /api/admin/observability/attempts: gate", () => {
-  it("fails closed in production without an allowlist", async () => {
-    delete process.env.PCC_OBSERVABILITY_ADMINS;
+  it("fails closed in production without a configured admin secret", async () => {
+    delete process.env.PCC_ADMIN_KEY;
     const app = await buildApp(ADMIN);
     try {
-      expect((await get(app)).statusCode).toBe(403);
+      expect((await get(app)).statusCode).toBe(503);
     } finally {
       await app.close();
     }
   });
 
-  it("refuses an operator who is not on the allowlist, and an anonymous caller", async () => {
-    for (const who of ["op-someone-else", null]) {
+  it("refuses an operator (allowlisted or not) and an anonymous caller without the admin secret, and a wrong secret", async () => {
+    for (const who of ["op-someone-else", ADMIN, null]) {
       const app = await buildApp(who);
       try {
-        expect((await get(app)).statusCode).toBe(403);
+        expect((await get(app, "", null)).statusCode).toBe(401);
+        expect((await get(app, "", "not-the-admin-secret")).statusCode).toBe(403);
       } finally {
         await app.close();
       }
@@ -218,7 +227,8 @@ describe("GET /api/admin/observability/attempts?format=digest", () => {
     }
     const outsider = await buildApp("op-someone-else");
     try {
-      expect((await get(outsider, "?format=digest")).statusCode).toBe(403);
+      expect((await get(outsider, "?format=digest", null)).statusCode).toBe(401);
+      expect((await get(outsider, "?format=digest", "not-the-admin-secret")).statusCode).toBe(403);
     } finally {
       await outsider.close();
     }

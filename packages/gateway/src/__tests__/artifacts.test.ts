@@ -520,3 +520,47 @@ describe("durability across a store restart", () => {
     }
   });
 });
+
+// astra pack 146c (NEW, CRITICAL): /a/:slug serves an owner-only PRIVATE dashboard, and refusals that
+// differ by identity, outside the /api cache default. None of those may be stored by a browser or an
+// intermediary and replayed to another identity after a session switch.
+describe("/a/:slug identity-dependent responses are never stored (astra pack 146c)", () => {
+  const neverStored = (res: { headers: Record<string, unknown> }, what: string) => {
+    const cc = String(res.headers["cache-control"] ?? "");
+    expect(cc, what).toMatch(/\bno-store\b/);
+    expect(cc, what).toMatch(/\bprivate\b/);
+    expect(cc, what).not.toMatch(/\bpublic\b/);
+    expect(cc, what).not.toMatch(/max-age=[1-9]/);
+  };
+
+  it("[neg] sol's reproduction: the owner's 200 for a PRIVATE dashboard is private, no-store", async () => {
+    const a = (await save({ visibility: "private" }, ALICE)).json();
+    const res = await app.inject({ method: "GET", url: `/a/${a.slug}`, headers: ALICE });
+    expect(res.statusCode).toBe(200);
+    neverStored(res, "owner's private 200");
+  });
+
+  it("[neg] the non-owner's 404 for that private dashboard is private, no-store (it differs by identity)", async () => {
+    const a = (await save({ visibility: "private" }, ALICE)).json();
+    const res = await app.inject({ method: "GET", url: `/a/${a.slug}`, headers: BOB });
+    expect(res.statusCode).toBe(404);
+    neverStored(res, "non-owner 404");
+  });
+
+  it("[neg] the miss limiter's 429 is private, no-store", async () => {
+    let res: Awaited<ReturnType<typeof app.inject>> | undefined;
+    for (let i = 0; i < 40; i++) {
+      res = await app.inject({ method: "GET", url: `/a/n146c-missing-${i}`, remoteAddress: "10.146.3.1" });
+      if (res.statusCode === 429) break;
+    }
+    expect(res!.statusCode).toBe(429);
+    neverStored(res!, "limiter 429");
+  });
+
+  it("a PUBLIC dashboard fetched anonymously is the same for every viewer: no forced no-store", async () => {
+    const a = (await save({ visibility: "public" }, ALICE)).json();
+    const res = await app.inject({ method: "GET", url: `/a/${a.slug}` });
+    expect(res.statusCode).toBe(200);
+    expect(String(res.headers["cache-control"] ?? "")).not.toMatch(/\bno-store\b/);
+  });
+});

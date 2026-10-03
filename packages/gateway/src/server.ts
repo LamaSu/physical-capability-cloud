@@ -1,4 +1,5 @@
 import { initSentry, Sentry } from "./sentry.js";
+import { decodedRequestPath } from "./middleware/route-path.js";
 import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
@@ -161,6 +162,7 @@ import { traceIdPlugin } from "./middleware/trace-id.js";
 import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
 import { funnelTrackerPlugin } from "./services/funnel-tracker.js";
 import { adminObservabilityRoutes } from "./routes/admin-observability.js";
+import { adminKeyAuditRoutes } from "./routes/admin-key-audit.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
 import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
@@ -252,6 +254,24 @@ export async function createGateway(port = 3200) {
   // making the package's "any 5xx carries report_hint" contract actually true. The
   // status gate is cheap (only 5xx pay the parse cost) and it skips /api/feedback
   // itself. See ai/research/agent-feedback-auto-design.md.
+  // Default cache policy (astra packs 146, 146b and 146c). A response computed for
+  // the CALLER (its own channels, jobs, keys, a private dashboard; an admin view)
+  // that a browser or intermediary stores can be replayed to another identity after
+  // a session switch. So every response that sets no Cache-Control of its own is
+  // "private, no-store" when it is under /api (most of which is per-caller) OR the
+  // request carries credentials (Authorization, a cookie, an API or admin key), on
+  // any path. A route that is deliberately cacheable sets its own header, which
+  // this never overrides; anonymous requests outside /api are left alone.
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (reply.hasHeader("cache-control")) return payload;
+    const path = request.url;
+    const underApi = path === "/api" || path.startsWith("/api/") || path.startsWith("/api?");
+    const h = request.headers;
+    const credentialed = Boolean(h.authorization || h.cookie || h["x-api-key"] || h["x-admin-key"] || h["x-admin-token"]);
+    if (underApi || credentialed) reply.header("cache-control", "private, no-store");
+    return payload;
+  });
+
   app.addHook("onSend", async (request, reply, payload) => {
     if (typeof payload !== "string" || reply.statusCode < 500 || reply.statusCode >= 600) return payload;
     return decorateWithReportHint(payload, {
@@ -736,6 +756,8 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+  // Retire-the-wildcard #1099 piece 4 — read-only audit of keys still on "*".
+  await app.register(adminKeyAuditRoutes);
   // Generic /api/job-offers/* surface — every PCC adapter shares this.
   await app.register(jobOffersRoutes);
   // Legacy /api/courier-jobs/* shim — kept for backward compat through the
@@ -973,7 +995,11 @@ export async function createGateway(port = 3200) {
     const resolvedDashboardRoot = resolvePath(dashboardPath);
 
     app.setNotFoundHandler(async (req, reply) => {
-      if (req.url.startsWith("/api/") || req.url.startsWith("/sse/")) {
+      // Classified by the SAME decoded path apiGate authorized (route-path.ts), so an
+      // encoded /api/ or /sse/ prefix (/%61pi/...) is a bare 404 too, never the SPA
+      // (astra, pack 59, AZ-6).
+      const classifiedPath = decodedRequestPath(req.url);
+      if (classifiedPath.startsWith("/api/") || classifiedPath.startsWith("/sse/")) {
         return reply.status(404).send({ error: "not_found" });
       }
       // Check if a real static file exists (strip query string)
