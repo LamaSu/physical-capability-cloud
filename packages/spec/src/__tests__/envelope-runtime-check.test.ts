@@ -1253,3 +1253,44 @@ describe("envelope-runtime-check.ts source: no RegExp, no zod, no ambient call, 
     expect(found).toEqual([]);
   });
 });
+
+describe("plain data, exactly R8's rules (gaps a mutation run found)", () => {
+  const command = (labwareSlot: unknown) => checkRuntimeCommand(OT2, { name: "runProtocol", params: { minutes: 10, labwareSlot } }, stateFor(OT2));
+
+  /** An object nested `levels` deep: {a: {a: ... {} }}. */
+  function nest(levels: number): Record<string, unknown> {
+    let value: Record<string, unknown> = {};
+    for (let i = 1; i < levels; i++) value = { a: value };
+    return value;
+  }
+
+  it("refuses a list whose prototype is not Array.prototype, in the command and in the envelope", () => {
+    const odd = Object.setPrototypeOf([1], Object.create(Array.prototype)) as number[];
+    expect(codeOf(command(odd))).toBe("command-malformed");
+    expect(codeOf(command(Object.setPrototypeOf([1], null)))).toBe("command-malformed");
+    expect(envelopeInvalid(changed(OT2, (e) => (e.hazards = Object.setPrototypeOf(["heat", "mechanical"], Object.create(Array.prototype)))))).toBe(true);
+  });
+
+  it("copies objects nested up to depth 64 and refuses one at depth 65", () => {
+    // The command is depth 0, params 1, the value 2: nest(63) puts its innermost object at depth 64.
+    expect(codeOf(command(nest(63)))).toBe("value-not-allowed");
+    const deep = command(nest(64));
+    expect(codeOf(deep)).toBe("command-malformed");
+    if (!deep.allowed) expect(deep.reason).toMatch(/nested deeper than 64/);
+  });
+
+  it("names a cycle a cycle (the depth limit would refuse it too, with a less useful reason)", () => {
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    const d = command(cycle);
+    expect(codeOf(d)).toBe("command-malformed");
+    if (!d.allowed) expect(d.reason).toMatch(/a cycle/);
+  });
+
+  it("with allowedItems alone, even an item never passes as a single value", () => {
+    const itemsOnly = changed(PLATE, (e) => delete e.commands[1].params[2].unbounded.allowed);
+    const read = (wells: unknown) => codeOf(checkRuntimeCommand(itemsOnly, { name: "read", params: { seconds: 30, wavelengthNm: 450, wells } }, stateFor(itemsOnly)));
+    expect(read("A1")).toBe("value-not-allowed");
+    expect(read(["A1"])).toBe("allowed");
+  });
+});
