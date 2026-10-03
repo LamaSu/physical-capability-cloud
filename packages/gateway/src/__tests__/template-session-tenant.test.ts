@@ -22,6 +22,7 @@ import { tenantContext } from "../middleware/tenant-context.js";
 import { templateSessionRoutes, _resetSessionsForTests } from "../routes/template-session.js";
 import { initStore, closeStore } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
+import { auditService } from "../services/audit-service.js";
 
 vi.mock("../services/audit-service.js", () => ({
   auditService: {
@@ -204,5 +205,69 @@ describe("N58 fails closed on a missing actor", () => {
     expect((await status(id, "")).statusCode).toBe(404);
     expect((await status(id, "tenant-b")).statusCode).toBe(404);
     expect((await status(id, "tenant-a")).statusCode).toBe(200);
+  });
+});
+
+
+/**
+ * Verdict 75 on #443, each failed at 874c5c46:
+ * - MEDIUM: both mounts share one session store, and ownedSession checked the
+ *   tenant but not the template, so an owner could drive one mount's session
+ *   through the other mount's hooks;
+ * - CRITICAL (this file's half): /start wrote the session id, name and URL to
+ *   the audit log, which other tenants can read through unscoped audit routes
+ *   (the read scoping is the gateway lane's).
+ */
+describe("verdict 75: a session stays in its mount and leaves no usable trail in the audit log", () => {
+  let app: FastifyInstance;
+  let ownerKey: string;
+  let agents: Record<string, Agent>;
+
+  beforeEach(async () => {
+    _resetSessionsForTests();
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: false });
+    ownerKey = provisionApiKey({ operatorId: "owner@example.com", name: "owner", scopes: ["*"] }).rawKey;
+    agents = { "physical-operator": stubAgent(), "data-product": stubAgent() };
+    app = Fastify({ logger: false });
+    await app.register(apiGate);
+    await app.register(tenantContext);
+    for (const { prefix, template } of MOUNTS) {
+      await app.register(templateSessionRoutes, { routePrefix: prefix, template, agentFactory: () => agents[template] });
+    }
+    await app.ready();
+    vi.mocked(auditService.log).mockClear();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+    _resetSessionsForTests();
+  });
+
+  const headers = () => ({ authorization: `Bearer ${ownerKey}` });
+
+  it("M3: a session started on one mount is unknown to the other, even to its owner", async () => {
+    const started = await app.inject({ method: "POST", url: "/api/onboard/start", headers: headers(), payload: { name: "Acme" } });
+    const id = started.json().session_id as string;
+    for (const route of ROUTES) {
+      const res = await app.inject({ method: route.method, url: `/api/orchestrator/data-product/${id}/${route.suffix}`,
+        headers: headers(), ...(route.payload ? { payload: route.payload } : {}) });
+      expect(res.statusCode, route.name).toBe(404);
+      if (route.hook) expect(agents["data-product"][route.hook], route.name).not.toHaveBeenCalled();
+    }
+    const own = await app.inject({ method: "GET", url: `/api/onboard/${id}/status`, headers: headers() });
+    expect(own.statusCode).toBe(200);
+  });
+
+  it("C2: the audit log carries neither the session id nor its name or URL", async () => {
+    const started = await app.inject({ method: "POST", url: "/api/onboard/start", headers: headers(),
+      payload: { name: "Secret project", url: "https://secret.example/plans" } });
+    const id = started.json().session_id as string;
+    const logged = JSON.stringify(vi.mocked(auditService.log).mock.calls);
+    expect(logged).toContain("physical-operator.session_started");
+    expect(logged).not.toContain(id);
+    expect(logged).not.toContain("Secret project");
+    expect(logged).not.toContain("secret.example");
   });
 });
