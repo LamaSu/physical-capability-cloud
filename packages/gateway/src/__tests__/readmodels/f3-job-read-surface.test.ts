@@ -115,7 +115,7 @@ describe("identity first on every surface: 401 without a credential, 403 without
 
 describe("a stranger's proven wallet gets what a missing job gets; the party and the admin read", () => {
   it("GET /api/jobs lists only the caller's jobs", async () => {
-    const ids = async (h: Record<string, string>) => ((await get("/api/jobs?limit=500", h)).json().jobs as Array<{ id: string; kernelId: string }>);
+    const ids = async (h: Record<string, string>) => ((await get("/api/jobs?limit=200", h)).json().jobs as Array<{ id: string; kernelId: string }>);
     expect(await ids(STRANGER_H)).toEqual([]);
     const mine = await ids(PARTY);
     expect(mine.map((j) => j.id)).toContain("job-001");
@@ -200,7 +200,7 @@ describe("TENANT_ENFORCE: a caller with no tenant lists only tenant-less jobs (r
     const { schema, eq } = await import("@pcc/store");
     const setTenant = (tenantId: string | null) =>
       getStore().db.update(schema.jobs).set({ tenantId }).where(eq(schema.jobs.id, "job-001")).run();
-    const ids = async () => ((await get("/api/jobs?limit=500", PARTY)).json().jobs as Array<{ id: string }>).map((j) => j.id);
+    const ids = async () => ((await get("/api/jobs?limit=200", PARTY)).json().jobs as Array<{ id: string }>).map((j) => j.id);
     setTenant("tenant-other");
     process.env.TENANT_ENFORCE = "true";
     try {
