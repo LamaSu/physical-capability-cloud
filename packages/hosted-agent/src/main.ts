@@ -15,12 +15,17 @@
  *   PCC_HOSTED_L2=1              offer L2 tools (default: off)
  *   PCC_HOSTED_HOST              default 127.0.0.1
  *   PCC_HOSTED_PORT              default 4420
+ *   PCC_HOSTED_TRUSTED_PROXY_HOPS  how many deployment-proxy hops to trust when reading
+ *                                  the client address from X-Forwarded-For (0..8). A
+ *                                  deployer must choose: there is no safe default, because
+ *                                  guessing wrong either shares one budget address-wide
+ *                                  (R2 round 3) or lets a client spoof a fresh one.
  *   ANTHROPIC_API_KEY            read by the Anthropic SDK; never logged
  */
 import Anthropic from "@anthropic-ai/sdk";
 import Database from "better-sqlite3";
 import { BudgetMeter, type BudgetCaps, type MessagesClient, type ModelPrice } from "./budget.js";
-import { loadPinnedPack, type PackPin, type PinnedPack } from "./pack.js";
+import { loadPinnedPack, PackPinMismatch, type PackPin, type PinnedPack } from "./pack.js";
 import { gatewayPrincipal } from "./principal.js";
 import { buildServer, type ServerOptions } from "./server.js";
 import type { AttemptReport } from "./session.js";
@@ -44,6 +49,9 @@ export interface HostedConfig {
   readonly l2Enabled: boolean;
   readonly host: string;
   readonly port: number;
+  /** How many deployment-proxy hops to trust for X-Forwarded-For (0..8). Passed
+   * straight through to Fastify's own `trustProxy` option (server.ts). */
+  readonly trustedProxyHops: number;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -82,6 +90,10 @@ export function readConfig(env: NodeJS.ProcessEnv): HostedConfig {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new ConfigError("PCC_HOSTED_PORT", "must be a TCP port");
   const l2 = env.PCC_HOSTED_L2?.trim() ?? "";
   if (l2 !== "" && l2 !== "0" && l2 !== "1") throw new ConfigError("PCC_HOSTED_L2", 'must be "1" or "0"');
+  const hopsRaw = required(env, "PCC_HOSTED_TRUSTED_PROXY_HOPS");
+  if (!/^\d+$/.test(hopsRaw)) throw new ConfigError("PCC_HOSTED_TRUSTED_PROXY_HOPS", "must be a non-negative integer");
+  const trustedProxyHops = Number(hopsRaw);
+  if (trustedProxyHops > 8) throw new ConfigError("PCC_HOSTED_TRUSTED_PROXY_HOPS", "must be at most 8");
   return {
     gatewayBase,
     packUrl: env.PCC_HOSTED_PACK_URL?.trim() || new URL("/agent-package.json", gatewayBase).toString(),
@@ -100,6 +112,7 @@ export function readConfig(env: NodeJS.ProcessEnv): HostedConfig {
     l2Enabled: l2 === "1",
     host: env.PCC_HOSTED_HOST?.trim() || "127.0.0.1",
     port,
+    trustedProxyHops,
   };
 }
 
@@ -108,14 +121,26 @@ export function readConfig(env: NodeJS.ProcessEnv): HostedConfig {
  * /api/feedback (contract v1). It sends NO credential (the user's key is never
  * reused for the service's own reporting), and a failed send never blocks a
  * session from closing.
+ *
+ * Q6 round 2: master's generic /api/feedback is not the attempt.v1 receiver —
+ * it rewrites the report as `kind:"feedback"` and drops contract, sessionId,
+ * seq, phase, outcome, harness, pack, tokens and consent. The real receiver
+ * (painpoints' #458) is recognized by its OWN answer: a 2xx JSON body whose
+ * `sessionId` echoes the report's. Anything else — a non-2xx, a 2xx with no or
+ * a different sessionId, a send that throws — is "not accepted", and this sink
+ * never claims delivery for it. Logged once per process (this closure's
+ * lifetime: one call site for the life of the service) with NO content, since
+ * the far end's status/body/URL are not this sink's to repeat into a log.
  */
 export function attemptSink(
   gatewayBase: string,
   log: (line: string) => void = (l) => console.log(l),
 ): (report: AttemptReport) => Promise<void> {
   const url = new URL("/api/feedback", gatewayBase).toString();
+  let notAcceptedLogged = false;
   return async (report) => {
     log(JSON.stringify({ attempt: report }));
+    let accepted = false;
     try {
       const res = await fetch(url, {
         method: "POST",
@@ -123,14 +148,29 @@ export function attemptSink(
         body: JSON.stringify(report),
         signal: AbortSignal.timeout(5_000),
       });
-      if (!res.ok) log(JSON.stringify({ attemptNotStored: res.status }));
-    } catch (err) {
-      log(JSON.stringify({ attemptNotSent: err instanceof Error ? err.name : "error" }));
+      if (res.ok) {
+        const body: unknown = await res.json().catch(() => null);
+        accepted = body !== null && typeof body === "object" && (body as { sessionId?: unknown }).sessionId === report.sessionId;
+      }
+    } catch {
+      accepted = false;
+    }
+    if (!accepted && !notAcceptedLogged) {
+      notAcceptedLogged = true;
+      log(JSON.stringify({ event: "attempt-report-not-accepted" }));
     }
   };
 }
 
-async function fetchBytes(url: string): Promise<Uint8Array> {
+/**
+ * R4 (round 3, check only): on a non-2xx response, the message carries only
+ * the operator's OWN configured `url` and the numeric status — never
+ * `res.statusText`, the response body, or `res.url` (the post-redirect
+ * location), any of which the upstream gateway (or whatever a redirect
+ * pointed at) controls. Exported so the property is tested directly, not just
+ * read.
+ */
+export async function fetchBytes(url: string): Promise<Uint8Array> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`the pack at ${url} answered ${res.status}`);
   return new Uint8Array(await res.arrayBuffer());
@@ -168,6 +208,7 @@ export function buildServerOptions(
     // A signed-in budget belongs to the operator the gateway names for the key.
     resolvePrincipal: gatewayPrincipal(cfg.gatewayBase),
     log,
+    trustProxy: cfg.trustedProxyHops,
   };
 }
 
@@ -180,9 +221,25 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   console.log(`hosted agent: pack ${pack.version} (${pack.sha256.slice(0, 12)}), L2 ${cfg.l2Enabled ? "on" : "off"}, listening on ${cfg.host}:${cfg.port}`);
 }
 
+/**
+ * The line to log for a startup failure (Q1-B round 2). `loadPinnedPack`'s
+ * "version" PackPinMismatch echoes the served pack's own `version` field in
+ * its message — the SAME upstream trust boundary as the MCP handshake's
+ * `serverInfo.version` (Q1-B's original finding), since a compromised or
+ * misconfigured gateway serves both. So a PackPinMismatch logs only its
+ * closed-set `field`, never the message. Every other startup error (a
+ * ConfigError, a pack-fetch HTTP failure) is built entirely from the
+ * operator's OWN env vars and config, never from an upstream or caller
+ * string, so its message is safe to log in full for operator debugging.
+ */
+export function formatStartupFailure(err: unknown): string {
+  if (err instanceof PackPinMismatch) return JSON.stringify({ event: "pack-pin-mismatch", field: err.field });
+  return err instanceof Error ? err.message : String(err);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((err: unknown) => {
-    console.error(err instanceof Error ? err.message : String(err));
+    console.error(formatStartupFailure(err));
     process.exit(1);
   });
 }

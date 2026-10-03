@@ -29,14 +29,21 @@ export interface ToolTransport {
 /** JSON field names whose values are secrets, whatever they contain. A name is
  * compared in lower case with `_` and `-` removed, so token, accessToken,
  * access_token and access-token are one name. Only WHOLE names match:
- * max_tokens, tokenCount and secretary are kept. */
+ * max_tokens, tokenCount and secretary are kept.
+ *
+ * R1-e (round 3): also passwd, pwd, secretkey, secretaccesskey (so
+ * aws_secret_access_key= is covered), apisecret, appsecret. Deliberately NOT
+ * added: session / sessionid (the agent must keep seeing negotiation session
+ * ids) and pass (too common in benign text — "pass: 5" is a score, not a
+ * credential). */
 const SECRET_FIELDS: ReadonlySet<string> = new Set([
   "token", "accesstoken", "refreshtoken", "idtoken", "sessiontoken", "authtoken", "bearertoken",
-  "apikey", "rawkey", "secret", "clientsecret", "password", "passphrase", "privatekey",
+  "apikey", "rawkey", "secret", "clientsecret", "secretkey", "secretaccesskey", "apisecret", "appsecret",
+  "password", "passwd", "pwd", "passphrase", "privatekey",
   "mnemonic", "seed", "seedphrase", "bearer", "authorization",
 ]);
 
-const isSecretField = (name: string): boolean => SECRET_FIELDS.has(name.toLowerCase().replace(/[_-]/g, ""));
+const isSecretField = (name: string): boolean => SECRET_FIELDS.has(name.toLowerCase().replace(/[_ -]/g, ""));
 
 /** Secret-shaped strings. A bare 0x-prefixed 32-byte hex is NOT scrubbed:
  * transaction hashes and evidence digests have that shape, and the agent must
@@ -52,13 +59,384 @@ const SECRET_STRINGS: readonly RegExp[] = [
 
 export const REDACTED = "[redacted]";
 
-/** A `"name": "value"` pair inside text that is not itself JSON, an error body
- * after a prefix for example. Only the value of a secret-named field is redacted. */
-const JSON_STRING_PAIR = /("([A-Za-z0-9_-]{1,64})"\s*:\s*)"(?:[^"\\]|\\.)*"/g;
+/**
+ * R5 (round 3 addendum 2): the most of any single string that `scrubText`
+ * will scan. `scrubToolResult` otherwise passes a non-JSON text, and every
+ * string inside a JSON result, through with no size cap at all — one long
+ * attacker-written field blocks the event loop for every session (about 20
+ * minutes at 1 MB, by the lane's extrapolation). Cut here, before any
+ * scrubbing pass runs, same principle as `toolError`'s 20_000.
+ */
+export const SCRUB_TEXT_LIMIT = 200_000;
+const TRUNCATED_MARKER = "…[truncated]";
+
+/**
+ * R5/R6 (round 3 addendum 2): URL userinfo, as a LINEAR scanner — the
+ * backtracking regex this replaced was quadratic on adversarial input (20k
+ * chars: 441ms; 40k: 1.8s, by the lane's measurement) and missed the
+ * empty-username form (`redis://:pw@host`).
+ *
+ *   - for each `://`, scan the authority up to the first `/`, `?`, `#`,
+ *     whitespace or the end;
+ *   - if it contains `@`, the userinfo is the text before the LAST `@`
+ *     (so a password containing `@` is covered too);
+ *   - redact everything after the FIRST `:` in the userinfo (so an empty
+ *     username, `:pw@host`, still loses the password).
+ *
+ * Every step advances monotonically and is bounded by the authority's own
+ * length (schemes are capped at 32 chars backward from `://`), so the whole
+ * scan is O(n) over the input, not O(n^2).
+ */
+function redactUrlUserinfo(text: string): string {
+  let out = "";
+  let cursor = 0;
+  const n = text.length;
+  let searchFrom = 0;
+  const MAX_SCHEME_CHARS = 32;
+  for (;;) {
+    const schemeEnd = text.indexOf("://", searchFrom);
+    if (schemeEnd === -1) break;
+    let schemeStart = schemeEnd;
+    while (schemeStart > 0 && schemeEnd - schemeStart < MAX_SCHEME_CHARS && /[A-Za-z0-9+.-]/.test(text[schemeStart - 1]!)) schemeStart--;
+    if (schemeStart >= schemeEnd || !/[A-Za-z]/.test(text[schemeStart]!)) {
+      searchFrom = schemeEnd + 3;
+      continue;
+    }
+    let authorityEnd = schemeEnd + 3;
+    while (authorityEnd < n && !/[\s/?#]/.test(text[authorityEnd]!)) authorityEnd++;
+    const authority = text.slice(schemeEnd + 3, authorityEnd);
+    const lastAt = authority.lastIndexOf("@");
+    if (lastAt === -1) {
+      searchFrom = authorityEnd;
+      continue;
+    }
+    const userinfo = authority.slice(0, lastAt);
+    const firstColon = userinfo.indexOf(":");
+    // No password: the whole userinfo is redacted. A token sent as the USERNAME is the common
+    // git-over-https form (`https://<token>@github.com/...`); a plain username is a cheap loss.
+    const passStart = schemeEnd + 3 + (firstColon === -1 ? 0 : firstColon + 1);
+    const passEnd = schemeEnd + 3 + lastAt;
+    out += text.slice(cursor, passStart) + REDACTED;
+    cursor = passEnd;
+    searchFrom = authorityEnd;
+  }
+  out += text.slice(cursor);
+  return out;
+}
+
+/**
+ * `Cookie:` / `Set-Cookie:` header VALUES. Every `name=value` pair's value is
+ * redacted, whatever the name — simpler and at least as safe as trying to
+ * recognize which cookie names are sensitive, and the lane's own spec allows
+ * it ("attribute names stay readable; redacting their values too is
+ * acceptable"). Runs on the header's text value only, up to end of line.
+ * Linear: a flat alternation and two single-pass char classes, no nested or
+ * ambiguous quantifiers to backtrack.
+ */
+const COOKIE_HEADER = /\b(Cookie|Set-Cookie)(:\s*)([^\r\n]+)/gi;
+const COOKIE_PAIR = /([A-Za-z0-9_-]+)(=)([^;]*)/g;
+
+/** SECRET_FIELDS as literal regex alternatives, longest first (defensive only:
+ * a shorter member that happens to prefix a longer one, e.g. "seed" / "seedphrase",
+ * is handled correctly either way by backtracking, since a short match that
+ * cannot be followed by the separator fails and the engine tries the next
+ * alternative at the same position). Every member is plain letters, but the
+ * escape is kept so this stays correct if that ever changes.
+ *
+ * `authorization` is excluded here on purpose: the dedicated AUTH_HEADER_ASSIGNMENT
+ * pass below owns that name (and `proxy-authorization`), so its scheme-word rule
+ * isn't bypassed by also matching here. `isSecretField`/`scrub` (object-key
+ * traversal) still treat `authorization` as secret via the full SECRET_FIELDS set. */
+const SECRET_FIELD_ALTERNATION = [...SECRET_FIELDS]
+  .filter((n) => n !== "authorization")
+  .sort((a, b) => b.length - a.length)
+  .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  .join("|");
+
+/**
+ * The natural multi-word SEPARATED spellings of a SECRET_FIELDS name that is
+ * inherently a qualifier + noun (+ noun) in free text (`access token`,
+ * `api key`, `secret access key`, ...). The zero-separator spelling
+ * ("accesstoken") is already a literal member of SECRET_FIELDS and so is
+ * covered by SECRET_FIELD_ALTERNATION directly.
+ *
+ * Spelled out as EXPLICIT word sequences — never "any word + any word" — so an
+ * unrelated qualifier ("new token: x", "refused: token=x") cannot be greedily
+ * absorbed into a non-matching candidate, which would consume those
+ * characters and pre-empt the later, narrower match that `token` alone would
+ * have won a few characters on.
+ */
+const COMPOUND_NAME =
+  "(?:access|refresh|id|session|auth|bearer)[ _-]token|api[ _-]key|raw[ _-]key|private[ _-]key|seed[ _-]phrase|" +
+  "secret[ _-]access[ _-]key|client[ _-]secret|secret[ _-]key|api[ _-]secret|app[ _-]secret";
+
+/** The full name alternative: ONLY a recognized SECRET_FIELDS spelling can
+ * start a match — never an arbitrary word — which is what keeps an unrelated
+ * word's own stray `:`/`=` (a product name, a URL scheme, "refused:") from
+ * being misread as a name and swallowing a real assignment that follows it. */
+const ASSIGNMENT_NAME = `(?:${COMPOUND_NAME}|${SECRET_FIELD_ALTERNATION})`;
+
+/**
+ * R7 (round 3 addendum 2, regression from 73d1fe20): a QUOTED key (`"k"`,
+ * `'k'`, `\"k\"`) has an unambiguous boundary — the closing quote — so unlike
+ * a bare key it can safely be GENERIC: any run of up to 64 letters, digits,
+ * `_`, `-` or space. `isSecretField` (which strips `_`/`-`/space before
+ * comparing) decides whether it names a secret, so `"pass_phrase"`,
+ * `"access__token"` and `"Pass-Word"` are covered even though none of those
+ * exact spellings appears in ASSIGNMENT_NAME. A BARE key keeps the enumerated
+ * alternation (ASSIGNMENT_NAME) — the free-text safety above still applies,
+ * since a bare key has no boundary and a generic pattern there would let an
+ * unrelated decoy word swallow a real assignment that follows it.
+ */
+const QUOTED_KEY = "[A-Za-z0-9_ -]{1,64}";
+
+/**
+ * R1-a (round 3): a name or value may be bare, `"..."`, `'...'`, or
+ * backslash-escaped `\"...\"` (a JSON string pair as it appears when the JSON
+ * itself sits inside another string, e.g. an error body that embedded the
+ * request). The redaction keeps whichever style was used. The four forms are
+ * independent alternatives (not a backreference) so the name's style and the
+ * value's style need not match, though every lane probe happens to pair them.
+ */
+const NAME_PART = `(?:\\\\"(${QUOTED_KEY})\\\\"|"(${QUOTED_KEY})"|'(${QUOTED_KEY})'|(${ASSIGNMENT_NAME}))`;
+const SEP_PART = `(\\s*[:=]\\s*)`;
+
+/** R9 (round 3 addendum 2, LOW): never re-redact a value an earlier pass
+ * (SECRET_STRINGS, or this module's own bracket pass) already reduced to
+ * exactly `[redacted]` — without this, the bare-token alternative below would
+ * match the marker's own `[redacted` (its `]` is outside the bare charset,
+ * see R8) and wrap it again, producing `[redacted]]`. */
+const REDACTED_ESCAPED = REDACTED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const NOT_ALREADY_REDACTED = `(?!${REDACTED_ESCAPED})`;
+
+/**
+ * The value: escaped-double (runs to the next literal `\"`), double-quoted,
+ * single-quoted (each running to its own closing quote, `\\.` escapes inner
+ * occurrences), a bare NUMBER (R1-f: a secret-named key may hold a non-string
+ * JSON value), or a bare token running to the first whitespace, quote, `&`,
+ * `,`, `;`, `)`, `]`, `}` or end. R8: the bare-token alternative must never
+ * start matching at `{` or `[` — those are object/array values, handled
+ * wholesale by the bracket scanner below, never picked at one char at a time.
+ * This exclusion is also what makes R9's double-bracket bug structurally
+ * impossible here: an already-redacted `[redacted]` marker starts with `[`,
+ * so the bare-token alternative can never start matching it, and the other
+ * four alternatives all require a leading quote or digit that `[` is not. A
+ * NOT_ALREADY_REDACTED guard is therefore only needed where a value can start
+ * with `{`/`[` structurally regardless of quoting — see BRACKET_TRIGGER.
+ */
+const VALUE_PART =
+  '(?:\\\\"((?:(?!\\\\").)*)\\\\"' +
+  '|"((?:[^"\\\\]|\\\\.)*)"' +
+  "|'((?:[^'\\\\]|\\\\.)*)'" +
+  "|(-?\\d+(?:\\.\\d+)?)(?![\\w.])" +
+  '|([^\\s"\'\\\\&,;)\\]}{[]+))';
+
+/**
+ * `name=value`, `name: value` or `name = "value"` in free text (not itself a
+ * JSON string pair with an unescaped quote, which this pattern also now
+ * covers directly — see NAME_PART/VALUE_PART): the VALUE of a secret-named
+ * ASSIGNMENT. The name is not preceded by a letter or digit (so
+ * `max_tokens=100`, `tokenCount=3`, `secretary: Bob` and `sessionId: s-123`
+ * are kept — nothing in ASSIGNMENT_NAME can even start a match there, and
+ * `session`/`sessionid`/`pass` are deliberately not secret names).
+ */
+const FREE_TEXT_ASSIGNMENT = new RegExp(`(?<![A-Za-z0-9])${NAME_PART}${SEP_PART}${VALUE_PART}`, "gi");
+
+/** Re-wraps a redacted value in whichever quote style (if any) the match used. */
+function wrapRedacted(vEsc: string | undefined, vDq: string | undefined, vSq: string | undefined, vNum: string | undefined): string {
+  if (vEsc !== undefined) return `\\"${REDACTED}\\"`;
+  if (vDq !== undefined) return `"${REDACTED}"`;
+  if (vSq !== undefined) return `'${REDACTED}'`;
+  if (vNum !== undefined) return `"${REDACTED}"`; // R1-f: a number value becomes a quoted redaction marker
+  return REDACTED;
+}
+
+function redactAssignmentValue(
+  nameEsc: string | undefined,
+  nameDq: string | undefined,
+  nameSq: string | undefined,
+  nameBare: string | undefined,
+  sep: string,
+  vEsc: string | undefined,
+  vDq: string | undefined,
+  vSq: string | undefined,
+  vNum: string | undefined,
+  whole: string,
+): string {
+  const name = nameEsc ?? nameDq ?? nameSq ?? nameBare ?? "";
+  if (!isSecretField(name)) return whole;
+  const keyText = nameEsc !== undefined ? `\\"${nameEsc}\\"` : nameDq !== undefined ? `"${nameDq}"` : nameSq !== undefined ? `'${nameSq}'` : (nameBare as string);
+  return `${keyText}${sep}${wrapRedacted(vEsc, vDq, vSq, vNum)}`;
+}
+
+/**
+ * R1-b (round 3): after `authorization` or `proxy-authorization` specifically,
+ * ANY single scheme word (`[A-Za-z][A-Za-z0-9._-]*` then whitespace) stays
+ * visible and only the token after it is redacted — `Authorization: Token xyz`
+ * reads as `Authorization: Token [redacted]`, whatever the scheme word is, not
+ * just the fixed Basic/Bearer/Digest set. With no scheme word (one token
+ * only), that token IS the value. No other name gets this scheme-skipping:
+ * `token: abc def` redacts only `abc`, handled by FREE_TEXT_ASSIGNMENT above.
+ */
+const AUTH_HEADER_NAME = "(?:proxy[ _-]?authorization|authorization)";
+const AUTH_HEADER_ASSIGNMENT = new RegExp(
+  `(?<![A-Za-z0-9])(${AUTH_HEADER_NAME})${SEP_PART}(?:([A-Za-z][A-Za-z0-9._-]*)\\s+)?${VALUE_PART}`,
+  "gi",
+);
+
+function redactAuthHeader(
+  name: string,
+  sep: string,
+  scheme: string | undefined,
+  vEsc: string | undefined,
+  vDq: string | undefined,
+  vSq: string | undefined,
+  vNum: string | undefined,
+): string {
+  const lead = scheme ? `${scheme} ` : "";
+  return `${name}${sep}${lead}${wrapRedacted(vEsc, vDq, vSq, vNum)}`;
+}
+
+/**
+ * R8 (round 3 addendum 2): a secret-named key whose value starts with `{` or
+ * `[` — the bare-token alternative above never starts there, so without this
+ * pass the name+sep matched, one bracket character got redacted alone, and
+ * the REST of the object/array (including the real secret somewhere inside
+ * it) rode along untouched. Matches name+sep with a lookahead for the
+ * upcoming bracket (and a guard against an already-redacted marker shaped
+ * like `[redacted...`, same reasoning as R9).
+ */
+const BRACKET_TRIGGER = new RegExp(`(?<![A-Za-z0-9])${NAME_PART}${SEP_PART}(?=[{[])${NOT_ALREADY_REDACTED}`, "gi");
+
+/**
+ * Linear, quote-aware bracket matcher: `text[start]` is `{` or `[`. Returns
+ * the index AFTER the matching close bracket, or `text.length` if the span
+ * never closes (R8: an unterminated span is redacted to the end of the
+ * — already capped, see SCRUB_TEXT_LIMIT — text).
+ *
+ * Tracks depth for the bracket's OWN type only; a different bracket type
+ * nested inside (an array inside an object, say) is not itself tracked, but
+ * on well-formed input its opens and closes are still balanced before ours
+ * closes, so this is correct for valid JSON-shaped input and always
+ * terminates (bounded by the text length) on anything else.
+ *
+ * Quote-aware: a bare `"`/`'` opens a string (closed by the same bare quote;
+ * `\` escapes the next character, including a same-type quote, without
+ * closing it) so a bracket CHARACTER inside an ordinary string value is never
+ * miscounted as structural. ALSO recognizes the backslash-delimited form
+ * (`\"...\"`, the escaped-JSON representation this scrubber already supports
+ * elsewhere): a string opened by `\"` is closed only by the next `\"`, not by
+ * a bare `"`, so the escaped-JSON case nests correctly too.
+ */
+function findBracketEnd(text: string, start: number): number {
+  const open = text[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let stringQuote: string | null = null;
+  let stringEscaped = false;
+  const n = text.length;
+  for (let i = start; i < n; i++) {
+    const c = text[i];
+    if (stringQuote !== null) {
+      if (c === "\\") {
+        if (stringEscaped && text[i + 1] === stringQuote) {
+          stringQuote = null;
+          i++;
+          continue;
+        }
+        i++; // an ordinary escape within the string's content
+        continue;
+      }
+      if (!stringEscaped && c === stringQuote) stringQuote = null;
+      continue;
+    }
+    if (c === "\\" && (text[i + 1] === '"' || text[i + 1] === "'")) {
+      stringQuote = text[i + 1]!;
+      stringEscaped = true;
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      stringQuote = c;
+      stringEscaped = false;
+      continue;
+    }
+    if (c === open) depth++;
+    else if (c === close) {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return n;
+}
+
+/** Redacts every secret-named key's bracketed (object/array) value, scanning
+ * once through `text` with `BRACKET_TRIGGER` + `findBracketEnd` (both
+ * linear), rather than via `.replace()` — the replacement SPAN's length is
+ * only known after scanning, which a fixed regex cannot express. */
+function redactBracketedValues(text: string): string {
+  let out = "";
+  let cursor = 0;
+  BRACKET_TRIGGER.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = BRACKET_TRIGGER.exec(text))) {
+    if (m.index < cursor) continue; // inside a span already consumed below
+    const whole = m[0];
+    const name = m[1] ?? m[2] ?? m[3] ?? m[4] ?? "";
+    const bracketStart = m.index + whole.length;
+    if (!isSecretField(name)) {
+      BRACKET_TRIGGER.lastIndex = bracketStart; // not this key's value; keep scanning from here
+      continue;
+    }
+    const bracketEnd = findBracketEnd(text, bracketStart);
+    // Keep the quoting of the key's own form: an escaped key (`\"token\"`) sits inside a string,
+    // where a bare quote would end that string.
+    const q = m[1] !== undefined ? '\\"' : '"';
+    out += text.slice(cursor, m.index) + whole + `${q}${REDACTED}${q}`;
+    cursor = bracketEnd;
+    BRACKET_TRIGGER.lastIndex = bracketEnd;
+  }
+  out += text.slice(cursor);
+  return out;
+}
 
 export function scrubText(text: string): string {
-  const shapes = SECRET_STRINGS.reduce((t, re) => t.replace(re, REDACTED), text);
-  return shapes.replace(JSON_STRING_PAIR, (whole, head: string, name: string) => (isSecretField(name) ? `${head}"${REDACTED}"` : whole));
+  const bounded = text.length > SCRUB_TEXT_LIMIT ? `${text.slice(0, SCRUB_TEXT_LIMIT)}${TRUNCATED_MARKER}` : text;
+  const shapes = SECRET_STRINGS.reduce((t, re) => t.replace(re, REDACTED), bounded);
+  const noUserinfo = redactUrlUserinfo(shapes);
+  const noCookies = noUserinfo.replace(COOKIE_HEADER, (_whole, header: string, sep: string, rest: string) => {
+    const redactedRest = rest.replace(COOKIE_PAIR, (_m, n: string, eq: string) => `${n}${eq}${REDACTED}`);
+    return `${header}${sep}${redactedRest}`;
+  });
+  const noAuthHeaders = noCookies.replace(
+    AUTH_HEADER_ASSIGNMENT,
+    (
+      _whole: string,
+      name: string,
+      sep: string,
+      scheme: string | undefined,
+      vEsc: string | undefined,
+      vDq: string | undefined,
+      vSq: string | undefined,
+      vNum: string | undefined,
+    ) => redactAuthHeader(name, sep, scheme, vEsc, vDq, vSq, vNum),
+  );
+  const noBrackets = redactBracketedValues(noAuthHeaders);
+  return noBrackets.replace(
+    FREE_TEXT_ASSIGNMENT,
+    (
+      whole: string,
+      nameEsc: string | undefined,
+      nameDq: string | undefined,
+      nameSq: string | undefined,
+      nameBare: string | undefined,
+      sep: string,
+      vEsc: string | undefined,
+      vDq: string | undefined,
+      vSq: string | undefined,
+      vNum: string | undefined,
+    ) => redactAssignmentValue(nameEsc, nameDq, nameSq, nameBare, sep, vEsc, vDq, vSq, vNum, whole),
+  );
 }
 
 export function scrub(value: unknown): unknown {

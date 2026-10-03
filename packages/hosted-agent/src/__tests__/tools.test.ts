@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
-import { connectMcp, packTools, scrub, scrubText, REDACTED } from "../tools.js";
+import { connectMcp, packTools, scrub, scrubText, REDACTED, SCRUB_TEXT_LIMIT } from "../tools.js";
 import type { PinnedPack } from "../pack.js";
 
 const KEY = "pcc_live_ThisIsTheUsersKey123";
@@ -54,6 +54,12 @@ beforeAll(async () => {
       if (name === "fails") return { isError: true, content: [{ type: "text", text: "refused for pcc_live_zzzzzzzz9999" }] };
       if (name === "token-result") return { content: [{ type: "text", text: JSON.stringify({ registered: true, token: "eyJhbGciOiJIUzI1NiJ9.synthetic.signature" }) }] };
       if (name === "error-with-json-body") return { isError: true, content: [{ type: "text", text: 'PCC API request failed with HTTP 400: {\n  "error": "bad request",\n  "token": "opaque-session-value-0123"\n}' }] };
+      // Q1-A round 2: opaque, non-JSON credential ASSIGNMENTS (no surrounding braces/quotes on the name).
+      if (name === "opaque-assignment") return { content: [{ type: "text", text: "token=opaque-session-value-0123" }] };
+      if (name === "opaque-assignment-spaced") return { content: [{ type: "text", text: "session token: opaque-session-value-0123" }] };
+      if (name === "opaque-assignment-error") return { isError: true, content: [{ type: "text", text: "refused: token=opaque-session-value-0123" }] };
+      // R1-b round 3: an Authorization header with an arbitrary (non-Basic/Bearer) scheme word.
+      if (name === "opaque-authorization-scheme") return { content: [{ type: "text", text: "Authorization: Token opaqueA1secret" }] };
       if (name === "rpc-error") throw new McpError(ErrorCode.InternalError, "rejected pcc_live_abcdefgh12345678");
       if (name === "long-error") return { isError: true, content: [{ type: "text", text: `pcc_live_zzzzzzzz9999 ${"x".repeat(20_000)}` }] };
       return { content: [{ type: "text", text: JSON.stringify({ tool: name, echoed: r.params.arguments ?? null }) }] };
@@ -326,6 +332,308 @@ describe("the scrubber redacts credential fields and bare tokens (Q3-B)", () => 
     });
     expect(scrubText("eyJhbGciOiJIUzI1NiJ9")).toBe("eyJhbGciOiJIUzI1NiJ9"); // no dots: not a JWT
     expect(scrubText("eyJhbGciOiJIUzI1NiJ9.payload")).toBe("eyJhbGciOiJIUzI1NiJ9.payload"); // two parts only
+  });
+});
+
+describe("opaque credentials in non-JSON text survive the scrubber (Q1-A round 2)", () => {
+  it("`name=value` through connectMcp().callTool() is redacted, not just quoted JSON pairs", async () => {
+    const t = await connectMcp(base, KEY);
+    const out = await t.callTool("opaque-assignment", {});
+    await t.close();
+    expect(JSON.stringify(out)).not.toContain("opaque-session-value-0123");
+    expect(JSON.stringify(out)).toContain(REDACTED);
+  });
+
+  it("a multi-word name (`session token: value`) is redacted the same way", async () => {
+    const t = await connectMcp(base, KEY);
+    const out = await t.callTool("opaque-assignment-spaced", {});
+    await t.close();
+    expect(JSON.stringify(out)).not.toContain("opaque-session-value-0123");
+  });
+
+  it("the error path (toolError) is scrubbed too", async () => {
+    const t = await connectMcp(base, KEY);
+    const err = await t.callTool("opaque-assignment-error", {}).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+    await t.close();
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).not.toContain("opaque-session-value-0123");
+  });
+
+  it.each([
+    ["token", "token=opaque-value-0123456789"],
+    ["access token", "access_token=opaque-value-0123456789"],
+    ["refresh token", "refresh-token=opaque-value-0123456789"],
+    ["id token", "id token=opaque-value-0123456789"],
+    ["session token", "session_token=opaque-value-0123456789"],
+    ["auth token", "auth-token=opaque-value-0123456789"],
+    ["bearer token", "bearer token=opaque-value-0123456789"],
+    ["api key", "api_key=opaque-value-0123456789"],
+    ["raw key", "raw-key=opaque-value-0123456789"],
+    ["secret", "secret=opaque-value-0123456789"],
+    ["client secret", "client_secret=opaque-value-0123456789"],
+    ["password", "password=opaque-value-0123456789"],
+    ["passphrase", "passphrase=opaque-value-0123456789"],
+    ["private key", "private-key=opaque-value-0123456789"],
+    ["mnemonic", "mnemonic=opaque-value-0123456789"],
+    ["seed", "seed=opaque-value-0123456789"],
+    ["seed phrase", "seed phrase=opaque-value-0123456789"],
+    ["bearer", "bearer=opaque-value-0123456789"],
+    ["authorization", "authorization=opaque-value-0123456789"],
+  ])("every SECRET_FIELDS name is covered in free text: %s", (_label, text) => {
+    const out = scrubText(text);
+    expect(out).not.toContain("opaque-value-0123456789");
+    expect(out).toContain(REDACTED);
+  });
+
+  it("Authorization: Basic/Bearer both lose the credential, with the scheme word kept", () => {
+    expect(scrubText("Authorization: Basic xyz")).toBe(`Authorization: Basic ${REDACTED}`);
+    expect(scrubText("Authorization: Bearer xyz")).toBe(`Authorization: Bearer ${REDACTED}`);
+  });
+
+  it("a URL query parameter is covered by the same rule", () => {
+    const out = scrubText("https://x.example/y?token=abcdefgh123&x=1");
+    expect(out).not.toContain("abcdefgh123");
+    expect(out).toContain("&x=1");
+  });
+
+  it("the name must not be preceded by a letter or digit: kept look-alikes", () => {
+    for (const text of ["max_tokens=100", "tokenCount=3", "secretary: Bob"]) {
+      expect(scrubText(text)).toBe(text);
+    }
+  });
+
+  it("an unrelated qualifier word before a real name is not swallowed: `new token: value` still redacts value", () => {
+    const out = scrubText("new token: opaque-value-0123456789");
+    expect(out).not.toContain("opaque-value-0123456789");
+    expect(out).toContain("new token");
+  });
+
+  it("several occurrences in one string are all redacted", () => {
+    const out = scrubText("token=abc0123456789 and later password: def0123456789");
+    expect(out).not.toContain("abc0123456789");
+    expect(out).not.toContain("def0123456789");
+  });
+
+  it("a value in quotes keeps its quotes, redacted inside", () => {
+    expect(scrubText('password = "letme-in-0123456"')).toBe(`password = "${REDACTED}"`);
+    expect(scrubText("api_key='abcdefgh123456'")).toBe(`api_key='${REDACTED}'`);
+  });
+});
+
+describe("R1 (round 3 lane review): the free-text scrubber still leaks", () => {
+  // The lane's exact probe lines (spec-456-r3-addendum-lane-review.md). Each must lose its
+  // opaque secret; several assert what must STAY visible too (scheme word, cookie shape).
+  it("R1-b: any scheme word after Authorization/Proxy-Authorization stays visible; the credential after it does not", () => {
+    expect(scrubText("Authorization: Token opaqueA1secret")).toBe("Authorization: Token [redacted]");
+    expect(scrubText("Authorization: ApiKey opaqueA2secret")).toBe("Authorization: ApiKey [redacted]");
+    expect(scrubText("Proxy-Authorization: Basic opaqueA3secret")).toBe("Proxy-Authorization: Basic [redacted]");
+    // no scheme word at all: the lone token is the value, not a kept "scheme"
+    expect(scrubText("Authorization: opaqueonlysecret0000")).toBe(`Authorization: ${REDACTED}`);
+    // other names get NO scheme skipping: the first token is the whole value
+    expect(scrubText("token: abc def")).toBe(`token: ${REDACTED} def`);
+  });
+
+  it("R1-a: an escaped-quoted JSON pair (backslash-quote on both key and value) is redacted, quoting style kept", () => {
+    expect(scrubText('{\\"access_token\\":\\"opaqueB2secret\\"}')).toBe(`{\\"access_token\\":\\"${REDACTED}\\"}`);
+    expect(scrubText('{\\"password\\": \\"opaqueB3secret\\"}')).toBe(`{\\"password\\": \\"${REDACTED}\\"}`);
+  });
+
+  it("R1-a: a single-quoted JSON-ish pair is redacted, quotes kept", () => {
+    expect(scrubText("{'client_secret': 'opaqueK1secret'}")).toBe(`{'client_secret': '${REDACTED}'}`);
+  });
+
+  it("R1-c: URL userinfo loses its password, for any URL scheme", () => {
+    expect(scrubText("fetch https://bob:opaqueC3secret@api.example.com/x failed")).toBe(`fetch https://bob:${REDACTED}@api.example.com/x failed`);
+    expect(scrubText("wss://svc:opaqueC4secret@relay.example.com/ws")).toBe(`wss://svc:${REDACTED}@relay.example.com/ws`);
+  });
+
+  it("R1-d: Cookie and Set-Cookie header values lose every pair's value", () => {
+    expect(scrubText("Cookie: sid=opaqueD4secret; theme=dark")).not.toContain("opaqueD4secret");
+    expect(scrubText("Set-Cookie: session=opaqueD5secret; Path=/")).not.toContain("opaqueD5secret");
+    // chosen design (spec explicitly allows this): every pair's VALUE is redacted, attribute
+    // names stay readable. Simpler than selectively sparing non-secret attribute values.
+    expect(scrubText("Cookie: sid=opaqueD4secret; theme=dark")).toBe(`Cookie: sid=${REDACTED}; theme=${REDACTED}`);
+    expect(scrubText("Set-Cookie: session=opaqueD5secret; Path=/")).toBe(`Set-Cookie: session=${REDACTED}; Path=${REDACTED}`);
+  });
+
+  it("R1-f: a non-string (numeric) JSON value under a secret-named key is redacted", () => {
+    expect(scrubText('{"token": 1234567890123456}')).toBe(`{"token": "${REDACTED}"}`);
+  });
+
+  it("R1-e: the new names are covered — passwd, pwd, secretkey, secretaccesskey, apisecret, appsecret", () => {
+    expect(scrubText("passwd=opaqueJ1secret")).toBe(`passwd=${REDACTED}`);
+    expect(scrubText("pwd: opaqueJ2secret")).toBe(`pwd: ${REDACTED}`);
+    expect(scrubText("secretkey=opaqueJ3secret")).toBe(`secretkey=${REDACTED}`);
+    expect(scrubText("secret_key=opaqueJ4secret")).toBe(`secret_key=${REDACTED}`);
+    expect(scrubText("aws_secret_access_key=opaqueJ5secret")).toBe(`aws_secret_access_key=${REDACTED}`);
+    expect(scrubText("api_secret: opaqueJ6secret")).toBe(`api_secret: ${REDACTED}`);
+    expect(scrubText("app_secret: opaqueJ7secret")).toBe(`app_secret: ${REDACTED}`);
+  });
+
+  it("R1-e: session, sessionid and pass are deliberately NOT secret names", () => {
+    expect(scrubText("sessionId: s-123")).toBe("sessionId: s-123");
+    expect(scrubText("session_id=s-456")).toBe("session_id=s-456");
+    expect(scrubText("pass: 5")).toBe("pass: 5");
+  });
+
+  it("R1: the kept look-alikes from the lane's list", () => {
+    for (const text of ["max_tokens=100", "tokenCount=3", "secretary: Bob", "sessionId: s-123", '"tokens": 5', "pass: 5", "Path=/"]) {
+      expect(scrubText(text)).toBe(text);
+    }
+  });
+
+  it("R1: through connectMcp().callTool(), an Authorization header with an arbitrary scheme word loses only the credential", async () => {
+    const t = await connectMcp(base, KEY);
+    const out = await t.callTool("opaque-authorization-scheme", {});
+    await t.close();
+    expect(JSON.stringify(out)).not.toContain("opaqueA1secret");
+    expect(JSON.stringify(out)).toContain("Token");
+  });
+});
+
+describe("R6 (round 3 addendum 2): empty-username userinfo leaks", () => {
+  it("R6: scheme://:password@host (the Redis form) redacts the password", () => {
+    expect(scrubText("redis://:opaqueR1secret@localhost:6379")).toBe(`redis://:${REDACTED}@localhost:6379`);
+  });
+
+  it("R5: a password containing @ is covered too — userinfo is the text before the LAST @ in the authority", () => {
+    expect(scrubText("https://user:p@ssopaqueR2secret@host.example/x")).toBe(`https://user:${REDACTED}@host.example/x`);
+  });
+});
+
+describe("R7 (round 3 addendum 2, regression from 73d1fe20): quoted keys lost their generic coverage", () => {
+  it.each([
+    ['"', '"'],
+    ["'", "'"],
+    ['\\"', '\\"'],
+  ])("a QUOTED key (%s...%s) is generic: isSecretField, not the enumerated alternation, decides", (o, c) => {
+    expect(scrubText(`{${o}pass_phrase${c}:${o}opaqueP1secret${c}}`)).toBe(`{${o}pass_phrase${c}:${o}${REDACTED}${c}}`);
+    expect(scrubText(`{${o}access__token${c}:${o}opaqueP2secret${c}}`)).toBe(`{${o}access__token${c}:${o}${REDACTED}${c}}`);
+    expect(scrubText(`{${o}Pass-Word${c}:${o}opaqueP3secret${c}}`)).toBe(`{${o}Pass-Word${c}:${o}${REDACTED}${c}}`);
+    expect(scrubText(`{${o}seed-phrase${c}:${o}opaqueP4secret${c}}`)).toBe(`{${o}seed-phrase${c}:${o}${REDACTED}${c}}`);
+  });
+
+  it("R7: BARE keys still use the enumerated names (free-text safety is unchanged)", () => {
+    expect(scrubText("new token: opaque-value-0123456789")).not.toContain("opaque-value-0123456789");
+    expect(scrubText("refused: token=opaque-session-value-0123")).toContain("refused:");
+  });
+
+  it("R7: the kept list still holds", () => {
+    for (const text of ["max_tokens=100", "tokenCount=3", "secretary: Bob", "sessionId: s-123", '"tokens": 5', "pass: 5", "Path=/"]) {
+      expect(scrubText(text)).toBe(text);
+    }
+  });
+});
+
+describe("R8 (round 3 addendum 2): an object or array value under a secret key is mangled and its contents survive", () => {
+  it("R8: a nested object value is redacted whole, quoting kept consistent", () => {
+    expect(scrubText('{"token": {"value": "opaqueN1secret"}}')).toBe('{"token": "[redacted]"}');
+  });
+
+  it("R8: a nested array value is redacted whole", () => {
+    expect(scrubText('{"token": ["opaqueN2secret"]}')).toBe('{"token": "[redacted]"}');
+  });
+
+  it("R8: deep nesting (object inside array inside object) is fully consumed", () => {
+    const out = scrubText('{"token": {"a": {"b": [1, {"c": "opaqueN3secret"}]}}}');
+    expect(out).toBe('{"token": "[redacted]"}');
+  });
+
+  it("R8: a bracket inside a STRING inside the value does not confuse the depth counter", () => {
+    const out = scrubText('{"token": {"note": "use { carefully }", "x": "opaqueN4secret"}}');
+    expect(out).toBe('{"token": "[redacted]"}');
+    expect(out).not.toContain("opaqueN4secret");
+  });
+
+  it("R8: an unterminated bracket span is redacted to the end of the (capped) text", () => {
+    const out = scrubText('{"token": {"value": "opaqueN5secret"');
+    expect(out).not.toContain("opaqueN5secret");
+  });
+
+  it("R8: the escaped-JSON form (backslash-quoted throughout) is also fully consumed", () => {
+    const out = scrubText('{\\"token\\": {\\"value\\": \\"opaqueN6secret\\"}}');
+    expect(out).not.toContain("opaqueN6secret");
+  });
+
+  it("R8: a non-secret key's bracket value is left alone, and a secret key nested inside it is still found", () => {
+    const out = scrubText('{"meta": {"token": "opaqueX1secret"}}');
+    expect(out).not.toContain("opaqueX1secret");
+    expect(out).toContain('"meta": {');
+  });
+
+  it("R8: two adjacent secret-bracketed keys are each redacted independently", () => {
+    expect(scrubText('{"token": {"a":1}, "secret": {"b":2}}')).toBe('{"token": "[redacted]", "secret": "[redacted]"}');
+  });
+});
+
+describe("R9 (round 3 addendum 2, LOW): no double brackets", () => {
+  it("R9: a value already redacted by an earlier pass (SECRET_STRINGS) is left as-is, not re-wrapped", () => {
+    expect(scrubText("Authorization: Bearer abcdefghijklmnop1234")).toBe("Authorization: [redacted]");
+    expect(scrubText("token: pcc_live_abcdefgh12345678 rest")).toBe("token: [redacted] rest");
+  });
+});
+
+describe("lane review (round 3): a credential in the URL username position, and escaped-key bracket quoting", () => {
+  it("a token used as the URL username (no password) is redacted: the git-over-https form", () => {
+    expect(scrubText("git clone https://ghp_opaqueU1secret@github.com/o/r.git failed")).toBe(
+      `git clone https://${REDACTED}@github.com/o/r.git failed`,
+    );
+  });
+
+  it("a URL with no userinfo is untouched", () => {
+    expect(scrubText("see https://example.com/a?b=c and ssh://github.com:22/x")).toBe("see https://example.com/a?b=c and ssh://github.com:22/x");
+  });
+
+  it("an object value under a backslash-escaped key is replaced in the same escaped quoting", () => {
+    expect(scrubText('{\\"token\\": {\\"value\\": \\"opaqueN3secret\\"}}')).toBe(`{\\"token\\": \\"${REDACTED}\\"}`);
+  });
+});
+
+describe("R5 (round 3 addendum 2, availability): URL_USERINFO is linear, and scrubText caps its work", () => {
+  it("R5: userinfo redaction is linear — the lane's adversarial shape finishes well under 200ms at every size", () => {
+    for (const n of [5_000, 10_000, 20_000, 40_000, SCRUB_TEXT_LIMIT]) {
+      const input = "a".repeat(Math.floor(n / 2)) + "://b:" + "c".repeat(Math.floor(n / 2));
+      const t0 = Date.now();
+      scrubText(input);
+      const ms = Date.now() - t0;
+      expect(ms, `n=${n} took ${ms}ms`).toBeLessThan(200);
+    }
+  });
+
+  it("R5: every other pattern stays fast on its own adversarial shape, at the cap", () => {
+    const cases: Array<[string, string]> = [
+      ["unterminated PEM markers", "-----BEGIN PRIVATE KEY-----".repeat(Math.ceil(SCRUB_TEXT_LIMIT / 28))],
+      ["unterminated bracket span", '"token": ' + "[".repeat(50_000) + "]".repeat(50_000)],
+      ["many bare assignments", "token=x; ".repeat(30_000)],
+      ["many quoted JSON pairs", '{"token": "a"}, '.repeat(15_000)],
+      ["long Cookie header", "Cookie: " + "a=b; ".repeat(50_000)],
+    ];
+    for (const [label, input] of cases) {
+      const t0 = Date.now();
+      scrubText(input);
+      const ms = Date.now() - t0;
+      expect(ms, `${label} (${input.length} chars) took ${ms}ms`).toBeLessThan(200);
+    }
+  });
+
+  it("R5: input over SCRUB_TEXT_LIMIT is cut, with a visible truncation marker, before any scrubbing", () => {
+    const huge = "x".repeat(SCRUB_TEXT_LIMIT + 50_000);
+    const out = scrubText(huge);
+    expect(out.length).toBeLessThan(huge.length);
+    expect(out).toContain("[truncated]");
+    expect(out.startsWith("x".repeat(100))).toBe(true); // the kept prefix is untouched content
+  });
+
+  it("R5: a secret sitting exactly at the cap boundary is still redacted (the cap does not split it)", () => {
+    const prefix = "x".repeat(SCRUB_TEXT_LIMIT - 10);
+    const input = `${prefix}token=opaquecapboundarysecret0123`;
+    const out = scrubText(input);
+    // Either the secret was fully inside the kept prefix (redacted) or it was cut by
+    // truncation — either way, the raw secret must never survive in the output.
+    expect(out).not.toContain("opaquecapboundarysecret0123");
   });
 });
 

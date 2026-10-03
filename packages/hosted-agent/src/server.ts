@@ -39,6 +39,14 @@ export interface ServerOptions {
   readonly maxTurns?: number;
   readonly idleMs?: number;
   readonly now?: () => number;
+  /** How many deployment-proxy hops to trust for X-Forwarded-For (R2 round 3).
+   * Passed straight to Fastify's own `trustProxy`: `0`/`false` ignores
+   * X-Forwarded-For entirely (`req.ip` is the raw socket address — the right
+   * choice with no proxy in front, or a client could buy a fresh address cap
+   * just by sending a fake header); a positive hop count is the number of
+   * trusted proxies between the client and this service. Required by the
+   * caller (main.ts's readConfig) — there is no safe default here. */
+  readonly trustProxy?: number | boolean;
 }
 
 interface Entry {
@@ -52,8 +60,29 @@ const SESSION_HEADER = "x-hosted-session";
 
 const digest = (s: string): string => createHash("sha256").update(s).digest("hex").slice(0, 32);
 
+type ReportedPackShape = "absent" | "bare-version" | "version+sha256" | "other";
+
+/** A bare version string: alnum, dots and hyphens only (semver-ish), no `+sha256.` suffix. */
+const BARE_VERSION = /^[0-9A-Za-z][0-9A-Za-z.-]*$/;
+/** The pin's own shape: `<version>+sha256.<64 lowercase hex>`. */
+const VERSION_PLUS_SHA256 = /^[0-9A-Za-z][0-9A-Za-z.-]*\+sha256\.[0-9a-f]{64}$/;
+
+/**
+ * How the gateway's claimed pack version compares to the pin's own shape — for
+ * the mismatch log (Q1-B). NEVER the string itself: a gateway can put anything,
+ * including a credential, in `serverInfo.version`; the log carries only a
+ * closed-set SHAPE label and a sha256 prefix (a digest, not the value), so a
+ * secret in `reported` can never reach a log line, whatever it looks like.
+ */
+function reportedPackShape(reported: string | undefined): { reportedShape: ReportedPackShape; reportedSha256Prefix: string | null } {
+  if (reported === undefined) return { reportedShape: "absent", reportedSha256Prefix: null };
+  const reportedSha256Prefix = createHash("sha256").update(reported).digest("hex").slice(0, 16);
+  const reportedShape: ReportedPackShape = VERSION_PLUS_SHA256.test(reported) ? "version+sha256" : BARE_VERSION.test(reported) ? "bare-version" : "other";
+  return { reportedShape, reportedSha256Prefix };
+}
+
 export function buildServer(opts: ServerOptions): FastifyInstance {
-  const app = Fastify({ logger: false, bodyLimit: 64 * 1024 });
+  const app = Fastify({ logger: false, bodyLimit: 64 * 1024, trustProxy: opts.trustProxy ?? false });
   const sessions = new Map<string, Entry>();
   const now = opts.now ?? Date.now;
   const maxChars = opts.maxMessageChars ?? 8_000;
@@ -124,11 +153,20 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
     // Keyed by a digest, never a key and never the operator id itself. A signed-in
     // caller is keyed by the operator the gateway names for the credential, so every
     // key of one operator shares one daily budget and a string the gateway never issued gets none.
-    // Anonymous callers are keyed by address, which behind a proxy needs the real
-    // client address (trustProxy).
+    // Anonymous callers are keyed by address, which behind a proxy needs the real client
+    // address: req.ip honors X-Forwarded-For once `trustProxy` is configured (R2 round 3,
+    // main.ts's PCC_HOSTED_TRUSTED_PROXY_HOPS) — with it unset (hops=0), every client behind
+    // a deployment proxy would otherwise share this ONE address, proxy-wide.
+    //
+    // addressKey (Q3): provisioning accepts an unverified email or wallet, so the
+    // operator id alone is not a trust root — an attacker can mint a fresh
+    // operator id per allowance. Every session, signed in or not, is ALSO keyed by
+    // this same client-address digest, and the budget meter charges both. For an
+    // anonymous session the two keys are identical: one cap, not two.
+    const addressKey = `anon:${digest(req.ip)}`;
     let userKey: string;
     if (credential === null) {
-      userKey = `anon:${digest(req.ip)}`;
+      userKey = addressKey;
     } else {
       const operatorId = await operatorOf(credential);
       if (operatorId === null) {
@@ -139,12 +177,13 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
     }
     let session: HostedSession;
     try {
-      session = await HostedSession.open(opts.deps, { userKey, credential });
+      session = await HostedSession.open(opts.deps, { userKey, addressKey, credential });
     } catch (err) {
       // Never an upstream detail: the same shape a failed message answers. What the
       // operator needs is in the log, without the error's message (it may carry a credential).
       if (err instanceof PackMismatch) {
-        log(JSON.stringify({ event: "pack-mismatch", expected: err.expected, reported: err.reported?.slice(0, 200) ?? null }));
+        const { reportedShape, reportedSha256Prefix } = reportedPackShape(err.reported);
+        log(JSON.stringify({ event: "pack-mismatch", expected: err.expected, reportedShape, reportedSha256Prefix }));
       } else {
         log(JSON.stringify({ event: "session-open-failed", error: err instanceof Error ? err.name : "unknown" }));
       }
@@ -211,6 +250,11 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
   app.delete("/session", async (req, reply) => {
     const entry = await entryFor(req, reply);
     if (!entry) return;
+    // Q5-2: a turn in flight settles its spend and its report when it finishes; closing
+    // underneath it would report zero/incomplete tokens and drop the transport out from
+    // under tool calls the turn may still attempt. Refuse, close nothing, and leave the
+    // session exactly as it was: the caller may retry the DELETE once the turn answers.
+    if (entry.busy) return reply.code(409).send({ error: "session_busy" });
     sessions.delete(req.headers[SESSION_HEADER] as string);
     return await entry.session.close();
   });

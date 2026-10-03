@@ -39,6 +39,7 @@ function setup(
     connectError?: Error;
     listError?: Error;
     reportError?: Error;
+    trustProxy?: number | boolean;
   } = {},
 ) {
   const replies = [...(o.replies ?? [])];
@@ -92,6 +93,7 @@ function setup(
     maxTurns: o.maxTurns,
     idleMs: 60_000,
     now: () => clock.t,
+    trustProxy: o.trustProxy ?? false,
   });
   return { app, connect, calls, reports, logs, create, clock, db, transport };
 }
@@ -177,6 +179,31 @@ describe("the hosted agent's HTTP surface", () => {
     expect(second.statusCode).toBe(409);
     release();
     expect((await first).statusCode).toBe(200);
+  });
+
+  it("Q5-2: DELETE while a turn is busy answers 409 and closes nothing; after the turn settles, DELETE answers 200 with the final tokens", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { app, transport, reports } = setup({ create: async () => (await gate, text("slow")) });
+    const id = await open(app);
+    const inFlight = say(app, id, "one");
+    await new Promise((r) => setTimeout(r, 20));
+    const busyDelete = await app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(busyDelete.statusCode).toBe(409);
+    expect(busyDelete.json()).toEqual({ error: "session_busy" });
+    expect(transport.closes).toBe(0); // the transport was not closed
+    expect(reports).toHaveLength(0); // no attempt report was emitted
+    release();
+    expect((await inFlight).statusCode).toBe(200);
+    // the session is still usable after a refused DELETE
+    expect((await app.inject({ method: "GET", url: "/session/pending", headers: { "x-hosted-session": id } })).statusCode).toBe(200);
+    const res = await app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().report).toMatchObject({ tokens: { in: 1, out: 1, source: "metered" } });
+    expect(transport.closes).toBe(1);
+    expect(reports).toHaveLength(1);
+    // and now it is really gone
+    expect((await say(app, id, "hi")).statusCode).toBe(404);
   });
 
   it("confirm and reject by body token; an unknown token is refused", async () => {
@@ -316,6 +343,20 @@ describe("what the HTTP caller is shown is scrubbed (Q1-C, Q3-B)", () => {
     expect(JSON.stringify(create.mock.calls.at(-1))).not.toMatch(/pcc_live_Leaked|abcdefgh12345678/);
   });
 
+  it("Q1-A round 2: an opaque non-JSON credential assignment in a confirmed result reaches neither the confirmation response nor the next model request", async () => {
+    const { app, create } = setup({
+      replies: [toolUse("onboard_machine"), text("confirm?"), text("ok")],
+      toolResult: "token=opaque-session-value-0123",
+    });
+    const id = await open(app, KEY);
+    const [held] = (await say(app, id, "register")).json().pending as Array<{ token: string }>;
+    const res = await confirmCall(app, id, held!.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain("opaque-session-value-0123");
+    await say(app, id, "thanks");
+    expect(JSON.stringify(create.mock.calls.at(-1))).not.toContain("opaque-session-value-0123");
+  });
+
   it("Q3-B: a token in a confirmed result reaches neither the confirmation response nor the next model request", async () => {
     const { app, create } = setup({
       replies: [toolUse("onboard_machine"), text("confirm?"), text("ok")],
@@ -337,8 +378,8 @@ describe("a signed-in budget belongs to an authenticated operator, never to the 
   // 9,100 nano-USD actually used, under a worst case of about 11,000: spends the allowance without overrunning the reservation.
   const spendy = { stop_reason: "end_turn", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 9_000, output_tokens: 100 } };
   const dayCap = { perUserDay: 15_000 };
-  const openWith = (app: ReturnType<typeof buildServer>, authorization?: string) =>
-    app.inject({ method: "POST", url: "/session", headers: authorization ? { authorization } : {} });
+  const openWith = (app: ReturnType<typeof buildServer>, authorization?: string, remoteAddress?: string) =>
+    app.inject({ method: "POST", url: "/session", headers: authorization ? { authorization } : {}, ...(remoteAddress ? { remoteAddress } : {}) });
 
   it("Q4-A: a Bearer string that resolves to no operator refuses the open with 401, never a downgrade to anonymous", async () => {
     const { app, connect } = setup({ resolvePrincipal });
@@ -380,16 +421,84 @@ describe("a signed-in budget belongs to an authenticated operator, never to the 
     expect(other.statusCode).toBe(401); // no fresh allowance, because no session at all
   });
 
-  it("Q4-A: two different valid keys of the SAME operator share ONE daily budget; another operator has its own", async () => {
+  it("Q4-A: two different valid keys of the SAME operator share ONE daily budget; another operator AT A DIFFERENT ADDRESS has its own", async () => {
     const { app } = setup({ resolvePrincipal, caps: dayCap, maxTokens: 10_000, replies: [spendy, spendy, spendy, spendy] });
     const a1 = (await openWith(app, "Bearer pcc_live_ValidKeyA1")).json().session as string;
     expect((await say(app, a1, "one")).json().stopped).toBeUndefined();
     const second = await openWith(app, "Bearer pcc_live_ValidKeyA2");
     expect(second.statusCode).toBe(201);
     expect((await say(app, second.json().session, "two")).json().stopped).toBe("per-user-day");
-    const other = await openWith(app, "Bearer pcc_live_ValidKeyB1");
+    // A different operator (op-2) AND a different client address: Q3 round 2 also shares a day
+    // cap across operators at the SAME address (tested below), so this one must be elsewhere to
+    // get its own allowance.
+    const other = await openWith(app, "Bearer pcc_live_ValidKeyB1", "203.0.113.77");
     expect(other.statusCode).toBe(201);
     expect((await say(app, other.json().session, "three")).json().stopped).toBeUndefined();
+  });
+
+  it("Q3 round 2: two operators from ONE client share its address cap — after the first exhausts it, the second key's session is refused too", async () => {
+    const { app } = setup({ resolvePrincipal, caps: dayCap, maxTokens: 10_000, replies: [spendy, spendy] });
+    const ip = "198.51.100.9";
+    const a = (await openWith(app, "Bearer pcc_live_ValidKeyA1", ip)).json().session as string;
+    expect((await say(app, a, "one")).json().stopped).toBeUndefined(); // exhausts op-1's day cap AND the shared address cap
+    const b = (await openWith(app, "Bearer pcc_live_ValidKeyB1", ip)).json().session as string; // a DIFFERENT operator, SAME client address
+    expect((await say(app, b, "two")).json().stopped).toBe("per-address-day");
+  });
+
+  it("Q3 round 2: a second client (different address) with a second operator gets its own allowance", async () => {
+    const { app } = setup({ resolvePrincipal, caps: dayCap, maxTokens: 10_000, replies: [spendy, spendy] });
+    const a = (await openWith(app, "Bearer pcc_live_ValidKeyA1", "198.51.100.10")).json().session as string;
+    expect((await say(app, a, "one")).json().stopped).toBeUndefined();
+    const b = (await openWith(app, "Bearer pcc_live_ValidKeyB1", "198.51.100.20")).json().session as string;
+    expect((await say(app, b, "two")).json().stopped).toBeUndefined();
+  });
+
+  it("Q3 round 2: an anonymous session and a signed-in session from ONE client share the address cap", async () => {
+    const { app } = setup({ resolvePrincipal, caps: dayCap, maxTokens: 10_000, replies: [spendy, spendy] });
+    const ip = "198.51.100.30";
+    const anon = (await openWith(app, undefined, ip)).json().session as string;
+    expect((await say(app, anon, "one")).json().stopped).toBeUndefined(); // exhausts the shared address cap
+    const signedIn = (await openWith(app, "Bearer pcc_live_ValidKeyA1", ip)).json().session as string;
+    expect((await say(app, signedIn, "two")).json().stopped).toBe("per-address-day");
+  });
+
+  it("R2 (round 3): reproduced — with no trustProxy, two different real clients behind one proxy share ONE address cap", async () => {
+    const { app } = setup({ resolvePrincipal, caps: dayCap, maxTokens: 10_000, replies: [spendy, spendy], trustProxy: false });
+    const proxyIp = "203.0.113.200";
+    const a = (
+      await app.inject({ method: "POST", url: "/session", remoteAddress: proxyIp, headers: { authorization: "Bearer pcc_live_ValidKeyA1", "x-forwarded-for": "1.1.1.1" } })
+    ).json().session as string;
+    expect((await say(app, a, "one")).json().stopped).toBeUndefined(); // exhausts the shared (proxy-keyed) address cap
+    const b = (
+      await app.inject({ method: "POST", url: "/session", remoteAddress: proxyIp, headers: { authorization: "Bearer pcc_live_ValidKeyB1", "x-forwarded-for": "2.2.2.2" } })
+    ).json().session as string;
+    expect((await say(app, b, "two")).json().stopped).toBe("per-address-day"); // wrongly shares the proxy's one cap
+  });
+
+  it("R2: fixed — with trustProxy hops=1, two different XFF clients behind one proxy address get SEPARATE address caps", async () => {
+    const { app } = setup({ resolvePrincipal, caps: dayCap, maxTokens: 10_000, replies: [spendy, spendy], trustProxy: 1 });
+    const proxyIp = "203.0.113.201";
+    const a = (
+      await app.inject({ method: "POST", url: "/session", remoteAddress: proxyIp, headers: { authorization: "Bearer pcc_live_ValidKeyA1", "x-forwarded-for": "3.3.3.3" } })
+    ).json().session as string;
+    expect((await say(app, a, "one")).json().stopped).toBeUndefined();
+    const b = (
+      await app.inject({ method: "POST", url: "/session", remoteAddress: proxyIp, headers: { authorization: "Bearer pcc_live_ValidKeyB1", "x-forwarded-for": "4.4.4.4" } })
+    ).json().session as string;
+    expect((await say(app, b, "two")).json().stopped).toBeUndefined(); // separate allowance
+  });
+
+  it("R2: with trustProxy hops=0, a client cannot buy a fresh allowance by sending a different X-Forwarded-For", async () => {
+    const { app } = setup({ resolvePrincipal, caps: dayCap, maxTokens: 10_000, replies: [spendy, spendy], trustProxy: 0 });
+    const clientIp = "203.0.113.202";
+    const a = (
+      await app.inject({ method: "POST", url: "/session", remoteAddress: clientIp, headers: { authorization: "Bearer pcc_live_ValidKeyA1", "x-forwarded-for": "5.5.5.5" } })
+    ).json().session as string;
+    expect((await say(app, a, "one")).json().stopped).toBeUndefined();
+    const b = (
+      await app.inject({ method: "POST", url: "/session", remoteAddress: clientIp, headers: { authorization: "Bearer pcc_live_ValidKeyB1", "x-forwarded-for": "6.6.6.6" } })
+    ).json().session as string;
+    expect((await say(app, b, "two")).json().stopped).toBe("per-address-day"); // XFF ignored: same real address, same cap
   });
 
   it("Q4-A: an anonymous session is still keyed by address and needs no resolution", async () => {
@@ -426,6 +535,41 @@ describe("the gateway's pack is the pack that was pinned (Q5-A)", () => {
     const res = await app.inject({ method: "POST", url: "/session" });
     expect(res.statusCode).toBe(502);
     expect(logs.join("\n")).toContain("pack-mismatch");
+  });
+});
+
+describe("the pack-mismatch log never contains the reported string (Q1-B round 2)", () => {
+  it("Q1-B: a credential-shaped reported version opens nothing (502), and the logs contain no pcc_live", async () => {
+    const { app, logs } = setup({ reported: { version: "pcc_live_SyntheticCredential0001" } });
+    const res = await app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
+    expect(res.statusCode).toBe(502);
+    const logged = logs.join("\n");
+    expect(logged).toContain("pack-mismatch");
+    expect(logged).not.toContain("pcc_live");
+  });
+
+  it("Q1-B: the log carries expected, reportedShape and a sha256 prefix, never the raw reported field", async () => {
+    const { app, logs } = setup({ reported: { version: "pcc_live_SyntheticCredential0001" } });
+    await app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
+    const line = JSON.parse(logs.find((l) => l.includes("pack-mismatch"))!);
+    expect(line.expected).toBe(`${PACK.version}+sha256.${PACK.sha256}`);
+    expect(line.reportedShape).toBe("other");
+    expect(line.reportedSha256Prefix).toMatch(/^[0-9a-f]{16}$/);
+    expect(line).not.toHaveProperty("reported");
+    expect(JSON.stringify(line)).not.toContain("pcc_live");
+  });
+
+  it.each([
+    [undefined, "absent"],
+    ["2.19.1", "bare-version"],
+    [`${PACK.version}+sha256.${"0".repeat(64)}`, "version+sha256"],
+    ["pcc_live_SyntheticCredential0002", "other"],
+  ] as const)("Q1-B: reportedShape classifies %s as %s", async (reported, shape) => {
+    const { app, logs } = setup({ reported: { version: reported } });
+    await app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
+    const line = JSON.parse(logs.find((l) => l.includes("pack-mismatch"))!);
+    expect(line.reportedShape).toBe(shape);
+    if (reported === undefined) expect(line.reportedSha256Prefix).toBeNull();
   });
 });
 

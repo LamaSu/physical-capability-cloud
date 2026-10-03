@@ -38,7 +38,7 @@ describe("the policy table against the served agent package", () => {
     "pcc_relay_tool_call", "pcc_relay_generic_tool_call", "pcc_create_scope", "pcc_chat_send", "start_protocol_run",
     "cancel_protocol_run", "kernel_heartbeat", "kernel_announce_capabilities", "operator_heartbeat",
     "provision_api_key", "list_api_keys", "pcc_generate_ui", "delete_operator_channel", "fund_escrow",
-    "setup_test_job", "redeem_invite",
+    "setup_test_job", "redeem_invite", "execute_composition", "pcc_submit_paid_job",
   ])("%s is never offered (device, impersonation, credential, absolute URL, or a name LLMAgent reserves)", (name) => {
     expect(level(name)).toBe("never");
   });
@@ -53,10 +53,20 @@ describe("the policy table against the served agent package", () => {
     expect(DEFAULT_TOOL_POLICY.write.has("redeem_invite")).toBe(false);
   });
 
+  it("Q2 round 2: execute_composition is never: its production implementation submits every step as a real job via JobFacade.submit (packages/gateway/src/routes/compose.ts createProductionBinding)", () => {
+    expect(level("execute_composition")).toBe("never");
+    expect(DEFAULT_TOOL_POLICY.l2.has("execute_composition")).toBe(false);
+  });
+
+  it("Q2 round 2: pcc_submit_paid_job is never: its handler commits a job to a kernelId and opens an active execution scope on it (packages/gateway/src/routes/paid-job-flow.ts createJobFromSession, repos.jobs.insert + executionScopes insert with status 'active')", () => {
+    expect(level("pcc_submit_paid_job")).toBe("never");
+    expect(DEFAULT_TOOL_POLICY.l2.has("pcc_submit_paid_job")).toBe(false);
+  });
+
   it.each([
-    "pcc_submit_paid_job", "marketplace_place_order", "distribute_royalties", "create_kernel", "create_capability",
+    "marketplace_place_order", "distribute_royalties", "create_kernel", "create_capability",
     "prove_registration", "activate_registration", "pcc_job_complete", "operator_push_evidence", "claim_bounty",
-    "release_milestone", "execute_composition", "revoke_api_key",
+    "release_milestone", "revoke_api_key",
   ])("%s is L2 (money, work, authority)", (name) => {
     expect(level(name)).toBe("l2");
   });

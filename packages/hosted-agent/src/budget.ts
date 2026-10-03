@@ -34,11 +34,24 @@ export interface BudgetCaps {
   readonly perMonth: number;
 }
 
-/** Who a call is charged to. `userKey` is the service's account key for the
- * caller (an account id once signed in; an anonymous key before that). */
+/**
+ * Who a call is charged to. `userKey` is the service's account key for the
+ * caller (an account id once signed in; an anonymous key before that).
+ *
+ * `addressKey` is the caller's client address (the SAME key an anonymous
+ * session uses: `anon:${digest(req.ip)}`), charged ALONGSIDE `userKey`. A
+ * signed-in operator id is only as trustworthy as provisioning, which accepts
+ * an unverified email or wallet (Q3): an attacker can provision any number of
+ * operator ids from one client and give each its own `userKey` allowance. The
+ * address cap closes that: it is shared by every `userKey` (and every
+ * anonymous session) seen from one client address, so provisioning a fresh
+ * operator id never grants a fresh allowance by itself. For an anonymous
+ * session `addressKey` equals `userKey` — they are the same cap, not two.
+ */
 export interface Payer {
   readonly sessionId: string;
   readonly userKey: string;
+  readonly addressKey: string;
 }
 
 /** The usage block a Messages API response carries. */
@@ -49,7 +62,7 @@ export interface Usage {
   readonly cache_read_input_tokens?: number | null;
 }
 
-export type BudgetStopReason = "per-session" | "per-user-day" | "per-month" | "disabled" | "overrun";
+export type BudgetStopReason = "per-session" | "per-user-day" | "per-address-day" | "per-month" | "disabled" | "overrun";
 
 export class BudgetStop extends Error {
   readonly retryable = false;
@@ -79,6 +92,7 @@ CREATE TABLE IF NOT EXISTS hosted_agent_spend (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
   user_key TEXT NOT NULL,
+  address_key TEXT NOT NULL,
   day TEXT NOT NULL,
   month TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('pending', 'settled')),
@@ -87,19 +101,54 @@ CREATE TABLE IF NOT EXISTS hosted_agent_spend (
 );
 CREATE INDEX IF NOT EXISTS hosted_agent_spend_session ON hosted_agent_spend (session_id);
 CREATE INDEX IF NOT EXISTS hosted_agent_spend_user_day ON hosted_agent_spend (user_key, day);
+CREATE INDEX IF NOT EXISTS hosted_agent_spend_address_day ON hosted_agent_spend (address_key, day);
 CREATE INDEX IF NOT EXISTS hosted_agent_spend_month ON hosted_agent_spend (month);
--- A settlement that cost more than its reservation. One row stops that payer for the rest of its UTC day.
+-- A settlement that cost more than its reservation. One row stops that payer (by EITHER its
+-- operator id or its client address) for the rest of its UTC day.
 CREATE TABLE IF NOT EXISTS hosted_agent_overrun (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
   user_key TEXT NOT NULL,
+  address_key TEXT NOT NULL,
   day TEXT NOT NULL,
   reserved_nano_usd INTEGER NOT NULL CHECK (reserved_nano_usd >= 0),
   actual_nano_usd INTEGER NOT NULL CHECK (actual_nano_usd >= 0),
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS hosted_agent_overrun_user_day ON hosted_agent_overrun (user_key, day);
+CREATE INDEX IF NOT EXISTS hosted_agent_overrun_address_day ON hosted_agent_overrun (address_key, day);
 `;
+
+/**
+ * Fail closed on an old-shape spend or overrun table (Q3 round 2 + R3 round
+ * 3): `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists,
+ * so a pre-existing table from before `address_key` existed would otherwise
+ * silently keep running without the address cap — exactly the sybil hole this
+ * column closes. A table that does not exist yet is unaffected; the DDL below
+ * creates it with the current shape. The service is undeployed, so there is
+ * no data to migrate: recreate the ledger instead of patching it in place.
+ *
+ * R3: checks `hosted_agent_overrun` too, not just `hosted_agent_spend` — an
+ * old-shape overrun table on its own left `settle()` to throw a raw SQLite
+ * error AFTER the model call it was settling, instead of refusing at startup.
+ */
+function assertTableShape(db: Database.Database, table: string): void {
+  const exists = db.prepare(`SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table);
+  if (!exists) return;
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === "address_key")) {
+    throw new Error(
+      `${table} exists without an address_key column (Q3 round 2: the address-day cap). ` +
+        "This is an old-shape table; refusing to start rather than silently migrating it. " +
+        "The service is undeployed — recreate the spend ledger.",
+    );
+  }
+}
+
+function assertSpendTableShape(db: Database.Database): void {
+  assertTableShape(db, "hosted_agent_spend");
+  assertTableShape(db, "hosted_agent_overrun");
+}
 
 function nonNegativeSafeInteger(n: number, what: string): number {
   if (!Number.isSafeInteger(n) || n < 0) throw new RangeError(`${what} must be a non-negative safe integer, got ${n}`);
@@ -144,10 +193,18 @@ export class BudgetMeter {
     nonNegativeSafeInteger(caps.perSession, "perSession cap");
     nonNegativeSafeInteger(caps.perUserDay, "perUserDay cap");
     nonNegativeSafeInteger(caps.perMonth, "perMonth cap");
+    assertSpendTableShape(db);
     db.exec(DDL);
   }
 
-  /** Reserve `worstNanoUsd` for one call, or throw BudgetStop. */
+  /**
+   * Reserve `worstNanoUsd` for one call, or throw BudgetStop. Charges the
+   * reservation against every applicable cap: per-session, the operator's own
+   * day (user_key), the CLIENT's day (address_key — Q3 round 2, shared by
+   * every operator id and every anonymous session seen from that address),
+   * and the month. A kill switch or an earlier overrun (by EITHER the
+   * operator or the address) refuses before any cap is even summed.
+   */
   reserve(payer: Payer, worstNanoUsd: number): Reservation {
     nonNegativeSafeInteger(worstNanoUsd, "worst case");
     if (this.disabled()) throw new BudgetStop("disabled", 0, 0);
@@ -158,12 +215,18 @@ export class BudgetMeter {
     const sum = (where: string, ...args: string[]): number =>
       (this.db.prepare(`SELECT COALESCE(SUM(nano_usd), 0) AS s FROM hosted_agent_spend WHERE ${where}`).get(...args) as { s: number }).s;
     return this.db.transaction((): Reservation => {
-      // An overrun stops the payer for the rest of its UTC day, before any cap is looked at.
-      const overrun = this.db.prepare(`SELECT 1 AS found FROM hosted_agent_overrun WHERE user_key = ? AND day = ? LIMIT 1`).get(payer.userKey, day);
+      // An overrun stops the payer for the rest of its UTC day, before any cap is looked at —
+      // by its operator id OR its client address, whichever carries the flag.
+      const overrun = this.db
+        .prepare(`SELECT 1 AS found FROM hosted_agent_overrun WHERE day = ? AND (user_key = ? OR address_key = ?) LIMIT 1`)
+        .get(day, payer.userKey, payer.addressKey);
       if (overrun !== undefined) throw new BudgetStop("overrun", sum("user_key = ? AND day = ?", payer.userKey, day), this.caps.perUserDay);
       const checks: Array<[BudgetStopReason, number, number]> = [
         ["per-session", sum("session_id = ?", payer.sessionId), this.caps.perSession],
         ["per-user-day", sum("user_key = ? AND day = ?", payer.userKey, day), this.caps.perUserDay],
+        // Same cap VALUE as per-user-day (there is one address allowance, not a separately
+        // configured one): the address cap is the cap anonymous sessions already use.
+        ["per-address-day", sum("address_key = ? AND day = ?", payer.addressKey, day), this.caps.perUserDay],
         ["per-month", sum("month = ?", month), this.caps.perMonth],
       ];
       for (const [reason, spent, cap] of checks) {
@@ -171,10 +234,10 @@ export class BudgetMeter {
       }
       const info = this.db
         .prepare(
-          `INSERT INTO hosted_agent_spend (session_id, user_key, day, month, state, nano_usd, created_at)
-           VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+          `INSERT INTO hosted_agent_spend (session_id, user_key, address_key, day, month, state, nano_usd, created_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
         )
-        .run(payer.sessionId, payer.userKey, day, month, worstNanoUsd, at.getTime());
+        .run(payer.sessionId, payer.userKey, payer.addressKey, day, month, worstNanoUsd, at.getTime());
       return { id: Number(info.lastInsertRowid), worstNanoUsd };
     }).immediate();
   }
@@ -183,34 +246,44 @@ export class BudgetMeter {
    * Settle a reservation to what the call cost. Each reservation settles once.
    * The ledger records the TRUE cost, even when it exceeds the reservation. When
    * it does, that is an overrun: it is flagged in the ledger and the payer is
-   * stopped for the rest of the UTC day (see `blocked`).
+   * stopped for the rest of the UTC day (see `blocked`) by EITHER its operator
+   * id or its client address.
    */
   settle(reservation: Reservation, actualNanoUsdValue: number): { overrun: boolean } {
     nonNegativeSafeInteger(actualNanoUsdValue, "actual cost");
     const at = this.now();
     return this.db.transaction((): { overrun: boolean } => {
       const row = this.db
-        .prepare(`SELECT session_id AS sessionId, user_key AS userKey, nano_usd AS reserved FROM hosted_agent_spend WHERE id = ? AND state = 'pending'`)
-        .get(reservation.id) as { sessionId: string; userKey: string; reserved: number } | undefined;
+        .prepare(
+          `SELECT session_id AS sessionId, user_key AS userKey, address_key AS addressKey, nano_usd AS reserved
+           FROM hosted_agent_spend WHERE id = ? AND state = 'pending'`,
+        )
+        .get(reservation.id) as { sessionId: string; userKey: string; addressKey: string; reserved: number } | undefined;
       if (row === undefined) throw new Error(`reservation ${reservation.id} is not pending`);
       this.db.prepare(`UPDATE hosted_agent_spend SET state = 'settled', nano_usd = ? WHERE id = ?`).run(actualNanoUsdValue, reservation.id);
       const overrun = actualNanoUsdValue > row.reserved;
       if (overrun) {
         this.db
           .prepare(
-            `INSERT INTO hosted_agent_overrun (session_id, user_key, day, reserved_nano_usd, actual_nano_usd, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO hosted_agent_overrun (session_id, user_key, address_key, day, reserved_nano_usd, actual_nano_usd, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(row.sessionId, row.userKey, at.toISOString().slice(0, 10), row.reserved, actualNanoUsdValue, at.getTime());
+          .run(row.sessionId, row.userKey, row.addressKey, at.toISOString().slice(0, 10), row.reserved, actualNanoUsdValue, at.getTime());
       }
       return { overrun };
     }).immediate();
   }
 
-  /** Whether an overrun has stopped this payer for the current UTC day. */
+  /** Whether an overrun has stopped this payer for the current UTC day — by its
+   * operator id, or by its client address (Q3 round 2: shared with every other
+   * operator id, and any anonymous session, seen from that address). */
   blocked(payer: Payer): boolean {
     const day = this.now().toISOString().slice(0, 10);
-    return this.db.prepare(`SELECT 1 AS found FROM hosted_agent_overrun WHERE user_key = ? AND day = ? LIMIT 1`).get(payer.userKey, day) !== undefined;
+    return (
+      this.db
+        .prepare(`SELECT 1 AS found FROM hosted_agent_overrun WHERE day = ? AND (user_key = ? OR address_key = ?) LIMIT 1`)
+        .get(day, payer.userKey, payer.addressKey) !== undefined
+    );
   }
 
   /** A call that failed without a usage block is charged its worst case. */
@@ -218,14 +291,15 @@ export class BudgetMeter {
     this.settle(reservation, reservation.worstNanoUsd);
   }
 
-  /** Spent (settled plus pending) for the payer's session, user-day and the month. */
-  spent(payer: Payer): { session: number; userDay: number; month: number } {
+  /** Spent (settled plus pending) for the payer's session, operator-day, address-day and the month. */
+  spent(payer: Payer): { session: number; userDay: number; addressDay: number; month: number } {
     const iso = this.now().toISOString();
     const q = (where: string, ...args: string[]): number =>
       (this.db.prepare(`SELECT COALESCE(SUM(nano_usd), 0) AS s FROM hosted_agent_spend WHERE ${where}`).get(...args) as { s: number }).s;
     return {
       session: q("session_id = ?", payer.sessionId),
       userDay: q("user_key = ? AND day = ?", payer.userKey, iso.slice(0, 10)),
+      addressDay: q("address_key = ? AND day = ?", payer.addressKey, iso.slice(0, 10)),
       month: q("month = ?", iso.slice(0, 7)),
     };
   }

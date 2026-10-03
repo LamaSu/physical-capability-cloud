@@ -68,6 +68,13 @@ export interface SessionDeps {
   readonly l2Enabled: boolean;
   readonly report?: (report: AttemptReport) => void | Promise<void>;
   readonly now?: () => number;
+  /** Builds the session's GatedTools from the pinned pack and the transport.
+   * Defaults to the real `packTools` (tools.ts), whose caller scrubs the
+   * transport's result. Test-only seam (Q7): overriding this lets a test
+   * exercise `confirm`'s OWN scrub independently of packTools' — full-stack
+   * tests always go through the real packTools, which would otherwise mask a
+   * mutant that removes the second scrub below. */
+  readonly packTools?: typeof packTools;
 }
 
 export interface TurnResult {
@@ -103,6 +110,7 @@ export class HostedSession {
   private constructor(
     readonly id: string,
     private readonly userKey: string,
+    private readonly addressKey: string,
     private readonly deps: SessionDeps,
     private readonly transport: ToolTransport,
     private readonly gate: ConfirmationGate,
@@ -111,7 +119,10 @@ export class HostedSession {
     private readonly tokens: { in: number; out: number },
   ) {}
 
-  static async open(deps: SessionDeps, opts: { readonly userKey: string; readonly credential: string | null }): Promise<HostedSession> {
+  static async open(
+    deps: SessionDeps,
+    opts: { readonly userKey: string; readonly addressKey: string; readonly credential: string | null },
+  ): Promise<HostedSession> {
     const id = randomBytes(24).toString("base64url");
     const transport = await deps.connect(opts.credential);
     try {
@@ -124,7 +135,8 @@ export class HostedSession {
       if (reported !== expected) throw new PackMismatch(expected, reported);
       const gate = new ConfirmationGate({ now: deps.now });
       const served = new Set(await transport.listTools());
-      const offered = gate.forSession(id, packTools(deps.pack, transport, served), { l2Enabled: deps.l2Enabled });
+      const buildTools = deps.packTools ?? packTools;
+      const offered = gate.forSession(id, buildTools(deps.pack, transport, served), { l2Enabled: deps.l2Enabled });
       // LLMAgent refuses reserved tool names (delete_*, fund_*, ...). The policy
       // never offers the ones it knows; any other is dropped here, never renamed.
       const defs = offered.defs.filter((d) => {
@@ -148,10 +160,10 @@ export class HostedSession {
           },
         },
       };
-      const client = meteredClient(counting, deps.meter, { sessionId: id, userKey: opts.userKey }, deps.price);
+      const client = meteredClient(counting, deps.meter, { sessionId: id, userKey: opts.userKey, addressKey: opts.addressKey }, deps.price);
       // LLMAgent calls only messages.create on its client.
       const agent = new LLMAgent(defs, callers, { client: client as unknown as Anthropic, model: deps.model, maxTokens: deps.maxTokens });
-      return new HostedSession(id, opts.userKey, deps, transport, gate, agent, (deps.now ?? Date.now)(), tokens);
+      return new HostedSession(id, opts.userKey, opts.addressKey, deps, transport, gate, agent, (deps.now ?? Date.now)(), tokens);
     } catch (err) {
       // A session that fails to open leaves no connection behind.
       await transport.close().catch(() => undefined);
@@ -247,7 +259,7 @@ export class HostedSession {
     return {
       report,
       turns: this.turns,
-      spentNanoUsd: this.deps.meter.spent({ sessionId: this.id, userKey: this.userKey }).session,
+      spentNanoUsd: this.deps.meter.spent({ sessionId: this.id, userKey: this.userKey, addressKey: this.addressKey }).session,
     };
   }
 }

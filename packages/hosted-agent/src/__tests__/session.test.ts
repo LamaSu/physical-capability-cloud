@@ -41,7 +41,17 @@ const PACK: PinnedPack = {
 
 type Req = { system?: string; tools: Array<{ name: string }>; messages: Array<{ role: string; content: unknown }> };
 
-function harness(opts: { caps?: BudgetCaps; replies?: unknown[]; served?: string[]; pack?: PinnedPack; reported?: { version: string | undefined } } = {}) {
+function harness(
+  opts: {
+    caps?: BudgetCaps;
+    replies?: unknown[];
+    served?: string[];
+    pack?: PinnedPack;
+    reported?: { version: string | undefined };
+    toolResult?: unknown;
+    packTools?: SessionDeps["packTools"];
+  } = {},
+) {
   const pack = opts.pack ?? PACK;
   const requests: Req[] = [];
   const replies = [...(opts.replies ?? [])];
@@ -58,7 +68,7 @@ function harness(opts: { caps?: BudgetCaps; replies?: unknown[]; served?: string
     closed: false,
     serverVersion: () => (opts.reported ? opts.reported.version : versionOf(pack)),
     listTools: async () => [...(opts.served ?? pack.tools.map((t) => t.def.name)), "delete_preview"],
-    callTool: async (name, args) => (calls.push([name, args]), { ok: true, tool: name }),
+    callTool: async (name, args) => (calls.push([name, args]), opts.toolResult ?? { ok: true, tool: name }),
     close: async () => void (transport.closed = true),
   };
   const connect = vi.fn(async (_credential: string | null) => transport);
@@ -72,6 +82,7 @@ function harness(opts: { caps?: BudgetCaps; replies?: unknown[]; served?: string
     connect,
     l2Enabled: false,
     report: (r) => void reports.push(r),
+    ...(opts.packTools ? { packTools: opts.packTools } : {}),
   };
   return { deps, requests, create, calls, transport, connect, reports };
 }
@@ -88,7 +99,7 @@ const toolUse = (name: string, input: unknown) => ({
 describe("a hosted session", () => {
   it("the credential goes only to the transport: never to the model, never into the report", async () => {
     const h = harness({ replies: [text("hello")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     expect(h.connect).toHaveBeenCalledWith(CREDENTIAL);
     await s.send("hi");
     const { report } = await s.close();
@@ -102,7 +113,7 @@ describe("a hosted session", () => {
 
   it("the model gets the preamble and the pack prompt, and only the tools the policy offers", async () => {
     const h = harness({ replies: [text("ok")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     await s.send("hi");
     expect(h.requests[0]!.system).toBe(`${HOSTED_PREAMBLE}\n\nPACK SYSTEM PROMPT`);
     expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_jobs", "onboard_machine"]);
@@ -112,7 +123,7 @@ describe("a hosted session", () => {
     const h = harness({
       replies: [toolUse("onboard_machine", { name: "plate reader" }), text("Please confirm the registration."), text("Registered.")],
     });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const turn = await s.send("register my plate reader");
     expect(turn.reply).toBe("Please confirm the registration.");
     expect(h.calls).toEqual([]);
@@ -129,7 +140,7 @@ describe("a hosted session", () => {
 
   it("the outcome note is told once: a later turn does not repeat it", async () => {
     const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?"), text("Done."), text("Next.")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const turn = await s.send("register");
     await s.confirm(turn.pending[0]!.token);
     await s.send("thanks");
@@ -140,7 +151,7 @@ describe("a hosted session", () => {
   it("the outcome note is scrubbed even when the transport returns a secret", async () => {
     const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?"), text("Done.")] });
     h.transport.callTool = async () => ({ registered: true, apiKey: "pcc_live_LeakedByATransport99" });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     const turn = await s.send("register");
     await s.confirm(turn.pending[0]!.token);
     await s.send("thanks");
@@ -151,7 +162,7 @@ describe("a hosted session", () => {
 
   it("a declined write never runs, and the model is told", async () => {
     const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?"), text("OK, not registering.")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const turn = await s.send("register");
     s.reject(turn.pending[0]!.token);
     await s.send("never mind");
@@ -162,7 +173,7 @@ describe("a hosted session", () => {
 
   it("a budget stop ends the turn without calling the model, and the report says so", async () => {
     const h = harness({ caps: { perSession: 1, perUserDay: USD, perMonth: USD }, replies: [text("never")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     const turn = await s.send("hi");
     expect(turn.stopped).toBe("per-session");
     expect(h.create).not.toHaveBeenCalled();
@@ -186,7 +197,7 @@ describe("a hosted session", () => {
 
   it("a failed turn leaves the history as it was", async () => {
     const h = harness({ replies: [text("first"), new Error("upstream down"), text("third")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     await s.send("one");
     await expect(s.send("two")).rejects.toThrow("upstream down");
     await s.send("three");
@@ -200,7 +211,7 @@ describe("a hosted session", () => {
 
   it("only the pinned tools the connected surface serves are offered", async () => {
     const h = harness({ replies: [text("ok")], served: ["list_jobs"] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     await s.send("hi");
     expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_jobs"]);
   });
@@ -208,14 +219,14 @@ describe("a hosted session", () => {
   it("a tool name LLMAgent reserves is dropped, not fatal", async () => {
     const h = harness({ replies: [text("ok")] });
     const reserved = { ...h.deps, pack: { ...PACK, tools: [...PACK.tools, tool("delete_preview", "GET", "/api/preview")] } };
-    const s = await HostedSession.open(reserved, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(reserved, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     await s.send("hi");
     expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_jobs", "onboard_machine"]);
   });
 
   it("a closed session refuses further use", async () => {
     const h = harness({ replies: [] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     await s.close();
     await expect(s.send("hi")).rejects.toThrow(/closed/);
     await expect(s.close()).rejects.toThrow(/closed/);
@@ -228,7 +239,7 @@ describe("a failing or leaking tool never reaches the model or the caller unscru
     h.transport.callTool = async () => {
       throw new Error("rejected pcc_live_abcdefgh12345678");
     };
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     await s.send("list my jobs");
     expect(h.requests).toHaveLength(2);
     expect(JSON.stringify(h.requests)).not.toContain("pcc_live_abcdefgh12345678");
@@ -241,7 +252,7 @@ describe("a failing or leaking tool never reaches the model or the caller unscru
   it("Q1-C: the confirmation's result is scrubbed whatever the transport returns", async () => {
     const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?")] });
     h.transport.callTool = async () => ({ registered: true, apiKey: "pcc_live_LeakedByATransport99", note: "Bearer abcdefgh12345678" });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     const turn = await s.send("register");
     const out = await s.confirm(turn.pending[0]!.token);
     expect(JSON.stringify(out)).toContain('"registered":true');
@@ -252,7 +263,7 @@ describe("a failing or leaking tool never reaches the model or the caller unscru
     const jwt = "eyJhbGciOiJIUzI1NiJ9.synthetic.signature";
     const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?"), text("Done.")] });
     h.transport.callTool = async () => ({ token: jwt });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     const turn = await s.send("register");
     const out = await s.confirm(turn.pending[0]!.token);
     expect(JSON.stringify(out)).not.toContain("eyJ");
@@ -266,7 +277,7 @@ describe("the hosted agent never actuates a device or provisions a credential (Q
   it("Q3-A: setup_test_job, which runs a job on a device, is never offered or run, with L2 off", async () => {
     const pack = await realPack();
     const h = harness({ pack, replies: [toolUse("setup_test_job", { kernelId: "k1", deviceId: "d1" }), text("I cannot run device jobs.")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const turn = await s.send("run a test job on my device");
     for (const held of turn.pending) await s.confirm(held.token).catch(() => undefined);
     expect.soft(h.requests[0]!.tools.map((t) => t.name)).not.toContain("setup_test_job");
@@ -277,7 +288,7 @@ describe("the hosted agent never actuates a device or provisions a credential (Q
   it("Q3-B: redeem_invite, which returns a session token and wallet material, is never offered or run", async () => {
     const pack = await realPack();
     const h = harness({ pack, replies: [toolUse("redeem_invite", { code: "c", password: "p" }), text("I cannot redeem invites.")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const turn = await s.send("redeem my invite");
     for (const held of turn.pending) await s.confirm(held.token).catch(() => undefined);
     expect.soft(h.requests[0]!.tools.map((t) => t.name)).not.toContain("redeem_invite");
@@ -289,7 +300,7 @@ describe("a GET is a read only when it is reviewed to write nothing (Q3-C)", () 
   it("Q3-C: get_dashboard on a signed-in session (the full /mcp surface) is held, not run: there it bumps loadCount", async () => {
     const pack = await realPack();
     const h = harness({ pack, replies: [toolUse("get_dashboard", { idOrSlug: "d1" }), text("Please confirm.")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const turn = await s.send("show my dashboard");
     expect(h.calls).toEqual([]);
     expect(turn.pending.map((p) => p.tool)).toEqual(["get_dashboard"]);
@@ -300,7 +311,7 @@ describe("a GET is a read only when it is reviewed to write nothing (Q3-C)", () 
   it("Q3-C: a listed passive read still runs directly, with nothing held", async () => {
     const pack = await realPack();
     const h = harness({ pack, replies: [toolUse("list_capability_types", {}), text("Here they are.")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const turn = await s.send("what capability types exist?");
     expect(h.calls).toEqual([["list_capability_types", {}]]);
     expect(turn.pending).toEqual([]);
@@ -314,7 +325,7 @@ describe("the pack the gateway runs is the pack that was pinned (Q5-A)", () => {
   it("Q5-A: a gateway running a pack other than the pinned one is refused before any tool is listed or offered, even when a tool name matches", async () => {
     const h = harness({ pack: A, replies: [toolUse("list_jobs", {}), text("never")], reported: { version: versionOf(B as PinnedPack) } });
     const listed = vi.spyOn(h.transport, "listTools");
-    await expect(HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL })).rejects.toThrow(/pack/i);
+    await expect(HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL })).rejects.toThrow(/pack/i);
     expect(listed).not.toHaveBeenCalled();
     expect(h.create).not.toHaveBeenCalled();
     expect(h.calls).toEqual([]);
@@ -330,13 +341,13 @@ describe("the pack the gateway runs is the pack that was pinned (Q5-A)", () => {
     ["extra text after the digest", `2.19.1+sha256.${"a".repeat(64)}.x`],
   ])("Q5-A: %s is refused", async (_name, reported) => {
     const h = harness({ pack: A, reported: { version: reported } });
-    await expect(HostedSession.open(h.deps, { userKey: "user:alice", credential: null })).rejects.toThrow(/pack/i);
+    await expect(HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null })).rejects.toThrow(/pack/i);
     expect(h.transport.closed).toBe(true);
   });
 
   it("Q5-A: the exact pinned version and digest opens", async () => {
     const h = harness({ pack: A, reported: { version: `2.19.1+sha256.${"a".repeat(64)}` }, replies: [text("ok")] });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     await s.send("hi");
     expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_jobs"]);
   });
@@ -348,7 +359,7 @@ describe("a session that fails to open leaves nothing open (Q1-B)", () => {
     h.transport.listTools = async () => {
       throw new Error("upstream down");
     };
-    await expect(HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL })).rejects.toThrow("upstream down");
+    await expect(HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL })).rejects.toThrow("upstream down");
     expect(h.transport.closed).toBe(true);
   });
 });
@@ -366,7 +377,7 @@ describe("an outcome that arrives mid-message is never lost (Q6-B)", () => {
         text("Later."),
       ],
     });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const first = await s.send("register");
     const inFlight = s.send("one more question"); // blocked inside the model call
     await new Promise((r) => setTimeout(r, 10));
@@ -393,7 +404,7 @@ describe("an outcome that arrives mid-message is never lost (Q6-B)", () => {
         text("Noted."),
       ],
     });
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: CREDENTIAL });
     const one = await s.send("register one");
     s.reject(one.pending[0]!.token); // note 1: told to the NEXT message (the one that starts below)
     const two = await s.send("register two"); // captures note 1, completes, clears note 1
@@ -409,12 +420,45 @@ describe("an outcome that arrives mid-message is never lost (Q6-B)", () => {
   });
 });
 
+describe("the confirmation scrub is independently mutation-locked (Q7)", () => {
+  it("Q7: HostedSession.confirm's OWN scrub catches a secret even when packTools' scrub layer is bypassed", async () => {
+    // Full-stack confirmation tests (tools.test.ts, server.test.ts) always go through the
+    // REAL packTools, whose caller scrubs first (tools.ts:163) — so removing the SECOND
+    // scrub, in session.ts confirm, is masked: the value already arrives clean. This test
+    // injects at the SessionDeps.packTools seam added for exactly this: a caller that
+    // returns the transport's result UNscrubbed, as if packTools' own scrub were absent.
+    // HostedSession.confirm's own scrub is then the ONLY thing standing between the secret
+    // and the confirmation response / the next model request.
+    const bypassPackTools: NonNullable<SessionDeps["packTools"]> = (pack, transport, served) =>
+      pack.tools
+        .filter(({ def }) => served.has(def.name))
+        .map(({ def, spec }) => ({
+          def,
+          spec,
+          caller: (input: unknown) => transport.callTool(def.name, input !== null && typeof input === "object" ? (input as Record<string, unknown>) : {}),
+        }));
+    const h = harness({
+      replies: [toolUse("onboard_machine", { a: 1 }), text("confirm?"), text("ok")],
+      toolResult: { apiKey: "pcc_live_UnscrubbedByPackTools99" },
+      packTools: bypassPackTools,
+    });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
+    const turn = await s.send("register");
+    const [held] = turn.pending;
+    const result = await s.confirm(held!.token);
+    expect(JSON.stringify(result)).not.toContain("pcc_live_");
+    expect(JSON.stringify(result)).toContain("[redacted]");
+    await s.send("thanks"); // the outcome note (built from the SAME scrubbed result) reaches the model next turn
+    expect(JSON.stringify(h.requests.at(-1))).not.toContain("pcc_live_");
+  });
+});
+
 describe("an overrun stops the payer for the day (Q4-B, at the session)", () => {
   it("Q4-B: a payer whose earlier call overran is stopped with the overrun reason, the model is not called, and the report says budget_stop", async () => {
     const h = harness({ replies: [text("never")] });
-    const payer = { sessionId: "earlier-session", userKey: "user:alice" };
+    const payer = { sessionId: "earlier-session", userKey: "user:alice", addressKey: "addr:alice" };
     h.deps.meter.settle(h.deps.meter.reserve(payer, 1_000), 1_001); // an earlier call cost more than it reserved
-    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", addressKey: "addr:alice", credential: null });
     const turn = await s.send("hi");
     expect(turn.stopped).toBe("overrun");
     expect(turn.reply).toMatch(/tomorrow/);

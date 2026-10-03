@@ -81,9 +81,9 @@ const L2 = [
   "approve_registration", "reject_registration", "activate_registration", "prove_registration",
   "create_kernel", "create_capability", "pcc_dht_announce",
   "marketplace_create_listing", "marketplace_update_listing", "marketplace_delete_listing", "marketplace_place_order",
-  "pcc_submit_paid_job", "pcc_job_complete", "update_job_status", "operator_update_job_status", "operator_push_evidence",
+  "pcc_job_complete", "update_job_status", "operator_update_job_status", "operator_push_evidence",
   "pcc_submit_request", "pcc_decompose_request", "pcc_publish_request", "pcc_assign_node_operator",
-  "pcc_update_node_status", "pcc_update_request", "pcc_cancel_request", "execute_composition", "create_shipment",
+  "pcc_update_node_status", "pcc_update_request", "pcc_cancel_request", "create_shipment",
   "mint_certificate", "near_intent", "lit_decrypt", "grant_evidence_access", "archive_encrypted_bundle", "revoke_api_key",
   "pcc_capture_challenge", "pcc_capture_upload", "pcc_capture_anchor", "commit_evidence", "verify_evidence_zk",
   "submit_for_human_verification", "respond_to_verification", "dispute_verification", "pcc_oracle_verify",
@@ -95,6 +95,14 @@ const NEVER = [
   // device actuation: runs or relays commands on hardware (setup_test_job submits a job the gateway's runner executes on the device)
   "pcc_relay_tool_call", "pcc_relay_generic_tool_call", "pcc_create_scope", "pcc_revoke_scope", "pcc_chat_send",
   "start_protocol_run", "pause_protocol_run", "resume_protocol_run", "cancel_protocol_run", "setup_test_job",
+  // Q2 round 2 (full audit of every WRITE/L2 tool against its gateway handler): both of these reach real job
+  // submission the same way setup_test_job does, despite looking like ordinary L2 "accept/complete work" tools.
+  // execute_composition: when PCC_COMPOSE_EXECUTE_REAL=true, createProductionBinding().runStep calls
+  // JobFacade.submit() per composition step (packages/gateway/src/routes/compose.ts:677-697).
+  // pcc_submit_paid_job: POST /api/jobs/submit-from-discovery -> createJobFromSession() inserts a REAL job row
+  // targeting the caller's kernelId (status "queued"/"active") AND an execution scope with status "active" that
+  // immediately permits write-tool calls against that kernel (packages/gateway/src/routes/paid-job-flow.ts:636-669).
+  "execute_composition", "pcc_submit_paid_job",
   // device impersonation: calls only the device's own runtime makes
   "kernel_heartbeat", "kernel_announce_capabilities", "operator_heartbeat",
   // credentials through the model, or provisioned by a tool: a key or session token in a tool result lands in the transcript
