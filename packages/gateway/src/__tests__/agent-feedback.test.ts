@@ -284,7 +284,10 @@ describe("POST /api/feedback/agent-report", () => {
       payload: { summary: "posthog event check" },
     });
     expect(trackEventSpy).toHaveBeenCalledTimes(1);
-    expect(trackEventSpy.mock.calls[0][0]).toBe("agent_report_filed");
+    // N107b codemod: the event name is now declared (lit) — unwrap it the same way the
+    // audit-log assertion above does, via the closed-schema helper.
+    const { closedText } = await import("../observability/closed-schema.js");
+    expect(closedText(trackEventSpy.mock.calls[0][0])).toBe("agent_report_filed");
   });
 
   it("does NOT write to the audit log on validation failure", async () => {

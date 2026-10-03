@@ -218,12 +218,12 @@ export async function agentFeedbackRoutes(app: FastifyInstance) {
           });
 
           // PostHog event for the live dashboard.
-          trackServerEvent("agent_report_filed", {
-            report_id,
-            trace_id,
-            agent_kind: body.agent_kind,
-            last_error_code: body.last_error_code,
-            confused_about: body.confused_about,
+          trackServerEvent(lit("agent_report_filed"), {
+            report_id: declare.id(report_id),
+            trace_id: declare.id(trace_id),
+            agent_kind: declare.id(body.agent_kind),
+            last_error_code: declare.id(body.last_error_code),
+            confused_about: declare.id(body.confused_about),
           });
 
           // Add a span event so any OTel collector subscribed to the
