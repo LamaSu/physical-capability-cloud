@@ -585,6 +585,18 @@ describe("E13 F2 — a lookup that never settles is bounded: the verifier answer
     await expect(timely.verifyOperatorSignature(positiveInput())).resolves.toBe(true);
   });
 
+  it("a bound beyond Node's timer range is refused at construction, and the largest timer delay works (E13d)", async () => {
+    // setTimeout clamps a delay above 2**31 - 1 ms to 1 ms, so such a bound would refuse almost at once.
+    expect(() =>
+      createEip712OperatorVerifier({ operatorForUnit: operatorForUnitAlways(OPERATOR_ADDRESS_LOWER), operatorLookupTimeoutMs: 2 ** 31 }),
+    ).toThrow(RangeError);
+    const largest = createEip712OperatorVerifier({
+      operatorForUnit: () => new Promise<string>((resolve) => setTimeout(() => resolve(OPERATOR_ADDRESS_LOWER), 10)),
+      operatorLookupTimeoutMs: 2 ** 31 - 1,
+    });
+    await expect(largest.verifyOperatorSignature(positiveInput())).resolves.toBe(true);
+  });
+
   it("an undefined bound is the default; it is not an invalid one", async () => {
     const verifier = createEip712OperatorVerifier({ operatorForUnit: operatorForUnitAlways(OPERATOR_ADDRESS_LOWER), operatorLookupTimeoutMs: undefined });
     await expect(verifier.verifyOperatorSignature(positiveInput())).resolves.toBe(true);

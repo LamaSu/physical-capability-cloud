@@ -113,6 +113,10 @@ const LOWERCASE_BYTES32 = /^0x[0-9a-f]{64}$/;
 /** The default bound on `operatorForUnit` (E13 F2): a pinned-block `operator()` read answers well inside it. */
 export const DEFAULT_OPERATOR_LOOKUP_TIMEOUT_MS = 10_000;
 
+/** The largest delay Node's setTimeout honours (2^31 - 1 ms, about 24.8 days). A larger one is clamped
+ *  to 1 ms, which would refuse every lookup almost at once (E13d), so no larger bound is accepted. */
+export const MAX_OPERATOR_LOOKUP_TIMEOUT_MS = 2 ** 31 - 1;
+
 const TIMED_OUT: unique symbol = Symbol("operatorForUnit did not settle in time");
 
 /** The injected chain read, and how long it may take. */
@@ -123,7 +127,8 @@ export interface Eip712OperatorVerifierDeps {
    * refuses. `options.signal` is aborted when the lookup's bound passes; a lookup should stop then.
    */
   operatorForUnit(unitBinding: UnitBinding, options: { signal: AbortSignal }): Promise<string | null> | string | null;
-  /** How long `operatorForUnit` may take, in milliseconds: a positive safe integer. Default 10 000. */
+  /** How long `operatorForUnit` may take, in milliseconds: a positive integer, at most
+   *  MAX_OPERATOR_LOOKUP_TIMEOUT_MS (2^31 - 1). Default 10 000. */
   operatorLookupTimeoutMs?: number;
 }
 
@@ -135,8 +140,15 @@ export interface Eip712OperatorVerifierDeps {
 export function createEip712OperatorVerifier(deps: Eip712OperatorVerifierDeps): OperatorSignatureVerifier {
   // Only `undefined` selects the default: `null`, like any other non-number, is refused (E13b).
   const timeoutMs = deps.operatorLookupTimeoutMs === undefined ? DEFAULT_OPERATOR_LOOKUP_TIMEOUT_MS : deps.operatorLookupTimeoutMs;
-  if (typeof timeoutMs !== "number" || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
-    throw new RangeError("operatorLookupTimeoutMs must be a positive safe integer of milliseconds");
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs <= 0 ||
+    timeoutMs > MAX_OPERATOR_LOOKUP_TIMEOUT_MS
+  ) {
+    throw new RangeError(
+      "operatorLookupTimeoutMs must be a positive integer of milliseconds, at most 2^31 - 1 (the largest setTimeout delay)",
+    );
   }
   const operatorForUnit = deps.operatorForUnit;
   return {
