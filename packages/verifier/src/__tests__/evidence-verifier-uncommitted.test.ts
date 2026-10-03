@@ -87,8 +87,10 @@ describe("E11c HIGH — the order of events never drives EvidenceVerifier's verd
     }
     expect(verdicts[1]).toEqual(verdicts[0]);
     expect(verdicts[2]).toEqual(verdicts[0]);
-    // A completion that precedes a start fails closed, whichever order the events arrive in.
+    // A completion that precedes a start fails closed, whichever order the events arrive in: the
+    // duration check itself fails (not only tier 1's missing power summary).
     expect(verdicts[0]!.result).toBe("invalid");
+    expect(verdicts[0]!.findings).toContain("execution_duration_positive:false:critical");
   });
 
   it("a completion between two starts fails closed in every order (the latest start counts)", async () => {
