@@ -114,8 +114,8 @@ describe("CRITICAL 1 (r1 of #514): a fingerprint carries no header's text", () =
   });
 });
 
-describe("MEDIUM 1 (r2 of #514): a caller's two letters are no country, and the language is not reported", () => {
-  it("Accept-Language zqx and cf-ipcountry ZQ: no language field, and the country is other; a real code stays", async () => {
+describe("MEDIUM 1 (r2 of #514), then the steward's ruling #5664: neither the language nor the country is reported", () => {
+  it("Accept-Language zqx and cf-ipcountry ZQ or US: no language field and no country field", async () => {
     const start = events.length;
     await raw("GET", "/admin", { "accept-language": "zqx", "cf-ipcountry": "ZQ" });
     await raw("GET", "/admin", { "cf-ipcountry": "US" });
@@ -123,9 +123,9 @@ describe("MEDIUM 1 (r2 of #514): a caller's two letters are no country, and the 
     const honeypots = events.slice(start).filter((e) => e.name === "honeypot_triggered");
     expect(honeypots).toHaveLength(2);
     expect(honeypots[0]!.props).not.toHaveProperty("acceptLanguage");
-    expect(honeypots[0]!.props.cfCountry).toBe("other");
-    expect(honeypots[1]!.props.cfCountry).toBe("US");
-    expect(JSON.stringify(honeypots)).not.toContain("zqx");
+    for (const honeypot of honeypots) expect(honeypot.props).not.toHaveProperty("cfCountry");
+    const sent = JSON.stringify(honeypots);
+    for (const value of ["zqx", "ZQ", "US"]) expect(sent).not.toContain(`"${value}"`);
   });
 });
 

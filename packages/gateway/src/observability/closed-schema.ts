@@ -8,7 +8,7 @@
  *     distinctId) leave as keyedHash: an HMAC under the server secret PCC_TELEMETRY_KEY, so a value
  *     cannot be recovered by guessing;
  *   - a string leaves as itself only when it is one of the gateway's own string literals, a
- *     registered closed value (a route template, an ISO country code), or an ISO-8601 timestamp;
+ *     registered closed value (a route template, a registered vocabulary word), or an ISO-8601 timestamp;
  *     anything else, prose included, leaves as its keyed hash. A request value cannot be one of the
  *     gateway's literals unless the code already says it, so nothing secret passes as text;
  *   - object keys follow the same rule (a key a caller chose, like a query parameter's name, is

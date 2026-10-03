@@ -9,7 +9,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { isIP } from "node:net";
-import { keyedHash, METHODS, registerClosedValues, uaClass } from "../observability/closed-schema.js";
+import { keyedHash, METHODS, uaClass } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Attack Signatures
@@ -263,20 +263,6 @@ const clientIpOf = (req: FastifyRequest) => (isIP(req.ip) ? req.ip : "invalid");
 
 const headerText = (value: unknown) => (typeof value === "string" ? value : Array.isArray(value) ? value.join(",") : "");
 
-/**
- * ISO 3166-1 alpha-2 country codes: a country is reported only as one of these (#514 r2, MEDIUM 1),
- * so a caller's two letters cannot pass as a country.
- */
-const ISO_COUNTRIES: ReadonlySet<string> = new Set(
-  ("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ " +
-    "CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR " +
-    "GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP " +
-    "KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT " +
-    "MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW " +
-    "SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG " +
-    "UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW").split(" "),
-);
-registerClosedValues(ISO_COUNTRIES);
 
 /** Where an attack was found: a closed name, never built from the request. */
 const HEADER_SOURCES: Readonly<Record<string, string>> = {
@@ -315,12 +301,12 @@ function attackSummary(attackType: AttackType, attackSource: string) {
  * A request's fingerprint as the security events carry it (r1 of #514; N107b, the PR steward's
  * closed schema): derived values only. The client is a keyed hash (observability/closed-schema.ts,
  * under PCC_TELEMETRY_KEY), the User-Agent one of four classes, the Referer a kind, the content type
- * an allowlisted media type, the country an ISO 3166 code or "other", the edge an enum and the
- * forwarding chain a count capped at 5. The Accept-Language is not reported (#514 r2, MEDIUM 1).
+ * an allowlisted media type, the edge an enum and the forwarding chain a count capped at 5. Neither
+ * the Accept-Language (#514 r2, MEDIUM 1) nor the country (the PR steward's ruling #5664: not a
+ * class the schema keeps unless gateway names a forensics need) is reported.
  */
 function buildFingerprint(req: FastifyRequest) {
   const media = headerText(req.headers["content-type"]).split(";", 1)[0]!.trim().toLowerCase();
-  const country = headerText(req.headers["cf-ipcountry"] ?? req.headers["x-vercel-ip-country"]).trim().toUpperCase();
   const forwarded = headerText(req.headers["x-forwarded-for"]);
   const ip = clientIpOf(req);
   return {
@@ -330,7 +316,6 @@ function buildFingerprint(req: FastifyRequest) {
     uaClass: uaClass(req.headers["user-agent"]),
     referer: refererKindOf(req),
     contentType: media ? (MEDIA_TYPES.has(media) ? media : "other") : "none",
-    cfCountry: country ? (ISO_COUNTRIES.has(country) ? country : "other") : "unknown",
     edge:
       req.headers["cf-ray"] !== undefined ? "cloudflare"
         : req.headers["x-railway-edge"] !== undefined ? "railway"
