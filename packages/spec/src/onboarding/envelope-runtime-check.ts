@@ -39,8 +39,13 @@
  *     descriptors, so no getter, proxy trap or other code supplied with it runs.
  *     Internal records have a null prototype, so a value written onto
  *     Object.prototype is never read as theirs.
- * The boundary, named honestly: a realm whose intrinsics were replaced BEFORE
- * `primordials.ts` loaded is beyond any in-process check.
+ * The boundary, named honestly (astra pack 169): rule 1 checks the envelope's
+ * structure. "That validation establishes structure, not authority; trusted
+ * delivery or registry commitment remains separately necessary." The runtime
+ * must obtain the envelope from the registry's signed registration (R8's
+ * compileOperationalEnvelope), never from the party issuing commands. And a
+ * realm whose intrinsics were replaced BEFORE `primordials.ts` loaded is
+ * beyond any in-process check.
  *
  * Pure: it never reads a clock (the runtime passes the times in), performs no
  * I/O, and never throws for any input.
@@ -53,6 +58,7 @@ import {
   HAZARDS,
   isAdapterManifestDigest,
   isSafetyEnvelopeDigest,
+  isTimeUnit,
   supervisionPolicy,
   SUPERVISION_MODES,
   type DeviceClassTemplate,
@@ -132,7 +138,7 @@ function refuse(code: RuntimeRefusalCode, reason: string): RuntimeDecision {
 /** The rate window: commands sent in (now - 60 s, now] count against `maxCommandsPerMinute`. */
 const WINDOW_MS = 60000;
 
-/** Milliseconds per deadline time unit; a null-prototype table, frozen at load. */
+/** Milliseconds per deadline time unit (R8's isTimeUnit units); a null-prototype table, frozen at load. */
 const MS_PER_TIME_UNIT: Readonly<Record<string, number>> = (() => {
   const table = ObjectCreate(null) as Record<string, number>;
   table.s = 1000;
@@ -141,8 +147,9 @@ const MS_PER_TIME_UNIT: Readonly<Record<string, number>> = (() => {
   return ObjectFreeze(table);
 })();
 
-function isTimeUnit(unit: unknown): unit is string {
-  return typeof unit === "string" && hasOwn(MS_PER_TIME_UNIT, unit);
+/** A deadline unit in milliseconds, or NaN for a unit the table lacks: a deadline then refuses every command (rule 7). */
+function msPerTimeUnit(unit: string): number {
+  return hasOwn(MS_PER_TIME_UNIT, unit) ? MS_PER_TIME_UNIT[unit]! : NaN;
 }
 
 // ── Plain data, read once ───────────────────────────────────────────
@@ -501,7 +508,7 @@ export function checkRuntimeCommand(envelope: unknown, command: unknown, state: 
   if (!isStop) {
     // 7. The deadline: the max of the deadline limit, in ms. Refused past it, and refused when it cannot be computed.
     const deadline = limitOf(env.limits, env.deadlineQuantity);
-    const deadlineMs = deadline === undefined || !isTimeUnit(deadline.unit) ? NaN : deadline.max * MS_PER_TIME_UNIT[deadline.unit]!;
+    const deadlineMs = deadline === undefined ? NaN : deadline.max * msPerTimeUnit(deadline.unit);
     const elapsedMs = st.nowMs - st.jobStartedAtMs;
     if (!(elapsedMs <= deadlineMs)) {
       return refuse("past-deadline", `the job has run ${elapsedMs} ms, past its ${env.deadlineQuantity} deadline of ${deadlineMs} ms`);

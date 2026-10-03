@@ -78,11 +78,20 @@ const OT2_MAP: CommandMapV1 = {
   ],
 };
 
-function ot2Input(moduleTemperature: { min: number; max: number }): SafetyEnvelopeInput {
+/**
+ * The same OT-2 with no command parameter for its deadline quantity (run_duration):
+ * its deadline is enforced as elapsed time alone, the seam both runtimes must
+ * get right (astra pack 169).
+ */
+const OT2_ELAPSED_ONLY_MAP: CommandMapV1 = {
+  commands: OT2_MAP.commands.map((c) => (c.name === "runProtocol" ? { ...c, params: c.params.filter((p) => p.quantity !== "run_duration") } : c)),
+};
+
+function ot2Input(moduleTemperature: { min: number; max: number }, commandMap: CommandMapV1 = OT2_MAP): SafetyEnvelopeInput {
   return {
     deviceClass: "liquid-handler-ot2",
     device: { deviceId: "ot2-sim-1", adapterType: "opentrons", adapterVersion: `sha256:${"21".repeat(32)}` },
-    commandMap: OT2_MAP,
+    commandMap,
     intake: {
       limits: [
         { field: "safety.limits", quantity: "aspirate_volume", unit: "uL", min: 1, max: 300 },
@@ -139,6 +148,8 @@ const OT2 = compile(ot2Input({ min: 4, max: 95 }));
 /** A cold block: 0 is the upper bound of module_temperature. */
 const OT2_COLD = compile(ot2Input({ min: -20, max: 0 }));
 const PLATE = compile(plateInput());
+/** No command parameter sets run_duration: the deadline is elapsed time only. */
+const OT2_ELAPSED_ONLY = compile(ot2Input({ min: 4, max: 95 }, OT2_ELAPSED_ONLY_MAP));
 
 const T0 = 1_790_985_600_000;
 const MIN = 60_000;
@@ -289,6 +300,12 @@ const VECTORS: Vector[] = [
   ["past-deadline/a-zero-max", changed(OT2, (e) => (e.limits[3].max = 0)), ASPIRATE, stateOf(OT2, { nowMs: T0 + 1 }), "past-deadline"],
   ["past-deadline/before-the-rate", OT2, ASPIRATE, late(OT2, { recentCommandsAtMs: sends(60, T0 + DEADLINE_MS) }), "past-deadline"],
   ["past-deadline/before-the-params", OT2, { name: "aspirate", params: { volumeUl: "x", extra: 1 } }, late(OT2), "past-deadline"],
+  // The elapsed-time seam: no command parameter carries the deadline, and the job is stopped on elapsed time alone.
+  ["allowed/elapsed-only-at-exactly-the-deadline", OT2_ELAPSED_ONLY, ASPIRATE, stateOf(OT2_ELAPSED_ONLY, { nowMs: T0 + DEADLINE_MS }), "allowed"],
+  ["past-deadline/elapsed-only-1-ms-past", OT2_ELAPSED_ONLY, ASPIRATE, late(OT2_ELAPSED_ONLY), "past-deadline"],
+  ["past-deadline/elapsed-only-run-protocol-1-ms-past", OT2_ELAPSED_ONLY, { name: "runProtocol", params: { labwareSlot: 1 } }, late(OT2_ELAPSED_ONLY), "past-deadline"],
+  ["allowed/elapsed-only-stop-past-deadline", OT2_ELAPSED_ONLY, STOP, late(OT2_ELAPSED_ONLY), "allowed"],
+  ["undeclared-param/elapsed-only-a-deadline-param-it-does-not-declare", OT2_ELAPSED_ONLY, { name: "runProtocol", params: { minutes: 10, labwareSlot: 1 } }, stateOf(OT2_ELAPSED_ONLY), "undeclared-param"],
 
   // ── 8. rate-limited ──
   ["rate-limited/60-sent", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW - 1000) }), "rate-limited"],
@@ -369,7 +386,7 @@ function buildFixtures() {
       "Regenerate: PCC_UPDATE_FIXTURES=1 npx --no-install vitest run src/__tests__/envelope-runtime-check-fixtures.test.ts (in packages/spec).",
       "Each vector: checkRuntimeCommand(envelope, command, state) must return decision, {allowed: true} or {allowed: false, code}. Reasons are human messages and are not part of the contract.",
       "Rules, in order; the first failure decides: 1 envelope-invalid, 2 state-invalid, 3 adapter-mismatch, 4 command-malformed, 5 unknown-command, 6 the adapter stop (eStop.stopCommand) skips 7 and 8, 7 past-deadline, 8 rate-limited, 9 undeclared-param, 10 missing-param, 11 not-a-number then out-of-range per bounded param in declaration order, 12 value-not-allowed, 13 allowed.",
-      "Format: one line per field of each vector; every value is plain JSON data. The envelopes are compiled OT-2 (adapter stop) and plate-reader (hardware stop) envelopes, or invalid copies of the OT-2's.",
+      "Format: one line per field of each vector; every value is plain JSON data. The envelopes are compiled OT-2 (adapter stop) and plate-reader (hardware stop) envelopes, or invalid copies of the OT-2's. The plate reader and the elapsed-only OT-2 have no command parameter for their deadline quantity: the deadline is elapsed time alone (the elapsed-only vectors and plate-1-ms-past).",
       "Parity notes for a non-JavaScript runtime. Numbers: read every JSON number as an IEEE-754 double; a boolean is never a number (Python's bool is an int, and True == 1); a numeric string is never a number. Blank: JavaScript's String.prototype.trim, which strips U+FEFF but not U+001C..U+001F or U+0085 (Python's str.strip differs on all of these). Digests: exact length and characters, no trailing newline (a regex $ in Python matches before one).",
       "Plain data: NaN and Infinity (which Python's json.loads accepts by default) are not JSON data and make the input they appear in invalid (envelope-invalid, state-invalid or command-malformed); so does a key named __proto__ anywhere. An undefined member is absent. List items are distinct by their JSON text as JavaScript writes it (1 and 1.0 are one item).",
       "Time: elapsed = nowMs - jobStartedAtMs, refused when strictly greater than the deadline limit's max times 1000 (s), 60000 (min) or 3600000 (h). The rate window is (nowMs - 60000, nowMs]: a send time equal to nowMs - 60000, or after nowMs, is outside it; refused when the count is >= maxCommandsPerMinute.",
@@ -448,6 +465,18 @@ describe("runtime check parity fixtures (for pcc-node)", () => {
     const decisionLines = text.split("\n").filter((line) => line.trimStart().startsWith('"decision"'));
     expect(decisionLines).toHaveLength(VECTORS.length);
     for (const line of decisionLines) expect(line).not.toMatch(/reason/);
+  });
+
+  it("covers the elapsed-time seam: past-deadline vectors whose envelope has no command parameter for its deadline (astra pack 169)", () => {
+    type Env = { deadlineQuantity: string; commands: Array<{ params: Array<{ quantity?: string }> }> };
+    const carriesDeadline = (env: Env) => env.commands.some((c) => c.params.some((p) => p.quantity === env.deadlineQuantity));
+    expect(carriesDeadline(OT2 as unknown as Env)).toBe(true);
+    expect(carriesDeadline(OT2_ELAPSED_ONLY as unknown as Env)).toBe(false);
+    expect(carriesDeadline(PLATE as unknown as Env)).toBe(false);
+    const seam = fixtures.vectors.filter((v) => !v.decision.allowed && v.decision.code === "past-deadline" && !carriesDeadline(v.envelope as Env));
+    expect(seam.map((v) => v.name)).toEqual(
+      expect.arrayContaining(["past-deadline/elapsed-only-1-ms-past", "past-deadline/elapsed-only-run-protocol-1-ms-past", "past-deadline/plate-1-ms-past"]),
+    );
   });
 
   it("replaying the committed file reproduces every recorded decision", () => {

@@ -313,10 +313,20 @@ describe("rule 1, envelope-invalid: one plain copy, valid as OperationalEnvelope
     expect(envelopeInvalid(changed(OT2, (e) => (e.notes = undefined)))).toBe(false);
   });
 
-  it("accepts every valid and refuses every invalid runtime envelope in R8's parity fixture", () => {
-    for (const v of R8_FIXTURE.operationalEnvelopeV1.valid) expect(envelopeInvalid(v.envelope), v.name).toBe(false);
-    for (const v of R8_FIXTURE.operationalEnvelopeV1.invalid) expect(envelopeInvalid(v.envelope), v.name).toBe(true);
+  it("refuses every envelope the schema refuses in safety-envelope-fixtures.test.ts, and accepts every compiled fixture", () => {
+    // safety-envelope-v1.json is generated from that test's INVALID list and compiled inputs, and its drift test keeps it so.
+    for (const v of R8_FIXTURE.operationalEnvelopeV1.invalid) {
+      expect(OperationalEnvelopeV1Schema.safeParse(v.envelope).success, v.name).toBe(false);
+      expect(envelopeInvalid(v.envelope), v.name).toBe(true);
+    }
+    for (const v of R8_FIXTURE.operationalEnvelopeV1.valid) {
+      expect(OperationalEnvelopeV1Schema.safeParse(v.envelope).success, v.name).toBe(true);
+      expect(envelopeInvalid(v.envelope), v.name).toBe(false);
+    }
     expect(R8_FIXTURE.operationalEnvelopeV1.invalid.length).toBeGreaterThan(40);
+    expect(R8_FIXTURE.operationalEnvelopeV1.valid.length).toBeGreaterThan(1);
+    // And the envelopes compiled here.
+    for (const env of [OT2, OT2_COLD, PLATE]) expect(envelopeInvalid(env)).toBe(false);
   });
 
   it("decides exactly as OperationalEnvelopeV1Schema over a systematic corpus of one-change variants", () => {
@@ -1292,5 +1302,167 @@ describe("plain data, exactly R8's rules (gaps a mutation run found)", () => {
     const read = (wells: unknown) => codeOf(checkRuntimeCommand(itemsOnly, { name: "read", params: { seconds: 30, wavelengthNm: 450, wells } }, stateFor(itemsOnly)));
     expect(read("A1")).toBe("value-not-allowed");
     expect(read(["A1"])).toBe("allowed");
+  });
+});
+
+describe("astra pack 169: the scope of rule 1, one test per item, each refused as envelope-invalid", () => {
+  /** Each change is refused by the structural check and by the schema; each control is accepted by both. */
+  function refusesAll(base: OperationalEnvelopeV1, cases: Array<[string, (e: any) => void]>, controls: Array<[string, (e: any) => void]> = []) {
+    for (const [label, mutate] of cases) {
+      const bad = changed(base, mutate);
+      expect(codeOf(checkRuntimeCommand(bad, STOP, stateFor(base))), label).toBe("envelope-invalid");
+      expect(OperationalEnvelopeV1Schema.safeParse(bad).success, `schema: ${label}`).toBe(false);
+    }
+    for (const [label, mutate] of controls) {
+      const ok = changed(base, mutate);
+      expect(codeOf(checkRuntimeCommand(ok, STOP, stateFor(ok))), label).not.toBe("envelope-invalid");
+      expect(OperationalEnvelopeV1Schema.safeParse(ok).success, `schema: ${label}`).toBe(true);
+    }
+  }
+
+  it("a closed shape, envelopeVersion 1, strict true, non-blank deviceClass, deviceId and adapterType, and both digest forms", () => {
+    const cases: Array<[string, (e: any) => void]> = [
+      ["an extra key", (e) => (e.fallbackLimits = [])],
+      ...["envelopeVersion", "envelopeDigest", "deviceClass", "deviceId", "adapterType", "adapterVersion", "strict", "limits", "commands", "deadlineQuantity", "maxCommandsPerMinute", "eStop", "supervision", "hazards"].map(
+        (key): [string, (e: any) => void] => [`no ${key}`, (e) => delete e[key]],
+      ),
+      ["envelopeVersion 2", (e) => (e.envelopeVersion = 2)],
+      ["envelopeVersion as a string", (e) => (e.envelopeVersion = "1")],
+      ["strict false", (e) => (e.strict = false)],
+      ["strict as a string", (e) => (e.strict = "true")],
+      ["a blank deviceClass", (e) => (e.deviceClass = " ")],
+      ["a blank deviceId", (e) => (e.deviceId = "")],
+      ["a blank adapterType", (e) => (e.adapterType = String.fromCharCode(9))],
+      ["envelopeDigest in uppercase", (e) => (e.envelopeDigest = `0x${"AB".repeat(32)}`)],
+      ["envelopeDigest in the adapter's form", (e) => (e.envelopeDigest = OT2_MANIFEST)],
+      ["adapterVersion in the envelope digest's form", (e) => (e.adapterVersion = `0x${"21".repeat(32)}`)],
+      ["adapterVersion as a version string", (e) => (e.adapterVersion = "2.1.0")],
+    ];
+    refusesAll(OT2, cases);
+  });
+
+  it("a known device class: an own property of DEVICE_CLASS_TEMPLATES", () => {
+    refusesAll(
+      OT2,
+      ["unknown-robot", "toString", "constructor", "__proto__", "hasOwnProperty", "valueOf", "LIQUID-HANDLER-OT2", "liquid-handler-ot2 "].map(
+        (deviceClass): [string, (e: any) => void] => [deviceClass, (e) => (e.deviceClass = deviceClass)],
+      ),
+    );
+  });
+
+  it("exactly the template's limits, in order and unit, each a finite min <= max", () => {
+    refusesAll(
+      OT2,
+      [
+        ["reversed", (e) => e.limits.reverse()],
+        ["two swapped", (e) => ([e.limits[0], e.limits[1]] = [e.limits[1], e.limits[0]])],
+        ["one missing", (e) => e.limits.pop()],
+        ["one extra", (e) => e.limits.push({ ...e.limits[3] })],
+        ["another unit", (e) => (e.limits[2].unit = "degF")],
+        ["another quantity's unit", (e) => (e.limits[0].unit = "min")],
+        ["min above max", (e) => (e.limits[1].min = 301)],
+        ["a numeric-string min", (e) => (e.limits[1].min = "1")],
+        ["no max", (e) => delete e.limits[1].max],
+        ["an extra key", (e) => (e.limits[1].default = 50)],
+      ],
+      [["min equal to max", (e) => (e.limits[1].min = 300)]],
+    );
+  });
+
+  it("closed, unique commands and params: no duplicate command, no duplicate param in a command, no extra keys", () => {
+    refusesAll(OT2, [
+      ["a duplicate command", (e) => e.commands.push({ name: "aspirate", params: [] })],
+      ["a duplicate param", (e) => e.commands[4].params.push({ name: "slot", unbounded: { reason: "again", allowed: [1] } })],
+      ["an extra key on a command", (e) => (e.commands[0].description = "aspirate")],
+      ["an extra key on a param", (e) => (e.commands[0].params[0].max = 300)],
+      ["an extra key on an unbounded param", (e) => (e.commands[3].params[1].unbounded.pattern = ".*")],
+      ["a command without params", (e) => delete e.commands[5].params],
+      ["a command without a name", (e) => delete e.commands[0].name],
+      ["a param without a name", (e) => delete e.commands[0].params[0].name],
+    ]);
+  });
+
+  it("each param either sets a quantity or is unbounded with a finite typed allowlist", () => {
+    const unbounded = (u: unknown) => (e: any) => (e.commands[3].params[1].unbounded = u);
+    refusesAll(
+      OT2,
+      [
+        ["both", (e) => (e.commands[0].params[0].unbounded = { reason: "r", allowed: [1] })],
+        ["neither", (e) => (e.commands[0].params[0] = { name: "volumeUl" })],
+        ["a quantity without its unit", (e) => delete e.commands[0].params[0].unit],
+        ["a unit without its quantity", (e) => delete e.commands[0].params[0].quantity],
+        ["no allowed and no allowedItems", unbounded({ reason: "a deck position" })],
+        ["an empty allowed", unbounded({ reason: "r", allowed: [] })],
+        ["a duplicated allowed value", unbounded({ reason: "r", allowed: [1, 2, 1] })],
+        ["a blank allowed value", unbounded({ reason: "r", allowed: ["  "] })],
+        ["a boolean allowed value", unbounded({ reason: "r", allowed: [true] })],
+        ["an object allowed value", unbounded({ reason: "r", allowed: [{ slot: 1 }] })],
+        ["a null allowed value", unbounded({ reason: "r", allowed: [null] })],
+        ["an empty allowedItems", unbounded({ reason: "r", allowedItems: [] })],
+        ["a duplicated allowedItems value", unbounded({ reason: "r", allowedItems: ["A1", "A1"] })],
+        ["a blank reason", unbounded({ reason: " ", allowed: [1] })],
+        ["a free-form string", unbounded("any slot")],
+      ],
+      [
+        ["allowed and allowedItems", unbounded({ reason: "r", allowed: [1], allowedItems: [2, 3] })],
+        ["allowedItems alone", unbounded({ reason: "r", allowedItems: ["A1"] })],
+        ["mixed strings and numbers", unbounded({ reason: "r", allowed: [1, "1"] })],
+      ],
+    );
+  });
+
+  it("the e-stop: an adapter stop naming a declared command, or hardware, or none only for a template that neither moves nor heats", () => {
+    const cases: Array<[string, (e: any) => void]> = [
+      ["an adapter stop naming an undeclared command", (e) => (e.eStop.stopCommand = "halt")],
+      ["an adapter stop without its command", (e) => delete e.eStop.stopCommand],
+      ["an adapter stop with a blank command", (e) => (e.eStop.stopCommand = " ")],
+      ["hardware with a command", (e) => (e.eStop = { mechanism: "hardware", stopCommand: "stop" })],
+      ["none, on a device that moves or heats", (e) => (e.eStop = { mechanism: "none" })],
+      ["an unknown mechanism", (e) => (e.eStop = { mechanism: "software" })],
+      ["no mechanism", (e) => (e.eStop = { stopCommand: "stop" })],
+    ];
+    refusesAll(OT2, cases, [["hardware", (e) => (e.eStop = { mechanism: "hardware" })]]);
+    refusesAll(PLATE, [["none, on the plate reader (it heats)", (e) => (e.eStop = { mechanism: "none" })]], [["an adapter stop naming its stop command", (e) => (e.eStop = { mechanism: "adapter-stop", stopCommand: "stop" })]]);
+  });
+
+  it("a positive integer command rate", () => {
+    refusesAll(
+      OT2,
+      [0, -1, 1.5, 0.5, "60", true, null, [60]].map((rate): [string, (e: any) => void] => [JSON.stringify(rate), (e) => (e.maxCommandsPerMinute = rate)]),
+      [["1", (e) => (e.maxCommandsPerMinute = 1)]],
+    );
+  });
+
+  it("canonical hazards (known, distinct, in HAZARDS order) and the supervision policy", () => {
+    refusesAll(
+      OT2,
+      [
+        ["an unknown hazard", (e) => (e.hazards = ["heat", "radiation"])],
+        ["a duplicated hazard", (e) => (e.hazards = ["heat", "heat", "mechanical"])],
+        ["hazards out of order", (e) => (e.hazards = ["mechanical", "heat"])],
+        ["hazards not a list", (e) => (e.hazards = null)],
+        ["an unknown supervision", (e) => (e.supervision = "occasional")],
+        ["unattended, on a device that moves or heats", (e) => (e.supervision = "unattended")],
+        ["remote supervision with a hardware stop", (e) => {
+          e.supervision = "remote-supervised";
+          e.eStop = { mechanism: "hardware" };
+        }],
+      ],
+      [
+        ["no hazards (the operator's none)", (e) => (e.hazards = [])],
+        ["remote supervision with an adapter stop", (e) => (e.supervision = "remote-supervised")],
+      ],
+    );
+  });
+
+  it("the template's deadline: deadlineQuantity is the template's, naming an included limit in a time unit", () => {
+    refusesAll(OT2, [
+      ["another quantity", (e) => (e.deadlineQuantity = "aspirate_volume")],
+      ["the plate reader's deadline", (e) => (e.deadlineQuantity = "job_duration")],
+      ["blank", (e) => (e.deadlineQuantity = " ")],
+      // The deadline limit's unit is the template's own (min); another time unit is refused by the limits rule first.
+      ["the deadline limit in hours", (e) => (e.limits[3].unit = "h")],
+      ["the deadline limit dropped", (e) => e.limits.pop()],
+    ]);
   });
 });
