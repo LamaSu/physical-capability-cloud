@@ -235,3 +235,33 @@ describe("N110 equal-time: the window note is part of the committed fingerprint"
     s.close();
   });
 });
+
+describe("astra n110 r1 (@975d583e): reproduced (verify before fix)", () => {
+  // MEDIUM: "none" must be decided by the SAME paging evidence the note uses. It may be claimed only
+  // when the window vouches for the whole collection.
+  it("capabilities {total: 1} with 0 returned is not 'none' (it contradicted '0 of 1 returned')", () => {
+    expect(listWindow(listNode({ path: "/api/capabilities" }), { total: 1 }, 0)).toEqual({ empty: "no rows in this window", note: "0 of 1 returned" });
+  });
+  it("capabilities with no reported total and 0 returned is not 'none' (the route cannot vouch)", () => {
+    expect(listWindow(listNode({ path: "/api/capabilities" }), {}, 0)).toEqual({ empty: "no rows in this window", note: "total not shown" });
+  });
+  it("jobs {limit: 0} with 0 returned is not 'none' (an off-grammar limit can empty a non-empty page)", () => {
+    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: 0 } }), {}, 0).empty).toBe("no rows in this window");
+  });
+  it("jobs {limit: 'x'} with 0 returned is not 'none'", () => {
+    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: "x" } }), {}, 0).empty).toBe("no rows in this window");
+  });
+  // Positive controls: an honest "none" survives the fix.
+  it("capabilities {total: 0} with 0 returned is 'none', with no note", () => {
+    expect(listWindow(listNode({ path: "/api/capabilities" }), { total: 0 }, 0)).toEqual({ empty: "none", note: null });
+  });
+  it("jobs with no query and 0 returned is 'none' (an empty FIRST page of a positive limit means an empty collection)", () => {
+    expect(listWindow(listNode({ path: "/api/jobs" }), {}, 0)).toEqual({ empty: "none", note: null });
+  });
+  it("jobs {limit: 10} with 0 returned is 'none'", () => {
+    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: 10 } }), {}, 0)).toEqual({ empty: "none", note: null });
+  });
+  it("kernels (unpaginated) with 0 returned is 'none'", () => {
+    expect(listWindow(listNode({ path: "/api/kernels" }), {}, 0)).toEqual({ empty: "none", note: null });
+  });
+});
