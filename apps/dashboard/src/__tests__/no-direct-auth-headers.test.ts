@@ -529,6 +529,8 @@ describe("the rules catch each known way around them (self-test)", () => {
       'Object.defineProperties(Request.prototype, { headers: { get: observe } });',
       'Object.defineProperty(navigator, "sendBeacon", { value: observe });',
       "Object.setPrototypeOf(Headers.prototype, Spy.prototype);",
+      'Object.defineProperty(JSON, "stringify", { value: observe });',
+      'Headers.prototype.__defineGetter__("get", observe);',
     ]) {
       expect(caught(line), line).toContain("global-write");
     }
