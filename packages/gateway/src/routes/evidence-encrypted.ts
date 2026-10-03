@@ -112,12 +112,12 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       pipelineTelemetry.emit(bundle.jobId ?? "pipeline-" + Date.now(), "evidence_archive", "completed", { metadata: { cid: result.cid } });
       trackServerEvent(lit("evidence_archived"), { cid: declare.id(result.cid), jobId: declare.id(bundle.jobId) }, (req as any).operatorId);
       auditService.log({
-        eventType: "evidence.archived",
+        eventType: lit("evidence.archived"),
         actor: (req as any).operatorId ?? (req as any).apiKeyId,
-        resourceType: "evidence",
-        resourceId: bundle.id ?? bundle.jobId,
-        action: "archive",
-        metadata: { cid: result.cid, metadataCid: result.metadataCid },
+        resourceType: lit("evidence"),
+        resourceId: declare.id(bundle.id ?? bundle.jobId),
+        action: lit("archive"),
+        metadata: { cid: declare.id(result.cid), metadataCid: declare.id(result.metadataCid) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
@@ -154,12 +154,12 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
         (req as any).operatorId,
       );
       auditService.log({
-        eventType: "evidence.archived",
+        eventType: lit("evidence.archived"),
         actor: (req as any).operatorId ?? (req as any).apiKeyId,
-        resourceType: "evidence",
-        resourceId: req.params.bundleId,
-        action: "archive",
-        metadata: { cid: result.cid, metadataCid: result.metadataCid, encrypted: true },
+        resourceType: lit("evidence"),
+        resourceId: declare.id(req.params.bundleId),
+        action: lit("archive"),
+        metadata: { cid: declare.id(result.cid), metadataCid: declare.id(result.metadataCid), encrypted: declare.flag(true) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
