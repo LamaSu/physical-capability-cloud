@@ -24,8 +24,15 @@ import {
   type ToolCatalogListing,
   type TypeLevelBountyResponse,
 } from "@pcc/spec";
+import { authenticatedActor, sameIdentity } from "../auth/actor.js";
 
 const catalog = new Map<string, ToolCatalogEntry>();
+/**
+ * entry id -> the authenticated operatorId that registered it. Private: never
+ * serialized (an operatorId can be an email). maintainerDid is caller-supplied
+ * attribution and proves nothing, so ownership keys on this instead.
+ */
+const catalogOwners = new Map<string, string>();
 
 function nowISO(): string {
   return new Date().toISOString();
@@ -72,6 +79,13 @@ function filterEntries(
 export async function toolCatalogRoutes(app: FastifyInstance): Promise<void> {
   // POST /api/tool-catalog/register — register a new tool or update an existing one
   app.post("/api/tool-catalog/register", async (req, reply) => {
+    const actor = authenticatedActor(req);
+    if (!actor) {
+      return reply.code(401).send({
+        error: "missing_identity",
+        message: "Registering a tool requires an authenticated operator (API key or SIWE session).",
+      });
+    }
     const parsed = ToolCatalogRegistrationSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -89,6 +103,14 @@ export async function toolCatalogRoutes(app: FastifyInstance): Promise<void> {
       : Array.from(catalog.values()).find((e) => e.repoUrl === reg.repoUrl);
 
     if (existing) {
+      // Only the operator who registered the entry may update it: otherwise
+      // anyone could re-point its maintainerDid and redirect demand routing.
+      if (!sameIdentity(catalogOwners.get(existing.id), actor)) {
+        return reply.code(403).send({
+          error: "forbidden",
+          message: "This tool is registered to another operator; only its registrant can update it.",
+        });
+      }
       const updated: ToolCatalogEntry = {
         ...existing,
         ...reg,
@@ -106,6 +128,7 @@ export async function toolCatalogRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: nowISO(),
     };
     catalog.set(id, entry);
+    catalogOwners.set(id, actor);
     return reply.code(201).send(entry);
   });
 
@@ -214,4 +237,5 @@ export async function toolCatalogRoutes(app: FastifyInstance): Promise<void> {
 /** Test helper: clear the in-memory store between test cases */
 export function _clearCatalogForTests(): void {
   catalog.clear();
+  catalogOwners.clear();
 }
