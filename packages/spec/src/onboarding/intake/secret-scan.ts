@@ -416,7 +416,8 @@ function setOwn(target: object, key: string, value: unknown): void {
  * object becomes a plain object of its own enumerable properties); an object
  * reachable twice is copied once, at the first path it is reached by. Numbers,
  * booleans, null and undefined are returned as they are. The input is not
- * modified.
+ * modified. Named properties on an array (JSON has none) are dropped from the
+ * copy; their keys are still reserved, so no token reproduces one.
  *
  * For safe LOGGING only. A record that has a hit must be rejected (see the
  * file header), not stored in redacted form.
@@ -446,7 +447,8 @@ export function redactIntakeSecrets<T>(record: T): T {
     }
     // Keys that are kept as they are claim their names first, so a renamed key
     // can never take (and then be overwritten by) one of them.
-    const entries = Object.entries(source).map(([key, value]) => ({ key, value, kept: pathSegment(key) === key }));
+    // Kept means IN THE VOCABULARY, decided directly; never by comparing a key with its own token (astra pack 120f).
+    const entries = Object.entries(source).map(([key, value]) => ({ key, value, kept: INTAKE_KEY_VOCABULARY.has(key) }));
     const usedKeys = new Set(entries.filter((e) => e.kept).map((e) => e.key));
     for (const { key, value, kept } of entries) {
       let outKey = key;

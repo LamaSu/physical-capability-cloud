@@ -3410,6 +3410,57 @@ describe("astra pack 120b", () => {
 // verifierStatus does not change readiness" (the stub-primitive gate is
 // removed, item 4).
 
+describe("astra pack 120f", () => {
+  const tokenKey = unknownKeyToken("bogus-id");
+  /** An array carrying a named own enumerable property (JSON has none; a JavaScript caller can attach one). */
+  const arrayWith = (items: unknown[], key: string, value: unknown): unknown[] => {
+    const arr = [...items];
+    (arr as unknown as Record<string, unknown>)[key] = value;
+    return arr;
+  };
+
+  it("CRITICAL 1 (astra's case): a named property on an array is reserved, so no token reproduces it in the report", () => {
+    const input = { schema: "pcc.device-intake.v1", answers: { "bogus-id": { value: arrayWith([], tokenKey, "x"), provenance: "human" } } };
+    expect(validateIntake(input, "register").unknownFields).not.toContain(tokenKey);
+  });
+
+  it("CRITICAL 1 (astra's case): ... nor among redaction's keys", () => {
+    const input = { schema: "pcc.device-intake.v1", answers: { "bogus-id": { value: arrayWith([], tokenKey, "x") } } };
+    expect(Object.keys((redactIntakeSecrets(input) as typeof input).answers)).not.toContain(tokenKey);
+  });
+
+  it("an array's named property is walked: a secret in it is found, and its key is shown as a token", () => {
+    const hits = scanIntakeStrings({ answers: { "device.description": { value: arrayWith(["ok"], "extra", "sk-" + "proj-" + "D".repeat(40)) } } });
+    expect(hits.map((h) => h.path)).toEqual([`answers/device.description/value/${unknownKeyToken("extra")}`]);
+  });
+
+  it("an array's named property is a key for the key checks too: a forbidden key there is reported", () => {
+    const report = validateIntake(
+      { schema: "pcc.device-intake.v1", answers: { "safety.hazards": { value: arrayWith(["chemical"], "privateKey", "x"), provenance: "human" } } },
+      "register",
+    );
+    expect(report.forbiddenKeys).toContain("safety.hazards.privateKey");
+  });
+
+  it("array indices are still walked by number, before the named properties", () => {
+    const secret = "sk-" + "proj-" + "E".repeat(40);
+    const hits = scanIntakeStrings({ answers: { "safety.hazards": { value: arrayWith([secret], "note", secret) } } });
+    expect(hits.map((h) => h.path)).toEqual([
+      "answers/safety.hazards/value/0",
+      `answers/safety.hazards/value/${unknownKeyToken("note")}`,
+    ]);
+  });
+
+  it("redaction drops an array's named properties from the copy (JSON has none) and keeps its elements", () => {
+    const out = redactIntakeSecrets({ answers: { "safety.hazards": { value: arrayWith(["chemical"], "note", "x") } } }) as {
+      answers: Record<string, { value: unknown[] }>;
+    };
+    const copied = out.answers["safety.hazards"]!.value;
+    expect([...copied]).toEqual(["chemical"]);
+    expect(Object.keys(copied)).toEqual(["0"]);
+  });
+});
+
 describe("astra pack 120e", () => {
   const digest = "sha256:" + "ab".repeat(32);
   const fakeKey = () => "sk-" + "proj-" + "A".repeat(40);

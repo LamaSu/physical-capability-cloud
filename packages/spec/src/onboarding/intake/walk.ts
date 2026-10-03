@@ -4,7 +4,10 @@
  * module; nothing here is exported through intake/index.ts.
  *
  * It descends into arrays and into every other non-null object (own
- * enumerable string keys, so a class instance is walked too, not skipped). It
+ * enumerable string keys, so a class instance is walked too, not skipped). An
+ * array's elements are walked by index (a number), and any NAMED own enumerable
+ * property on an array (JSON has none, but a JavaScript caller can attach one)
+ * is a key like any object key: visited and walked (astra pack 120f). It
  * is iterative, so depth cannot overflow the stack, and each frame links to its
  * parent so a path is only built when a visitor asks for it. An object reachable
  * twice, or through a cycle, is visited once.
@@ -32,6 +35,11 @@ export interface WalkVisitor {
   key?: (key: string, path: () => WalkPathSegment[]) => void;
 }
 
+/** Is `key` an index of an array of this length (a canonical decimal below the length)? */
+function isArrayIndex(key: string, length: number): boolean {
+  return /^(?:0|[1-9][0-9]*)$/.test(key) && Number(key) < length;
+}
+
 export function walkValue(root: unknown, visitor: WalkVisitor): void {
   const seen = new Set<object>();
   const stack: WalkFrame[] = [{ node: root, parent: null, key: "" }];
@@ -46,6 +54,13 @@ export function walkValue(root: unknown, visitor: WalkVisitor): void {
     seen.add(node);
 
     if (Array.isArray(node)) {
+      // Named properties first onto the stack, so the indices are walked before them.
+      const named = Object.keys(node).filter((k) => !isArrayIndex(k, node.length));
+      for (const key of named) visitor.key?.(key, () => [...pathOf(frame), key]);
+      for (let i = named.length - 1; i >= 0; i--) {
+        const key = named[i]!;
+        stack.push({ node: (node as unknown as Record<string, unknown>)[key], parent: frame, key });
+      }
       for (let i = node.length - 1; i >= 0; i--) stack.push({ node: node[i], parent: frame, key: i });
       continue;
     }
