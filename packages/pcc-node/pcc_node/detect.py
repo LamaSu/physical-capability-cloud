@@ -17,6 +17,7 @@ import subprocess
 import logging
 
 from .http_util import http
+from .spawn_guard import SpawnRefused
 
 log = logging.getLogger("pcc-node.detect")
 
@@ -56,8 +57,8 @@ def probe_v4l2(device_path):
                     info["formats"].append("YUYV")
 
         return info
-    except FileNotFoundError:
-        # v4l2-ctl not installed -- treat device as present but unverified
+    except (FileNotFoundError, SpawnRefused):
+        # v4l2-ctl not installed (or refused by the spawn guard as unpinned) -- present but unverified
         return {"name": "unknown (v4l2-ctl not available)", "formats": []}
     except subprocess.TimeoutExpired:
         return None
@@ -212,7 +213,6 @@ def detect_mdns(timeout=3.0):
 
     Requires the optional ``zeroconf`` package.  Returns [] if not installed.
     """
-    from .spawn_guard import SpawnRefused
     try:
         from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
     except ImportError:

@@ -12,6 +12,7 @@ import subprocess
 import time
 
 from .http_util import pcc_request
+from .spawn_guard import SpawnRefused
 
 log = logging.getLogger("pcc-node.camera")
 
@@ -58,7 +59,7 @@ def detect_camera_device():
                 log.info(f"Found capture device: {dev}")
                 _camera_device = dev
                 return dev
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (FileNotFoundError, subprocess.TimeoutExpired, SpawnRefused):
             pass
 
         # Fallback: device exists and is readable
@@ -116,7 +117,7 @@ def capture_frame_jpeg():
             end = data.find(b"\xff\xd9", max(start, 0))
             if start >= 0 and end > start:
                 return data[start:end + 2]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, SpawnRefused):
         pass
 
     # Method 2: ffmpeg
@@ -135,7 +136,7 @@ def capture_frame_jpeg():
                     data = f.read()
                 if len(data) > 100:
                     return data
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (FileNotFoundError, subprocess.TimeoutExpired, SpawnRefused):
             pass
 
     # Method 3: dd (last resort)
@@ -149,7 +150,7 @@ def capture_frame_jpeg():
         end = data.find(b"\xff\xd9", max(start, 0))
         if start >= 0 and end > start:
             return data[start:end + 2]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, SpawnRefused):
         pass
 
     log.warning("All camera capture methods failed")

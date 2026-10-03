@@ -1,0 +1,38 @@
+# AppArmor fallback for pcc-node (steward ruling 10/03), for hosts without systemd
+# NoExecPaths=/ / ExecPaths= (systemd < 248, or a non-systemd host). It allows execute of ONLY the
+# Python interpreter and pcc-node's pinned device utilities; AppArmor denies by default, so every
+# other exec (a shell, an arbitrary binary) is refused. Load and run:
+#   apparmor_parser -r -W deploy/apparmor/pcc-node
+#   # then AppArmorProfile=pcc-node in the unit, or: aa-exec -p pcc-node -- python3 -I -m pcc_node start
+# Verify on the host (aa-status; confirm a shell is denied) before relying on it.
+#include <tunables/global>
+
+profile pcc-node flags=(attach_disconnected) {
+  #include <abstractions/base>
+
+  # The interpreter and its libraries (ix = run under this same profile; mr = map read/exec the libs).
+  /usr/bin/python3* ix,
+  /usr/local/bin/python3* ix,
+  /usr/lib/python3*/** mr,
+  /usr/lib64/python3*/** mr,
+  /usr/local/lib/python3*/** mr,
+
+  # The pinned device utilities -- and, by default-deny, only these -- may be executed.
+  /{usr/,}bin/dd ix,
+  /{usr/,}bin/ffmpeg ix,
+  /{usr/,}bin/journalctl ix,
+  /{usr/,}bin/v4l2-ctl ix,
+  /{usr/,}sbin/arp ix,
+  /{usr/,}sbin/sysctl ix,
+
+  # Explicit: shells are denied (default-deny already refuses anything unlisted).
+  deny /{usr/,}bin/sh x,
+  deny /{usr/,}bin/bash x,
+  deny /{usr/,}bin/dash x,
+
+  # pcc-node's own data and network.
+  /etc/pcc-node/** r,
+  owner @{HOME}/.pcc-node/** rwk,
+  network inet stream,
+  network inet6 stream,
+}

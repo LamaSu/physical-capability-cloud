@@ -4,9 +4,10 @@ The no-shell guard (tests/test_no_shell_execution.py) reads the package's syntax
 to new spellings, so this one watches what CPython actually does (the steward's ruling after 105g).
 :func:`install` adds a PEP 578 audit hook (``sys.addaudithook``) that refuses, by raising
 :class:`SpawnRefused`, every audited event that starts a process or loads native code -- except a
-``subprocess.Popen`` of one of the fixed executables pcc-node runs (:data:`EXECUTABLES`), proven to
-be the very binary resolved at startup. However the call was reached -- an alias, a re-export,
-``getattr``, ``string.Formatter``, ``exec``, a process pool -- the event is what it checks.
+``subprocess.Popen`` of one of the fixed executables pcc-node runs (:data:`EXECUTABLES`), checked
+against the binary pinned at startup (best-effort -- the hard guarantee is the OS layer; see
+Boundary). However the call was reached -- an alias, a re-export, ``getattr``, ``string.Formatter``,
+``exec``, a process pool -- the event is what it sees.
 
 Refused events: ``subprocess.Popen`` (unless allowed as below); ``os.system``, ``os.exec``,
 ``os.spawn``, ``os.posix_spawn``, ``os.fork``, ``os.forkpty``, ``os.startfile``, ``pty.spawn``;
@@ -35,14 +36,19 @@ check of ``_winapi.CreateProcess``'s application-name against the pinned paths n
 test -- that is tracked follow-up, so on Windows :func:`install` is a no-op and the node runs
 unguarded (as it did before this layer existed).
 
-Boundary. An audit hook is defense in depth, not a sandbox. It is Python: code that reaches the
-interpreter's own object graph -- ``gc`` to find and rewrite the hook's closure, ``ctypes`` or other
-native code, frame surgery -- can get around any in-process Python hook, and a dependency whose
-*non-spawn* import-time code is malicious (reading files, say) is not its concern. Those belong to the
-static import guard (#507 refuses ``gc``/``ctypes`` etc. in package source) and the deployment (a
-trusted ``sys.path``, vetted dependencies). A shadowed dependency's import-time *spawn* is still
-refused, because :func:`install` runs before the CLI and its dependencies are imported
-(:func:`pcc_node._entry.run`); the tests call ``main``/``run_daemon`` directly and never install it.
+Boundary (steward ruling 10/03, after 105j/105k/105l). This hook is the ACCIDENTAL-spawn check: it
+catches a careless or mistaken spawn in pcc-node's own code, however reached. It is NOT a sandbox
+against code already running in the process. Ordinary in-process Python -- no ``gc``/``ctypes``/frame
+needed -- can still defeat the *allowed* path: mutate a captured function's ``__code__`` so the hook
+misreads the executable (105l HIGH 1), or pass a ``preexec_fn`` (absent from the ``subprocess.Popen``
+audit tuple, so the hook cannot see it) or race a thread to swap the binary between the audit-time
+``stat`` and ``execvp`` -- an irreducible TOCTOU (105l HIGH 2). The HARD guarantee -- that pcc-node can
+execute only the pinned utilities -- is enforced by the OS, not here: the shipped systemd unit sets
+``NoExecPaths=/`` plus ``ExecPaths=`` for the pinned binaries (and the interpreter and its libraries)
+and ``NoNewPrivileges=yes``, with an AppArmor profile as the fallback (see ``deploy/`` and
+``install.sh``). The hook still runs before the CLI and its dependencies import
+(:func:`pcc_node._entry.run`), so an accidental import-time spawn is refused; the tests call
+``main``/``run_daemon`` directly and never install it in-process.
 """
 
 import os

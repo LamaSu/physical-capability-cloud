@@ -26,6 +26,10 @@ import pytest
 PKG = Path(__file__).resolve().parents[1]  # packages/pcc-node, so a child's `import pcc_node` resolves
 ABSPATH = "/usr/bin:/bin:/usr/sbin:/sbin"  # a clean, all-absolute PATH for the allowed-executable tests
 
+# The guard installs only on POSIX (install() is a no-op on Windows); these refusal tests would fail
+# where the hook is intentionally absent (verdict 105l MEDIUM 5). Skip the module on Windows.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="pcc-node spawn guard is POSIX-only")
+
 
 def _run_raw(code: str, env: dict | None = None) -> subprocess.CompletedProcess:
     e = dict(os.environ)
@@ -210,12 +214,13 @@ def test_a_relative_PATH_component_with_a_matching_cwd_is_refused():
 
 
 # ---- HIGH 3: no unguarded runnable entry; install happens before the CLI's imports ----------------
-def test_python_dash_m_cli_is_refused_fail_closed():
-    # `python -m pcc_node.cli detect` must not run the CLI unguarded: a fake zeroconf on PYTHONPATH
-    # whose import spawns must not run, because the module exits before dispatching.
+def test_python_dash_m_cli_is_refused_before_its_imports():
+    # `python -m pcc_node.cli` must refuse ABOVE its imports (verdict 105l HIGH 3): a hostile `click`
+    # (cli.py imports it at module top) on PYTHONPATH must not run its import-time spawn, because the
+    # refusal is the first statement in the module.
     z = tempfile.mkdtemp()
-    zmark = Path(z, "ZRAN")
-    Path(z, "zeroconf.py").write_text(f"import os\nos.system('touch {zmark}')\n")
+    zmark = Path(z, "CRAN")
+    Path(z, "click.py").write_text(f"import os\nos.system('touch {zmark}')\n")
     r = subprocess.run([sys.executable, "-m", "pcc_node.cli", "detect"], cwd=str(PKG),
                        env={**{k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"},
                             "PYTHONPATH": z + os.pathsep + str(PKG)},
