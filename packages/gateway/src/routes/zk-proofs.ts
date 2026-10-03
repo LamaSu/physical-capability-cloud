@@ -223,12 +223,17 @@ export async function zkProofRoutes(app: FastifyInstance) {
             mock: declare.flag(starknetService.isMock()),
           }, (req as any).operatorId);
           auditService.log({
-            eventType: "zk.proof_anchored",
+            eventType: lit("zk.proof_anchored"),
             actor: (req as any).operatorId ?? (req as any).apiKeyId,
-            resourceType: "zk_anchor",
-            resourceId: anchor.txHash,
-            action: "anchor",
-            metadata: { type: "merkle_root", merkleRoot: body.merkleRoot, depth, mock: starknetService.isMock() },
+            resourceType: lit("zk_anchor"),
+            resourceId: declare.id(anchor.txHash),
+            action: lit("anchor"),
+            metadata: {
+              type: lit("merkle_root"),
+              merkleRoot: declare.id(body.merkleRoot),
+              depth: declare.id(depth),
+              mock: declare.flag(starknetService.isMock()),
+            },
             ip: req.ip,
             userAgent: req.headers["user-agent"],
           });
@@ -266,12 +271,12 @@ export async function zkProofRoutes(app: FastifyInstance) {
           mock: declare.flag(starknetService.isMock()),
         }, (req as any).operatorId);
         auditService.log({
-          eventType: "zk.proof_anchored",
+          eventType: lit("zk.proof_anchored"),
           actor: (req as any).operatorId ?? (req as any).apiKeyId,
-          resourceType: "zk_anchor",
-          resourceId: anchor.txHash,
-          action: "anchor",
-          metadata: { type: "proof", proofId: body.proofId, mock: starknetService.isMock() },
+          resourceType: lit("zk_anchor"),
+          resourceId: declare.id(anchor.txHash),
+          action: lit("anchor"),
+          metadata: { type: lit("proof"), proofId: declare.id(body.proofId), mock: declare.flag(starknetService.isMock()) },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });
