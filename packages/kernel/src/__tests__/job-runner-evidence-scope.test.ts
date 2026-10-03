@@ -409,12 +409,13 @@ describe("R4: a device that emits again whenever an event is recorded", () => {
         .then((result) => {
           outcome = result;
         });
-      // The fake clock moves 10 ms per event the device emits, so on that clock it is
-      // never quiet for 1 s, however fast the real hashing that drives it runs.
-      for (let turns = 0; outcome === undefined && turns < 100_000; turns++) {
+      // The fake clock moves 50 ms per event the device emits, so on that clock it is
+      // never quiet for 1 s, however fast or slow the real hashing that drives it runs.
+      const deadline = performance.now() + 4_000;
+      while (outcome === undefined && performance.now() < deadline) {
         const before = emitted;
         await turn();
-        if (emitted > before) await vi.advanceTimersByTimeAsync(10);
+        if (emitted > before) await vi.advanceTimersByTimeAsync(50);
       }
       expect(outcome, "run()'s result").toEqual({ success: false, error: "evidence did not quiesce within 2000 ms", durationMs: expect.any(Number) });
 
@@ -727,10 +728,11 @@ describe("the settle timer", () => {
         .then((result) => {
           outcome = result;
         });
-      for (let steps = 0; outcome === undefined && steps < 100; steps++) {
-        await turn();
-        await vi.advanceTimersByTimeAsync(100);
-      }
+      // The quiet period, once (the events all came at load); then only real turns, so
+      // however long the real hashing takes, no other timer comes due.
+      await vi.advanceTimersByTimeAsync(1_000);
+      const deadline = performance.now() + 4_000;
+      while (outcome === undefined && performance.now() < deadline) await turn();
       expect(outcome?.success).toBe(failing === null);
       expect(vi.getTimerCount(), "timers left pending").toBe(0);
     } finally {
