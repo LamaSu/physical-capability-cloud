@@ -6,15 +6,28 @@
  *
  * Every entry is stored under the closed observability schema (N107b, the PR steward's ruling of
  * 10/03): the actor, the resource id and the address are keyed hashes, the user agent is a coarse
- * class, the event type, resource type and action are closed names, and the metadata is rebuilt
- * under the closed rules (observability/closed-schema.ts). A query by actor hashes the actor the
- * same way, so an entry is still found by who wrote it.
+ * class, the event type, resource type and action are declared codes (lit, declare.code) or their
+ * keyed hashes, and the metadata is rebuilt under the closed rules (observability/closed-schema.ts).
+ * A code filter matches the code as given or its keyed hash, so a declared code and an undeclared
+ * one are both found; an actor filter is hashed as the writer hashes it.
  */
 
 import { getRepos } from "../db.js";
-import { closedText, closeValue, keyedHash, uaClass } from "../observability/closed-schema.js";
+import { closedId, closedText, closeValue, emitted, isDeclared, keyedHash, uaClass, type Declared } from "../observability/closed-schema.js";
 
 export interface AuditEntry {
+  eventType: string | Declared;
+  actor?: string | Declared;
+  resourceType?: string | Declared;
+  resourceId?: string | Declared;
+  action: string | Declared;
+  metadata?: Record<string, unknown>;
+  ip?: string;
+  userAgent?: string;
+}
+
+/** An entry as the audit log keeps it. */
+export interface AuditRecord {
   eventType: string;
   actor?: string;
   resourceType?: string;
@@ -23,6 +36,12 @@ export interface AuditEntry {
   metadata?: Record<string, unknown>;
   ip?: string;
   userAgent?: string;
+}
+
+/** A code filter as the writer may have stored it: the code itself (declared) and its keyed hash. */
+function bothForms(value: string | Declared): string[] {
+  const raw = isDeclared(value) ? String(emitted(value)) : value;
+  return [raw, keyedHash(raw)];
 }
 
 class AuditService {
@@ -38,11 +57,11 @@ class AuditService {
       repos.auditLog.insert({
         timestamp: new Date().toISOString(),
         eventType: closedText(entry.eventType),
-        actor: entry.actor != null ? keyedHash(entry.actor) : null,
+        actor: entry.actor != null ? closedId(entry.actor) : null,
         resourceType: entry.resourceType != null ? closedText(entry.resourceType) : null,
-        resourceId: entry.resourceId != null ? keyedHash(entry.resourceId) : null,
+        resourceId: entry.resourceId != null ? closedId(entry.resourceId) : null,
         action: closedText(entry.action),
-        metadata: entry.metadata ? ((closeValue(entry.metadata, "metadata", 1) ?? null) as Record<string, unknown> | null) : null,
+        metadata: entry.metadata ? ((closeValue(entry.metadata, 1) ?? null) as Record<string, unknown> | null) : null,
         ip: entry.ip ? keyedHash(entry.ip) : null,
         userAgent: entry.userAgent ? uaClass(entry.userAgent) : null,
       });
@@ -52,22 +71,24 @@ class AuditService {
   }
 
   /**
-   * Query audit entries with optional filters. An actor filter is hashed as the writer hashes it.
+   * Query audit entries with optional filters. A code filter matches the code as given or its keyed
+   * hash; an actor filter is hashed as the writer hashes it.
    */
   query(opts: {
-    eventType?: string;
-    actor?: string;
-    resourceType?: string;
+    eventType?: string | Declared;
+    actor?: string | Declared;
+    resourceType?: string | Declared;
     since?: string;
     limit?: number;
-  }): AuditEntry[] {
+  }): AuditRecord[] {
     try {
       const repos = getRepos();
       const rows = repos.auditLog.query({
-        ...opts,
-        ...(opts.eventType !== undefined ? { eventType: closedText(opts.eventType) } : {}),
-        ...(opts.resourceType !== undefined ? { resourceType: closedText(opts.resourceType) } : {}),
-        ...(opts.actor !== undefined ? { actor: keyedHash(opts.actor) } : {}),
+        since: opts.since,
+        limit: opts.limit,
+        ...(opts.eventType !== undefined ? { eventType: bothForms(opts.eventType) } : {}),
+        ...(opts.resourceType !== undefined ? { resourceType: bothForms(opts.resourceType) } : {}),
+        ...(opts.actor !== undefined ? { actor: closedId(opts.actor) } : {}),
       });
       return rows.map((r) => ({
         eventType: r.eventType,

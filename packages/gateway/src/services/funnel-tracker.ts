@@ -31,7 +31,7 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastif
 import { trace } from "@opentelemetry/api";
 import { auditService } from "./audit-service.js";
 import { identifyAgent, trackServerEvent } from "./posthog-service.js";
-import { keyedHash, registerClosedValues } from "../observability/closed-schema.js";
+import { declare, declaredRoute, isDeclared, keyedHash, lit, routeTemplates, type Declared } from "../observability/closed-schema.js";
 
 // ── Stages ───────────────────────────────────────────────────────────────────
 
@@ -53,9 +53,8 @@ export const ONBOARDING_STAGES: OnboardingStage[] = [
   "settle",
 ];
 
-// The funnel's PostHog event names are built from the stages: closed names the observability
-// schema keeps as text (N107b).
-registerClosedValues(ONBOARDING_STAGES.map((stage) => `onboarding_${stage}`));
+const asStage = (value: unknown): OnboardingStage | undefined =>
+  typeof value === "string" && (ONBOARDING_STAGES as string[]).includes(value) ? (value as OnboardingStage) : undefined;
 
 /** auditService eventType used for every funnel stage row. */
 export const FUNNEL_AUDIT_EVENT = "agent.funnel";
@@ -148,31 +147,37 @@ export function __resetFunnelState(): void {
 
 const tracer = trace.getTracer("pcc-gateway-funnel", "1.0.0");
 
-/** Emit one funnel stage to all three sinks. Safe — never throws. */
+/**
+ * Emit one funnel stage to all three sinks. Safe — never throws. Every field is declared (the closed
+ * observability schema, N107b round 2): the stage a code of ONBOARDING_STAGES, the route the matched
+ * template, the status and time the server's own, the trace id an identifier (stored hashed).
+ */
 export function recordStage(
   traceId: string,
   stage: OnboardingStage,
-  route: string,
+  route: string | Declared,
   status: number,
 ): void {
-  const ts = new Date().toISOString();
+  const at = new Date();
+  const routeField = isDeclared(route) ? route : declare.code(route, routeTemplates());
+  const stageField = declare.code(stage, ONBOARDING_STAGES);
 
   // 1. Durable audit row (system of record). resourceId = trace_id, action = stage.
   auditService.log({
-    eventType: FUNNEL_AUDIT_EVENT,
+    eventType: lit(FUNNEL_AUDIT_EVENT),
     actor: traceId,
-    resourceType: "agent_journey",
+    resourceType: lit("agent_journey"),
     resourceId: traceId,
-    action: stage,
-    metadata: { stage, route, status, ts },
+    action: stageField,
+    metadata: { stage: stageField, route: routeField, status: declare.metric(status), ts: declare.serverTime(at) },
   });
 
   // 2. PostHog — identify on provision so funnel conversion counts, then capture.
   try {
     if (stage === "provision") {
-      identifyAgent(traceId, { first_stage: "provision", first_route: route });
+      identifyAgent(traceId, { first_stage: lit("provision"), first_route: routeField });
     }
-    trackServerEvent(`onboarding_${stage}`, { trace_id: traceId, route, status }, traceId);
+    trackServerEvent(lit(`onboarding_${stage}`), { trace_id: declare.id(traceId), route: routeField, status: declare.metric(status) }, traceId);
   } catch {
     /* analytics must never break request flow */
   }
@@ -182,7 +187,7 @@ export function recordStage(
     trace.getActiveSpan()?.addEvent(`pcc.funnel.${stage}`, {
       "pcc.trace_id": traceId,
       "pcc.funnel.stage": stage,
-      "pcc.funnel.route": route,
+      "pcc.funnel.route": String(routeField),
       "pcc.funnel.status": status,
     });
   } catch {
@@ -208,8 +213,10 @@ export function getFunnelForTraceId(traceId: string): FunnelStageRow[] {
   for (const r of rows) {
     if (r.resourceId !== traceKey) continue;
     const meta = (r.metadata ?? {}) as Record<string, unknown>;
+    const stage = asStage(r.action) ?? asStage(meta.stage);
+    if (!stage) continue;
     out.push({
-      stage: (r.action as OnboardingStage) ?? (meta.stage as OnboardingStage),
+      stage,
       route: meta.route as string | undefined,
       status: meta.status as number | undefined,
       ts: meta.ts as string | undefined,
@@ -245,9 +252,9 @@ export function getCohortFunnel(opts: { since?: string } = {}): FunnelCohortRow[
   for (const s of ONBOARDING_STAGES) perStage.set(s, new Set());
   for (const r of rows) {
     const meta = (r.metadata ?? {}) as Record<string, unknown>;
-    const stage = (r.action as OnboardingStage) ?? (meta.stage as OnboardingStage);
+    const stage = asStage(r.action) ?? asStage(meta.stage);
     const traceId = r.resourceId;
-    if (!stage || !traceId || !perStage.has(stage)) continue;
+    if (!stage || !traceId) continue;
     perStage.get(stage)!.add(traceId);
   }
 
@@ -276,12 +283,13 @@ const funnelTrackerPluginImpl: FastifyPluginAsync = async (app: FastifyInstance)
     try {
       const traceId = (req as FastifyRequest & { traceId?: string }).traceId;
       if (!traceId) return;
-      const routePattern = req.routeOptions?.url ?? req.url;
+      // The matched route's pattern, never the caller's path (an unmatched request is no stage).
+      const routePattern = req.routeOptions?.url;
       if (!routePattern) return;
       const stage = detectStage(req.method, routePattern, reply.statusCode);
       if (!stage) return;
       if (!recordOnce(traceId, stage)) return;
-      recordStage(traceId, stage, routePattern, reply.statusCode);
+      recordStage(traceId, stage, declaredRoute(req), reply.statusCode);
     } catch {
       /* funnel tracking must never affect request handling */
     }

@@ -5,8 +5,8 @@ initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 initPostHog();
-import { closeConsole, gatewayLoggerOptions } from "./observability/closed-sinks.js";
-import { openRequestScope, routeTemplateOf, TELEMETRY_KEY_EPHEMERAL, trackRouteTemplates } from "./observability/closed-schema.js";
+import { closeConsole, gatewayLoggerOptions, issueRequestId } from "./observability/closed-sinks.js";
+import { declare, declaredRoute, lit, METHODS, openRequestScope, TELEMETRY_KEY_EPHEMERAL, trackRouteTemplates } from "./observability/closed-schema.js";
 // Request-path console output leaves under the closed observability schema (N107b).
 closeConsole();
 import { randomBytes } from "node:crypto";
@@ -189,8 +189,9 @@ export async function createGateway(port = 3200) {
     // method, route template and client hash, never a URL, header or body value.
     logger: gatewayLoggerOptions(),
     // A caller never names the request id that every log line carries (Fastify 4 reads it from a
-    // request-id header by default).
+    // request-id header by default), and the log keeps only an id the gateway issued.
     requestIdHeader: false,
+    genReqId: issueRequestId,
     bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
@@ -200,7 +201,7 @@ export async function createGateway(port = 3200) {
   trackRouteTemplates(app);
   app.addHook("onRequest", openRequestScope);
   if (TELEMETRY_KEY_EPHEMERAL) {
-    app.log.warn("[observability] PCC_TELEMETRY_KEY is not set: telemetry hashes use a per-process key and do not correlate across restarts.");
+    app.log.warn(lit("[observability] PCC_TELEMETRY_KEY is not set: telemetry hashes use a per-process key and do not correlate across restarts."));
   }
 
   // Sentry error handler — captures Fastify errors and attaches request context
@@ -237,7 +238,7 @@ export async function createGateway(port = 3200) {
     // For 5xx errors, report to Sentry before responding
     const statusCode = error.statusCode ?? 500;
     if (statusCode >= 500) {
-      Sentry.captureException(error, { extra: { route: routeTemplateOf(request), method: request.method } });
+      Sentry.captureException(error, { extra: { route: declaredRoute(request), method: declare.code(request.method, METHODS) } });
     }
     const body: Record<string, unknown> = {
       error: statusCode >= 500 ? "internal_error" : "request_error",
@@ -401,6 +402,8 @@ export async function createGateway(port = 3200) {
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
 
+  const HTTP_WRITE_ACTIONS = ["post", "put", "delete", "patch"] as const;
+
   // Automatic write-operation audit hook — logs all POST/PUT/DELETE requests
   // to the audit log so every state-changing call is captured without
   // per-route boilerplate. Individual routes may also log richer events.
@@ -414,16 +417,17 @@ export async function createGateway(port = 3200) {
 
     try {
       const { auditService: audit } = await import("./services/audit-service.js");
+      // Every field declared (the closed observability schema, N107b round 2).
       audit.log({
-        eventType: "http.write",
+        eventType: lit("http.write"),
         actor,
-        resourceType: "http",
-        action: method.toLowerCase(),
+        resourceType: lit("http"),
+        action: declare.code(method.toLowerCase(), HTTP_WRITE_ACTIONS),
         metadata: {
-          method,
-          route: routeTemplateOf(request),
-          statusCode: reply.statusCode,
-          duration_ms: Math.round(reply.elapsedTime ?? 0),
+          method: declare.code(method, METHODS),
+          route: declaredRoute(request),
+          statusCode: declare.metric(reply.statusCode),
+          duration_ms: declare.metric(Math.round(reply.elapsedTime ?? 0)),
         },
         ip: request.ip,
         userAgent: request.headers["user-agent"],

@@ -4,7 +4,9 @@
  * class. Each chokepoint is driven here with a marker under arbitrary names and in prose; the
  * every-position test (every-position.test.ts) drives the real gateway.
  * Also #514 r2's two MEDIUMs: a caller's two letters as a country or language, and the MPP failure
- * log carrying the payment library's error.
+ * log carrying the payment library's error. Round 2 (cross-family review r1 of #538): a value
+ * leaves as text only when its producer declared it (declare, lit), never by its spelling;
+ * closed-schema-r2.test.ts pins each round-2 finding.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { Writable } from "node:stream";
@@ -44,10 +46,12 @@ describe("the shared rules", () => {
     expect(schema.keyedHash(mark("b"))).not.toBe(a);
   });
 
-  it("closedText keeps the gateway's own literals, framework messages and timestamps; hashes anything else", () => {
-    expect(schema.closedText("[payment-gate] MPP payment check error — blocking request")).toBe("[payment-gate] MPP payment check error — blocking request");
-    expect(schema.closedText("request completed")).toBe("request completed");
-    expect(schema.closedText("2026-10-03T09:00:00.000Z")).toBe("2026-10-03T09:00:00.000Z");
+  it("closedText keeps a declared text; it hashes anything else, a gateway literal, a framework message and a timestamp included", () => {
+    const literal = "[payment-gate] MPP payment check error — blocking request";
+    expect(schema.closedText(schema.lit("[payment-gate] MPP payment check error — blocking request"))).toBe(literal);
+    expect(schema.closedText(literal)).toBe(schema.keyedHash(literal));
+    expect(schema.closedText("request completed")).toMatch(/^h:/);
+    expect(schema.closedText("2026-10-03T09:00:00.000Z")).toMatch(/^h:/);
     expect(schema.closedText(`caller supplied ${mark("prose")}`)).toMatch(/^h:/);
     expect(schema.closedText(mark("plain"))).toMatch(/^h:/);
   });
@@ -61,7 +65,7 @@ describe("the shared rules", () => {
       nested: { deeper: [m, { email: m }] },
       jobId: m,
       err: new Error(`failed for ${m}`),
-      count: 3,
+      count: schema.declare.metric(3),
       amount: 123456,
     });
     expect(closed).not.toContain(m);
@@ -79,7 +83,7 @@ describe("the shared rules", () => {
 });
 
 function closeValueText(value: unknown) {
-  return JSON.stringify(schema.closeValue(value, "", 1));
+  return JSON.stringify(schema.closeValue(value));
 }
 
 describe("the PostHog boundary", () => {
@@ -130,7 +134,7 @@ describe("the audit writer", () => {
       resourceType: "http",
       resourceId: m,
       action: "post",
-      metadata: { email: m, note: `prose ${m}`, [m]: 1, route: "/x", statusCode: 201 },
+      metadata: { email: m, note: `prose ${m}`, [m]: 1, route: "/x", statusCode: schema.declare.metric(201) },
       ip: m,
       userAgent: `ordinary-client ${m}`,
     });
@@ -159,14 +163,16 @@ describe("the logger", () => {
     logger.info({ zq1: m, note: `prose ${m}`, [m]: 1, url: `/cb?code=${m}` }, `route ${m} not found`);
     logger.warn("printf %s and %j", m, { m });
     logger.error(new Error(`boom ${m}`));
-    logger.error({ err: new Error(`boom ${m}`) }, "[payment-gate] MPP payment check error — blocking request");
+    logger.error({ err: new Error(`boom ${m}`) }, schema.lit("[payment-gate] MPP payment check error — blocking request"));
     logger.child({ reqId: m }).info("request completed");
-    logger.child({ reqId: "req-1" }).info("request completed");
+    // A request id stays readable only when the gateway issued it (round 2).
+    const issued = sinks.issueRequestId();
+    logger.child({ reqId: issued }).info(schema.lit("request completed"));
     const text = lines.join("");
     expect(lines.length).toBeGreaterThanOrEqual(6);
     expect(text).not.toContain(m);
     expect(text).toContain("[payment-gate] MPP payment check error — blocking request");
-    expect(text).toContain('"reqId":"req-1"');
+    expect(text).toContain(`"reqId":"${issued}"`);
     await app.close();
   });
 });
@@ -182,7 +188,7 @@ describe("request-path console output", () => {
       const m = mark("console");
       schema.requestScope.run(true, () => {
         console.log(`echo ${m}`, { zq: m });
-        console.info("request completed");
+        console.info(schema.lit("request completed"));
       });
       expect(log.mock.calls.length + info.mock.calls.length).toBe(2);
       expect(written()).not.toContain(m);

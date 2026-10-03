@@ -12,6 +12,8 @@
  *   sinks:     the Sentry envelope (a capture transport under the gateway's own Sentry options),
  *              the gateway's log stream, stdout and stderr, every audit row, and PostHog
  *              (posthog-node mocked, so the gateway's own posthog-service runs).
+ * Round 2 (cross-family review r1 of #538) adds a valid timestamp and a gateway literal as request
+ * values.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import http from "node:http";
@@ -69,6 +71,10 @@ vi.setConfig({ testTimeout: 120_000 });
 
 // Every marker is built at runtime, so no literal here looks like a secret or is a gateway literal.
 const mark = (name: string) => ["n107b", "ep", name, "6d2a"].join("-");
+// Round 2 (cross-family review r1 of #538): a valid ISO timestamp no server writes now, and a
+// string the gateway's own source contains.
+const STAMP = ["2031-07-19T04", "23", "55.817Z"].join(":");
+const GATEWAY_LITERAL = "[payment-gate] MPP payment check error — blocking request";
 const DSN = "https://public@o0.ingest.sentry.io/0";
 
 const sentryBodies: string[] = [];
@@ -177,6 +183,7 @@ describe("N107b: a marker in every request position reaches no sink and no conso
       xff: mark("xff"), auth: mark("auth"), cookie: mark("cookie"), reqId: mark("reqid"), custom: mark("custom"),
       json: mark("json"), prose: mark("prose"), form: mark("form"), email: mark("email"), name: mark("name"),
       capability: mark("capability"), consoleQuery: mark("consolequery"), notFound: mark("notfound"),
+      stamp: STAMP, literal: GATEWAY_LITERAL,
     };
     const headers = {
       "user-agent": `ordinary-client ${m.ua}`,
@@ -203,6 +210,9 @@ describe("N107b: a marker in every request position reaches no sink and no conso
     // Provision: a PostHog and audit producer that copies body fields.
     await request("POST", "/api/auth/provision", { ...headers, "content-type": "application/json" },
       JSON.stringify({ email: `${m.email}@x.test`, name: m.name, capability: m.capability }));
+    // A request value that is a valid timestamp, and one equal to a gateway literal (round 2, MEDIUM 3).
+    await request("POST", "/api/auth/provision", { ...headers, "content-type": "application/json" },
+      JSON.stringify({ email: `${m.email}@y.test`, name: m.stamp, capability: m.literal }));
     // A 404 with encoded separators, and a route with a path parameter.
     await request("GET", `/n107b-ep/none%3Fzq%3D${m.encoded}%26code%3D${m.encoded}?zq=${m.notFound}`, headers);
     await request("GET", `/api/jobs/${m.path}`, headers);
@@ -229,5 +239,6 @@ describe("N107b: a marker in every request position reaches no sink and no conso
       Object.entries(sinks).map(([sink, text]) => [sink, Object.entries(m).filter(([, value]) => text.includes(value)).map(([key]) => key)]),
     );
     expect(found).toEqual({ sentry: [], log: [], console: [], audit: [], posthog: [] });
+
   });
 });

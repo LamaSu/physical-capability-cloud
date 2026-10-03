@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { redactSecrets } from "../redaction.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
 // Migrate to a table later if volume warrants it.
@@ -386,25 +387,27 @@ export async function feedbackRoutes(app: FastifyInstance) {
     //     feedback-stream + error-histogram + per-agent journey light up with the new
     //     reports (metadata shape mirrors what admin-observability.ts expects).
     try {
+      // Every field declared (the closed observability schema, N107b round 2): what the agent
+      // wrote leaves as its keyed hash under its own name, so the views still find each field.
       auditService.log({
-        eventType: "agent.report",
+        eventType: lit("agent.report"),
         actor:
           (req as unknown as { operatorId?: string }).operatorId ??
           (req as unknown as { apiKeyId?: string }).apiKeyId ??
           `anonymous:${req.ip}`,
-        resourceType: "agent_report",
+        resourceType: lit("agent_report"),
         resourceId: rec.id,
-        action: "create",
+        action: lit("create"),
         metadata: {
-          trace_id: rec.traceId,
-          summary: rec.summary,
-          agent_kind: rec.agentId,
-          last_endpoint: rec.endpoint,
-          last_error_code: rec.errorCode,
-          confused_about: rec.type,
-          http_status: rec.httpStatus,
-          severity: rec.severity,
-          log_count: rec.logs?.length ?? 0,
+          trace_id: declare.id(rec.traceId),
+          summary: declare.id(rec.summary),
+          agent_kind: declare.id(rec.agentId),
+          last_endpoint: declare.id(rec.endpoint),
+          last_error_code: declare.id(rec.errorCode),
+          confused_about: declare.code(rec.type, FEEDBACK_TYPES),
+          http_status: declare.id(rec.httpStatus),
+          severity: declare.code(rec.severity, SEVERITIES),
+          log_count: declare.id(rec.logs?.length ?? 0),
         },
         ip: req.ip,
         userAgent: req.headers["user-agent"] as string | undefined,

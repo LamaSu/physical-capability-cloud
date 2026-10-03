@@ -3,10 +3,14 @@
  *
  * AuditService delegates to getRepos().auditLog which requires initStore().
  * We call initStore({ seed: false }) with an in-memory DB before each test.
+ *
+ * The closed audit log (N107b round 2) keeps a code as written only when its producer declared it
+ * (lit); these producers do, as the gateway's own do. An undeclared code is stored as its keyed
+ * hash, and a filter still finds it.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { keyedHash } from "../observability/closed-schema.js";
+import { keyedHash, lit } from "../observability/closed-schema.js";
 import { initStore, closeStore } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 
@@ -75,10 +79,10 @@ describe("AuditService", () => {
 
   describe("query()", () => {
     beforeEach(() => {
-      auditService.log({ eventType: "job.submitted", actor: "alice", resourceType: "job", action: "create" });
-      auditService.log({ eventType: "escrow.funded", actor: "bob", resourceType: "escrow", action: "fund" });
-      auditService.log({ eventType: "job.submitted", actor: "charlie", resourceType: "job", action: "create" });
-      auditService.log({ eventType: "evidence.archived", actor: "alice", resourceType: "evidence", action: "archive" });
+      auditService.log({ eventType: lit("job.submitted"), actor: "alice", resourceType: lit("job"), action: lit("create") });
+      auditService.log({ eventType: lit("escrow.funded"), actor: "bob", resourceType: lit("escrow"), action: lit("fund") });
+      auditService.log({ eventType: lit("job.submitted"), actor: "charlie", resourceType: lit("job"), action: lit("create") });
+      auditService.log({ eventType: lit("evidence.archived"), actor: "alice", resourceType: lit("evidence"), action: lit("archive") });
     });
 
     it("returns empty array when no entries match", () => {
@@ -103,6 +107,14 @@ describe("AuditService", () => {
       const rows = auditService.query({ resourceType: "escrow" });
       expect(rows.length).toBe(1);
       expect(rows[0].eventType).toBe("escrow.funded");
+    });
+
+    it("an undeclared code is stored as its keyed hash, and a filter by the code still finds it", () => {
+      auditService.log({ eventType: "undeclared.event", action: "create" });
+      const rows = auditService.query({ eventType: "undeclared.event" });
+      expect(rows.length).toBe(1);
+      expect(rows[0].eventType).toBe(keyedHash("undeclared.event"));
+      expect(rows[0].action).toBe(keyedHash("create"));
     });
 
     it("filters by since (ISO timestamp string)", () => {
@@ -150,9 +162,9 @@ describe("AuditService", () => {
     });
 
     it("aggregates counts by eventType", () => {
-      auditService.log({ eventType: "job.submitted", action: "create" });
-      auditService.log({ eventType: "job.submitted", action: "create" });
-      auditService.log({ eventType: "escrow.funded", action: "fund" });
+      auditService.log({ eventType: lit("job.submitted"), action: lit("create") });
+      auditService.log({ eventType: lit("job.submitted"), action: lit("create") });
+      auditService.log({ eventType: lit("escrow.funded"), action: lit("fund") });
 
       const stats = auditService.stats();
       const jobStats = stats.find((s) => s.eventType === "job.submitted");

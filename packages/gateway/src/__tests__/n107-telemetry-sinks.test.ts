@@ -16,12 +16,19 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 const events = vi.hoisted(() => [] as Array<{ name: string; props: Record<string, unknown>; distinctId?: string }>);
-vi.mock("../services/posthog-service.js", () => ({
-  initPostHog: vi.fn(),
-  trackServerEvent: (name: string, props: Record<string, unknown>, distinctId?: string) => events.push({ name, props, distinctId }),
-  identifyAgent: vi.fn(),
-  shutdownPostHog: vi.fn().mockResolvedValue(undefined),
-}));
+// The PostHog boundary's contract (N107b round 2): the event name and the properties leave closed, a
+// declared field as declared and anything else as its keyed hash. The producer's distinct id is kept
+// as passed (the boundary hashes it).
+vi.mock("../services/posthog-service.js", async () => {
+  const { closedText, closeValue } = await import("../observability/closed-schema.js");
+  return {
+    initPostHog: vi.fn(),
+    trackServerEvent: (name: unknown, props: unknown, distinctId?: unknown) =>
+      events.push({ name: closedText(name), props: closeValue(props ?? {}) as Record<string, unknown>, distinctId: distinctId === undefined ? undefined : String(distinctId) }),
+    identifyAgent: vi.fn(),
+    shutdownPostHog: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 // Built at runtime, so no literal here looks like a secret.
 const mark = (name: string) => ["n107", name, "7c1d"].join("-");

@@ -1,50 +1,150 @@
 /**
  * The closed schema at each sink chokepoint (N107b; see closed-schema.ts for the rules):
  *   - gatewayLoggerOptions(): pino options for the gateway's Fastify logger. Every log line's
- *     object, message, bindings, request and error leave under the closed rules;
+ *     object, message, bindings, request and error leave under the closed rules, and the last pass
+ *     over the serialized line closes whatever reached it any other way (a child logger's bindings);
  *   - closeConsole(): request-path console output (inside a request's scope) leaves closed too;
  *   - closedSentryEvent / closedSentryTransaction / closedSentrySpan / closedBreadcrumb: Sentry's
  *     outbound events are rebuilt from closed fields only (sentry.ts wires them).
  */
+import type { FastifyLogFn } from "fastify";
+import { hostname } from "node:os";
+import { ServerResponse } from "node:http";
+import { Readable } from "node:stream";
 import {
   closedError,
-  closedKey,
   closedMessage,
   closedText,
+  closeField,
   closeValue,
+  declare,
+  emitted,
+  isDeclared,
   keyedHash,
   METHODS,
   requestScope,
   routeTemplateOf,
+  routeTemplates,
+  type Declared,
 } from "./closed-schema.js";
+
+/** A log call whose message is declared (lit): the logger keeps it as written. */
+interface DeclaredLogFn {
+  (msg: Declared, ...args: unknown[]): void;
+  (obj: object, msg: Declared, ...args: unknown[]): void;
+}
+
+declare module "fastify" {
+  // Every Fastify logger takes a declared message as well as a string (which leaves as its keyed hash).
+  interface FastifyBaseLogger {
+    fatal: FastifyLogFn & DeclaredLogFn;
+    error: FastifyLogFn & DeclaredLogFn;
+    warn: FastifyLogFn & DeclaredLogFn;
+    info: FastifyLogFn & DeclaredLogFn;
+    debug: FastifyLogFn & DeclaredLogFn;
+    trace: FastifyLogFn & DeclaredLogFn;
+  }
+}
+
+// ── Request ids ────────────────────────────────────────────────────────────
+
+let issued = 0;
+
+/**
+ * The gateway's request ids (Fastify's genReqId): req-<n> in base 36, as Fastify's default makes
+ * them. The line pass keeps a request id only when this process issued it.
+ */
+export function issueRequestId(): string {
+  issued = (issued + 1) & 0x7fffffff;
+  return `req-${issued.toString(36)}`;
+}
+
+function isIssuedRequestId(value: unknown): boolean {
+  if (typeof value !== "string" || !value.startsWith("req-")) return false;
+  const n = Number.parseInt(value.slice(4), 36);
+  return Number.isSafeInteger(n) && n >= 1 && n <= issued && value === `req-${n.toString(36)}`;
+}
 
 // ── Logger ─────────────────────────────────────────────────────────────────
 
-const REQ_ID = /^req-[0-9a-z]+$/;
-const HASHED = /^h:[0-9a-f]{32}$/;
-/** Fields of a serialized log line that are already closed (or are the logger's own). */
-const LINE_SYSTEM_KEYS: ReadonlySet<string> = new Set(["level", "time", "pid", "hostname", "msg", "req", "res", "err", "responseTime"]);
+const HOSTNAME = hostname();
+
+/** Fastify's own messages, kept only on Fastify's own records (frameworkRecord). */
+const FRAMEWORK_MESSAGES: ReadonlySet<string> = new Set(["incoming request", "request completed"]);
 
 /**
- * The last check on every serialized log line: a child logger's bindings (a request id, or any
- * binding a module adds) do not pass through the bindings formatter in this Fastify, so each
- * top-level string that is not already closed is closed here, and a request id must be server-made.
+ * What the current log call's own chokepoints produced. One pino write is synchronous: logMethod
+ * closes the message, formatters.log the object, and the line pass reads both before the next call.
+ */
+let writing: { msg: string | undefined; keys: ReadonlySet<string> } | undefined;
+
+/**
+ * Fastify's own records ("incoming request", "request completed", its error records): an object
+ * whose req is the request's own stream or whose res is the server's own response, which nothing
+ * parsed from a request can be. Its response time is a measurement the server made.
+ */
+function frameworkRecord(obj: Record<string, unknown>): Record<string, unknown> | undefined {
+  const req = obj.req as { raw?: unknown } | undefined;
+  const res = obj.res as { raw?: unknown } | undefined;
+  const own = (req && typeof req === "object" && req.raw instanceof Readable) || (res && typeof res === "object" && res.raw instanceof ServerResponse);
+  if (!own) return undefined;
+  return typeof obj.responseTime === "number" ? { ...obj, responseTime: declare.metric(obj.responseTime) } : obj;
+}
+
+/**
+ * The last pass over every serialized log line. A child logger's bindings are serialized when the
+ * child is made (pino resets the bindings formatter for a child), so they reach the line without
+ * passing any other chokepoint: every field the call's own chokepoints did not produce is closed
+ * here, recursively, nested objects and arrays included. The logger's own fields are written by the
+ * server (time, pid, hostname), and a request id must be one this process issued.
  */
 function closedLine(line: string): string {
+  const own = writing;
+  writing = undefined;
+  let record: unknown;
   try {
-    const record = JSON.parse(line) as Record<string, unknown>;
-    for (const [key, value] of Object.entries(record)) {
-      if (LINE_SYSTEM_KEYS.has(key)) continue;
-      if (key === "reqId") {
-        record.reqId = typeof value === "string" && REQ_ID.test(value) ? value : keyedHash(value);
-        continue;
-      }
-      if (typeof value === "string" && !HASHED.test(value)) record[key] = closedText(value);
-    }
-    return JSON.stringify(record) + "\n";
+    record = JSON.parse(line);
   } catch {
-    return closedText(line) + "\n";
+    return keyedHash(line) + "\n";
   }
+  if (!record || typeof record !== "object" || Array.isArray(record)) return keyedHash(line) + "\n";
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record as Record<string, unknown>)) {
+    switch (key) {
+      case "level":
+        out.level = typeof value === "number" ? value : keyedHash(value);
+        break;
+      case "time":
+        out.time = Date.now();
+        break;
+      case "pid":
+        out.pid = process.pid;
+        break;
+      case "hostname":
+        out.hostname = HOSTNAME;
+        break;
+      case "msg":
+        out.msg = own && (value === own.msg || own.keys.has("msg")) ? value : keyedHash(value);
+        break;
+      case "reqId":
+        out.reqId = isIssuedRequestId(value) ? value : keyedHash(value);
+        break;
+      case "req":
+      case "res":
+      case "err":
+        // Their serializers built them, for an object's fields and a binding's alike.
+        out[key] = value;
+        break;
+      default:
+        if (own?.keys.has(key)) {
+          out[key] = value;
+        } else {
+          const closed = closeValue(value);
+          if (closed !== undefined) out[keyedHash(key)] = closed;
+        }
+    }
+  }
+  return JSON.stringify(out) + "\n";
 }
 
 interface LoggedRequest {
@@ -53,7 +153,7 @@ interface LoggedRequest {
   routeOptions?: { url?: string };
 }
 
-/** A request as a log line carries it: method, route template and the client's keyed hash. */
+/** A request as a log line carries it, built here: method, route template and the client's keyed hash. */
 export function closedRequest(req: LoggedRequest | undefined): Record<string, unknown> {
   if (!req || typeof req !== "object") return {};
   return {
@@ -71,20 +171,17 @@ export function closeLogObject(obj: Record<string, unknown>): Record<string, unk
       out[key] = value;
       continue;
     }
-    if (key === "responseTime" && typeof value === "number") {
-      out[key] = value;
-      continue;
-    }
-    const closed = closeValue(value, key, 1);
-    if (closed !== undefined) out[closedKey(key)] = closed;
+    const closed = closeField(value, 1);
+    if (closed.value !== undefined) out[closed.declared ? key : keyedHash(key)] = closed.value;
   }
+  if (writing) writing.keys = new Set(Object.keys(out).filter((key) => key !== "req" && key !== "res" && key !== "err"));
   return out;
 }
 
 /**
  * The gateway's pino options: the request is its method, route and client hash (never a URL or a
  * header), the response its status, an error its class, code and frames, the bindings only the
- * process and a server-made request id, and every message and object under the text rule.
+ * process and an issued request id, and every message and field under the closed rules.
  */
 export function gatewayLoggerOptions() {
   return {
@@ -107,7 +204,7 @@ export function gatewayLoggerOptions() {
         const out: Record<string, unknown> = {};
         if (typeof bindings.pid === "number") out.pid = bindings.pid;
         if (typeof bindings.hostname === "string") out.hostname = bindings.hostname;
-        if (bindings.reqId !== undefined) out.reqId = typeof bindings.reqId === "string" && REQ_ID.test(bindings.reqId) ? bindings.reqId : keyedHash(bindings.reqId);
+        if (bindings.reqId !== undefined) out.reqId = isIssuedRequestId(bindings.reqId) ? bindings.reqId : keyedHash(bindings.reqId);
         return out;
       },
       log: (obj: Record<string, unknown>) => closeLogObject(obj),
@@ -115,15 +212,24 @@ export function gatewayLoggerOptions() {
     hooks: {
       streamWrite: (line: string) => closedLine(line),
       logMethod(this: unknown, args: unknown[], method: (...a: unknown[]) => void) {
-        if (args.length === 0) return method.apply(this, args);
         const [first, ...rest] = args;
-        if (typeof first === "string") return method.call(this, closedMessage(first, ...rest));
-        if (first instanceof Error) {
-          const message = rest.length > 0 && typeof rest[0] === "string" ? closedMessage(rest[0], ...rest.slice(1)) : closedText(first.message ?? "");
-          return method.call(this, { err: first }, message);
+        let call: unknown[];
+        if (args.length === 0) {
+          call = [];
+        } else if (first instanceof Error) {
+          call = [{ err: first }, rest.length > 0 ? closedMessage(rest[0], ...rest.slice(1)) : closedText(first.message ?? "")];
+        } else if (first !== null && typeof first === "object" && !isDeclared(first)) {
+          const framework = frameworkRecord(first as Record<string, unknown>);
+          const message = rest.length === 0 ? undefined
+            : framework && typeof rest[0] === "string" && FRAMEWORK_MESSAGES.has(rest[0]) ? rest[0]
+            : closedMessage(rest[0], ...rest.slice(1));
+          call = message === undefined ? [framework ?? first] : [framework ?? first, message];
+        } else {
+          call = [closedMessage(first, ...rest)];
         }
-        if (rest.length > 0 && typeof rest[0] === "string") return method.call(this, first, closedMessage(rest[0], ...rest.slice(1)));
-        return method.call(this, first);
+        const msg = call.length === 1 && typeof call[0] === "string" ? call[0] : typeof call[1] === "string" ? call[1] : undefined;
+        writing = { msg, keys: new Set() };
+        return method.apply(this, call);
       },
     },
   };
@@ -135,7 +241,8 @@ let consoleClosed = false;
 
 /**
  * Request-path console output under the closed rules: inside a request's scope (requestScope), a
- * console line is one JSON object of closed arguments; outside it (boot, timers), output is as written.
+ * console line is one JSON object of closed arguments; outside it (boot, timers), output is as
+ * written, a declared argument as its text.
  */
 export function closeConsole(): void {
   if (consoleClosed) return;
@@ -143,9 +250,8 @@ export function closeConsole(): void {
   for (const level of ["log", "info", "warn", "error", "debug"] as const) {
     const original = console[level].bind(console);
     console[level] = (...args: unknown[]) => {
-      if (!requestScope.getStore()) return original(...args);
-      const closed = args.map((arg) => (typeof arg === "string" ? closedText(arg) : arg instanceof Error ? closedError(arg) : closeValue(arg, "", 1)));
-      original(JSON.stringify({ console: level, args: closed }));
+      if (!requestScope.getStore()) return original(...args.map((arg) => (isDeclared(arg) ? emitted(arg) : arg)));
+      original(JSON.stringify({ console: level, args: args.map((arg) => closeValue(arg) ?? null) }));
     };
   }
 }
@@ -155,29 +261,69 @@ export function closeConsole(): void {
 type Json = Record<string, unknown>;
 const obj = (value: unknown): Json | undefined => (value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : undefined);
 
-/** A transaction or span name: "METHOD template" or a closed name; anything else is unmatched. */
+/** A value from a closed vocabulary: itself; anything else its keyed hash (or left out). */
+const coded = (value: unknown, vocabulary: ReadonlySet<string>): string | undefined =>
+  typeof value === "string" ? (vocabulary.has(value) ? value : keyedHash(value)) : undefined;
+
+/** Sentry's span statuses. */
+const SPAN_STATUSES: ReadonlySet<string> = new Set([
+  "ok", "cancelled", "unknown", "unknown_error", "invalid_argument", "deadline_exceeded", "not_found",
+  "already_exists", "permission_denied", "resource_exhausted", "failed_precondition", "aborted",
+  "out_of_range", "unimplemented", "internal_error", "unavailable", "data_loss", "unauthenticated",
+]);
+/** Sentry's transaction sources. */
+const SOURCES: ReadonlySet<string> = new Set(["custom", "url", "route", "view", "component", "task"]);
+/** OpenTelemetry span kinds. */
+const SPAN_KINDS: ReadonlySet<string> = new Set(["INTERNAL", "SERVER", "CLIENT", "PRODUCER", "CONSUMER"]);
+/** Span operations: the SDK's, and the gateway's own (settlement-service.ts). */
+const SPAN_OPS: ReadonlySet<string> = new Set([
+  "http.server", "http.client", "http", "db", "db.query", "db.sql.query", "cache.get", "cache.put", "function",
+  "middleware.fastify", "request_handler.fastify", "hook.fastify", "graphql", "rpc", "file", "console",
+  "settlement", "storage", "blockchain", "default",
+]);
+/** Span and mechanism origins the SDK sets (its integrations' names), and manual. */
+const ORIGINS: ReadonlySet<string> = new Set([
+  "manual", "generic", "chained", "instrument", "onerror", "onunhandledrejection", "onuncaughtexception",
+  "auto.http.otel.http", "auto.http.otel.fastify", "auto.http.otel.node_fetch", "auto.http.otel.connect",
+  "auto.http.otel.express", "auto.http.otel.hapi", "auto.http.otel.koa", "auto.http.otel.hono",
+  "auto.function.fastify", "auto.function.hapi", "auto.middleware.connect", "auto.middleware.express",
+  "auto.middleware.hono", "auto.middleware.koa", "auto.db.otel.postgres", "auto.db.otel.redis",
+  "auto.db.otel.prisma", "auto.db.otel.knex", "auto.db.otel.mongo", "auto.db.otel.mongoose",
+  "auto.db.otel.tedious", "auto.db.otel.generic_pool", "auto.db.otel.dataloader", "auto.db.postgresjs",
+  "auto.file.fs", "auto.log.console", "auto.log.pino", "auto.core.capture_console", "auto.core.linked_errors",
+  "auto.node.onuncaughtexception", "auto.node.onunhandledrejection", "auto.graphql.otel.graphql",
+  "auto.ai.anthropic", "auto.ai.openai", "auto.vercelai.otel", "auto.child_process.worker_thread",
+]);
+const LEVELS: ReadonlySet<string> = new Set(["fatal", "error", "warning", "log", "info", "debug"]);
+const BREADCRUMB_TYPES: ReadonlySet<string> = new Set(["default", "debug", "error", "navigation", "http", "info", "query", "transaction", "ui", "user"]);
+const BREADCRUMB_CATEGORIES: ReadonlySet<string> = new Set([
+  "console", "http", "fetch", "xhr", "navigation", "ui.click", "ui.input", "sentry.event", "sentry.transaction", "query",
+]);
+
+const httpStatus = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v >= 100 && v <= 599 ? v : undefined);
+
+/** A route field Sentry built: a template the app declared, or unmatched. */
+const route = (v: unknown) => (typeof v === "string" && routeTemplates().has(v) ? v : undefined);
+
+/** A transaction or span name: "METHOD template" or a declared route; anything else is unmatched. */
 function closedName(name: unknown): string | undefined {
   if (typeof name !== "string") return undefined;
   const http = /^([A-Z]+) (\S+)$/.exec(name);
-  if (http && METHODS.has(http[1]!)) {
-    const template = closedText(http[2]!);
-    return template.startsWith("h:") ? `${http[1]} unmatched` : `${http[1]} ${template}`;
-  }
-  const text = closedText(name);
-  return text.startsWith("h:") ? "unmatched" : text;
+  if (http && METHODS.has(http[1]!)) return `${http[1]} ${route(http[2]) ?? "unmatched"}`;
+  return route(name) ?? "unmatched";
 }
 
 const SPAN_DATA_KEYS: Readonly<Record<string, (value: unknown) => unknown>> = {
-  "http.route": (v) => (typeof v === "string" && !closedText(v).startsWith("h:") ? v : undefined),
+  "http.route": route,
   "http.request.method": (v) => (typeof v === "string" && METHODS.has(v) ? v : undefined),
   "http.method": (v) => (typeof v === "string" && METHODS.has(v) ? v : undefined),
-  "http.response.status_code": (v) => (typeof v === "number" ? v : undefined),
-  "http.status_code": (v) => (typeof v === "number" ? v : undefined),
-  "sentry.op": (v) => (typeof v === "string" ? closedText(v) : undefined),
-  "sentry.origin": (v) => (typeof v === "string" ? closedText(v) : undefined),
-  "sentry.source": (v) => (typeof v === "string" ? closedText(v) : undefined),
-  "sentry.sample_rate": (v) => (typeof v === "number" ? v : undefined),
-  "otel.kind": (v) => (typeof v === "string" ? closedText(v) : undefined),
+  "http.response.status_code": httpStatus,
+  "http.status_code": httpStatus,
+  "sentry.op": (v) => coded(v, SPAN_OPS),
+  "sentry.origin": (v) => coded(v, ORIGINS),
+  "sentry.source": (v) => coded(v, SOURCES),
+  "sentry.sample_rate": (v) => (typeof v === "number" && v >= 0 && v <= 1 ? v : undefined),
+  "otel.kind": (v) => coded(v, SPAN_KINDS),
 };
 
 /** A span's data: only the route template, method, status and Sentry's own bookkeeping. */
@@ -201,9 +347,9 @@ function closedTrace(trace: unknown): Json | undefined {
     trace_id: t.trace_id,
     span_id: t.span_id,
     parent_span_id: t.parent_span_id,
-    op: typeof t.op === "string" ? closedText(t.op) : undefined,
-    status: typeof t.status === "string" ? closedText(t.status) : undefined,
-    origin: typeof t.origin === "string" ? closedText(t.origin) : undefined,
+    op: coded(t.op, SPAN_OPS),
+    status: coded(t.status, SPAN_STATUSES),
+    origin: coded(t.origin, ORIGINS),
     data: closedSpanData(t.data),
   };
 }
@@ -218,19 +364,32 @@ function closedContexts(contexts: unknown): Json | undefined {
   return out;
 }
 
-function closedTags(tags: unknown): Json | undefined {
-  const t = obj(tags);
-  return t ? (closeValue(t, "tags", 1) as Json) : undefined;
+/** What the server itself sets on every event: its tags. */
+export interface SentryServerValues {
+  /** Tags the server set (initialScope), each with the one value it set. */
+  tags?: Readonly<Record<string, string>>;
 }
 
-/** A breadcrumb: its type, category and level. Its message and data never leave. */
+/** Tags: a tag the server set keeps its value; any other tag leaves under the closed rules. */
+function closedTags(tags: unknown, server: SentryServerValues): Json | undefined {
+  const t = obj(tags);
+  if (!t) return undefined;
+  const out: Json = {};
+  for (const [key, value] of Object.entries(t)) {
+    if (server.tags && Object.hasOwn(server.tags, key) && server.tags[key] === value) out[key] = value;
+    else out[keyedHash(key)] = closeValue(value);
+  }
+  return out;
+}
+
+/** A breadcrumb: its type, category and level from Sentry's vocabularies, and its time. Its message and data never leave. */
 export function closedBreadcrumb<T extends object>(breadcrumb: T): T {
   const b = breadcrumb as Json;
   return {
-    type: typeof b.type === "string" ? closedText(b.type) : undefined,
-    category: typeof b.category === "string" ? closedText(b.category) : undefined,
-    level: b.level,
-    timestamp: b.timestamp,
+    type: coded(b.type, BREADCRUMB_TYPES),
+    category: coded(b.category, BREADCRUMB_CATEGORIES),
+    level: coded(b.level, LEVELS),
+    timestamp: typeof b.timestamp === "number" ? b.timestamp : undefined,
   } as unknown as T;
 }
 
@@ -257,33 +416,34 @@ function closedException(value: unknown): Json {
   return {
     type: typeof v.type === "string" && /^[A-Z][A-Za-z0-9]{0,63}$/.test(v.type) ? v.type : "Error",
     value: typeof v.value === "string" ? closedText(v.value) : undefined,
-    mechanism: mechanism ? { type: typeof mechanism.type === "string" ? closedText(mechanism.type) : undefined, handled: mechanism.handled } : undefined,
+    mechanism: mechanism ? { type: coded(mechanism.type, ORIGINS), handled: typeof mechanism.handled === "boolean" ? mechanism.handled : undefined } : undefined,
     stacktrace: stacktrace ? { frames: closedFrames(stacktrace.frames) } : undefined,
   };
 }
 
-/** The envelope fields every Sentry event keeps: identity, time, platform and the SDK's own metadata. */
+/** The fields every Sentry event keeps: identity, time, platform, its trace and the SDK's own metadata. */
 function envelopeFields(e: Json): Json {
   return {
     event_id: e.event_id,
     timestamp: e.timestamp,
     start_timestamp: e.start_timestamp,
     platform: e.platform,
-    level: e.level,
+    level: coded(e.level, LEVELS),
     environment: e.environment,
     release: e.release,
     dist: e.dist,
     sdk: e.sdk,
+    contexts: closedContexts(e.contexts),
     sdkProcessingMetadata: e.sdkProcessingMetadata,
   };
 }
 
 /**
- * An error event rebuilt from closed fields: the exception's class, message under the text rule and
- * code frames; the trace context; closed tags and extra; breadcrumbs as their kind only. No request,
- * user, server name, module list or context beyond the trace and runtime.
+ * An error event rebuilt from closed fields: the exception's class, its message as a keyed hash and
+ * its code frames; the trace context; closed tags and extra; breadcrumbs as their
+ * kind only. No request, user, server name, module list or context beyond the trace and runtime.
  */
-export function closedSentryEvent<T extends object>(event: T): T {
+export function closedSentryEvent<T extends object>(event: T, server: SentryServerValues = {}): T {
   const e = event as Json;
   const exception = obj(e.exception);
   const message = typeof e.message === "string" ? e.message : obj(e.message)?.formatted;
@@ -292,9 +452,8 @@ export function closedSentryEvent<T extends object>(event: T): T {
     exception: exception && Array.isArray(exception.values) ? { values: exception.values.map(closedException) } : undefined,
     message: typeof message === "string" ? closedText(message) : undefined,
     transaction: closedName(e.transaction),
-    tags: closedTags(e.tags),
-    extra: e.extra ? (closeValue(e.extra, "extra", 1) as Json) : undefined,
-    contexts: closedContexts(e.contexts),
+    tags: closedTags(e.tags, server),
+    extra: e.extra ? (closeValue(e.extra) as Json) : undefined,
     breadcrumbs: Array.isArray(e.breadcrumbs) ? e.breadcrumbs.map((b) => closedBreadcrumb(b as object)) : undefined,
     fingerprint: Array.isArray(e.fingerprint) ? e.fingerprint.map((f) => (typeof f === "string" ? closedText(f) : undefined)) : undefined,
   } as unknown as T;
@@ -311,10 +470,10 @@ export function closedSentrySpan<T extends object>(span: T): T {
     start_timestamp: s.start_timestamp,
     timestamp: s.timestamp,
     exclusive_time: s.exclusive_time,
-    is_segment: s.is_segment,
-    status: typeof s.status === "string" ? closedText(s.status) : s.status,
-    op: typeof s.op === "string" ? closedText(s.op) : undefined,
-    origin: typeof s.origin === "string" ? closedText(s.origin) : undefined,
+    is_segment: typeof s.is_segment === "boolean" ? s.is_segment : undefined,
+    status: coded(s.status, SPAN_STATUSES),
+    op: coded(s.op, SPAN_OPS),
+    origin: coded(s.origin, ORIGINS),
     description: closedName(s.description),
     data: closedSpanData(s.data) ?? {},
     measurements: s.measurements,
@@ -322,16 +481,15 @@ export function closedSentrySpan<T extends object>(span: T): T {
 }
 
 /** A transaction rebuilt from closed fields: its route name, trace, measurements and closed spans. */
-export function closedSentryTransaction<T extends object>(event: T): T {
+export function closedSentryTransaction<T extends object>(event: T, server: SentryServerValues = {}): T {
   const e = event as Json;
   const info = obj(e.transaction_info);
   return {
     ...envelopeFields(e),
     type: e.type,
     transaction: closedName(e.transaction),
-    transaction_info: info ? { source: typeof info.source === "string" ? closedText(info.source) : undefined } : undefined,
-    contexts: closedContexts(e.contexts),
-    tags: closedTags(e.tags),
+    transaction_info: info ? { source: coded(info.source, SOURCES) } : undefined,
+    tags: closedTags(e.tags, server),
     measurements: e.measurements,
     spans: Array.isArray(e.spans) ? e.spans.map((span) => closedSentrySpan(span as object)) : undefined,
   } as unknown as T;

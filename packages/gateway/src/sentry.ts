@@ -16,6 +16,7 @@ import {
   closedSentryEvent,
   closedSentrySpan,
   closedSentryTransaction,
+  type SentryServerValues,
 } from "./observability/closed-sinks.js";
 
 const SENTRY_DSN =
@@ -24,6 +25,14 @@ const SENTRY_DSN =
   "";
 
 let _initialized = false;
+
+/** The tags the gateway sets on every event (initialScope): the only tag values that leave as text. */
+const SERVER_TAGS = { service: "pcc-gateway" } as const;
+
+/** What the server itself sets on every event. */
+function serverValues(): SentryServerValues {
+  return { tags: SERVER_TAGS };
+}
 
 /**
  * The gateway's Sentry options (N107b, the closed observability schema). The SDK collects no
@@ -40,7 +49,7 @@ export function sentryOptions(dsn: string): Sentry.NodeOptions {
     profilesSampleRate: 0.1,
     // Tag every event with the service name so Sentry dashboards can filter
     initialScope: {
-      tags: { service: "pcc-gateway" },
+      tags: { ...SERVER_TAGS },
     },
     sendDefaultPii: false,
     integrations: (defaults) => [
@@ -50,8 +59,8 @@ export function sentryOptions(dsn: string): Sentry.NodeOptions {
         include: { cookies: false, data: false, headers: false, ip: false, query_string: false, url: false },
       }),
     ],
-    beforeSend: (event) => closedSentryEvent(event),
-    beforeSendTransaction: (event) => closedSentryTransaction(event),
+    beforeSend: (event) => closedSentryEvent(event, serverValues()),
+    beforeSendTransaction: (event) => closedSentryTransaction(event, serverValues()),
     beforeSendSpan: (span) => closedSentrySpan(span),
     beforeBreadcrumb: (breadcrumb) => closedBreadcrumb(breadcrumb),
   };

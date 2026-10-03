@@ -6,11 +6,12 @@
  * posthog-node is not installed.
  *
  * Every event leaves under the closed observability schema (N107b, the PR steward's ruling of
- * 10/03): the distinct id is a keyed hash, the event name a closed name, and each property is
- * rebuilt under the closed rules (observability/closed-schema.ts). No request-controlled value
- * reaches PostHog except as a keyed hash or a coarse class, whatever a producer passes.
+ * 10/03): the distinct id is a keyed hash, the event name a declared name (lit) or its keyed hash,
+ * and each property is rebuilt under the closed rules (observability/closed-schema.ts): a declared
+ * field as declared, anything else as its keyed hash. No request-controlled value reaches PostHog
+ * except as a keyed hash or a coarse class, whatever a producer passes.
  */
-import { closedText, closeValue, keyedHash } from "../observability/closed-schema.js";
+import { closedId, closedText, closeValue, type Declared } from "../observability/closed-schema.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let posthog: any = null;
@@ -35,17 +36,17 @@ export function initPostHog(): void {
 const GATEWAY_ID = "pcc-gateway";
 
 const closedProperties = (properties: Record<string, unknown> | undefined) =>
-  (closeValue(properties ?? {}, "properties", 1) ?? {}) as Record<string, unknown>;
+  (closeValue(properties ?? {}, 1) ?? {}) as Record<string, unknown>;
 
 export function trackServerEvent(
-  event: string,
+  event: string | Declared,
   properties?: Record<string, unknown>,
-  distinctId?: string,
+  distinctId?: string | Declared,
 ): void {
   if (!posthog) return;
   try {
     posthog.capture({
-      distinctId: distinctId ? keyedHash(distinctId) : GATEWAY_ID,
+      distinctId: distinctId ? closedId(distinctId) : GATEWAY_ID,
       event: closedText(event),
       properties: {
         ...closedProperties(properties),
@@ -70,13 +71,13 @@ export function trackServerEvent(
  * No-op (silent) when posthog-node is not installed / POSTHOG_API_KEY unset.
  */
 export function identifyAgent(
-  distinctId: string,
+  distinctId: string | Declared,
   properties?: Record<string, unknown>,
 ): void {
   if (!posthog) return;
   try {
     posthog.identify({
-      distinctId: keyedHash(distinctId),
+      distinctId: closedId(distinctId),
       properties: {
         ...closedProperties(properties),
         kind: "agent_journey",

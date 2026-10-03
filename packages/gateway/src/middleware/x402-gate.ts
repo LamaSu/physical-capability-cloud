@@ -18,6 +18,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { X402Middleware, type RoutePaymentMap, type X402Config } from "@pcc/payments";
 import { MppMiddleware } from "@pcc/payments";
 import { hasValidAdminKey } from "../readmodels/job-execution.js";
+import { errorClassOf, lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Shared route pricing — single source of truth for both protocols
@@ -234,8 +235,8 @@ export async function paymentGate(app: FastifyInstance) {
         // A fixed code and the error's class only (#514 r2, MEDIUM 2): the payment library handled the
         // request's URL and headers, and its message could echo them.
         app.log.error(
-          { code: "mpp_check_failed", errorClass: err instanceof Error ? err.constructor.name : typeof err },
-          "[payment-gate] MPP payment check error — blocking request",
+          { code: lit("mpp_check_failed"), errorClass: errorClassOf(err) },
+          lit("[payment-gate] MPP payment check error — blocking request"),
         );
         stats.gatedRequests++;
         reply.status(402).headers({ "Content-Type": "application/json" }).send({

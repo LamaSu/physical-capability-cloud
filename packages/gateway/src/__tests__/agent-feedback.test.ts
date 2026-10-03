@@ -266,11 +266,15 @@ describe("POST /api/feedback/agent-report", () => {
     });
     expect(auditLogSpy).toHaveBeenCalledTimes(1);
     const call = auditLogSpy.mock.calls[0][0];
-    expect(call.eventType).toBe("agent.report");
-    expect(call.resourceType).toBe("agent_report");
-    expect(call.action).toBe("create");
-    expect(call.metadata.summary).toBe("audit log entry check");
-    expect(call.metadata.agent_kind).toBe("claude");
+    // As the closed audit log stores the call (N107b round 2): the codes are declared, and what the
+    // agent wrote is its keyed hash under the field's own name.
+    const { closedText, closeValue, keyedHash } = await import("../observability/closed-schema.js");
+    expect(closedText(call.eventType)).toBe("agent.report");
+    expect(closedText(call.resourceType)).toBe("agent_report");
+    expect(closedText(call.action)).toBe("create");
+    const metadata = closeValue(call.metadata) as Record<string, unknown>;
+    expect(metadata.summary).toBe(keyedHash("audit log entry check"));
+    expect(metadata.agent_kind).toBe(keyedHash("claude"));
   });
 
   it("emits one posthog event on success", async () => {
