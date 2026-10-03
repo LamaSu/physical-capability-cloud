@@ -628,7 +628,7 @@ class TestDiscoverCommand:
                  mock.patch("pcc_node.cli.run_daemon"):
                 result = runner.invoke(
                     main,
-                    ["start", "-c", config_path, "--api-key", "k", "--discover"],
+                    ["start", "--yes", "-c", config_path, "--api-key", "k", "--discover"],
                 )
 
             assert result.exit_code == 0
