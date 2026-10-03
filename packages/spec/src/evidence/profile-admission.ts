@@ -162,6 +162,8 @@
  *                                    only applies to required roles
  */
 
+import { types } from "node:util";
+
 import { isFabricated } from "./is-fabricated.js";
 import {
   evidenceLevelOf,
@@ -398,6 +400,33 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** Membership by own index reads, never through Array.prototype methods. */
+function ownIncludes(list: readonly unknown[], x: unknown): boolean {
+  for (let i = 0; i < list.length; i++) if (list[i] === x) return true;
+  return false;
+}
+
+/**
+ * Where reading `value` could run code supplied with it: a proxy (its traps)
+ * or an accessor property (its getter), anywhere inside. It reads property
+ * descriptors only, so no getter runs; null when the value is plain data.
+ * A cycle stops the walk here, and plainDataCopy refuses it later.
+ */
+function codeInData(value: unknown, path: string, seen: Set<object>): string | null {
+  if (value === null || typeof value !== "object") return null;
+  if (types.isProxy(value)) return `${path}: a proxy`;
+  if (seen.has(value)) return null;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined) continue;
+    if (!("value" in descriptor)) return `${path}.${String(key)}: an accessor (a getter or setter)`;
+    const found = codeInData(descriptor.value, `${path}.${String(key)}`, seen);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -418,7 +447,7 @@ function readObservation(
   const record = isRecord(event.payload) ? event.payload[PROFILE_OBSERVATION_FIELD] : undefined;
   if (!isRecord(record)) return { ok: false, why: "without a profileObservation record" };
   if (record.profileDigest !== committedDigest) return { ok: false, why: "not matching the committed profile digest" };
-  if (typeof record.primitiveId !== "string" || !profile.interpretation.evidenceTypeIds.includes(record.primitiveId)) {
+  if (typeof record.primitiveId !== "string" || !ownIncludes(profile.interpretation.evidenceTypeIds, record.primitiveId)) {
     return { ok: false, why: "not matching interpretation.evidenceTypeIds" };
   }
   const object = record.object;
@@ -485,8 +514,32 @@ async function legPasses(leg: () => boolean | Promise<boolean>): Promise<boolean
  * answers, after that point can reach the decision.
  */
 export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise<ProfileAdmissionResult> {
-  // Every read of `input` happens here, once, inside one guard: a getter or a
-  // proxy that throws resolves to a reject, never to a rejected promise.
+  // No code supplied with the input runs during admission. The input object,
+  // and everything in its profile, subject and bundles, must be plain data: a
+  // proxy or an accessor anywhere is refused, found through property
+  // descriptors alone, before anything is read. (A getter that ran during the
+  // copy could change shared built-ins, such as Array.prototype.includes,
+  // while admission waits; astra pack 127.) The verification callbacks are the
+  // caller's trusted code. A process whose built-ins were changed before the
+  // call is beyond what any in-process check can defend.
+  if (typeof input !== "object" || input === null || types.isProxy(input)) {
+    return reject("input-unreadable", "the admission input must be a plain object, not a proxy");
+  }
+  const fields = ["pinnedBundleSetDigest", "verifyBundleSignature", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile"] as const;
+  const read = Object.create(null) as Record<(typeof fields)[number], unknown>;
+  for (const key of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, key);
+    if (descriptor !== undefined && !("value" in descriptor)) {
+      return reject("input-unreadable", `input.${key} is an accessor; the admission input must be plain data`);
+    }
+    read[key] = descriptor?.value;
+  }
+  for (const key of ["profile", "subject", "bundles"] as const) {
+    const code = codeInData(read[key], `input.${key}`, new Set());
+    if (code !== null) return reject("input-unreadable", `${code}: no code supplied with the data may run during admission`);
+  }
+
+  // Every read happens once, inside one guard, so a throw resolves to a reject, never to a rejected promise.
   let entry: {
     pinnedBundleSetDigest: unknown;
     verifyBundleSignature: ProfileAdmissionInput["verifyBundleSignature"];
@@ -498,13 +551,13 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   };
   try {
     entry = {
-      pinnedBundleSetDigest: input.pinnedBundleSetDigest,
-      verifyBundleSignature: input.verifyBundleSignature,
-      verifyPrimitiveInstance: input.verifyPrimitiveInstance,
-      subjectCopy: plainDataCopy(input.subject),
-      bundlesCopy: plainDataCopy(input.bundles),
-      committedDigest: input.committedDigest,
-      presentedProfile: input.profile,
+      pinnedBundleSetDigest: read.pinnedBundleSetDigest,
+      verifyBundleSignature: read.verifyBundleSignature as ProfileAdmissionInput["verifyBundleSignature"],
+      verifyPrimitiveInstance: read.verifyPrimitiveInstance as ProfileAdmissionInput["verifyPrimitiveInstance"],
+      subjectCopy: plainDataCopy(read.subject),
+      bundlesCopy: plainDataCopy(read.bundles),
+      committedDigest: read.committedDigest as string,
+      presentedProfile: read.profile as MeasurementProfileV1,
     };
   } catch {
     return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
@@ -632,8 +685,6 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   const reached = evidenceLevelOfBundle(events);
   const executing = executingDeviceIds(events);
   const { device } = profile;
-  const adapterPins = new Set(device.permittedAdapterVersions);
-  const firmwarePins = new Set(device.permittedFirmwareVersions);
   const window = captureWindow(profile, events);
 
   let atLevel = 0;
@@ -669,8 +720,8 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     if (
       typeof adapterVersion !== "string" ||
       typeof firmwareVersion !== "string" ||
-      !adapterPins.has(adapterVersion) ||
-      !firmwarePins.has(firmwareVersion)
+      !ownIncludes(device.permittedAdapterVersions, adapterVersion) ||
+      !ownIncludes(device.permittedFirmwareVersions, firmwareVersion)
     ) {
       exclude("unpermitted version");
       continue;

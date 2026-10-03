@@ -515,9 +515,11 @@ describe("profile admission — evaluates only what was hashed (coord-watch rule
       configurable: true,
     });
     const r = await admit(p, [b]);
-    expect(codes(r)).not.toContain("unbound-bundle");
+    // Since astra pack 127, data that carries code (an accessor anywhere) is refused before
+    // anything is read, so the getter never runs at all: stronger than evaluating its first answer.
     expect(r.decision).toBe("reject");
-    expect(codes(r)).toContain("contradictory-evidence");
+    expect(codes(r)).toEqual(["input-unreadable"]);
+    expect(r.reasons[0]!.detail).toMatch(/input\.bundles\.0\.events\.2\.payload\.passed: an accessor/);
     expect(r.qualifyingSamples).toBe(0);
   });
 
@@ -1262,6 +1264,93 @@ describe("profile admission — astra r4 (pack 125): inherited values never reac
       expect(r.decision).toBe("reject");
     } finally {
       delete (Object.prototype as Record<string, unknown>).minSamples;
+    }
+  });
+});
+
+// ── astra r5 (pack 127, gpt-5.6-sol): no code supplied with the data runs during admission ──
+describe("profile admission — astra r5 (pack 127): a data getter cannot change inherited behavior mid-call", () => {
+  it("a getter scheduling an Array.prototype.includes swap cannot admit an uncommitted primitive", async () => {
+    const committed = inspectedPageProfile(); // commits capture.photo_nonced only
+    const committedDigest = computeMeasurementProfileDigest(committed);
+    const original = Array.prototype.includes;
+    const presented = { ...committed } as Record<string, unknown>;
+    Object.defineProperty(presented, "onMissingData", {
+      enumerable: true,
+      get() {
+        queueMicrotask(() => {
+          // after the first await: every includes() answers yes
+          Array.prototype.includes = function () { return true; } as typeof Array.prototype.includes;
+        });
+        return "reject";
+      },
+    });
+    try {
+      // the camera's observation names a primitive the profile never committed
+      const drafts = PILOT.map((d) => (d.observation === null ? d : { ...d, observation: { ...(d.observation ?? {}), primitiveId: "artifact.hash" } }));
+      const bundles = [await toBundle(drafts, committed)];
+      const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+      const r = await profileAdmitsBundle({
+        profile: presented as unknown as MeasurementProfileV1,
+        committedDigest,
+        subject,
+        bundles,
+        pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
+        verifyBundleSignature: verifySignature,
+        verifyPrimitiveInstance: () => true,
+      });
+      expect(r.decision).not.toBe("admit");
+    } finally {
+      Array.prototype.includes = original;
+    }
+  });
+});
+
+describe("profile admission — astra r5 (pack 127): no data-supplied code, and own membership checks", () => {
+  it("a proxy anywhere in the data is refused before any trap runs", async () => {
+    const p = inspectedPageProfile();
+    let trapped = 0;
+    const proxied = new Proxy({ ...p }, { get: (t, k) => { trapped++; return Reflect.get(t, k); }, ownKeys: (t) => { trapped++; return Reflect.ownKeys(t); } });
+    const r = await admit(p, [await toBundle(PILOT, p)], { profile: proxied as unknown as MeasurementProfileV1 });
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toEqual(["input-unreadable"]);
+    expect(trapped).toBe(0);
+  });
+
+  it("an accessor on the input object itself is refused, and its getter never runs", async () => {
+    const p = inspectedPageProfile();
+    const bundles = [await toBundle(PILOT, p)];
+    const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+    let ran = false;
+    const input = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+      pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
+    } as Record<string, unknown>;
+    Object.defineProperty(input, "bundles", { enumerable: true, get() { ran = true; return bundles; } });
+    const r = await profileAdmitsBundle(input as unknown as ProfileAdmissionInput);
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toEqual(["input-unreadable"]);
+    expect(ran).toBe(false);
+  });
+
+  it("membership in committed lists does not go through Array.prototype.includes", async () => {
+    const p = inspectedPageProfile();
+    const committedDigest = computeMeasurementProfileDigest(p);
+    const original = Array.prototype.includes;
+    const bundles = [await toBundle(PILOT.map((d) => (d.observation === null ? d : { ...d, observation: { ...(d.observation ?? {}), primitiveId: "artifact.hash" } })), p)];
+    const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+    const pin = await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash));
+    // A process-level change that admission's own membership checks must not consult.
+    Array.prototype.includes = function () { return true; } as typeof Array.prototype.includes;
+    try {
+      const r = await profileAdmitsBundle({ profile: p, committedDigest, subject, bundles, pinnedBundleSetDigest: pin, verifyBundleSignature: verifySignature, verifyPrimitiveInstance: () => true });
+      expect(r.decision).not.toBe("admit");
+    } finally {
+      Array.prototype.includes = original;
     }
   });
 });
