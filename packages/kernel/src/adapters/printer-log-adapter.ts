@@ -93,8 +93,14 @@ export class PrinterLogAdapter implements SensorAdapter {
   /** The recording, from startRecording until stopRecording has emitted its summary, and each poll in flight. */
   private readonly work = new OutstandingWork();
   private endRecording: (() => void) | null = null;
-  /** Polls the timer started that have not finished: stopRecording waits for them. */
+  /** Polls the timer started that have not finished: stopRecording waits for them. At most one. */
   private readonly polls = new Set<Promise<void>>();
+  /** From startRecording until a stop succeeds: there is no summary without a recording. */
+  private active = false;
+  /** The first timer poll of this recording that failed: its chain may lack lines. */
+  private pollFailure: string | null = null;
+  /** The stop in flight: a second stop meanwhile is the same stop. */
+  private stopping: Promise<Omit<EvidenceEvent, "id" | "hash">> | null = null;
 
   /** True when no logProvider was supplied and the simulated script is used. */
   private readonly usingSimulatedProvider: boolean;
@@ -145,6 +151,8 @@ export class PrinterLogAdapter implements SensorAdapter {
     }
 
     this.recording = true;
+    this.active = true;
+    this.pollFailure = null;
     this.jobId = jobId;
     this.chainLength = 0;
     this.latestEntryHash = null;
@@ -159,6 +167,7 @@ export class PrinterLogAdapter implements SensorAdapter {
       await this.poll();
     } catch (err) {
       this.recording = false;
+      this.active = false;
       this.jobId = null;
       this.endRecording?.();
       this.endRecording = null;
@@ -166,9 +175,13 @@ export class PrinterLogAdapter implements SensorAdapter {
     }
 
     this.pollTimer = setInterval(() => {
-      const poll = this.poll().catch(() => {
-        // Non-fatal poll errors are silently swallowed to avoid crashing the
-        // adapter loop; real implementations would log here.
+      // One poll at a time: a tick that finds one in flight is skipped, so a slow poll is
+      // never overtaken and the chain keeps the log's order (astra pack 190).
+      if (this.polls.size > 0) return;
+      const poll = this.poll().catch((err: unknown) => {
+        // The chain may now lack the lines this poll would have read: latched, so the
+        // stop refuses to vouch for it (astra pack 190).
+        this.pollFailure ??= err instanceof Error ? err.message : String(err);
       });
       this.polls.add(poll);
       void this.work.track(poll).then(() => this.polls.delete(poll));
@@ -178,13 +191,36 @@ export class PrinterLogAdapter implements SensorAdapter {
   /**
    * Stop polling, finalize the chain, and return a summary evidence event.
    * The summary event type is `printer_job_verified`.
+   *
+   * Refused, emitting nothing, with no recording to stop (none started, or its stop already
+   * succeeded): a summary needs a recording (astra pack 190). Single-flight: a stop while one
+   * is in flight is that stop. Each stop is the adapter's outstanding work, so
+   * quiesceEvidence() waits for one in flight, including a retry after a failed stop, which
+   * still emits the job's last entry and its summary.
    */
-  async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
+  stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
+    if (this.stopping !== null) return this.stopping;
+    if (!this.active) {
+      return Promise.reject(new Error(`[printer-log-adapter] ${this.id}: no recording to stop`));
+    }
+    const stop = this.work.track(this.stopOnce());
+    this.stopping = stop;
+    const clear = () => {
+      if (this.stopping === stop) this.stopping = null;
+    };
+    stop.then(clear, clear);
+    return stop;
+  }
+
+  private async stopOnce(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
     try {
-      return await this.finishRecording();
+      const summary = await this.finishRecording();
+      this.active = false;
+      return summary;
     } finally {
       // Ended once the summary is emitted, or once stopping failed: nothing more is
-      // scheduled either way. A poll still in flight is counted on its own.
+      // scheduled either way. A poll still in flight is counted on its own, and so is a
+      // stop retried later.
       this.endRecording?.();
       this.endRecording = null;
     }
@@ -202,6 +238,14 @@ export class PrinterLogAdapter implements SensorAdapter {
     // entry is captured under this job, in the log's order, and the summary covers it
     // (astra pack 186). Like the final poll, it waits on the log source.
     await Promise.all([...this.polls]);
+
+    // A timer poll that failed may have lost lines, so a summary would vouch for a chain that
+    // could be incomplete: refused, emitting nothing (astra pack 190). A retry refuses too.
+    if (this.pollFailure !== null) {
+      throw new Error(
+        `[printer-log-adapter] ${this.id}: a log poll failed during the recording (${this.pollFailure}), so its chain may be incomplete`,
+      );
+    }
 
     // Do a final poll to capture any remaining lines
     if (this.jobId) {
@@ -274,6 +318,7 @@ export class PrinterLogAdapter implements SensorAdapter {
       this.pollTimer = null;
     }
     this.recording = false;
+    this.active = false;
     this.listeners = [];
     this.endRecording?.();
     this.endRecording = null;
