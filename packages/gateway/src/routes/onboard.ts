@@ -123,7 +123,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         createdAt: registration.createdAt,
         submittedAt: registration.submittedAt,
       });
-    } catch (e) { console.warn("[onboard] DB insert failed, continuing:", (e as Error).message); }
+    } catch (e) { console.warn(lit("[onboard] DB insert failed, continuing:"), e); }
     pipelineTelemetry.emit(registration.id, "operator_register", "completed", { metadata: { name: registration.name, category: registration.category } });
     trackServerEvent("operator_registered", { name: registration.name, category: registration.category });
     auditService.log({
