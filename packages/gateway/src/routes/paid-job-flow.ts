@@ -66,6 +66,15 @@ import {
   type SettlementEvidenceSlot,
 } from "../services/device-evidence-settlement.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
+import {
+  admitGatewaySpend,
+  checkGatewaySpend,
+  GatewaySpendRefusedError,
+  spenderOfRequest,
+  type GatewaySpendDecision,
+  type GatewaySpender,
+  type GatewaySpendRefusal,
+} from "../services/gateway-spend-guard.js";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -244,8 +253,50 @@ function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
   }
 }
 
+/**
+ * N46: what the gateway signer pays to fund this session's escrow, in micro-USD.
+ * It is the sum of the milestones createJobFromSession funds: the contract
+ * terms' milestones, or the quote's total when the terms define none. Returns
+ * null when an amount is not a decimal the chain would accept.
+ */
+export function sessionFundingMicro(session: { quote: unknown; contractTerms: unknown }): bigint | null {
+  const quote = session.quote as Record<string, unknown> | null;
+  const contractTerms = session.contractTerms as Record<string, unknown> | null;
+  const milestones = (contractTerms?.milestones ?? []) as Array<{ amount?: unknown }>;
+  const amounts = milestones.length > 0
+    ? milestones.map((m) => m.amount)
+    : [(quote?.totalPrice as string | undefined) ?? "10.00"];
+  let total = 0n;
+  for (const a of amounts) {
+    if (typeof a !== "string" || !/^\d+(\.\d{1,6})?$/.test(a.trim())) return null;
+    total += parseUnits(a.trim(), 6);
+  }
+  return total;
+}
+
+const INVALID_FUNDING_AMOUNT: GatewaySpendRefusal = {
+  ok: false,
+  status: 400,
+  error: "gateway_pay_invalid_amount",
+  message: "The session's amount to fund is not a valid decimal amount.",
+};
+
+/**
+ * N46: would the gateway pay to fund this session for `spender` now? Routes call
+ * it before changing any state, so a refusal leaves the session untouched.
+ */
+export function gatewayFundingDecision(
+  session: { quote: unknown; contractTerms: unknown },
+  spender: GatewaySpender,
+): GatewaySpendDecision {
+  const amountMicro = sessionFundingMicro(session);
+  if (amountMicro === null) return INVALID_FUNDING_AMOUNT;
+  return checkGatewaySpend({ spender, amountMicro });
+}
+
 export async function createJobFromSession(
   session: typeof negotiationSessions.$inferSelect,
+  spender?: GatewaySpender,
 ): Promise<{
   jobId: string;
   scopeId: string;
@@ -333,6 +384,23 @@ export async function createJobFromSession(
       );
     }
     const cwmIdBytes = keccak256(toBytes(`pcc-session-${session.id}-${Date.now()}`));
+
+    // N46 (operator item 57): the gateway signer is the payer below. Admit this
+    // payment against the hard caps BEFORE the first signer write. A refusal
+    // throws here, before any chain call, so nothing is partly paid. An admitted
+    // amount stays counted even if a later step fails.
+    const fundingMicro = sessionFundingMicro(session);
+    const admitted = fundingMicro === null
+      ? INVALID_FUNDING_AMOUNT
+      : admitGatewaySpend({
+          // 104/F2 (astra): an unattributed helper call (no authenticated spender) must
+        // NOT trust the body-declared session.userAgentId as its principal — that
+        // would give each userAgentId its own cap bucket. All unattributed calls
+        // share ONE bucket (normalizePrincipal("") => "unknown").
+        spender: spender ?? { action: "unattributed" },
+          amountMicro: fundingMicro,
+        });
+    if (!admitted.ok) throw new GatewaySpendRefusedError(admitted);
 
     if (useV3ModeA()) {
       // ── V3 Mode-A (payer-approval, oracle-free) ─────────────────────────
@@ -843,6 +911,16 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         committedAt: now.toISOString(),
       };
 
+      // N46: in real settlement the gateway signer funds this job. Refuse here,
+      // before the session exists, when a spend cap says no.
+      const spender = spenderOfRequest(req, "submit_from_discovery");
+      if (!isMockSettlement()) {
+        const decision = gatewayFundingDecision({ quote, contractTerms }, spender);
+        if (!decision.ok) {
+          return reply.status(decision.status).send({ error: decision.error, message: decision.message });
+        }
+      }
+
       db.insert(negotiationSessions).values(session as any).run();
 
       // ── Wire: create escrow + job + scope ───────────────────────────
@@ -855,7 +933,20 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         return reply.status(500).send({ error: "Failed to create session" });
       }
 
-      const result = await createJobFromSession(sessionRow);
+      let result;
+      try {
+        result = await createJobFromSession(sessionRow, spender);
+      } catch (err) {
+        // N46 (astra pack 104, F3): the session row was already inserted; a
+        // funding failure (a spend-cap refusal, or any wiring error) must NOT
+        // leave a committed session with no job. Remove it, then surface the
+        // error — never a false 201.
+        try { db.delete(negotiationSessions).where(eq(negotiationSessions.id, sessionId)).run(); } catch { /* best-effort cleanup */ }
+        if (err instanceof GatewaySpendRefusedError) {
+          return reply.status(err.status).send({ error: err.code, message: err.message });
+        }
+        throw err;
+      }
 
       pipelineTelemetry.emit(result.jobId, "job_accepted", "completed", {
         metadata: {
@@ -878,6 +969,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         message: "Fast-track job created. Scope is active — executor can start making tool calls.",
       });
     } catch (err) {
+      if (err instanceof GatewaySpendRefusedError) {
+        return reply.status(err.status).send({ error: err.code, message: err.message });
+      }
       return reply.status(500).send({
         error: "fast_track_failed",
         details: err instanceof Error ? err.message : String(err),

@@ -24,6 +24,7 @@ import {
   CdpOnrampClient,
   CdpSpendPermissionService,
 } from "@pcc/payments";
+import { admitFaucetDrip, faucetMaxPerCall, requestCaller } from "../services/gateway-spend-guard.js";
 
 // ---------------------------------------------------------------------------
 // Service singletons (lazy-init)
@@ -789,9 +790,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     }
 
     const amount = body.amount ?? 100; // Default: 100 USDC
-    const maxDrip = 1000; // Max 1000 USDC per request
-    if (amount <= 0 || amount > maxDrip) {
-      return reply.status(400).send({ error: `Amount must be 1-${maxDrip} USDC` });
+    // N46: the gateway's key signs every mint. Testnet only, with a per-call cap,
+    // a per-wallet daily total and a per-caller hourly count. A drip is counted
+    // as soon as it is admitted.
+    const drip = admitFaucetDrip({ wallet: body.walletAddress, amount, spender: requestCaller(req) });
+    if (!drip.ok) {
+      return reply.status(drip.status).send({ error: drip.error, message: drip.message });
     }
 
     const MOCK_USDC = "0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb";
@@ -866,7 +870,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         endpoint: "POST /api/faucet/usdc",
         body: { walletAddress: "0x...", amount: 100 },
         description: "Free testnet USDC faucet. Mints mUSDC to any wallet on Sepolia. No fees, no KYC.",
-        limits: { maxPerRequest: 1000, currency: "mUSDC", network: "sepolia" },
+        limits: { maxPerRequest: faucetMaxPerCall(), currency: "mUSDC", network: "sepolia" },
         tokenContract: "0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb",
         quickUrl: "/api/faucet/usdc?wallet=0x...&amount=100",
       };

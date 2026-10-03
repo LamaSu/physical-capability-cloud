@@ -33,7 +33,8 @@ import type {
   DemandEnvelope,
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, budgetToBand } from "@pcc/spec";
-import { createJobFromSession, isMockSettlement } from "./paid-job-flow.js";
+import { createJobFromSession, gatewayFundingDecision, isMockSettlement } from "./paid-job-flow.js";
+import { GATEWAY_SPEND_REFUSED_PREFIX, spenderOfRequest } from "../services/gateway-spend-guard.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
   getCapabilityDescriptor,
@@ -92,9 +93,16 @@ const SETTLEMENT_FAILED_AMBIGUOUS = "settlement_failed:onchain_maybe_minted";
  * at failure time proves no on-chain escrow could exist, and a fresh mint on retry is
  * safe. EVERY other failure (key present → a chain write may have landed before the
  * throw; or a completed-but-no-address result) is treated as "an escrow may exist".
+ *
+ * N46: a spend-guard refusal (GatewaySpendRefusedError) is also provably
+ * pre-flight. createJobFromSession admits the payment before its first signer
+ * write, so a refusal means no chain call was made.
  */
-function settlementFailureClass(settlementError: string | null): string {
+export function settlementFailureClass(settlementError: string | null): string {
   if (settlementError && !process.env.PCC_GATEWAY_PRIVATE_KEY) {
+    return SETTLEMENT_FAILED_PREFLIGHT;
+  }
+  if (settlementError?.startsWith(GATEWAY_SPEND_REFUSED_PREFIX)) {
     return SETTLEMENT_FAILED_PREFLIGHT;
   }
   return SETTLEMENT_FAILED_AMBIGUOUS;
@@ -632,6 +640,15 @@ export async function negotiationRoutes(app: FastifyInstance) {
         if (commitQuote?.validUntil && new Date(commitQuote.validUntil) < new Date()) {
           return reply.status(410).send({ error: "Quote expired — re-quote before commit" });
         }
+        // N46: in real settlement the gateway signer funds this escrow. Refuse
+        // here, before the session changes, when a spend cap says no.
+        const spender = spenderOfRequest(req, "commit");
+        if (!isMockSettlement()) {
+          const decision = gatewayFundingDecision(row, spender);
+          if (!decision.ok) {
+            return reply.status(decision.status).send({ error: decision.error, message: decision.message });
+          }
+        }
 
         const jobId = `job-${crypto.randomUUID().slice(0, 12)}`;
         const cwmId = `cwm-${crypto.randomUUID().slice(0, 12)}`;
@@ -671,7 +688,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
             .where(eq(negotiationSessions.id, req.params.id))
             .get();
           if (committedRow) {
-            paidJobResult = await createJobFromSession(committedRow);
+            paidJobResult = await createJobFromSession(committedRow, spender);
           }
         } catch (err) {
           settlementError = err instanceof Error ? err.message : String(err);
@@ -814,6 +831,16 @@ export async function negotiationRoutes(app: FastifyInstance) {
           });
         }
 
+        // N46: a re-mint is a new gateway-paid funding. Refuse here, before the
+        // session changes, when a spend cap says no.
+        const spender = spenderOfRequest(req, "retry_settlement");
+        if (!isMockSettlement()) {
+          const decision = gatewayFundingDecision(row, spender);
+          if (!decision.ok) {
+            return reply.status(decision.status).send({ error: decision.error, message: decision.message });
+          }
+        }
+
         // ── 3. Safe to (re-)mint. Mirror /commit: mark committed, then wire. ─────
         const now = new Date().toISOString();
         const jobId = row.jobId ?? `job-${crypto.randomUUID().slice(0, 12)}`;
@@ -836,7 +863,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
           const committedRow = db.select().from(negotiationSessions)
             .where(eq(negotiationSessions.id, req.params.id))
             .get();
-          if (committedRow) paidJobResult = await createJobFromSession(committedRow);
+          if (committedRow) paidJobResult = await createJobFromSession(committedRow, spender);
         } catch (err) {
           settlementError = err instanceof Error ? err.message : String(err);
           console.warn("[negotiation] retry-settlement wiring failed:", settlementError);
