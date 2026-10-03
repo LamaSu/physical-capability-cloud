@@ -5,15 +5,21 @@ kernel identity, PCC gateway location, detected devices, approval policy,
 pricing, camera, and poll intervals.
 """
 
+import errno
 import json
 import logging
 import os
 import hashlib
+import stat
 import time
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any
 
 log = logging.getLogger("pcc-node.config")
+
+
+class ConfigFileError(Exception):
+    """The config file exists but must not be used as it is."""
 
 
 @dataclass
@@ -128,18 +134,36 @@ def save_config(config: NodeConfig, path: str = "./pcc-node.json") -> str:
 def load_config(path: str = "./pcc-node.json") -> NodeConfig:
     """Load config from a JSON file.
 
-    Raises FileNotFoundError if the file does not exist. Warns (without
-    printing the key) when the file holds an API key that other users can read.
+    Raises FileNotFoundError if the file does not exist. The file is read
+    through one no-follow descriptor, so a symlink is refused, and it must be
+    a regular file. A config that holds an API key must belong to this
+    account; if other users could read it, it is restricted to 0600 before
+    use and the operator is told to rotate the key (verdict 105b, finding 7).
+    ConfigFileError says why a config was refused; the key is never printed.
     """
     abs_path = os.path.abspath(path)
-    with open(abs_path) as f:
+    try:
+        fd = os.open(abs_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        # open(O_NOFOLLOW) on a symlink fails with ELOOP (Linux, macOS) or EMLINK (FreeBSD).
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise ConfigFileError(f"{abs_path} is a symbolic link: point pcc-node at the file itself") from None
+        raise
+    with os.fdopen(fd, "r") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise ConfigFileError(f"{abs_path} is not a regular file")
         data = json.load(f)
-        mode = os.fstat(f.fileno()).st_mode & 0o777
-    if os.name != "nt" and mode & 0o077 and _holds_a_key(data):
-        log.warning(
-            "%s holds an API key and other users can read it (mode %s). "
-            "Restrict it with: chmod 600 %s", abs_path, oct(mode), abs_path,
-        )
+        if os.name != "nt" and _holds_a_key(data):
+            if st.st_uid != os.getuid():
+                raise ConfigFileError(f"{abs_path} holds an API key but is owned by another account (uid {st.st_uid})")
+            mode = st.st_mode & 0o777
+            if mode & 0o077:
+                os.fchmod(f.fileno(), 0o600)
+                log.warning(
+                    "%s holds an API key and other users could read it (mode %s). It is now 0600; "
+                    "rotate the key if other accounts on this machine may have read it.", abs_path, oct(mode),
+                )
     return NodeConfig.from_dict(data)
 
 

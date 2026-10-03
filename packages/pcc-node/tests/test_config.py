@@ -170,13 +170,16 @@ class TestConfigHoldsTheApiKey:
             save_config(NodeConfig(kernel_id="k"), str(tmp_path / "pcc-node.json"))
         assert list(tmp_path.iterdir()) == []
 
-    def test_loading_a_readable_config_that_holds_a_key_warns(self, tmp_path, caplog):
+    # Verdict 105b, finding 7: a readable config that holds a key was loaded with only a
+    # warning, and stayed readable. Now it is restricted to its owner before use.
+    def test_a_readable_config_that_holds_a_key_is_restricted_to_its_owner(self, tmp_path, caplog):
         path = tmp_path / "pcc-node.json"
         path.write_text(json.dumps({"kernel_id": "k", "pcc_api_key": self._key()}))
         os.chmod(path, 0o644)
         with caplog.at_level("WARNING"):
-            load_config(str(path))
-        assert "chmod 600" in caplog.text
+            assert load_config(str(path)).pcc_api_key == self._key()
+        assert os.stat(path).st_mode & 0o777 == 0o600
+        assert "rotate" in caplog.text
         assert self._key() not in caplog.text
 
     def test_a_device_api_key_counts_as_a_key(self, tmp_path, caplog):
@@ -185,7 +188,54 @@ class TestConfigHoldsTheApiKey:
         os.chmod(path, 0o640)
         with caplog.at_level("WARNING"):
             load_config(str(path))
-        assert "chmod 600" in caplog.text
+        assert os.stat(path).st_mode & 0o777 == 0o600
+
+    def test_a_symlinked_config_is_refused(self, tmp_path):
+        from pcc_node import config as config_module
+        target = tmp_path / "elsewhere.json"
+        target.write_text(json.dumps({"kernel_id": "k", "pcc_api_key": self._key()}))
+        os.chmod(target, 0o600)
+        link = tmp_path / "pcc-node.json"
+        link.symlink_to(target)
+        refused = getattr(config_module, "ConfigFileError", None)
+        assert refused is not None, "a symlinked config was loaded"
+        with pytest.raises(refused, match="symbolic link"):
+            load_config(str(link))
+
+    def test_a_config_with_a_key_owned_by_another_account_is_refused(self, tmp_path, monkeypatch):
+        from pcc_node import config as config_module
+        path = tmp_path / "pcc-node.json"
+        path.write_text(json.dumps({"kernel_id": "k", "pcc_api_key": self._key()}))
+        os.chmod(path, 0o644)
+        monkeypatch.setattr(config_module.os, "getuid", lambda: os.stat(path).st_uid + 1)
+        refused = getattr(config_module, "ConfigFileError", None)
+        assert refused is not None, "another account's config was loaded"
+        with pytest.raises(refused, match="owned by another account"):
+            load_config(str(path))
+        assert os.stat(path).st_mode & 0o777 == 0o644  # not touched
+
+    def test_start_stops_rather_than_replacing_a_config_it_refused(self, tmp_path):
+        from unittest import mock
+        from click.testing import CliRunner
+        from pcc_node.cli import main
+        target = tmp_path / "elsewhere.json"
+        target.write_text(json.dumps({"kernel_id": "k", "pcc_api_key": self._key()}))
+        os.chmod(target, 0o600)
+        link = tmp_path / "pcc-node.json"
+        link.symlink_to(target)
+        with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
+             mock.patch("pcc_node.cli.detect_all", return_value=[]), \
+             mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 32, "cd" * 32)), \
+             mock.patch("pcc_node.cli.provision_api_key", return_value="test-key"), \
+             mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}), \
+             mock.patch("pcc_node.cli.register_devices", return_value=None), \
+             mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
+             mock.patch("pcc_node.cli.announce_capabilities", create=True), \
+             mock.patch("pcc_node.cli.run_daemon") as daemon:
+            result = CliRunner().invoke(main, ["start", "-c", str(link), "--api-key", "k"])
+        assert result.exit_code == 1, result.output
+        assert link.is_symlink()
+        daemon.assert_not_called()
 
     def test_loading_a_readable_config_without_a_key_is_quiet(self, tmp_path, caplog):
         path = tmp_path / "pcc-node.json"

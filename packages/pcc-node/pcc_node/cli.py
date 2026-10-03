@@ -18,7 +18,7 @@ from datetime import datetime
 import click
 
 from . import __version__
-from .config import NodeConfig, generate_config, save_config, load_config
+from .config import ConfigFileError, NodeConfig, generate_config, save_config, load_config
 from .crypto import KeyFileError, load_or_create_keys
 from .daemon import run_daemon, is_running, read_state
 from .detect import detect_all
@@ -220,6 +220,10 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
         try:
             config = load_config(config_file)
             click.echo(f"Loaded config from {os.path.abspath(config_file)}")
+        except ConfigFileError as e:
+            # Never carry on and save a fresh config over one that was refused.
+            click.echo(f"Cannot use the config file: {e}", err=True)
+            sys.exit(1)
         except Exception as e:
             log.warning(f"Failed to load config: {e}")
 
@@ -754,6 +758,9 @@ def feedback_cmd(config_file, mode, interval):
                 click.echo("  Trigger: after 5+ consecutive errors")
         except FileNotFoundError:
             click.echo("No config file found. Run 'pcc-node start' first.")
+        except ConfigFileError as e:
+            click.echo(f"Cannot use the config file: {e}", err=True)
+            sys.exit(1)
         return
 
     try:
@@ -762,6 +769,9 @@ def feedback_cmd(config_file, mode, interval):
         click.echo(f"Config not found: {config_path}")
         click.echo("Run 'pcc-node start' first to generate a config.")
         return
+    except ConfigFileError as e:
+        click.echo(f"Cannot use the config file: {e}", err=True)
+        sys.exit(1)
 
     if mode == "on":
         mode = "errors"
