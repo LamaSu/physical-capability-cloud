@@ -214,8 +214,10 @@ def detect_mdns(timeout=3.0):
     """
     try:
         from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
-    except ImportError:
-        log.debug("zeroconf not installed -- skipping mDNS discovery")
+    except (ImportError, RuntimeError):
+        # Not installed, or its native interface enumeration (ifaddr -> ctypes.dlopen) is refused by
+        # the spawn guard. mDNS is best-effort; degrade to the other detectors either way.
+        log.debug("mDNS discovery unavailable (zeroconf absent or blocked) -- skipping")
         return []
 
     import time
