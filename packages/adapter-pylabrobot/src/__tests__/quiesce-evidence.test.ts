@@ -233,11 +233,24 @@ describe("astra pack 186 HIGH: the sidecar's stopRecording answer is the barrier
     expect(methods).toEqual(["backend.init", "evidence.startRecording", "backend.run", "evidence.stopRecording", "backend.shutdown"]);
   });
 });
-
-describe("astra pack 191 HIGH: a barrier that fails proves nothing, so the run fails and the sidecar is stopped", () => {
+describe("astra pack 191 HIGH: a barrier that fails proves nothing, so the run fails and the adapter is held until it answers", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
+
+  /** A started sidecar and an adapter on it, recording its evidence. */
+  async function setup(deviceId: string) {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId, kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+    return { transport, sidecar, adapter, events };
+  }
 
   /** Drive start up to the barrier: init, startRecording and run answered; returns the barrier's request id. */
   async function upToTheBarrier(transport: InMemoryTransport, deviceId: string, jobId: string, run: "ok" | "fails"): Promise<string> {
@@ -256,66 +269,147 @@ describe("astra pack 191 HIGH: a barrier that fails proves nothing, so the run f
     return barrier.id;
   }
 
-  it.each([
-    ["rejects", "fails"],
-    ["times out", "fails"],
-  ] as const)("(sidecar) after a run that succeeded, a barrier that %s fails the run with no execution_completed, and stops the sidecar before start returns", async (how) => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
-    const transport = new InMemoryTransport();
-    const sidecar = new SidecarClient({ inMemoryTransport: transport });
-    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-barrier", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
-    await sidecar.start();
-    const events: AdapterEvidenceEvent[] = [];
-    adapter.onEvidence((e) => events.push(e));
-    let done = false;
-    let aliveAtReturn: boolean | undefined;
-    const startP = adapter.execute({ type: "start", payload: { jobId: "j-bar" } }).then((r) => ((done = true), (aliveAtReturn = sidecar.isAlive()), r));
-    const hook = ask(adapter, events);
+  const methodsSent = (transport: InMemoryTransport) => transport.sent.map((l) => (JSON.parse(l) as { method?: string }).method);
 
-    const barrierId = await upToTheBarrier(transport, "dev-q-barrier", "j-bar", "ok");
-    if (how === "rejects") transport.respondError(barrierId, -32603, "drain failed");
-    else await vi.advanceTimersByTimeAsync(5_000);
+  /** Dispose on the fake clock: answer the sidecar's shutdown, if it sends one, so the stop completes. */
+  async function disposeNow(transport: InMemoryTransport, adapter: PyLabRobotAdapter): Promise<void> {
+    const disposing = adapter.dispose();
     await vi.advanceTimersByTimeAsync(0);
-    // A shutdown, if the adapter stops the sidecar: answer it, so the stop completes.
-    const after = transport.lastSent() as { id: string; method: string };
-    if (after.method === "backend.shutdown") transport.respondSuccess(after.id, { ok: true });
-    await vi.advanceTimersByTimeAsync(10_000);
-    const result = await startP;
+    const last = transport.lastSent() as { id: string; method: string };
+    if (last.method === "backend.shutdown") transport.respondSuccess(last.id, { ok: true });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await disposing;
+  }
 
-    expect.soft(result.success, "the run").toBe(false);
-    expect.soft(events.map((e) => e.type), "events").not.toContain("execution_completed");
-    expect.soft(events.map((e) => e.type), "events").toContain("execution_failed");
-    expect.soft(after.method, "the call after the failed barrier").toBe("backend.shutdown");
-    expect.soft(aliveAtReturn, "the sidecar, when start returned").toBe(false);
-    expect.soft(done && hook.resolved, "the hook answered, once start returned").toBe(true);
-    // Whatever the stopped sidecar's transport still delivers is not forwarded.
-    const settled = events.length;
-    transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-barrier", jobId: "j-bar", timestamp: new Date().toISOString(), payload: { well: "A1" } });
-    transport.notify("evidence", { type: "calibration_record", deviceId: "dev-q-barrier", jobId: null, timestamp: new Date().toISOString(), payload: {} });
-    await vi.advanceTimersByTimeAsync(0);
-    expect.soft(events.length, "events from the stopped sidecar").toBe(settled);
-  });
+  it.each(["rejects", "times out"] as const)(
+    "(sidecar) after a run that succeeded, a barrier that %s fails the run with no execution_completed; the sidecar is not recycled, and the hook waits for a retried barrier",
+    async (how) => {
+      const { transport, sidecar, adapter, events } = await setup("dev-q-barrier");
+      const startP = adapter.execute({ type: "start", payload: { jobId: "j-bar" } });
+      const hook = ask(adapter, events);
 
-  it("(sidecar) after a run that failed, a barrier that fails also stops the sidecar before start returns", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
-    const transport = new InMemoryTransport();
-    const sidecar = new SidecarClient({ inMemoryTransport: transport });
-    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-barrier-f", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
-    await sidecar.start();
-    const events: AdapterEvidenceEvent[] = [];
-    adapter.onEvidence((e) => events.push(e));
+      const barrierId = await upToTheBarrier(transport, "dev-q-barrier", "j-bar", "ok");
+      if (how === "rejects") transport.respondError(barrierId, -32603, "drain failed");
+      else await vi.advanceTimersByTimeAsync(5_000);
+      const result = await startP;
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect.soft(result, "the run").toMatchObject({ success: false });
+      expect.soft(result.message, "why").toMatch(/^evidence barrier failed: evidence\.stopRecording did not answer/);
+      expect.soft(events.map((e) => e.type), "events").toEqual(["device_birth", "execution_started", "execution_failed"]);
+      expect.soft(methodsSent(transport), "calls after the failed barrier").not.toContain("backend.shutdown");
+      expect.soft(sidecar.isAlive(), "the sidecar").toBe(true);
+      expect.soft(hook.resolved, "the hook, while the barrier has not answered").toBe(false);
+
+      // Meanwhile a new run is refused before it reaches the sidecar.
+      const sentBefore = transport.sent.length;
+      const refused = await adapter.execute({ type: "start", payload: { jobId: "j-next" } });
+      expect.soft(refused, "a new start").toMatchObject({ success: false });
+      expect.soft(refused.message, "why").toMatch(/evidence of job j-bar is not yet proven complete/);
+      expect.soft(transport.sent.length, "calls the refused start made").toBe(sentBefore);
+
+      // Whatever arrives now is no job's evidence: the failed job's, or one bound to no job.
+      const settled = events.length;
+      transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-barrier", jobId: "j-bar", timestamp: new Date().toISOString(), payload: { well: "A1" } });
+      transport.notify("evidence", { type: "calibration_record", deviceId: "dev-q-barrier", jobId: null, timestamp: new Date().toISOString(), payload: {} });
+      await vi.advanceTimersByTimeAsync(0);
+      expect.soft(events.length, "events forwarded after the run failed").toBe(settled);
+
+      // The retried barrier (after 1 s) answers: the hook resolves, and a new run may start.
+      await vi.advanceTimersByTimeAsync(1_000);
+      const retried = transport.lastSent() as { id: string; method: string; params: { jobId: string } };
+      expect.soft(retried.method, "the retry").toBe("evidence.stopRecording");
+      expect.soft(retried.params.jobId, "the retried barrier's job").toBe("j-bar");
+      transport.respondSuccess(retried.id, { ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect.soft(hook.resolved, "the hook, once the retried barrier answered").toBe(true);
+      void adapter.execute({ type: "start", payload: { jobId: "j-after" } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect.soft((transport.lastSent() as { method: string }).method, "a new run, once proven").toBe("evidence.startRecording");
+      expect.soft(methodsSent(transport), "calls overall").not.toContain("backend.shutdown");
+      await disposeNow(transport, adapter);
+    },
+  );
+
+  it("(sidecar) after a run that failed, a failed barrier holds the adapter the same way, with the backoff doubling", async () => {
+    const { transport, adapter, events } = await setup("dev-q-barrier-f");
     const startP = adapter.execute({ type: "start", payload: { jobId: "j-bar-f" } });
-
+    const hook = ask(adapter, events);
     const barrierId = await upToTheBarrier(transport, "dev-q-barrier-f", "j-bar-f", "fails");
     transport.respondError(barrierId, -32603, "drain failed");
-    await vi.advanceTimersByTimeAsync(0);
-    const after = transport.lastSent() as { id: string; method: string };
-    if (after.method === "backend.shutdown") transport.respondSuccess(after.id, { ok: true });
-    await vi.advanceTimersByTimeAsync(10_000);
     const result = await startP;
+    await vi.advanceTimersByTimeAsync(0);
 
-    expect.soft(result.success, "the run").toBe(false);
-    expect.soft(after.method, "the call after the failed barrier").toBe("backend.shutdown");
+    expect.soft(result, "the run").toMatchObject({ success: false });
+    expect.soft(result.message, "why").toMatch(/protocol failed: tip collision; evidence barrier failed/);
     expect.soft(events.map((e) => e.type), "events").not.toContain("execution_completed");
+    expect.soft(methodsSent(transport), "calls").not.toContain("backend.shutdown");
+
+    // The first retry fails too; the next comes 2 s later, and answers.
+    await vi.advanceTimersByTimeAsync(1_000);
+    const first = transport.lastSent() as { id: string; method: string };
+    expect.soft(first.method, "the first retry").toBe("evidence.stopRecording");
+    transport.respondError(first.id, -32603, "still draining");
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect.soft((transport.lastSent() as { id: string }).id, "no second retry before 2 s").toBe(first.id);
+    await vi.advanceTimersByTimeAsync(1);
+    const second = transport.lastSent() as { id: string; method: string };
+    expect.soft(second.method, "the second retry").toBe("evidence.stopRecording");
+    expect.soft(hook.resolved, "the hook, before an answer").toBe(false);
+    transport.respondSuccess(second.id, { ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook.resolved, "the hook, once answered").toBe(true);
+    await disposeNow(transport, adapter);
+  });
+
+  it("(sidecar) dispose releases a held adapter: its sidecar is stopped, so nothing more can come", async () => {
+    const { transport, adapter, events } = await setup("dev-q-barrier-d");
+    const startP = adapter.execute({ type: "start", payload: { jobId: "j-bar-d" } });
+    const barrierId = await upToTheBarrier(transport, "dev-q-barrier-d", "j-bar-d", "ok");
+    transport.respondError(barrierId, -32603, "drain failed");
+    await startP;
+    const hook = ask(adapter, events);
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook.resolved, "held").toBe(false);
+    await disposeNow(transport, adapter);
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook.resolved, "released by dispose").toBe(true);
+    expect.soft(vi.getTimerCount(), "retry timers left").toBe(0);
+  });
+});
+
+describe("steward #5413: nothing with no job binding is recorded under a job", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("(sidecar) a notification bound to no job, during a job's window, is dropped; the job's own is recorded", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-unbound", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+
+    const startP = adapter.execute({ type: "start", payload: { jobId: "j-u" } });
+    for (const method of ["backend.init", "evidence.startRecording"]) {
+      await tick();
+      expect(answerLast(transport, "dev-q-unbound", "j-u")).toBe(method);
+    }
+    await tick();
+    transport.notify("evidence", { type: "calibration_record", deviceId: "dev-q-unbound", jobId: null, timestamp: new Date().toISOString(), payload: { of: "no job" } });
+    transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-unbound", jobId: "j-u", timestamp: new Date().toISOString(), payload: { well: "A1" } });
+    // The sidecar's stderr names no job either.
+    (sidecar as unknown as { emit: (event: string, msg: string) => void }).emit("stderr", "Traceback (most recent call last): ...");
+    await tick();
+    for (const method of ["backend.run", "evidence.stopRecording"]) {
+      expect(answerLast(transport, "dev-q-unbound", "j-u")).toBe(method);
+      await tick();
+    }
+    await startP;
+
+    expect(events.map((e) => e.type)).toEqual(["device_birth", "execution_started", "instrument_result", "execution_completed"]);
+    expect(events.map((e) => e.payload)).not.toContainEqual(expect.objectContaining({ of: "no job" }));
   });
 });
