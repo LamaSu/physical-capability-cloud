@@ -19,7 +19,9 @@ import {
   buildFormHtml,
   IntakeAnswerSchema,
   IntakeRecordSchema,
+  IntakeSourceSchema,
   validateIntake,
+  normalizeIntakeLimits,
   executionModeTierCap,
   NO_EXECUTION_MODE_CAP,
   intakeFieldArtifactMap,
@@ -28,6 +30,7 @@ import {
   INTAKE_SECRET_KINDS,
   CONFIRMATION_REQUIRED_FIELDS,
   ESTOP_NONE_APPROVED_CAPABILITIES,
+  REVIEWED_COUNT_PARAMETERS,
   UNITLESS_LIMIT_UNIT,
   intakeValueHash,
   type IntakeAnswer,
@@ -35,10 +38,11 @@ import {
   type IntakeConfirmationEvent,
   type IntakeRecord,
   type IntakeSecretKind,
+  type IntakeSubject,
 } from "../onboarding/intake/index.js";
 import { BIP39_ENGLISH_WORDLIST } from "../onboarding/intake/bip39-english.js";
 import { TIER_SUBSTANCE_RULE_FIELDS } from "../onboarding/intake/tier-readiness.js";
-import { getPrimitive } from "../evidence/primitives.js";
+import { getPrimitive, EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
 import { canonicalize } from "../util/canonical.js";
 import { CsdRegistry, loadBuiltinCsds } from "../csd/registry.js";
 import { CsdSchema, type CSD } from "../csd/schema.js";
@@ -264,9 +268,11 @@ describe("MILESTONE_IMPLIES — milestone implication closure", () => {
     expect([...MILESTONE_IMPLIES["accept-jobs"]].sort()).toEqual(
       ["accept-jobs", "identify", "publish", "register", "register-device"].sort(),
     );
-    expect([...MILESTONE_IMPLIES.tier1].sort()).toEqual(["identify", "register", "register-device", "tier1"].sort());
-    expect([...MILESTONE_IMPLIES.tier2].sort()).toEqual(
-      ["identify", "register", "register-device", "tier1", "tier2"].sort(),
+    expect([...MILESTONE_IMPLIES["tier1-intake-complete"]].sort()).toEqual(
+      ["identify", "register", "register-device", "tier1-intake-complete"].sort(),
+    );
+    expect([...MILESTONE_IMPLIES["tier2-intake-complete"]].sort()).toEqual(
+      ["identify", "register", "register-device", "tier1-intake-complete", "tier2-intake-complete"].sort(),
     );
     expect([...MILESTONE_IMPLIES["get-paid"]].sort()).toEqual(
       ["get-paid", "identify", "publish", "register", "register-device"].sort(),
@@ -325,6 +331,23 @@ describe("IntakeSourceSchema — the same source rules as a research citation", 
       { doc: "manual", url: "not a url" },
     ]) {
       expect(accepts(bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("contentHash is optional and, when present, must be sha256: + 64 lowercase hex (item 7)", () => {
+    const hash = `sha256:${"ab".repeat(32)}`;
+    expect(accepts({ doc: "manual", contentHash: hash })).toBe(true);
+    expect(accepts({ doc: "manual" })).toBe(true); // still optional
+    for (const bad of [
+      `sha256:${"AB".repeat(32)}`, // uppercase
+      `sha256:${"ab".repeat(31)}ab1`, // 63 hex
+      `sha256:${"ab".repeat(32)}0`, // 65 hex
+      `sha1:${"ab".repeat(32)}`, // wrong algorithm label
+      `${"ab".repeat(32)}`, // missing the sha256: prefix
+      `sha256: ${"ab".repeat(32)}`, // a space after the colon
+      `sha256:${"zz".repeat(32)}`, // non-hex characters
+    ]) {
+      expect(accepts({ doc: "manual", contentHash: bad }), bad).toBe(false);
     }
   });
 
@@ -436,11 +459,17 @@ function confirmationEvent(
   };
 }
 
+/** The authenticated subject `makeAuthority` builds for by default — matches
+ *  `confirmationEvent()`'s own defaults (principal/deviceRef/projectRef). */
+const DEFAULT_SUBJECT: IntakeSubject = { operatorRef: "operator:acme", deviceRef: "dev-1", projectRef: "proj-1" };
+
 interface StubAuthorityOptions {
   /** What the payout store says (default: a destination exists). */
   payout?: boolean;
   /** Edit the events after they are derived from the record. */
   events?: (events: Map<string, IntakeConfirmationEvent>) => void;
+  /** Override the authenticated subject (default: DEFAULT_SUBJECT). */
+  subject?: IntakeSubject;
 }
 
 /** A Map-backed authority holding exactly the events the record's confirmation refs name. */
@@ -450,9 +479,11 @@ function makeAuthority(record: IntakeRecord, options: StubAuthorityOptions = {})
     if (answer.confirmation) events.set(answer.confirmation.eventId, confirmationEvent(fieldId, answer));
   }
   options.events?.(events);
+  const payout = options.payout ?? true;
   return {
+    subject: options.subject ?? DEFAULT_SUBJECT,
     resolveConfirmation: (eventId) => events.get(eventId) ?? null,
-    payoutDestinationExists: () => options.payout ?? true,
+    payoutDestination: (operatorRef) => ({ operatorRef, exists: payout }),
   };
 }
 
@@ -476,11 +507,8 @@ describe("validateIntake — a fully and correctly answered record", () => {
     expect(IntakeRecordSchema.safeParse(full).success).toBe(true);
   });
 
-  it("is `ok` for every milestone except the tiers when its confirmation events resolve and a payout destination exists", () => {
-    // The tiers are checked in "validateIntake — tier readiness fails closed": with the shipped
-    // evidence registry their primitives are stubs, so they are NOT ready.
+  it("is `ok` for EVERY milestone, tiers included, when its confirmation events resolve and a payout destination exists (item 4: the stub-primitive gate is removed)", () => {
     for (const milestone of INTAKE_MILESTONES) {
-      if (milestone === "tier1" || milestone === "tier2") continue;
       const report = ready(full, milestone);
       expect(report, `${milestone}: ${JSON.stringify(report)}`).toMatchObject({
         ok: true,
@@ -496,9 +524,9 @@ describe("validateIntake — a fully and correctly answered record", () => {
         unverified: [],
         limitErrors: [],
         safetyBlocks: [],
-        stubPrimitives: [],
         insubstantial: [],
       });
+      expect(report).not.toHaveProperty("stubPrimitives");
     }
   });
 
@@ -557,16 +585,16 @@ describe("validateIntake — cumulative milestone readiness (review fix)", () =>
     expect(report.missing).toContain("capability.type");
   });
 
-  it("a tier2 check also requires tier1 fields (and, transitively, register-device)", () => {
+  it("a tier2-intake-complete check also requires tier1-intake-complete fields (and, transitively, register-device)", () => {
     const record = cloneRecord(buildFullValidRecord());
-    delete record.answers["evidence.executorDeviceId"]; // required for "tier1"
+    delete record.answers["evidence.executorDeviceId"]; // required for "tier1-intake-complete"
     delete record.answers["device.vendor"]; // required for "register-device"
 
-    const tier1Report = validateIntake(record, "tier1");
+    const tier1Report = validateIntake(record, "tier1-intake-complete");
     expect(tier1Report.ok).toBe(false);
     expect(tier1Report.missing).toEqual(expect.arrayContaining(["evidence.executorDeviceId", "device.vendor"]));
 
-    const tier2Report = validateIntake(record, "tier2");
+    const tier2Report = validateIntake(record, "tier2-intake-complete");
     expect(tier2Report.ok).toBe(false);
     expect(tier2Report.missing).toEqual(expect.arrayContaining(["evidence.executorDeviceId", "device.vendor"]));
   });
@@ -674,6 +702,14 @@ describe("validateIntake — rule 5 (sensitive: {set:true} only)", () => {
 
 // ── 6. Forbidden keys — refused everywhere, individually ─────────────────
 
+/** The INTAKE_FORBIDDEN_KEYS spelling `variant` normalizes to (case/underscore/hyphen-loose),
+ *  mirroring index.ts's own normalization — used to predict the CANONICAL spelling
+ *  `forbiddenKeys` now reports (item 5: never the raw key). */
+function canonicalForbiddenKeyFor(variant: string): string {
+  const normalized = variant.toLowerCase().replace(/[_-]/g, "");
+  return INTAKE_FORBIDDEN_KEYS.find((k) => k.toLowerCase().replace(/[_-]/g, "") === normalized)!;
+}
+
 describe("validateIntake — forbidden keys are always refused", () => {
   it.each(INTAKE_FORBIDDEN_KEYS)("refuses forbidden key %s inside an answer's value", (key) => {
     const record = cloneRecord(buildFullValidRecord());
@@ -682,8 +718,9 @@ describe("validateIntake — forbidden keys are always refused", () => {
       expectedResultRef: "cube-20mm",
       [key]: "smuggled",
     });
-    const report = validateIntake(record, "tier1");
+    const report = validateIntake(record, "tier1-intake-complete");
     expect(report.ok).toBe(false);
+    // These are already their own canonical spelling, so raw === canonical here.
     expect(report.forbiddenKeys).toContain(`evidence.referenceSample.${key}`);
   });
 
@@ -697,21 +734,28 @@ describe("validateIntake — forbidden keys are always refused", () => {
     // Inject a forbidden key directly onto the source object (bypassing the
     // strict zod shape, as a hostile/malformed caller might).
     (record.answers["calibration.procedureRef"].source as unknown as Record<string, unknown>).freshness = "now";
-    const report = validateIntake(record, "tier1");
+    const report = validateIntake(record, "tier1-intake-complete");
     expect(report.forbiddenKeys).toContain("calibration.procedureRef.freshness");
   });
 
-  it("refuses a forbidden key used directly as a field id", () => {
+  it("refuses a forbidden key used directly as a field id, and never echoes the raw unknown field id (item 5)", () => {
     const record = cloneRecord(buildFullValidRecord());
     (record.answers as Record<string, IntakeAnswer>).verificationResult = human(true);
     const report = validateIntake(record, "register");
+    // "verificationResult" IS the canonical spelling, so it's shown verbatim here.
     expect(report.forbiddenKeys).toContain("verificationResult");
-    expect(report.unknownFields).toContain("verificationResult");
+    // But it is also an unknown field id (not an INTAKE_FIELD_IDS entry, and not
+    // in the key vocabulary either), so it is shown only as its pathSegment token.
+    expect(report.unknownFields).not.toContain("verificationResult");
+    expect(report.unknownFields).toHaveLength(1);
+    expect(report.unknownFields[0]).toMatch(/^#[0-9a-f]{12}$/);
+    expect(JSON.stringify(report.unknownFields)).not.toContain("verificationResult");
   });
 });
 
 // ── 6b. Forbidden keys match loosely: case/underscore/hyphen-insensitive ──
-// (review fix — was exact-match only).
+// (review fix — was exact-match only). Item 5: the report names the CANONICAL
+// INTAKE_FORBIDDEN_KEYS spelling, never the raw variant the caller wrote.
 
 describe("validateIntake — forbidden keys match loosely (case/underscore/hyphen-insensitive)", () => {
   it.each([
@@ -722,24 +766,26 @@ describe("validateIntake — forbidden keys match loosely (case/underscore/hyphe
     "PrivateKey",
     "HASH",
     "device_key_binding",
-  ])("treats %s as a variant of its canonical forbidden key inside an answer's value", (variant) => {
+  ])("treats %s as a variant of its canonical forbidden key, reported as the CANONICAL spelling", (variant) => {
     const record = cloneRecord(buildFullValidRecord());
     record.answers["evidence.referenceSample"] = human({
       available: true,
       expectedResultRef: "cube-20mm",
       [variant]: "smuggled",
     });
-    const report = validateIntake(record, "tier1");
+    const report = validateIntake(record, "tier1-intake-complete");
     expect(report.ok).toBe(false);
-    expect(report.forbiddenKeys).toContain(`evidence.referenceSample.${variant}`);
+    expect(report.forbiddenKeys).toContain(`evidence.referenceSample.${canonicalForbiddenKeyFor(variant)}`);
+    expect(report.forbiddenKeys.join(" ")).not.toContain(variant);
   });
 
-  it("treats a loose-variant field id as forbidden too", () => {
+  it("treats a loose-variant field id as forbidden too, reported as the bare canonical spelling", () => {
     const record = cloneRecord(buildFullValidRecord());
     (record.answers as Record<string, IntakeAnswer>)["Assurance-Tier"] = human(true);
     const report = validateIntake(record, "register");
     expect(report.ok).toBe(false);
-    expect(report.forbiddenKeys).toContain("Assurance-Tier");
+    expect(report.forbiddenKeys).toContain("assuranceTier");
+    expect(report.forbiddenKeys).not.toContain("Assurance-Tier");
   });
 
   it("still refuses the exact canonical spelling (loose matching doesn't regress exact matches)", () => {
@@ -748,7 +794,7 @@ describe("validateIntake — forbidden keys match loosely (case/underscore/hyphe
       available: true,
       freshness: "now",
     });
-    const report = validateIntake(record, "tier1");
+    const report = validateIntake(record, "tier1-intake-complete");
     expect(report.forbiddenKeys).toContain("evidence.referenceSample.freshness");
   });
 
@@ -763,13 +809,20 @@ describe("validateIntake — forbidden keys match loosely (case/underscore/hyphe
 
 // ── 7. Unknown fields ─────────────────────────────────────────────────────
 
+/** The pathSegment token index.ts computes for a key outside the closed intake
+ *  vocabulary: "#" + the first 12 hex digits of sha256(utf8(key)) (item 5). */
+function unknownKeyToken(raw: string): string {
+  return `#${createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12)}`;
+}
+
 describe("validateIntake — unknown fields", () => {
-  it("reports a field id that isn't in the registry", () => {
+  it("reports a field id that isn't in the registry, as its pathSegment token, never the raw id (item 5)", () => {
     const record = cloneRecord(buildFullValidRecord());
     (record.answers as Record<string, IntakeAnswer>)["bogus.field"] = human("x");
     const report = validateIntake(record, "register");
     expect(report.ok).toBe(false);
-    expect(report.unknownFields).toContain("bogus.field");
+    expect(report.unknownFields).toContain(unknownKeyToken("bogus.field"));
+    expect(report.unknownFields).not.toContain("bogus.field");
   });
 });
 
@@ -984,20 +1037,33 @@ const FAKE = {
   stripeRestricted: "rk_" + "live_" + "A1b2C3d4E5f6G7h8I9",
   anthropic: "sk-" + "ant-" + "api03-" + "x".repeat(24),
   openaiStyle: "sk" + "-" + "Ab12".repeat(10),
+  skProj: "sk-" + "proj-" + "A".repeat(40),
+  skSvcacct: "sk-" + "svcacct-" + "A".repeat(20),
   awsAccessKeyId: "AK" + "IA" + "ABCDEFGHIJKLMNOP",
+  awsSessionTokenId: "AS" + "IA" + "ABCDEFGHIJKLMNOP",
   googleApiKey: "AI" + "za" + "x".repeat(35),
   slack: "xo" + "xb-" + "1234567890-abcdefghij",
   githubClassic: "gh" + "p_" + "a".repeat(36),
   githubFineGrained: "github" + "_pat_" + "A1".repeat(20),
+  gitlab: "glpat" + "-" + "A".repeat(20),
+  huggingface: "hf" + "_" + "A".repeat(30),
+  npmToken: "npm" + "_" + "A".repeat(36),
+  sendgrid: "SG" + "." + "A".repeat(16) + "." + "B".repeat(16),
+  azureAccountKey: "Account" + "Key=" + "A".repeat(40),
   pccLive: "pcc_" + "live_" + "A1b2C3d4E5f6G7h8I9",
   pccOracle: "pcc_" + "oracle_" + "A1b2C3d4E5f6G7h8I9",
   pccTest: "pcc_" + "test_" + "A1b2C3d4E5f6G7h8I9",
   jwt: ["ey" + "JhbGciOiJIUzI1NiJ9", "ey" + "JzdWIiOiJ4eHh4eHgifQ", "sig" + "nature12345"].join("."),
+  labeledApiKey: "api" + "_key: " + "abcd1234efgh5678",
+  labeledPassword: "password" + "=" + "Sup3rSecretValue!",
+  bearerToken: "Bearer" + " " + "A".repeat(24),
   hex64: "ab".repeat(32),
   hex64Prefixed: "0x" + "AB".repeat(32),
   address: "0x" + "282Fa9C122b433864f8C8a8F2EfE411b52067539",
   mnemonic12: BIP39_ENGLISH_WORDLIST.slice(100, 112).join(" "),
   street: "1600 Pennsylvania Avenue",
+  streetWay: "1 Hacker Way",
+  streetLane: "12 Elm Lane",
 };
 
 function withAnswer(id: string, answer: unknown): IntakeRecord {
@@ -1028,28 +1094,42 @@ describe("scanIntakeStrings — one detector per kind", () => {
     ["vendor-key", FAKE.stripeRestricted],
     ["vendor-key", FAKE.anthropic],
     ["vendor-key", FAKE.openaiStyle],
+    ["vendor-key", FAKE.skProj],
+    ["vendor-key", FAKE.skSvcacct],
     ["vendor-key", FAKE.awsAccessKeyId],
+    ["vendor-key", FAKE.awsSessionTokenId],
     ["vendor-key", FAKE.googleApiKey],
     ["vendor-key", FAKE.slack],
     ["vendor-key", FAKE.githubClassic],
     ["vendor-key", FAKE.githubFineGrained],
+    ["vendor-key", FAKE.gitlab],
+    ["vendor-key", FAKE.huggingface],
+    ["vendor-key", FAKE.npmToken],
+    ["vendor-key", FAKE.sendgrid],
+    ["vendor-key", FAKE.azureAccountKey],
     ["vendor-key", FAKE.pccLive],
     ["vendor-key", FAKE.pccOracle],
     ["vendor-key", FAKE.pccTest],
     ["vendor-key", FAKE.jwt],
+    ["labeled-secret", FAKE.labeledApiKey],
+    ["labeled-secret", FAKE.labeledPassword],
+    ["labeled-secret", FAKE.bearerToken],
     ["hex-secret", FAKE.hex64],
     ["hex-secret", FAKE.hex64Prefixed],
     ["payout-address", FAKE.address],
     ["mnemonic", FAKE.mnemonic12],
     ["street-address", FAKE.street],
+    ["street-address", FAKE.streetWay],
+    ["street-address", FAKE.streetLane],
   ] as const)("flags %s", (kind, secret) => {
     expect(kindsIn(`note: ${secret} end`)).toEqual([kind]);
   });
 
-  it("covers exactly the six kinds, each exercised above", () => {
+  it("covers exactly the seven kinds (labeled-secret added after vendor-key), each exercised above", () => {
     expect([...INTAKE_SECRET_KINDS]).toEqual([
       "pem",
       "vendor-key",
+      "labeled-secret",
       "hex-secret",
       "payout-address",
       "mnemonic",
@@ -1069,6 +1149,9 @@ describe("scanIntakeStrings — one detector per kind", () => {
       BIP39_ENGLISH_WORDLIST.slice(100, 111).join(" "), // 11 words
       "3 drive bays",
       "4 way valve",
+      "2 Lane conveyor",
+      "password: see the manual", // no digit in the value
+      "the token field", // no value at all (no colon/equals)
       "A desktop FDM 3D printer for PLA/PETG prototypes.",
       "Prusa bed-leveling procedure v2",
     ];
@@ -1123,12 +1206,21 @@ describe("scanIntakeStrings — street-address heuristic", () => {
     "123 MAIN STREET",
     "10 Downing Street",
     "9 Old Mill Road",
+    "1 Hacker Way",
+    "12 Elm Lane",
   ])("flags %s", (address) => {
     expect(kindsIn(`ships to ${address}, thanks`)).toEqual(["street-address"]);
   });
 
   it("is case-sensitive on the capitals and needs a street type", () => {
-    for (const text of ["3 drive bays", "4 way valve", "12 steps to the Court", "100 Mile House", "2 Print Shops"]) {
+    for (const text of [
+      "3 drive bays",
+      "4 way valve",
+      "2 Lane conveyor",
+      "12 steps to the Court",
+      "100 Mile House",
+      "2 Print Shops",
+    ]) {
       expect(kindsIn(text), text).toEqual([]);
     }
   });
@@ -1196,41 +1288,109 @@ describe("scanIntakeStrings — walking and paths", () => {
     expect(scanIntakeStrings({ [FAKE.stripeLive]: "harmless" })).toEqual([]);
   });
 
-  it("never returns the matched text, not even through a key in the path", () => {
+  it("never returns the matched text, not even through a key in the path — an unknown key becomes its token (item 5)", () => {
     const tree = { answers: { [FAKE.stripeLive]: { value: FAKE.pem, other: FAKE.address } } };
     const hits = scanIntakeStrings(tree);
     expect(hits.map((h) => h.kind)).toEqual(["pem", "payout-address"]);
     const out = JSON.stringify(hits);
     for (const secret of Object.values(FAKE)) expect(out).not.toContain(secret);
-    expect(hits[0]!.path).toBe("answers/[redacted:vendor-key]/value");
+    expect(hits[0]!.path).toBe(`answers/${unknownKeyToken(FAKE.stripeLive)}/value`);
   });
 
-  it("escapes pointer characters and writes non-ASCII key characters as \\u{hex}", () => {
+  it("hashes any key outside the closed vocabulary — including one with pointer-special or non-ASCII characters — never echoing it (item 5)", () => {
     const lookalike = "priv" + String.fromCodePoint(0x430) + "te";
     const hits = scanIntakeStrings({ "a/b~c": { [lookalike]: FAKE.hex64 } });
-    expect(hits).toEqual([{ path: "a~1b~0c/priv\\u{430}te", kind: "hex-secret" }]);
+    expect(hits).toEqual([{ path: `${unknownKeyToken("a/b~c")}/${unknownKeyToken(lookalike)}`, kind: "hex-secret" }]);
   });
 
   it("walks the own properties of a class instance too, not only plain objects", () => {
     class Approver {
       name = FAKE.hex64;
     }
+    // "evidence.approver" is a real field id and "name" a schema property name,
+    // so both are in the closed vocabulary and stay verbatim.
     expect(scanIntakeStrings({ answers: { "evidence.approver": { value: new Approver() } } })).toEqual([
       { path: "answers/evidence.approver/value/name", kind: "hex-secret" },
     ]);
-    const redacted = redactIntakeSecrets({ approver: new Approver() });
-    expect(redacted.approver).toEqual({ name: "[redacted:hex-secret]" });
-    expect(Object.getPrototypeOf(redacted.approver)).toBe(Object.prototype);
+    // A bare top-level "approver" key is NOT itself in the vocabulary, so it is renamed.
+    const redacted = redactIntakeSecrets({ approver: new Approver() }) as Record<string, unknown>;
+    const key = unknownKeyToken("approver");
+    expect(redacted[key]).toEqual({ name: "[redacted:hex-secret]" });
+    expect(Object.getPrototypeOf(redacted[key])).toBe(Object.prototype);
   });
 
   it("terminates on a cyclic structure and on very deep nesting", () => {
     const cyclic: Record<string, unknown> = { text: FAKE.hex64 };
     cyclic.self = cyclic;
-    expect(scanIntakeStrings(cyclic)).toEqual([{ path: "text", kind: "hex-secret" }]);
+    expect(scanIntakeStrings(cyclic)).toEqual([{ path: unknownKeyToken("text"), kind: "hex-secret" }]);
 
     let deep: unknown = FAKE.address;
     for (let i = 0; i < 100000; i++) deep = [deep];
     expect(scanIntakeStrings(deep)).toHaveLength(1);
+  });
+});
+
+describe("scanIntakeStrings — the contentHash exemption (item 7)", () => {
+  const digest = `sha256:${"ab".repeat(32)}`;
+
+  it("does not flag the digest at exactly answers/<field>/source/contentHash", () => {
+    const hits = scanIntakeStrings({
+      answers: {
+        "calibration.procedureRef": {
+          value: "Prusa bed-leveling procedure v2",
+          provenance: "confirmed",
+          source: { doc: "manual", section: "specs", contentHash: digest },
+        },
+      },
+    });
+    expect(hits).toEqual([]);
+  });
+
+  it("still flags the identical 64-hex digest when it appears in value, or at any other path", () => {
+    // In an answer's value.
+    expect(kindsIn(`copied: ${digest}`)).toEqual(["hex-secret"]);
+
+    // At a path that is NOT answers/<field>/source/contentHash — here it's doc, not contentHash.
+    const notTheExemptPath = scanIntakeStrings({
+      answers: {
+        "calibration.procedureRef": {
+          value: "v2",
+          provenance: "confirmed",
+          source: { doc: digest, section: "specs", contentHash: digest },
+        },
+      },
+    });
+    // The "doc" copy is flagged; the "contentHash" copy at the exact exempt path is not.
+    expect(notTheExemptPath).toEqual([{ path: "answers/calibration.procedureRef/source/doc", kind: "hex-secret" }]);
+  });
+
+  it("still flags a malformed form of the digest (e.g. uppercase) even at the exempt path", () => {
+    const uppercase = `sha256:${"AB".repeat(32)}`;
+    const hits = scanIntakeStrings({
+      answers: {
+        "calibration.procedureRef": {
+          value: "v2",
+          provenance: "confirmed",
+          // Bypasses IntakeSourceSchema's own regex (a hostile/malformed caller might).
+          source: { doc: "manual", contentHash: uppercase } as Record<string, unknown> as never,
+        },
+      },
+    });
+    expect(hits).toEqual([{ path: "answers/calibration.procedureRef/source/contentHash", kind: "hex-secret" }]);
+  });
+
+  it("the 120c reproduction: a research citation's contentHash copied into an answer's source validates, with no secret hit", () => {
+    expect(IntakeSourceSchema.safeParse({ doc: "manual", section: "specs", contentHash: digest }).success).toBe(true);
+    const hits = scanIntakeStrings({
+      answers: {
+        "calibration.procedureRef": {
+          value: "v2",
+          provenance: "confirmed",
+          source: { doc: "manual", section: "specs", contentHash: digest },
+        },
+      },
+    });
+    expect(hits).toEqual([]);
   });
 });
 
@@ -1253,37 +1413,43 @@ describe("redactIntakeSecrets — for logs only", () => {
 
   it("keeps the shape, copies clean fields unchanged, and is idempotent", () => {
     const out = redactIntakeSecrets(record());
+    // Every key here is a real INTAKE_FIELD_IDS entry, so all are in the vocabulary and kept verbatim.
     expect(Object.keys(out.answers).sort()).toEqual([...INTAKE_FIELD_IDS]);
     expect(out.answers["operator.displayName"]).toEqual(buildFullValidRecord().answers["operator.displayName"]);
     expect(redactIntakeSecrets(out)).toEqual(out);
   });
 
-  it("removes a whole PEM block through its footer, not only the header", () => {
-    const out = redactIntakeSecrets({ v: `before ${FAKE.pem} after` });
-    expect(out.v).toBe("before [redacted:pem] after");
+  it("removes a whole PEM block through its footer, not only the header (key 'v' is outside the vocabulary and renamed)", () => {
+    const out = redactIntakeSecrets({ v: `before ${FAKE.pem} after` }) as Record<string, unknown>;
+    expect(out[unknownKeyToken("v")]).toBe("before [redacted:pem] after");
+    expect(out.v).toBeUndefined();
   });
 
   it("redacts a PEM block with no footer through the end of the string", () => {
     const header = "-----BEGIN " + "PRIVATE KEY-----";
-    expect(redactIntakeSecrets({ v: `${header}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC` }).v).toBe("[redacted:pem]");
+    const out = redactIntakeSecrets({ v: `${header}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC` }) as Record<string, unknown>;
+    expect(out[unknownKeyToken("v")]).toBe("[redacted:pem]");
   });
 
-  it("renames a key that is itself a secret, keeping keys distinct, and keeps __proto__ as data", () => {
+  it("renames every top-level key outside the vocabulary — including one that looks like a secret — to its distinct token, and copies a literal __proto__ key as ordinary (renamed) data", () => {
     const hostile = JSON.parse(`{"__proto__": {"polluted": "yes"}, "ok": "fine"}`) as Record<string, unknown>;
     const out = redactIntakeSecrets({ [FAKE.stripeLive]: 1, [FAKE.stripeRestricted]: 2, hostile }) as Record<string, unknown>;
-    expect(Object.keys(out)).toEqual(["[redacted:vendor-key]", "[redacted:vendor-key]-2", "hostile"]);
-    const copy = out.hostile as Record<string, unknown>;
+    const expectedKeys = [unknownKeyToken(FAKE.stripeLive), unknownKeyToken(FAKE.stripeRestricted), unknownKeyToken("hostile")];
+    expect(Object.keys(out).sort()).toEqual([...expectedKeys].sort());
+    expect(new Set(expectedKeys).size).toBe(3); // three distinct raw keys, three distinct tokens
+    const copy = out[unknownKeyToken("hostile")] as Record<string, unknown>;
     expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
-    expect(Object.keys(copy)).toEqual(["__proto__", "ok"]);
+    expect(Object.keys(copy).sort()).toEqual([unknownKeyToken("__proto__"), unknownKeyToken("ok")].sort());
+    expect(copy[unknownKeyToken("__proto__")]).toEqual({ [unknownKeyToken("polluted")]: "yes" });
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
-  it("a renamed secret key never collides with a literal key of the same text", () => {
-    const literal = "[redacted:vendor-key]";
-    const out = redactIntakeSecrets({ [FAKE.stripeLive]: 1, [literal]: 2 }) as Record<string, unknown>;
-    expect(Object.keys(out).sort()).toEqual([literal, `${literal}-2`].sort());
-    expect(out[literal]).toBe(2);
-    expect(out[`${literal}-2`]).toBe(1);
+  it("a key already shaped like a token is not trusted as one — it is hashed again, never echoed verbatim", () => {
+    const tokenShaped = "#aaaaaaaaaaaa";
+    const out = redactIntakeSecrets({ [tokenShaped]: 1, [FAKE.stripeLive]: 2 }) as Record<string, unknown>;
+    expect(Object.keys(out)).not.toContain(tokenShaped);
+    expect(out[unknownKeyToken(tokenShaped)]).toBe(1);
+    expect(out[unknownKeyToken(FAKE.stripeLive)]).toBe(2);
   });
 
   it("copies primitives, null and shared/cyclic references without looping", () => {
@@ -1291,9 +1457,9 @@ describe("redactIntakeSecrets — for logs only", () => {
     expect(redactIntakeSecrets(null)).toBeNull();
     const cyclic: Record<string, unknown> = { text: FAKE.hex64 };
     cyclic.self = cyclic;
-    const out = redactIntakeSecrets(cyclic);
-    expect(out.text).toBe("[redacted:hex-secret]");
-    expect(out.self).toBe(out);
+    const out = redactIntakeSecrets(cyclic) as Record<string, unknown>;
+    expect(out[unknownKeyToken("text")]).toBe("[redacted:hex-secret]");
+    expect(out[unknownKeyToken("self")]).toBe(out);
   });
 });
 
@@ -1437,7 +1603,7 @@ describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () =
     expect(report.ok).toBe(false);
     expect(report.structuralErrors.length).toBeGreaterThan(0);
     expect(report.forbiddenKeys).toContain("calibration.procedureRef.freshness");
-    expect(report.unknownFields).toContain("bogus.field");
+    expect(report.unknownFields).toContain(unknownKeyToken("bogus.field"));
     expect(report.secretsInText).toEqual([{ path: "answers/device.description/value", kind: "hex-secret" }]);
     // The milestone checks are not run on a record that did not parse.
     expect(report.missing).toEqual([]);
@@ -1453,7 +1619,7 @@ describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () =
     ) as unknown;
     const report = validateIntake(raw, "register");
     expect(report.ok).toBe(false);
-    expect(report.unknownFields).toContain("__proto__");
+    expect(report.unknownFields).toContain(unknownKeyToken("__proto__"));
   });
 
   it("never echoes a secret-looking field id or key text into the report", () => {
@@ -1467,7 +1633,7 @@ describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () =
       [FAKE.githubClassic]: "v",
     });
     const report = validateIntake(record, "register");
-    expect(report.unknownFields).toEqual(["[redacted:vendor-key]"]);
+    expect(report.unknownFields).toEqual([unknownKeyToken(FAKE.stripeLive)]);
     expect(report.invalidFields).toContain("evidence.camera");
     expect(JSON.stringify(report)).not.toContain(FAKE.stripeLive);
     expect(JSON.stringify(report)).not.toContain(FAKE.githubClassic);
@@ -1665,6 +1831,65 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
       expect(report.missing).toEqual([]);
     });
 
+    describe("the event's subject must match the authenticated subject (astra pack 120c, HIGH 3)", () => {
+      it("an event for deviceRef dev-2 does not confirm a dev-1 subject (unconfirmed lists the field)", () => {
+        const report = ready(full, "publish", {
+          events: (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, subject: { ...e.get(`evt-${field}`)!.subject, deviceRef: "dev-2" } }),
+        });
+        expect(report.ok).toBe(false);
+        expect(report.unconfirmed).toEqual([field]);
+      });
+
+      it("an event carrying a projectRef when the authenticated subject has none does not confirm", () => {
+        const report = validateIntake(
+          full,
+          "publish",
+          makeAuthority(full, { subject: { operatorRef: "operator:acme", deviceRef: "dev-1" } }), // no projectRef
+        );
+        expect(report.ok).toBe(false);
+        expect(report.unconfirmed.length).toBeGreaterThan(0);
+      });
+
+      it("the reverse: a subject with a projectRef is not confirmed by an event with none", () => {
+        const report = ready(full, "publish", {
+          events: (e) => {
+            const { projectRef: _dropped, ...subjectWithoutProject } = e.get(`evt-${field}`)!.subject;
+            e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, subject: subjectWithoutProject });
+          },
+        });
+        expect(report.ok).toBe(false);
+        expect(report.unconfirmed).toEqual([field]);
+      });
+
+      it("an event confirmed by another principal does not confirm", () => {
+        const report = ready(full, "publish", {
+          events: (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, confirmedBy: { principal: "operator:someone-else", authMethod: "siwe" } }),
+        });
+        expect(report.ok).toBe(false);
+        expect(report.unconfirmed).toEqual([field]);
+      });
+
+      it("a missing authority subject confirms nothing", () => {
+        const { subject: _dropped, ...withoutSubject } = makeAuthority(full);
+        const report = validateIntake(full, "publish", withoutSubject as unknown as IntakeAuthority);
+        expect(report.ok).toBe(false);
+        expect(report.unconfirmed.length).toBeGreaterThan(0);
+      });
+
+      it("a malformed authority subject (missing deviceRef, or an unrecognized extra key) confirms nothing", () => {
+        for (const badSubject of [
+          { operatorRef: "operator:acme" }, // no deviceRef
+          { operatorRef: "", deviceRef: "dev-1" }, // blank operatorRef
+          { operatorRef: "operator:acme", deviceRef: "dev-1", extra: "x" }, // strict: unknown key
+        ]) {
+          const authority = { ...makeAuthority(full), subject: badSubject as unknown as IntakeSubject };
+          const report = validateIntake(full, "publish", authority);
+          expect(report.ok, JSON.stringify(badSubject)).toBe(false);
+          expect(report.unconfirmed.length, JSON.stringify(badSubject)).toBeGreaterThan(0);
+        }
+      });
+    });
+
     it("a missing confirmation reference", () => {
       const record = cloneRecord(full);
       const { confirmation: _dropped, ...withoutRef } = record.answers[field]!;
@@ -1676,10 +1901,11 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
 
     it("an authority whose resolver throws is treated as not confirmed, never as an exception", () => {
       const throwing: IntakeAuthority = {
+        subject: DEFAULT_SUBJECT,
         resolveConfirmation: () => {
           throw new Error("store offline");
         },
-        payoutDestinationExists: () => true,
+        payoutDestination: (operatorRef) => ({ operatorRef, exists: true }),
       };
       const report = validateIntake(full, "publish", throwing);
       expect(report.ok).toBe(false);
@@ -1688,8 +1914,9 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
 
     it("an async resolver (a Promise instead of an event) confirms nothing", () => {
       const asyncAuthority: IntakeAuthority = {
+        subject: DEFAULT_SUBJECT,
         resolveConfirmation: () => Promise.resolve(null) as never,
-        payoutDestinationExists: () => true,
+        payoutDestination: (operatorRef) => ({ operatorRef, exists: true }),
       };
       expect(validateIntake(full, "publish", asyncAuthority).unconfirmed.length).toBeGreaterThan(0);
     });
@@ -1722,7 +1949,7 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
         confirmation: { eventId: "evt-pricing.minimum" },
       };
       const authority = makeAuthority(record);
-      expect(authority.resolveConfirmation("evt-pricing.minimum")!.valueHash).toBe(intakeValueHash("2.00"));
+      expect(authority.resolveConfirmation("evt-pricing.minimum", authority.subject)!.valueHash).toBe(intakeValueHash("2.00"));
       const report = validateIntake(record, "publish", authority);
       expect(report.unconfirmed).toEqual(["pricing.unitPrice"]);
     });
@@ -1808,13 +2035,31 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
       const events = makeAuthority(full);
       const throwing: IntakeAuthority = {
         ...events,
-        payoutDestinationExists: () => {
+        payoutDestination: () => {
           throw new Error("payout store offline");
         },
       };
       expect(validateIntake(full, "get-paid", throwing).unverified).toEqual(["payout.destination"]);
-      const loose: IntakeAuthority = { ...events, payoutDestinationExists: () => "yes" as never };
+      const loose: IntakeAuthority = { ...events, payoutDestination: () => "yes" as never };
       expect(validateIntake(full, "get-paid", loose).unverified).toEqual(["payout.destination"]);
+    });
+
+    it("a payout answer for another operatorRef, exists:false, or null all leave payout.destination unverified (item 1)", () => {
+      const events = makeAuthority(full);
+      const forAnotherOperator: IntakeAuthority = {
+        ...events,
+        payoutDestination: () => ({ operatorRef: "operator:someone-else", exists: true }),
+      };
+      expect(validateIntake(full, "get-paid", forAnotherOperator).unverified).toEqual(["payout.destination"]);
+
+      const existsFalse: IntakeAuthority = {
+        ...events,
+        payoutDestination: (operatorRef) => ({ operatorRef, exists: false }),
+      };
+      expect(validateIntake(full, "get-paid", existsFalse).unverified).toEqual(["payout.destination"]);
+
+      const answersNull: IntakeAuthority = { ...events, payoutDestination: () => null };
+      expect(validateIntake(full, "get-paid", answersNull).unverified).toEqual(["payout.destination"]);
     });
 
     it("only get-paid asks the payout store", () => {
@@ -1822,9 +2067,9 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
       const base = makeAuthority(full);
       const counting: IntakeAuthority = {
         ...base,
-        payoutDestinationExists: () => {
+        payoutDestination: (operatorRef) => {
           calls += 1;
-          return true;
+          return { operatorRef, exists: true };
         },
       };
       for (const milestone of INTAKE_MILESTONES) {
@@ -2012,12 +2257,13 @@ describe("validateIntake — safety limits bind to the selected CSD (astra 120b,
     ]);
   });
 
-  it("a parameter that declares no unit takes only the dimensionless unit \"count\" (120b round)", () => {
-    expect(labReport([limit("plain", "count", 1, 5)]).limitErrors).toEqual([]);
-    // a table unit has nothing to equal on a unitless parameter
-    expect(labReport([limit("plain", "%", 1, 5)]).limitErrors).toEqual([
-      'safety.limits[0]: the CSD parameter declares no unit; its limit uses the unit "count"',
-    ]);
+  it("an unreviewed unitless parameter (test-lab's \"plain\") refuses every limit, whatever the unit (item 6)", () => {
+    // "count" is now a table unit, but a parameter counts as a count parameter
+    // ONLY when it is in REVIEWED_COUNT_PARAMETERS (or declares unit "count" itself).
+    // test-lab's "plain" is neither, so it refuses a "count" limit too — not just "%".
+    const refused = 'safety.limits[0]: the CSD parameter declares no unit and is not a reviewed count parameter';
+    expect(labReport([limit("plain", "count", 1, 5)]).limitErrors).toEqual([refused]);
+    expect(labReport([limit("plain", "%", 1, 5)]).limitErrors).toEqual([refused]);
   });
 
   it("every number parameter with a unit in a built-in CSD accepts its own full range, and the table covers those units", () => {
@@ -2058,18 +2304,69 @@ describe("validateIntake — safety limits bind to the selected CSD (astra 120b,
     const { min, max } = copies as { min: number; max: number };
     expect(at2d([limit("copies", "count", min, max)]).limitErrors).toEqual([]);
     expect(at2d([limit("copies", " count ", min, max)]).limitErrors).toEqual([]);
-    for (const wrong of ["pages", "%", "Count", "1"]) {
+    // "count" IS now a closed-table unit (dimension "count"), so a wrong unit that
+    // IS in the table (a different dimension) and one that ISN'T give different
+    // messages (item 6) — "pages"/"%" resolve but mismatch the dimension;
+    // "Count" (wrong case) and "1" do not resolve at all.
+    for (const wrong of ["pages", "%"]) {
       expect(at2d([limit("copies", wrong, min, max)]).limitErrors, wrong).toEqual([
-        'safety.limits[0]: the CSD parameter declares no unit; its limit uses the unit "count"',
+        "safety.limits[0]: unit does not match the CSD parameter's unit",
+      ]);
+    }
+    for (const wrong of ["Count", "1"]) {
+      expect(at2d([limit("copies", wrong, min, max)]).limitErrors, wrong).toEqual([
+        "safety.limits[0]: unit is not in the closed unit table",
       ]);
     }
     expect(at2d([limit("copies", "count", min, max + 1)]).limitErrors).toEqual([
       "safety.limits[0]: limit lies outside the CSD parameter's range",
     ]);
-    // "count" on fdm/v2's infill (unit %) is refused: it is not in the unit table.
+    // "count" on fdm/v2's infill (unit %) is now a resolvable table unit, so this
+    // is a dimension mismatch, not an unrecognized unit (item 6).
     const fdm = cloneRecord(buildFullValidRecord());
     fdm.answers["safety.limits"] = limitsAnswer([limit("infill", "count", 10, 90)]);
-    expect(ready(fdm, "accept-jobs").limitErrors).toEqual(["safety.limits[0]: unit is not in the closed unit table"]);
+    expect(ready(fdm, "accept-jobs").limitErrors).toEqual(["safety.limits[0]: unit does not match the CSD parameter's unit"]);
+  });
+
+  it("every built-in unitless number parameter is listed in REVIEWED_COUNT_PARAMETERS, and every listed one exists and is unitless (item 6)", () => {
+    const registry = loadBuiltinCsds();
+    const builtinUnitless = new Map<string, string[]>();
+    for (const csd of registry.list()) {
+      const keys = csd.parameters.filter((p) => p.type === "number" && p.unit === undefined).map((p) => p.key).sort();
+      if (keys.length > 0) builtinUnitless.set(csd.url, keys);
+    }
+    for (const [url, keys] of builtinUnitless) {
+      expect([...(REVIEWED_COUNT_PARAMETERS.get(url) ?? [])].sort(), url).toEqual(keys);
+    }
+    for (const [url, keys] of REVIEWED_COUNT_PARAMETERS) {
+      const csd = registry.resolve(url);
+      for (const key of keys) {
+        const param = csd.parameters.find((p) => p.key === key);
+        expect(param, `${url}#${key}`).toBeDefined();
+        expect(param!.type, `${url}#${key}`).toBe("number");
+        expect((param as { unit?: string }).unit, `${url}#${key}`).toBeUndefined();
+      }
+    }
+  });
+
+  it("the 120c reproduction: a registered CSD with an unlisted unitless 'ratio' parameter refuses a 'count' limit", () => {
+    const registry = loadBuiltinCsds();
+    const base = registry.resolve("pcc://capabilities/fdm/v2");
+    registry.register({
+      ...base,
+      url: "pcc://capabilities/ratio-lab/v1",
+      parameters: [
+        { type: "number", key: "ratio", label: "Ratio", required: false, min: 0, max: 1, step: 0.01 } as never,
+      ],
+    } as never);
+    const record = cloneRecord(buildFullValidRecord());
+    record.answers["capability.type"] = typeAnswer("pcc://capabilities/ratio-lab/v1");
+    record.answers["safety.limits"] = limitsAnswer([limit("ratio", "count", 0.1, 0.9)]);
+    const report = validateIntake(record, "accept-jobs", { ...makeAuthority(record), csdRegistry: registry });
+    expect(report.limitErrors.length).toBeGreaterThan(0);
+    expect(report.limitErrors).toEqual([
+      "safety.limits[0]: the CSD parameter declares no unit and is not a reviewed count parameter",
+    ]);
   });
 
   it("refuses duplicate quantities and never intersects them", () => {
@@ -2230,7 +2527,7 @@ describe("validateIntake — estop none is not runnable by default (astra 120b, 
   });
 
   it("does not block milestones that do not imply publish: it stays an honest observation", () => {
-    for (const milestone of ["register", "identify", "register-device", "tier1", "tier2", "optional"] as const) {
+    for (const milestone of ["register", "identify", "register-device", "tier1-intake-complete", "tier2-intake-complete", "optional"] as const) {
       expect(ready(withEstop(none), milestone).safetyBlocks, milestone).toEqual([]);
     }
   });
@@ -2267,6 +2564,98 @@ describe("validateIntake — estop none is not runnable by default (astra 120b, 
   });
 });
 
+describe("normalizeIntakeLimits — limits converted into each CSD parameter's own unit (item 8)", () => {
+  it("returns the same limit for the fixture (fdm infill %, 10-90)", () => {
+    expect(normalizeIntakeLimits(buildFullValidRecord())).toEqual([{ quantity: "infill", unit: "%", min: 10, max: 90 }]);
+  });
+
+  it("converts a limit given in mL into a parameter's own uL unit, exactly (1 mL -> 1000 uL)", () => {
+    const registry = labRegistry();
+    registry.register(
+      CsdSchema.parse({
+        url: "pcc://capabilities/micro-volume-lab/v1",
+        version: "1.0.0",
+        status: "active",
+        name: "Micro volume lab rig",
+        description: "fixture CSD with a uL-declaring parameter",
+        kind: "base",
+        baseDefinition: null,
+        parameters: [
+          {
+            type: "number",
+            key: "reactionVolume",
+            label: "Reaction volume",
+            required: false,
+            min: 0,
+            max: 5000,
+            step: 1,
+            unit: "uL",
+          },
+        ],
+        constraints: [],
+        pricing: { basePrice: "1", currency: "USD" },
+      }),
+    );
+    const record = cloneRecord(buildFullValidRecord());
+    record.answers["capability.type"] = typeAnswer("pcc://capabilities/micro-volume-lab/v1");
+    record.answers["safety.limits"] = limitsAnswer([limit("reactionVolume", "mL", 1, 1)]);
+    const result = normalizeIntakeLimits(record, { ...makeAuthority(record), csdRegistry: registry });
+    expect(result).toEqual([{ quantity: "reactionVolume", unit: "uL", min: 1000, max: 1000 }]);
+  });
+
+  it('a reviewed count parameter comes back with unit "count"', () => {
+    const wallCount = loadBuiltinCsds()
+      .resolve("pcc://capabilities/fdm/v2")
+      .parameters.find((p) => p.key === "wallCount") as { min: number; max: number };
+    const record = cloneRecord(buildFullValidRecord());
+    record.answers["safety.limits"] = limitsAnswer([limit("wallCount", "count", wallCount.min, wallCount.max)]);
+    expect(normalizeIntakeLimits(record)).toEqual([
+      { quantity: "wallCount", unit: "count", min: wallCount.min, max: wallCount.max },
+    ]);
+  });
+
+  it("returns null for a malformed record, a missing/unknown capability.type, a duplicate quantity, an out-of-range limit, or an unbound unitless parameter", () => {
+    expect(normalizeIntakeLimits(null)).toBeNull();
+    expect(normalizeIntakeLimits({ schema: "pcc.device-intake.v1" })).toBeNull();
+    expect(normalizeIntakeLimits("not a record")).toBeNull();
+
+    const noType = cloneRecord(buildFullValidRecord());
+    delete noType.answers["capability.type"];
+    expect(normalizeIntakeLimits(noType)).toBeNull();
+
+    const unknownType = cloneRecord(buildFullValidRecord());
+    unknownType.answers["capability.type"] = typeAnswer("pcc://capabilities/nonexistent/v9");
+    expect(normalizeIntakeLimits(unknownType)).toBeNull();
+
+    const duplicate = cloneRecord(buildFullValidRecord());
+    duplicate.answers["safety.limits"] = limitsAnswer([
+      { quantity: "infill", unit: "%", min: 10, max: 20 },
+      { quantity: "infill", unit: "%", min: 30, max: 40 },
+    ]);
+    expect(normalizeIntakeLimits(duplicate)).toBeNull();
+
+    const outOfRange = cloneRecord(buildFullValidRecord());
+    outOfRange.answers["safety.limits"] = limitsAnswer([{ quantity: "infill", unit: "%", min: 1, max: 200 }]);
+    expect(normalizeIntakeLimits(outOfRange)).toBeNull();
+
+    // An unreviewed unitless parameter ("plain") cannot bind a limit at all (item 6).
+    const unbound = cloneRecord(buildFullValidRecord());
+    unbound.answers["capability.type"] = typeAnswer("pcc://capabilities/test-lab/v1");
+    unbound.answers["safety.limits"] = limitsAnswer([limit("plain", "count", 1, 5)]);
+    expect(normalizeIntakeLimits(unbound, { ...makeAuthority(unbound), csdRegistry: labRegistry() })).toBeNull();
+  });
+
+  it("never throws, even on a throwing getter", () => {
+    const hostile = {
+      schema: "pcc.device-intake.v1",
+      get answers(): never {
+        throw new Error("boom");
+      },
+    };
+    expect(normalizeIntakeLimits(hostile)).toBeNull();
+  });
+});
+
 // ── 13. Tier readiness fails closed (astra 120b, finding 5) ──────────────
 
 const TIER_PRIMITIVE_IDS = [
@@ -2300,136 +2689,84 @@ function withPrimitiveFields<T>(
 const everyTierPrimitiveLive = (): Record<string, { verifierStatus: string }> =>
   Object.fromEntries(TIER_PRIMITIVE_IDS.map((id) => [id, { verifierStatus: "live" }]));
 
-describe("validateIntake — tier readiness fails closed (astra 120b, finding 5)", () => {
+describe("validateIntake — tier readiness fails closed (astra pack 120c, HIGH 5: the stub-primitive gate is REMOVED, item 4)", () => {
   const full = buildFullValidRecord();
 
-  it("injects nothing: with the shipped registry tier1 and tier2 are NOT ready, and stubPrimitives is exact", () => {
-    const tier1 = ready(full, "tier1");
-    expect(tier1.ok).toBe(false);
-    expect(tier1.stubPrimitives).toEqual(["ident.registered_key", "machine.execution_log", "measure.io_test_pair"]);
-    expect(tier1.insubstantial).toEqual([]);
-    expect(tier1.missing).toEqual([]);
+  it("with a full authority and the shipped registry, tier1-intake-complete and tier2-intake-complete are ok", () => {
+    const tier1 = ready(full, "tier1-intake-complete");
+    expect(tier1, JSON.stringify(tier1)).toMatchObject({ ok: true, insubstantial: [], missing: [] });
+    expect(tier1).not.toHaveProperty("stubPrimitives");
 
-    const tier2 = ready(full, "tier2");
-    expect(tier2.ok).toBe(false);
-    expect(tier2.stubPrimitives).toEqual([
-      "approval.expert",
-      "capture.photo_nonced",
-      "ident.registered_key",
-      "machine.execution_log",
-      "measure.io_test_pair",
-    ]);
-    expect(tier2.insubstantial).toEqual([]);
+    const tier2 = ready(full, "tier2-intake-complete");
+    expect(tier2, JSON.stringify(tier2)).toMatchObject({ ok: true, insubstantial: [], missing: [] });
+    expect(tier2).not.toHaveProperty("stubPrimitives");
   });
 
-  it("only the tier milestones look at primitives", () => {
-    for (const milestone of INTAKE_MILESTONES) {
-      if (milestone === "tier1" || milestone === "tier2") continue;
-      const report = ready(full, milestone);
-      expect(report.stubPrimitives, milestone).toEqual([]);
-      expect(report.insubstantial, milestone).toEqual([]);
-    }
-  });
-
-  it("takes the status from the evidence registry, not from what the field declared", () => {
-    // fields.ts declares every one of these as "stub"; flipping only the registry changes the result.
-    withPrimitiveFields({ "machine.execution_log": { verifierStatus: "live" } }, () => {
-      expect(ready(full, "tier1").stubPrimitives).toEqual(["ident.registered_key", "measure.io_test_pair"]);
-    });
-    expect(ready(full, "tier1").stubPrimitives).toContain("machine.execution_log"); // restored
-  });
-
-  it("is ready when every mapped primitive is live and the answers are substantive", () => {
+  it("the 120c reproduction: flipping registry verifierStatus to live (try/finally restore) does not change any report", () => {
+    const before: Record<string, unknown> = {};
+    for (const milestone of INTAKE_MILESTONES) before[milestone] = ready(full, milestone);
     withPrimitiveFields(everyTierPrimitiveLive(), () => {
-      for (const milestone of ["tier1", "tier2"] as const) {
-        const report = ready(full, milestone);
-        expect(report, `${milestone}: ${JSON.stringify(report)}`).toMatchObject({
-          ok: true,
-          stubPrimitives: [],
-          insubstantial: [],
-        });
+      for (const milestone of INTAKE_MILESTONES) {
+        expect(ready(full, milestone), milestone).toEqual(before[milestone]);
       }
     });
-  });
-
-  it("a primitive that is live but not active, or active but planned, is still a stub", () => {
-    for (const fields of [
-      { status: "reserved", verifierStatus: "live" },
-      { status: "deprecated", verifierStatus: "live" },
-      { status: "active", verifierStatus: "planned" },
-      { status: "active", verifierStatus: "stub" },
-    ]) {
-      withPrimitiveFields({ ...everyTierPrimitiveLive(), "machine.execution_log": fields }, () => {
-        const report = ready(full, "tier1");
-        expect(report.ok, JSON.stringify(fields)).toBe(false);
-        expect(report.stubPrimitives, JSON.stringify(fields)).toEqual(["machine.execution_log"]);
-      });
+    // ... and restoring leaves every report exactly as it was.
+    for (const milestone of INTAKE_MILESTONES) {
+      expect(ready(full, milestone), milestone).toEqual(before[milestone]);
     }
   });
 
-  it("a field that maps to a primitive the registry does not know is a stub too", () => {
-    const field = INTAKE_FIELDS.find((f) => f.id === "evidence.controllerRunLog")!;
-    const ref = field.evidencePrimitive as { id: string };
-    const original = ref.id;
-    ref.id = "no.such.primitive";
-    try {
-      withPrimitiveFields(everyTierPrimitiveLive(), () => {
-        const report = ready(full, "tier1");
-        expect(report.ok).toBe(false);
-        expect(report.stubPrimitives).toEqual(["no.such.primitive"]);
-      });
-    } finally {
-      ref.id = original;
+  it("the report has no stubPrimitives key, for any milestone", () => {
+    for (const milestone of INTAKE_MILESTONES) {
+      expect(ready(full, milestone), milestone).not.toHaveProperty("stubPrimitives");
     }
-    expect(field.evidencePrimitive!.id).toBe("machine.execution_log");
   });
 
   it("every tier field that maps to an evidence primitive has a substance rule, and nothing else is ruled", () => {
     const mapped = INTAKE_FIELDS.filter(
-      (f) => f.evidencePrimitive && f.requiredFor.some((m) => m === "tier1" || m === "tier2"),
+      (f) => f.evidencePrimitive && f.requiredFor.some((m) => m === "tier1-intake-complete" || m === "tier2-intake-complete"),
     ).map((f) => f.id);
     expect(mapped.length).toBeGreaterThan(0);
     for (const id of mapped) expect(TIER_SUBSTANCE_RULE_FIELDS, id).toContain(id);
     for (const id of TIER_SUBSTANCE_RULE_FIELDS) {
       const field = INTAKE_FIELDS.find((f) => f.id === id)!;
-      expect(field.requiredFor.some((m) => m === "tier1" || m === "tier2"), id).toBe(true);
+      expect(field.requiredFor.some((m) => m === "tier1-intake-complete" || m === "tier2-intake-complete"), id).toBe(true);
     }
     // operatorPresence is the one tier field with no rule: always, sometimes and never are all honest.
     expect(TIER_SUBSTANCE_RULE_FIELDS).not.toContain("evidence.operatorPresence");
   });
 
-  describe("an answer that satisfies its schema but proves nothing is insubstantial", () => {
+  describe("an answer that satisfies its schema but proves nothing is insubstantial (unchanged by item 4)", () => {
     const camera = { seesWorkArea: true, seesOutput: true, mount: "fixed", captureDeviceId: "cam-1" };
-    const rows: [string, string, "tier1" | "tier2", unknown][] = [
-      ["calibration.lastDate", "an impossible day", "tier1", "2026-02-30"],
-      ["calibration.lastDate", "month 13", "tier1", "2026-13-01"],
-      ["calibration.lastDate", "month 00", "tier1", "2026-00-10"],
-      ["calibration.lastDate", "Feb 29 in a common year", "tier1", "2023-02-29"],
-      ["calibration.lastDate", "year 0000", "tier1", "0000-01-01"],
-      ["calibration.procedureRef", "blank", "tier1", "   "],
-      ["evidence.executorDeviceId", "blank", "tier1", "  "],
-      ["evidence.observerDeviceIds", "a blank entry", "tier1", ["cam-1", "  "]],
-      ["evidence.executionMode", "mock", "tier1", "mock"],
-      ["evidence.executionMode", "dry_run", "tier1", "dry_run"],
-      ["evidence.controllerRunLog", "controller does not export its own log", "tier1", { exportsOwnLogPerJob: false, access: "api" }],
-      ["evidence.instrumentSignsOutput", "instrument does not sign", "tier1", false],
-      ["evidence.referenceSample", "none available", "tier1", { available: false }],
-      ["evidence.referenceSample", "available but no expected result", "tier1", { available: true }],
-      ["evidence.referenceSample", "blank expected result", "tier1", { available: true, expectedResultRef: "  " }],
-      ["evidence.camera", "sees neither", "tier2", { ...camera, seesWorkArea: false, seesOutput: false }],
-      ["evidence.camera", "sees the work area but not the output", "tier2", { ...camera, seesOutput: false }],
-      ["evidence.camera", "sees the output but not the work area", "tier2", { ...camera, seesWorkArea: false }],
-      ["evidence.camera", "blank capture device", "tier2", { ...camera, captureDeviceId: "  " }],
-      ["evidence.approver", "blank name", "tier2", { name: "   " }],
+    const rows: [string, string, "tier1-intake-complete" | "tier2-intake-complete", unknown][] = [
+      ["calibration.lastDate", "an impossible day", "tier1-intake-complete", "2026-02-30"],
+      ["calibration.lastDate", "month 13", "tier1-intake-complete", "2026-13-01"],
+      ["calibration.lastDate", "month 00", "tier1-intake-complete", "2026-00-10"],
+      ["calibration.lastDate", "Feb 29 in a common year", "tier1-intake-complete", "2023-02-29"],
+      ["calibration.lastDate", "year 0000", "tier1-intake-complete", "0000-01-01"],
+      ["calibration.procedureRef", "blank", "tier1-intake-complete", "   "],
+      ["evidence.executorDeviceId", "blank", "tier1-intake-complete", "  "],
+      ["evidence.observerDeviceIds", "a blank entry", "tier1-intake-complete", ["cam-1", "  "]],
+      ["evidence.executionMode", "mock", "tier1-intake-complete", "mock"],
+      ["evidence.executionMode", "dry_run", "tier1-intake-complete", "dry_run"],
+      ["evidence.controllerRunLog", "controller does not export its own log", "tier1-intake-complete", { exportsOwnLogPerJob: false, access: "api" }],
+      ["evidence.instrumentSignsOutput", "instrument does not sign", "tier1-intake-complete", false],
+      ["evidence.referenceSample", "none available", "tier1-intake-complete", { available: false }],
+      ["evidence.referenceSample", "available but no expected result", "tier1-intake-complete", { available: true }],
+      ["evidence.referenceSample", "blank expected result", "tier1-intake-complete", { available: true, expectedResultRef: "  " }],
+      ["evidence.camera", "sees neither", "tier2-intake-complete", { ...camera, seesWorkArea: false, seesOutput: false }],
+      ["evidence.camera", "sees the work area but not the output", "tier2-intake-complete", { ...camera, seesOutput: false }],
+      ["evidence.camera", "sees the output but not the work area", "tier2-intake-complete", { ...camera, seesWorkArea: false }],
+      ["evidence.camera", "blank capture device", "tier2-intake-complete", { ...camera, captureDeviceId: "  " }],
+      ["evidence.approver", "blank name", "tier2-intake-complete", { name: "   " }],
     ];
 
     it.each(rows)("%s: %s (%s)", (fieldId, _why, milestone, bad) => {
       const record = cloneRecord(full);
       record.answers[fieldId] = human(bad);
-      const report = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, milestone));
+      const report = ready(record, milestone);
       expect(report.ok).toBe(false);
       expect(report.insubstantial).toEqual([fieldId]);
-      expect(report.stubPrimitives).toEqual([]);
       expect(report.missing).toEqual([]);
       expect(report.invalidFields).toEqual([]);
     });
@@ -2439,7 +2776,7 @@ describe("validateIntake — tier readiness fails closed (astra 120b, finding 5)
       record.answers["calibration.lastDate"] = human("2024-02-29");
       record.answers["evidence.observerDeviceIds"] = human([]);
       record.answers["evidence.operatorPresence"] = human("never");
-      const report = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, "tier2"));
+      const report = ready(record, "tier2-intake-complete");
       expect(report.ok).toBe(true);
     });
 
@@ -2447,10 +2784,8 @@ describe("validateIntake — tier readiness fails closed (astra 120b, finding 5)
       const weak = cloneRecord(full);
       weak.answers["evidence.camera"] = human({ ...camera, seesWorkArea: false, seesOutput: false });
       weak.answers["evidence.controllerRunLog"] = human({ exportsOwnLogPerJob: false, access: "api" });
-      withPrimitiveFields(everyTierPrimitiveLive(), () => {
-        expect(ready(weak, "tier1").insubstantial).toEqual(["evidence.controllerRunLog"]);
-        expect(ready(weak, "tier2").insubstantial).toEqual(["evidence.camera", "evidence.controllerRunLog"]);
-      });
+      expect(ready(weak, "tier1-intake-complete").insubstantial).toEqual(["evidence.controllerRunLog"]);
+      expect(ready(weak, "tier2-intake-complete").insubstantial).toEqual(["evidence.camera", "evidence.controllerRunLog"]);
       for (const milestone of ["publish", "accept-jobs", "get-paid"] as const) {
         const report = ready(weak, milestone);
         expect(report.insubstantial, milestone).toEqual([]);
@@ -2462,20 +2797,11 @@ describe("validateIntake — tier readiness fails closed (astra 120b, finding 5)
       const record = cloneRecord(full);
       delete record.answers["evidence.camera"];
       record.answers["evidence.approver"] = human("A. Approver"); // a string, not {name}
-      const report = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, "tier2"));
+      const report = ready(record, "tier2-intake-complete");
       expect(report.missing).toEqual(["evidence.camera", "evidence.approver"]);
       expect(report.invalidFields).toEqual(["evidence.approver"]);
       expect(report.insubstantial).toEqual([]);
     });
-  });
-
-  it("stub primitives and insubstantial answers are reported together, each on its own list", () => {
-    const record = cloneRecord(full);
-    record.answers["evidence.instrumentSignsOutput"] = human(false);
-    const report = ready(record, "tier1");
-    expect(report.ok).toBe(false);
-    expect(report.stubPrimitives).toEqual(["ident.registered_key", "machine.execution_log", "measure.io_test_pair"]);
-    expect(report.insubstantial).toEqual(["evidence.instrumentSignsOutput"]);
   });
 });
 
@@ -2620,35 +2946,46 @@ describe("validateIntake — object keys come from a closed ASCII vocabulary (as
     const key = `priv${cyrillicA}teKey`;
     const report = ready(withAnswer("evidence.camera", cameraWith({ [key]: "x" })), "register");
     expect(report.ok).toBe(false);
-    expect(report.nonAsciiKeys).toEqual(["answers/evidence.camera/value/priv\\u{430}teKey"]);
+    // "evidence.camera" and "value" are vocabulary members; the key itself is not, so it is hashed (item 5).
+    expect(report.nonAsciiKeys).toEqual([`answers/evidence.camera/value/${unknownKeyToken(key)}`]);
     expect(report.invalidFields).toEqual(["evidence.camera"]); // the strict field schema refuses it too
     expect(JSON.stringify(report)).not.toContain(key);
   });
 
-  it("a non-ASCII key anywhere in a value or a source is reported with its full path", () => {
-    const deep = human({ available: true, expectedResultRef: "x", nested: { list: [{ [`k${cyrillicA}`]: 1 }] } });
+  it("a non-ASCII key anywhere in a value or a source is reported with its full path — every out-of-vocabulary segment on that path is also hashed (item 5)", () => {
+    const nonAsciiKey = `k${cyrillicA}`;
+    const deep = human({ available: true, expectedResultRef: "x", nested: { list: [{ [nonAsciiKey]: 1 }] } });
     const report = ready(withAnswer("evidence.referenceSample", deep), "register");
-    expect(report.nonAsciiKeys).toEqual(["answers/evidence.referenceSample/value/nested/list/0/k\\u{430}"]);
+    // "nested" and "list" are not themselves in the vocabulary either, so they are ALSO hashed,
+    // not just the non-ASCII leaf key; "0" is a numeric array index and stays literal.
+    expect(report.nonAsciiKeys).toEqual([
+      `answers/evidence.referenceSample/value/${unknownKeyToken("nested")}/${unknownKeyToken("list")}/0/${unknownKeyToken(nonAsciiKey)}`,
+    ]);
 
+    const sourceKey = `s${String.fromCodePoint(0xe9)}ction`;
     const sourced = withAnswer("calibration.procedureRef", {
       value: "Prusa bed-leveling procedure v2",
       provenance: "confirmed",
-      source: { doc: "manual", [`s${String.fromCodePoint(0xe9)}ction`]: "x" },
+      source: { doc: "manual", [sourceKey]: "x" },
     });
     const sourcedReport = ready(sourced, "register");
     expect(sourcedReport.ok).toBe(false);
-    expect(sourcedReport.nonAsciiKeys).toEqual(["answers/calibration.procedureRef/source/s\\u{e9}ction"]);
+    // "source" is a structural vocabulary key, so only the leaf key is hashed here.
+    expect(sourcedReport.nonAsciiKeys).toEqual([`answers/calibration.procedureRef/source/${unknownKeyToken(sourceKey)}`]);
     // the strict source schema fails the parse, and the key is still reported from the raw input
     expect(sourcedReport.structuralErrors).toEqual(["answers/calibration.procedureRef/source: unrecognized_keys"]);
   });
 
-  it("a non-ASCII field id is reported too (as unknown and as a non-ASCII key)", () => {
+  it("a non-ASCII field id is reported too (as unknown and as a non-ASCII key), both as its token", () => {
+    const fieldId = `caf${String.fromCodePoint(0xe9)}.menu`;
     const record = cloneRecord(buildFullValidRecord());
-    (record.answers as Record<string, IntakeAnswer>)[`caf${String.fromCodePoint(0xe9)}.menu`] = human("x");
+    (record.answers as Record<string, IntakeAnswer>)[fieldId] = human("x");
     const report = ready(record, "register");
     expect(report.ok).toBe(false);
-    expect(report.nonAsciiKeys).toEqual(["answers/caf\\u{e9}.menu"]);
-    expect(report.unknownFields).toEqual(["caf\\u{e9}.menu"]);
+    // The whole field id is one path segment (field ids are literal map keys, not split on "."),
+    // not itself in the vocabulary, so it is hashed — both as a non-ASCII key and as an unknown field.
+    expect(report.nonAsciiKeys).toEqual([`answers/${unknownKeyToken(fieldId)}`]);
+    expect(report.unknownFields).toEqual([unknownKeyToken(fieldId)]);
   });
 
   it("an all-ASCII record, and non-ASCII text in VALUES, are not affected", () => {
@@ -2662,25 +2999,29 @@ describe("validateIntake — object keys come from a closed ASCII vocabulary (as
   it("ASCII is up to and including DEL (0x7f); the first non-ASCII character is 0x80", () => {
     const camera = (key: string) => cameraWith({ [key]: "x" });
     expect(ready(withAnswer("evidence.camera", camera(`a${String.fromCharCode(0x7f)}`)), "register").nonAsciiKeys).toEqual([]);
-    expect(ready(withAnswer("evidence.camera", camera(`a${String.fromCharCode(0x80)}`)), "register").nonAsciiKeys).toEqual([
-      "answers/evidence.camera/value/a\\u{80}",
+    const key80 = `a${String.fromCharCode(0x80)}`;
+    expect(ready(withAnswer("evidence.camera", camera(key80)), "register").nonAsciiKeys).toEqual([
+      `answers/evidence.camera/value/${unknownKeyToken(key80)}`,
     ]);
   });
 
   it("never echoes a secret-looking non-ASCII key", () => {
     const key = `${FAKE.pem}${cyrillicA}`;
     const report = ready(withAnswer("evidence.camera", cameraWith({ [key]: "x" })), "register");
-    expect(report.nonAsciiKeys).toEqual(["answers/evidence.camera/value/[redacted:pem]"]);
+    expect(report.nonAsciiKeys).toEqual([`answers/evidence.camera/value/${unknownKeyToken(key)}`]);
     expect(JSON.stringify(report)).not.toContain("PRIVATE KEY");
   });
 
   it("finds a non-ASCII key at any depth without overflowing the stack", () => {
-    let nested: unknown = { [`z${cyrillicA}`]: 1 };
+    const nonAsciiKey = `z${cyrillicA}`;
+    let nested: unknown = { [nonAsciiKey]: 1 };
     for (let i = 0; i < 50000; i++) nested = { a: nested };
     const report = ready(withAnswer("evidence.camera", cameraWith({ extra: nested })), "register");
     expect(report.ok).toBe(false);
     expect(report.nonAsciiKeys).toHaveLength(1);
-    expect(report.nonAsciiKeys[0]!.endsWith("/z\\u{430}")).toBe(true);
+    // "a" and "extra" are not in the vocabulary either, so they are hashed too — only the final
+    // (leaf) segment is deterministically the token of the non-ASCII key itself.
+    expect(report.nonAsciiKeys[0]!.endsWith(`/${unknownKeyToken(nonAsciiKey)}`)).toBe(true);
   });
 
   describe("forbidden keys are compared after NFKC normalization", () => {
@@ -2694,14 +3035,16 @@ describe("validateIntake — object keys come from a closed ASCII vocabulary (as
       expect(report.ok).toBe(false);
       expect(report.forbiddenKeys).toHaveLength(1);
       expect(report.forbiddenKeys[0]!.startsWith("evidence.referenceSample.")).toBe(true);
-      expect(report.forbiddenKeys[0]).not.toContain(key); // written as \u{hex}, not echoed raw
+      expect(report.forbiddenKeys[0]).not.toContain(key); // the CANONICAL spelling is shown, never the raw key
       expect(report.nonAsciiKeys).toHaveLength(1);
     });
 
-    it("a ligature spelling (the fi in verified) is a forbidden key too", () => {
+    it("a ligature spelling (the fi in verified) is a forbidden key too, reported as the CANONICAL spelling (item 5)", () => {
       const key = `veri${String.fromCodePoint(0xfb01)}ed`;
       const report = ready(sampleWith(key), "register");
-      expect(report.forbiddenKeys).toEqual([`evidence.referenceSample.veri\\u{fb01}ed`]);
+      // NFKC-folds the ligature to "fi", matching the canonical "verified" — forbiddenKeys shows
+      // that canonical spelling, never a representation (escaped or hashed) of the raw key.
+      expect(report.forbiddenKeys).toEqual(["evidence.referenceSample.verified"]);
     });
 
     it("a look-alike from another script is not folded by NFKC — it is refused as a non-ASCII key instead", () => {
@@ -2712,9 +3055,9 @@ describe("validateIntake — object keys come from a closed ASCII vocabulary (as
       expect(report.ok).toBe(false);
     });
 
-    it("the ASCII variants keep matching", () => {
+    it("the ASCII variants keep matching, reported as the canonical spelling (item 5)", () => {
       const report = ready(sampleWith("Private_Key"), "register");
-      expect(report.forbiddenKeys).toEqual(["evidence.referenceSample.Private_Key"]);
+      expect(report.forbiddenKeys).toEqual(["evidence.referenceSample.privateKey"]);
     });
   });
 });
@@ -2779,7 +3122,11 @@ describe("validateIntake — seeded hostile-input fuzz", () => {
         eventId,
       });
     }
-    return { resolveConfirmation: (id) => events.get(id) ?? null, payoutDestinationExists: () => payout };
+    return {
+      subject: DEFAULT_SUBJECT,
+      resolveConfirmation: (id) => events.get(id) ?? null,
+      payoutDestination: (operatorRef) => ({ operatorRef, exists: payout }),
+    };
   }
 
   it("never throws, and an ok report implies every component check is clean (2000 cases)", () => {
@@ -2821,7 +3168,8 @@ describe("validateIntake — seeded hostile-input fuzz", () => {
           if (!answer.confirmation) violations.push(`${label}: ok, but ${field.id} has no confirmation reference`);
         }
       }
-      if (implied.includes("tier1") || implied.includes("tier2")) violations.push(`${label}: ok for a tier on stub primitives`);
+      // (item 4: the stub-primitive gate is removed — a tier-intake milestone being "ok" is now
+      // unremarkable on its own, so there is no longer an invariant to check here.)
       if (Object.keys(parsed.data.answers).some((k) => /[^\x00-\x7f]/.test(k))) {
         violations.push(`${label}: ok with a non-ASCII field id`);
       }
@@ -2940,26 +3288,21 @@ describe("astra pack 120b", () => {
     expect(report.safetyBlocks).toEqual(['safety.estop: mechanism "none" is not approved for this capability']);
   });
 
-  it("HIGH 5a: tier2 is not ready while its required primitives are stub", () => {
-    const report = ready(buildFullValidRecord(), "tier2");
-    expect(report.ok).toBe(false);
-    expect(report.stubPrimitives).toEqual([
-      "approval.expert",
-      "capture.photo_nonced",
-      "ident.registered_key",
-      "machine.execution_log",
-      "measure.io_test_pair",
-    ]);
+  it("HIGH 5a (re-framed, astra pack 120c): tier2-intake-complete is ready regardless of the evidence registry's mutable verifierStatus — the stub-primitive gate is removed (item 4)", () => {
+    const report = ready(buildFullValidRecord(), "tier2-intake-complete");
+    expect(report.ok).toBe(true);
+    expect(report).not.toHaveProperty("stubPrimitives");
+    // Flipping the registry's verifierStatus changes nothing — it is never consulted.
+    const flipped = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(buildFullValidRecord(), "tier2-intake-complete"));
+    expect(flipped).toEqual(report);
   });
 
-  it("HIGH 5b: a camera that sees neither work area nor output does not count for tier2", () => {
+  it("HIGH 5b: a camera that sees neither work area nor output does not count for tier2-intake-complete (the substance rule itself is unchanged by item 4)", () => {
     const answer = human({ seesWorkArea: false, seesOutput: false, mount: "fixed", captureDeviceId: "cam-1" });
     const record = withAnswer("evidence.camera", answer);
-    expect(ready(record, "tier2").ok).toBe(false);
-    // ... and it is the camera, not just the stubs, that fails once the primitives are live
-    const live = withPrimitiveFields(everyTierPrimitiveLive(), () => ready(record, "tier2"));
-    expect(live.ok).toBe(false);
-    expect(live.insubstantial).toEqual(["evidence.camera"]);
+    const report = ready(record, "tier2-intake-complete");
+    expect(report.ok).toBe(false);
+    expect(report.insubstantial).toEqual(["evidence.camera"]);
   });
 
   it("HIGH 5c: a malformed execution mode caps at 0, not the no-cap 3", () => {
@@ -3005,5 +3348,155 @@ describe("astra pack 120b", () => {
   it("MEDIUM 8d: an instruction in searches is caught too", () => {
     const entry = RESEARCH_LIBRARY[0]!;
     expect(entryInstructsExecution({ ...entry, searches: [...entry.searches, "then flash firmware to the device"] })).toBe(true);
+  });
+});
+
+// ── 17. astra pack 120c — ported reproductions (commit 44e965fa) ─────────
+// Each case below asserts the CORRECT (new) behaviour, adapted to the
+// subject-scoped IntakeAuthority API. Ported from
+// scratchpad/repro-120c.test.ts; HIGH 5 is re-framed as "flipping
+// verifierStatus does not change readiness" (the stub-primitive gate is
+// removed, item 4).
+
+describe("astra pack 120c", () => {
+  /** buildFullValidRecord() with evidence.executorDeviceId overridden to `device`. */
+  function fullFor(device = "dev-1"): IntakeRecord {
+    const record = cloneRecord(buildFullValidRecord());
+    record.answers["evidence.executorDeviceId"] = human(device);
+    return record;
+  }
+
+  /** An authority authenticated for `device`, holding an honest event for every
+   *  confirmation-required answer in `record` (events are also scoped to `device`). */
+  function authorityFor(record: IntakeRecord, device: string, extra: Partial<IntakeAuthority> = {}): IntakeAuthority {
+    const events = new Map<string, IntakeConfirmationEvent>();
+    for (const [fieldId, a] of Object.entries(record.answers)) {
+      if (!a.confirmation) continue;
+      events.set(a.confirmation.eventId, {
+        schema: "pcc.intake-confirmation.v1",
+        eventId: a.confirmation.eventId,
+        fieldId,
+        valueHash: intakeValueHash(a.value),
+        ...(a.source ? { sourceHash: intakeValueHash(a.source) } : {}),
+        confirmedBy: { principal: "operator:acme", authMethod: "siwe" },
+        subject: { deviceRef: device, projectRef: "proj-1" },
+        sequence: 1,
+        confirmedAt: "2026-09-30T12:00:00Z",
+        challenge: "challenge-1",
+        supersededBy: null,
+        revoked: false,
+      });
+    }
+    return {
+      subject: { operatorRef: "operator:acme", deviceRef: device, projectRef: "proj-1" },
+      resolveConfirmation: (id) => events.get(id) ?? null,
+      payoutDestination: (operatorRef) => ({ operatorRef, exists: true }),
+      ...extra,
+    };
+  }
+
+  it("control: the full record, confirmed on its own device, is publish-ready", () => {
+    expect(validateIntake(fullFor("dev-1"), "publish", authorityFor(fullFor("dev-1"), "dev-1")).ok).toBe(true);
+  });
+
+  it("CRITICAL 1a: an sk-proj- credential in device.description is detected", () => {
+    const secret = "sk-" + "proj-" + "A".repeat(40);
+    expect(
+      scanIntakeStrings({ answers: { "device.description": { value: `key ${secret}`, provenance: "human" } } }).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("CRITICAL 1b: '1 Hacker Way' is detected as a street address", () => {
+    expect(
+      scanIntakeStrings({ answers: { "device.description": { value: "It sits at 1 Hacker Way", provenance: "human" } } })
+        .length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("CRITICAL 1c: an unrecognized credential used as an answer key is never echoed in the report", () => {
+    const secret = "sk-" + "proj-" + "B".repeat(40);
+    const r = fullFor();
+    const input = { schema: r.schema, answers: { ...r.answers, [secret]: human("x") } };
+    expect(JSON.stringify(validateIntake(input, "register"))).not.toContain(secret);
+  });
+
+  it("HIGH 3: the subject is what matters, NOT the record — B validated under subject dev-1 passes; the same events under a dev-2 subject fail", () => {
+    const recordB = fullFor("dev-2"); // claims dev-2 via evidence.executorDeviceId only
+    const eventsForDev1 = authorityFor(fullFor("dev-1"), "dev-1");
+    // The record cannot pick its own subject: B's dev-2 claim is just a data field, irrelevant to confirmation.
+    expect(validateIntake(recordB, "publish", eventsForDev1).ok).toBe(true);
+    // The SAME events, scoped to a dev-2 subject instead, no longer confirm (they were made for dev-1).
+    const asDev2 = authorityFor(fullFor("dev-1"), "dev-1", {
+      subject: { operatorRef: "operator:acme", deviceRef: "dev-2", projectRef: "proj-1" },
+    });
+    expect(validateIntake(recordB, "publish", asDev2).ok).toBe(false);
+  });
+
+  it("MEDIUM (was HIGH 4): a unitless CSD parameter that is not a count does not accept a 'count' limit", () => {
+    const registry = loadBuiltinCsds();
+    const base = registry.resolve("pcc://capabilities/fdm/v2");
+    registry.register({
+      ...base,
+      url: "pcc://capabilities/ratio-lab/v1",
+      parameters: [
+        { type: "number", key: "ratio", label: "Ratio", required: false, min: 0, max: 1, step: 0.01 } as never,
+      ],
+    } as never);
+    const r = fullFor();
+    r.answers["capability.type"] = {
+      ...human("pcc://capabilities/ratio-lab/v1"),
+      confirmation: { eventId: "evt-capability.type" },
+    };
+    r.answers["safety.limits"] = {
+      ...confirmed([{ quantity: "ratio", unit: "count", min: 0.1, max: 0.9 }]),
+      confirmation: { eventId: "evt-safety.limits" },
+    };
+    const report = validateIntake(r, "accept-jobs", { ...authorityFor(r, "dev-1"), csdRegistry: registry });
+    expect(report.limitErrors.length).toBeGreaterThan(0);
+  });
+
+  it("HIGH 5 (re-framed, item 4): flipping mutable verifierStatus metadata does not change tier readiness", () => {
+    const ids = [
+      "ident.registered_key",
+      "machine.execution_log",
+      "measure.io_test_pair",
+      "approval.expert",
+      "capture.photo_nonced",
+    ];
+    const touched = EVIDENCE_PRIMITIVES.filter((p) => ids.includes(p.id));
+    const before = touched.map((p) => p.verifierStatus);
+    const record = fullFor();
+    const authority = authorityFor(record, "dev-1");
+    const reportBefore = validateIntake(record, "tier2-intake-complete", authority);
+    expect(reportBefore.ok).toBe(true); // substantive answers, no gate left to fail
+    try {
+      for (const p of touched) (p as { verifierStatus: string }).verifierStatus = "live";
+      expect(validateIntake(record, "tier2-intake-complete", authority)).toEqual(reportBefore);
+    } finally {
+      touched.forEach((p, i) => ((p as { verifierStatus: string }).verifierStatus = before[i]!));
+    }
+  });
+
+  it("MEDIUM 8: 'Do not install A and execute B.' instructs execution", () => {
+    expect(entryInstructsExecution({ ...RESEARCH_LIBRARY[0]!, prompt: "Do not install A and execute B." })).toBe(true);
+  });
+
+  it("MEDIUM (new): a research citation's contentHash can flow into an answer's source, and is not a secret", () => {
+    const contentHash = "sha256:" + "ab".repeat(32);
+    expect(IntakeSourceSchema.safeParse({ doc: "manual", section: "specs", contentHash }).success).toBe(true);
+    const hits = scanIntakeStrings({
+      answers: {
+        "calibration.procedureRef": {
+          value: "v2",
+          provenance: "confirmed",
+          source: { doc: "manual", section: "specs", contentHash },
+        },
+      },
+    });
+    expect(hits).toEqual([]);
+  });
+
+  it("registry sanity for the unitless case (CsdRegistry is a class)", () => {
+    expect(typeof CsdRegistry).toBe("function");
   });
 });
