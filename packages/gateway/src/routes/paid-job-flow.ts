@@ -1458,7 +1458,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         settlementStatus = "evidence_submitted";
       }
 
-      pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
+      // "completed" only for a settled job. Real settlement that has only submitted its evidence is still
+      // under way (it waits for the challenge window and a release receipt), so it is "started" (astra A07d N2).
+      pipelineTelemetry.emit(jobId, "settlement_complete", settlementStatus === "settled" ? "completed" : "started", {
         metadata: {
           bundleId,
           bundleHash,
@@ -1793,7 +1795,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       }
       reclaimed = false;
 
-      pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
+      // As in /complete: "completed" only when this resume settled the job (astra A07d N2).
+      pipelineTelemetry.emit(jobId, "settlement_complete", settlementStatus === "settled" ? "completed" : "started", {
         metadata: {
           path: "resume-settlement",
           bundleId,

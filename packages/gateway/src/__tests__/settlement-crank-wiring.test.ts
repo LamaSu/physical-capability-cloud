@@ -80,6 +80,7 @@ import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { verifyWithOracle } from "../services/oracle-client.js";
+import { pipelineTelemetry } from "../telemetry.js";
 
 const KERNEL = "kernel-biolab-01";
 const CAP = "liquid-handler";
@@ -300,5 +301,68 @@ describe("/complete routes the on-chain settle through driveSettlement", () => {
     // Attestation leg: hash + minted UID (self-healing drive carries the hash too).
     expect(h.driveSettlement.mock.calls[1][2].evidenceBundleHash).toBeDefined();
     expect(h.driveSettlement.mock.calls[1][2].easUid).toBe(h.easUid);
+  });
+});
+
+describe("settlement_complete is announced as completed only for a settled job (astra A07d N2)", () => {
+  /** This job's settlement_complete telemetry statuses, in order. */
+  const settlementStatuses = (spy: ReturnType<typeof vi.spyOn>, jobId: string) =>
+    spy.mock.calls.filter(([id, phase]) => id === jobId && phase === "settlement_complete").map(([, , status]) => status);
+  const awaitingWindow = () =>
+    h.driveSettlement
+      .mockResolvedValueOnce({
+        escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Evidenced",
+        outcome: "needs_input", needs: "eas_uid", settled: false, steps: [], stepId: "0x" + "11".repeat(32),
+      })
+      .mockResolvedValueOnce({
+        escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Attested",
+        outcome: "awaiting_challenge_window", settled: false, challengeWindowEnd: 9_999_999_999,
+        steps: [{ action: "submitAttestation", result: "landed", txHash: "0xat" }],
+      });
+
+  it("resume: a settlement still awaiting its window is started, not completed", async () => {
+    const { jobId } = await makeJobWithRealEscrow("n2-resume-wait");
+    trap(jobId, "n2-resume-wait");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "false";
+    awaitingWindow();
+    const spy = vi.spyOn(pipelineTelemetry, "emit");
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+    expect(res.json().status).toBe("evidence_submitted");
+    expect(settlementStatuses(spy, jobId)).toEqual(["started"]);
+    spy.mockRestore();
+  });
+
+  it("resume: a settlement the chain released is completed", async () => {
+    const { jobId } = await makeJobWithRealEscrow("n2-resume-released");
+    trap(jobId, "n2-resume-released");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "false";
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Released",
+      outcome: "released", settled: true, steps: [{ action: "release", result: "landed", txHash: "0xrel" }],
+      stepId: "0x" + "11".repeat(32),
+    });
+    const spy = vi.spyOn(pipelineTelemetry, "emit");
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+    expect(res.json().status).toBe("settled");
+    expect(settlementStatuses(spy, jobId)).toEqual(["completed"]);
+    spy.mockRestore();
+  });
+
+  it("/complete in real settlement: evidence submitted is started, not completed", async () => {
+    const { jobId } = await makeJobWithRealEscrow("n2-complete");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "false";
+    awaitingWindow();
+    const spy = vi.spyOn(pipelineTelemetry, "emit");
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("evidence_submitted");
+    expect(settlementStatuses(spy, jobId)).toEqual(["started"]);
+    spy.mockRestore();
   });
 });

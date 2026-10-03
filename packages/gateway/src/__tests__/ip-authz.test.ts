@@ -1,0 +1,813 @@
+/**
+ * N10a — /api/ip/* authorization (Gate A). WP-E's negative tests, each paired with its allowed case
+ * so the check is proven in both directions:
+ *   - a non-owner cannot set licensing terms, set splits or claim; the owner can;
+ *   - an IP with no recorded owner cannot be changed by anyone;
+ *   - an API key is not proof of identity, even when its operatorId equals the owner's wallet;
+ *   - settle-royalties: only a party to the job, only a released milestone, revenue and payer from
+ *     server state (a disagreeing body is 409), and a failed payment fails the request;
+ *   - claim records the caller; pay and dispute act as the caller only.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import Fastify, { type FastifyInstance } from "fastify";
+import { privateKeyToAccount } from "viem/accounts";
+import { kernelSigningProofMessage } from "@pcc/kernel";
+import { getLicensingEngine, getStoryIPService, resetLicensingEngine, resetStoryIPService, type LicenseEvaluation } from "@pcc/contracts";
+import { ipRoutes, recordedIpOwner } from "../routes/ip.js";
+import { capabilityRoutes } from "../routes/capabilities.js";
+import { kernelRoutes } from "../routes/kernels.js";
+import { apiGate } from "../middleware/api-gate.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
+import { closeStore, getRepos, initStore } from "../db.js";
+
+process.env.STORY_MOCK = "true";
+
+/** Seeded: kernel-nyc is operated by OWNER and runs capability cap-nyc-fdm. */
+const OWNER = "0x1111111111111111111111111111111111111111";
+/** Seeded: kernel-sf's operator, who owns nothing on kernel-nyc. */
+const OTHER = "0x2222222222222222222222222222222222222222";
+const BUYER = "0x0000000000000000000000000000000000b0b0b0";
+
+let seq = 0;
+function as(wallet: string): Record<string, string> {
+  const now = new Date();
+  const token = `authz-session-${++seq}`;
+  getRepos().sessions.insert({
+    id: `authz-sess-${seq}`,
+    walletAddress: wallet,
+    token,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+    lastActiveAt: now.toISOString(),
+  });
+  return { authorization: `Bearer ${token}` };
+}
+
+async function buildApp(withGate = false): Promise<FastifyInstance> {
+  process.env.PCC_DB_PATH = ":memory:";
+  initStore({ seed: true });
+  const app = Fastify({ logger: false });
+  if (withGate) await app.register(apiGate);
+  await app.register(ipRoutes);
+  await app.ready();
+  return app;
+}
+
+async function registerCapabilityIp(app: FastifyInstance): Promise<string> {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/ip/register-capability",
+    headers: as(OWNER),
+    payload: {
+      capability: { id: "cap-nyc-fdm", name: "FDM", type: "fdm", kernelId: "kernel-nyc" },
+      designerAddress: OWNER,
+      designerName: "NYC MakerSpace",
+    },
+  });
+  expect(res.statusCode).toBe(200);
+  return res.json<{ registration: { ipId: string } }>().registration.ipId;
+}
+
+/** A job on kernel-nyc with a consistent escrow and milestone (the seeded ones do not line up). */
+function seedSettledJob(opts: { status?: string; currency?: string; amount?: string } = {}): string {
+  const repos = getRepos();
+  repos.jobs.insert({
+    id: "job-n10a",
+    stepId: "step-n10a",
+    cwmId: "cwm-n10a",
+    capabilityId: "cap-nyc-fdm",
+    kernelId: "kernel-nyc",
+    status: "completed",
+    assignedDevices: [],
+    progress: 100,
+  });
+  repos.escrows.insert({
+    id: "esc-n10a",
+    cwmId: "cwm-n10a",
+    contractAddress: "mock-escrow-n10a",
+    payer: BUYER,
+    totalAmount: opts.amount ?? "25.00",
+    currency: opts.currency ?? "USDC",
+    status: "completed",
+    createdAt: "2026-09-24T00:00:00Z",
+    deadline: "2026-09-30T00:00:00Z",
+  });
+  repos.escrows.insertMilestone({
+    id: "ms-n10a",
+    escrowId: "esc-n10a",
+    stepId: "step-n10a",
+    amount: opts.amount ?? "25.00",
+    status: opts.status ?? "released",
+    bondAmount: "0.00",
+  });
+  return "job-n10a";
+}
+
+async function registerEvidenceIp(app: FastifyInstance, parentIpId: string, jobId: string): Promise<string> {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/ip/register-job-evidence",
+    headers: as(OWNER),
+    payload: { parentIpId, jobId, evidenceBundleHash: "0xbundle", operatorAddress: OWNER, operatorName: "NYC" },
+  });
+  expect(res.statusCode).toBe(200);
+  return res.json<{ link: { childIpId: string } }>().link.childIpId;
+}
+
+/** Make the licensing engine owe the parent 10% of the child's revenue, so settlement has a row. */
+function owe10Percent(parentIpId: string, childIpId: string): void {
+  const evaluation = { approved: true, revSharePercent: 10, derivativeDepth: 1, effectiveRevShare: 10, reasons: [] } as unknown as LicenseEvaluation;
+  getLicensingEngine().grantLicense(evaluation, { parentIpId, childIpId, licensingTermsId: "terms-n10a", recipientAddress: OWNER });
+}
+
+describe("N10a: /api/ip/* authorization", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    resetStoryIPService();
+    resetLicensingEngine();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await app.close();
+    closeStore();
+    resetStoryIPService();
+    resetLicensingEngine();
+  });
+
+  describe("E1/E2: only the recorded owner changes an IP", () => {
+    it("set-licensing-terms, distribute-royalties and claim: a non-owner is 403, the owner is 200", async () => {
+      const ipId = await registerCapabilityIp(app);
+      const terms = (who: string) => ({
+        method: "POST" as const,
+        url: "/api/ip/set-licensing-terms",
+        headers: as(who),
+        payload: { ipId, designerAddress: who, autoLicense: {}, standingOffers: [], defaultRevShare: 5, allowSubDerivatives: true, derivativeDecayRate: 0.5 },
+      });
+      const splits = (who: string) => ({
+        method: "POST" as const,
+        url: "/api/ip/distribute-royalties",
+        headers: as(who),
+        payload: { ipId, splits: [{ address: who, role: "integrator", percentage: 100, label: "all to me" }] },
+      });
+      const claim = (who: string) => ({ method: "POST" as const, url: `/api/ip/${encodeURIComponent(ipId)}/claim`, headers: as(who), payload: {} });
+
+      for (const req of [terms(OTHER), splits(OTHER), claim(OTHER)]) {
+        const res = await app.inject(req);
+        expect(res.statusCode).toBe(403);
+        expect(res.json<{ error: string }>().error).toBe("not_ip_owner");
+      }
+      for (const req of [terms(OWNER), splits(OWNER), claim(OWNER)]) {
+        expect((await app.inject(req)).statusCode).toBe(200);
+      }
+    });
+
+    it("an IP with no recorded owner cannot be changed by anyone", async () => {
+      for (const url of ["/api/ip/set-licensing-terms", "/api/ip/distribute-royalties"]) {
+        const res = await app.inject({
+          method: "POST",
+          url,
+          headers: as(OWNER),
+          payload: { ipId: "0xunrecorded", designerAddress: OWNER, splits: [{ address: OWNER, role: "integrator", percentage: 100, label: "x" }] },
+        });
+        expect(res.statusCode).toBe(403);
+        expect(res.json<{ error: string }>().error).toBe("ip_owner_unknown");
+      }
+      const claim = await app.inject({ method: "POST", url: "/api/ip/0xunrecorded/claim", headers: as(OWNER), payload: {} });
+      expect(claim.json<{ error: string }>().error).toBe("ip_owner_unknown");
+    });
+
+    it("the owner cannot set terms that name someone else as the designer", async () => {
+      const ipId = await registerCapabilityIp(app);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/ip/set-licensing-terms",
+        headers: as(OWNER),
+        payload: { ipId, designerAddress: OTHER, autoLicense: {}, standingOffers: [] },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json<{ error: string }>().error).toBe("designer_must_be_caller");
+    });
+
+    it("claim records the caller's address, never the zero address", async () => {
+      const ipId = await registerCapabilityIp(app);
+      expect((await app.inject({ method: "POST", url: `/api/ip/${encodeURIComponent(ipId)}/claim`, headers: as(OWNER), payload: {} })).statusCode).toBe(200);
+      const claims = getRepos().story.findRevenueClaimsByIp(ipId);
+      expect(claims).toHaveLength(1);
+      expect(claims[0]!.claimerAddress).toBe(OWNER);
+    });
+  });
+
+  describe("registration records ownership from the caller, never from the body", () => {
+    it("only the operator of the capability's kernel registers it, as itself, for a recorded capability", async () => {
+      const body = (designer: string, capabilityId = "cap-nyc-fdm") => ({
+        capability: { id: capabilityId, name: "FDM", type: "fdm", kernelId: "kernel-nyc" },
+        designerAddress: designer,
+        designerName: "X",
+      });
+      const run = (who: string, payload: unknown) => app.inject({ method: "POST", url: "/api/ip/register-capability", headers: as(who), payload: payload as object });
+      expect((await run(OTHER, body(OTHER))).json<{ error: string }>().error).toBe("not_kernel_operator");
+      expect((await run(OWNER, body(OTHER))).json<{ error: string }>().error).toBe("designer_must_be_caller");
+      expect((await run(OWNER, body(OWNER, "cap-not-recorded"))).json<{ error: string }>().error).toBe("capability_not_found");
+      expect((await run(OWNER, body(OWNER))).statusCode).toBe(200);
+    });
+
+    it("only the operator of a job's kernel registers its evidence, for a recorded job and parent", async () => {
+      const parent = await registerCapabilityIp(app);
+      const body = (who: string, jobId = "job-001", parentIpId = parent) => ({ parentIpId, jobId, evidenceBundleHash: "0xb", operatorAddress: who, operatorName: "op" });
+      const run = (who: string, payload: object) => app.inject({ method: "POST", url: "/api/ip/register-job-evidence", headers: as(who), payload });
+      expect((await run(OTHER, body(OTHER))).json<{ error: string }>().error).toBe("not_kernel_operator");
+      expect((await run(OWNER, body(OTHER))).json<{ error: string }>().error).toBe("operator_must_be_caller");
+      expect((await run(OWNER, body(OWNER, "job-not-recorded"))).json<{ error: string }>().error).toBe("job_not_found");
+      // The parent must be the IP of the job's own capability (coord-watch #2974), not any known IP.
+      expect((await run(OWNER, body(OWNER, "job-001", "0xno-parent"))).json<{ error: string }>().error).toBe("parent_not_job_capability");
+      expect((await run(OWNER, body(OWNER))).statusCode).toBe(200);
+    });
+  });
+
+  describe("identity: an API key is not proof of who you are", () => {
+    it("a key whose operatorId IS the owner's wallet is still refused; the owner's SIWE session is accepted", async () => {
+      await app.close();
+      closeStore();
+      app = await buildApp(true);
+      const ipId = await registerCapabilityIp(app);
+      // Anyone can provision a key claiming any operatorId (POST /api/auth/provision is public).
+      const { rawKey } = provisionApiKey({ operatorId: OWNER, name: "claims to be the owner" });
+      const payload = { ipId, splits: [{ address: OWNER, role: "integrator", percentage: 100, label: "all" }] };
+      const withKey = await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: { authorization: `Bearer ${rawKey}` }, payload });
+      expect(withKey.statusCode).toBe(401);
+      expect(withKey.json<{ error: string }>().error).toBe("verified_wallet_required");
+      const withSession = await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OWNER), payload });
+      expect(withSession.statusCode).toBe(200);
+    });
+
+    it("no session at all is 401 on every mutation", async () => {
+      for (const [url, payload] of [
+        ["/api/ip/set-licensing-terms", { ipId: "0xa", designerAddress: OWNER }],
+        ["/api/ip/distribute-royalties", { ipId: "0xa", splits: [{ address: OWNER, role: "integrator", percentage: 100, label: "x" }] }],
+        ["/api/ip/settle-royalties", { jobId: "job-001", childIpId: "0xc" }],
+        ["/api/ip/0xa/pay", { amount: "1" }],
+        ["/api/ip/0xa/claim", {}],
+        ["/api/ip/0xa/dispute", { evidenceHash: "0xe", reason: "r" }],
+      ] as const) {
+        const res = await app.inject({ method: "POST", url, payload });
+        expect(res.statusCode, url).toBe(401);
+      }
+    });
+  });
+
+  describe("E3: settle-royalties", () => {
+    async function settled(opts?: Parameters<typeof seedSettledJob>[0]) {
+      const parent = await registerCapabilityIp(app);
+      const jobId = seedSettledJob(opts);
+      const child = await registerEvidenceIp(app, parent, jobId);
+      owe10Percent(parent, child);
+      return { parent, child, jobId };
+    }
+    const settle = (who: string, body: object) => app.inject({ method: "POST", url: "/api/ip/settle-royalties", headers: as(who), payload: body });
+
+    it.each([["the buyer", BUYER], ["the kernel operator", OWNER]])("%s settles a released milestone, at the server's revenue and payer", async (_who, who) => {
+      const { child, jobId } = await settled();
+      const res = await settle(who, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(200);
+      const body = res.json<{ revenue: string; payerAddress: string; distributions: Array<{ outcome: string; amount: string }>; totalDistributed: string }>();
+      expect(body.revenue).toBe("25000000"); // $25.00 in USDC base units, from the milestone
+      expect(body.payerAddress).toBe(BUYER); // the escrow's payer
+      expect(body.distributions).toEqual([expect.objectContaining({ outcome: "paid", amount: "2500000" })]);
+    });
+
+    it("royalties are settled once: a second settlement by anyone is 409 already_settled, and pays nothing", async () => {
+      const { child, jobId } = await settled();
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(200);
+      const spy = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      for (const who of [BUYER, OWNER]) {
+        const again = await settle(who, { jobId, childIpId: child });
+        expect(again.statusCode).toBe(409);
+        expect(again.json<{ error: string }>().error).toBe("already_settled");
+      }
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    /** The settlement journal, oldest first: claim, then per row an intent and its outcome, and any release. */
+    const journal = () =>
+      getRepos()
+        .auditLog.query({ eventType: "ip.royalties.settlement", limit: 1000 })
+        .sort((a, b) => a.id - b.id)
+        .map((r) => r.action);
+
+    it("a failure that may have executed is held for reconciliation and never retried automatically (astra #385 r2)", async () => {
+      const { child, jobId } = await settled();
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(new Error("receipt lookup failed after submission"));
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(502);
+      const again = await settle(BUYER, { jobId, childIpId: child });
+      expect(again.statusCode).toBe(409);
+      expect(again.json<{ error: string }>().error).toBe("already_settled");
+      expect(journal()).toEqual(["claim", "intent", "failed"]);
+    });
+
+    it("only Story's explicit nonexecution releases the claim; then a retry pays once, and never twice", async () => {
+      const { child, jobId } = await settled();
+      const notExecuted = Object.assign(new Error("Story real mode is not executed"), { code: "STORY_NOT_EXECUTED" });
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(notExecuted);
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(501);
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(200);
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(409);
+      expect(journal()).toEqual(["claim", "intent", "failed", "release", "claim", "intent", "paid"]);
+    });
+
+    it("a Story service built in real mode is refused even when STORY_MOCK no longer says so (astra #385 r2)", async () => {
+      const { child, jobId } = await settled();
+      // The instance fixed its mode when it was built; the environment now says mock. Only the instance signs.
+      (getStoryIPService() as unknown as { mock: boolean }).mock = false;
+      expect(process.env.STORY_MOCK).toBe("true");
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(501);
+      expect(res.json<{ error: string }>().error).toBe("not_executed");
+      expect(pay).not.toHaveBeenCalled();
+    });
+
+    it("two escrows for one workflow are ambiguous, and nothing is settled (astra #385 r2)", async () => {
+      const { child, jobId } = await settled();
+      const job = getRepos().jobs.findById(jobId)!;
+      getRepos().escrows.insert({ id: "esc-twin", cwmId: job.cwmId, contractAddress: "mock-escrow-twin", payer: OTHER, totalAmount: "25.00", currency: "USDC", status: "completed", createdAt: "2026-09-24T00:00:00Z", deadline: "2026-09-30T00:00:00Z" });
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(409);
+      expect(res.json<{ error: string }>().error).toBe("settlement_ambiguous");
+    });
+
+    it("another workflow's released milestone never settles this job (no fallback across workflows)", async () => {
+      const parent = await registerCapabilityIp(app);
+      const repos = getRepos();
+      // The job's own workflow has no escrow; another workflow has a released milestone with the same step id.
+      repos.jobs.insert({ id: "job-orphan", stepId: "step-shared", cwmId: "cwm-mine", capabilityId: "cap-nyc-fdm", kernelId: "kernel-nyc", status: "completed", assignedDevices: [], progress: 100 });
+      repos.escrows.insert({ id: "esc-other", cwmId: "cwm-other", contractAddress: "mock-escrow-other", payer: BUYER, totalAmount: "99.00", currency: "USDC", status: "completed", createdAt: "2026-09-24T00:00:00Z", deadline: "2026-09-30T00:00:00Z" });
+      repos.escrows.insertMilestone({ id: "ms-other", escrowId: "esc-other", stepId: "step-shared", amount: "99.00", status: "released", bondAmount: "0.00" });
+      const child = await registerEvidenceIp(app, parent, "job-orphan");
+      const res = await settle(BUYER, { jobId: "job-orphan", childIpId: child });
+      expect(res.statusCode).toBe(409);
+      expect(res.json<{ error: string }>().error).toBe("no_settlement_record");
+    });
+
+    it("a non-party is 403", async () => {
+      const { child, jobId } = await settled();
+      const res = await settle(OTHER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(403);
+      expect(res.json<{ error: string }>().error).toBe("not_job_party");
+    });
+
+    it("an unreleased milestone is 409", async () => {
+      const { child, jobId } = await settled({ status: "funded" });
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(409);
+      expect(res.json<{ error: string }>().error).toBe("milestone_not_released");
+    });
+
+    it("a body revenue or payer that disagrees with server state is 409; one that agrees is accepted", async () => {
+      const { child, jobId } = await settled();
+      const inflated = await settle(BUYER, { jobId, childIpId: child, jobRevenue: "250000000" });
+      expect(inflated.statusCode).toBe(409);
+      expect(inflated.json<{ error: string }>().error).toBe("revenue_mismatch");
+      const otherPayer = await settle(BUYER, { jobId, childIpId: child, payerAddress: OTHER });
+      expect(otherPayer.statusCode).toBe(409);
+      expect(otherPayer.json<{ error: string }>().error).toBe("payer_mismatch");
+      expect((await settle(BUYER, { jobId, childIpId: child, jobRevenue: "25000000", payerAddress: BUYER })).statusCode).toBe(200);
+    });
+
+    it("the child IP must be this job's own evidence", async () => {
+      const { parent, jobId } = await settled();
+      const res = await settle(BUYER, { jobId, childIpId: parent });
+      expect(res.statusCode).toBe(409);
+      expect(res.json<{ error: string }>().error).toBe("ip_not_linked_to_job");
+    });
+
+    it("an unknown job is 404 and a currency with no known decimals is 409", async () => {
+      expect((await settle(BUYER, { jobId: "job-nope", childIpId: "0xc" })).statusCode).toBe(404);
+      const { child, jobId } = await settled({ currency: "DAI" });
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(409);
+      expect(res.json<{ error: string }>().error).toBe("unsupported_currency");
+    });
+
+    it("a failed royalty payment fails the request and is reported as failed, not swallowed (and the claim is released)", async () => {
+      const { child, jobId } = await settled();
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(new Error("rpc down"));
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(502);
+      const body = res.json<{ error: string; distributions: Array<{ outcome: string; error?: string }>; totalDistributed: string }>();
+      expect(body.error).toBe("settlement_incomplete");
+      expect(body.distributions).toEqual([expect.objectContaining({ outcome: "failed", error: "rpc down" })]);
+      expect(body.totalDistributed).toBe("0");
+    });
+  });
+
+  describe("Story real mode: the gateway never pays on a caller's behalf (gateway review #2971)", () => {
+    afterEach(() => {
+      process.env.STORY_MOCK = "true";
+    });
+
+    it("pay and settle-royalties answer 501 not_executed, and nothing is paid", async () => {
+      const parent = await registerCapabilityIp(app);
+      const jobId = seedSettledJob();
+      const child = await registerEvidenceIp(app, parent, jobId);
+      owe10Percent(parent, child);
+      const spy = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      process.env.STORY_MOCK = "false";
+      const pay = await app.inject({ method: "POST", url: `/api/ip/${encodeURIComponent(parent)}/pay`, headers: as(BUYER), payload: { amount: "1000" } });
+      const settle = await app.inject({ method: "POST", url: "/api/ip/settle-royalties", headers: as(BUYER), payload: { jobId, childIpId: child } });
+      expect([pay.statusCode, settle.statusCode]).toEqual([501, 501]);
+      expect(pay.json<{ error: string }>().error).toBe("not_executed");
+      expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a derivative's parent is the registrant's own IP (astra #385 r2)", () => {
+    it("a job whose capability is another kernel's cannot derive from that capability's IP", async () => {
+      // OTHER operates kernel-sf and registers its capability cap-sf-cnc as IP.
+      const reg = await app.inject({
+        method: "POST",
+        url: "/api/ip/register-capability",
+        headers: as(OTHER),
+        payload: { capability: { id: "cap-sf-cnc", name: "CNC", type: "cnc", kernelId: "kernel-sf" }, designerAddress: OTHER, designerName: "SF Precision Workshop" },
+      });
+      expect(reg.statusCode).toBe(200);
+      const sfIp = reg.json<{ registration: { ipId: string } }>().registration.ipId;
+      // A job on OWNER's kernel-nyc that names kernel-sf's capability: job submission does not check the pair.
+      getRepos().jobs.insert({ id: "job-cross", stepId: "step-cross", cwmId: "cwm-cross", capabilityId: "cap-sf-cnc", kernelId: "kernel-nyc", status: "completed", assignedDevices: [], progress: 100 });
+      const derive = await app.inject({
+        method: "POST",
+        url: "/api/ip/register-job-evidence",
+        headers: as(OWNER),
+        payload: { parentIpId: sfIp, jobId: "job-cross", evidenceBundleHash: "sha256:cross", operatorAddress: OWNER, operatorName: "NYC MakerSpace" },
+      });
+      expect(derive.statusCode).toBe(409);
+      expect(derive.json<{ error: string }>().error).toBe("job_capability_not_on_kernel");
+    });
+  });
+
+  describe("root of trust at this head: re-registration cannot move a registered IP (astra #385 r2)", () => {
+    it("a capability cannot be repointed and an owned kernel cannot be re-registered, so the IP's owner stays", async () => {
+      await app.close();
+      closeStore();
+      process.env.PCC_DB_PATH = ":memory:";
+      initStore({ seed: true });
+      app = Fastify({ logger: false });
+      // What apiGate does for an API key: sets the key's (self-asserted) operatorId.
+      app.addHook("onRequest", async (req) => {
+        const op = req.headers["x-test-operator"];
+        if (typeof op === "string") (req as { operatorId?: string }).operatorId = op;
+      });
+      await app.register(ipRoutes);
+      await app.register(capabilityRoutes);
+      await app.register(kernelRoutes);
+      await app.ready();
+      const ipId = await registerCapabilityIp(app); // cap-nyc-fdm, owned by OWNER through kernel-nyc
+
+      // Re-posting the capability with another kernel returns the existing row unchanged.
+      const repost = await app.inject({ method: "POST", url: "/api/capabilities", headers: { "x-test-operator": OTHER }, payload: { id: "cap-nyc-fdm", kernelId: "kernel-sf", type: "fdm" } });
+      expect(repost.json<{ created: boolean }>().created).toBe(false);
+      expect(getRepos().capabilities.findById("cap-nyc-fdm")!.kernelId).toBe("kernel-nyc");
+
+      // Re-registering the owned kernel as another actor is refused, and its operator is unchanged.
+      const rekernel = await app.inject({
+        method: "POST",
+        url: "/api/kernels",
+        headers: { "x-test-operator": OTHER },
+        payload: { id: "kernel-nyc", name: "taken", operatorAddress: OTHER, location: { lat: 0, lng: 0 }, physicalAddress: "elsewhere", maxAssuranceTier: 0 },
+      });
+      expect(rekernel.statusCode).toBe(403);
+      expect(getRepos().kernels.findById("kernel-nyc")!.operatorAddress.toLowerCase()).toBe(OWNER);
+
+      // So the IP still belongs to OWNER: OTHER is refused on it, OWNER is not.
+      expect(recordedIpOwner(ipId)).toBe(OWNER);
+      const splits = (to: string) => ({ ipId, splits: [{ address: to, role: "integrator", percentage: 100, label: "all" }] });
+      expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OTHER), payload: splits(OTHER) })).statusCode).toBe(403);
+      expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OWNER), payload: splits(OWNER) })).statusCode).toBe(200);
+    });
+  });
+
+  describe("forward-compatible with gateway #326's proven wallet", () => {
+    it("a wallet apiGate proved (req.provenWallet) is accepted without a session; a client cannot set it", async () => {
+      await app.close();
+      closeStore();
+      process.env.PCC_DB_PATH = ":memory:";
+      initStore({ seed: true });
+      app = Fastify({ logger: false });
+      app.addHook("onRequest", async (req) => {
+        // What #326's apiGate will do for a SIWE-minted key; here, for any request carrying x-test-proven.
+        if (req.headers["x-test-proven"] === "1") (req as { provenWallet?: string }).provenWallet = OWNER;
+      });
+      await app.register(ipRoutes);
+      await app.ready();
+      const ipId = await registerCapabilityIp(app);
+      const payload = { ipId, splits: [{ address: OWNER, role: "integrator", percentage: 100, label: "all" }] };
+      expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: { "x-test-proven": "1" }, payload })).statusCode).toBe(200);
+      expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", payload })).statusCode).toBe(401);
+    });
+
+    it("once apiGate has decided, its null is final: the owner's session is not consulted behind it (gateway #3160)", async () => {
+      await app.close();
+      closeStore();
+      process.env.PCC_DB_PATH = ":memory:";
+      initStore({ seed: true });
+      app = Fastify({ logger: false });
+      app.addHook("onRequest", async (req) => {
+        // What #326's apiGate does for a SIWE cookie riding on another identity's API key: it proves no wallet.
+        if (req.headers["x-test-gate-null"] === "1") (req as { provenWallet?: string | null }).provenWallet = null;
+      });
+      await app.register(ipRoutes);
+      await app.ready();
+      const ipId = await registerCapabilityIp(app);
+      const payload = { ipId, splits: [{ address: OWNER, role: "integrator", percentage: 100, label: "all" }] };
+      // With no verdict from the gate, the owner's own SIWE session is the proof.
+      expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OWNER), payload })).statusCode).toBe(200);
+      // The same session, after the gate answered null, proves nothing.
+      const res = await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: { ...as(OWNER), "x-test-gate-null": "1" }, payload });
+      expect(res.statusCode).toBe(401);
+      expect(res.json<{ error: string }>().error).toBe("verified_wallet_required");
+    });
+  });
+
+  describe("Story real mode that refuses to execute (N10b's STORY_NOT_EXECUTED) is 501, not a 500", () => {
+    const notExecuted = () => Object.assign(new Error("Story real mode is not executed"), { code: "STORY_NOT_EXECUTED" });
+
+    it("pay answers 501 not_executed", async () => {
+      const ipId = await registerCapabilityIp(app);
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(notExecuted());
+      const res = await app.inject({ method: "POST", url: `/api/ip/${encodeURIComponent(ipId)}/pay`, headers: as(BUYER), payload: { amount: "1000" } });
+      expect(res.statusCode).toBe(501);
+      expect(res.json<{ error: string }>().error).toBe("not_executed");
+    });
+
+    it("settle-royalties answers 501 when Story executed none of the payments, and says nothing was paid", async () => {
+      const parent = await registerCapabilityIp(app);
+      const jobId = seedSettledJob();
+      const child = await registerEvidenceIp(app, parent, jobId);
+      owe10Percent(parent, child);
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValue(notExecuted());
+      const res = await app.inject({ method: "POST", url: "/api/ip/settle-royalties", headers: as(BUYER), payload: { jobId, childIpId: child } });
+      expect(res.statusCode).toBe(501);
+      expect(res.json<{ error: string; totalDistributed: string }>()).toMatchObject({ error: "not_executed", totalDistributed: "0" });
+    });
+
+    it("any other Story failure stays a 500 with its own error name", async () => {
+      const ipId = await registerCapabilityIp(app);
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(new Error("rpc down"));
+      const res = await app.inject({ method: "POST", url: `/api/ip/${encodeURIComponent(ipId)}/pay`, headers: as(BUYER), payload: { amount: "1000" } });
+      expect(res.statusCode).toBe(500);
+      expect(res.json<{ error: string }>().error).toBe("pay_royalty_failed");
+    });
+  });
+
+  describe("E4: pay and dispute act as the caller, against an IP with a recorded owner", () => {
+    it("pay: the payer is the caller; another payer is 403, an ownerless IP 403, a non-integer amount 400", async () => {
+      const ipId = await registerCapabilityIp(app);
+      const pay = (body: object, id = ipId) => app.inject({ method: "POST", url: `/api/ip/${encodeURIComponent(id)}/pay`, headers: as(BUYER), payload: body });
+      expect((await pay({ amount: "1000", payerAddress: OTHER })).json<{ error: string }>().error).toBe("payer_must_be_caller");
+      expect((await pay({ amount: "1000" }, "0xunrecorded")).json<{ error: string }>().error).toBe("ip_owner_unknown");
+      expect((await pay({ amount: "10.5" })).statusCode).toBe(400);
+      const spy = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      expect((await pay({ amount: "1000" })).statusCode).toBe(200);
+      expect(spy).toHaveBeenCalledWith(ipId, "1000", BUYER);
+    });
+
+    it("dispute: any proven wallet may dispute a recorded IP and is named as the disputant", async () => {
+      const ipId = await registerCapabilityIp(app);
+      const res = await app.inject({ method: "POST", url: `/api/ip/${encodeURIComponent(ipId)}/dispute`, headers: as(OTHER), payload: { evidenceHash: "0xe", reason: "copied design" } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json<{ raisedBy: string }>().raisedBy).toBe(OTHER);
+      const unknown = await app.inject({ method: "POST", url: "/api/ip/0xunrecorded/dispute", headers: as(OTHER), payload: { evidenceHash: "0xe", reason: "r" } });
+      expect(unknown.json<{ error: string }>().error).toBe("ip_owner_unknown");
+    });
+  });
+
+  describe("astra A07b (round 3 at 4df69fae)", () => {
+    const THIRD = "0x3333333333333333333333333333333333333333";
+    const settle = (who: string, body: object) => app.inject({ method: "POST", url: "/api/ip/settle-royalties", headers: as(who), payload: body });
+    /** The licensing engine owes the parent `revSharePercent` of the child's revenue, paid to `recipientAddress`. */
+    const grant = (parentIpId: string, childIpId: string, revSharePercent: number, recipientAddress: string) => {
+      const evaluation = { approved: true, revSharePercent, derivativeDepth: 1, effectiveRevShare: revSharePercent, reasons: [] } as unknown as LicenseEvaluation;
+      getLicensingEngine().grantLicense(evaluation, { parentIpId, childIpId, licensingTermsId: `terms-${childIpId}`, recipientAddress });
+    };
+    async function settledJob() {
+      const parent = await registerCapabilityIp(app);
+      const jobId = seedSettledJob();
+      const child = await registerEvidenceIp(app, parent, jobId);
+      grant(parent, child, 10, OWNER);
+      return { parent, child, jobId };
+    }
+    const settlementJournal = () =>
+      getRepos()
+        .auditLog.query({ eventType: "ip.royalties.settlement", limit: 1000 })
+        .sort((a, b) => a.id - b.id)
+        .map((r) => r.action);
+    /** Make the settlement journal refuse one action, as a full disk or a lost database would. */
+    const journalRefuses = (action: string) => {
+      const log = getRepos().auditLog;
+      const insert = log.insert.bind(log);
+      vi.spyOn(log, "insert").mockImplementation((row) => {
+        if (row.eventType === "ip.royalties.settlement" && row.action === action) throw new Error("disk full");
+        return insert(row);
+      });
+    };
+
+    it("F1: a job with two evidence IPs is ambiguous, so no caller picks the schedule that consumes the milestone", async () => {
+      const { parent, child, jobId } = await settledJob();
+      // A second evidence IP of the same job that owes the parent more and pays someone else, recorded directly
+      // (the route no longer registers a second one: see below).
+      const second = `0x${"c2".repeat(20)}`;
+      getRepos().story.insertDerivativeLink({ id: "dl-second", parentIpId: parent, childIpId: second, licenseTokenId: "lt-2", jobId, evidenceBundleHash: "sha256:second", txHash: `0x${"cd".repeat(32)}`, linkedAt: new Date().toISOString() });
+      grant(parent, second, 50, THIRD);
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      for (const childIpId of [second, child]) {
+        const res = await settle(BUYER, { jobId, childIpId });
+        expect(res.statusCode).toBe(409);
+        expect(res.json<{ error: string }>().error).toBe("settlement_ambiguous");
+      }
+      expect(pay).not.toHaveBeenCalled();
+    });
+
+    it("F1: a job's evidence is registered once: a second evidence IP for the same job is refused", async () => {
+      const { parent, jobId } = await settledJob();
+      const again = await app.inject({
+        method: "POST",
+        url: "/api/ip/register-job-evidence",
+        headers: as(OWNER),
+        payload: { parentIpId: parent, jobId, evidenceBundleHash: "0xbundle2", operatorAddress: OWNER, operatorName: "NYC" },
+      });
+      expect(again.statusCode).toBe(409);
+      expect(again.json<{ error: string }>().error).toBe("job_evidence_already_registered");
+      expect(getRepos().story.findDerivativeLinksByJob(jobId)).toHaveLength(1);
+    });
+
+    it("F1: two concurrent evidence registrations for one job register one IP", async () => {
+      const parent = await registerCapabilityIp(app);
+      const jobId = seedSettledJob();
+      const register = () =>
+        app.inject({ method: "POST", url: "/api/ip/register-job-evidence", headers: as(OWNER), payload: { parentIpId: parent, jobId, evidenceBundleHash: "0xbundle", operatorAddress: OWNER, operatorName: "NYC" } });
+      // Hold the first registration inside Story until the second has made its check.
+      const svc = getStoryIPService();
+      const original = svc.registerJobAsDerivative.bind(svc);
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => (open = resolve));
+      vi.spyOn(svc, "registerJobAsDerivative").mockImplementation(async (...args) => {
+        await gate;
+        return original(...args);
+      });
+      const pending = [register(), register()];
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      open();
+      const codes = (await Promise.all(pending)).map((r) => r.statusCode).sort();
+      expect(codes).toEqual([200, 409]);
+      expect(getRepos().story.findDerivativeLinksByJob(jobId)).toHaveLength(1);
+    });
+
+    it("F1: two jobs that settle through one milestone are ambiguous; neither settles it", async () => {
+      const { parent, child, jobId } = await settledJob();
+      const job = getRepos().jobs.findById(jobId)!;
+      getRepos().jobs.insert({ id: "job-twin", stepId: job.stepId, cwmId: job.cwmId, capabilityId: job.capabilityId, kernelId: job.kernelId, status: "completed", assignedDevices: [], progress: 100 });
+      const twinChild = await registerEvidenceIp(app, parent, "job-twin");
+      grant(parent, twinChild, 50, THIRD);
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      for (const [id, childIpId] of [["job-twin", twinChild], [jobId, child]] as const) {
+        const res = await settle(BUYER, { jobId: id, childIpId });
+        expect(res.statusCode).toBe(409);
+        expect(res.json<{ error: string }>().error).toBe("settlement_ambiguous");
+      }
+      expect(pay).not.toHaveBeenCalled();
+    });
+
+    it("F1: the milestone's first claim binds its job, child and schedule: a retry after nonexecution cannot pay a changed one", async () => {
+      const { parent, child, jobId } = await settledJob();
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      pay.mockRejectedValueOnce(Object.assign(new Error("Story real mode is not executed"), { code: "STORY_NOT_EXECUTED" }));
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(501); // nothing paid; the claim is released
+      grant(parent, child, 50, THIRD); // the schedule changes before the retry
+      const retry = await settle(BUYER, { jobId, childIpId: child });
+      expect(retry.statusCode).toBe(409);
+      expect(retry.json<{ error: string }>().error).toBe("settlement_binding_changed");
+      expect(pay).toHaveBeenCalledTimes(1);
+      grant(parent, child, 10, OWNER); // the bound schedule again: the retry pays it, once
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(200);
+      expect(pay).toHaveBeenCalledTimes(2);
+    });
+
+    it("F2: a payment whose outcome the journal cannot record makes the response reconciliation-required", async () => {
+      const { child, jobId } = await settledJob();
+      journalRefuses("paid");
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(502);
+      const body = res.json<{ error: string; reconciliationRequired: boolean; distributions: Array<{ outcome: string; txHash?: string }> }>();
+      expect(body.error).toBe("settlement_unrecorded");
+      expect(body.reconciliationRequired).toBe(true);
+      expect(body.distributions).toEqual([expect.objectContaining({ outcome: "paid", txHash: expect.any(String) })]);
+      expect(settlementJournal()).toEqual(["claim", "intent"]);
+      // The claim stands: nothing is paid again.
+      expect((await settle(BUYER, { jobId, childIpId: child })).json<{ error: string }>().error).toBe("already_settled");
+    });
+
+    it("F2: nothing is paid when its intent cannot be journaled", async () => {
+      const { child, jobId } = await settledJob();
+      journalRefuses("intent");
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(503);
+      expect(res.json<{ error: string }>().error).toBe("journal_unavailable");
+      expect(pay).not.toHaveBeenCalled();
+      expect(settlementJournal()).toEqual(["claim", "release"]); // nothing was paid, so the claim is released
+    });
+
+    it("F3: a kernel with no recorded owner is not claimed by re-registering it with an API key, so its IPs stay ownerless", async () => {
+      await app.close();
+      closeStore();
+      process.env.PCC_DB_PATH = ":memory:";
+      initStore({ seed: true });
+      app = Fastify({ logger: false });
+      // What apiGate does for an API key: sets the key's (self-asserted) operatorId.
+      app.addHook("onRequest", async (req) => {
+        const op = req.headers["x-test-operator"];
+        if (typeof op === "string") (req as { operatorId?: string }).operatorId = op;
+      });
+      await app.register(ipRoutes);
+      await app.register(kernelRoutes);
+      await app.ready();
+      const ipId = await registerCapabilityIp(app); // registered while kernel-nyc was OWNER's
+      for (const legacy of ["0x0000000000000000000000000000000000000000", ""]) {
+        getRepos().kernels.update("kernel-nyc", { operatorAddress: legacy }); // a legacy row: no recorded owner
+        const claim = await app.inject({
+          method: "POST",
+          url: "/api/kernels",
+          headers: { "x-test-operator": OTHER },
+          payload: { id: "kernel-nyc", name: "mine now", location: { lat: 0, lng: 0 }, physicalAddress: "elsewhere", maxAssuranceTier: 0 },
+        });
+        expect(claim.statusCode).toBeLessThan(500);
+        expect(getRepos().kernels.findById("kernel-nyc")!.operatorAddress).toBe(legacy);
+        expect(recordedIpOwner(ipId)).toBeNull();
+        const splits = { ipId, splits: [{ address: OTHER, role: "integrator", percentage: 100, label: "all" }] };
+        expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OTHER), payload: splits })).statusCode).toBe(403);
+      }
+    });
+  });
+
+  describe("astra A07c (round 4 at a31ae78e)", () => {
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    const attacker = privateKeyToAccount(`0x${"7a".repeat(32)}`);
+    const nodeKey = privateKeyToAccount(`0x${"5c".repeat(32)}`);
+    /** An app with the kernel routes, where an API key's (asserted) operatorId comes from x-test-operator. */
+    async function kernelApp() {
+      await app.close();
+      closeStore();
+      process.env.PCC_DB_PATH = ":memory:";
+      initStore({ seed: true });
+      app = Fastify({ logger: false });
+      app.addHook("onRequest", async (req) => {
+        const op = req.headers["x-test-operator"];
+        if (typeof op === "string") (req as { operatorId?: string }).operatorId = op;
+      });
+      await app.register(kernelRoutes);
+      await app.ready();
+    }
+    const reRegister = async (who: string, signer: ReturnType<typeof privateKeyToAccount>) =>
+      app.inject({
+        method: "POST",
+        url: "/api/kernels",
+        headers: { "x-test-operator": who },
+        payload: {
+          id: "kernel-nyc",
+          name: "mine now",
+          location: { lat: 0, lng: 0 },
+          physicalAddress: "elsewhere",
+          maxAssuranceTier: 0,
+          signingAddress: signer.address,
+          signingProof: await signer.signMessage({ message: kernelSigningProofMessage("kernel-nyc") }),
+        },
+      });
+    const signerOf = () => {
+      const row = getRepos().kernels.findById("kernel-nyc")!;
+      return [row.signingAddress ?? null, row.signingKeyAlgorithm ?? null, row.signingKeyPublicKey ?? null];
+    };
+
+    it("N1: no signer can be bound to a kernel with no recorded owner, so its trust root is not first-come", async () => {
+      await kernelApp();
+      for (const legacy of [ZERO, ""]) {
+        getRepos().kernels.update("kernel-nyc", { operatorAddress: legacy, signingAddress: null, signingKeyAlgorithm: null, signingKeyPublicKey: null });
+        const res = await reRegister(OTHER, attacker);
+        expect(res.statusCode).toBe(403);
+        expect(signerOf()).toEqual([null, null, null]);
+        expect(getRepos().kernels.findById("kernel-nyc")!.name).not.toBe("mine now"); // refused before any write
+      }
+    });
+
+    it("N1: a legacy kernel that already has a signer keeps it: that signer's proof changes nothing, another is refused", async () => {
+      await kernelApp();
+      getRepos().kernels.update("kernel-nyc", { operatorAddress: ZERO, signingAddress: nodeKey.address, signingKeyAlgorithm: "secp256k1", signingKeyPublicKey: null });
+      expect((await reRegister(OTHER, nodeKey)).statusCode).toBeLessThan(300);
+      expect(signerOf()).toEqual([nodeKey.address, "secp256k1", null]);
+      expect((await reRegister(OTHER, attacker)).statusCode).toBe(409);
+      expect(signerOf()).toEqual([nodeKey.address, "secp256k1", null]);
+    });
+  });
+});
