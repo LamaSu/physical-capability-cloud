@@ -368,6 +368,8 @@ describe("no production mock (ratchet)", () => {
       'import "../ProbePage.js";',
       'import { ProbePage } from "../ProbePage.js";\nconst unused = ProbePage;',
       'import { ProbePage } from "../ProbePage.js";\nrender(<ProbePage />);',
+      // It asserts, but never renders the page: only the render check decides this one.
+      'import { ProbePage } from "../ProbePage.js";\nit("x", () => {\n  expect(ProbePage).toBeDefined();\n});',
     ]) {
       expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test]), test).toEqual(["pages/ProbePage.tsx"]);
     }
