@@ -2654,6 +2654,58 @@ describe("normalizeIntakeLimits — limits converted into each CSD parameter's o
     };
     expect(normalizeIntakeLimits(hostile)).toBeNull();
   });
+
+  /** A registry holding one fixture CSD with a single number parameter. */
+  function registryWithParameter(url: string, parameter: { key: string; min: number; max: number; unit: string }) {
+    const registry = labRegistry();
+    registry.register(
+      CsdSchema.parse({
+        url,
+        version: "1.0.0",
+        status: "active",
+        name: "Fixture rig",
+        description: "fixture CSD with one number parameter",
+        kind: "base",
+        baseDefinition: null,
+        parameters: [{ type: "number", label: parameter.key, required: false, step: 1, ...parameter }],
+        constraints: [],
+        pricing: { basePrice: "1", currency: "USD" },
+      }),
+    );
+    return registry;
+  }
+
+  it("a converted bound never leaves the parameter's range: the conversion slack is clamped away", () => {
+    const url = "pcc://capabilities/clamp-lab/v1";
+    const registry = registryWithParameter(url, { key: "reactionVolume", min: 1000, max: 2000, unit: "uL" });
+    const record = cloneRecord(buildFullValidRecord());
+    record.answers["capability.type"] = typeAnswer(url);
+    // 0.9999999999 mL and 2.0000000001 mL lie within checkSafetyLimits' conversion slack of [1000, 2000] uL...
+    record.answers["safety.limits"] = limitsAnswer([limit("reactionVolume", "mL", 0.9999999999, 2.0000000001)]);
+    const authority = { ...makeAuthority(record), csdRegistry: registry };
+    expect(validateIntake(record, "register", authority).limitErrors).toEqual([]);
+    // ...but the normalized limit is the parameter's own range, never a hair outside it.
+    expect(normalizeIntakeLimits(record, authority)).toEqual([{ quantity: "reactionVolume", unit: "uL", min: 1000, max: 2000 }]);
+  });
+
+  it("nanometres are a length unit (sensors #5048: a plate reader's wavelength), converted exactly", () => {
+    const url = "pcc://capabilities/absorbance-lab/v1";
+    const registry = registryWithParameter(url, { key: "wavelengthNm", min: 405, max: 600, unit: "nm" });
+    const record = cloneRecord(buildFullValidRecord());
+    record.answers["capability.type"] = typeAnswer(url);
+    const authority = { ...makeAuthority(record), csdRegistry: registry };
+    record.answers["safety.limits"] = limitsAnswer([limit("wavelengthNm", "nm", 405, 600)]);
+    expect(validateIntake(record, "register", authority).limitErrors).toEqual([]);
+    expect(normalizeIntakeLimits(record, authority)).toEqual([{ quantity: "wavelengthNm", unit: "nm", min: 405, max: 600 }]);
+    // The same limit in micrometres comes back in the parameter's nm.
+    record.answers["safety.limits"] = limitsAnswer([limit("wavelengthNm", "um", 0.405, 0.6)]);
+    expect(normalizeIntakeLimits(record, authority)).toEqual([{ quantity: "wavelengthNm", unit: "nm", min: 405, max: 600 }]);
+    // A different dimension is still refused.
+    record.answers["safety.limits"] = limitsAnswer([limit("wavelengthNm", "s", 405, 600)]);
+    expect(validateIntake(record, "register", authority).limitErrors).toEqual([
+      "safety.limits[0]: unit does not match the CSD parameter's unit",
+    ]);
+  });
 });
 
 // ── 13. Tier readiness fails closed (astra 120b, finding 5) ──────────────

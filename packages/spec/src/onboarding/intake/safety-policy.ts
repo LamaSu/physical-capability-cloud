@@ -57,7 +57,8 @@ const UNIT_TABLE: ReadonlyMap<string, UnitDef> = new Map<string, UnitDef>([
   // temperature (base: kelvin)
   ["C", unit("temperature", 1, 273.15)],
   ["K", unit("temperature", 1)],
-  // length (base: metre)
+  // length (base: metre); nm for optical wavelengths (sensors #5048)
+  ["nm", unit("length", 1e-9)],
   ["um", unit("length", 1e-6)],
   ["mm", unit("length", 1e-3)],
   ["cm", unit("length", 1e-2)],
@@ -252,8 +253,11 @@ export function checkSafetyLimits(limits: readonly SafetyLimit[], parameters: Nu
  * them fails checkSafetyLimits (or the CSD is not bound). Each result names the
  * parameter's unit ("count" for a count parameter) and its bounds converted
  * through the closed table, rounded to 12 significant digits so a conversion
- * such as 1 mL -> 1000 uL reads exactly. A consumer that does no conversion of
- * its own (sensors' R8) takes these (kits re sensors #4764).
+ * such as 1 mL -> 1000 uL reads exactly, then clamped into the parameter's
+ * [min, max]: checkSafetyLimits allows a converted bound CONVERSION_SLACK past
+ * the range, and a normalized limit never lies outside the CSD's own range. A
+ * consumer that does no conversion of its own (sensors' R8) takes these (kits
+ * re sensors #4764).
  */
 export function limitsInParameterUnits(
   limits: readonly SafetyLimit[],
@@ -265,11 +269,12 @@ export function limitsInParameterUnits(
     const parameter = parameters.get(limit.quantity)!;
     const from = tableUnit(limit.unit)!;
     const to = tableUnit(parameter.unit!)!;
+    const inRange = (n: number): number => Math.min(parameter.max, Math.max(parameter.min, n));
     return {
       quantity: limit.quantity,
       unit: parameter.unit!,
-      min: from === to ? limit.min : round(convert(limit.min, from, to)),
-      max: from === to ? limit.max : round(convert(limit.max, from, to)),
+      min: from === to ? limit.min : inRange(round(convert(limit.min, from, to))),
+      max: from === to ? limit.max : inRange(round(convert(limit.max, from, to))),
     };
   });
 }
