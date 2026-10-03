@@ -322,7 +322,7 @@ export async function createGateway(port = 3200) {
     process.env.COOKIE_SECRET ||
     (process.env.NODE_ENV === "production"
       ? (() => {
-          app.log.error("[security] COOKIE_SECRET env var is not set in production. Cookies will not be signed.");
+          app.log.error(lit("[security] COOKIE_SECRET env var is not set in production. Cookies will not be signed."));
           return "insecure-default-do-not-use";
         })()
       : randomBytes(32).toString("hex"));
@@ -539,21 +539,21 @@ export async function createGateway(port = 3200) {
   // gateway restarts. Must run before any onboarding routes register so
   // the SDK is ready by the time requests arrive.
   setSessionStore(new OrchestratorSessionStore(getRepos().orchestratorSessions));
-  app.log.info("orchestrator-sdk session store: SQLite-backed");
+  app.log.info(lit("orchestrator-sdk session store: SQLite-backed"));
 
   // Wave 4.4 — bridge orchestrator-sdk's eventBus into PCC's existing OTel
   // pipeline (otel.ts). Every emit() becomes a one-shot span. Bridge runs
   // for the lifetime of the process; no explicit unsubscribe needed since
   // the SDK is GC'd at shutdown.
   startEventBusOtelBridge();
-  app.log.info("orchestrator-sdk event-bus → OTel bridge: active");
+  app.log.info(lit("orchestrator-sdk event-bus → OTel bridge: active"));
 
   // Wave 5 — internal demand-intel hourly/daily snapshot cron.
   // Persists DemandSnapshots into materializedViews. Auth-gated read via
   // /api/admin/demand/*. NOT a public oracle.
   startDemandSnapshotCron({
-    info: (msg) => app.log.info(msg),
-    warn: (msg) => app.log.warn(msg),
+    info: (msg) => app.log.info({ note: declare.id(msg) }, lit("[demand-snapshot] note")),
+    warn: (msg) => app.log.warn({ note: declare.id(msg) }, lit("[demand-snapshot] note")),
   });
 
   // Job-offers — generic /api/job-offers/* matching primitive. Replaces
@@ -577,20 +577,18 @@ export async function createGateway(port = 3200) {
     }).$client;
     initJobOffersStore(rawSqlite ? { sqlite: rawSqlite } : {});
     startJobOffersSweeper({
-      info: (msg) => app.log.info(msg),
-      warn: (msg) => app.log.warn(msg),
+      info: (msg) => app.log.info({ note: declare.id(msg) }, lit("[job-offers-sweeper] note")),
+      warn: (msg) => app.log.warn({ note: declare.id(msg) }, lit("[job-offers-sweeper] note")),
     });
   } catch (err) {
     // Best-effort wiring — if the store handle is shaped differently in some
     // environments (e.g. tests that build the app without initStore), fall
     // back to a pure in-memory job-offers store so routes still respond.
-    app.log.warn(
-      `[job-offers] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
-    );
+    app.log.warn({ err }, lit("[job-offers] could not attach SQLite; falling back to in-memory"));
     initJobOffersStore({});
     startJobOffersSweeper({
-      info: (msg) => app.log.info(msg),
-      warn: (msg) => app.log.warn(msg),
+      info: (msg) => app.log.info({ note: declare.id(msg) }, lit("[job-offers-sweeper] note")),
+      warn: (msg) => app.log.warn({ note: declare.id(msg) }, lit("[job-offers-sweeper] note")),
     });
   }
 
@@ -617,13 +615,13 @@ export async function createGateway(port = 3200) {
       initCarrierShipmentStore(rawSqlite ? { sqlite: rawSqlite, strictHydration: strict } : {});
       if (!rawSqlite) {
         app.log[strict ? "error" : "warn"](
-          "[carrier] no SQLite handle; shipment commitments are in-memory only — in production classification the carrier capability will 503 as unconfigured (durable store missing)",
+          lit("[carrier] no SQLite handle; shipment commitments are in-memory only — in production classification the carrier capability will 503 as unconfigured (durable store missing)"),
         );
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
       app.log[strict ? "error" : "warn"](
-        `[carrier] could not attach SQLite (${msg}); falling back to in-memory. In production classification the carrier capability will 503 as unconfigured rather than serve from a store that failed strict hydration.`,
+        { err },
+        lit("[carrier] could not attach SQLite; falling back to in-memory. In production classification the carrier capability will 503 as unconfigured rather than serve from a store that failed strict hydration."),
       );
       initCarrierShipmentStore({});
     }
@@ -633,8 +631,8 @@ export async function createGateway(port = 3200) {
   // the first /api/tools/search call doesn't pay the load+parse cost. Safe
   // to call if agent-package.json is missing (index just stays empty).
   prewarmToolIndex({
-    info: (msg) => app.log.info(msg),
-    warn: (msg) => app.log.warn(msg),
+    info: (msg) => app.log.info({ note: declare.id(msg) }, lit("[tool-index] note")),
+    warn: (msg) => app.log.warn({ note: declare.id(msg) }, lit("[tool-index] note")),
   });
 
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
@@ -1094,8 +1092,8 @@ export async function createGateway(port = 3200) {
           "./services/settlement-keeper.js"
         );
         const handle = startSettlementKeeper(() => getRepos(), {
-          info: (m) => app.log.info(`[settlement-keeper] ${m}`),
-          warn: (m) => app.log.warn(`[settlement-keeper] ${m}`),
+          info: (m) => app.log.info({ note: declare.id(m) }, lit("[settlement-keeper] note")),
+          warn: (m) => app.log.warn({ note: declare.id(m) }, lit("[settlement-keeper] note")),
         });
         if (process.env.SETTLEMENT_KEEPER_ENABLED === "true") {
           console.log(
