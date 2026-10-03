@@ -270,26 +270,28 @@ describe("N71: the device health error channel does not forward credentials", ()
   const ADAPTER_ERROR = `connect failed for http://u:${SENTINEL}@printer.invalid:5000/api/printer?apikey=${SENTINEL}-q`;
   const DEVICE = "dev_fdm_001"; // the default mock machine of the gateway's KernelService
 
-  it("[neg] POST /api/devices/:deviceId/health strips URL credentials from an adapter exception", async () => {
+  it("[neg] POST /api/devices/:deviceId/health returns a fixed code for an adapter exception, never its text", async () => {
+    // Round 3 (astra pack 83b) supersedes round 2's "still a usable diagnostic" scrub:
+    // astra showed scrubbing can never be complete (free text like "password=..." has
+    // no URL to catch), so the fix is a fixed code, not a better scrub. See the N71
+    // round 3 describe block below for the full astra-pack-83b coverage of this path.
     const spy = vi.spyOn(MockFDMAdapter.prototype, "getStatus").mockRejectedValue(new Error(ADAPTER_ERROR));
     try {
       const res = await inj("POST", `/api/devices/${DEVICE}/health`, keyB);
       expect(res.statusCode).toBe(200);
-      const body = bodyOf(res);
-      expect(body.healthy).toBe(false);
-      expect(String(body.details)).toContain("printer.invalid"); // still a usable diagnostic
+      expect(bodyOf(res)).toEqual({ healthy: false, details: "adapter_error" });
       expect(res.body).not.toContain(SENTINEL);
+      expect(res.body).not.toContain("printer.invalid"); // not even the location, anymore
     } finally {
       spy.mockRestore();
     }
   });
 
-  it("[neg] KernelService.checkDeviceHealth does not return URL credentials in details", async () => {
+  it("[neg] KernelService.checkDeviceHealth returns a fixed code for an adapter exception, never its text", async () => {
     const spy = vi.spyOn(MockFDMAdapter.prototype, "getStatus").mockRejectedValue(new Error(ADAPTER_ERROR));
     try {
       const result = await getKernelService().checkDeviceHealth(DEVICE);
-      expect(result.healthy).toBe(false);
-      expect(result.details).toContain("printer.invalid");
+      expect(result).toEqual({ healthy: false, details: "adapter_error" });
       expect(JSON.stringify(result)).not.toContain(SENTINEL);
     } finally {
       spy.mockRestore();
@@ -375,6 +377,11 @@ describe("N71: GET /api/setup/detect does not return server-held configuration",
   });
 
   it("[neg] a URL-valued variable does not carry its credentials out", async () => {
+    // Round 3 (astra pack 83b) supersedes round 2's "the location itself is still
+    // useful" scrub-and-keep: astra's remediation for this field is presence-only
+    // (see the dedicated N71 round 3 describe block below for the full X402_FACILITATOR_URL
+    // coverage, apostrophe cases included). No "value" key survives JSON serialization
+    // of an undefined property, so envEntryOf's result carries only name/category/set.
     const userinfo = `${SENTINEL}-facilitator-userinfo`;
     const query = `${SENTINEL}-facilitator-query`;
     await withEnv({ X402_FACILITATOR_URL: `https://svc:${userinfo}@facilitator.invalid/v1?apikey=${query}` }, async () => {
@@ -384,7 +391,7 @@ describe("N71: GET /api/setup/detect does not return server-held configuration",
         (v) => v.name === "X402_FACILITATOR_URL",
       );
       expect(entry?.set).toBe(true);
-      expect(entry?.value).toContain("facilitator.invalid"); // the location itself is still useful
+      expect(entry?.value).toBeUndefined();
       expectNoLeak(res.body, { userinfo, query });
     });
   });
@@ -958,7 +965,10 @@ describe("N71 round 3 (astra pack 83b): the setup catch blocks answer with fixed
       });
       expect(res.statusCode).toBe(500);
       expect(res.body).not.toContain(SENTINEL);
-      expect(bodyOf(res)).toEqual({ error: "upsert_failed", message: "Device registration failed" });
+      // toMatchObject, not toEqual: the gateway's onSend hook decorates every 5xx
+      // JSON body with a report_hint block (traceId, how-to-report), same as the
+      // sibling test-job assertion below pins it.
+      expect(bodyOf(res)).toMatchObject({ error: "upsert_failed", message: "Device registration failed" });
     } finally {
       spy.mockRestore();
     }
