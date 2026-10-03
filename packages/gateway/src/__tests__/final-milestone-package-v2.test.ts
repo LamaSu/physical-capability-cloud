@@ -378,6 +378,33 @@ describe("validatePackageBody — pinned forms", () => {
     }
   });
 
+  it("refuses a lone UTF-16 surrogate in any free-text field, before hashing (F5)", () => {
+    // operatorPrincipalId / devicePrincipalId / tChallengeRef are the body's
+    // free-text fields (kernelId is already ASCII-only via isValidKernelId).
+    // The shared canonicalizer's JSON.stringify happily escapes a lone
+    // surrogate as "\udXXX" — the public producer can hash it — but the
+    // private Oracle's jcs() refuses it, so it must be refused HERE, first.
+    for (const key of ["operatorPrincipalId", "devicePrincipalId"] as const) {
+      const b = clone(BODY);
+      b.producer[key] = "kernel-\ud800";
+      expect(() => validatePackageBody(b), key).toThrow(PackageBodyValidationError);
+      expect(() => validatePackageBody(b), key).toThrow(/lone UTF-16 surrogate/);
+      expect(() => computePackageBodyHash(b), key).toThrow(PackageBodyValidationError);
+    }
+    const b2 = clone(BODY);
+    b2.challengeBinding.tChallengeRef = "\ud800";
+    expect(() => validatePackageBody(b2)).toThrow(/lone UTF-16 surrogate/);
+    // A lone LOW surrogate (not just a lone high one) is refused too.
+    const b3 = clone(BODY);
+    b3.challengeBinding.tChallengeRef = "x\udc00y";
+    expect(() => validatePackageBody(b3)).toThrow(/lone UTF-16 surrogate/);
+    // A well-formed surrogate PAIR (a real non-ASCII character) is accepted —
+    // this check is specifically about LONE surrogates, not all of Unicode.
+    const ok = clone(BODY);
+    ok.challengeBinding.tChallengeRef = "chal-😀"; // 😀, a valid pair
+    expect(() => validatePackageBody(ok)).not.toThrow();
+  });
+
   it("every hashing function refuses empty principal ids too, instead of hashing them (F7)", () => {
     const sigs = [
       { signer: SIGNER_OP, scheme: "secp256k1-eip712", sig: "0xop" },

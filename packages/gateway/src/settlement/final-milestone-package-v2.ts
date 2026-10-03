@@ -131,6 +131,43 @@ function nonEmpty(v: unknown, path: string): string {
   return s;
 }
 /**
+ * Is `s` well-formed UTF-16 (no lone surrogate)? A lone surrogate survives
+ * `JSON.stringify` (the shared canonicalizer's string leaf, `util/canonical.ts`)
+ * as a `\uXXXX` escape, so the public producer can hash it — but the private
+ * Oracle's `jcs()` refuses it (F5, cross-family E9: evidence schema docs §3 vs
+ * oracle `oracle-verdict.ts:215-219`). A body that hashes on one side and is
+ * refused on the other is a producer bug, not an Oracle bug: refuse it here,
+ * before hashing, not after a mint fails downstream.
+ */
+function isWellFormedUnicode(s: string): boolean {
+  const withNativeCheck = s as unknown as { isWellFormed?: () => boolean };
+  if (typeof withNativeCheck.isWellFormed === "function") return withNativeCheck.isWellFormed();
+  // Fallback for a runtime without String.prototype.isWellFormed (Node < 20):
+  // a lone surrogate is a high surrogate not followed by a low one, or a low
+  // surrogate not preceded by a high one.
+  return !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
+}
+/**
+ * A free-text field (`operatorPrincipalId`, `devicePrincipalId`,
+ * `tChallengeRef`): non-empty, like every other id, AND well-formed Unicode
+ * (F5). The two principal ids and the kernel id are ASCII-restricted
+ * elsewhere (`isValidKernelId` here; `parseOperatorPrincipalId` /
+ * `parseDevicePrincipalId` at mint time), but at THIS layer
+ * `operatorPrincipalId` / `devicePrincipalId` must still accept the golden's
+ * free-text sample values ("op-golden"), so this is the one check standing
+ * between a lone surrogate and a hash the Oracle cannot reproduce.
+ */
+function freeText(v: unknown, path: string): string {
+  const s = nonEmpty(v, path);
+  if (!isWellFormedUnicode(s)) {
+    throw new PackageBodyValidationError(
+      path,
+      "must not contain a lone UTF-16 surrogate (unhashable by the Oracle's canonicalizer)",
+    );
+  }
+  return s;
+}
+/**
  * A kernel id, by #399's rule (`isValidKernelId`, pcc.evidence.principal-id.v1):
  * 1-128 printable ASCII characters, no space, not starting `eip155:` or `ed25519:`
  * in any ASCII case. It is the same rule `principalTupleWord("kernel", id)` hashes
@@ -273,13 +310,13 @@ export function validatePackageBody(input: unknown): FinalMilestonePackageV2Body
       acceptedEnvelopeHash: hex32(ub.acceptedEnvelopeHash, "$.unitBinding.acceptedEnvelopeHash"),
     },
     producer: {
-      operatorPrincipalId: nonEmpty(pr.operatorPrincipalId, "$.producer.operatorPrincipalId"),
+      operatorPrincipalId: freeText(pr.operatorPrincipalId, "$.producer.operatorPrincipalId"),
       kernelId: kernelIdField(pr.kernelId, "$.producer.kernelId"),
-      devicePrincipalId: nonEmpty(pr.devicePrincipalId, "$.producer.devicePrincipalId"),
+      devicePrincipalId: freeText(pr.devicePrincipalId, "$.producer.devicePrincipalId"),
     },
     challengeBinding: {
       nonce: hex32(cb.nonce, "$.challengeBinding.nonce"),
-      tChallengeRef: nonEmpty(cb.tChallengeRef, "$.challengeBinding.tChallengeRef"),
+      tChallengeRef: freeText(cb.tChallengeRef, "$.challengeBinding.tChallengeRef"),
     },
     evidence: {
       evidenceBlockHash: hex32(ev.evidenceBlockHash, "$.evidence.evidenceBlockHash"),
