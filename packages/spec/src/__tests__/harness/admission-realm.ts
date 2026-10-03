@@ -969,6 +969,25 @@ const RECIPES: Scenario[] = [
     items: one("an accessor deep in the bundles", () => RECIPE.accessorDeep),
   },
   {
+    // unverifiableProfileTerms is exported: a caller may pass an ordinary object. It reads own data only, so a
+    // term written on Object.prototype is never taken for the profile's (identical, not merely more terms).
+    id: "recipe: Object.prototype.tolerance and maxIntervalMs written; unverifiableProfileTerms on an ordinary profile",
+    apply: pollute(() => ({ tolerance: { comparator: ">=", target: 1 }, maxIntervalMs: 5 })),
+    items: async () => {
+      const rows: Row[] = [];
+      for (let i = 0; i < TERM_CASES.length; i++) {
+        let value: unknown;
+        try {
+          value = copyList(unverifiableProfileTerms(TERM_CASES[i]![1]));
+        } catch {
+          value = "threw";
+        }
+        rows[i] = ["terms", TERM_CASES[i]![0], value];
+      }
+      return rows;
+    },
+  },
+  {
     id: "recipe: Promise.prototype.then forges the presented set digest",
     apply: replace(Promise.prototype, "then", forgingThen),
     items: async () => {
