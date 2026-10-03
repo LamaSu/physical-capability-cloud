@@ -225,24 +225,58 @@ describe("PrinterLogAdapter polling (astra pack 190)", () => {
     expect.soft(entries(events), "entries").toEqual(["line 1", "line 2"]);
   });
 
+  it("a final poll that fails is latched like a timer poll's: it may have consumed a line it never delivered, so a retried stop refuses too (astra pack 208)", async () => {
+    const source = ["line 1", "line 2"]; // the printer's log: the final poll takes line 2, then fails
+    let calls = 0;
+    const logProvider = async (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 2) {
+        source.shift(); // consumed...
+        throw new Error("final poll failed after reading"); // ...and never delivered
+      }
+      return source.shift() ?? null;
+    };
+    const log = new PrinterLogAdapter("log-final-latch", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider });
+    const events = record(log);
+
+    await log.startRecording("job-f");
+    const first = await settle(log.stopRecording());
+    const retried = await settle(log.stopRecording());
+    expect.soft(first.error ?? "resolved", "the stop").toBe("final poll failed after reading");
+    expect.soft(retried.error ?? "resolved", "the retried stop").toMatch(/a log poll failed during the recording \(final poll failed after reading\), so its chain may be incomplete/);
+    expect.soft(summaries(events), "summaries").toEqual([]);
+    expect.soft(calls, "log polls: no poll after the failed final one").toBe(2);
+  });
+
   it("a stop retried after a failed one is the adapter's work: the hook waits until it has emitted", async () => {
     let calls = 0;
     const retryPoll = deferred();
     const logProvider = async (): Promise<string | null> => {
       calls += 1;
       if (calls === 1) return "line 1";
-      if (calls === 2) throw new Error("final poll failed once"); // the first stop's final poll
       if (calls === 3) {
         await retryPoll.promise; // the retried stop's final poll waits on the log source
         return "line 2";
       }
       return null;
     };
-    const log = new PrinterLogAdapter("log-retry", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider });
+    // The first stop fails reading the chain, which loses no line, so a retry may still summarize
+    // (a failed poll would refuse it: astra pack 208).
+    const capture = memoryLogCapture();
+    let chainReads = 0;
+    const flaky = {
+      ...capture,
+      getChain: () => {
+        chainReads += 1;
+        if (chainReads === 1) throw new Error("chain read failed once");
+        return capture.getChain();
+      },
+    } as unknown as LogCaptureService;
+    const log = new PrinterLogAdapter("log-retry", KERNEL_ID, flaky, { pollIntervalMs: 60_000, logProvider });
     const events = record(log);
 
     await log.startRecording("job-r");
-    await expect(log.stopRecording()).rejects.toThrow("final poll failed once");
+    await expect(log.stopRecording()).rejects.toThrow("chain read failed once");
     const retry = log.stopRecording();
     const hook = ask(log);
     await vi.advanceTimersByTimeAsync(10_000);
@@ -836,8 +870,82 @@ describe("PrinterLogAdapter: a stop asked from inside a timer poll (astra pack 1
   });
 });
 
+describe("PrinterLogAdapter: one summary per recording (astra pack 202)", () => {
+  /** A capture whose k-th reset, or k-th getChain, throws or calls `inside`. */
+  function oddCapture(opts: { resetThrowsOn?: number; getChainCalls?: () => void }): LogCaptureService {
+    let resets = 0;
+    const capture = memoryLogCapture();
+    return {
+      ...capture,
+      reset: () => {
+        resets += 1;
+        if (resets === opts.resetThrowsOn) throw new Error("reset failed");
+        capture.reset();
+      },
+      getChain: () => {
+        opts.getChainCalls?.();
+        return capture.getChain();
+      },
+    } as unknown as LogCaptureService;
+  }
+
+  it("the reset after the summary throws: that stop fails, but the recording has had its one summary, and a retried stop is refused", async () => {
+    let k = 0;
+    const log = new PrinterLogAdapter("log-202-reset", KERNEL_ID, oddCapture({ resetThrowsOn: 2 }), { pollIntervalMs: 60_000, logProvider: async () => `line ${++k}` });
+    const events = record(log);
+    await log.startRecording("job-r");
+    const first = await settle(log.stopRecording());
+    const retried = await settle(log.stopRecording());
+    expect.soft(first.error ?? "resolved", "the stop").toBe("reset failed");
+    expect.soft(retried.error ?? "resolved", "the retried stop").toMatch(/no recording to stop/);
+    expect.soft(summaries(events).map((e) => e.payload.chainLength), "summaries").toEqual([2]);
+    expect.soft(k, "log polls: the first and the final, no more").toBe(2);
+  });
+
+  it("a summary listener throws: every listener still gets the summary, the stop fails, and a retried stop is refused", async () => {
+    let k = 0;
+    const log = new PrinterLogAdapter("log-202-listener", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider: async () => `line ${++k}` });
+    log.onEvidence((e) => {
+      if (e.type === "printer_job_verified") throw new Error("listener failed");
+    });
+    const after = record(log); // registered after the one that throws
+    await log.startRecording("job-l");
+    const first = await settle(log.stopRecording());
+    const retried = await settle(log.stopRecording());
+    expect.soft(first.error ?? "resolved", "the stop").toBe("listener failed");
+    expect.soft(retried.error ?? "resolved", "the retried stop").toMatch(/no recording to stop/);
+    expect.soft(summaries(after).map((e) => e.payload.chainLength), "summaries the later listener got").toEqual([2]);
+  });
+
+  it("the reset at the start throws: the start fails and the adapter is idle again, not left starting", async () => {
+    let k = 0;
+    const log = new PrinterLogAdapter("log-202-start", KERNEL_ID, oddCapture({ resetThrowsOn: 1 }), { pollIntervalMs: 60_000, logProvider: async () => `line ${++k}` });
+    const events = record(log);
+    const start = await settle(log.startRecording("job-s"));
+    const reading = await log.getCurrentReading();
+    const again = await settle(log.startRecording("job-s"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(start.error ?? "resolved", "the start").toBe("reset failed");
+    expect.soft(reading, "the reading after it").toMatchObject({ recording: false, jobId: null });
+    expect.soft(again.error, "the same job, started again").toBeUndefined();
+    expect.soft(entries(events), "entries: only the second start's first poll").toEqual(["line 1"]);
+    await log.dispose();
+  });
+
+  it("a dispose from inside getChain, while stopping: there is no summary, and the stop fails", async () => {
+    let k = 0;
+    let log!: PrinterLogAdapter;
+    log = new PrinterLogAdapter("log-202-getchain", KERNEL_ID, oddCapture({ getChainCalls: () => void log.dispose() }), { pollIntervalMs: 60_000, logProvider: async () => `line ${++k}` });
+    const events = record(log);
+    await log.startRecording("job-g");
+    const stop = await settle(log.stopRecording());
+    expect.soft(stop.error ?? "resolved", "the stop").toMatch(/disposed while job job-g was stopping, so it has no summary/);
+    expect.soft(summaries(events), "summaries").toEqual([]);
+  });
+});
+
 describe("PrinterLogAdapter under JobRunner (astra pack 196): its start at step 2, its stop at step 6, and the stop its failure path retries", () => {
-  it("each run's calls meet the lifecycle: a summary per recorded run, a failed stop retried before the run returns, and a failed start's stop refused", async () => {
+  it("each run's calls meet the lifecycle: a summary per recorded run, a stop whose final poll failed refused on retry, and a failed start's stop refused", async () => {
     vi.useRealTimers(); // real hashing (crypto.subtle) and a real run, as in job-runner-evidence-settled.test.ts
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -875,7 +983,7 @@ describe("PrinterLogAdapter under JobRunner (astra pack 196): its start at step 
       new JobRunner(machine, [log], null, emitter).run({ jobId, stepId: "step-1", gcodeHash: `sha256:${n.toString(16).padStart(64, "0")}` as SHA256, assuranceTier: 1 });
 
     const r1 = await run("job-1", 1);
-    const r2 = await run("job-2", 2); // step 6's stop fails; the failure path retries it
+    const r2 = await run("job-2", 2); // step 6's stop fails at its final poll; the failure path's retry is refused (latched, astra pack 208)
     const seenWhenRun2Returned = seen.length;
     const r3 = await run("job-3", 3); // step 2's start fails; the failure path's stop is refused
     const r4 = await run("job-4", 4);
@@ -887,19 +995,20 @@ describe("PrinterLogAdapter under JobRunner (astra pack 196): its start at step 
       ["log_hash_chain_entry", "job-1", "job-1 line 1"],
       ["log_hash_chain_entry", "job-1", "job-1 line 2"],
       ["printer_job_verified", "job-1", 2],
-      ["log_hash_chain_entry", "job-2", "job-2 line 1"],
-      ["log_hash_chain_entry", "job-2", "job-2 line 2"], // the retried stop's final poll
-      ["printer_job_verified", "job-2", 2],
+      ["log_hash_chain_entry", "job-2", "job-2 line 1"], // no summary: its final poll failed, and the retry refuses
       ["log_hash_chain_entry", "job-4", "job-4 line 1"],
       ["printer_job_verified", "job-4", 1],
     ]);
-    expect.soft(seenWhenRun2Returned, "events emitted by the time run 2 returned: its retry's summary included").toBe(6);
+    expect.soft(seenWhenRun2Returned, "events emitted by the time run 2 returned").toBe(4);
     expect
       .soft(
         errors.mock.calls.filter((call) => String(call[0]).includes("stopping sensor log-jobrunner after a failed run")).map((call) => String(call[1])),
         "the failure path's stops that failed",
       )
-      .toEqual([expect.stringMatching(/log-jobrunner: no recording to stop/)]);
+      .toEqual([
+        expect.stringMatching(/log-jobrunner: a log poll failed during the recording \(final poll failed once\), so its chain may be incomplete/),
+        expect.stringMatching(/log-jobrunner: no recording to stop/),
+      ]);
     expect
       .soft(
         bundles.map((bundle) => bundle.events.map((e) => [e.type, e.payload.jobId])),
