@@ -380,6 +380,25 @@ describe("19g CRITICAL: the next account's key is stored only after the generati
     expect(gateway.siweCookie).toBe(false);
   }, 30_000);
 
+  it("not reproduced for logout: a tab opened between its two writes shows the login page, with no shell or session", async () => {
+    await aSignedIn();
+    const b = await openTab("B");
+    gateway.logoutsToAnswer = 0;
+    recordAccountWrites();
+    await act(async () => b.store.getState().logout());
+    stopRecording();
+    expect(accountWrites.map((w) => w.key), "logout removes the key, then moves the generation").toEqual(["pcc-api-key", "pcc-account-generation"]);
+    const c = await openTabSeeing("C", snapshot!);
+    await settle();
+    expect(c.container.querySelector("#api-key"), "C shows the login form").not.toBeNull();
+    const buttons = [...c.container.querySelectorAll("button")].map((el) => (el.textContent ?? "").trim());
+    expect(buttons.some((t) => t === "Connect Wallet" || t === "Sign In" || t === "Disconnect"), "C shows no shell").toBe(false);
+    expect(c.store.getState().sessionToken, "C adopted no session").toBeNull();
+    await deliver(accountWrites);
+    await everythingSettles();
+    expect(gateway.siweCookie, "A's cookie is gone in the end").toBe(false);
+  }, 30_000);
+
   it("a login whose generation can't move stores no key: an interrupted change fails closed", async () => {
     const b = await openTab("B");
     Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
