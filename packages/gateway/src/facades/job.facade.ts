@@ -26,6 +26,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
 
 /**
@@ -233,10 +234,15 @@ export class JobFacade extends BaseFacade {
     progress?: number,
   ): Promise<Result<JobDTO>> {
     return this.execute("updateStatus", async () => {
-      const updated = this.repos.jobs.updateStatus(jobId, status, progress);
-      if (!updated) {
+      // N85(a): a generic writer may not finish, fail, cancel or re-open a paid job.
+      const outcome = writeJobStatusGuarded(jobId, status, progress);
+      if (outcome.kind === "not_found") {
         throw new NotFoundError("job", jobId);
       }
+      if (outcome.kind === "refused") {
+        throw new ConflictError(SETTLEMENT_OWNED_MESSAGE, "settlement_owned_status");
+      }
+      const updated = outcome.job;
 
       const kernelMap = this.loadKernelMap([updated.kernelId]);
       const capabilityMap = this.loadCapabilityMap([updated.capabilityId]);
@@ -597,6 +603,16 @@ export class JobFacade extends BaseFacade {
 
     scored.sort((a, b) => b.score - a.score);
     return scored[0].score > 0 ? scored[0].cap.id : caps[0].id;
+  }
+}
+
+/** Internal error for flow control — caught by BaseFacade.execute(), which answers 409 with `code`. */
+class ConflictError extends Error {
+  readonly code: string;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "ConflictError";
+    this.code = code;
   }
 }
 
