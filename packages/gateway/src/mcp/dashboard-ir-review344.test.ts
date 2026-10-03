@@ -18,9 +18,10 @@ import {
   EFFECT_REVIEWED_READS, bindPolicyRouteSources, reviewedRouteSource,
   RECORD_STATUS_NOTE, isMoneyState, recordValueText,
   WITHHELD_FIELD, RECORD_CLAIM_NOTE, boundValueText, isProseClaim, statesAmount, mentionsWithheld,
+  SAFE_STATUS_WORDS,
 } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
-import { bindListRows, bindScalar, bindSchemaCard, renderIrDoc } from "./dashboard-ir-renderer.js";
+import { bindListRows, bindScalar, bindSchemaCard, renderIrDoc, UNAVAILABLE } from "./dashboard-ir-renderer.js";
 import { buildMcpAppIrDashboardHtml } from "./mcp-app-view.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 
@@ -44,8 +45,12 @@ function withheldOf(n: IrNode | undefined): number {
 
 describe("#344 money: manifest prose cannot present money", () => {
   it("amounts and payment/verification claims are withheld in every prose slot", () => {
+    // Title and form-field title say "Balance confirmed", not bare "Balance": astra r3 moved
+    // "balance" out of the strict claim list into the noun-only pair rule (M4 fix), so a bare
+    // noun label no longer self-triggers — it takes a paired GENERIC word ("confirmed") within 3
+    // words to withhold it, exactly like "payment received"/"payout approved".
     const doc = ok({
-      csd: CSD, title: "Available balance",
+      csd: CSD, title: "Balance confirmed",
       sections: [{ heading: "Payment received - verified", windows: [
         { kind: "note", text: "1,000,000 USDC" },
         { kind: "note", text: "$12.50 on the way" },
@@ -53,7 +58,7 @@ describe("#344 money: manifest prose cannot present money", () => {
         { kind: "note", text: "ｐａｉｄ" },       // fullwidth "paid"
         { kind: "note", text: "Settle​d yesterday" },        // zero-width space
         { kind: "actions", actions: [{ id: "a", label: "Refunded" }] },
-        { kind: "form", schema: { type: "object", properties: { b: { type: "number", title: "Balance" } } } },
+        { kind: "form", schema: { type: "object", properties: { b: { type: "number", title: "Balance confirmed" } } } },
         { kind: "note", text: "Pick a kernel near you" },         // benign prose stays
       ] }],
     });
@@ -231,8 +236,9 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
     bindListRows(fdoc, listEl, node, [{ id: "j3", kernelId: "k1", status: "released" }, { id: "j4", kernelId: "k1", status: "running" }]);
     const texts = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(texts).toEqual([
-      ["j3", "k1", "released" + RECORD_STATUS_NOTE, "released" + RECORD_STATUS_NOTE],
-      ["j4", "k1", "running", "running"],
+      // row texts now carry PCC-owned field labels (astra r3 H2 structural framing)
+      ["ID:", "j3", "Kernel:", "k1", "Status:", "released" + RECORD_STATUS_NOTE, "Status:", "released" + RECORD_STATUS_NOTE],
+      ["ID:", "j4", "Kernel:", "k1", "Status:", "running", "Status:", "running"],
     ]);
   });
 
@@ -327,7 +333,7 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     for (const t of [
       "P\u0410ID", "\u0420\u0410\u0406D", // Cyrillic capitals
       "\u1d18\u1d00\u026a\u1d05", "pa\u0268d", "\u24df\u24d0\u24d8\u24d3", "\u{1D429}\u{1D41A}\u{1D422}\u{1D41D}",
-      "p41d", "r3l3as3d", "s3tt1ed", "p a i d", "p.a.i.d", "v-e-r-i-f-i-e-d",
+      "p41d", "funds r3l3as3d", "s3tt1ed", "p a i d", "p.a.i.d", "v-e-r-i-f-i-e-d",
       "paymentReceived", "payout_done", "pa\u200did", "pa\u2066id\u2069", "pa\u00adid", "pa\u3164id", "pa\ufe0fid",
     ]) expect(isMoneyClaim(t), JSON.stringify(t)).toBe(true);
   });
@@ -448,13 +454,22 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     const listEl = fdoc.createElement("div");
     const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["location.label"], statusFrom: "status" } } as unknown as IrNode;
     bindListRows(fdoc, listEl, node, [{ name: "Arm 1", "location": { label: "\u2705 verified site" }, status: "approved" }]);
-    expect((listEl.children[0]!.children as RElement[]).map((c) => c.textContent)).toEqual(["Arm 1", WITHHELD_FIELD, "approved" + RECORD_CLAIM_NOTE]);
+    // row texts now carry PCC-owned field labels (astra r3 H2); "approved" is in the CLOSED
+    // SAFE_STATUS_WORDS vocabulary (astra r3 H1 fail-closed status), so it is shown bare, not
+    // qualified \u2014 the record-status note is reserved for words NOT on that safe list.
+    expect((listEl.children[0]!.children as RElement[]).map((c) => c.textContent))
+      .toEqual(["Name:", "Arm 1", "Location:", WITHHELD_FIELD, "Status:", "approved"]);
     const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
     bindSchemaCard("capability-summary-v1", { name: "Refunded in full", type: "arm", pricing: { baseCost: "12.50", currency: "USDC" }, assuranceTiers: [1, 2], available: true }, slots);
     expect(slots.map((x) => x.textContent)).toEqual([WITHHELD_FIELD, "arm", "12.50", "USDC", "1, 2", "Yes"]);
-    // the card's own price fields show money as stated, even an amount; no other field may
-    bindSchemaCard("capability-summary-v1", { name: "Arm", type: "1,000 USDC", pricing: { baseCost: "1,000 USDC", currency: "USDC" }, assuranceTiers: ["Paid", 2], available: false }, slots);
-    expect(slots.map((x) => x.textContent)).toEqual(["Arm", WITHHELD_FIELD, "1,000 USDC", "USDC", WITHHELD_FIELD, "No"]);
+    // astra r3 M3 / #348 r2b F1: "type" is a mistyped capType ("1,000 USDC" fails the closed
+    // identifier grammar) and "assuranceTiers" is a mistyped tiers array ("Paid" is not an
+    // integer) \u2014 the card now fails CLOSED on every slot instead of selectively masking just the
+    // claim-bearing ones; the card's own price fields no longer get a content-based exemption,
+    // they are validated like everything else.
+    const ok2 = bindSchemaCard("capability-summary-v1", { name: "Arm", type: "1,000 USDC", pricing: { baseCost: "1,000 USDC", currency: "USDC" }, assuranceTiers: ["Paid", 2], available: false }, slots);
+    expect(slots.map((x) => x.textContent)).toEqual([UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE]);
+    expect(ok2).toBe(false);
     expect(textOf(listEl)).not.toContain("verified site");
   });
 
@@ -504,4 +519,64 @@ describe("astra r2 (#344): the checks stay linear at the manifest's size limits"
       if (r.ok) expect(validateIr(r.doc)).toEqual({ ok: true });
     });
   }
+});
+describe("astra r3 (#344 @e909337a) and #348 r2 F1: reproduced findings (verify before fix)", () => {
+  type FakeEl = RElement & { attrs: Record<string, string> };
+  const fdoc: RDocument = { createElement(): RElement {
+    const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+    return e;
+  } };
+  const textOf = (e: RElement): string => e.textContent + (e.children as RElement[]).map(textOf).join(" ");
+
+  it("H1 (lexical): obvious claim spellings, confusables and extra currencies bypass the detector", () => {
+    expect(isProseClaim("Payment complete")).toBe(true);
+    expect(boundValueText("status", "Verification passed")).not.toBe("Verification passed");
+    expect(boundValueText("name", "PAlD")).toBe(WITHHELD_FIELD); // lowercase L, not capital I
+    expect(isMoneyClaim("USDC five")).toBe(true);
+    expect(isMoneyClaim("100 XLM")).toBe(true);
+    expect(isMoneyClaim("\u03c0\u03bb\u03b7\u03c1\u03ce\u03b8\u03b7\u03ba\u03b5")).toBe(true); // Greek: "it was paid"
+  });
+
+  it("H2 (split across bound fields): a list row's bound title+meta jointly stating a claim is withheld", () => {
+    const listEl = fdoc.createElement("div");
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["type"] }, bind: { path: "/api/capabilities" } } as unknown as IrNode;
+    bindListRows(fdoc, listEl, node, [{ name: "$", type: "100" }, { name: "Payment", type: "complete" }]);
+    const collapsed = textOf(listEl).replace(/\s+/g, " ");
+    expect(collapsed).not.toContain("$ 100");
+    expect(collapsed).not.toContain("Payment complete");
+  });
+
+  it("M3: a hostile price field cannot reproduce PCC's exact withheld notice", () => {
+    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    bindSchemaCard("capability-summary-v1", { name: "Arm", type: "arm", pricing: { baseCost: WITHHELD_PROSE, currency: "USDC" }, assuranceTiers: [1], available: true }, slots);
+    expect(slots.some((s) => s.textContent === WITHHELD_PROSE)).toBe(false);
+  });
+
+  it("M4 (over-suppression): ordinary physical-workflow prose is not withheld", () => {
+    for (const t of ["Sample received", "payload released", "biosafety approved", "balance calibrated", "Run confirmed for 9:00"]) {
+      expect(isProseClaim(t), t).toBe(false);
+    }
+  });
+
+  it("#348 F1 (types): a mistyped capability card fails closed on every slot", () => {
+    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    const okFlag = bindSchemaCard(
+      "capability-summary-v1",
+      { name: 7, type: true, pricing: { baseCost: "paid 5 USDC", currency: "verified" }, asOf: "2026-09-24T12:00:00.000Z" },
+      slots,
+    );
+    const texts = slots.map((s) => s.textContent);
+    for (const bad of ["7", "true", "paid 5 USDC", "verified"]) expect(texts).not.toContain(bad);
+    for (const t of texts) expect(t).toBe(UNAVAILABLE);
+    expect(okFlag).toBe(false);
+  });
+});
+
+describe("astra r3 H1: SAFE_STATUS_WORDS is a closed vocabulary with no payment word in it", () => {
+  it("no SAFE_STATUS_WORDS entry is itself a money claim or a money state", () => {
+    for (const w of SAFE_STATUS_WORDS) {
+      expect(isMoneyClaim(w), w).toBe(false);
+      expect(isMoneyState(w), w).toBe(false);
+    }
+  });
 });

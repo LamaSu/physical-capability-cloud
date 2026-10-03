@@ -13,14 +13,17 @@
  *    prose (all manifest text + fetched values) can only ever be inert text.
  *  - SCHEMA-VALIDATED DYNAMIC ROWS: fetched list rows/stat scalars are read ONLY via
  *    the doc's declared own-property selectors; anything else is dropped.
- *  - NO EFFECTS: no fetch of non-GET, no host tools/call, no __PCC_HOST_BRIDGE__/
- *    __PCC_HOST_OPERATIONS__. Data binding is GET-only and injected (item 8 wires it).
+ *  - NO WRITES, NO HOST BRIDGE: no fetch of non-GET, no __PCC_HOST_BRIDGE__/
+ *    __PCC_HOST_OPERATIONS__, no host tools/call. Data binding is GET-only and injected (item 8
+ *    wires it). GET reads are not effect-FREE, though: each carries the operational effects listed
+ *    in EFFECT_REVIEWED_READS (dashboard-ir.ts) — a facade telemetry event, and, for capability
+ *    reads with PCC_FUNNEL_ENABLED=true, a funnel audit row (astra r2 F3; astra r3 L5).
  *
  * Written self-contained (siblings-by-name only) so it can be inlined into the view
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema } from "./dashboard-ir.js";
-import { LIST_ROW_CAP, WITHHELD_PROSE, boundValueText } from "./dashboard-ir.js";
+import { LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, isMoneyClaim } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -34,11 +37,12 @@ export interface RElement {
 }
 export interface RDocument { createElement(tag: string): RElement; }
 
-const CLS: Record<IrNodeType | "untrusted" | "agent" | "withheld" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field", string> = {
+const CLS: Record<IrNodeType | "untrusted" | "agent" | "withheld" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fieldname", string> = {
   root: "pcc-ir", section: "pcc-section", heading: "pcc-heading", text: "pcc-text",
   stat: "pcc-stat", card: "pcc-card", receipt: "pcc-receipt", list: "pcc-list",
   badge: "pcc-badge", grid: "pcc-grid", "approval-notice": "pcc-approval",
   plan: "pcc-plan", "form-summary": "pcc-form", "field-label": "pcc-field",
+  fieldname: "pcc-fieldname",
   untrusted: "pcc-untrusted", agent: "pcc-agent", withheld: "pcc-withheld",
   invalid: "pcc-invalid", value: "pcc-value", row: "pcc-row", meta: "pcc-meta",
   note: "pcc-note", schemaCard: "pcc-schema-card", field: "pcc-fieldlabel",
@@ -82,10 +86,14 @@ function el(doc: RDocument, cls: string, text?: string, untrusted?: boolean): RE
 // never (a) relabel a field, (b) surface an off-schema response field (paid/verified/…),
 // or (c) mint a privileged-looking "receipt" — the settlement record is always framed
 // read-only with an explicit "not proof of payment" warning.
-const UNAVAILABLE = "—"; // em dash — honest "not available", never a partial fake
-// `money`: the card's own price fields. They are the one place a PCC card shows money, so they are
-// the only bound values that skip boundValueText (astra r2 F2).
-interface SchemaField { label: string; key: string | readonly string[]; list?: boolean; bool?: boolean; money?: boolean }
+export const UNAVAILABLE = "—"; // em dash — honest "not available", never a partial fake
+// Every field has a `kind`: a closed, typed grammar (astra r3 M3 / #348 r2b F1). `money` STAYS only
+// as documentation that a price field shows money as the card's own — it is no longer consulted to
+// skip validation: the "amount"/"currency" kinds admit no prose at all, so the withheld notice can
+// never be painted there, and a hostile shape (an object, a sentence, "verified" as a currency) is
+// rejected like any other mistyped field, never silently displayed.
+type FieldKind = "text" | "capType" | "amount" | "currency" | "tiers" | "bool" | "status" | "percent";
+interface SchemaField { label: string; key: string | readonly string[]; kind: FieldKind; money?: boolean }
 interface SchemaSpec { heading: string; note?: string; fields: readonly SchemaField[] }
 // Only the DATA-BEARING cards have a schema (a public/known-shape GET). The settlement
 // record is NOT here — it is a static pointer (see SETTLEMENT_NOTICE + the receipt painter).
@@ -93,12 +101,12 @@ export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.fr
   "capability-summary-v1": Object.freeze({
     heading: "Capability",
     fields: Object.freeze([
-      { label: "Name", key: "name" },
-      { label: "Type", key: "type" },
-      { label: "Base cost", key: "pricing.baseCost", money: true },
-      { label: "Currency", key: "pricing.currency", money: true },
-      { label: "Assurance tiers", key: "assuranceTiers", list: true },
-      { label: "Available", key: "available", bool: true },
+      { label: "Name", key: "name", kind: "text" },
+      { label: "Type", key: "type", kind: "capType" },
+      { label: "Base cost", key: "pricing.baseCost", kind: "amount", money: true },
+      { label: "Currency", key: "pricing.currency", kind: "currency", money: true },
+      { label: "Assurance tiers", key: "assuranceTiers", kind: "tiers" },
+      { label: "Available", key: "available", kind: "bool" },
     ]),
   }),
   "run-summary-v1": Object.freeze({
@@ -107,8 +115,8 @@ export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.fr
     // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
     // keys (NOT a manifest selector); first present wins.
     fields: Object.freeze([
-      { label: "Status", key: ["status", "job.status"] },
-      { label: "Progress", key: ["progress", "job.progress"] },
+      { label: "Status", key: ["status", "job.status"], kind: "status" },
+      { label: "Progress", key: ["progress", "job.progress"], kind: "percent" },
     ]),
   }),
 }) as Readonly<Record<BindSchema, SchemaSpec>>;
@@ -123,43 +131,77 @@ const SETTLEMENT_NOTICE = Object.freeze({
   note: "Not proof of payment; verify on the authenticated PCC surface.",
 });
 
-/** Read ONE fixed schema field from fetched data. `key` is a fixed own-property selector
- * (or an ordered list of KNOWN server shapes — first present wins); NEVER a manifest
- * selector. `list` joins a scalar array; `bool` normalizes to Yes/No. Missing / non-scalar
- * → the honest unavailable marker (never a partial authoritative card). */
-function readField(data: unknown, f: SchemaField): string {
+// Grammars for the typed kinds (astra r3 M3 / #348 r2b F1). `amount` admits a finite non-negative
+// number OR a canonical decimal string; `capType` is a closed identifier grammar (no spaces, no
+// prose); `currency` is the exact spec enum (types/common.ts:27 `Currency`). None of these admit
+// arbitrary text, so a hostile "paid 5 USDC" / "verified" / sentence value can never pass as one.
+const CAP_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const AMOUNT_STR_RE = /^\d{1,15}(\.\d{1,18})?$/;
+const CURRENCY_ENUM: ReadonlySet<string> = new Set(["USDC", "ETH", "DAI", "SOL"]);
+type FieldRead = { ok: true; text: string } | { ok: false };
+
+/** Read + type-validate ONE fixed schema field from fetched data. `key` is a fixed own-property
+ * selector (or an ordered list of KNOWN server shapes — first PRESENT key wins); NEVER a manifest
+ * selector. A key that resolves to no own-property on any candidate is MISSING → the honest
+ * unavailable marker (not a type error). A present value that does not match its `kind`'s grammar
+ * is MISTYPED → `{ok:false}` (the caller fails the WHOLE card closed, never a partial authoritative
+ * card built from one mistyped field). A present, well-typed value is shown per its kind:
+ * text/capType/status still pass through boundValueText (content-checked, same as any bound
+ * value); amount/currency/tiers/bool/percent have no prose grammar, so they are shown as-is. */
+function readField(data: unknown, f: SchemaField): FieldRead {
   const keys = Array.isArray(f.key) ? f.key : [f.key as string];
-  if (f.list) {
-    for (const k of keys) {
-      const arr = readOwnPath(data, k);
-      if (!Array.isArray(arr)) continue;
-      const parts: string[] = [];
-      for (const x of arr) {
-        if (typeof x === "string" && x.length > 0) parts.push(x);
-        else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
-        else if (typeof x === "boolean") parts.push(String(x));
-        // non-scalar array elements are skipped (never stringified)
-      }
-      if (parts.length) return boundValueText(k, parts.join(", "));
-    }
-    return UNAVAILABLE;
-  }
+  let raw: unknown;
+  let foundKey: string | null = null;
   for (const k of keys) {
-    const v = readSelector(data, k);
-    if (v === "") continue;
-    if (f.bool && (v === "true" || v === "false")) return v === "true" ? "Yes" : "No";
-    // the price fields show money as the card's own; every other value is checked (#3013; astra r2 F2)
-    return f.money ? v : boundValueText(k, v);
+    const v = readOwnPath(data, k);
+    if (v !== undefined) { raw = v; foundKey = k; break; }
   }
-  return UNAVAILABLE;
+  if (foundKey === null) return { ok: true, text: UNAVAILABLE };
+  switch (f.kind) {
+    case "text":
+      return typeof raw === "string" && raw.length > 0 && raw.length <= 200
+        ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+    case "capType":
+      return typeof raw === "string" && CAP_TYPE_RE.test(raw)
+        ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+    case "status":
+      return typeof raw === "string" && raw.length > 0
+        ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+    case "amount":
+      if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) return { ok: true, text: String(raw) };
+      if (typeof raw === "string" && AMOUNT_STR_RE.test(raw)) return { ok: true, text: raw };
+      return { ok: false };
+    case "currency":
+      return typeof raw === "string" && CURRENCY_ENUM.has(raw) ? { ok: true, text: raw } : { ok: false };
+    case "tiers":
+      return Array.isArray(raw) && raw.every((x) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 3)
+        ? { ok: true, text: raw.join(", ") } : { ok: false };
+    case "bool":
+      return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No" } : { ok: false };
+    case "percent":
+      return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 100
+        ? { ok: true, text: String(raw) } : { ok: false };
+    default:
+      return { ok: false };
+  }
 }
 
-/** Fill a fixed-schema card's value slots from fetched data (text-only). PCC owns the
- * field set + order; slot[i] ← the i-th field's fixed key. Missing key → UNAVAILABLE. */
-export function bindSchemaCard(schema: BindSchema, data: unknown, slots: Array<{ textContent: string }>): void {
+/** Fill a fixed-schema card's value slots from fetched data (text-only). PCC owns the field set +
+ * order; slot[i] <- the i-th field's fixed key. If ANY present field is mistyped for its `kind`,
+ * EVERY slot is set to UNAVAILABLE and this returns false — never a partial card built from one
+ * off-type field (astra r3 M3 / #348 r2b F1). Otherwise every slot is filled and this returns
+ * true. The caller (dashboard-ir-browser-entry.ts) may ignore the boolean. */
+export function bindSchemaCard(schema: BindSchema, data: unknown, slots: Array<{ textContent: string }>): boolean {
   const spec = SCHEMA_FIELDS[schema];
-  if (!spec) return;
-  spec.fields.forEach((f, i) => { const slot = slots[i]; if (slot) slot.textContent = readField(data, f); });
+  if (!spec) return false;
+  const reads = spec.fields.map((f) => readField(data, f));
+  const allOk = reads.every((r) => r.ok);
+  reads.forEach((r, i) => {
+    const slot = slots[i];
+    if (!slot) return;
+    slot.textContent = allOk && r.ok ? r.text : UNAVAILABLE;
+  });
+  return allOk;
 }
 
 // ── Frozen painter dispatch — exactly the 14 catalog types, immutable ─────────────
@@ -238,9 +280,28 @@ export function renderIrDoc(doc: RDocument, mount: RElement, ir: IrDoc): void {
   mount.appendChild(paintNode(doc, ir.root));
 }
 
-/** Schema-validated dynamic ROW rendering for a list node: read ONLY the declared
- * selectors from each fetched row via own-property traversal; drop rows that yield
- * no title. Every field reaches the DOM via textContent. */
+// ── PCC-owned list field labels (H2 fix: structural framing) ─────────────────────────────
+// A trusted, PCC-authored label precedes every bound list value ("Name:", "Status:", ...), so a
+// reader always sees which field a value came from instead of two untrusted values sitting bare
+// next to each other with no attribution at all — the structural half of the H2 fix (the row-level
+// backstop below is the content half). Closed map; an unknown field falls back to its own path.
+const LIST_FIELD_LABELS: Readonly<Record<string, string>> = {
+  id: "ID", name: "Name", capabilityId: "Capability", kernelId: "Kernel", status: "Status",
+  createdAt: "Created", updatedAt: "Updated", version: "Version", capabilityCount: "Capabilities",
+  "location.label": "Location", type: "Type", available: "Available",
+};
+/** The PCC-owned label for a list field; an unknown field falls back to the field path itself. */
+export function listFieldLabel(field: string): string { return LIST_FIELD_LABELS[field] ?? field; }
+
+/** Schema-validated dynamic ROW rendering for a list node: read ONLY the declared selectors from
+ * each fetched row via own-property traversal; drop rows that yield no title. Every value reaches
+ * the DOM via textContent, framed by its own trusted PCC label (title/meta/status keep their
+ * original heading/meta/badge classes on the VALUE element; the label is a separate, trusted,
+ * untrusted-free sibling). Row-level backstop (astra r3 H2): a claim split across this row's OWN
+ * bound fields ("$" as the title, "100" as a meta value) is caught here by joining the row's
+ * non-status values post-boundValueText and re-checking the joined text, even though neither value
+ * alone was a claim. Skipped when a value was already withheld individually — nothing left to
+ * catch, and it avoids re-triggering on WITHHELD_FIELD's own text. */
 export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[]): void {
   const rowTitle = String(node.props?.rowTitle ?? "");
   const rowMeta = Array.isArray(node.props?.rowMeta) ? (node.props!.rowMeta as string[]) : [];
@@ -255,10 +316,37 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
     // value that states money or verification is withheld (astra r2 F2).
     const title = boundValueText(rowTitle, readSelector(row, rowTitle));
     if (title === "") continue; // drop malformed row (no valid title)
+    const meta = rowMeta
+      .map((field) => ({ field, text: boundValueText(field, readSelector(row, field)) }))
+      .filter((m) => m.text !== "");
+    const statusText = statusFrom ? boundValueText(statusFrom, readSelector(row, statusFrom)) : "";
+
+    // The join excludes any field NAMED status (even one reached via rowMeta, not statusFrom): that
+    // text is already PCC-qualified (RECORD_STATUS_NOTE / RECORD_CLAIM_NOTE) by boundValueText's own
+    // status branch, and re-running the claim detector over PCC's OWN disclaimer wording is both
+    // redundant and unsafe — the disclaimer itself talks about confirmation/settlement and must not
+    // be able to trip the backstop into withholding an already-safe value.
+    const isStatusField = (field: string): boolean => /(^|\.)status$/.test(field);
+    const nonStatus = [{ field: rowTitle, text: title }, ...meta.filter((m) => !isStatusField(m.field))];
+    const alreadyWithheld = nonStatus.some((v) => v.text === WITHHELD_FIELD);
+    let finalTitle = title;
+    let finalMeta = meta;
+    if (!alreadyWithheld && nonStatus.length > 1 && isMoneyClaim(nonStatus.map((v) => v.text).join(" "))) {
+      finalTitle = isStatusField(rowTitle) ? title : WITHHELD_FIELD;
+      finalMeta = meta.map((m) => (isStatusField(m.field) ? m : { field: m.field, text: WITHHELD_FIELD }));
+    }
+
     const line = el(doc, CLS.row);
-    line.appendChild(el(doc, CLS.heading, title, true));
-    for (const m of rowMeta) { const v = boundValueText(m, readSelector(row, m)); if (v !== "") line.appendChild(el(doc, CLS.meta, v, true)); }
-    if (statusFrom) { const s = boundValueText(statusFrom, readSelector(row, statusFrom)); if (s !== "") line.appendChild(el(doc, CLS.badge, s, true)); }
+    line.appendChild(el(doc, CLS.fieldname, listFieldLabel(rowTitle) + ":"));
+    line.appendChild(el(doc, CLS.heading, finalTitle, true));
+    for (const m of finalMeta) {
+      line.appendChild(el(doc, CLS.fieldname, listFieldLabel(m.field) + ":"));
+      line.appendChild(el(doc, CLS.meta, m.text, true));
+    }
+    if (statusFrom && statusText !== "") {
+      line.appendChild(el(doc, CLS.fieldname, listFieldLabel(statusFrom) + ":"));
+      line.appendChild(el(doc, CLS.badge, statusText, true));
+    }
     listEl.appendChild(line);
     shown++;
   }
