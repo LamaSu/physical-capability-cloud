@@ -10,13 +10,14 @@ This module handles the full job execution lifecycle:
 
 import json
 import logging
+import math
 import os
 import platform
 import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 log = logging.getLogger("pcc-node.job-executor")
 
@@ -45,7 +46,14 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
     On Linux/macOS: ``lp -h <ip> -d default <file>``
     On Windows:     ``notepad /p <file>``  (or rundll32 for images)
 
-    Returns a result dict with printed, filepath, returncode.
+    Returns a result dict with submitted, filepath, returncode.
+
+    A zero exit status means the spooler QUEUED the job -- CUPS answers
+    "request id is ..." the moment it accepts it, before a sheet is printed,
+    and a job can still jam, run out of paper or be cancelled.  That is
+    ACCEPTANCE, not completion, so every path reports the acceptance flag
+    ``submitted`` and none the completion flag ``printed``: this adapter never
+    observes the job's own state (IPP job-state / ``lpstat``).
     """
     params = job.get("parameters", {})
     content = params.get("content", params.get("text", "Hello from PCC"))
@@ -93,7 +101,8 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
                 )
 
         return {
-            "printed": result.returncode == 0,
+            # Exit 0 = QUEUED (accepted), never printed -- see the docstring.
+            "submitted": result.returncode == 0,
             "filepath": filepath,
             "returncode": result.returncode,
             "stdout": result.stdout[:500] if result.stdout else "",
@@ -103,7 +112,7 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
         }
     except subprocess.TimeoutExpired:
         return {
-            "printed": False,
+            "submitted": False,
             "filepath": filepath,
             "error": "print command timed out",
             "printer_ip": printer_ip,
@@ -112,14 +121,14 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
         # lp / notepad not found -- return a soft success so tests pass
         log.warning(f"Print command not found: {e}")
         return {
-            "printed": False,
+            "submitted": False,
             "filepath": filepath,
             "error": f"print command not available: {e}",
             "printer_ip": printer_ip,
         }
     except Exception as e:
         return {
-            "printed": False,
+            "submitted": False,
             "filepath": filepath,
             "error": str(e),
             "printer_ip": printer_ip,
@@ -140,13 +149,27 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
 RESULT_SUCCESS = "success"
 RESULT_FAILURE = "failure"
 RESULT_UNCLASSIFIABLE = "unclassifiable"
+# The device ACCEPTED the work and its outcome has not been observed: neither a
+# success nor a failure (classify_execution_result rule 10).
+RESULT_ACCEPTED = "accepted"
 
 # Every type emitted here must be a member of the closed EVIDENCE_EVENT_TYPES
 # enum in packages/spec/src/types/evidence.ts (tests parse it); consumers that
 # validate bundles reject any other string.
 EVENT_EXECUTION_STARTED = "execution_started"
+EVENT_EXECUTION_PROGRESS = "execution_progress"
 EVENT_EXECUTION_COMPLETED = "execution_completed"
 EVENT_EXECUTION_FAILED = "execution_failed"
+
+# Evidence levels, weakest first:
+#   submitted        -- the device only ACCEPTED the command (a spooler queued
+#                       the job, a print was started, an API answered 202)
+#   device-reported  -- the device itself reported the work finished
+#   inspected-output -- the output itself was inspected
+# Only device-reported (or stronger) evidence may carry execution_completed,
+# which is what the settlement oracle releases on.  A submitted-only result is
+# recorded as execution_progress at this level and never as a completion.
+EVIDENCE_LEVEL_SUBMITTED = "submitted"
 
 # Outcome reported directly by an adapter via a "status" key.  Compared after
 # `.strip().lower()`: a device that shouts "FAILED" must not slip past the
@@ -160,14 +183,23 @@ SUCCESS_STATUS_VALUES = frozenset({
 })
 
 # COMPLETION flags -- the device reported that the WORK ITSELF finished.
-#   printed  -> execute_ipp_print, JobExecutor._execute_octoprint
-#   executed -> JobExecutor._execute_generic_http
+# Reserved for adapters that actually OBSERVE completion:
+#   executed -> JobExecutor._execute_generic_http, for a 2xx other than 202:
+#               a synchronous API's own answer that it ran the request
+#   printed  -> no current adapter.  An ``lp`` exit of 0 and an OctoPrint 2xx
+#               both mean the job was QUEUED or STARTED, so those adapters
+#               report ``submitted``; ``printed`` waits for an adapter that
+#               observes a finished print (IPP job-state, OctoPrint /api/job).
 COMPLETION_FLAG_KEYS = ("printed", "executed")
 
 # ACCEPTANCE flags -- the device only reported that it TOOK the request.
+#   submitted -> execute_ipp_print, JobExecutor._execute_octoprint,
+#                JobExecutor._execute_generic_http (HTTP 202 only),
+#                JobExecutor._execute_opentrons
 # Acceptance is not completion: an Opentrons run that is playing has been
 # accepted and can still fail at step 40.  True here is therefore NOT a success
-# (the outcome is not yet known -- fail closed); False is still a failure.
+# -- alone it classifies as accepted (rule 10), which never emits
+# execution_completed -- and False is still a failure.
 ACCEPTANCE_FLAG_KEYS = ("submitted",)
 
 ALL_FLAG_KEYS = COMPLETION_FLAG_KEYS + ACCEPTANCE_FLAG_KEYS
@@ -180,7 +212,18 @@ NESTED_RESULT_KEYS = ("response", "data", "body", "payload")
 
 # Keys inside a device body that POSITIVELY assert a failure.
 NESTED_ERROR_KEYS = ("error", "errors", "fault", "faultstring")
+# A success key is only a success when it holds the boolean True.  Any other
+# value present under it (False, "false", 0, None, "yes") is read as a failure:
+# an unreadable success claim is not evidence that nothing failed.
 NESTED_FALSE_SUCCESS_KEYS = ("success", "ok", "succeeded")
+# Status-like keys whose STRING value may name a failure at any depth.
+STATUS_FIELD_KEYS = ("status", "state")
+
+# The device-body scan walks nested dicts and lists (a failure is as real at
+# data.result[0].error as at the top level).  A body deeper or larger than
+# these bounds cannot be verified, and the scan says so as a failure.
+DEVICE_BODY_MAX_DEPTH = 8
+DEVICE_BODY_MAX_NODES = 5000
 
 # XML/SOAP fault ELEMENT markers, matched case-insensitively against a non-JSON
 # (string) body.  Anchored to structured fault vocabulary rather than free text
@@ -202,7 +245,45 @@ TRANSPORT_FAILURE_MAX_STATUS = 0
 HTTP_SUCCESS_MIN = 200
 HTTP_SUCCESS_MAX_EXCLUSIVE = 300
 
+# RFC 9110 sec 15.3.3, 202 Accepted: "the request has been accepted for
+# processing, but the processing has not been completed".  Inside the 2xx band,
+# but it is the device's own statement that the work has NOT finished.
+HTTP_ACCEPTED = 202
+
 OCTOPRINT_SUCCESS_STATUSES = (200, 201, 204)
+
+# Generic HTTP completion contract (r31 astra verdict item 1, bus #2476).  A 2xx
+# is only the TRANSPORT's answer; "2xx and no recognized error" is not the
+# device saying the work finished.  _execute_generic_http therefore claims
+# `executed` only on the device's POSITIVE completion statement:
+#   * a per-device contract, when configured -- ``device["completionField"]``
+#     (a dot path into the JSON body, e.g. "result.phase") and
+#     ``device["completionValues"]`` (the values meaning finished; default
+#     [True]).  With a contract, the default vocabulary below is not used; or
+#   * by default, a completion word in ``status``/``state``, or a completion
+#     boolean set to True, at the body's top level or in one of
+#     GENERIC_OUTCOME_ENVELOPES.
+# A recognised queueing/running statement is acceptance (``submitted``).
+# Anything else -- {}, null, {"ok": true}, an unknown status word, a malformed
+# value, or completion and acceptance stated at once -- carries no flag at
+# all and classifies as unclassifiable, which fails the job closed.
+# "ok" and "success" are deliberately NOT completion words: many APIs use them
+# for "your REQUEST succeeded", which says nothing about the work.
+GENERIC_COMPLETION_STATUS_VALUES = frozenset({
+    "completed", "complete", "succeeded", "finished", "done",
+})
+GENERIC_ACCEPTANCE_STATUS_VALUES = frozenset({
+    "accepted", "queued", "pending", "submitted", "scheduled", "created",
+    "started", "running", "in_progress", "in-progress", "processing", "busy",
+    "printing", "waiting",
+})
+GENERIC_COMPLETION_BOOL_KEYS = ("completed", "complete", "done", "finished")
+GENERIC_ACCEPTANCE_BOOL_KEYS = ("submitted", "accepted", "queued")
+GENERIC_OUTCOME_ENVELOPES = ("result", "data", "response", "body", "payload")
+
+OUTCOME_COMPLETED = "completed"
+OUTCOME_ACCEPTED = "accepted"
+OUTCOME_UNKNOWN = "unknown"
 
 # Opentrons run lifecycle.  `POST /runs/<id>/actions {play}` only STARTS the
 # protocol; the run's own status is the only report that it finished, so a
@@ -221,6 +302,8 @@ OPENTRONS_TERMINAL_FAILURE = frozenset({"failed", "stopped"})
 # run-completion watcher is the fix; releasing on "the run was accepted" is not.
 OPENTRONS_RUN_POLL_TIMEOUT_S = 120.0
 OPENTRONS_RUN_POLL_INTERVAL_S = 2.0
+# Upper bound for a single poll request; the remaining budget can lower it.
+POLL_REQUEST_TIMEOUT_MAX_S = 30.0
 
 UNCLASSIFIABLE_REASON = "unclassifiable_result"
 
@@ -280,31 +363,70 @@ def _normalized_status(container: Any) -> Optional[str]:
 def _extract_device_error(body: Any) -> Optional[str]:
     """The device's own failure message from a response body, or None.
 
-    Reads POSITIVE failure signals only.  An unrecognised body yields None, so
-    this never invents a failure -- and, being the only reader of a device
-    body, it is the single place a new failure envelope has to be taught.
+    Reads failure signals at ANY depth: a failure nested in ``data``,
+    ``result``, a list item or a deeper envelope is still the device saying it
+    failed.  A body it cannot finish reading (too deep, too large) counts as a
+    failure.  Otherwise an unrecognised body yields None -- this never turns an
+    unknown shape into a failure, and it never turns anything into a success.
+    Being the only reader of a device body, it is the single place a new
+    failure envelope has to be taught.
     """
-    if isinstance(body, str):
-        lowered = body.lower()
+    budget = [DEVICE_BODY_MAX_NODES]
+    return _scan_device_body(body, "", 0, budget)
+
+
+def _scan_device_body(node: Any, path: str, depth: int, budget: List[int]) -> Optional[str]:
+    """Depth-first failure scan behind :func:`_extract_device_error`."""
+    budget[0] -= 1
+    if budget[0] < 0:
+        return "device body too large to verify"
+    where = f" (at {path})" if path else ""
+
+    if isinstance(node, str):
+        # Only a whole body (or a whole nested value) is an XML/SOAP document.
+        lowered = node.lower()
         for marker in FAULT_BODY_MARKERS:
             if marker in lowered:
-                return f"device returned a fault body (matched {marker!r})"
+                return f"device returned a fault body (matched {marker!r}){where}"
         return None
 
-    if not isinstance(body, dict):
+    if isinstance(node, (list, tuple)):
+        if depth >= DEVICE_BODY_MAX_DEPTH:
+            return "device body too deeply nested to verify"
+        for index, item in enumerate(node):
+            message = _scan_device_body(item, f"{path}[{index}]", depth + 1, budget)
+            if message:
+                return message
         return None
+
+    if not isinstance(node, dict):
+        return None
+    if depth >= DEVICE_BODY_MAX_DEPTH:
+        return "device body too deeply nested to verify"
 
     for key in NESTED_ERROR_KEYS:
-        value = body.get(key)
+        value = node.get(key)
         if value:
-            return value if isinstance(value, str) else f"{key}={_short(value)}"
+            text = value if isinstance(value, str) else f"{key}={_short(value)}"
+            return f"{text}{where}"
 
     for key in NESTED_FALSE_SUCCESS_KEYS:
-        if body.get(key) is False:
-            return f"device reported {key}=False"
+        if key in node and node[key] is not True:
+            return f"device reported {key}={node[key]!r}{where}"
 
-    if _normalized_status(body) in FAILURE_STATUS_VALUES:
-        return f"device reported status={body.get('status')!r}"
+    for key in STATUS_FIELD_KEYS:
+        value = node.get(key)
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, str) and item.strip().lower() in FAILURE_STATUS_VALUES:
+                return f"device reported {key}={value!r}{where}"
+
+    for key, value in node.items():
+        if isinstance(value, (dict, list, tuple)) or (isinstance(value, str) and "<" in value):
+            child = f"{path}.{key}" if path else str(key)
+            message = _scan_device_body(value, child, depth + 1, budget)
+            if message:
+                return message
 
     return None
 
@@ -326,6 +448,87 @@ def _nested_device_error(result: Dict) -> Optional[str]:
     return None
 
 
+def _contract_outcome(data: Any, field: Any, values: Any) -> Tuple[str, str]:
+    """Outcome under a device's own completion contract (see the constants)."""
+    if not isinstance(field, str) or not field.strip():
+        return OUTCOME_UNKNOWN, "completionField is not a usable path"
+    node: Any = data
+    for part in field.strip().split("."):
+        if not isinstance(node, dict) or part not in node:
+            return OUTCOME_UNKNOWN, f"completionField {field!r} is absent from the body"
+        node = node[part]
+    wanted = values if isinstance(values, list) and values else [True]
+    for want in wanted:
+        if isinstance(want, bool):
+            matched = node is want
+        elif isinstance(want, int):
+            matched = isinstance(node, int) and not isinstance(node, bool) and node == want
+        elif isinstance(want, str):
+            matched = isinstance(node, str) and node.strip().lower() == want.strip().lower()
+        else:
+            matched = False
+        if matched:
+            return OUTCOME_COMPLETED, f"completionField {field!r} = {_short(node)}"
+    if isinstance(node, str) and node.strip().lower() in GENERIC_ACCEPTANCE_STATUS_VALUES:
+        return OUTCOME_ACCEPTED, f"completionField {field!r} = {_short(node)}"
+    return OUTCOME_UNKNOWN, f"completionField {field!r} = {_short(node)} is not a completion value"
+
+
+def _generic_http_outcome(data: Any, device: Dict) -> Tuple[str, str]:
+    """What a 2xx device body positively states: completed, accepted or unknown.
+
+    Called only after the failure scan found nothing, and never for a 202.
+    Returns ``(outcome, reason)``.  Only an explicit, well-formed statement
+    counts; everything else is unknown.
+    """
+    if "completionField" in device:
+        return _contract_outcome(data, device.get("completionField"), device.get("completionValues"))
+
+    if not isinstance(data, dict):
+        return OUTCOME_UNKNOWN, "the device body states no outcome"
+    containers = [data] + [
+        data[key] for key in GENERIC_OUTCOME_ENVELOPES if isinstance(data.get(key), dict)
+    ]
+
+    completed = accepted = unreadable = False
+    for container in containers:
+        for key in STATUS_FIELD_KEYS:
+            if key not in container:
+                continue
+            value = container[key]
+            if isinstance(value, dict):
+                continue  # an object under "state" is a container, not a statement
+            word = value.strip().lower() if isinstance(value, str) else None
+            if word in GENERIC_COMPLETION_STATUS_VALUES:
+                completed = True
+            elif word in GENERIC_ACCEPTANCE_STATUS_VALUES:
+                accepted = True
+            else:
+                unreadable = True  # unknown word, number, list, null
+        for key in GENERIC_COMPLETION_BOOL_KEYS:
+            if key in container:
+                if container[key] is True:
+                    completed = True
+                else:
+                    unreadable = True
+        for key in GENERIC_ACCEPTANCE_BOOL_KEYS:
+            if key in container:
+                if container[key] is True:
+                    accepted = True
+                else:
+                    unreadable = True
+
+    if unreadable:
+        return OUTCOME_UNKNOWN, "the device body carries an outcome field this node cannot read"
+    if completed and accepted:
+        return OUTCOME_UNKNOWN, "the device body states both completion and acceptance"
+    if completed:
+        return OUTCOME_COMPLETED, "the device body states completion"
+    if accepted:
+        return OUTCOME_ACCEPTED, "the device body states acceptance"
+    return OUTCOME_UNKNOWN, "the device body states no outcome"
+
+
 def _describe_transport_status(status: int, data: Any) -> str:
     """Failure text for an HTTP exchange that did not land in the 2xx band."""
     if status <= TRANSPORT_FAILURE_MAX_STATUS:
@@ -335,10 +538,15 @@ def _describe_transport_status(status: int, data: Any) -> str:
 
 
 def _as_float(value: Any, default: float) -> float:
-    """Read a numeric device-config override; fall back on anything unusable."""
+    """Read a numeric device-config override; fall back on anything unusable.
+
+    Infinity and NaN are unusable (r31 astra verdict item 4): an infinite poll
+    budget never ends, and NaN compares false against every deadline.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
-    return float(value)
+    number = float(value)
+    return number if math.isfinite(number) else default
 
 
 def _readable_status_code(result: Dict) -> Optional[int]:
@@ -388,10 +596,11 @@ def _is_returncode_failure(result: Dict) -> bool:
 
 
 def classify_execution_result(result: Any) -> str:
-    """Classify an adapter result as success / failure / unclassifiable.
+    """Classify an adapter result as success / failure / accepted / unclassifiable.
 
     Pure function -- no I/O, no side effects.  Returns one of
-    :data:`RESULT_SUCCESS`, :data:`RESULT_FAILURE`, :data:`RESULT_UNCLASSIFIABLE`.
+    :data:`RESULT_SUCCESS`, :data:`RESULT_FAILURE`, :data:`RESULT_ACCEPTED`,
+    :data:`RESULT_UNCLASSIFIABLE`.
 
     First matching rule wins:
 
@@ -405,11 +614,20 @@ def classify_execution_result(result: Any) -> str:
     5.  ``status`` in :data:`FAILURE_STATUS_VALUES`       -> failure
     6.  ANY flag in :data:`ALL_FLAG_KEYS` present and not
         ``True``                                          -> failure
+    4c. ``status_code`` present but not a genuine HTTP
+        status integer (checked after rule 6)             -> unclassifiable
     7.  ``status`` in :data:`SUCCESS_STATUS_VALUES`       -> success
-    8.  ``status`` present as a string but unrecognised   -> unclassifiable
+    8.  ``status`` present but unrecognised, not a string,
+        or null                                           -> unclassifiable
     9.  a :data:`COMPLETION_FLAG_KEYS` flag is present
         (and every flag passed rule 6)                     -> success
-    10. anything else                                      -> unclassifiable
+    10. an :data:`ACCEPTANCE_FLAG_KEYS` flag is ``True``,
+        or ``status_code`` is 202 (no success status,
+        no completion flag)                               -> accepted
+    11. anything else                                      -> unclassifiable
+
+    A ``status_code`` of 202 (:data:`HTTP_ACCEPTED`) turns what rules 7 and 9
+    would call a success into accepted: the device said it has not finished.
 
     Why the order is what it is, rule by rule:
 
@@ -436,8 +654,19 @@ def classify_execution_result(result: Any) -> str:
       recognise as success.
     * Rule 9 uses COMPLETION flags only.  An ACCEPTANCE flag (``submitted``)
       says the device took the request, never that the work finished, so
-      ``{"submitted": True}`` alone falls through to rule 10 -- unclassifiable,
-      which emits neither ``execution_completed`` nor ``execution_failed``.
+      ``{"submitted": True}`` alone never reaches a success.
+    * Rule 10 names that SUBMITTED evidence level rather than lumping it in
+      with results the classifier cannot read.  Accepted is neither outcome:
+      the bundle records the submission as ``execution_progress`` (level
+      ``submitted``) and carries no ``execution_completed`` for the settlement
+      oracle to release on, and the job is left non-terminal -- it has not
+      failed, it simply has not been observed to finish.  A success ``status``
+      (rule 7) or a completion flag (rule 9) outranks it, because each is the
+      device reporting the work done.  Rule 8 outranks it too, and not only by
+      position: ``{"submitted": True, "status": "running"}`` stays
+      unclassifiable because a status the classifier cannot read may name a
+      failure it does not know (``"rejected"``, ``"jammed"``), and accepted
+      would leave that job waiting instead of failing it closed.
     """
     if not isinstance(result, dict):
         return RESULT_UNCLASSIFIABLE
@@ -464,14 +693,33 @@ def classify_execution_result(result: Any) -> str:
     if any(result[key] is not True for key in ALL_FLAG_KEYS if key in result):
         return RESULT_FAILURE
 
-    if status in SUCCESS_STATUS_VALUES:
-        return RESULT_SUCCESS
+    # A status_code that is PRESENT but is not a genuine HTTP status number
+    # ("202", "0", "500", False, None) cannot be read, so rules 4 and 10 could
+    # not have seen it.  An unreadable outcome field is not evidence that
+    # nothing failed: it never reaches a success (rule 4c).
+    if "status_code" in result and _readable_status_code(result) is None:
+        return RESULT_UNCLASSIFIABLE
 
-    if status is not None:
+    # A 202 is the device saying the work has NOT finished, so it turns any
+    # success claim below (a success status, a completion flag) into accepted.
+    accepted_by_transport = result.get("status_code") == HTTP_ACCEPTED
+
+    if status in SUCCESS_STATUS_VALUES:
+        return RESULT_ACCEPTED if accepted_by_transport else RESULT_SUCCESS
+
+    # A status that is present but not a readable success -- an unknown string,
+    # a non-string ({"status": ["failed"]}) or an explicit null -- may be a
+    # failure in another shape, so it is never read as "no status" (rule 8).
+    if "status" in result:
         return RESULT_UNCLASSIFIABLE
 
     if any(key in result for key in COMPLETION_FLAG_KEYS):
-        return RESULT_SUCCESS
+        return RESULT_ACCEPTED if accepted_by_transport else RESULT_SUCCESS
+
+    # `is True`, not `in`: rule 6 already guarantees it, but this rule must not
+    # turn `submitted: False` into an acceptance if the rules are ever reordered.
+    if accepted_by_transport or any(result.get(key) is True for key in ACCEPTANCE_FLAG_KEYS):
+        return RESULT_ACCEPTED
 
     return RESULT_UNCLASSIFIABLE
 
@@ -511,20 +759,24 @@ def build_evidence_bundle(
     job_id: str,
     device: Dict,
     result: Dict,
-    events: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
     """Construct an evidence bundle from execution result.
 
-    The synthesized event trail branches on :func:`classify_execution_result`
+    The event trail ALWAYS comes from :func:`classify_execution_result`
     (evidence contract sec-10):
 
     * success        -> ``execution_completed``
     * failure        -> ``execution_failed`` (never ``execution_completed``)
+    * accepted       -> ``execution_progress`` with payload
+      ``{"level": "submitted", "result": <raw result>}``; no outcome event,
+      and never ``execution_completed``
     * unclassifiable -> no outcome event at all; the raw result is kept in
       ``bundle["result"]``
 
-    Passing ``events`` explicitly bypasses the branch entirely; that caller
-    escape hatch is unchanged.
+    There is deliberately no caller-supplied ``events`` override any more (r31
+    astra verdict item 6): it let any caller put ``execution_completed`` next
+    to a failed result, emit both terminal events, or emit types outside the
+    closed EVIDENCE_EVENT_TYPES enum.
     """
     now = datetime.now(tz=timezone.utc).isoformat()
     return {
@@ -533,12 +785,13 @@ def build_evidence_bundle(
         "deviceProtocol": device.get("protocol", device.get("type", "unknown")),
         "executedAt": now,
         "result": result,
-        "events": events or _synthesize_events(device, result, now),
+        "events": _synthesize_events(device, result, now),
     }
 
 
 def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
-    """Default event trail: ``execution_started`` plus at most one outcome event."""
+    """Default event trail: ``execution_started`` plus at most one more event --
+    an outcome (completed / failed), or a submitted-level progress record."""
     events: List[Dict] = [
         {
             "type": EVENT_EXECUTION_STARTED,
@@ -566,6 +819,17 @@ def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
                     "error": describe_execution_failure(result),
                     "result": result,
                 },
+            }
+        )
+    elif verdict == RESULT_ACCEPTED:
+        # SUBMITTED evidence: the device took the work and its outcome is not
+        # yet observed.  Progress, not an outcome -- and never
+        # execution_completed, which is what the settlement oracle releases on.
+        events.append(
+            {
+                "type": EVENT_EXECUTION_PROGRESS,
+                "timestamp": now,
+                "payload": {"level": EVIDENCE_LEVEL_SUBMITTED, "result": result},
             }
         )
     # Unclassifiable: fail closed by emitting NO outcome event. An invented
@@ -611,8 +875,21 @@ class JobExecutor:
 
         log.info(f"Executing job {job_id} (capability: {capability_type})")
 
-        if self.gateway:
-            self.gateway.update_job_status(job_id, "running")
+        # Claim before the side effect.  For an accepted job "running" is the
+        # only status this node ever reports, so if the claim does not land the
+        # job stays "queued" upstream and a restarted daemon would run it again
+        # (a second print).  Not starting is the safe side; the job is forgotten
+        # so a later poll can claim it.
+        if self.gateway and not self.gateway.update_job_status(job_id, "running"):
+            log.error(
+                "Job %s: the gateway did not acknowledge the 'running' claim; "
+                "not starting it, so no later poll or restart can run it twice",
+                job_id,
+            )
+            forget = getattr(self.gateway, "forget_job", None)
+            if callable(forget):
+                forget(job_id)
+            return {"status": "not_started", "error": "claim_not_acknowledged"}
 
         try:
             device = self._find_device(job)
@@ -648,6 +925,11 @@ class JobExecutor:
                             "result": result,
                         },
                     )
+                elif verdict == RESULT_ACCEPTED:
+                    # No terminal status.  The device took the job but has not
+                    # reported it finished, so it is neither completed nor
+                    # failed; it stays "running", as reported above.
+                    pass
                 else:
                     self._report_terminal_failure(
                         job_id,
@@ -660,6 +942,13 @@ class JobExecutor:
                 log.warning(
                     f"Job {job_id} failed on device {device_label}: "
                     f"{describe_execution_failure(result)}"
+                )
+            elif verdict == RESULT_ACCEPTED:
+                log.info(
+                    f"Job {job_id} accepted by device {device_label}; completion "
+                    f"not yet observed (evidence level "
+                    f"'{EVIDENCE_LEVEL_SUBMITTED}'), so no terminal status is "
+                    f"reported and the job stays running"
                 )
             else:
                 log.warning(
@@ -861,14 +1150,19 @@ class JobExecutor:
         }
 
         run_errors = _opentrons_run_errors(run_body)
+        # r31 astra verdict item 2: a "succeeded" data.status is not enough when
+        # the same polled body also carries a failure marker anywhere
+        # ({"error": "run failed", "data": {"status": "succeeded"}}).  A
+        # conflict is a failure, never a success.
+        body_error = _extract_device_error(run_body)
 
-        if run_status in OPENTRONS_TERMINAL_FAILURE or run_errors:
-            reason = (
-                f"run reported {len(run_errors)} protocol error(s): "
-                f"{_short(run_errors)}"
-                if run_errors
-                else f"run finished with status {run_status!r}"
-            )
+        if run_status in OPENTRONS_TERMINAL_FAILURE or run_errors or body_error:
+            if run_errors:
+                reason = f"run reported {len(run_errors)} protocol error(s): {_short(run_errors)}"
+            elif run_status in OPENTRONS_TERMINAL_FAILURE:
+                reason = f"run finished with status {run_status!r}"
+            else:
+                reason = f"run status {run_status!r} conflicts with a failure in the run body: {body_error}"
             return {
                 **base_result,
                 "status": "failed",
@@ -882,6 +1176,9 @@ class JobExecutor:
                 **base_result,
                 "status": "completed",
                 "runStatus": run_status,
+                # Keep the polled evidence: the classifier re-reads it (rule 3b)
+                # and the bundle carries what the success was decided on.
+                "response": run_body,
             }
 
         # Started, outcome unknown.  An explicit non-terminal status keeps this
@@ -921,8 +1218,14 @@ class JobExecutor:
         deadline = time.monotonic() + timeout_s
         last_body: Any = None
         while True:
+            # Each request gets at most the remaining budget (r31 item 4): a
+            # device that stops answering cannot hold the poll past its deadline.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, last_body
             status, body = http(
-                "GET", f"{base_url}/runs/{run_id}", headers=headers, verify_ssl=False
+                "GET", f"{base_url}/runs/{run_id}", headers=headers, verify_ssl=False,
+                timeout=max(1.0, min(POLL_REQUEST_TIMEOUT_MAX_S, remaining)),
             )
             last_body = body
             if status in (200, 201):
@@ -942,11 +1245,17 @@ class JobExecutor:
     def _execute_octoprint(self, device: Dict, job: Dict) -> Dict[str, Any]:
         """Start an OctoPrint print job.
 
-        ``printed`` reads the device's answer, not just the status line, for
-        the same reason as :meth:`_execute_generic_http`: OctoPrint answering
-        200/204 means the API accepted ``select + print``, and a printer that
-        replies ``{"error": "E_JAM: carriage jam, job aborted"}`` in a 200 body
-        has failed.  A failure stated in the body outranks the status code.
+        OctoPrint answering 200/201/204 to ``select + print`` means the API
+        ACCEPTED the job -- it selected the file and started the print -- not
+        that anything was printed: the print can still fail hours later.  The
+        result therefore carries the acceptance flag ``submitted``, never the
+        completion flag ``printed``.  Observing completion needs the job's own
+        state (``GET /api/job``), which this adapter does not poll.
+
+        ``submitted`` still reads the device's answer, not just the status
+        line, for the same reason as :meth:`_execute_generic_http`: a printer
+        that replies ``{"error": "E_JAM: carriage jam, job aborted"}`` in a 200
+        body has failed.  A failure stated in the body outranks the status code.
         """
         from .http_util import http
 
@@ -973,7 +1282,8 @@ class JobExecutor:
         device_error = _extract_device_error(data)
 
         result: Dict[str, Any] = {
-            "printed": transport_ok and device_error is None,
+            # Accepted-and-started, never printed -- see the docstring.
+            "submitted": transport_ok and device_error is None,
             "filename": filename,
             "status_code": status,
             "device": base_url,
@@ -1005,6 +1315,19 @@ class JobExecutor:
           REST ``{"status": "error"}``, ``{"success": false}``, a SOAP fault --
           is a failed job, and lifting its reason here is what stops the bundle
           claiming ``execution_completed`` for it.
+        * 202 Accepted is ACCEPTANCE, not completion (:data:`HTTP_ACCEPTED`):
+          the device took the request and has not finished it.  A 202 reports
+          the acceptance flag ``submitted`` instead of ``executed``, derived
+          the same way.
+        * any other clean 2xx claims ``executed`` ONLY when the body positively
+          states completion (the device's contract, or the default completion
+          vocabulary -- see GENERIC_COMPLETION_STATUS_VALUES).  A recognised
+          queueing/running statement reports ``submitted``.  Anything else
+          (``{}``, ``null``, ``{"ok": true}``, an unknown status word, a
+          malformed value) carries NO flag, so it classifies as unclassifiable
+          and the job fails closed: "2xx and no recognised error" is the
+          transport answering, not the device saying the work finished (r31
+          astra verdict item 1).
         """
         from .http_util import http
 
@@ -1022,15 +1345,21 @@ class JobExecutor:
 
         transport_ok = HTTP_SUCCESS_MIN <= status < HTTP_SUCCESS_MAX_EXCLUSIVE
         device_error = _extract_device_error(data)
+        # A 202 only acknowledges the request, so it may never claim `executed`.
+        flag = "submitted" if status == HTTP_ACCEPTED else "executed"
 
-        result: Dict[str, Any] = {
-            "executed": transport_ok and device_error is None,
-            "status_code": status,
-            "response": data,
-            "device": base_url,
-        }
+        result: Dict[str, Any] = {"status_code": status, "response": data, "device": base_url}
         if device_error is not None:
-            result["error"] = device_error
-        elif not transport_ok:
-            result["error"] = _describe_transport_status(status, data)
-        return result
+            return {flag: False, **result, "error": device_error}
+        if not transport_ok:
+            return {flag: False, **result, "error": _describe_transport_status(status, data)}
+        if status == HTTP_ACCEPTED:
+            return {"submitted": True, **result}
+
+        outcome, reason = _generic_http_outcome(data, device)
+        if outcome == OUTCOME_COMPLETED:
+            return {"executed": True, **result}
+        if outcome == OUTCOME_ACCEPTED:
+            return {"submitted": True, **result}
+        # No flag: the classifier reads this as unclassifiable (fail closed).
+        return {**result, "outcome": "unrecognized", "note": reason}

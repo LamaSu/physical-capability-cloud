@@ -82,7 +82,9 @@ class TestExecuteIppPrint:
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "notepad"
 
-    def test_returns_printed_true_on_success(self):
+    def test_zero_returncode_reports_submitted_not_printed(self):
+        """Item 5: `lp` exiting 0 means CUPS QUEUED the job, not that it
+        printed -- acceptance, never completion.  (Was: printed is True.)"""
         device = self._make_device()
         job = self._make_job()
 
@@ -91,10 +93,13 @@ class TestExecuteIppPrint:
             mock_run.return_value = mock.Mock(returncode=0, stdout="request ok", stderr="")
             result = execute_ipp_print(device, job)
 
-        assert result["printed"] is True
+        assert result["submitted"] is True
+        assert "printed" not in result, "lp exit 0 must never claim the print finished"
         assert result["returncode"] == 0
+        assert result["stdout"] == "request ok"
+        assert classify_execution_result(result) == RESULT_ACCEPTED
 
-    def test_returns_printed_false_on_nonzero_returncode(self):
+    def test_nonzero_returncode_reports_not_submitted(self):
         device = self._make_device()
         job = self._make_job()
 
@@ -103,7 +108,10 @@ class TestExecuteIppPrint:
             mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="lp: error")
             result = execute_ipp_print(device, job)
 
-        assert result["printed"] is False
+        assert result["submitted"] is False
+        assert "printed" not in result
+        assert result["returncode"] == 1
+        assert classify_execution_result(result) == RESULT_FAILURE
 
     def test_handles_timeout(self):
         device = self._make_device()
@@ -114,8 +122,10 @@ class TestExecuteIppPrint:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="lp", timeout=30)
             result = execute_ipp_print(device, job)
 
-        assert result["printed"] is False
+        assert result["submitted"] is False
+        assert "printed" not in result
         assert "timed out" in result.get("error", "")
+        assert classify_execution_result(result) == RESULT_FAILURE
 
     def test_handles_command_not_found(self):
         device = self._make_device()
@@ -126,8 +136,10 @@ class TestExecuteIppPrint:
             mock_run.side_effect = FileNotFoundError("lp not found")
             result = execute_ipp_print(device, job)
 
-        assert result["printed"] is False
+        assert result["submitted"] is False
+        assert "printed" not in result
         assert "error" in result
+        assert classify_execution_result(result) == RESULT_FAILURE
 
     def test_uses_default_content_on_missing_params(self):
         device = self._make_device()
@@ -175,12 +187,15 @@ class TestBuildEvidenceBundle:
         assert "execution_failed" in types
         assert "execution_completed" not in types
 
-    def test_custom_events(self):
+    def test_custom_events_are_refused(self):
+        """CHANGED (r31 astra verdict item 6).  Old: test_custom_events asserted
+        that a caller-supplied `custom_event` was emitted verbatim.  The
+        override let any caller emit types outside EVIDENCE_EVENT_TYPES, or
+        execution_completed for a failure, so it no longer exists."""
         device = {"id": "d1"}
         events = [{"type": "custom_event", "timestamp": "now", "payload": {}}]
-        bundle = build_evidence_bundle("j1", device, {}, events=events)
-        assert len(bundle["events"]) == 1
-        assert bundle["events"][0]["type"] == "custom_event"
+        with pytest.raises(TypeError):
+            build_evidence_bundle("j1", device, {}, events=events)
 
 
 # ---------------------------------------------------------------------------
@@ -250,17 +265,21 @@ class TestJobExecutorExecute:
         }
 
         with mock.patch("pcc_node.job_executor.execute_ipp_print") as mock_ipp:
-            mock_ipp.return_value = {"printed": True, "returncode": 0}
+            # What the real adapter returns when `lp` exits 0: the job QUEUED.
+            mock_ipp.return_value = {"submitted": True, "returncode": 0}
             result = ex.execute(job)
 
         # Gateway should have been called
         gateway.update_job_status.assert_called()
         gateway.push_evidence.assert_called_once()
 
-        # Check status sequence: running then completed
+        # Check status sequence: running, and nothing terminal after it.
+        # (Was: running then completed.  Item 5: a queued print is accepted,
+        # not completed, so the job stays running.)
         status_calls = [call[0][1] for call in gateway.update_job_status.call_args_list]
-        assert "running" in status_calls
-        assert "completed" in status_calls
+        assert status_calls == ["running"]
+        assert "completed" not in status_calls
+        assert "failed" not in status_calls
 
     def test_returns_error_when_no_device(self):
         gateway = self._make_mock_gateway()
@@ -299,11 +318,15 @@ class TestJobExecutorExecute:
         }
 
         with mock.patch("pcc_node.job_executor.execute_ipp_print") as mock_ipp:
-            mock_ipp.return_value = {"printed": True}
+            mock_ipp.return_value = {"submitted": True, "returncode": 0}
             result = ex.execute(job)
 
         # Should not raise even without gateway
         assert "jobId" in result or "error" in result
+        # The accepted path runs offline too: progress, never a completion.
+        assert [e["type"] for e in result["events"]] == [
+            "execution_started", "execution_progress",
+        ]
 
     def test_opentrons_job_routing(self):
         gateway = self._make_mock_gateway()
@@ -334,7 +357,7 @@ class TestJobExecutorExecute:
         }
 
         with mock.patch("pcc_node.job_executor.JobExecutor._execute_octoprint") as mock_op:
-            mock_op.return_value = {"printed": True, "filename": "benchy.gcode"}
+            mock_op.return_value = {"submitted": True, "filename": "benchy.gcode"}
             result = ex.execute(job)
 
         mock_op.assert_called_once()
@@ -370,12 +393,17 @@ from pcc_node.job_executor import (  # noqa: E402
     RESULT_SUCCESS,
     RESULT_FAILURE,
     RESULT_UNCLASSIFIABLE,
+    RESULT_ACCEPTED,
     EVENT_EXECUTION_STARTED,
+    EVENT_EXECUTION_PROGRESS,
     EVENT_EXECUTION_COMPLETED,
     EVENT_EXECUTION_FAILED,
+    EVIDENCE_LEVEL_SUBMITTED,
     UNCLASSIFIABLE_REASON,
     COMPLETION_FLAG_KEYS,
     ACCEPTANCE_FLAG_KEYS,
+    _is_transport_failure,
+    _extract_device_error,
 )
 
 
@@ -383,8 +411,14 @@ from pcc_node.job_executor import (  # noqa: E402
 # Each mirrors, verbatim, a return statement in pcc_node/job_executor.py.
 
 # execute_ipp_print
-IPP_SUCCESS = {
-    "printed": True,
+#
+# `lp` exiting 0 means CUPS QUEUED the job -- "request id is ..." is printed the
+# moment the spooler accepts it, before a sheet moves.  So the adapter reports
+# the ACCEPTANCE flag `submitted` on every path and never `printed`: this used
+# to be IPP_SUCCESS with `printed: True`, which minted execution_completed for
+# a job that had only been queued (must-close item 5).
+IPP_ACCEPTED = {
+    "submitted": True,
     "filepath": "/tmp/pcc-print.txt",
     "returncode": 0,
     "stdout": "request id is printer-1-1",
@@ -393,7 +427,7 @@ IPP_SUCCESS = {
     "printer_name": "Prusa",
 }
 IPP_FAIL_RETURNCODE = {
-    "printed": False,
+    "submitted": False,
     "filepath": "/tmp/pcc-print.txt",
     "returncode": 1,
     "stdout": "",
@@ -402,19 +436,19 @@ IPP_FAIL_RETURNCODE = {
     "printer_name": "Prusa",
 }
 IPP_FAIL_TIMEOUT = {
-    "printed": False,
+    "submitted": False,
     "filepath": "/tmp/pcc-print.txt",
     "error": "print command timed out",
     "printer_ip": "10.0.0.1",
 }
 IPP_FAIL_NOT_FOUND = {
-    "printed": False,
+    "submitted": False,
     "filepath": "/tmp/pcc-print.txt",
     "error": "print command not available: lp not found",
     "printer_ip": "10.0.0.1",
 }
 IPP_FAIL_EXCEPTION = {
-    "printed": False,
+    "submitted": False,
     "filepath": "/tmp/pcc-print.txt",
     "error": "device unreachable",
     "printer_ip": "10.0.0.1",
@@ -433,9 +467,13 @@ OT_SUCCESS = {
     "device": "http://192.168.1.200:31950",
     "status": "completed",
     "runStatus": "succeeded",
+    # r31 item 2: the success now keeps the polled run body it was decided on.
+    "response": {"data": {"id": "run-1", "status": "succeeded"}},
 }
 # The pre-fix shape: accepted, outcome never confirmed.  Locked as a shape that
 # must NEVER release -- it is exactly what "the run was accepted" looks like.
+# With no status of its own it now classifies as ACCEPTED (rule 10) rather than
+# unclassifiable; either way it carries no execution_completed.
 OT_ACCEPTED_ONLY = {
     "runId": "run-1",
     "protocolId": "proto-abc",
@@ -489,8 +527,12 @@ OT_FAIL_TRANSPORT = {
 }
 
 # JobExecutor._execute_octoprint
-OP_SUCCESS = {
-    "printed": True,
+#
+# A 2xx to `select + print` means OctoPrint ACCEPTED the job and started it,
+# not that anything was printed, so the adapter's flag is `submitted`.  This
+# used to be OP_SUCCESS with `printed: True` (must-close item 5).
+OP_ACCEPTED = {
+    "submitted": True,
     "filename": "benchy.gcode",
     "status_code": 200,
     "device": "http://10.0.0.20:5000",
@@ -500,14 +542,14 @@ OP_FAIL_NO_FILENAME = {
     "note": "octoprint job requires filename in parameters",
 }
 OP_FAIL_BAD_STATUS = {
-    "printed": False,
+    "submitted": False,
     "filename": "benchy.gcode",
     "status_code": 500,
     "device": "http://10.0.0.20:5000",
 }
 # Transport failure: status 0 falls outside the (200, 201, 204) allowlist.
 OP_FAIL_TRANSPORT = {
-    "printed": False,
+    "submitted": False,
     "filename": "benchy.gcode",
     "status_code": 0,
     "device": "http://10.0.0.20:5000",
@@ -517,7 +559,7 @@ OP_FAIL_TRANSPORT = {
 # answers 204 (in the allowlist) with a jam report.  Captured live -- see
 # TestDeviceReportedFailureInABody.
 OP_FAIL_ERROR_IN_2XX_BODY = {
-    "printed": False,
+    "submitted": False,
     "filename": "benchy.gcode",
     "status_code": 200,
     "device": "http://10.0.0.20:5000",
@@ -525,10 +567,23 @@ OP_FAIL_ERROR_IN_2XX_BODY = {
 }
 
 # JobExecutor._execute_generic_http
+# CHANGED (r31 astra verdict item 1): the response was {"ok": True}.  The live
+# adapter now claims `executed` only when the body states completion, so the
+# fixture mirrors a completion statement.
 GH_SUCCESS = {
     "executed": True,
     "status_code": 200,
-    "response": {"ok": True},
+    "response": {"status": "completed"},
+    "device": "http://10.0.0.9",
+}
+# RFC 9110 sec 15.3.3: 202 = accepted for processing, processing NOT completed.
+# The device's own statement that the work has not finished, so the flag is
+# `submitted`, never `executed`.  Captured from the live adapter -- see
+# TestAcceptanceIsNotCompletion.
+GH_ACCEPTED_202 = {
+    "submitted": True,
+    "status_code": 202,
+    "response": {"jobId": "abc", "status": "queued"},
     "device": "http://10.0.0.9",
 }
 GH_FAIL_NO_BASE_URL = {"error": "no_base_url", "executed": False}
@@ -625,11 +680,21 @@ GH_REDIRECT_PRE_FIX = {
     "device": "http://10.0.0.9",
 }
 
+# Device-reported completion only.  IPP and OctoPrint left this list for
+# ACCEPTED_SHAPES (must-close item 5): neither adapter observes completion.
 SUCCESS_SHAPES = [
-    pytest.param(IPP_SUCCESS, id="ipp-printed-true"),
-    pytest.param(OT_SUCCESS, id="opentrons-submitted-true"),
-    pytest.param(OP_SUCCESS, id="octoprint-printed-true"),
+    pytest.param(OT_SUCCESS, id="opentrons-run-succeeded"),
     pytest.param(GH_SUCCESS, id="generic-http-executed-true"),
+]
+
+# SUBMITTED evidence: the device accepted the command; completion unobserved.
+# Must produce execution_progress (level "submitted"), never
+# execution_completed, and no terminal job status.
+ACCEPTED_SHAPES = [
+    pytest.param(IPP_ACCEPTED, id="ipp-lp-exit-0-queued"),
+    pytest.param(OP_ACCEPTED, id="octoprint-select-print-2xx"),
+    pytest.param(GH_ACCEPTED_202, id="generic-http-202-accepted"),
+    pytest.param(OT_ACCEPTED_ONLY, id="opentrons-accepted-outcome-unknown"),
 ]
 
 FAILURE_SHAPES = [
@@ -671,7 +736,8 @@ UNCLASSIFIABLE_SHAPES = [
     pytest.param(0, id="int-zero"),
     pytest.param({"foo": "bar"}, id="novel-shape"),
     pytest.param({"status": "running"}, id="unknown-status-value"),
-    pytest.param(OT_ACCEPTED_ONLY, id="opentrons-accepted-outcome-unknown"),
+    # OT_ACCEPTED_ONLY moved to ACCEPTED_SHAPES.  OT_NONTERMINAL stays: it
+    # names a status of its own ("running"), and rule 8 outranks rule 10.
     pytest.param(OT_NONTERMINAL, id="opentrons-non-terminal-run"),
 ]
 
@@ -701,6 +767,10 @@ class TestClassifyExecutionResult:
     @pytest.mark.parametrize("result", UNCLASSIFIABLE_SHAPES)
     def test_unclassifiable_shapes(self, result):
         assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    @pytest.mark.parametrize("result", ACCEPTED_SHAPES)
+    def test_censused_accepted_shapes(self, result):
+        assert classify_execution_result(result) == RESULT_ACCEPTED
 
     @pytest.mark.parametrize("status", ["failed", "error"])
     def test_status_key_failure_values(self, status):
@@ -743,9 +813,43 @@ class TestClassifyExecutionResult:
 
         An Opentrons run that is playing has been submitted and can still fail
         at step 40, so acceptance alone must settle as neither -- it emits no
-        execution_completed for golden-v4 to release on.
+        execution_completed for golden-v4 to release on.  It is now named
+        ACCEPTED (rule 10) rather than unclassifiable; still never a success.
         """
-        assert classify_execution_result({flag: True}) == RESULT_UNCLASSIFIABLE
+        verdict = classify_execution_result({flag: True})
+        assert verdict != RESULT_SUCCESS
+        assert verdict == RESULT_ACCEPTED
+
+    @pytest.mark.parametrize("result", [
+        pytest.param({"submitted": True, "error": "boom"}, id="error-key"),
+        pytest.param({"submitted": True, "response": {"error": "jam"}}, id="nested-error"),
+        pytest.param({"submitted": True, "status_code": 500}, id="http-500"),
+        pytest.param({"submitted": True, "status_code": 0}, id="transport-sentinel"),
+        pytest.param({"submitted": True, "returncode": 1}, id="nonzero-returncode"),
+        pytest.param({"submitted": True, "status": "failed"}, id="failure-status"),
+        pytest.param({"submitted": True, "printed": False}, id="false-completion-flag"),
+    ])
+    def test_every_failure_rule_outranks_acceptance(self, result):
+        """Rule 10 sits below every failure rule: acceptance never masks one."""
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("result", [
+        pytest.param({"submitted": True, "printed": True}, id="completion-flag"),
+        pytest.param({"submitted": True, "executed": True}, id="executed-flag"),
+        pytest.param({"submitted": True, "status": "succeeded"}, id="success-status"),
+    ])
+    def test_device_reported_completion_outranks_acceptance(self, result):
+        """A completion the device itself reported is a success (rules 7, 9)."""
+        assert classify_execution_result(result) == RESULT_SUCCESS
+
+    @pytest.mark.parametrize("status", ["running", "rejected", "paused", "jammed"])
+    def test_unrecognised_status_outranks_acceptance(self, status):
+        """Rule 8 before rule 10: a status the classifier cannot read may name
+        a failure it does not know, so it fails closed as unclassifiable
+        instead of leaving the job waiting as accepted."""
+        assert classify_execution_result(
+            {"submitted": True, "status": status}
+        ) == RESULT_UNCLASSIFIABLE
 
     @pytest.mark.parametrize("flag", ["printed", "submitted", "executed"])
     def test_boolean_flag_false_is_failure(self, flag):
@@ -792,7 +896,9 @@ class TestClassifyExecutionResult:
         result = {"executed": True, "status_code": status_code, "response": ""}
         assert classify_execution_result(result) == RESULT_FAILURE
 
-    @pytest.mark.parametrize("status_code", [200, 201, 202, 204, 299])
+    # 202 is not here: it is the device saying the work has not finished (see
+    # TestAcceptedStatusAndShapeGaps).
+    @pytest.mark.parametrize("status_code", [200, 201, 204, 299])
     def test_2xx_status_codes_still_permit_success(self, status_code):
         result = {"executed": True, "status_code": status_code, "response": {"ok": True}}
         assert classify_execution_result(result) == RESULT_SUCCESS
@@ -917,17 +1023,53 @@ class TestEvidenceBundleOutcomeEvents:
         assert bundle["result"] == result
         assert len(bundle["events"]) == 1
 
+    # --- accepted: SUBMITTED evidence (must-close item 5) --------------------
+
+    @pytest.mark.parametrize("result", ACCEPTED_SHAPES)
+    def test_accepted_emits_execution_progress_and_no_outcome_event(self, result):
+        bundle = build_evidence_bundle("j1", self.DEVICE, result)
+        types = _event_types(bundle)
+        assert types == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS]
+        assert EVENT_EXECUTION_COMPLETED not in types
+        assert EVENT_EXECUTION_FAILED not in types
+
+    @pytest.mark.parametrize("result", ACCEPTED_SHAPES)
+    def test_golden_accepted_bundle_never_contains_execution_completed(self, result):
+        """Golden-style, as for failures: the oracle releases on the PRESENCE
+        of execution_completed, so the literal string must appear nowhere in a
+        bundle whose device only accepted the command."""
+        bundle = build_evidence_bundle("j1", self.DEVICE, result)
+        assert "execution_completed" not in _bundle_text(bundle)
+
+    @pytest.mark.parametrize("result", ACCEPTED_SHAPES)
+    def test_accepted_progress_payload_records_level_and_raw_result(self, result):
+        bundle = build_evidence_bundle("j1", self.DEVICE, result)
+        progress = bundle["events"][1]
+        assert progress["type"] == EVENT_EXECUTION_PROGRESS
+        assert progress["payload"]["level"] == "submitted"
+        assert progress["payload"]["level"] == EVIDENCE_LEVEL_SUBMITTED
+        assert progress["payload"]["result"] == result
+        assert progress["payload"] == {"level": "submitted", "result": result}
+        assert progress["timestamp"] == bundle["executedAt"]
+        assert bundle["result"] == result
+
     def test_execution_started_present_for_every_verdict(self):
-        for result in (IPP_SUCCESS, IPP_FAIL_TIMEOUT, {}, None, {"foo": "bar"}):
+        for result in (GH_SUCCESS, IPP_ACCEPTED, IPP_FAIL_TIMEOUT, {}, None, {"foo": "bar"}):
             bundle = build_evidence_bundle("j1", self.DEVICE, result)
             assert _event_types(bundle)[0] == EVENT_EXECUTION_STARTED
 
     def test_one_outcome_event_when_classified_and_none_otherwise(self):
+        # IPP_ACCEPTED used to sit here as IPP_SUCCESS with 1 outcome event;
+        # an accepted print has none (item 5).  GH_SUCCESS keeps the success
+        # row a real completion.
         outcome_types = {EVENT_EXECUTION_COMPLETED, EVENT_EXECUTION_FAILED}
         for result, expected in (
-            (IPP_SUCCESS, 1),
+            (GH_SUCCESS, 1),
             (IPP_FAIL_TIMEOUT, 1),
             (OP_FAIL_BAD_STATUS, 1),
+            (IPP_ACCEPTED, 0),
+            (OP_ACCEPTED, 0),
+            (GH_ACCEPTED_202, 0),
             ({}, 0),
             (None, 0),
         ):
@@ -944,20 +1086,46 @@ class TestEvidenceBundleOutcomeEvents:
         vocabulary = set(re.findall(r'"([a-z_]+)"', block))
         assert len(vocabulary) > 20, "failed to parse EVIDENCE_EVENT_TYPES"
         emitted = set()
-        for result in (IPP_SUCCESS, IPP_FAIL_TIMEOUT, OP_FAIL_BAD_STATUS, {}, None, {"foo": "bar"}):
+        for result in (
+            GH_SUCCESS,          # success        -> execution_completed
+            IPP_ACCEPTED,        # accepted       -> execution_progress
+            OP_ACCEPTED,
+            GH_ACCEPTED_202,
+            IPP_FAIL_TIMEOUT,    # failure        -> execution_failed
+            OP_FAIL_BAD_STATUS,
+            {}, None, {"foo": "bar"},  # unclassifiable -> execution_started only
+        ):
             emitted.update(_event_types(build_evidence_bundle("j1", self.DEVICE, result)))
         assert emitted, "no events synthesized"
+        # Every verdict's event must actually be exercised -- otherwise a shape
+        # changing verdict silently drops a type from this guard.
+        assert emitted == {
+            EVENT_EXECUTION_STARTED,
+            EVENT_EXECUTION_PROGRESS,
+            EVENT_EXECUTION_COMPLETED,
+            EVENT_EXECUTION_FAILED,
+        }, f"guard no longer covers every synthesized type: {sorted(emitted)}"
         assert emitted <= vocabulary, f"not in EVIDENCE_EVENT_TYPES: {sorted(emitted - vocabulary)}"
 
     def test_result_is_still_embedded_verbatim(self):
         bundle = build_evidence_bundle("j1", self.DEVICE, IPP_FAIL_TIMEOUT)
         assert bundle["result"] == IPP_FAIL_TIMEOUT
 
-    def test_explicit_events_override_still_bypasses_classification(self):
-        """Caller escape hatch is unchanged -- no classification is applied."""
-        events = [{"type": "custom_event", "timestamp": "now", "payload": {}}]
-        bundle = build_evidence_bundle("j1", self.DEVICE, IPP_FAIL_TIMEOUT, events=events)
-        assert bundle["events"] == events
+    def test_there_is_no_events_override_to_bypass_classification(self):
+        """CHANGED (r31 astra verdict item 6).  Old: asserted that an explicit
+        `events` list bypassed classification ("escape hatch unchanged").  The
+        reviewer's exploit -- a failed result with caller-supplied
+        execution_completed + execution_failed + custom_event -- is now a
+        TypeError, and the classified trail for the same result has no
+        completion."""
+        events = [{"type": "execution_completed"}, {"type": "execution_failed"},
+                  {"type": "custom_event"}]
+        with pytest.raises(TypeError):
+            build_evidence_bundle("j1", self.DEVICE, {"submitted": False, "error": "jam"}, events=events)
+        types = [e["type"] for e in build_evidence_bundle(
+            "j1", self.DEVICE, {"submitted": False, "error": "jam"})["events"]]
+        assert "execution_completed" not in types
+        assert "execution_failed" in types
 
 
 # ---------------------------------------------------------------------------
@@ -995,16 +1163,15 @@ class TestExecuteStatusGating:
             return ex.execute(job)
 
     # --- success -----------------------------------------------------------
+    #
+    # The ipp and octoprint rows moved to the accepted test below: a queued
+    # `lp` job and a started OctoPrint print are acceptance, not completion.
 
     @pytest.mark.parametrize(
         "device,capability,target,result",
         [
-            pytest.param(IPP_DEVICE, "document-printing",
-                         "pcc_node.job_executor.execute_ipp_print", IPP_SUCCESS, id="ipp"),
             pytest.param(OT_DEVICE, "liquid-handler",
                          "pcc_node.job_executor.JobExecutor._execute_opentrons", OT_SUCCESS, id="opentrons"),
-            pytest.param(OP_DEVICE, "3d-print",
-                         "pcc_node.job_executor.JobExecutor._execute_octoprint", OP_SUCCESS, id="octoprint"),
             pytest.param(GH_DEVICE, "generic",
                          "pcc_node.job_executor.JobExecutor._execute_generic_http", GH_SUCCESS, id="generic-http"),
         ],
@@ -1022,6 +1189,54 @@ class TestExecuteStatusGating:
         types = _event_types(self._pushed_bundle(gateway))
         assert EVENT_EXECUTION_COMPLETED in types
         assert EVENT_EXECUTION_FAILED not in types
+
+    # --- accepted (must-close item 5) ----------------------------------------
+
+    @pytest.mark.parametrize(
+        "device,capability,target,result",
+        [
+            pytest.param(IPP_DEVICE, "document-printing",
+                         "pcc_node.job_executor.execute_ipp_print", IPP_ACCEPTED, id="ipp"),
+            pytest.param(OP_DEVICE, "3d-print",
+                         "pcc_node.job_executor.JobExecutor._execute_octoprint", OP_ACCEPTED, id="octoprint"),
+            pytest.param(GH_DEVICE, "generic",
+                         "pcc_node.job_executor.JobExecutor._execute_generic_http", GH_ACCEPTED_202,
+                         id="generic-http-202"),
+            pytest.param(OT_DEVICE, "liquid-handler",
+                         "pcc_node.job_executor.JobExecutor._execute_opentrons", OT_ACCEPTED_ONLY,
+                         id="opentrons-accepted-only"),
+        ],
+    )
+    def test_accepted_reports_no_terminal_status(self, device, capability, target, result):
+        """The device took the job and has not reported it finished: neither
+        'completed' nor 'failed' may be reported, the evidence is still pushed,
+        and it carries execution_progress -- never execution_completed."""
+        gateway = self._gateway()
+        self._run(gateway, device, capability, target, result)
+
+        for call in gateway.update_job_status.call_args_list:
+            reported = list(call.args[1:]) + list(call.kwargs.values())
+            assert "completed" not in reported, f"accepted job reported completed: {call}"
+            assert "failed" not in reported, f"accepted job reported failed: {call}"
+        # The only status report is the "running" sent before execution.
+        assert gateway.update_job_status.call_args_list == [mock.call("job-sec10", "running")]
+
+        gateway.push_evidence.assert_called_once()
+        bundle = self._pushed_bundle(gateway)
+        assert _event_types(bundle) == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS]
+        assert "execution_completed" not in _bundle_text(bundle)
+
+    def test_accepted_is_logged_at_info_not_as_a_failure(self, caplog):
+        gateway = self._gateway()
+        with caplog.at_level(logging.INFO, logger="pcc-node.job-executor"):
+            self._run(gateway, self.IPP_DEVICE, "document-printing",
+                      "pcc_node.job_executor.execute_ipp_print", IPP_ACCEPTED)
+
+        accepted = [r for r in caplog.records if "accepted by device" in r.getMessage()]
+        assert accepted, f"no acceptance log line; records were {[r.getMessage() for r in caplog.records]}"
+        assert all(r.levelno == logging.INFO for r in accepted)
+        assert "completion not yet observed" in accepted[0].getMessage()
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     # --- failure -----------------------------------------------------------
 
@@ -1253,12 +1468,21 @@ class TestTransportFailureSentinel:
 
     def test_real_http_status_codes_are_untouched(self):
         assert classify_execution_result(GH_SUCCESS) == RESULT_SUCCESS
-        assert classify_execution_result(OP_SUCCESS) == RESULT_SUCCESS
+        # A real 200 is not the sentinel.  OctoPrint's 2xx is acceptance, not
+        # completion (item 5), so its verdict is accepted -- but not failure.
+        assert classify_execution_result(OP_ACCEPTED) == RESULT_ACCEPTED
 
     def test_boolean_status_code_is_not_read_as_the_sentinel(self):
         """`False == 0` in Python -- a bool there is a malformed result, not a
-        transport report, so the remaining rules classify it."""
-        assert classify_execution_result({"printed": True, "status_code": False}) == RESULT_SUCCESS
+        transport report, so it is not the sentinel (not a failure by rule 4).
+
+        CHANGED (r31 astra verdict item 3): this used to assert RESULT_SUCCESS.
+        A present-but-malformed status_code is unreadable, and an unreadable
+        outcome field is not evidence that nothing failed, so it now
+        classifies as unclassifiable (rule 4c) -- never a success."""
+        result = {"printed": True, "status_code": False}
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+        assert not _is_transport_failure(result)
 
     def test_failure_reason_names_the_transport_failure(self):
         reason = describe_execution_failure(GH_TRANSPORT_PRE_FIX)
@@ -1717,7 +1941,19 @@ class TestDeviceReportedFailureInABody:
         pytest.param(304, "", id="redirect-304"),
     ]
 
+    # Bodies in which the DEVICE states that the work finished.
     DEVICE_SUCCESSES = [
+        pytest.param(200, _json_body({"status": "completed"}), id="completed-status-200"),
+        pytest.param(200, _json_body({"data": {"state": "done"}}), id="nested-done-200"),
+        pytest.param(201, _json_body({"done": True, "jobId": "abc"}), id="done-true-201"),
+        pytest.param(200, _json_body({"result": {"status": "SUCCEEDED"}}), id="result-succeeded-200"),
+    ]
+    # CHANGED (r31 astra verdict item 1): these five bodies used to be
+    # DEVICE_SUCCESSES and were asserted to release.  None of them states that
+    # the work finished -- {"ok": true} and {"success": true} answer for the
+    # REQUEST, a job id is a receipt, and 204/"OK" carry no statement at all --
+    # so "2xx and no recognized error" is now unclassifiable and fails closed.
+    DEVICE_OPAQUE_2XX = [
         pytest.param(200, _json_body({"ok": True}), id="ok-true-200"),
         pytest.param(200, _json_body({"success": True, "jobId": "abc"}), id="success-true-200"),
         pytest.param(201, _json_body({"jobId": "abc"}), id="opaque-json-201"),
@@ -1767,15 +2003,19 @@ class TestDeviceReportedFailureInABody:
         with self._socket(status, raw):
             result = ex._execute_octoprint(self.OP_DEVICE, self._job())
 
-        assert result["printed"] is False, (
-            f"HTTP {status} with a device failure body reported as printed: {result!r}"
+        # The adapter's flag is now the acceptance flag (item 5); it must not
+        # even claim the job was accepted, let alone printed.
+        assert "printed" not in result, f"octoprint adapter claimed printed: {result!r}"
+        assert result["submitted"] is False, (
+            f"HTTP {status} with a device failure body reported as submitted: {result!r}"
         )
         assert result["error"]
         assert classify_execution_result(result) == RESULT_FAILURE
 
     @pytest.mark.parametrize("status,raw", DEVICE_SUCCESSES)
     def test_a_genuine_success_still_succeeds(self, status, raw):
-        """Negative control: reading the body must not dispute healthy runs."""
+        """Negative control: reading the body must not dispute healthy runs
+        whose device says the work finished."""
         ex = JobExecutor(devices=[])
         with self._socket(status, raw):
             result = ex._execute_generic_http(self.GH_DEVICE, self._job())
@@ -1783,6 +2023,16 @@ class TestDeviceReportedFailureInABody:
         assert result["executed"] is True, f"healthy device disputed: {result!r}"
         assert "error" not in result
         assert classify_execution_result(result) == RESULT_SUCCESS
+
+    @pytest.mark.parametrize("status,raw", DEVICE_OPAQUE_2XX)
+    def test_a_2xx_without_a_completion_statement_is_not_a_success(self, status, raw):
+        """r31 item 1: absence of a recognised error is not completion."""
+        ex = JobExecutor(devices=[])
+        with self._socket(status, raw):
+            result = ex._execute_generic_http(self.GH_DEVICE, self._job())
+
+        assert "executed" not in result and "submitted" not in result, result
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
 
     @pytest.mark.parametrize("status", [300, 301, 302, 304, 308])
     def test_success_band_is_2xx_not_sub_400(self, status):
@@ -1825,10 +2075,12 @@ class TestDeviceReportedFailureInABody:
         gateway.push_evidence.assert_called_once()
 
     def test_healthy_device_still_releases_end_to_end(self):
+        """CHANGED (r31 item 1): the body was {"ok": true}, which no longer
+        states completion; a device that says so still releases."""
         gateway = self._gateway()
         ex = JobExecutor(devices=[self.GH_DEVICE], gateway_client=gateway)
 
-        with self._socket(200, _json_body({"ok": True})):
+        with self._socket(200, _json_body({"status": "completed"})):
             bundle = ex.execute(self._job())
 
         types = _event_types(bundle)
@@ -1839,6 +2091,19 @@ class TestDeviceReportedFailureInABody:
         assert "execution_failed" not in _bundle_text(bundle)
         assert "completed" in statuses
         assert "failed" not in statuses
+
+    def test_an_opaque_2xx_fails_closed_end_to_end(self):
+        """r31 item 1: {"ok": true} used to release; now nothing is claimed
+        and the job is reported failed (unclassifiable)."""
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[self.GH_DEVICE], gateway_client=gateway)
+
+        with self._socket(200, _json_body({"ok": True})):
+            bundle = ex.execute(self._job())
+
+        assert EVENT_EXECUTION_COMPLETED not in _event_types(bundle)
+        assert "execution_completed" not in _bundle_text(bundle)
+        assert self._statuses(gateway) == ["running", "failed"]
 
 
 # ---------------------------------------------------------------------------
@@ -1862,7 +2127,11 @@ class TestDroppedFailureReportIsSurfaced:
     def _run(self, result, ack, caplog):
         gateway = mock.Mock()
         gateway.push_evidence.return_value = True
-        gateway.update_job_status.return_value = ack
+        # The 'running' claim lands (otherwise the job never starts, see
+        # TestClaimBeforeSideEffect); `ack` governs the terminal report.
+        gateway.update_job_status.side_effect = (
+            lambda job_id, status, *rest, **kw: True if status == "running" else ack
+        )
         ex = JobExecutor(devices=[self.IPP_DEVICE], gateway_client=gateway)
         job = {"id": "job-ack", "capabilityType": "document-printing", "parameters": {}}
 
@@ -1899,7 +2168,622 @@ class TestDroppedFailureReportIsSurfaced:
         assert "execution_completed" not in _bundle_text(bundle)
 
     def test_a_successful_job_is_unaffected(self, caplog):
-        gateway, bundle = self._run(IPP_SUCCESS, ack=True, caplog=caplog)
+        # Was IPP_SUCCESS.  A queued `lp` job is no longer a success (item 5),
+        # so a device-reported completion stands in: this control only needs a
+        # SUCCESS verdict flowing through execute().
+        gateway, bundle = self._run(GH_SUCCESS, ack=True, caplog=caplog)
         statuses = [c[0][1] for c in gateway.update_job_status.call_args_list]
         assert "completed" in statuses
         assert EVENT_EXECUTION_COMPLETED in _event_types(bundle)
+
+
+# ---------------------------------------------------------------------------
+# Acceptance is not completion (evidence contract, must-close item 5)
+#
+# Evidence has three levels: SUBMITTED (the device accepted the command),
+# DEVICE-REPORTED (the device reported the work finished) and INSPECTED-OUTPUT.
+# Three adapters minted a COMPLETION flag from what was only acceptance:
+#
+#   * execute_ipp_print   `printed: returncode == 0` -- but `lp` exits 0 once
+#                         CUPS has QUEUED the job ("request id is ..."), before
+#                         a sheet is printed.
+#   * _execute_octoprint  `printed` from a 2xx to `select + print` -- OctoPrint
+#                         accepted the job and started it.
+#   * _execute_generic_http  `executed` from ANY clean 2xx, including 202
+#                         Accepted (RFC 9110 sec 15.3.3: processing not
+#                         completed).
+#
+# Each became execution_completed, and golden-v4's and(execution_completed
+# present, execution_failed absent) RELEASED a job nobody saw finish.  The
+# adapters now report `submitted`; the classifier names that ACCEPTED; the
+# bundle records it as execution_progress (level "submitted"); and the job is
+# left "running" -- neither completed nor failed.
+#
+# Only the subprocess / socket layer is faked: the adapters, the classifier,
+# the evidence builder and execute() all run for real underneath.
+# ---------------------------------------------------------------------------
+
+class TestAcceptanceIsNotCompletion:
+    IPP_DEVICE = {"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}
+    OP_DEVICE = {"id": "op1", "protocol": "octoprint", "url": "http://10.0.0.20:5000"}
+    GH_DEVICE = {"id": "g1", "protocol": "generic-http", "url": "http://10.0.0.9"}
+
+    LP_QUEUED = "request id is printer-1-1 (1 file(s))"
+
+    def _gateway(self):
+        g = mock.Mock()
+        g.update_job_status.return_value = True
+        g.push_evidence.return_value = True
+        return g
+
+    def _statuses(self, gateway):
+        return [call[0][1] for call in gateway.update_job_status.call_args_list]
+
+    def _socket(self, status, raw):
+        return mock.patch(
+            "pcc_node.http_util.urlopen",
+            side_effect=lambda req, *a, **k: _RawResponse(status, raw),
+        )
+
+    @staticmethod
+    def _discard_spool_file(result):
+        """execute_ipp_print writes the document to a temp file it never
+        deletes; don't leave one behind per test run."""
+        path = result.get("filepath") if isinstance(result, dict) else None
+        if path and os.path.exists(path):
+            os.unlink(path)
+
+    # --- IPP: the polarity control ------------------------------------------
+
+    @pytest.mark.parametrize("system", ["Linux", "Darwin", "Windows"])
+    def test_polarity_control_lp_exit_zero_is_never_a_success(self, system):
+        """FAILS if `lp` (or `notepad /p`) exiting 0 is ever classified as
+        SUCCESS again -- whether the regression comes back through the
+        adapter's flag or through the classifier, since both run for real."""
+        job = {"id": "job-lp", "parameters": {"content": "x", "filename": "x.txt"}}
+        with mock.patch("subprocess.run") as run, \
+             mock.patch("platform.system", return_value=system):
+            run.return_value = mock.Mock(returncode=0, stdout=self.LP_QUEUED, stderr="")
+            result = execute_ipp_print(self.IPP_DEVICE, job)
+        self._discard_spool_file(result)
+
+        assert run.called, "the print command was never issued"
+        verdict = classify_execution_result(result)
+        assert verdict != RESULT_SUCCESS, (
+            f"exit 0 means the job was QUEUED, not printed -- classified as a "
+            f"completed print: {result!r}"
+        )
+        assert verdict == RESULT_ACCEPTED
+        assert not [k for k in COMPLETION_FLAG_KEYS if k in result]
+
+    def test_lp_exit_zero_never_releases_end_to_end(self):
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[self.IPP_DEVICE], gateway_client=gateway)
+        job = {
+            "id": "job-lp-e2e",
+            "capabilityType": "document-printing",
+            "parameters": {"content": "x", "filename": "x.txt"},
+        }
+        with mock.patch("subprocess.run") as run, \
+             mock.patch("platform.system", return_value="Linux"):
+            run.return_value = mock.Mock(returncode=0, stdout=self.LP_QUEUED, stderr="")
+            bundle = ex.execute(job)
+        self._discard_spool_file(bundle.get("result"))
+
+        assert run.called
+        assert _event_types(bundle) == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS]
+        assert "execution_completed" not in _bundle_text(bundle)
+        assert self._statuses(gateway) == ["running"]
+        gateway.push_evidence.assert_called_once()
+        payload = bundle["events"][1]["payload"]
+        assert payload["level"] == "submitted"
+        assert payload["result"]["returncode"] == 0
+        assert payload["result"]["stdout"] == self.LP_QUEUED
+
+    def test_ipp_fixture_mirrors_the_live_adapter(self):
+        job = {"parameters": {"content": "x", "filename": "x.txt"}}
+        with mock.patch("subprocess.run") as run, \
+             mock.patch("platform.system", return_value="Linux"):
+            run.return_value = mock.Mock(
+                returncode=0, stdout="request id is printer-1-1", stderr=""
+            )
+            result = execute_ipp_print({**self.IPP_DEVICE, "model": "Prusa"}, job)
+        self._discard_spool_file(result)
+
+        def without_path(d):
+            return {k: v for k, v in d.items() if k != "filepath"}
+
+        assert set(result) == set(IPP_ACCEPTED)
+        assert without_path(result) == without_path(IPP_ACCEPTED)
+
+    # --- OctoPrint ------------------------------------------------------------
+
+    @pytest.mark.parametrize("status,raw", [
+        # 204 No Content is OctoPrint's documented answer to select + print.
+        pytest.param(204, "", id="204-no-content"),
+        pytest.param(200, _json_body({}), id="200-empty-json"),
+        pytest.param(201, _json_body({"name": "benchy.gcode", "origin": "local"}), id="201"),
+    ])
+    def test_octoprint_2xx_is_accepted_not_printed(self, status, raw):
+        ex = JobExecutor(devices=[])
+        with self._socket(status, raw):
+            result = ex._execute_octoprint(
+                self.OP_DEVICE, {"parameters": {"filename": "benchy.gcode"}}
+            )
+
+        assert result["submitted"] is True
+        assert "printed" not in result, "a started print claimed to be finished"
+        assert "error" not in result
+        assert result == {**OP_ACCEPTED, "status_code": status}
+        assert classify_execution_result(result) == RESULT_ACCEPTED
+
+    def test_octoprint_2xx_never_releases_end_to_end(self):
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[self.OP_DEVICE], gateway_client=gateway)
+        job = {
+            "id": "job-op-e2e",
+            "capabilityType": "3d-print",
+            "parameters": {"filename": "benchy.gcode"},
+        }
+        with self._socket(204, ""):
+            bundle = ex.execute(job)
+
+        assert _event_types(bundle) == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS]
+        assert "execution_completed" not in _bundle_text(bundle)
+        assert self._statuses(gateway) == ["running"]
+        gateway.push_evidence.assert_called_once()
+
+    # --- generic HTTP: 202 is acceptance, every other 2xx is not --------------
+
+    def test_generic_http_202_is_accepted_not_executed(self):
+        ex = JobExecutor(devices=[])
+        with self._socket(202, _json_body({"jobId": "abc", "status": "queued"})):
+            result = ex._execute_generic_http(self.GH_DEVICE, {"parameters": {"path": "/execute"}})
+
+        assert result == GH_ACCEPTED_202, "fixture no longer mirrors the live adapter"
+        assert "executed" not in result
+        assert classify_execution_result(result) == RESULT_ACCEPTED
+
+    @pytest.mark.parametrize("raw", [
+        pytest.param(_json_body({"error": "queue full; job NOT accepted"}), id="error-key"),
+        pytest.param(_json_body({"success": False, "message": "rejected"}), id="success-false"),
+        pytest.param(SOAP_FAULT_BODY, id="soap-fault"),
+    ])
+    def test_generic_http_202_still_lifts_a_body_failure(self, raw):
+        """Body-error lifting runs at every status, 202 included."""
+        ex = JobExecutor(devices=[])
+        with self._socket(202, raw):
+            result = ex._execute_generic_http(self.GH_DEVICE, {"parameters": {"path": "/execute"}})
+
+        assert result["submitted"] is False
+        assert "executed" not in result
+        assert result["error"]
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("status,raw", [
+        pytest.param(200, _json_body({"ok": True}), id="200"),
+        pytest.param(201, _json_body({"jobId": "abc"}), id="201"),
+        pytest.param(204, "", id="204"),
+    ])
+    def test_generic_http_other_2xx_needs_a_completion_statement(self, status, raw):
+        """CHANGED (r31 astra verdict item 1).  Old name/assertion:
+        test_generic_http_other_2xx_is_still_executed_and_a_success asserted
+        executed=True and RESULT_SUCCESS for these bodies.  A 2xx whose body
+        states no completion is the transport answering, not the device saying
+        the work finished, so no flag is claimed and it is unclassifiable."""
+        ex = JobExecutor(devices=[])
+        with self._socket(status, raw):
+            result = ex._execute_generic_http(self.GH_DEVICE, {"parameters": {"path": "/execute"}})
+
+        assert "executed" not in result
+        assert "submitted" not in result
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    def test_generic_http_2xx_stating_completion_is_executed(self):
+        """Positive control for the test above."""
+        ex = JobExecutor(devices=[])
+        with self._socket(200, _json_body({"status": "completed"})):
+            result = ex._execute_generic_http(self.GH_DEVICE, {"parameters": {"path": "/execute"}})
+
+        assert result["executed"] is True
+        assert classify_execution_result(result) == RESULT_SUCCESS
+
+    @pytest.mark.parametrize("status,raw,expected_statuses,expected_types", [
+        pytest.param(200, _json_body({"jobId": "abc", "status": "completed"}), ["running", "completed"],
+                     [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_COMPLETED], id="200-stating-completion-completes"),
+        pytest.param(200, _json_body({"jobId": "abc"}), ["running", "failed"],
+                     [EVENT_EXECUTION_STARTED], id="200-without-completion-fails-closed"),
+        pytest.param(202, _json_body({"jobId": "abc"}), ["running"],
+                     [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS], id="202-stays-running"),
+    ])
+    def test_generic_http_200_completes_but_202_stays_running_end_to_end(
+        self, status, raw, expected_statuses, expected_types
+    ):
+        """CHANGED (r31 item 1): the 200 case used {"jobId": "abc"} and was
+        asserted to complete.  It now needs the device's completion statement;
+        without one the job fails closed."""
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[self.GH_DEVICE], gateway_client=gateway)
+        job = {"id": "job-gh-e2e", "capabilityType": "generic", "parameters": {"path": "/execute"}}
+        with self._socket(status, raw):
+            bundle = ex.execute(job)
+
+        assert self._statuses(gateway) == expected_statuses
+        assert _event_types(bundle) == expected_types
+        gateway.push_evidence.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# The last shapes by which a submitted or failed result could still read as a
+# success (review of item 5 against the R31 question: can a FAILED or merely
+# SUBMITTED device result reach execution_completed by any path?)
+# ---------------------------------------------------------------------------
+
+
+class TestAcceptedStatusAndShapeGaps:
+    @pytest.mark.parametrize("result", [
+        pytest.param({"executed": True, "status_code": 202}, id="executed-flag"),
+        pytest.param({"printed": True, "status_code": 202}, id="printed-flag"),
+        pytest.param({"status": "completed", "status_code": 202}, id="success-status"),
+        pytest.param({"status_code": 202, "response": {"ok": True}}, id="bare-202"),
+        pytest.param({"submitted": True, "status_code": 202}, id="submitted-flag"),
+    ])
+    def test_a_202_never_classifies_as_success(self, result):
+        assert classify_execution_result(result) == RESULT_ACCEPTED
+
+    @pytest.mark.parametrize("result", [
+        pytest.param({"status_code": 202, "error": "queue full"}, id="error"),
+        pytest.param({"status_code": 202, "executed": False}, id="false-flag"),
+        pytest.param({"status_code": 202, "status": "failed"}, id="failure-status"),
+    ])
+    def test_a_failed_202_is_still_a_failure(self, result):
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_an_unreadable_status_still_outranks_a_202(self):
+        result = {"status_code": 202, "status": "jammed"}
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    @pytest.mark.parametrize("status", [
+        pytest.param(["failed"], id="list"),
+        pytest.param({"state": "failed"}, id="dict"),
+        pytest.param(0, id="int"),
+        pytest.param(False, id="bool"),
+    ])
+    @pytest.mark.parametrize("flag", ["executed", "printed"])
+    def test_a_non_string_status_is_unclassifiable(self, status, flag):
+        result = {flag: True, "status": status}
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    def test_an_absent_status_is_not_a_non_string_status(self):
+        """Positive control: with no status key at all, a completion flag is
+        still a success."""
+        assert classify_execution_result({"executed": True}) == RESULT_SUCCESS
+
+    def test_an_explicit_null_status_is_unreadable_not_absent(self):
+        """CHANGED (r31 astra verdict item 3): `{"executed": True, "status":
+        None}` used to be asserted RESULT_SUCCESS here, reading an explicit null
+        as "no status".  A present status that cannot be read may be a failure
+        in another shape, so it is now unclassifiable (rule 8)."""
+        assert classify_execution_result({"executed": True, "status": None}) == RESULT_UNCLASSIFIABLE
+
+    def test_a_202_bundle_never_carries_execution_completed(self):
+        bundle = build_evidence_bundle(
+            "job-202", {"id": "gh"}, {"executed": True, "status_code": 202}
+        )
+        assert _event_types(bundle) == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS]
+        assert "execution_completed" not in _bundle_text(bundle)
+
+
+# ---------------------------------------------------------------------------
+# Claim before the side effect
+#
+# For an accepted job 'running' is the only status the node reports.  If that
+# claim is dropped the job stays 'queued' upstream, and a restarted daemon
+# (whose seen-set is in memory) would dispatch it again: a second physical
+# print.  So the node does not start a job whose claim did not land.
+# ---------------------------------------------------------------------------
+
+
+class TestClaimBeforeSideEffect:
+    IPP_DEVICE = {"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}
+    JOB = {"id": "job-claim", "capabilityType": "document-printing", "parameters": {}}
+
+    def _run(self, claim_ack, caplog):
+        gateway = mock.Mock()
+        gateway.push_evidence.return_value = True
+        gateway.update_job_status.return_value = claim_ack
+        ex = JobExecutor(devices=[self.IPP_DEVICE], gateway_client=gateway)
+        with mock.patch("pcc_node.job_executor.execute_ipp_print") as patched:
+            patched.return_value = IPP_ACCEPTED
+            with caplog.at_level(logging.ERROR, logger="pcc-node.job-executor"):
+                out = ex.execute(dict(self.JOB))
+        return gateway, patched, out
+
+    def test_an_unacknowledged_claim_does_not_start_the_job(self, caplog):
+        gateway, adapter, out = self._run(claim_ack=False, caplog=caplog)
+        adapter.assert_not_called()
+        gateway.push_evidence.assert_not_called()
+        assert [c[0][1] for c in gateway.update_job_status.call_args_list] == ["running"]
+        gateway.forget_job.assert_called_once_with("job-claim")
+        assert out["error"] == "claim_not_acknowledged"
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("did not acknowledge the 'running' claim" in m for m in errors)
+
+    def test_an_acknowledged_claim_starts_the_job(self, caplog):
+        """Positive control: the same job runs once the claim lands."""
+        gateway, adapter, _ = self._run(claim_ack=True, caplog=caplog)
+        adapter.assert_called_once()
+        gateway.push_evidence.assert_called_once()
+        gateway.forget_job.assert_not_called()
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_no_gateway_means_no_claim_to_wait_for(self):
+        ex = JobExecutor(devices=[self.IPP_DEVICE], gateway_client=None)
+        with mock.patch("pcc_node.job_executor.execute_ipp_print") as patched:
+            patched.return_value = IPP_ACCEPTED
+            ex.execute(dict(self.JOB))
+        patched.assert_called_once()
+
+    def test_a_forgotten_job_is_polled_again(self):
+        from pcc_node.ws_client import PCCGatewayClient
+
+        client = PCCGatewayClient.__new__(PCCGatewayClient)
+        client.gateway_url = "http://gw.test"
+        client.kernel_id = "k1"
+        client.api_key = "test-key"
+        client._seen_jobs = set()
+        with mock.patch(
+            "pcc_node.ws_client._http", return_value=(200, {"jobs": [{"id": "job-claim"}]})
+        ):
+            client.mark_job_seen("job-claim")
+            assert client.poll_for_jobs() == []
+            client.forget_job("job-claim")
+            assert [j["id"] for j in client.poll_for_jobs()] == ["job-claim"]
+
+
+# ---------------------------------------------------------------------------
+# r31 astra verdict (bus #2476), items 1 and 3: the device-body scan must read
+# nested and list-shaped failures, a success key must hold the boolean True,
+# and a PRESENT but malformed outcome field must never reach a success.
+# ---------------------------------------------------------------------------
+
+
+class TestR31MalformedFieldsAndDeepBodies:
+    @pytest.mark.parametrize("status_code", [
+        pytest.param("202", id="string-202"),
+        pytest.param("0", id="string-0"),
+        pytest.param("500", id="string-500"),
+        pytest.param(False, id="bool-false"),
+        pytest.param(None, id="null"),
+        pytest.param(200.0, id="float"),
+    ])
+    @pytest.mark.parametrize("flag", ["executed", "printed"])
+    def test_a_malformed_status_code_never_classifies_as_success(self, flag, status_code):
+        result = {flag: True, "status_code": status_code}
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    @pytest.mark.parametrize("body", [
+        pytest.param({"data": {"error": "jam"}}, id="nested-error"),
+        pytest.param({"result": {"success": False}}, id="nested-success-false"),
+        pytest.param([{"error": "jam"}], id="error-in-list"),
+        pytest.param({"success": "false"}, id="string-false-success"),
+        pytest.param({"ok": 0}, id="zero-ok"),
+        pytest.param({"succeeded": None}, id="null-succeeded"),
+        pytest.param({"status": ["failed"]}, id="status-list"),
+        pytest.param({"a": {"b": {"c": {"state": "ABORTED"}}}}, id="deep-state"),
+        pytest.param({"jobs": [{"id": 1}, {"id": 2, "status": "error"}]}, id="failure-in-second-item"),
+        pytest.param({"raw": "<soap:Envelope><soap:Fault>x</soap:Fault></soap:Envelope>"}, id="nested-soap-fault"),
+    ])
+    def test_a_2xx_carrying_a_nested_or_malformed_failure_is_a_failure(self, body):
+        result = {"executed": True, "status_code": 200, "response": body}
+        assert _extract_device_error(body) is not None
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_a_body_too_deep_to_verify_is_a_failure(self):
+        body = {"leaf": "ok"}
+        for _ in range(20):
+            body = {"next": body}
+        assert "too deeply nested" in (_extract_device_error(body) or "")
+        assert classify_execution_result({"executed": True, "status_code": 200, "response": body}) == RESULT_FAILURE
+
+    def test_a_body_too_large_to_verify_is_a_failure(self):
+        body = {"items": [{"n": i} for i in range(6000)]}
+        assert "too large" in (_extract_device_error(body) or "")
+
+    @pytest.mark.parametrize("body", [
+        pytest.param({"data": {"status": "completed", "errors": []}}, id="empty-errors-list"),
+        pytest.param({"data": {"items": [{"name": "x"}], "error": None}}, id="null-error"),
+        pytest.param({"ok": True, "state": "done"}, id="true-ok"),
+    ])
+    def test_benign_nested_bodies_are_not_failures(self, body):
+        """Negative control: the deeper scan does not invent failures."""
+        assert _extract_device_error(body) is None
+        assert classify_execution_result({"executed": True, "status_code": 200, "response": body}) == RESULT_SUCCESS
+
+    def test_existing_top_level_messages_are_unchanged(self):
+        """Adapters lift the device's own message verbatim; nested hits add a location."""
+        assert _extract_device_error({"error": "E_JAM: carriage jam"}) == "E_JAM: carriage jam"
+        assert _extract_device_error({"success": False}) == "device reported success=False"
+        assert _extract_device_error({"data": {"error": "jam"}}) == "jam (at data)"
+
+
+# ---------------------------------------------------------------------------
+# r31 astra verdict item 1 (bus #2476): the live generic HTTP adapter against
+# every row of the reviewer's table, plus the per-device completion contract.
+# ---------------------------------------------------------------------------
+
+
+class TestR31GenericHttpCompletionContract:
+    GH_DEVICE = {"id": "g1", "protocol": "generic-http", "url": "http://10.0.0.9"}
+
+    def _socket(self, status, raw):
+        return mock.patch(
+            "pcc_node.http_util.urlopen",
+            side_effect=lambda req, *a, **k: _RawResponse(status, raw),
+        )
+
+    def _run(self, status, raw, device=None):
+        ex = JobExecutor(devices=[])
+        with self._socket(status, raw):
+            return ex._execute_generic_http(device or self.GH_DEVICE, {"parameters": {"path": "/execute"}})
+
+    @pytest.mark.parametrize("raw,expected", [
+        pytest.param(_json_body({"status": "queued"}), RESULT_ACCEPTED, id="queued-is-acceptance"),
+        pytest.param(_json_body({"submitted": True}), RESULT_ACCEPTED, id="submitted-is-acceptance"),
+        pytest.param(_json_body({"data": {"error": "jam"}}), RESULT_FAILURE, id="nested-failure"),
+        pytest.param(_json_body({"result": {"success": False}}), RESULT_FAILURE, id="nested-failed-result"),
+        pytest.param(_json_body([{"error": "jam"}]), RESULT_FAILURE, id="failure-in-list"),
+        pytest.param(_json_body({"status": "jammed"}), RESULT_UNCLASSIFIABLE, id="unknown-status-word"),
+        pytest.param(_json_body({}), RESULT_UNCLASSIFIABLE, id="empty-object"),
+        pytest.param("null", RESULT_UNCLASSIFIABLE, id="null"),
+        pytest.param(_json_body({"success": "false"}), RESULT_FAILURE, id="string-false-success"),
+        pytest.param(_json_body({"ok": 0}), RESULT_FAILURE, id="zero-ok"),
+        pytest.param(_json_body({"status": ["failed"]}), RESULT_FAILURE, id="status-list"),
+        pytest.param(_json_body({"status": "completed", "data": {"state": "queued"}}),
+                     RESULT_UNCLASSIFIABLE, id="completion-and-acceptance-conflict"),
+        pytest.param(_json_body({"done": "yes"}), RESULT_UNCLASSIFIABLE, id="non-boolean-done"),
+        pytest.param(_json_body({"status": None}), RESULT_UNCLASSIFIABLE, id="null-status"),
+    ])
+    def test_the_reviewers_table_never_reaches_success(self, raw, expected):
+        result = self._run(200, raw)
+        assert "executed" not in result or result["executed"] is not True, result
+        assert classify_execution_result(result) == expected
+        bundle = build_evidence_bundle("j", self.GH_DEVICE, result)
+        assert EVENT_EXECUTION_COMPLETED not in _event_types(bundle)
+
+    @pytest.mark.parametrize("raw", [
+        pytest.param(_json_body({"status": "completed"}), id="completed"),
+        pytest.param(_json_body({"state": "FINISHED"}), id="finished-state"),
+        pytest.param(_json_body({"payload": {"completed": True}}), id="completed-flag-in-envelope"),
+    ])
+    def test_a_completion_statement_is_executed(self, raw):
+        result = self._run(200, raw)
+        assert result["executed"] is True
+        assert classify_execution_result(result) == RESULT_SUCCESS
+
+    def test_a_202_stating_completion_is_still_only_accepted(self):
+        result = self._run(202, _json_body({"status": "completed"}))
+        assert result == {"submitted": True, "status_code": 202,
+                          "response": {"status": "completed"}, "device": "http://10.0.0.9"}
+        assert classify_execution_result(result) == RESULT_ACCEPTED
+
+    # --- per-device contract ----------------------------------------------------
+
+    CONTRACT_DEVICE = {**GH_DEVICE, "completionField": "result.phase", "completionValues": ["FINISHED"]}
+
+    def test_a_contract_value_is_completion(self):
+        result = self._run(200, _json_body({"result": {"phase": "finished"}}), self.CONTRACT_DEVICE)
+        assert result["executed"] is True
+        assert classify_execution_result(result) == RESULT_SUCCESS
+
+    @pytest.mark.parametrize("raw,expected", [
+        pytest.param(_json_body({"result": {"phase": "QUEUED"}}), RESULT_ACCEPTED, id="queued-by-contract"),
+        pytest.param(_json_body({"result": {"phase": "HOMING"}}), RESULT_UNCLASSIFIABLE, id="other-value"),
+        pytest.param(_json_body({"status": "completed"}), RESULT_UNCLASSIFIABLE,
+                     id="default-vocabulary-ignored-under-a-contract"),
+        pytest.param(_json_body({"result": "FINISHED"}), RESULT_UNCLASSIFIABLE, id="path-not-traversable"),
+    ])
+    def test_under_a_contract_nothing_else_is_completion(self, raw, expected):
+        result = self._run(200, raw, self.CONTRACT_DEVICE)
+        assert "executed" not in result
+        assert classify_execution_result(result) == expected
+
+    def test_a_contract_never_overrides_a_failure(self):
+        result = self._run(200, _json_body({"result": {"phase": "FINISHED", "error": "tip crash"}}),
+                           self.CONTRACT_DEVICE)
+        assert result["executed"] is False
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("field", [None, "", 7])
+    def test_an_unusable_contract_is_never_completion(self, field):
+        device = {**self.GH_DEVICE, "completionField": field}
+        result = self._run(200, _json_body({"status": "completed"}), device)
+        assert "executed" not in result
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+
+# ---------------------------------------------------------------------------
+# r31 astra verdict item 2 (bus #2476): an Opentrons run whose polled body says
+# "succeeded" in data.status but carries a failure marker anywhere else is a
+# failure; a success keeps the polled body as evidence.
+# ---------------------------------------------------------------------------
+
+
+class TestR31OpentronsConflictingMarkers:
+    OT_DEVICE = {"id": "ot1", "protocol": "opentrons", "url": "http://10.255.255.1:31950",
+                 "runPollInterval": 0, "runPollTimeout": 5}
+    RUN_ID = "run-xyz"
+
+    def _socket(self, run_body):
+        def _router(req, *args, **kwargs):
+            url = req.full_url
+            if url.endswith("/actions"):
+                return _FakeResponse(201, {"data": {"id": "a1"}})
+            if url.endswith("/runs"):
+                return _FakeResponse(201, {"data": {"id": self.RUN_ID}})
+            if url.endswith(f"/runs/{self.RUN_ID}"):
+                return _FakeResponse(200, run_body)
+            raise AssertionError(f"unexpected request to {url}")
+        return mock.patch("pcc_node.http_util.urlopen", side_effect=_router)
+
+    def _run(self, run_body):
+        ex = JobExecutor(devices=[])
+        with self._socket(run_body):
+            return ex._execute_opentrons(self.OT_DEVICE, {"id": "j", "parameters": {"protocolId": "p"}})
+
+    @pytest.mark.parametrize("run_body", [
+        pytest.param({"error": "run failed", "data": {"id": RUN_ID, "status": "succeeded"}}, id="top-level-error"),
+        pytest.param({"data": {"id": RUN_ID, "status": "succeeded", "result": {"success": False}}},
+                     id="nested-false-success"),
+        pytest.param({"data": {"id": RUN_ID, "status": "succeeded",
+                               "commands": [{"status": "failed", "commandType": "aspirate"}]}},
+                     id="failed-command-in-list"),
+    ])
+    def test_a_succeeded_status_with_a_conflicting_failure_is_a_failure(self, run_body):
+        result = self._run(run_body)
+        assert result["status"] == "failed"
+        assert result["error"]
+        assert classify_execution_result(result) == RESULT_FAILURE
+        bundle = build_evidence_bundle("j", self.OT_DEVICE, result)
+        assert EVENT_EXECUTION_COMPLETED not in _event_types(bundle)
+
+    def test_a_clean_success_keeps_the_polled_body(self):
+        run_body = {"data": {"id": self.RUN_ID, "status": "succeeded", "errors": []}}
+        result = self._run(run_body)
+        assert result["status"] == "completed"
+        assert result["response"] == run_body
+        assert classify_execution_result(result) == RESULT_SUCCESS
+
+
+# ---------------------------------------------------------------------------
+# r31 astra verdict item 4 (non-blocking boundedness): no infinite or NaN
+# budgets, and a poll request never waits longer than the remaining budget.
+# ---------------------------------------------------------------------------
+
+
+class TestR31PollBoundedness:
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+    def test_non_finite_config_numbers_fall_back(self, value):
+        from pcc_node.job_executor import _as_float
+        assert _as_float(value, 5.0) == 5.0
+
+    def test_a_poll_request_never_outlives_the_budget(self):
+        seen_timeouts = []
+        run_id = "run-t"
+
+        def _router(req, *args, **kwargs):
+            url = req.full_url
+            if url.endswith("/actions"):
+                return _FakeResponse(201, {"data": {"id": "a1"}})
+            if url.endswith("/runs"):
+                return _FakeResponse(201, {"data": {"id": run_id}})
+            seen_timeouts.append(kwargs.get("timeout"))
+            return _FakeResponse(200, {"data": {"id": run_id, "status": "succeeded"}})
+
+        device = {"id": "ot1", "protocol": "opentrons", "url": "http://10.255.255.1:31950",
+                  "runPollInterval": 0, "runPollTimeout": 3}
+        with mock.patch("pcc_node.http_util.urlopen", side_effect=_router):
+            JobExecutor(devices=[])._execute_opentrons(device, {"parameters": {"protocolId": "p"}})
+
+        assert seen_timeouts, "the run was never polled"
+        assert all(t is not None and t <= 3 for t in seen_timeouts), seen_timeouts
