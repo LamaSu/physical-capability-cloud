@@ -260,9 +260,6 @@
   function isMoneyState(value) {
     return MONEY_STATE_RE.test(foldForClaims(value).replace(/[^a-z0-9]+/g, " "));
   }
-  function recordValueText(field, value) {
-    return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
-  }
   var RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
   var WITHHELD_FIELD = "withheld: stated money or verification";
   function boundValueText(field, value) {
@@ -1673,7 +1670,7 @@
           cur = cur[seg];
         }
         if (want === "number" ? !(typeof cur === "number" && Number.isFinite(cur)) : !(typeof cur === "string" && cur !== "")) return "mistyped field";
-        slot.textContent = recordValueText(String(node.bind?.select ?? ""), String(cur));
+        slot.textContent = boundValueText(String(node.bind?.select ?? ""), String(cur));
         return true;
       }, () => {
         slot.textContent = "";

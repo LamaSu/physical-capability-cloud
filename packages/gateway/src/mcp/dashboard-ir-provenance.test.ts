@@ -12,7 +12,7 @@ import { dirname, resolve } from "node:path";
 import { TextDecoder as NodeTextDecoder, TextEncoder as NodeTextEncoder } from "node:util";
 import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
-import { dashboardManifestToIr, validateIr, sourceClassOf, provenanceOf, type IrNode } from "./dashboard-ir.js";
+import { dashboardManifestToIr, validateIr, sourceClassOf, provenanceOf, RECORD_CLAIM_NOTE, RECORD_STATUS_NOTE, WITHHELD_FIELD, type IrNode } from "./dashboard-ir.js";
 import { sourceAsOf, isStale, acceptsNewer, ASOF_MAX_SKEW_MS } from "./dashboard-ir-binder.js";
 import { renderIrDoc, applyFreshness, applyUnknownTime, applyUnavailable, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
 
@@ -359,6 +359,24 @@ describe("PX-4 review #2524, absence: every failed, off-schema, partial or empty
     expect(row.textContent).not.toContain("PAID");
     expect(row.textContent).toContain("withheld: stated money");
     s.close();
+  });
+
+  it("the typed stat painter checks a status value like every bound sink (#344 astra r2 F2, merged)", async () => {
+    const statusManifest = { csd: "pcc://artifacts/dashboard/v1", title: "Ops", sections: [{ heading: "Sec S", windows: [
+      { kind: "metric", label: "Status", select: "status", binding: { path: "/api/jobs/j1/status" } },
+    ] }] };
+    for (const [status, shown] of [
+      ["verified", "verified" + RECORD_CLAIM_NOTE], // a verification word is qualified, never bare
+      ["pagado", "pagado" + RECORD_CLAIM_NOTE],
+      ["settled", "settled" + RECORD_STATUS_NOTE], // a money state keeps #3013's wording
+      ["paid 5 USDC", WITHHELD_FIELD], // a status may not state an amount
+      ["running", "running"],
+    ] as const) {
+      const s = scene([{ status: 200, json: { status, asOf: iso(T0) } }], T0);
+      s.deliver(statusManifest); await s.settle();
+      expect(value(s), status).toBe(shown);
+      s.close();
+    }
   });
 
   it("with no trusted origin, every bound element says unavailable (never sits empty)", async () => {
