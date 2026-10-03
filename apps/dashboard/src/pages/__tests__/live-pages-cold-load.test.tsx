@@ -250,4 +250,119 @@ describe("KernelsPage: kernel.location must never render as a React child", () =
     expect(error).toBeNull();
     expect(text).toContain("37.7700, -122.4200");
   });
+
+  // astra's H491 follow-up review (H491-location-followup-0c32f77a.astra.verdict.md),
+  // on top of the MEDIUM fixed above:
+  //
+  // MEDIUM — `kernel.physicalAddress || kernel.location?.label || (...)` renders
+  // whichever operand is truthy first. A non-empty *object* is truthy, so a
+  // malformed `location.label` crashes the same way the old {lat,lng} location
+  // object once did — "Objects are not valid as a React child".
+  it("renders \"Location not set\" instead of crashing when location.label is an object", async () => {
+    state.kernels = [
+      {
+        id: "kernel-geo-bad-label-object",
+        name: "Object Label Kernel",
+        operatorAddress: "0x00",
+        location: { label: {} },
+        physicalAddress: "",
+        maxAssuranceTier: 2,
+        status: "online",
+        lastHeartbeat: new Date().toISOString(),
+        version: "1.0",
+        capabilityCount: 0,
+        capabilityTypes: [],
+        totalJobsCompleted: 0,
+        isStale: false,
+      },
+    ];
+    const { KernelsPage } = await import("../KernelsPage.js");
+    const { error, text } = await coldLoad(KernelsPage as React.ComponentType);
+    expect(error).toBeNull();
+    expect(text).toContain("Location not set");
+  });
+
+  // MEDIUM — the coordinate branch checks only Number.isFinite, never a real
+  // geographic range, so out-of-range coordinates render as if they were a
+  // real location instead of falling back to "Location not set".
+  it("renders \"Location not set\", not \"91.0000, 181.0000\", for out-of-range coordinates", async () => {
+    state.kernels = [
+      {
+        id: "kernel-geo-out-of-range",
+        name: "Out Of Range Kernel",
+        operatorAddress: "0x00",
+        location: { lat: 91, lng: 181 },
+        physicalAddress: "",
+        maxAssuranceTier: 2,
+        status: "online",
+        lastHeartbeat: new Date().toISOString(),
+        version: "1.0",
+        capabilityCount: 0,
+        capabilityTypes: [],
+        totalJobsCompleted: 0,
+        isStale: false,
+      },
+    ];
+    const { KernelsPage } = await import("../KernelsPage.js");
+    const { error, text } = await coldLoad(KernelsPage as React.ComponentType);
+    expect(error).toBeNull();
+    expect(text).toContain("Location not set");
+    expect(text).not.toContain("91.0000");
+  });
+
+  // Same class of defect as the object-label case above, on physicalAddress
+  // instead: an object is truthy, so it crashes before ever falling through
+  // to the valid coordinates sitting right behind it.
+  it("renders the coordinates, not a crash, when physicalAddress is an object", async () => {
+    state.kernels = [
+      {
+        id: "kernel-address-object",
+        name: "Object Address Kernel",
+        operatorAddress: "0x00",
+        location: { lat: 37.77, lng: -122.42 },
+        physicalAddress: {},
+        maxAssuranceTier: 2,
+        status: "online",
+        lastHeartbeat: new Date().toISOString(),
+        version: "1.0",
+        capabilityCount: 0,
+        capabilityTypes: [],
+        totalJobsCompleted: 0,
+        isStale: false,
+      },
+    ];
+    const { KernelsPage } = await import("../KernelsPage.js");
+    const { error, text } = await coldLoad(KernelsPage as React.ComponentType);
+    expect(error).toBeNull();
+    expect(text).toContain("37.7700, -122.4200");
+  });
+
+  // Not reproduced: an empty string is already falsy in the existing `||`
+  // chain, so an empty label is already skipped in favor of the valid
+  // coordinates behind it — no crash, no blank line, nothing wrong. Kept as
+  // a guard: the fix's "label only if it's a non-empty string" check must
+  // keep taking this same path, not treat "" as a present label.
+  it("renders the coordinates, not a blank label, when location.label is an empty string", async () => {
+    state.kernels = [
+      {
+        id: "kernel-empty-label-valid-coords",
+        name: "Empty Label Kernel",
+        operatorAddress: "0x00",
+        location: { label: "", lat: 37.77, lng: -122.42 },
+        physicalAddress: "",
+        maxAssuranceTier: 2,
+        status: "online",
+        lastHeartbeat: new Date().toISOString(),
+        version: "1.0",
+        capabilityCount: 0,
+        capabilityTypes: [],
+        totalJobsCompleted: 0,
+        isStale: false,
+      },
+    ];
+    const { KernelsPage } = await import("../KernelsPage.js");
+    const { error, text } = await coldLoad(KernelsPage as React.ComponentType);
+    expect(error).toBeNull();
+    expect(text).toContain("37.7700, -122.4200");
+  });
 });
