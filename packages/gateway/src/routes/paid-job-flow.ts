@@ -32,7 +32,6 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   });
 }
 import { schema, eq, and, sql } from "@pcc/store";
-import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
 import { PricingCalculator } from "@pcc/contract-builder";
 import { applyPricingRules, sanitizeText } from "@pcc/kernel";
@@ -698,6 +697,86 @@ export async function createJobFromSession(
 }
 
 // ---------------------------------------------------------------------------
+// N98: the discovery quote's registered price and its applicable rules
+// ---------------------------------------------------------------------------
+
+/** The largest quantity a single discovery quote prices. */
+const MAX_QUOTE_QUANTITY = 1_000_000;
+/** A registered amount: a whole number of currency units with at most two decimals, as a JSON number or string. */
+const AMOUNT = /^(0|[1-9][0-9]{0,12})(\.[0-9]{1,2})?$/;
+const QUOTE_CURRENCY = /^[A-Z][A-Z0-9]{2,11}$/;
+const USAGE_RATES = ["perMinute", "perGram", "perCm3"] as const;
+
+/** A registered amount in cents, or null when it is not a canonical amount of at most two decimals. */
+function amountCents(x: unknown): bigint | null {
+  const text = typeof x === "number" ? (Number.isFinite(x) ? String(x) : "") : typeof x === "string" ? x : "";
+  const m = AMOUNT.exec(text);
+  if (!m) return null;
+  const [whole, frac = ""] = text.split(".");
+  return BigInt(whole!) * 100n + BigInt((frac + "00").slice(0, 2));
+}
+
+function centsToDecimal(cents: bigint): string {
+  const whole = cents / 100n;
+  const frac = (cents % 100n).toString().padStart(2, "0");
+  return `${whole}.${frac}`;
+}
+
+/**
+ * The price an operator REGISTERED on a capability (`pricing`), as a discovery quote uses it: the
+ * flat `baseCost` (a positive amount of at most two decimals; adk registers numbers, the seed strings)
+ * in its declared currency, the optional `minimum`, and the usage rates, which are disclosed and not
+ * charged. Anything else is not a declared price, and the route refuses it.
+ */
+function registeredQuotePrice(pricing: unknown):
+  | { ok: true; cents: bigint; currency: string; minimumCents: bigint | null; usage: Record<string, string> }
+  | { ok: false; reason: "no-pricing" | "invalid-currency" | "invalid-price" | "zero-price" | "invalid-minimum" } {
+  if (typeof pricing !== "object" || pricing === null || Array.isArray(pricing)) return { ok: false, reason: "no-pricing" };
+  const p = pricing as Record<string, unknown>;
+  const currency = p.currency;
+  if (typeof currency !== "string" || !QUOTE_CURRENCY.test(currency)) return { ok: false, reason: "invalid-currency" };
+  const cents = amountCents(p.baseCost);
+  if (cents === null) return { ok: false, reason: "invalid-price" };
+  if (cents === 0n) return { ok: false, reason: "zero-price" };
+  let minimumCents: bigint | null = null;
+  if (p.minimum !== undefined && p.minimum !== null) {
+    minimumCents = amountCents(p.minimum);
+    if (minimumCents === null) return { ok: false, reason: "invalid-minimum" };
+  }
+  const usage: Record<string, string> = {};
+  for (const k of USAGE_RATES) {
+    const v = p[k];
+    if (v !== undefined && v !== null && String(v) !== "0" && String(v) !== "0.00") usage[k] = String(v);
+  }
+  return { ok: true, cents, currency, minimumCents, usage };
+}
+
+/**
+ * The operator pricing rules that apply to a discovery quote. A rule applies only when EVERY key of
+ * its condition holds on a fact this route establishes from the order itself:
+ *   - minQuantity: the order's quantity;
+ *   - material: the order's selected material.
+ * The route takes no start time (rush, offpeak) and no authenticated buyer history (loyalty: the
+ * request's userAgentId is the caller's claim), so a rule conditioned on any of those never applies.
+ * A rule with an empty condition applies.
+ */
+function pricingRulesThatApply(
+  rules: readonly OperatorPolicy["pricingRules"][number][],
+  order: { quantity: number; material: unknown },
+): OperatorPolicy["pricingRules"] {
+  return rules.filter((r) => {
+    if (!r.enabled) return false;
+    const c = (r.condition ?? {}) as Record<string, unknown>;
+    return Object.entries(c).every(([key, value]) => {
+      if (value === undefined) return true;
+      if (key === "minQuantity") return typeof value === "number" && order.quantity >= value;
+      if (key === "material") return typeof value === "string" && typeof order.material === "string" && order.material.trim() === value;
+      return false;
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -762,26 +841,46 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         sanitizedSelections[key] = typeof value === "string" ? sanitizeText(value) : value;
       }
 
-      // Auto-compute quote
-      const template = getTemplate(capabilityType);
-      const basePrice = template?.basePricingHints?.basePrice
-        ? parseFloat(template.basePricingHints.basePrice)
-        : 10;
-      const quantity = (sanitizedSelections.quantity as number) ?? 1;
+      // The quote is the operator's REGISTERED price for the selected capability (N98): never a
+      // template hint, never a default. Exactly one capability of this type on this kernel; job
+      // creation (createJobFromSession) then resolves the same one.
+      const candidates = getRepos().capabilities.findByKernel(kernelId).filter((c) => c.type === capabilityType);
+      if (candidates.length === 0) {
+        return reply.status(404).send({ error: "capability_not_found", message: `No ${capabilityType} capability is registered on this kernel.` });
+      }
+      if (candidates.length > 1) {
+        return reply.status(409).send({ error: "capability_ambiguous", message: `This kernel registers more than one ${capabilityType} capability, so no single price applies.` });
+      }
+      const registered = registeredQuotePrice(candidates[0]!.pricing);
+      if (!registered.ok) {
+        return reply.status(422).send({ error: "capability_price_undeclared", reason: registered.reason, message: "This capability declares no usable price, so it cannot be quoted." });
+      }
+      const quantityRaw = sanitizedSelections.quantity;
+      const quantity = quantityRaw === undefined ? 1 : quantityRaw;
+      if (typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_QUOTE_QUANTITY) {
+        return reply.status(400).send({ error: "invalid_quantity", message: `quantity must be a whole number from 1 to ${MAX_QUOTE_QUANTITY}.` });
+      }
+      // Exact arithmetic in cents up to the rules: the registered price times the quantity, never
+      // below the operator's declared minimum.
+      let subtotalCents = registered.cents * BigInt(quantity);
+      if (registered.minimumCents !== null && subtotalCents < registered.minimumCents) subtotalCents = registered.minimumCents;
       const { adjustedPrice, adjustments } = applyPricingRules(
-        basePrice * quantity,
-        policy.pricingRules.filter((r) => r.enabled),
+        Number(subtotalCents) / 100,
+        pricingRulesThatApply(policy.pricingRules, { quantity, material: sanitizedSelections.material }),
       );
 
       const quote = {
-        basePrice: basePrice.toFixed(2),
+        basePrice: centsToDecimal(registered.cents),
         adjustments: adjustments.map((a) => ({
           ruleId: a.ruleId,
           label: a.label,
           impact: a.amount.toFixed(2),
         })),
         totalPrice: adjustedPrice.toFixed(2),
-        currency: template?.basePricingHints?.currency ?? "USDC",
+        currency: registered.currency,
+        // Rates the registered pricing declares per unit of usage, which a discovery quote cannot
+        // measure: shown so the buyer sees them, and not charged by this quote.
+        ...(Object.keys(registered.usage).length > 0 ? { unquotedUsage: registered.usage } : {}),
         bondAmount: "0.00",
         challengeWindowSeconds: 0,
         validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
