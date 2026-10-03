@@ -455,7 +455,7 @@ describe("the R8 modules call no ambient method (source scan)", () => {
     [/(^|[=(,:!&|?;{}[<>+\-*%~^]|\breturn|\btypeof)\s*\/(?![/*])/, "a regex literal"],
   ];
 
-  for (const file of ["primordials.ts", "safety-envelope.ts", "operational-envelope.ts"]) {
+  for (const file of ["primordials.ts", "safety-envelope.ts", "operational-envelope.ts", "envelope-runtime-check.ts"]) {
     it(`${file} checks no format with a RegExp`, () => {
       const code = codeOnly(readFileSync(fileURLToPath(new URL(`../onboarding/${file}`, import.meta.url)), "utf8"));
       const found: string[] = [];
@@ -472,7 +472,7 @@ describe("the R8 modules call no ambient method (source scan)", () => {
     for (const line of ["const half = total / 2;", "const r = (a + b) / c;", "x = list[0] / y;"]) expect(literal.test(line), line).toBe(false);
   });
 
-  for (const file of ["safety-envelope.ts", "operational-envelope.ts"]) {
+  for (const file of ["safety-envelope.ts", "operational-envelope.ts", "envelope-runtime-check.ts"]) {
     it(`${file} uses only the captured intrinsics`, () => {
       const code = codeOnly(readFileSync(fileURLToPath(new URL(`../onboarding/${file}`, import.meta.url)), "utf8"));
       const lines = code.split("\n");

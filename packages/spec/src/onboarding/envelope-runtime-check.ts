@@ -33,7 +33,8 @@
  *     envelope structurally, field by field, and the tests prove it accepts and
  *     refuses exactly what OperationalEnvelopeV1Schema does.
  *   - No RegExp: one can be recompiled in place, even frozen
- *     (RegExp.prototype.compile, Annex B). Digests are checked by char code.
+ *     (RegExp.prototype.compile, Annex B). Digests are checked by R8's
+ *     structural predicates, code unit by code unit.
  *   - Each input is read once, as a plain frozen copy, through property
  *     descriptors, so no getter, proxy trap or other code supplied with it runs.
  *     Internal records have a null prototype, so a value written onto
@@ -50,6 +51,8 @@ import {
   commandMapIssue,
   DEVICE_CLASS_TEMPLATES,
   HAZARDS,
+  isAdapterManifestDigest,
+  isSafetyEnvelopeDigest,
   supervisionPolicy,
   SUPERVISION_MODES,
   type DeviceClassTemplate,
@@ -59,7 +62,6 @@ import {
   append,
   ArrayIsArray,
   ArrayPrototype,
-  asciiBytes,
   deepFreeze,
   defineIndex,
   filterList,
@@ -234,28 +236,6 @@ function finite(v: unknown): v is number {
   return typeof v === "number" && NumberIsFinite(v);
 }
 
-const ENVELOPE_DIGEST_PREFIX = "0x";
-const MANIFEST_DIGEST_PREFIX = "sha256:";
-const HEX_DIGITS = 64;
-
-/** `prefix` followed by exactly 64 lowercase hex digits, checked code unit by code unit (no RegExp). */
-function isLowerHexDigest(value: unknown, prefix: string): value is string {
-  if (typeof value !== "string" || value.length !== prefix.length + HEX_DIGITS) return false;
-  const units = asciiBytes(value);
-  const head = asciiBytes(prefix);
-  if (units === null || head === null) return false;
-  for (let i = 0; i < head.length; i++) {
-    if (units[i] !== head[i]) return false;
-  }
-  for (let i = head.length; i < units.length; i++) {
-    const unit = units[i]!;
-    const digit = unit >= 0x30 && unit <= 0x39;
-    const lowerHex = unit >= 0x61 && unit <= 0x66;
-    if (!digit && !lowerHex) return false;
-  }
-  return true;
-}
-
 /** Why `v` does not hold exactly `keys` (each present, nothing else), or null. */
 function shapeProblem(v: Record<string, unknown>, keys: readonly string[], what: string): string | null {
   const own = ObjectKeys(v);
@@ -382,10 +362,10 @@ function envelopeProblem(e: unknown): string | null {
   const shape = shapeProblem(e, ENVELOPE_KEYS, "the envelope");
   if (shape !== null) return shape;
   if (e.envelopeVersion !== 1) return "envelopeVersion must be 1";
-  if (!isLowerHexDigest(e.envelopeDigest, ENVELOPE_DIGEST_PREFIX)) return "envelopeDigest must be 0x + 64 lowercase hex";
+  if (!isSafetyEnvelopeDigest(e.envelopeDigest)) return "envelopeDigest must be 0x + 64 lowercase hex";
   if (!nonBlank(e.deviceId)) return "deviceId must not be blank";
   if (!nonBlank(e.adapterType)) return "adapterType must not be blank";
-  if (!isLowerHexDigest(e.adapterVersion, MANIFEST_DIGEST_PREFIX)) {
+  if (!isAdapterManifestDigest(e.adapterVersion)) {
     return "adapterVersion must be sha256: + 64 lowercase hex (the adapter's manifest digest)";
   }
   if (e.strict !== true) return "strict must be true; v1 has no lenient mode";
@@ -418,7 +398,7 @@ function envelopeProblem(e: unknown): string | null {
 
 function stateProblem(s: unknown): string | null {
   if (!isRecord(s)) return "the state must be an object";
-  if (!isLowerHexDigest(s.adapterManifestDigest, MANIFEST_DIGEST_PREFIX)) {
+  if (!isAdapterManifestDigest(s.adapterManifestDigest)) {
     return "adapterManifestDigest must be sha256: + 64 lowercase hex (the running adapter's manifest digest)";
   }
   if (!finite(s.jobStartedAtMs) || !finite(s.nowMs)) return "jobStartedAtMs and nowMs must be finite numbers (epoch milliseconds)";
