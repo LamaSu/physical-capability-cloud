@@ -11,6 +11,7 @@ import type {
   DriftAlertDTO,
   EvidenceSummaryDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../types/dto.js";
 
 const BASE_URL = "/api";
@@ -70,7 +71,8 @@ export interface JobListResponse {
 
 export const api = {
   // Health
-  health: () => fetchAPI<{ status: string }>("/health"),
+  /** commit/commitSource arrive with N5 (#369); older gateways omit them. */
+  health: () => fetchAPI<{ status: string; commit?: string | null; commitSource?: string }>("/health"),
 
   // ── Capabilities ─────────────────────────────────────────────────────────
 
@@ -201,6 +203,14 @@ export const api = {
   /** Get a single escrow by ID or on-chain address. */
   getEscrow: (escrowId: string) =>
     fetchAPI<{ escrow: unknown; source: "on-chain" | "db" }>(`/escrow/${escrowId}`),
+
+  // ── Account ───────────────────────────────────────────────────────────────
+
+  /** Where the calling key's operator stands: identity, scopes, keys, work. */
+  getAgentMe: () => fetchAPI<AgentMeDTO>("/agent/me"),
+
+  /** ProductHomeDTO (readmodels #409); checked by lib/product-home.ts. */
+  getProductHome: () => fetchAPI<unknown>("/product/home"),
 
   // ── Agents ────────────────────────────────────────────────────────────────
 
