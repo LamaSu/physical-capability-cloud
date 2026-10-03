@@ -206,8 +206,12 @@ function rootOf(n: ts.Node): ts.Node {
 
 const isAssignment = (k: ts.SyntaxKind) => k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
 
-/** Object's methods that change another object's properties or prototype. */
-const MUTATION_APIS = new Set(["defineProperty", "defineProperties", "assign", "setPrototypeOf"]);
+/**
+ * Calls that change their first argument's properties or prototype, whatever
+ * they're called on: Object, an alias of it, or a helper library (_.assign,
+ * $.extend, merge).
+ */
+const MUTATION_APIS = new Set(["defineProperty", "defineProperties", "setPrototypeOf", "assign", "extend", "merge", "mixin", "defaults"]);
 /** The legacy accessor definers, called on the object they change. */
 const LEGACY_DEFINERS = new Set(["__defineGetter__", "__defineSetter__"]);
 /** Built-ins a request, its headers or the key pass through, or that hold everything else. */
@@ -216,14 +220,18 @@ const BUILTINS = new Set([
   "EventSource", "URL", "Blob", "FormData", "Object", "Function", "Array", "Promise", "JSON", "fetch",
 ]);
 
-/** The object a mutation API call changes: Object.defineProperty(target, …), or target.__defineGetter__(…). */
+/** The object a mutation call changes: any receiver's defineProperty(target, …), merge(target, …), or target.__defineGetter__(…). */
 function mutationTarget(call: ts.CallExpression): ts.Expression | null {
   const callee = call.expression;
-  if (!ts.isPropertyAccessExpression(callee)) return null;
-  if (ts.isIdentifier(callee.expression) && callee.expression.text === "Object" && MUTATION_APIS.has(callee.name.text)) {
-    return call.arguments[0] ?? null;
-  }
-  return LEGACY_DEFINERS.has(callee.name.text) ? callee.expression : null;
+  const name = ts.isPropertyAccessExpression(callee) ? callee.name.text : ts.isIdentifier(callee) ? callee.text : "";
+  if (MUTATION_APIS.has(name)) return call.arguments[0] ?? null;
+  return ts.isPropertyAccessExpression(callee) && LEGACY_DEFINERS.has(name) ? callee.expression : null;
+}
+
+/** A built-in's prototype, or anything reached from it: whatever a call does with it, it can change it for every request. */
+function isBuiltinPrototype(arg: ts.Expression, sf: ts.SourceFile): boolean {
+  const root = rootOf(arg);
+  return ts.isIdentifier(root) && BUILTINS.has(root.text) && /(?:^|\.)prototype(?:\.|$)/.test(arg.getText(sf).replace(/\s+/g, ""));
 }
 
 /** A global (window, navigator, document …), anything reached from one, a built-in, or any prototype. */
@@ -331,7 +339,8 @@ const RULES: Rule[] = [
         // The same replacement through a mutation API (astra A03e F1): Object.defineProperty(Headers.prototype, …).
         if (ts.isCallExpression(n)) {
           const target = mutationTarget(n);
-          return target !== null && isProtected(target, sf);
+          if (target !== null && isProtected(target, sf)) return true;
+          return n.arguments.some((arg) => isBuiltinPrototype(arg, sf));
         }
         if (!ts.isBinaryExpression(n) || !isAssignment(n.operatorToken.kind)) return false;
         const target = n.left;
@@ -560,6 +569,9 @@ describe("the rules catch each known way around them (self-test)", () => {
       ["setTimeout(() => setOpen(false), 300);", "pages/Probe.ts"],
       ["const merged = Object.assign({}, defaults, overrides);", "pages/Probe.ts"],
       ['Object.defineProperty(instance, "label", { value: "x" });', "pages/Probe.ts"],
+      ['window.location.assign("/agents");', "pages/Probe.ts"],
+      ["const next = merge(state, update);", "pages/Probe.ts"],
+      ["const items = Array.prototype.slice.call(list);", "pages/Probe.ts"],
     ]) {
       expect(caught(code, rel), code).toEqual([]);
     }
