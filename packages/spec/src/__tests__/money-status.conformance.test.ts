@@ -655,6 +655,15 @@ describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as
     }
   });
 
+  it("F6 (HIGH): a run window rendered from a snapshot never shows a bare final money word either", async () => {
+    for (const w of WORDS) {
+      boot({}, man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "message" }]),
+        { _ts: "2026-09-24T00:00:00Z", "/api/escrow/e1": { status: w, message: "m" } });
+      await flush();
+      expect(bare(pills(), w), w).toEqual([]);
+    }
+  });
+
   it("F6 (HIGH): a receipt never shows a bare final money word for a legacy record", async () => {
     for (const w of WORDS) {
       bootRead(man([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]),
@@ -679,6 +688,29 @@ describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as
     await flush();
     expect(bare(pills(), "settled")).toEqual([]);
     expect(pills()).toContain("running"); // an ordinary status word is unchanged
+  });
+
+  it("F6: a run window names a gated-out final by the classifier's label, a verified one by its plain name", async () => {
+    const LC_LIVE = `/api/settlement/units/${UNIT}/lifecycle`;
+    const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" };
+    const run = (p: string) => man([{ kind: "run", binding: { path: p }, statusFrom: "status", latestFrom: "message" }]);
+    boot({}, run(LC_LIVE), { _ts: "2026-09-24T00:00:00Z", [LC_LIVE]: LC8 }); // a baked snapshot: gated out
+    await flush();
+    const gated = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
+    expect(gated.className).toContain("st-unknown");
+    expect(gated.textContent).toBe("final state not shown - not a live read of a settlement route");
+    bootRead(run(LC_LIVE), (u) => (new URL(u).pathname === LC_LIVE ? LC8 : null)); // a LIVE read of the exact route
+    await flush();
+    const verified = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
+    expect(verified.className).toContain("st-settled");
+    expect(verified.textContent).toBe("SETTLED_RELEASED");
+  });
+
+  it("F6: money data shows the classifier's honest label, not the bare word", async () => {
+    bootRead(man([{ kind: "list", binding: { path: "/api/escrow" }, item: { title: "id", statusFrom: "status" } }]),
+      (u) => (new URL(u).pathname === "/api/escrow" ? [{ id: "e1", status: "funded" }, { id: "e2", status: "released" }] : null));
+    await flush();
+    expect(pills()).toEqual(["funds held - not released", "released - not confirmed by a settlement read"]);
   });
 
   it("F6 positive control: a VERIFIED final state (live read of the exact route) keeps its plain name", async () => {

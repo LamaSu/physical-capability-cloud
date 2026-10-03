@@ -1049,7 +1049,9 @@
       var snap = ctx.snapshot[w.binding.path];
       apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom), snap, true, false);
       var stat = dot(snap, w.statusFrom);
-      pill.textContent = String(stat != null ? stat : 'snapshot');
+      // apply() has set the honest text (F6: never the raw word); only a status-less, non-read-model
+      // snapshot keeps the plain 'snapshot' marker.
+      if (stat == null && !isVNextRecord(snap)) pill.textContent = 'snapshot';
       var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
       if (Array.isArray(tl) && tl.length) {
         for (var ti = 0; ti < tl.length; ti++) feedLine((tl[ti].timestamp ? fmtTs(tl[ti].timestamp) + ' · ' : '') + (tl[ti].type || ''));
