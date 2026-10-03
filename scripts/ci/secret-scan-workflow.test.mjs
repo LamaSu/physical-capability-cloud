@@ -70,12 +70,12 @@ test("editing a pull request's title or description runs the trusted scan again"
 
 test("every checkout is the base commit for a pull request, never the code under test", () => {
   const refs = [...TRUSTED.matchAll(/ref: (\$\{\{.*\}\})/g)].map((m) => m[1]);
-  assert.equal(refs.length, 3, refs.join("\n"));
+  assert.equal(refs.length, 4, refs.join("\n"));
   for (const ref of refs) {
     assert.match(ref, /github\.event\.pull_request\.base\.sha/);
     assert.ok(!ref.includes(".head."), ref);
   }
-  assert.equal((TRUSTED.match(/persist-credentials: false/g) || []).length, 3);
+  assert.equal((TRUSTED.match(/persist-credentials: false/g) || []).length, 4);
   assert.match(TRUSTED, /^permissions:\n {2}contents: read$/m);
 });
 
@@ -141,6 +141,14 @@ test("the workflow grants permissions exactly once, so trust-root-guard inherits
   assert.match(TRUSTED, /^permissions:\n {2}contents: read$/m);
 });
 
+test("the required scan covers commit content only; the title and description are scanned by their own job, for pr-text", () => {
+  assert.ok(!job(TRUSTED, "trusted-secret-scan").includes("title and description"), "the required scan reads PR text");
+  const text = job(TRUSTED, "pr-text-scan");
+  assert.match(text, /\n {4}if: github\.event_name == 'pull_request_target'\n/);
+  assert.ok(text.includes("- name: Scan the pull request's title and description"), text);
+  assert.match(text, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+});
+
 test("the header names both required checks, the App as their source, and the master-only environment", () => {
   const header = TRUSTED.slice(0, TRUSTED.indexOf("\non:"));
   assert.ok(header.includes("pcc-trusted/secret-scan"), "pcc-trusted/secret-scan");
@@ -148,6 +156,8 @@ test("the header names both required checks, the App as their source, and the ma
   assert.match(header, /with that App as their source \(its app_id\), never "any source"/);
   assert.match(header, /environment named trusted-checks whose deployment branches are\n# +"Selected branches": master only/);
   assert.match(header, /No merge queue/);
+  assert.match(header, /pcc-trusted\/pr-text, but that check is\n# INFORMATIONAL and must not be required/);
+  assert.match(header, /allow ONLY rebase merging/);
 });
 
 // ── The verdicts (finding 1, round 6) ───────────────────────────────────────
@@ -157,7 +167,7 @@ test("the header names both required checks, the App as their source, and the ma
 const VERDICT_JOB = job(TRUSTED, "post-verdicts");
 
 test("post-verdicts waits for both jobs, runs whatever their result, and never for a cancelled run or a push", () => {
-  assert.match(VERDICT_JOB, /\n {4}needs: \[trusted-secret-scan, trust-root-guard\]\n/);
+  assert.match(VERDICT_JOB, /\n {4}needs: \[trusted-secret-scan, trust-root-guard, pr-text-scan\]\n/);
   assert.match(VERDICT_JOB, /\n {4}if: \$\{\{ github\.event_name == 'pull_request_target' && !cancelled\(\) \}\}\n/);
 });
 
@@ -182,6 +192,7 @@ test("post-verdicts gets every pull-request value and both job results through e
     ["PR_BODY", "github.event.pull_request.body"],
     ["SCAN_RESULT", "needs.trusted-secret-scan.result"],
     ["GUARD_RESULT", "needs.trust-root-guard.result"],
+    ["TEXT_RESULT", "needs.pr-text-scan.result"],
   ]) {
     assert.ok(s.includes(`${name}: \${{ ${expr} }}`), `${name}: ${expr}`);
   }

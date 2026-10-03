@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { VERDICTS, conclusionFor } from "./post-trusted-verdicts.mjs";
+import { PR_TEXT, VERDICTS, conclusionFor, textConclusionFor } from "./post-trusted-verdicts.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = resolve(HERE, "post-trusted-verdicts.mjs");
@@ -76,6 +76,7 @@ function env(api, overrides = {}) {
     PR_BODY: BODY,
     SCAN_RESULT: "success",
     GUARD_RESULT: "success",
+    TEXT_RESULT: "success",
     ...overrides,
   };
 }
@@ -105,7 +106,7 @@ function decodeJwt(jwt) {
   return { header: json(h), payload: json(p), signed: `${h}.${p}`, signature: Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64") };
 }
 
-test("both verdicts are posted on the head commit, as the App, with a token scoped to this repo, then the token is revoked", async () => {
+test("the verdicts are posted on the head commit, as the App, with a token scoped to this repo, then the token is revoked", async () => {
   const api = await fakeGitHub();
   try {
     const r = await run(env(api));
@@ -119,7 +120,7 @@ test("both verdicts are posted on the head commit, as the App, with a token scop
     assert.equal(payload.exp - payload.iat, 600);
     assert.ok(verify("sha256", Buffer.from(signed), publicKey, signature), "the JWT signature");
 
-    const [installation, minted, pr, first, second, revoke] = api.requests;
+    const [installation, minted, pr, first, second, text, revoke] = api.requests;
     assert.deepEqual([installation.method, installation.path], ["GET", "/repos/o/r/installation"]);
     assert.deepEqual([minted.method, minted.path, minted.auth], ["POST", "/app/installations/42/access_tokens", `Bearer ${jwt}`]);
     assert.deepEqual(minted.body, { repositories: ["r"], permissions: { checks: "write", pull_requests: "read" } });
@@ -133,8 +134,12 @@ test("both verdicts are posted on the head commit, as the App, with a token scop
       assert.equal(request.body.external_id, "999/2");
       assert.equal(request.body.details_url, "https://github.com/o/r/actions/runs/999");
     }
+    // The text check: informational, "neutral" when the scan found nothing, never "success".
+    assert.equal(text.body.name, "pcc-trusted/pr-text");
+    assert.equal(text.body.head_sha, HEAD);
+    assert.equal(text.body.conclusion, "neutral");
     assert.deepEqual([revoke.method, revoke.path, revoke.auth], ["DELETE", "/installation/token", `Bearer ${TOKEN}`]);
-    assert.equal(api.requests.length, 6);
+    assert.equal(api.requests.length, 7);
 
     // The token appears in the log only on the line that masks it.
     const tokenLines = r.stdout.split("\n").filter((line) => line.includes(TOKEN));
@@ -144,41 +149,56 @@ test("both verdicts are posted on the head commit, as the App, with a token scop
   }
 });
 
-test("the required checks are exactly the two the workflow's header names", () => {
+test("the required checks are exactly the two the workflow's header names, and pr-text is the informational one", () => {
   assert.deepEqual(VERDICTS.map((v) => v.name), ["pcc-trusted/secret-scan", "pcc-trusted/trust-root-guard"]);
-  for (const verdict of VERDICTS) assert.ok(WORKFLOW.includes(verdict.name), verdict.name);
+  for (const verdict of [...VERDICTS, PR_TEXT]) assert.ok(WORKFLOW.includes(verdict.name), verdict.name);
+  assert.equal(PR_TEXT.name, "pcc-trusted/pr-text");
 });
 
 test("only an exact success passes; failure, cancelled and skipped all fail the required check", async () => {
   assert.equal(conclusionFor("success"), "success");
+  assert.equal(textConclusionFor("success"), "neutral", "the text check never reads as a pass");
+  for (const result of ["failure", "cancelled", "skipped"]) assert.equal(textConclusionFor(result), "failure", result);
   for (const result of ["failure", "cancelled", "skipped", "", undefined, "SUCCESS"]) {
     assert.equal(conclusionFor(result), "failure", String(result));
   }
   const api = await fakeGitHub();
   try {
-    const r = await run(env(api, { SCAN_RESULT: "failure", GUARD_RESULT: "skipped" }));
+    const r = await run(env(api, { SCAN_RESULT: "failure", GUARD_RESULT: "skipped", TEXT_RESULT: "failure" }));
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(checkRuns(api).map((c) => [c.body.name, c.body.conclusion]), [
       ["pcc-trusted/secret-scan", "failure"],
       ["pcc-trusted/trust-root-guard", "failure"],
+      ["pcc-trusted/pr-text", "failure"],
     ]);
   } finally {
     await api.close();
   }
 });
 
+test("nothing is posted when the pull request has a new head commit since this run read it (the newer run posts)", async () => {
+  const api = await fakeGitHub({ "GET /repos/o/r/pulls/7": () => [200, { head: { sha: "b".repeat(40) }, title: TITLE, body: BODY }] });
+  try {
+    const r = await run(env(api));
+    assert.equal(r.status, 1, r.stderr);
+    assert.deepEqual(checkRuns(api), []);
+    assert.equal(api.requests.at(-1).path, "/installation/token", "the token is still revoked");
+  } finally {
+    await api.close();
+  }
+});
+
 for (const [label, pr] of [
-  ["a new head commit", { head: { sha: "b".repeat(40) }, title: TITLE, body: BODY }],
   ["a new title", { head: { sha: HEAD }, title: "Add the widget (now with a key)", body: BODY }],
   ["a new description", { head: { sha: HEAD }, title: TITLE, body: `${BODY}\nedited` }],
 ]) {
-  test(`nothing is posted when the pull request has ${label} since this run read it (the newer run posts)`, async () => {
+  test(`with ${label} on the same head, the required checks still post (they cover the commit only) but pr-text does not`, async () => {
     const api = await fakeGitHub({ "GET /repos/o/r/pulls/7": () => [200, pr] });
     try {
       const r = await run(env(api));
-      assert.equal(r.status, 1, r.stderr);
-      assert.deepEqual(checkRuns(api), []);
-      assert.equal(api.requests.at(-1).path, "/installation/token", "the token is still revoked");
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(checkRuns(api).map((c) => c.body.name), ["pcc-trusted/secret-scan", "pcc-trusted/trust-root-guard"]);
+      assert.equal(api.requests.at(-1).path, "/installation/token");
     } finally {
       await api.close();
     }
@@ -190,7 +210,7 @@ test("a description the API reports as null matches the empty one the event rend
   try {
     const r = await run(env(api, { PR_BODY: "" }));
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(checkRuns(api).length, 2);
+    assert.equal(checkRuns(api).length, 3, "pr-text is posted: the text is unchanged");
   } finally {
     await api.close();
   }
@@ -208,6 +228,7 @@ for (const [label, overrides] of [
   ["a pull request number with a path in it", { PR_NUMBER: "7/../../x" }],
   ["an unknown job result", { SCAN_RESULT: "succeeded" }],
   ["a missing job result", { GUARD_RESULT: "" }],
+  ["a missing text result", { TEXT_RESULT: "" }],
   ["a repository that is not owner/name", { GITHUB_REPOSITORY: "o/r/../x" }],
 ]) {
   test(`given ${label}, it exits 2 and calls no API`, async () => {

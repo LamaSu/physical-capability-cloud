@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Board row N44, round 6: the secret scan's verdicts, as check runs a pull request cannot forge.
+// Board row N44, rounds 6 and 7: the secret scan's verdicts, as check runs a pull request cannot forge.
 //
 // The scan and the trust-root guard run on pull_request_target, from the base
 // branch's definition. But GitHub attaches those jobs' results to the BASE
@@ -11,12 +11,17 @@
 // token: its key is a secret of the trusted-checks environment, which only master
 // can deploy to (see the header of .github/workflows/secret-scan.yml).
 //
+// The required checks guarantee the head commit's CONTENT only, which no edit can
+// change (round 7). A title or description can be edited after any check, so the
+// text scan is reported as the INFORMATIONAL pcc-trusted/pr-text: neutral when it
+// found nothing, failure when it did, and never a merge guarantee.
+//
 // Usage, in the post-verdicts job only; every input comes from the environment:
 //   node scripts/ci/post-trusted-verdicts.mjs
-// It posts a verdict only when the pull request still has the head commit,
-// title and description this run scanned. If any changed, a newer run is
-// coming, so it posts nothing.
-// Exit codes: 0 both verdicts posted; 1 the pull request changed since this run
+// The required checks are posted only while the pull request's head is still the
+// commit this run scanned; pcc-trusted/pr-text only while its title and
+// description are also unchanged. Otherwise a newer run is coming, and posts.
+// Exit codes: 0 the required checks posted; 1 a new head commit since this run
 // read it, nothing posted; 2 a missing or malformed input; 3 a GitHub API failure.
 // Nothing from the pull request (title, description, file names) is ever printed,
 // and neither is the App's key or token, except to mask the token.
@@ -25,11 +30,14 @@ import { createPrivateKey, sign } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-/** The required checks, each from the result of the job that produced it. */
+/** The required checks, each from the result of the job that produced it. Both cover the head commit only. */
 export const VERDICTS = Object.freeze([
   Object.freeze({ name: "pcc-trusted/secret-scan", job: "trusted-secret-scan", input: "SCAN_RESULT" }),
   Object.freeze({ name: "pcc-trusted/trust-root-guard", job: "trust-root-guard", input: "GUARD_RESULT" }),
 ]);
+
+/** The informational check on the title and description. It must never be required (see the header). */
+export const PR_TEXT = Object.freeze({ name: "pcc-trusted/pr-text", job: "pr-text-scan", input: "TEXT_RESULT" });
 
 const JOB_RESULTS = Object.freeze(["success", "failure", "cancelled", "skipped"]);
 const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -65,7 +73,7 @@ export function readInputs(env) {
     throw new UsageError("TRUSTED_CHECKS_PRIVATE_KEY is missing or not a PEM private key");
   }
   const results = {};
-  for (const verdict of VERDICTS) {
+  for (const verdict of [...VERDICTS, PR_TEXT]) {
     const value = env[verdict.input];
     if (!JOB_RESULTS.includes(value)) throw new UsageError(`${verdict.input} is missing or malformed`);
     results[verdict.input] = value;
@@ -106,6 +114,11 @@ export function appJwt(appId, privateKeyPem, nowSeconds = Math.floor(Date.now() 
 /** Only an exact "success" passes; failure, cancelled and skipped all fail the required check. */
 export function conclusionFor(result) {
   return result === "success" ? "success" : "failure";
+}
+
+/** The text check never reads as a pass: "neutral" when the scan found nothing, else "failure". */
+export function textConclusionFor(result) {
+  return result === "success" ? "neutral" : "failure";
 }
 
 function client(apiUrl, fetchImpl) {
@@ -173,32 +186,41 @@ export async function main(env, { fetch: fetchImpl = globalThis.fetch, out = pro
     // Post only for what this run scanned. A newer push or edit has its own run, which posts.
     const pr = await request("GET", "/repos/{repo}/pulls/{number}", `/repos/${repository}/pulls/${prNumber}`, token);
     const current = { head: pr?.head?.sha, title: pr?.title ?? "", body: pr?.body ?? "" };
-    if (current.head !== headSha || current.title !== inputs.title || current.body !== inputs.body) {
-      out.write(
-        `post-trusted-verdicts: pull request #${prNumber} changed since this run read it ` +
-          `(${current.head !== headSha ? "a new head commit" : "a new title or description"}); nothing posted, the newer run posts.\n`,
-      );
+    if (current.head !== headSha) {
+      out.write(`post-trusted-verdicts: pull request #${prNumber} has a new head commit since this run read it; nothing posted, the newer run posts.\n`);
       return 1;
     }
-
-    for (const verdict of VERDICTS) {
-      const result = inputs.results[verdict.input];
-      const conclusion = conclusionFor(result);
+    const post = async (check, conclusion, result, summary) => {
       await request("POST", "/repos/{repo}/check-runs", `/repos/${repository}/check-runs`, token, {
-        name: verdict.name,
+        name: check.name,
         head_sha: headSha,
         status: "completed",
         conclusion,
         ...(inputs.runId ? { external_id: `${inputs.runId}/${inputs.runAttempt}` } : {}),
         ...(inputs.runId && inputs.serverUrl ? { details_url: `${inputs.serverUrl}/${repository}/actions/runs/${inputs.runId}` } : {}),
         output: {
-          title: conclusion === "success" ? "Passed" : `Failed (the ${verdict.job} job: ${result})`,
-          summary:
-            `The base branch's ${verdict.job} job finished with "${result}" for this commit. ` +
-            "Posted by the trusted-checks App from the base branch's secret-scan workflow.",
+          title: conclusion === "failure" ? `Failed (the ${check.job} job: ${result})` : conclusion === "success" ? "Passed" : "Nothing found (not a merge guarantee)",
+          summary,
         },
       });
-      out.write(`post-trusted-verdicts: ${verdict.name} = ${conclusion} on ${headSha}\n`);
+      out.write(`post-trusted-verdicts: ${check.name} = ${conclusion} on ${headSha}\n`);
+    };
+
+    for (const verdict of VERDICTS) {
+      const result = inputs.results[verdict.input];
+      await post(verdict, conclusionFor(result), result,
+        `The base branch's ${verdict.job} job finished with "${result}" for this commit's content. ` +
+          "Posted by the trusted-checks App from the base branch's secret-scan workflow.");
+    }
+
+    // The title and description: informational, and only for the text this run scanned.
+    if (current.title !== inputs.title || current.body !== inputs.body) {
+      out.write(`post-trusted-verdicts: ${PR_TEXT.name} not posted: the title or description changed since this run read them; the newer run posts.\n`);
+    } else {
+      const result = inputs.results[PR_TEXT.input];
+      await post(PR_TEXT, textConclusionFor(result), result,
+        `The base branch's ${PR_TEXT.job} job finished with "${result}" for this version of the title and description. ` +
+          "Informational only: the text can change after this check, so it never guarantees a merge.");
     }
     return 0;
   } catch (error) {
