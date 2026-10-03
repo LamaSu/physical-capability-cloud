@@ -286,29 +286,79 @@ export function classifySettlementRead(
   return UNKNOWN("", "final state not shown - not a live read of a settlement route");
 }
 
-// ── Pill text (astra r4 on #313, F6) ────────────────────────────────────────
-// The tone decides the colour, and the TEXT may not claim more. A status value that claims money finally
-// moved (paid, released, settled, refunded...) is shown as the record's own claim, qualified, unless a
-// live read of an exact settlement route verified it. So is any value that is not a plain status word
-// (punctuation, non-ASCII look-alikes). The kit mirrors this (pcc-ui.js statusPillText); the
-// conformance test compares them.
-export const FINAL_MONEY_TOKENS: readonly string[] = Object.freeze([
-  "PAID", "PAIDOUT", "PAYOUT", "SETTLED", "SETTLEMENT", "RELEASED", "REFUNDED", "DISBURSED", "CREDITED",
+// ── Pill text (astra r4 on #313, F6; astra r5 on #313, F7-F9) ───────────────
+// The tone decides the colour, and the TEXT may not claim more. A blacklist of "final money" tokens
+// (astra r4) missed explicit claims it didn't enumerate (astra r5 F7: PAYEE_RECEIVED_FUNDS,
+// FUNDS_TRANSFERRED_TO_PAYEE, ... never matched a token, so they rendered bare) and over-qualified
+// ordinary non-money text with a settlement-flavoured suffix (astra r5 F9: a job status "running!" read
+// "... - settlement unconfirmed" even though a job is not a settlement surface at all). So the rule now
+// fails CLOSED over a CLOSED safe vocabulary instead of failing open over an open blacklist: unverified
+// text is shown as-is ONLY when it normalizes to a word on the surface's OWN safe list; anything else --
+// any claim this module does not affirmatively recognize as safe, spelled however -- is qualified, with
+// a suffix that matches the surface. There is no "unsafe" list to keep enumerating.
+//
+// SAFE_STATUS_WORDS (non-money surfaces: jobs, kernels, capabilities, agents, artifacts, csd, sensors,
+// devices, skills...). Ordinary lifecycle/health words only. No outcome here is ever a payment claim, so
+// an unverified value on a non-money surface reads "status unverified", never "settlement unconfirmed"
+// (astra r5 F9). Sources: the kit's own GENERIC_STATES, plus the documented non-money status enums:
+// KernelJobStatus (job-lifecycle.ts:38), CapabilityNodeStatus (requests.ts:21), CompositionStatus
+// (composition.ts:170), the kernel status schemas (schemas/index.ts:270), DeviceHealthStatus
+// (kernel.ts:37), ApprovalStatus (operator-policy.ts:210), licensing.ts:149, primitives.ts:76/88.
+export const SAFE_STATUS_WORDS: readonly string[] = Object.freeze([
+  "RUNNING", "IN_PROGRESS", "PROGRESS", "STREAMING", "BUILDING", "CONNECTING",
+  "PENDING", "QUEUED", "WAITING", "PAUSED", "REVIEW", "CONFIRM", "NEEDS_INPUT", "NEEDS_YOU",
+  "ERROR", "FAILED", "DENIED", "CANCELLED", "CANCELED", "REJECTED",
+  "DONE", "COMPLETE", "COMPLETED", "OK", "SUCCESS", "SUCCEEDED", "RESOLVED", "READY",
+  "DISPATCHED", "ACCEPTED", "PREPARING", "EXECUTING", "COLLECTING_EVIDENCE", "AWAITING_PICKUP", "TIMED_OUT",
+  "ONLINE", "OFFLINE", "MAINTENANCE", "SUSPENDED", "HEALTHY", "DEGRADED", "UNKNOWN",
+  "BIDDING", "ASSIGNED", "PROPOSED", "OVER_BUDGET", "NO_PATH_FOUND", "APPROVED", "EXPIRED",
+  "ACTIVE", "INACTIVE", "REVOKED", "IDLE", "BUSY", "DRAFT", "DEPRECATED", "RESERVED", "LIVE", "STUB", "PLANNED",
 ]);
-export const UNCONFIRMED_SUFFIX = " - settlement unconfirmed";
 
-/** Does this status text claim that money finally moved (or is it not a plain status word at all)? */
-export function claimsFinalMoney(s: unknown): boolean {
-  if (typeof s !== "string") return false;
-  const k = normalizeMoneyStatus(s);
-  if (k === "") return /[A-Za-z]|[^\x00-\x7f]/.test(s);
-  return k.split("_").some((t) => FINAL_MONEY_TOKENS.includes(t));
+// SAFE_MONEY_STATUS_WORDS (money surfaces): in-progress and failure words ONLY -- no success-ish word
+// (done, ok, approved, completed, ...) is here, because on money data "done" is not "paid" (steward
+// #2490) and this module has no way to tell, from a bare success word alone, which one a caller meant.
+// A money-surface value that is not on this list is always qualified, even a non-final, merely-decided
+// word like RELEASE_ALLOCATED: astra r4's honest-label lookup (dataStatusText / settlementLabel) is the
+// path that names those by their own direction-explicit label; this function has no such table to
+// consult, so it stays conservative.
+export const SAFE_MONEY_STATUS_WORDS: readonly string[] = Object.freeze([
+  "RUNNING", "IN_PROGRESS", "PROGRESS", "PENDING", "QUEUED", "WAITING", "PAUSED", "REVIEW",
+  "ERROR", "FAILED", "DENIED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "UNKNOWN",
+]);
+
+export const UNCONFIRMED_SUFFIX = " - settlement unconfirmed";
+export const UNVERIFIED_SUFFIX = " - status unverified";
+
+/**
+ * The text of a status pill: the value itself when it is verified, empty, or normalizes to a word on the
+ * surface's own safe list (SAFE_MONEY_STATUS_WORDS when `money` is true, SAFE_STATUS_WORDS otherwise);
+ * any other unverified text -- a money claim this module does not recognize as safe, a decorated or
+ * non-ASCII look-alike, anything at all -- is shown qualified, with a suffix that matches the surface:
+ * money data reads "settlement unconfirmed" (astra r4 F6), a non-money surface reads "status unverified"
+ * (astra r5 F9) so an ordinary job status is never given a payment-flavoured qualifier it has no claim to.
+ */
+export function statusPillText(raw: unknown, verified: boolean, money: boolean): string {
+  const t = raw == null ? "" : String(raw);
+  if (verified || t === "") return t;
+  const k = normalizeMoneyStatus(t);
+  const safe = money ? SAFE_MONEY_STATUS_WORDS : SAFE_STATUS_WORDS;
+  if (k !== "" && safe.includes(k)) return t;
+  return "reported status: " + t + (money ? UNCONFIRMED_SUFFIX : UNVERIFIED_SUFFIX);
 }
 
-/** The text of a status pill: the value itself, qualified when it claims money moved and is not verified. */
-export function statusPillText(raw: unknown, verified: boolean): string {
+/**
+ * The text of a free-text server MESSAGE shown outside a pill, such as a run window's latest line (astra
+ * r6 F12). A message cannot be checked against a vocabulary, so it is never presented as PCC's own claim:
+ * it is attributed to its source ("reported: ..."), and on money data it also says the settlement is
+ * unconfirmed. Only `verified` shows it plainly, and for any secondary text (a message, a timeline entry,
+ * a latest line) callers pass a VERIFIED PAYEE PAYMENT there, never a verified refund: a refund proves the
+ * payees were NOT paid, so it vouches for no other claim (astra r6 F10).
+ */
+export function reportedText(raw: unknown, verified: boolean, money: boolean): string {
   const t = raw == null ? "" : String(raw);
-  return verified || !claimsFinalMoney(t) ? t : "reported status: " + t + UNCONFIRMED_SUFFIX;
+  if (verified || t === "") return t;
+  return "reported: " + t + (money ? UNCONFIRMED_SUFFIX : "");
 }
 
 // ── Coverage ───────────────────────────────────────────────────────────────
