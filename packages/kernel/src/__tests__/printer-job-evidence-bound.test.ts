@@ -1253,7 +1253,7 @@ describe("the print's setup, its latch's event label and the recovery log, whate
     const { emitter } = recordingEmitter();
     const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-hook", jobName: "a.pdf", totalPages: 1 })));
     expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
-    expect.soft("value" in out ? out.value.success : undefined, "the print").toBe(false);
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("the print's adapter could not be checked: a reason with no text form");
   });
 
   it("registerStep throws: the print resolves with a failure, and releases the session and the step's lease", async () => {
