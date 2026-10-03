@@ -83,16 +83,31 @@ def _read_json(name, default):
         return default
 
 
-def next_seq():
-    """This attempt's sessionId and the next seq, persisted in .pcc/attempt.json."""
+def _private_state():
+    """Make .pcc private (0700), repairing one created earlier with looser modes."""
     os.makedirs(STATE, mode=0o700, exist_ok=True)
-    attempt = _read_json("attempt.json", {})
-    if not isinstance(attempt.get("sessionId"), str):
-        attempt = {"sessionId": str(uuid.uuid4()), "seq": -1}
-    attempt["seq"] = int(attempt.get("seq", -1)) + 1
-    with open(_state_path("attempt.json"), "w") as f:
-        json.dump(attempt, f)
-    return attempt["sessionId"], attempt["seq"]
+    if os.name != "nt" and os.stat(STATE).st_mode & 0o077:
+        os.chmod(STATE, 0o700)
+
+
+def next_seq():
+    """This attempt's sessionId and the next seq, persisted in .pcc/attempt.json.
+
+    Reporting never blocks onboarding: if the state cannot be written, this
+    report gets a fresh one-off sessionId and says so on stderr.
+    """
+    try:
+        _private_state()
+        attempt = _read_json("attempt.json", {})
+        if not isinstance(attempt.get("sessionId"), str):
+            attempt = {"sessionId": str(uuid.uuid4()), "seq": -1}
+        attempt["seq"] = int(attempt.get("seq", -1)) + 1
+        with open(_state_path("attempt.json"), "w") as f:
+            json.dump(attempt, f)
+        return attempt["sessionId"], attempt["seq"]
+    except (OSError, ValueError, TypeError) as err:
+        print(f"pcc-report: cannot keep state in {STATE} ({err}); sending a one-off report", file=sys.stderr)
+        return str(uuid.uuid4()), 0
 
 
 def gateway():
@@ -154,20 +169,24 @@ def build_body(args, session_id, seq):
 def remember(body):
     if body["phase"] == "session":
         return
-    with open(_state_path("phases.jsonl"), "a") as f:
-        f.write(json.dumps({"sessionId": body["sessionId"], "phase": body["phase"], "outcome": body["outcome"]}) + "\n")
+    try:
+        with open(_state_path("phases.jsonl"), "a") as f:
+            f.write(json.dumps({"sessionId": body["sessionId"], "phase": body["phase"], "outcome": body["outcome"]}) + "\n")
+    except OSError as err:
+        print(f"pcc-report: phase not remembered for the session roll-up ({err})", file=sys.stderr)
 
 
 def send(body, base, timeout=15):
-    request = urllib.request.Request(
-        f"{base}/api/feedback", data=json.dumps(body).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json"})
+    """POST the report. Returns the HTTP status, or 0 if it could not be sent; never raises."""
     try:
+        request = urllib.request.Request(
+            f"{base}/api/feedback", data=json.dumps(body).encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status
     except urllib.error.HTTPError as err:
         return err.code
-    except (urllib.error.URLError, OSError):
+    except (urllib.error.URLError, OSError, ValueError):
         return 0
 
 

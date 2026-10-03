@@ -5,16 +5,20 @@
 Run every command from the folder you are onboarding in. State lives in `./.pcc/`, which stays out of git (see `.gitignore`), so it survives shells that forget variables.
 
 ## 1. The gateway: PCC_BASE
-Use the PCC gateway you were given. At an event, a rehearsal or a staging gateway, **never call production** (`https://capability.network`) unless you were told to.
+Use the PCC gateway you were given. There is no default. At an event, a rehearsal or a staging gateway, **never call production** (`https://capability.network`) unless you were told to.
 
 **Ask the human** (class C) only if no gateway was given: "Which PCC gateway should this machine join? I need its URL."
 
+pcc-node talks to a gateway only over **https**, or over plain http to **127.0.0.1** or **[::1]** on this machine. It refuses `http://localhost` and plain http to any other host, because the operator key would cross the network in clear text.
+
 ```bash
-umask 077 && mkdir -p .pcc
+umask 077 && mkdir -p .pcc && chmod 700 .pcc    # chmod repairs a .pcc made earlier with looser modes
 printf '%s\n' "http://127.0.0.1:4310" > .pcc/base    # the gateway you were given
 curl -sf "$(cat .pcc/base)/api/health" && echo " gateway OK"
 ```
 **Check:** `/api/health` answers 200 with JSON. If not, stop and report `prerequisites blocked`. Don't guess another address.
+
+**The gateway must enforce ownership.** It must check that each operator call names a kernel or job its caller owns. Master does not do that yet for every operator route: jobs, evidence, job status and the emergency stop. The gateway's WP-C (#445) adds it. Until your gateway carries it, onboard only on a private gateway that no other tenant uses, and tell the human why.
 
 ## 2. pcc-node, with the crypto extra
 pcc-node runs next to the device. It registers the kernel, signs its evidence and runs jobs. The `crypto` extra (pynacl) is **not optional**: without it the node cannot register a signing key or sign evidence, so its work can never verify.
@@ -24,7 +28,7 @@ python3 -m pip install 'pcc-node[crypto]>=0.1.1'
 ```
 Until 0.1.1 is on PyPI (0.1.0 was withdrawn for security fixes), install the release commit instead:
 ```bash
-python3 -m pip install 'pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1e9308a81f21fd25c38eba976b9b58797c67c5ed#subdirectory=packages/pcc-node'
+python3 -m pip install 'pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node'
 ```
 **Check:**
 ```bash
@@ -47,15 +51,20 @@ chmod 600 .pcc/node-keys.json
 **Check:** `.pcc/node-public-key` holds 64 hex characters. `.pcc/node-keys.json` holds the private half; never print it or copy it anywhere.
 
 ## 4. An operator API key, captured without logging it
-**Ask the human** (class C): "Which email should this operator account be registered under?" The key is issued to it.
+**Ask the human** (class C), in one batch:
+- "Which email should this operator account be registered under?"
+- "Which wallet address should payouts go to?" Money goes only where they say.
+
+Provisioning with the wallet makes it this operator's id. Kernels you create record it as their `operatorAddress`, which is where settlement pays today. If the human has no wallet yet, leave `walletAddress` out and tell them: the kernel then has no payable address, so paid jobs cannot settle to them.
 
 The response contains your **API key**. Write it straight to a private file, and **never print it, echo it, or paste it into the conversation**.
 
 ```bash
 umask 077
+printf '%s' "0x…" > .pcc/payout-wallet          # the human's answer, exactly; never a guess
 curl -s -X POST "$(cat .pcc/base)/api/auth/provision" \
   -H 'Content-Type: application/json' \
-  -d "{\"email\": \"operator@example.org\", \"name\": \"Bench plate reader\", \"publicKey\": \"$(cat .pcc/node-public-key)\"}" > .pcc/provision.json
+  -d "{\"publicKey\": \"$(cat .pcc/node-public-key)\", \"email\": \"operator@example.org\", \"walletAddress\": \"$(cat .pcc/payout-wallet)\", \"name\": \"Bench plate reader\"}" > .pcc/provision.json
 python3 - <<'EOF'
 import json
 key = json.load(open(".pcc/provision.json"))["api_key"]

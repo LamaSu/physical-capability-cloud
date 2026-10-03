@@ -4,7 +4,7 @@
 
 `bin/pcc-report` collects every phase you reported into the roll-up for you. Add the one change you would most like made: to this runbook, the agent pack, the docs, the code or the process. Say where, and what.
 ```bash
-bin/pcc-report session ok "device onboarded: kernel, capability, device, one verified test run, loop running" \
+bin/pcc-report session ok "device onboarded: kernel, capability, device, one test run with stored (unverified) evidence, loop running" \
   --proposal-target runbook --proposal-path runbook/05-register.md \
   --proposal-text "register-device should accept the device URL from pcc-node.json instead of repeating it"
 ```

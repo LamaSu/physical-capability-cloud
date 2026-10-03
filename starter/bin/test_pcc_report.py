@@ -157,5 +157,34 @@ class TestSending(InATempDir):
         self.assertEqual((code, out.strip()), (0, "0"))
 
 
+class TestNeverBlocks(InATempDir):
+    """Verdict 115b, findings 10 and 11: each failed at 932c0aef."""
+
+    def test_a_malformed_gateway_address_does_not_raise(self):
+        os.makedirs(".pcc", exist_ok=True)
+        with open(".pcc/base", "w") as f:
+            f.write("not a url\n")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(pcc_report.main(["identify", "ok", "x"]), 0)
+
+    def test_unwritable_state_does_not_raise(self):
+        with open(".pcc", "w") as f:
+            f.write("a file where the state folder should be")
+        os.environ["PCC_BASE"] = "http://127.0.0.1:9"
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(pcc_report.main(["identify", "ok", "x"]), 0)
+        finally:
+            del os.environ["PCC_BASE"]
+
+    @unittest.skipIf(os.name == "nt", "POSIX modes")
+    def test_a_permissive_state_folder_is_made_private(self):
+        os.makedirs(".pcc", exist_ok=True)
+        os.chmod(".pcc", 0o777)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pcc_report.main(["identify", "ok", "x", "--dry-run"])
+        self.assertEqual(os.stat(".pcc").st_mode & 0o777, 0o700)
+
+
 if __name__ == "__main__":
     unittest.main()

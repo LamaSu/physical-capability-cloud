@@ -168,7 +168,7 @@
     },
     "verify.estop-drill-failed": {
       "phase": "verify",
-      "trigger": "During the drill a job was taken, or the device did not stop.",
+      "trigger": "During the drill the gateway accepted a new job for the stopped kernel, or the device did not stop.",
       "do": "Stop onboarding and report exactly what happened. Clear the stop only after the human confirms the device is safe.",
       "file": "06-verify.md",
       "section": "3. Emergency-stop drill",
@@ -213,6 +213,28 @@
       "report": {
         "phase": "session",
         "outcome": "abandoned"
+      }
+    },
+    "verify.price-mismatch": {
+      "phase": "verify",
+      "trigger": "The test job's quote is not the human's price from intake (amount or currency).",
+      "do": "Don't run it. Report both values; the gateway priced the job itself.",
+      "file": "06-verify.md",
+      "section": "1. Be your own test buyer",
+      "report": {
+        "phase": "verify",
+        "outcome": "blocked"
+      }
+    },
+    "verify.evidence-not-stored": {
+      "phase": "verify",
+      "trigger": "POST /api/operator/evidence answered without \"stored\": true for this jobId (HTTP 200 included).",
+      "do": "Send status failed with reason evidence_not_stored, never completed, and report what the receipt said.",
+      "file": "06-verify.md",
+      "section": "2. Run it the way the operating loop will (phase 7), once, by hand",
+      "report": {
+        "phase": "verify",
+        "outcome": "failed"
       }
     }
   }

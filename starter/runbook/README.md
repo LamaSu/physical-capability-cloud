@@ -1,8 +1,10 @@
-# The runbook: device to verified kernel
+# The runbook: device to registered, exercised kernel
+
+The kernel ends registered and exercised by one real test job. Its evidence stays unverified until the operating agent signs it (phase 7).
 
 Follow the phases **in order**. `runbook.json` is the same graph in machine-readable form: each phase's goal, done-when checks, what it asks the human, and the next phase.
 
-When something happens mid-phase (the human says "don't know", a register call answers 4xx, the emergency stop is set), look it up in `index.json`. Its 22 events, keyed `<phase>.<event>`, each say what to do, where the runbook covers it, and what to report.
+When something happens mid-phase (the human says "don't know", a register call answers 4xx, the emergency stop is set), look it up in `index.json`. Its 24 events, keyed `<phase>.<event>`, each say what to do, where the runbook covers it, and what to report.
 
 | # | Phase | You end with |
 |---|---|---|

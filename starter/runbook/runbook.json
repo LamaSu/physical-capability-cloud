@@ -1,11 +1,11 @@
 {
   "schema": "pcc-adk/runbook@1",
-  "title": "Device to verified kernel: onboarding a machine as a PCC operator",
-  "status": "first cut, written against master ac86a404; each phase lists what is still pending",
+  "title": "Device to registered, exercised kernel: onboarding a machine as a PCC operator",
+  "status": "second cut, written against master 753feb43 and pcc-node 0.1.1; each phase lists what is still pending",
   "target": {
     "env": "PCC_BASE",
-    "default": "https://capability.network",
-    "rule": "Use the PCC gateway you were given. The default is production; at an event, rehearsal or staging gateway, never call production unless told to."
+    "default": null,
+    "rule": "Use the PCC gateway you were given; there is no default. Never call production unless told to. pcc-node needs https, or plain http to 127.0.0.1 or [::1]."
   },
   "reporting": {
     "tool": "pcc_report_attempt",
@@ -24,7 +24,7 @@
         "pcc-node --version prints 0.1.1 or later, and python3 -c \"import nacl\" succeeds",
         "GET $PCC_BASE/api/auth/validate with your key returns valid: true"
       ],
-      "asksHuman": ["which PCC gateway to use, if PCC_BASE is not already set", "the email to register the operator key under"],
+      "asksHuman": ["which PCC gateway to use, if PCC_BASE is not already set", "the email to register the operator key under", "the wallet address payouts go to (it becomes the operator id)"],
       "next": "identify"
     },
     {
@@ -43,7 +43,7 @@
       "file": "02-intake.md",
       "goal": "Collect the facts only the human has, in one batch.",
       "doneWhen": ["every class C fact answered, or explicitly routed to research"],
-      "asksHuman": ["authority to operate", "location", "emergency stop: where it is and who can press it", "supervision", "consumables", "price", "payout", "availability"],
+      "asksHuman": ["authority to operate", "location", "emergency stop: where it is and who can press it", "supervision", "consumables", "price", "payout (confirm the wallet from prerequisites)", "availability"],
       "next": "research"
     },
     {
@@ -69,11 +69,11 @@
     {
       "id": "register",
       "file": "05-register.md",
-      "goal": "The kernel, its device and its capability exist on the gateway, and the node is running.",
+      "goal": "The kernel, its signing key, its capability and its device exist on the gateway, and buyers can find the capability.",
       "doneWhen": [
-        "pcc-node start printed your gateway as the target and did not report a registration failure",
-        "POST /api/capabilities returned 201 for your capability",
-        "POST /api/setup/register-device returned 201 or 200",
+        "GET /api/kernels/<id> shows your kernel with a non-null signingKey",
+        "POST /api/capabilities returned 201 for your capability, priced from intake",
+        "POST /api/setup/register-device returned 201 or 200, with no capabilities listed",
         "GET /api/capabilities/search finds your capability"
       ],
       "asksHuman": [],
@@ -82,13 +82,14 @@
     {
       "id": "verify",
       "file": "06-verify.md",
-      "goal": "A real job ran on the real device and its evidence reached the gateway; the emergency stop works.",
+      "goal": "A real job ran on the real device at the human's price, and its evidence was stored for that job; the emergency-stop drill exercised the gateway's refusal and the device's own stop.",
       "doneWhen": [
+        "the job's quote equals the human's price from intake",
         "a test job reached your node and ran on the device (the device's own log shows it)",
-        "its evidence was accepted (POST /api/operator/evidence 200)",
-        "setting and clearing the emergency stop made the node refuse, then resume, jobs"
+        "its evidence receipt says stored: true for that job, and only then was it marked completed",
+        "while the kernel was stopped the gateway refused a new job, and the device stopped on its own command"
       ],
-      "asksHuman": ["permission to run one real test job on the device"],
+      "asksHuman": ["permission to run one real test job on the device", "permission for one emergency-stop drill"],
       "next": "operate"
     },
     {
@@ -104,7 +105,7 @@
       "file": "08-publish.md",
       "goal": "Optionally publish the setup as a kit others can reuse, with the license rate the human chooses.",
       "doneWhen": ["the human decided whether to publish, and at what license rate"],
-      "asksHuman": ["whether to publish", "the license rate (0 to 100 basis points)"],
+      "asksHuman": ["whether to publish", "the license rate (0 to 100 basis points; never defaulted)"],
       "next": "session"
     },
     {

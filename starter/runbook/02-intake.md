@@ -26,7 +26,7 @@ Ask these together. Skip one only if the human has already answered it.
 | 5 | Which consumables are loaded or on hand? (plates, reagents, filament…) | Jobs needing what you don't have get refused, not failed. |
 | 6 | Is there a camera or sensor that can record runs? Where is it? | Independent evidence raises the assurance tier buyers can ask for. |
 | 7 | What do you charge per job, and in which currency? | The price is yours to set; it is never defaulted. |
-| 8 | Where should payouts go (a wallet address)? | Money goes only where you say. |
+| 8 | Payouts: confirm the wallet given in phase 0 (`.pcc/payout-wallet`). | Money goes only where you say; it is this operator's id. |
 | 9 | When may it take jobs? (days, hours, time zone) | Jobs outside those hours are refused. |
 
 ## Record the answers with their source

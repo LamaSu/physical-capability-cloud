@@ -140,5 +140,92 @@ class TestTruths(unittest.TestCase):
         self.assertIn(".pcc/", (STARTER / ".gitignore").read_text(encoding="utf-8").splitlines())
 
 
+def phase_text(name):
+    return (RUNBOOK / name).read_text(encoding="utf-8")
+
+
+def between(text, start, end):
+    i = text.index(start)
+    return text[i:text.index(end, i + len(start))]
+
+
+class TestRound2(unittest.TestCase):
+    """Verdict 115b on #464: each of these failed at 932c0aef."""
+
+    def setUp(self):
+        self.book = json.loads((RUNBOOK / "runbook.json").read_text(encoding="utf-8"))
+
+    def test_nothing_claims_a_verified_kernel_or_run(self):
+        # F3: by-hand evidence is unverified; nothing may call the result verified.
+        for path, text in text_files():
+            for line in text.splitlines():
+                if re.search(r"(?i)(?<!un)\bverified\b", line):
+                    self.assertRegex(line, r"(?i)\bnot\b|\bnever\b|\buntil\b|\bisn't\b|\bno\b", f"{path.name}: {line}")
+
+    def test_completed_is_sent_only_after_stored_evidence(self):
+        # F2: the relay answers 200 with stored:false; that must never lead to "completed".
+        finish = between(phase_text("06-verify.md"), "/api/operator/evidence", "/api/operator/job-status")
+        self.assertIn('"stored"', finish)
+        self.assertIn("jobId", finish)
+
+    def test_prices_and_rates_come_from_the_humans_answers(self):
+        # F4: no literal price in the capability, no literal license rate, no "default" rate.
+        capability = between(phase_text("05-register.md"), "/api/capabilities\"", "**Check:**")
+        self.assertNotRegex(capability, r'baseCost\\?"?:\s*\d')
+        publish = phase_text("08-publish.md")
+        self.assertNotRegex(publish, r'licenseBps\\?"?:\s*\d')
+        self.assertNotRegex(publish, r"(?i)default(s)? (is|of|to)? ?50|50 by default")
+
+    def test_register_device_creates_no_second_capability(self):
+        # F4: register-device with `capabilities` auto-creates a zero-priced capability.
+        device = between(phase_text("05-register.md"), "/api/setup/register-device", "**Check:**")
+        self.assertNotIn("capabilities", device)
+
+    def test_the_payout_wallet_is_sent_and_the_quote_is_checked(self):
+        # F4: the human's payout address must reach the gateway; a quote that differs from the price stops the test.
+        self.assertIn("walletAddress", between(phase_text("00-prerequisites.md"), "/api/auth/provision", "**Check:**"))
+        self.assertRegex(phase_text("06-verify.md"), r"(?i)price.*intake|intake.*price")
+
+    def test_the_envelope_digest_is_rechecked_before_any_run(self):
+        # F6: an edited envelope must not run on an old confirmation.
+        for name in ("06-verify.md", "07-operate.md"):
+            self.assertIn("envelope.confirmed.json", phase_text(name), name)
+
+    def test_the_graph_matches_the_phases(self):
+        # F8 and F5: no pcc-node start in register; the drill asks permission and claims only what it tests.
+        phases = {p["id"]: p for p in self.book["phases"]}
+        self.assertNotIn("pcc-node start", json.dumps(phases["register"]))
+        self.assertTrue(any("emergency" in ask for ask in phases["verify"]["asksHuman"]))
+        self.assertNotIn("made the node refuse", json.dumps(phases["verify"]))
+
+    def test_there_is_no_production_default(self):
+        # F9: a machine reading the graph must never fall back to production.
+        self.assertIsNone(self.book["target"]["default"])
+
+    def test_private_state_permissions_are_repaired(self):
+        # F11: mkdir -p does not fix an existing permissive .pcc.
+        self.assertIn("chmod 700 .pcc", phase_text("00-prerequisites.md"))
+
+    def test_the_kernel_sends_a_physical_address_field(self):
+        # The gateway reads only lat and lng from a location object; a text address is physicalAddress.
+        kernel = between(phase_text("05-register.md"), "/api/kernels\"", "**Check:**")
+        self.assertIn("physicalAddress", kernel)
+        self.assertNotRegex(kernel, r'"location":\s*\{[^}]*"address"')
+
+    def test_the_kernel_is_checked_before_its_signing_key_is_registered(self):
+        # F7: a mistyped kernel id would sign, and create, another kernel.
+        signing = between(phase_text("05-register.md"), "## 2.", "## 3.")
+        self.assertRegex(signing, r"GET[^\n]*/api/kernels/")
+        self.assertLess(signing.index("/api/kernels/"), signing.index("register_signing_key("))
+
+    def test_the_gateway_must_check_operator_ownership(self):
+        # F1: master's operator routes do not check who owns the kernel or job.
+        self.assertRegex(phase_text("00-prerequisites.md"), r"(?i)ownership")
+
+    def test_no_pcc_node_daemon_beside_the_loop(self):
+        # 0.1.1's daemon takes no jobs and its heartbeat says so, which would hide the listing.
+        self.assertRegex(phase_text("07-operate.md"), r"acceptingJobs")
+
+
 if __name__ == "__main__":
     unittest.main()
