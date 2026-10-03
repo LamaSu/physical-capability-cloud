@@ -1,20 +1,22 @@
 /**
- * What of a batch a caller may see (F3; cross-family review r4 of #403). A batch is its kernel's
- * record, but each slot is also the record of the job it names, and the batch's other data (its
- * runConfig, its sample and batch events) can carry any slot's job. So for every caller except an
- * admin without a tenant (rule.all), who sees everything:
+ * What of a batch a caller may see (F3; cross-family reviews r4 and r5 of #403). A batch is its
+ * kernel's record, but each slot is also the record of the job the LIVE batch holds for it, and the
+ * batch's other data (its runConfig, its batch-level events) can carry any slot's job. So:
  *
- *   - the batch is judged as it is sent (asSent), so a toJSON or a getter cannot make the checked
- *     and the sent forms differ;
- *   - a slot is kept only when it names at least one job, every job it names (at any depth) is one
- *     the caller may read under the tenant-aware job rule, and its bindings are well formed;
+ *   - the batch is sent as a typed projection of the live batch: its own fields and each slot's,
+ *     from the spec types, each read once and kept only when it is a string, so no toJSON, getter
+ *     or field outside the spec reaches the caller, and what is judged is what is sent;
+ *   - a slot is kept only when the caller may read its live job under the tenant-aware job rule;
+ *     an admin without a tenant (rule.all) sees every slot;
  *   - the batch is "whole" for the caller when no slot was withheld;
- *   - runConfig is kept only when the batch is whole and every job it names is readable; otherwise
- *     it is null and runConfigWithheld is true;
- *   - an event is kept only when every job it names is readable, and then: a sample event (it names
- *     its slot) only when that slot was kept, and a batch-level event only when the batch is whole.
+ *   - runConfig is kept only when the batch is whole and the caller may read every job that owns
+ *     it (recordOwnersOf); otherwise it is null and runConfigWithheld is true;
+ *   - an event is kept only when the caller may read every job that owns it (recordOwnersOf with
+ *     the batch's id): a sample event is its slot's live job's, and an event that names none of
+ *     the batch's slots is the batch's, owned by every job of the batch.
  */
-import { asSent, recordBindingsOf } from "./job-read-gate.js";
+import type { BatchManifest } from "@pcc/spec";
+import { asSent, recordOwnersOf } from "./job-read-gate.js";
 
 /** The caller's job rule for a kernel record's parts (jobPartScopeOf). */
 export interface JobPartRule {
@@ -22,76 +24,77 @@ export interface JobPartRule {
   keep: (jobId: unknown) => boolean;
 }
 
-/** The events BatchTracker emits (packages/kernel/src/batch-tracker.ts). */
-export const BATCH_EVENT_TYPES: ReadonlySet<string> = new Set([
-  "batch_created",
-  "sample_added",
-  "batch_sealed",
-  "batch_started",
-  "sample_injection_start",
-  "sample_acquisition_start",
-  "sample_result_available",
-  "sample_completed",
-  "batch_completed",
-]);
+/** The batch's fields a caller may be sent (BatchManifest), slots and runConfig apart. */
+const BATCH_FIELDS = ["id", "kernelId", "deviceId", "capabilityId", "status", "sealedAt", "startedAt", "completedAt", "methodId"] as const;
+
+/** A slot's fields a caller may be sent (SampleSlot). */
+const SLOT_FIELDS = [
+  "id", "position", "jobId", "stepId", "userId", "sampleLabel", "sampleType", "status",
+  "acquisitionStart", "acquisitionEnd", "resultHash", "resultRef",
+] as const;
 
 export interface BatchView {
-  /** The batch as it is sent, projected for the caller. */
+  /** The batch as it is sent to this caller. */
   batch: Record<string, unknown>;
   /** True when the caller sees every slot. */
   whole: boolean;
-  /** The ids of the slots kept; null when the caller sees everything. */
-  keptSlotIds: ReadonlySet<string> | null;
 }
 
-const namesOnlyReadable = (value: unknown, rule: JobPartRule) => {
-  const bound = recordBindingsOf(value);
-  return !bound.malformed && bound.jobs.every((jobId) => rule.keep(jobId));
+/** The string fields of a live record, each read once. Undefined when it is not an object or a read throws. */
+function typedFields(live: unknown, fields: readonly string[]): Record<string, string> | undefined {
+  if (live === null || typeof live !== "object" || Array.isArray(live)) return undefined;
+  const out: Record<string, string> = {};
+  try {
+    for (const field of fields) {
+      const value = (live as Record<string, unknown>)[field];
+      if (typeof value === "string") out[field] = value;
+    }
+  } catch {
+    return undefined;
+  }
+  return out;
+}
+
+const ownersReadable = (record: unknown, rule: JobPartRule, ctx: { batchId?: string } = {}) => {
+  const owners = recordOwnersOf(record, ctx);
+  return owners !== undefined && owners.jobs.every((jobId) => rule.keep(jobId));
 };
 
 /**
- * The batch as this caller may see it. `slotFilter` narrows the slots further (a job's buyer, by job,
- * sees only that job's slots). Undefined when the batch does not serialize; it is then not sent.
+ * The live batch as this caller may see it. `slotFilter` narrows the slots further (a job's buyer,
+ * by job, sees only that job's slots). Undefined when there is no batch or it has no id.
  */
 export function batchViewFor(
-  batch: unknown,
+  batch: BatchManifest | undefined,
   rule: JobPartRule,
-  slotFilter: (slot: Record<string, unknown>) => boolean = () => true,
+  slotFilter: (slot: Readonly<Record<string, string>>) => boolean = () => true,
 ): BatchView | undefined {
-  const sent = asSent(batch);
-  if (!sent || sent.value === null || typeof sent.value !== "object" || Array.isArray(sent.value)) return undefined;
-  const plain = sent.value as Record<string, unknown>;
-  if (rule.all) return { batch: plain, whole: true, keptSlotIds: null };
-  const slots = Array.isArray(plain.slots) ? (plain.slots as unknown[]) : [];
-  const kept = slots.filter((slot): slot is Record<string, unknown> => {
-    if (slot === null || typeof slot !== "object" || Array.isArray(slot)) return false;
-    const bound = recordBindingsOf(slot);
-    return (
-      !bound.malformed &&
-      bound.jobs.length > 0 &&
-      bound.jobs.every((jobId) => rule.keep(jobId)) &&
-      slotFilter(slot as Record<string, unknown>)
-    );
-  });
-  const whole = kept.length === slots.length;
-  const runConfigShown = whole && namesOnlyReadable(plain.runConfig, rule);
-  const projected: Record<string, unknown> = { ...plain, slots: kept, runConfig: runConfigShown ? plain.runConfig : null };
-  if (!runConfigShown) projected.runConfigWithheld = true;
-  return {
-    batch: projected,
-    whole,
-    keptSlotIds: new Set(kept.map((slot) => slot.id).filter((id): id is string => typeof id === "string")),
-  };
+  const head = typedFields(batch, BATCH_FIELDS);
+  if (!batch || !head || !head.id) return undefined;
+  let liveSlots: unknown;
+  let liveConfig: unknown;
+  try {
+    liveSlots = batch.slots;
+    liveConfig = batch.runConfig;
+  } catch {
+    return undefined;
+  }
+  const slots: Record<string, string>[] = [];
+  let whole = true;
+  for (const live of Array.isArray(liveSlots) ? liveSlots : []) {
+    const slot = typedFields(live, SLOT_FIELDS);
+    const owned = slot?.jobId !== undefined && slot.jobId.trim() !== "";
+    if (slot && (rule.all || (owned && rule.keep(slot.jobId))) && slotFilter(slot)) slots.push(slot);
+    else whole = false;
+  }
+  const config = asSent(liveConfig);
+  const shown = config !== undefined && (rule.all || (whole && ownersReadable(config.value, rule)));
+  const projected: Record<string, unknown> = { ...head, slots, runConfig: shown ? config.value : null };
+  if (!shown && liveConfig !== undefined && liveConfig !== null) projected.runConfigWithheld = true;
+  return { batch: projected, whole };
 }
 
-/** May this caller see this event (as sent) of a batch it was allowed to read? */
-export function batchEventVisible(event: unknown, view: BatchView, rule: JobPartRule): boolean {
-  if (rule.all) return true;
-  if (!namesOnlyReadable(event, rule)) return false;
-  if (event === null || typeof event !== "object" || Array.isArray(event)) return true;
-  const e = event as { type?: unknown; slotId?: unknown };
-  if (typeof e.slotId === "string" && e.slotId !== "") return view.keptSlotIds !== null && view.keptSlotIds.has(e.slotId);
-  if (typeof e.type === "string" && BATCH_EVENT_TYPES.has(e.type)) return view.whole;
-  // Not a batch event (a sensor reading on the batch's topic): the jobs it names decided above.
-  return true;
+/** May this caller see this event (as sent) of the batch `batchId`? */
+export function batchEventVisible(event: unknown, batchId: string, rule: JobPartRule): boolean {
+  return rule.all || ownersReadable(event, rule, { batchId });
 }

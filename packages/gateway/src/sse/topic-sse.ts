@@ -9,8 +9,6 @@ import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-
 import { resolveSSEAuth } from "./sse-auth.js";
 import { asSent, gateJobRead, gateKernelRead, refuseJobRead, streamEventFilterOf, type KernelReadGate } from "../readmodels/job-read-gate.js";
 import { getStore } from "../db.js";
-import { jobPartScopeOf } from "../readmodels/job-read-gate.js";
-import { batchEventVisible, batchViewFor } from "../readmodels/batch-read.js";
 import { schema, eq } from "@pcc/store";
 import { batchTracker } from "../services.js";
 
@@ -145,33 +143,19 @@ export async function topicSSE(app: FastifyInstance) {
       trackSSEClose(req.ip);
       return refuseJobRead(reply, gate, { error: "not_found", message: `${what} '${id}' not found` });
     }
-    // The kernel's stream carries job-bound readings: each one is also its job's record, so under
-    // TENANT_ENFORCE only the jobs of the caller's tenant reach it (review r3 of #403, CRITICAL).
-    const events = streamEventFilterOf(req);
+    // The kernel's stream carries job-bound readings: each one is also the record of the jobs that
+    // own it, so under TENANT_ENFORCE only the jobs of the caller's tenant reach it (review r3 of
+    // #403, CRITICAL). Who owns a reading or a batch event is what the live batch says, decided at
+    // each event, replayed ones included (reviews r4 and r5 of #403, CRITICAL). On a batch's own
+    // stream, an event naming none of its slots is the batch's.
+    const events = streamEventFilterOf(req, { batchId: opts.batchId });
     if (!events.ok) {
       trackSSEClose(req.ip);
       return refuseJobRead(reply, events);
     }
-    // A batch's own events (sample events name only their slot) follow the batch view, decided at
-    // each event from the batch as it is then (review r4 of #403, CRITICAL), replayed ones included.
-    let keep = events.keep;
-    if (opts.batchId !== undefined) {
-      const parts = jobPartScopeOf(req);
-      if (!parts.ok) {
-        trackSSEClose(req.ip);
-        return refuseJobRead(reply, parts);
-      }
-      const batchId = opts.batchId;
-      keep = (event) => {
-        if (!events.keep(event)) return false;
-        if (parts.all) return true;
-        const view = batchViewFor(batchTracker.getBatch(batchId), parts);
-        return view !== undefined && batchEventVisible(event, view, parts);
-      };
-    }
     const lastEventId = req.headers["last-event-id"] as string | undefined;
     const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [topic], lastEventId, origin, keep);
+    setupSSE(req, reply, [topic], lastEventId, origin, events.keep);
     await new Promise(() => {});
   };
 

@@ -31,6 +31,8 @@ const ADMIN_H = { "x-admin-key": ADMIN };
 let app: FastifyInstance;
 let port = 0;
 let batchId = "";
+/** Each job's slot in the batch: a reading names its sample (review r5 of #403: one naming none is the batch's). */
+const slotOfJob: Record<string, string> = {};
 let sharedId = "";
 let channel = "";
 let getStore: typeof import("../../db.js").getStore;
@@ -67,8 +69,8 @@ beforeAll(async () => {
   streamHub = (await import("../../sse/stream-hub.js")).streamHub;
   // One kernel-nyc batch holding a tenant-A slot (job-001) and a tenant-B slot (job-003).
   const batch = services.batchTracker.createBatch("kernel-nyc", DEVICE, "cap-nyc-fdm", {});
-  services.batchTracker.addSample(batch.id, { position: "A1", jobId: "job-001", stepId: "step-1", userId: OPERATOR_NYC as never, sampleLabel: "r4-tenant-a-sample" } as never);
-  services.batchTracker.addSample(batch.id, { position: "A2", jobId: "job-003", stepId: "step-3", userId: BUYER_003 as never, sampleLabel: "r4-tenant-b-sample" } as never);
+  slotOfJob["job-001"] = services.batchTracker.addSample(batch.id, { position: "A1", jobId: "job-001", stepId: "step-1", userId: OPERATOR_NYC as never, sampleLabel: "r4-tenant-a-sample" } as never).id;
+  slotOfJob["job-003"] = services.batchTracker.addSample(batch.id, { position: "A2", jobId: "job-003", stepId: "step-3", userId: BUYER_003 as never, sampleLabel: "r4-tenant-b-sample" } as never).id;
   batchId = batch.id;
   channel = sensorPipeline.getDescriptors()[0]!.channel;
 
@@ -100,12 +102,12 @@ beforeAll(async () => {
 
   // A shared batch on kernel-nyc with two claimants' claims (CRITICAL 2).
   const created = await app.inject({
-    method: "POST", url: "/api/batches/shared",
+    method: "POST", url: "/api/batches/shared", headers: ADMIN_H,
     payload: { kernelId: "kernel-nyc", capabilityType: "hplc", totalSlots: 8, protocolType: "hplc-standard", pricePerSlot: "10" },
   });
   sharedId = created.json().batch.id;
   for (const [agentId, label] of [["agent-r4-alice", "r4-alice-sample"], ["agent-r4-bob", "r4-bob-sample"]]) {
-    await app.inject({ method: "POST", url: `/api/batches/shared/${sharedId}/claim`, payload: { agentId, slotCount: 2, sampleLabels: [label, label] } });
+    await app.inject({ method: "POST", url: `/api/batches/shared/${sharedId}/claim`, headers: ADMIN_H, payload: { agentId, slotCount: 2, sampleLabels: [label, label] } });
   }
 }, 60_000);
 
@@ -143,7 +145,7 @@ const stream = (path: string, headers: Record<string, string>, during: () => voi
 const emit = (jobId: string, value: number) =>
   sensorPipeline.ingest({
     timestamp: new Date().toISOString(), kernelId: "kernel-nyc", deviceId: DEVICE, channel, dataType: "scalar",
-    unit: "degC", value, jobId, batchId,
+    unit: "degC", value, jobId, batchId, sampleId: slotOfJob[jobId],
   } as never);
 
 const withTenantEnforce = async (fn: () => Promise<void>) => {

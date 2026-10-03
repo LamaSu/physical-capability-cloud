@@ -94,12 +94,12 @@ beforeAll(async () => {
 
   // A shared batch with a victim's claim (HIGH 3).
   const created = await app.inject({
-    method: "POST", url: "/api/batches/shared",
+    method: "POST", url: "/api/batches/shared", headers: ADMIN_H,
     payload: { kernelId: "kernel-nyc", capabilityType: "hplc", totalSlots: 8, protocolType: "hplc-standard", pricePerSlot: "10" },
   });
   sharedId = created.json().batch.id;
   const claim = await app.inject({
-    method: "POST", url: `/api/batches/shared/${sharedId}/claim`,
+    method: "POST", url: `/api/batches/shared/${sharedId}/claim`, headers: ADMIN_H,
     payload: { agentId: "agent-r5-victim", slotCount: 2, sampleLabels: ["r5-victim-sample", "r5-victim-sample"] },
   });
   victimClaimId = claim.json().claim.id;

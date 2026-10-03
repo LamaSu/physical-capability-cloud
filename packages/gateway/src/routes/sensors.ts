@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { sensorPipeline } from "../services.js";
-import { gateJobRead, jobRecordFilterOf, keepAsSent, refuseJobRead } from "../readmodels/job-read-gate.js";
-import type { SensorAnomaly } from "@pcc/spec";
+import { asSent, gateJobRead, jobRecordFilterOf, keepAsSent, refuseJobRead } from "../readmodels/job-read-gate.js";
+import type { SensorAnomaly, SensorReading } from "@pcc/spec";
 
 // Collected anomalies (pipeline emits these; we store for REST queries AND persist to DB)
 const recentAnomalies: SensorAnomaly[] = [];
@@ -65,23 +65,48 @@ export async function sensorRoutes(app: FastifyInstance) {
     },
   );
 
-  // Aggregated data for a channel (live from pipeline)
+  // Aggregated data for a channel (live from pipeline). An aggregate is derived from readings, so
+  // it is computed over the readings this caller may read only (the record filter), and with
+  // ?jobId= over that job's readings once the job read gate passes (found while fixing review r5
+  // of #403: the route had no read gate). Each reading is judged as sent and by the bindings the
+  // aggregate takes from it.
   app.get<{ Params: { channel: string }; Querystring: { windowMs?: string; jobId?: string } }>(
     "/api/sensors/aggregates/:channel",
-    async (req) => {
+    async (req, reply) => {
+      const filter = jobRecordFilterOf(req);
+      if (!filter.ok) return refuseJobRead(reply, filter);
+      const jobId = req.query.jobId;
+      if (jobId) {
+        const gate = gateJobRead(req, jobId);
+        if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
+        if (!gate.ok) return { aggregate: null };
+      }
+      const keep = (reading: SensorReading) => {
+        const { kernelId, deviceId, jobId: readingJob, stepId, batchId, sampleId } = reading;
+        const sent = asSent(reading);
+        return (
+          sent !== undefined &&
+          filter.keep(sent.value) &&
+          filter.keep({ kernelId, deviceId, jobId: readingJob, stepId, batchId, sampleId }) &&
+          (!jobId || readingJob === jobId)
+        );
+      };
       const windowMs = parseInt(req.query.windowMs ?? "60000", 10);
-      const aggregate = sensorPipeline.aggregate(req.params.channel, windowMs);
-      if (!aggregate) return { aggregate: null };
-      return { aggregate };
+      const aggregate = sensorPipeline.aggregate(req.params.channel, windowMs, keep);
+      return { aggregate: aggregate ?? null };
     },
   );
 
-  // Recent anomalies — check in-memory first, fall back to DB for history
+  // Recent anomalies — check in-memory first, fall back to DB for history. An anomaly is derived
+  // from readings and names their sources, so it follows the record filter as a reading does (found
+  // while fixing review r5 of #403: the route had no read gate).
   app.get<{ Querystring: { kernelId?: string; severity?: string; source?: string } }>(
     "/api/sensors/anomalies",
-    async (req) => {
+    async (req, reply) => {
+      const filter = jobRecordFilterOf(req);
+      if (!filter.ok) return refuseJobRead(reply, filter);
       // In-memory anomalies from pipeline (DB history deferred to Wave 2)
-      let anomalies = [...recentAnomalies];
+      let anomalies = keepAsSent(recentAnomalies, filter.keep) as SensorAnomaly[];
       if (req.query.kernelId) {
         anomalies = anomalies.filter((a) => a.kernelId === req.query.kernelId);
       }

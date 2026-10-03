@@ -47,6 +47,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
+import { batchOwnership } from "./batch-ownership.js";
 import {
   JOB_READ_REFUSAL,
   decideJobRead,
@@ -254,25 +255,28 @@ export function keepAsSent(records: readonly unknown[], keep: (record: unknown) 
 
 /**
  * For a stream the caller was allowed to open (a job's, or a kernel's, device's or batch's), and
- * for a kernel record's events: drops an event that names, at any depth, a job the caller may not
- * read, or whose bindings are malformed (cross-family review r3 of #403, CRITICAL). The job rule is
- * tenant-aware (jobReadScopeOf), so under TENANT_ENFORCE a kernel's stream carries only the jobs of
- * the caller's tenant. An event naming no job is the topic's own. An admin without a tenant keeps
- * every event. Judge the event as sent (asSent).
+ * for a kernel record's events: keeps an event only when the caller may read every job that owns
+ * it (recordOwnersOf: the jobs it names, and the jobs the live batch holds for the slots and
+ * batches it is tied to; cross-family reviews r3 and r5 of #403, CRITICAL). A batch's own stream
+ * passes the batch's id (ctx.batchId), so an event there that names none of its slots is the
+ * batch's, shown only to a caller who may read every job of the batch. The job rule is
+ * tenant-aware (jobReadScopeOf), so under TENANT_ENFORCE a kernel's stream carries only the jobs
+ * of the caller's tenant. An event no job owns is the topic's own; one whose owners cannot be
+ * known is dropped. An admin without a tenant keeps every event. Judge the event as sent (asSent).
  */
 export type StreamEventFilter =
   | { ok: true; keep: (event: unknown) => boolean }
   | { ok: false; kind: "unavailable" | "unauthenticated" | "identity_unverified" };
 
-export function streamEventFilterOf(req: FastifyRequest): StreamEventFilter {
+export function streamEventFilterOf(req: FastifyRequest, ctx: { batchId?: string } = {}): StreamEventFilter {
   const scope = jobReadScopeOf(req);
   if (!scope.ok) return scope;
   if (scope.jobIds === null) return { ok: true, keep: () => true };
   return {
     ok: true,
     keep: (event) => {
-      const bound = recordBindingsOf(event);
-      return !bound.malformed && bound.jobs.every((jobId) => scopeAllows(scope, jobId));
+      const owners = recordOwnersOf(event, ctx);
+      return owners !== undefined && owners.jobs.every((jobId) => scopeAllows(scope, jobId));
     },
   };
 }
@@ -292,27 +296,38 @@ export function jobPartScopeOf(req: FastifyRequest): JobPartScope {
   return { ok: true, all: scope.jobIds === null, keep: (jobId) => scopeAllows(scope, jobId) };
 }
 
-/** Keys that bind a record to jobs or kernels, in any of the shapes producers use. */
+/**
+ * Keys that bind a record to jobs, kernels, batch slots or batches, in any of the shapes producers
+ * use. A slot's id is its sample's id (BatchTracker), so a sensor reading's sampleId names a slot.
+ */
 const JOB_KEY = /^job_?id$/i;
 const JOB_LIST_KEY = /^job_?ids$/i;
 const KERNEL_KEY = /^kernel_?id$/i;
 const KERNEL_LIST_KEY = /^kernel_?ids$/i;
+const SLOT_KEY = /^(slot|sample)_?id$/i;
+const SLOT_LIST_KEY = /^(slot|sample)_?ids$/i;
+const BATCH_KEY = /^batch_?id$/i;
+const BATCH_LIST_KEY = /^batch_?ids$/i;
 const MAX_DEPTH = 8;
 
 export interface RecordBindings {
   jobs: string[];
   kernels: string[];
+  /** The batch slots (samples) it names. Who owns them is the live batch's to say (recordOwnersOf). */
+  slots: string[];
+  batches: string[];
   /** A binding key held something other than a nonempty string: the record cannot be placed. */
   malformed: boolean;
 }
 
 /**
- * Every job and kernel a record names, at any depth (up to MAX_DEPTH), in objects and arrays.
+ * Every job, kernel, batch slot and batch a record names, at any depth (up to MAX_DEPTH), in
+ * objects and arrays.
  * A binding key whose value is not a nonempty string, or a record nested deeper than
  * MAX_DEPTH, is malformed: the filter then keeps the record only for an unscoped admin.
  */
 export function recordBindingsOf(record: unknown): RecordBindings {
-  const out: RecordBindings = { jobs: [], kernels: [], malformed: false };
+  const out: RecordBindings = { jobs: [], kernels: [], slots: [], batches: [], malformed: false };
   const seen = new WeakSet<object>();
   const one = (value: unknown, into: string[]) => {
     if (value === undefined || value === null) return;
@@ -341,6 +356,10 @@ export function recordBindingsOf(record: unknown): RecordBindings {
       else if (JOB_LIST_KEY.test(key)) many(child, out.jobs);
       else if (KERNEL_KEY.test(key)) one(child, out.kernels);
       else if (KERNEL_LIST_KEY.test(key)) many(child, out.kernels);
+      else if (SLOT_KEY.test(key)) one(child, out.slots);
+      else if (SLOT_LIST_KEY.test(key)) many(child, out.slots);
+      else if (BATCH_KEY.test(key)) one(child, out.batches);
+      else if (BATCH_LIST_KEY.test(key)) many(child, out.batches);
       else walk(child, depth + 1);
     }
   };
@@ -348,12 +367,61 @@ export function recordBindingsOf(record: unknown): RecordBindings {
   return out;
 }
 
+export interface RecordOwners {
+  /** The jobs that own the record: the caller must be able to read each one. */
+  jobs: string[];
+  /** The kernels it names, for the rule on a record that no job owns. */
+  kernels: string[];
+}
+
+/**
+ * Who owns a record (cross-family review r5 of #403, CRITICAL 1 and 2):
+ *   - every job it names, at any depth;
+ *   - for each batch slot (sample) it names, the job the LIVE slot belongs to;
+ *   - for each batch it is tied to (it names the batch, or it is on the batch's own stream:
+ *     ctx.batchId) when it names none of that batch's slots, every job of the batch, since it is
+ *     then the batch's own record.
+ * A name can only add owners, never take one away. Undefined when the owners cannot be known (a
+ * malformed binding; a slot or batch that no live batch has; a slot that names no job; no
+ * registered BatchOwnership, batch-ownership.ts): such a record is an unscoped admin's only.
+ */
+export function recordOwnersOf(record: unknown, ctx: { batchId?: string } = {}): RecordOwners | undefined {
+  const bound = recordBindingsOf(record);
+  if (bound.malformed) return undefined;
+  const jobs = new Set(bound.jobs);
+  const batches = new Set(bound.batches);
+  if (ctx.batchId !== undefined) batches.add(ctx.batchId);
+  if (bound.slots.length > 0 || batches.size > 0) {
+    const live = batchOwnership();
+    if (!live) return undefined;
+    const batchesOfSlots = new Set<string>();
+    for (const slotId of bound.slots) {
+      const slot = live.slotOf(slotId);
+      if (!slot || slot.jobId === undefined) return undefined;
+      jobs.add(slot.jobId);
+      batchesOfSlots.add(slot.batchId);
+    }
+    for (const batchId of batches) {
+      if (batchesOfSlots.has(batchId)) continue;
+      const batchJobs = live.batchJobsOf(batchId);
+      if (!batchJobs) return undefined;
+      for (const jobId of batchJobs) {
+        if (jobId === undefined) return undefined;
+        jobs.add(jobId);
+      }
+    }
+  }
+  return { jobs: [...jobs], kernels: bound.kernels };
+}
+
 /**
  * For a route that returns records of many jobs and kernels (log lines, sensor readings, live
- * telemetry): keeps a record only when the caller may read every job it names, and, when it
- * names no job, every kernel it names (the kernel's operator). A record that names neither is
- * kept only for an admin: free text such as a log message can name any job. A malformed
- * binding is kept only for an unscoped admin. Refused like the other gates: 401 without a
+ * telemetry): keeps a record only when the caller may read every job that owns it (recordOwnersOf:
+ * the jobs it names, and for a record tied to a batch slot or a batch, the jobs the live batch
+ * holds; review r5 of #403), and, when no job owns it, every kernel it names (the kernel's
+ * operator). A record that names neither is kept only for an admin: free text such as a log
+ * message can name any job. A record whose owners cannot be known (a malformed binding, a slot or
+ * batch no live batch has) is kept only for an unscoped admin. Refused like the other gates: 401 without a
  * credential, 403 without a proven wallet, 503 when the records the rule needs cannot be read.
  */
 export type JobRecordFilter =
@@ -374,11 +442,11 @@ export function jobRecordFilterOf(req: FastifyRequest): JobRecordFilter {
   return {
     ok: true,
     keep: (record) => {
-      const bound = recordBindingsOf(record);
-      if (bound.malformed) return false;
-      if (bound.jobs.length > 0) return bound.jobs.every((jobId) => scopeAllows(scope, jobId));
+      const owners = recordOwnersOf(record);
+      if (!owners) return false;
+      if (owners.jobs.length > 0) return owners.jobs.every((jobId) => scopeAllows(scope, jobId));
       if (admin) return true;
-      if (bound.kernels.length > 0) return operated !== null && bound.kernels.every((kernelId) => operated!.has(kernelId));
+      if (owners.kernels.length > 0) return operated !== null && owners.kernels.every((kernelId) => operated!.has(kernelId));
       return false;
     },
   };

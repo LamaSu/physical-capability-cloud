@@ -266,16 +266,18 @@ describe("MEDIUM: the gate's authorization reads are keyed by the caller, not by
 
 describe("HIGH: recordBindingsOf finds every job and kernel a record names, and a malformed binding fails closed", () => {
   it("reads bindings at any depth, in objects and arrays, under each key spelling", () => {
-    expect(recordBindingsOf({ message: "x", metadata: { jobId: "job-001" } })).toEqual({ jobs: ["job-001"], kernels: [], malformed: false });
+    expect(recordBindingsOf({ message: "x", metadata: { jobId: "job-001" } })).toEqual({ jobs: ["job-001"], kernels: [], slots: [], batches: [], malformed: false });
     expect(recordBindingsOf({ payload: { items: [{ job_id: "job-002" }, { JobId: "job-003" }] } }).jobs).toEqual(["job-002", "job-003"]);
     expect(recordBindingsOf({ jobIds: ["job-001", "job-003"], kernel_id: "kernel-nyc" })).toEqual({
       jobs: ["job-001", "job-003"],
       kernels: ["kernel-nyc"],
+      slots: [],
+      batches: [],
       malformed: false,
     });
     // An absent top-level binding does not hide a nested one (the r2 finding's third shape).
     expect(recordBindingsOf({ jobId: undefined, metadata: { jobId: "job-001" } }).jobs).toEqual(["job-001"]);
-    expect(recordBindingsOf({ message: "names job-001 only in its text" })).toEqual({ jobs: [], kernels: [], malformed: false });
+    expect(recordBindingsOf({ message: "names job-001 only in its text" })).toEqual({ jobs: [], kernels: [], slots: [], batches: [], malformed: false });
   });
 
   it("NEGATIVE: a binding that is not a nonempty string, or a record nested too deep, is malformed", () => {
@@ -297,7 +299,7 @@ describe("HIGH: recordBindingsOf finds every job and kernel a record names, and 
   it("a record that refers to itself is read once", () => {
     const record: Record<string, unknown> = { jobId: "job-001" };
     record.self = record;
-    expect(recordBindingsOf(record)).toEqual({ jobs: ["job-001"], kernels: [], malformed: false });
+    expect(recordBindingsOf(record)).toEqual({ jobs: ["job-001"], kernels: [], slots: [], batches: [], malformed: false });
   });
 });
 
