@@ -226,6 +226,7 @@ export class ${adapter.className} {
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private lastProgress = 0;
+  private endPolling: (() => void) | null = null;
 
   constructor(id: string, config: ${adapter.className}Config) {
     this.id = id;
@@ -264,7 +265,12 @@ export class ${adapter.className} {
     }
   }
 
-  async execute(command: MachineCommand): Promise<MachineCommandResult> {
+  execute(command: MachineCommand): Promise<MachineCommandResult> {
+    // A command in flight can still emit (after its request returns).
+    return this.track(this.runCommand(command));
+  }
+
+  private async runCommand(command: MachineCommand): Promise<MachineCommandResult> {
     switch (command.type) {
       case "load_gcode": {
         ${loadEndpoint
@@ -323,6 +329,37 @@ export class ${adapter.className} {
     this.listeners = [];
   }
 
+  // ── Evidence handshake ──────────────────────────────────────────
+  // REQUIRED by the PCC kernel (the JobRunner refuses an adapter without it):
+  // quiesceEvidence() resolves once every evidence event of the work this adapter
+  // was given has been emitted, and never while that work can still emit; called
+  // again with no new work, it resolves at once. The kernel keeps the device from
+  // the next job until it resolves. Count each thing that can still emit with
+  // begin()/track(), and end it only after its last emission.
+  private outstanding = 0;
+  private whenIdle: Array<() => void> = [];
+
+  quiesceEvidence(): Promise<void> {
+    if (this.outstanding === 0) return Promise.resolve();
+    return new Promise((resolve) => this.whenIdle.push(resolve));
+  }
+
+  private begin(): () => void {
+    this.outstanding++;
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      if (--this.outstanding === 0) for (const resolve of this.whenIdle.splice(0)) resolve();
+    };
+  }
+
+  private track<T>(work: Promise<T>): Promise<T> {
+    const end = this.begin();
+    work.then(end, end);
+    return work;
+  }
+
   // ── HTTP helpers ────────────────────────────────────────────────
 
   private async apiGet(path: string): Promise<Record<string, any>> {
@@ -348,35 +385,46 @@ export class ${adapter.className} {
 
   // ── Polling ─────────────────────────────────────────────────────
 
+  // The loop is outstanding work until it reports how the job ended and stops.
   private startPolling(): void {
     this.stopPolling();
-    this.pollTimer = setInterval(async () => {
-      try {
-        const progress = await this.getProgress();
-        if (Math.floor(progress / 25) > Math.floor(this.lastProgress / 25)) {
-          this.emit({
-            type: "execution_progress",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: { progress },
-          });
-        }
-        if (this.lastProgress < 100 && progress >= 100) {
-          this.emit({
-            type: "execution_completed",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: { progress: 100 },
-          });
-          this.stopPolling();
-        }
-        this.lastProgress = progress;
-      } catch {}
+    this.endPolling = this.begin();
+    this.pollTimer = setInterval(() => {
+      void this.track(this.poll());
     }, this.config.pollIntervalMs ?? ${adapter.pollIntervalMs ?? 2000});
+  }
+
+  private async poll(): Promise<void> {
+    try {
+      const progress = await this.getProgress();
+      if (Math.floor(progress / 25) > Math.floor(this.lastProgress / 25)) {
+        this.emit({
+          type: "execution_progress",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { progress },
+        });
+      }
+      if (this.lastProgress < 100 && progress >= 100) {
+        this.emit({
+          type: "execution_completed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { progress: 100 },
+        });
+        this.stopPolling();
+      }
+      // TODO: report your device's failure and cancel states too (emit execution_failed,
+      // then stopPolling()). A loop that never ends keeps quiesceEvidence() pending, and
+      // the kernel keeps the device from every later job.
+      this.lastProgress = progress;
+    } catch {}
   }
 
   private stopPolling(): void {
     if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+    this.endPolling?.();
+    this.endPolling = null;
   }
 
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
@@ -410,6 +458,7 @@ export class ${adapter.className} {
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private samples: Array<{ timestamp: string; value: number }> = [];
+  private endRecording: (() => void) | null = null;
 
   constructor(id: string, config: ${adapter.className}Config) {
     this.id = id;
@@ -422,27 +471,40 @@ export class ${adapter.className} {
     };
   }
 
+  // The recording is outstanding work from here until stopRecording; each read in flight too.
   async startRecording(jobId: string): Promise<void> {
+    this.stopSampling();
     this.samples = [];
-    this.pollTimer = setInterval(async () => {
-      try {
-        // TODO: Read from your sensor's API
-        const value = this.config.mockMode
-          ? Math.random() * 500 + 100
-          : await this.readSensor();
-        this.samples.push({ timestamp: new Date().toISOString(), value });
-        this.emit({
-          type: "sensor_reading",
-          timestamp: new Date().toISOString(),
-          source: this.source,
-          payload: { value, jobId },
-        });
-      } catch {}
+    this.endRecording = this.begin();
+    this.pollTimer = setInterval(() => {
+      void this.track(this.sample(jobId));
     }, this.config.sampleIntervalMs ?? 1000);
   }
 
-  async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
+  private async sample(jobId: string): Promise<void> {
+    try {
+      // TODO: Read from your sensor's API
+      const value = this.config.mockMode
+        ? Math.random() * 500 + 100
+        : await this.readSensor();
+      this.samples.push({ timestamp: new Date().toISOString(), value });
+      this.emit({
+        type: "sensor_reading",
+        timestamp: new Date().toISOString(),
+        source: this.source,
+        payload: { value, jobId },
+      });
+    } catch {}
+  }
+
+  private stopSampling(): void {
     if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+    this.endRecording?.();
+    this.endRecording = null;
+  }
+
+  async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
+    this.stopSampling();
     const values = this.samples.map(s => s.value);
     return {
       type: "sensor_data_summary",
@@ -470,8 +532,39 @@ export class ${adapter.className} {
   }
 
   async dispose(): Promise<void> {
-    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.stopSampling();
     this.listeners = [];
+  }
+
+  // ── Evidence handshake ──────────────────────────────────────────
+  // REQUIRED by the PCC kernel (the JobRunner refuses an adapter without it):
+  // quiesceEvidence() resolves once every evidence event of the work this adapter
+  // was given has been emitted, and never while that work can still emit; called
+  // again with no new work, it resolves at once. The kernel keeps the device from
+  // the next job until it resolves. Count each thing that can still emit with
+  // begin()/track(), and end it only after its last emission.
+  private outstanding = 0;
+  private whenIdle: Array<() => void> = [];
+
+  quiesceEvidence(): Promise<void> {
+    if (this.outstanding === 0) return Promise.resolve();
+    return new Promise((resolve) => this.whenIdle.push(resolve));
+  }
+
+  private begin(): () => void {
+    this.outstanding++;
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      if (--this.outstanding === 0) for (const resolve of this.whenIdle.splice(0)) resolve();
+    };
+  }
+
+  private track<T>(work: Promise<T>): Promise<T> {
+    const end = this.begin();
+    work.then(end, end);
+    return work;
   }
 
   private async readSensor(): Promise<number> {
@@ -521,7 +614,16 @@ export class ${adapter.className} {
     };
   }
 
-  async captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+  // A capture or inspection in flight can still emit.
+  captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+    return this.track(this.capture());
+  }
+
+  runInspection(referenceHash?: string): Promise<{ passed: boolean; confidence: number; findings: string[]; imageHash: string }> {
+    return this.track(this.inspect(referenceHash));
+  }
+
+  private async capture(): Promise<{ imageHash: string; storageRef: string }> {
     if (this.config.mockMode) {
       const hash = \`mock_\${Date.now()}\`;
       this.emit({ type: "camera_snapshot", timestamp: new Date().toISOString(), source: this.source, payload: { imageHash: hash } });
@@ -535,7 +637,7 @@ export class ${adapter.className} {
     return { imageHash, storageRef: data.url ?? "" };
   }
 
-  async runInspection(referenceHash?: string): Promise<{ passed: boolean; confidence: number; findings: string[]; imageHash: string }> {
+  private async inspect(referenceHash?: string): Promise<{ passed: boolean; confidence: number; findings: string[]; imageHash: string }> {
     const snap = await this.captureSnapshot();
     if (this.config.mockMode) {
       const passed = Math.random() > 0.05;
@@ -551,6 +653,37 @@ export class ${adapter.className} {
   }
 
   async dispose(): Promise<void> { this.listeners = []; }
+
+  // ── Evidence handshake ──────────────────────────────────────────
+  // REQUIRED by the PCC kernel (the JobRunner refuses an adapter without it):
+  // quiesceEvidence() resolves once every evidence event of the work this adapter
+  // was given has been emitted, and never while that work can still emit; called
+  // again with no new work, it resolves at once. The kernel keeps the device from
+  // the next job until it resolves. Count each thing that can still emit with
+  // begin()/track(), and end it only after its last emission.
+  private outstanding = 0;
+  private whenIdle: Array<() => void> = [];
+
+  quiesceEvidence(): Promise<void> {
+    if (this.outstanding === 0) return Promise.resolve();
+    return new Promise((resolve) => this.whenIdle.push(resolve));
+  }
+
+  private begin(): () => void {
+    this.outstanding++;
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      if (--this.outstanding === 0) for (const resolve of this.whenIdle.splice(0)) resolve();
+    };
+  }
+
+  private track<T>(work: Promise<T>): Promise<T> {
+    const end = this.begin();
+    work.then(end, end);
+    return work;
+  }
 
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
     for (const listener of this.listeners) listener(event);
