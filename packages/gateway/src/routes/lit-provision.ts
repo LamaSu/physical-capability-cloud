@@ -122,9 +122,9 @@ export async function litProvisionRoutes(app: FastifyInstance) {
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
-      trackServerEvent("lit_key_provisioned", {
-        kernelId: body.kernelId,
-        operatorDid: body.operatorDid,
+      trackServerEvent(lit("lit_key_provisioned"), {
+        kernelId: declare.id(body.kernelId),
+        operatorDid: declare.id(body.operatorDid),
       });
 
       console.log(lit("[LIT] usage key provisioned"), declare.id(body.kernelId));
