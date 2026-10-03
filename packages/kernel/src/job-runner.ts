@@ -112,6 +112,10 @@ export class JobRunner {
     let recorded: Promise<void> = Promise.resolve();
     // Set when the run fails, so an event still queued is never written.
     let sealed = false;
+    // The first event the run accepted but could not record (its hash or its write failed).
+    // Its chain then lacks that event, so the run fails: success would sign an incomplete
+    // record (found with astra pack 192, where printer-job.ts swallowed the same failure).
+    const unrecorded: { first: { type: string; error: string } | null } = { first: null };
 
     // Every refusal below comes before any adapter command, and before registerStep,
     // which would overwrite the step of a job already running under the same ids. The
@@ -157,6 +161,7 @@ export class JobRunner {
           try {
             await this.evidenceEmitter.addEvent(jobId, stepId, event);
           } catch (err) {
+            unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
             console.error(err);
           }
         });
@@ -302,6 +307,14 @@ export class JobRunner {
             return {
               success: false,
               error: `evidence recording did not settle within ${this.evidenceSettleTimeoutMs} ms`,
+              durationMs: Date.now() - startTime,
+            };
+          }
+          const lost = unrecorded.first;
+          if (lost !== null) {
+            return {
+              success: false,
+              error: `a ${lost.type} event of this job could not be recorded (${lost.error}), so its evidence is incomplete`,
               durationMs: Date.now() - startTime,
             };
           }

@@ -379,3 +379,25 @@ describe("astra pack 184 MEDIUM: a sensor stop that fails is never forgotten, an
     expect.soft(held.busy, "a job on the sensor that never stopped").toEqual({ reason: "quiescing", adapterId: "sensor-stop-throws", jobId: "job-throw-A" });
   });
 });
+
+describe("an event the runner could not record fails the run (lane-found with astra pack 192)", () => {
+  it("a completion whose recording fails (its hash rejects) leaves no successful run and no bundle", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const bundles: EvidenceBundle[] = [];
+    emitter.onBundle((bundle) => bundles.push(bundle));
+    const record = emitter.addEvent.bind(emitter);
+    vi.spyOn(emitter, "addEvent").mockImplementation(async (jobId, stepId, event) => {
+      if (event.type === "execution_completed") throw new Error("hashEvent rejected");
+      return record(jobId, stepId, event);
+    });
+    const machine = handshakeMachine("machine-unrecorded", {
+      hook: async () => {},
+      onStart: (emit) => emit(evidence("execution_completed", "machine-unrecorded", { of: "job U" })),
+    });
+
+    const result = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-unrecorded", stepId: STEP, gcodeHash: gcode(171), assuranceTier: 1 }));
+    expect.soft(result.success, "the run").toBe(false);
+    expect.soft(result.error, "why").toMatch(/could not be recorded/);
+    expect.soft(bundles.map((b) => b.jobId), "bundles finalized").toEqual([]);
+  });
+});

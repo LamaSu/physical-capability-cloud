@@ -758,7 +758,9 @@ describe("the settle timer", () => {
 });
 
 describe("an addEvent that fails", () => {
-  it.each(["rejects", "throws"] as const)("is logged and skipped when it %s, and the events after it are still recorded", async (how) => {
+  // It was logged and skipped, and the run succeeded without that event. A run whose chain lacks an event it
+  // accepted now fails, and nothing is finalized (found with astra pack 192, where printer-job.ts did the same).
+  it.each(["rejects", "throws"] as const)("fails the run when it %s: the chain would lack that event, so nothing is finalized", async (how) => {
     class FailingEmitter extends EvidenceEmitter {
       override addEvent(jobId: string, stepId: string, rawEvent: Emitted): Promise<EvidenceEvent> {
         if (rawEvent.type === "gcode_received") {
@@ -777,8 +779,9 @@ describe("an addEvent that fails", () => {
 
     const result = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-failing-add", stepId: STEP, gcodeHash: gcode(19), assuranceTier: 1 });
 
-    expect(result).toMatchObject({ success: true });
-    expect(bundles.map((bundle) => bundle.events.map((e) => e.type))).toEqual([["gcode_hash_verified", "execution_completed", "power_profile_summary"]]);
+    expect(result).toMatchObject({ success: false, error: "a gcode_received event of this job could not be recorded (storage full), so its evidence is incomplete" });
+    expect(bundles, "bundles finalized").toEqual([]);
+    expect(emitter.getEvents("job-failing-add", STEP), "the failed run's step, detached").toEqual([]);
     expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ message: "storage full" }));
   });
 });
