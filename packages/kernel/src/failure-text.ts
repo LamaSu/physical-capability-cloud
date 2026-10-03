@@ -14,3 +14,17 @@ export function failureText(err: unknown): string {
   }
   return "a reason with no text form";
 }
+
+/**
+ * An event's type, for a latch's message, read without throwing: an event whose type cannot be
+ * read, or is not a string, is "(unreadable)" (astra pack 209).
+ */
+export function eventType(event: unknown): string {
+  try {
+    const type: unknown = (event as { type?: unknown }).type;
+    if (typeof type === "string") return type;
+  } catch {
+    // Unreadable: the fixed label below.
+  }
+  return "(unreadable)";
+}

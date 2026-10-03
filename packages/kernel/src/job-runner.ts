@@ -9,7 +9,7 @@
 import type { AssuranceTier, SHA256 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
-import { failureText } from "./failure-text.js";
+import { eventType, failureText } from "./failure-text.js";
 import { openEvidenceSession } from "./evidence-session.js";
 import * as Sentry from "@sentry/node";
 
@@ -125,14 +125,26 @@ export class JobRunner {
     // Fail closed: without its quiesceEvidence() an adapter cannot say when a job's
     // evidence is complete, and nothing else binds an event to the job (round 3b).
     const adapters = [this.machine, ...this.sensors, ...(this.camera ? [this.camera] : [])];
-    for (const adapter of adapters) {
-      if (typeof (adapter as { quiesceEvidence?: unknown }).quiesceEvidence !== "function") {
-        return {
-          success: false,
-          error: `adapter ${adapter.id} has no quiesceEvidence(), so its evidence cannot be bound to a job`,
-          durationMs: Date.now() - startTime,
-        };
+    // An adapter that throws while it is checked, or while the session opens (its onEvidence),
+    // fails the run with a result, never a rejection. Nothing is held yet: the session takes
+    // its claim only once every adapter is tapped (astra pack 209).
+    const setupFailed = (what: string, err: unknown): JobResult => ({
+      success: false,
+      error: `${what}: ${failureText(err)}`,
+      durationMs: Date.now() - startTime,
+    });
+    try {
+      for (const adapter of adapters) {
+        if (typeof (adapter as { quiesceEvidence?: unknown }).quiesceEvidence !== "function") {
+          return {
+            success: false,
+            error: `adapter ${adapter.id} has no quiesceEvidence(), so its evidence cannot be bound to a job`,
+            durationMs: Date.now() - startTime,
+          };
+        }
       }
+    } catch (err) {
+      return setupFailed("the run's adapters could not be checked", err);
     }
 
     const stepKey = `${jobId}:${stepId}`; // the emitter's own key for the step
@@ -153,21 +165,26 @@ export class JobRunner {
     // This run's evidence window: events reach the chain only while it is open.
     // A listener per run could not be removed, so it went on recording later and
     // overlapping jobs' events into this run's step (astra pack 168).
-    const opened = openEvidenceSession(
-      adapters,
-      { jobId, stepId },
-      (event) => {
-        recorded = recorded.then(async () => {
-          if (sealed) return;
-          try {
-            await this.evidenceEmitter.addEvent(jobId, stepId, event);
-          } catch (err) {
-            unrecorded.first ??= { type: event.type, error: failureText(err) };
-            console.error(err);
-          }
-        });
-      },
-    );
+    let opened: ReturnType<typeof openEvidenceSession>;
+    try {
+      opened = openEvidenceSession(
+        adapters,
+        { jobId, stepId },
+        (event) => {
+          recorded = recorded.then(async () => {
+            if (sealed) return;
+            try {
+              await this.evidenceEmitter.addEvent(jobId, stepId, event);
+            } catch (err) {
+              unrecorded.first ??= { type: eventType(event), error: failureText(err) };
+              console.error(err);
+            }
+          });
+        },
+      );
+    } catch (err) {
+      return setupFailed("the run's evidence session could not open", err);
+    }
     if (!opened.ok) {
       const { reason, adapterId, jobId: holder } = opened.busy;
       return {
@@ -180,7 +197,15 @@ export class JobRunner {
     const session = opened.session;
     const lease = `${jobId}#${++runs}`;
     leases.set(stepKey, lease);
-    this.evidenceEmitter.registerStep(jobId, stepId, assuranceTier);
+    try {
+      this.evidenceEmitter.registerStep(jobId, stepId, assuranceTier);
+    } catch (err) {
+      // Nothing was sent to a device: release what this run took, and fail with a result.
+      session.close();
+      this.evidenceEmitter.cleanup(jobId, stepId);
+      if (leases.get(stepKey) === lease) leases.delete(stepKey);
+      return setupFailed("the run's step could not be registered", err);
+    }
 
     // Wait for the chain, but not forever: an addEvent may never settle.
     // Resolves false when the timeout comes first.

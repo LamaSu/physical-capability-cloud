@@ -13,6 +13,7 @@ import type { EvidenceBundle, EvidenceEvent, EvidenceSource, SHA256, Signature }
 import type { CameraAdapter, MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus, SensorAdapter } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
+import { failureText } from "../failure-text.js";
 import type { JobResult } from "../job-runner.js";
 
 // Plain functions, not vi.fn(), so vi.restoreAllMocks() cannot strip them.
@@ -146,7 +147,7 @@ async function catchingUnhandled<T>(body: () => Promise<T>): Promise<{ value?: T
     return { value, unhandled };
   } catch (err) {
     await new Promise((r) => setTimeout(r, 30));
-    return { rejected: err instanceof Error ? err.message : "a reason with no text form", unhandled };
+    return { rejected: failureText(err), unhandled };
   } finally {
     process.off("unhandledRejection", on);
   }
@@ -213,5 +214,79 @@ describe("JobRunner: a collaborator that rejects with a reason that has no text 
     expect.soft(second.value?.busy?.reason, "the second run, refused").toBe("quiescing");
     expect.soft(second.unhandled.length, "unhandled rejections").toBe(0);
     expect.soft(console.error, "the hook's failure, logged").toHaveBeenCalledWith(expect.stringMatching(/could not confirm its evidence is complete: /));
+  });
+});
+
+describe("JobRunner's setup, and the latch's event label, whatever a collaborator throws (astra pack 209)", () => {
+  it.each(REASONS)("an adapter whose onEvidence throws %s while the session opens: run() resolves with a failure, and the device is not left claimed", async (what, reason) => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const broken = testMachine(`m-ft-setup-${what}`);
+    broken.onEvidence = () => {
+      throw reason();
+    };
+    const out = await catchingUnhandled(() => new JobRunner(broken, [], null, emitter).run({ jobId: "job-ft-setup", stepId: STEP, gcodeHash: gcode(51), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.success, "success").toBe(false);
+    expect.soft(out.value?.error ?? "", "why").toMatch(/^the run's evidence session could not open: .+/);
+    expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
+    // The same device, with an adapter that works, runs: the failed open claimed nothing.
+    const healthy = testMachine(`m-ft-setup-${what}`);
+    const again = await new JobRunner(healthy, [], null, emitter).run({ jobId: "job-ft-setup-2", stepId: STEP, gcodeHash: gcode(52), assuranceTier: 1 });
+    expect.soft(again.success, "the next run on the same device").toBe(true);
+  });
+
+  it("an adapter whose quiesceEvidence cannot even be read: run() resolves with a failure", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("m-ft-unreadable-hook");
+    Object.defineProperty(machine, "quiesceEvidence", {
+      get: () => {
+        throw Object.create(null);
+      },
+    });
+    const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-ft-hook", stepId: STEP, gcodeHash: gcode(53), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.success, "success").toBe(false);
+    expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
+  });
+
+  it("registerStep throws: run() resolves with a failure, and releases the session and the step's lease", async () => {
+    class BrokenEmitter extends EvidenceEmitter {
+      broken = true;
+      override registerStep(jobId: string, stepId: string, tier: Parameters<EvidenceEmitter["registerStep"]>[2]): void {
+        if (this.broken) throw Object.create(null);
+        super.registerStep(jobId, stepId, tier);
+      }
+    }
+    const emitter = new BrokenEmitter(KERNEL_ID);
+    const machine = testMachine("m-ft-register");
+    const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-ft-reg", stepId: STEP, gcodeHash: gcode(54), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.error ?? "", "why").toMatch(/^the run's step could not be registered: a reason with no text form$/);
+    expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
+    expect.soft(machine.commands, "commands sent").toEqual([]);
+    // The same step on the same device runs once the emitter works: the session and the lease were released.
+    emitter.broken = false;
+    const again = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-ft-reg", stepId: STEP, gcodeHash: gcode(54), assuranceTier: 1 });
+    expect.soft(again.success, "the same step, run again").toBe(true);
+  });
+
+  it("addEvent rejects for an event whose type cannot be read: the latch still names it, and run() resolves with a failure", async () => {
+    class FailingEmitter extends EvidenceEmitter {
+      override addEvent(): Promise<EvidenceEvent> {
+        return Promise.reject(new Error("storage full"));
+      }
+    }
+    const emitter = new FailingEmitter(KERNEL_ID);
+    const odd = { timestamp: new Date().toISOString(), source: { deviceId: "m-ft-type", deviceType: "controller", kernelId: KERNEL_ID }, payload: {} } as Record<string, unknown>;
+    Object.defineProperty(odd, "type", {
+      get: () => {
+        throw new Error("no type");
+      },
+    });
+    const machine = testMachine("m-ft-type", { onLoad: () => [odd as unknown as Emitted] });
+    const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-ft-type", stepId: STEP, gcodeHash: gcode(55), assuranceTier: 1 }));
+    expect.soft(out.rejected, "run() rejected").toBeUndefined();
+    expect.soft(out.value?.error ?? "", "why").toBe("a (unreadable) event of this job could not be recorded (storage full), so its evidence is incomplete");
+    expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
   });
 });
