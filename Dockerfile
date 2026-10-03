@@ -102,6 +102,10 @@ RUN cd packages/gateway && node -e "const v = require('@fastify/static/package.j
 
 # Copy all source and build
 COPY . .
+# Build provenance (N5): digest the source exactly as copied, BEFORE anything is built, so the
+# digest binds /api/health to the files this image's code is built from. Same script CI and
+# scripts/verify-build-source.sh use (spec pcc.source-digest/v1 in scripts/source-digest.sh).
+RUN mkdir -p /opt/pcc && sh scripts/source-digest.sh /app > /opt/pcc/source-digest && echo "[docker] source digest $(cat /opt/pcc/source-digest)"
 ARG BUILD_BUST=7
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 # Build all packages except dashboard and mcp-server (tsc only — turbo handles deps)
@@ -160,6 +164,40 @@ ENV PCC_NETWORK=base-sepolia
 ENV PCC_DB_PATH=/app/data/pcc.sqlite
 ENV SERVE_DASHBOARD=true
 ENV DASHBOARD_PATH=/app/apps/dashboard/dist
+
+# Build provenance (N5): the commit this image was built from, written into the image's FILES
+# (not an ENV), so no runtime variable can change what /api/health reports.
+#   PCC_BUILD_SHA           CI's GHCR image build passes github.sha (ci.yml build-args).
+#   RAILWAY_GIT_COMMIT_SHA  Railway provides it when it builds this Dockerfile from a commit.
+# A build argument is a CLAIM: whoever runs the build chooses it. What binds it to the code is
+# sourceDigest (computed above from the copied source): CI refuses to push an image whose digest
+# differs from its checkout of github.sha, and scripts/verify-build-source.sh checks any served
+# image against a commit. Rules: a non-empty argument that is not a full 40-hex SHA fails the
+# build; two full SHAs that differ fail the build; with neither, commit is null. The file is
+# always written (it always carries sourceDigest), after removing any earlier copy.
+ARG PCC_BUILD_SHA=""
+ARG RAILWAY_GIT_COMMIT_SHA=""
+RUN set -e; \
+    rm -f /app/BUILD_INFO.json; \
+    ci="$(printf '%s' "$PCC_BUILD_SHA" | tr 'A-F' 'a-f')"; \
+    rw="$(printf '%s' "$RAILWAY_GIT_COMMIT_SHA" | tr 'A-F' 'a-f')"; \
+    full() { case "$1" in ""|*[!0-9a-f]*) return 1;; esac; [ "${#1}" -eq 40 ]; }; \
+    if [ -n "$ci" ] && ! full "$ci"; then echo "[docker] PCC_BUILD_SHA is set but is not a full 40-hex SHA; refusing to build" >&2; exit 1; fi; \
+    if [ -n "$rw" ] && ! full "$rw"; then echo "[docker] RAILWAY_GIT_COMMIT_SHA is set but is not a full 40-hex SHA; refusing to build" >&2; exit 1; fi; \
+    if [ -n "$ci" ] && [ -n "$rw" ] && [ "$ci" != "$rw" ]; then \
+      echo "[docker] PCC_BUILD_SHA ($ci) and RAILWAY_GIT_COMMIT_SHA ($rw) disagree; refusing to record a build commit" >&2; exit 1; \
+    fi; \
+    digest="$(cat /opt/pcc/source-digest 2>/dev/null || true)"; \
+    case "$digest" in sha256:*) ;; *) echo "[docker] no source digest was recorded; refusing to build" >&2; exit 1;; esac; \
+    hex="${digest#sha256:}"; \
+    case "$hex" in ""|*[!0-9a-f]*) echo "[docker] the source digest is malformed; refusing to build" >&2; exit 1;; esac; \
+    [ "${#hex}" -eq 64 ] || { echo "[docker] the source digest is malformed; refusing to build" >&2; exit 1; }; \
+    if [ -n "$ci" ]; then commit="\"$ci\""; arg='"PCC_BUILD_SHA"'; \
+    elif [ -n "$rw" ]; then commit="\"$rw\""; arg='"RAILWAY_GIT_COMMIT_SHA"'; \
+    else commit=null; arg=null; fi; \
+    printf '{"commit":%s,"buildArg":%s,"sourceDigest":"%s","sourceDigestSpec":"pcc.source-digest/v1"}\n' "$commit" "$arg" "$digest" > /app/BUILD_INFO.json; \
+    chmod 0444 /app/BUILD_INFO.json; \
+    echo "[docker] build info: $(cat /app/BUILD_INFO.json)"
 
 # As root: ensure the (possibly volume-mounted) /app/data is writable by pcc, then drop to pcc.
 ENTRYPOINT ["/bin/sh", "-c", "if [ \"$(id -u)\" = \"0\" ]; then mkdir -p /app/data && chown -R pcc:pcc /app/data && exec gosu pcc \"$@\"; fi; exec \"$@\"", "--"]
