@@ -490,6 +490,18 @@ describe("the rules catch each known way around them (self-test)", () => {
     for (const [rule, line] of cases) expect(caught(line), line).toContain(rule);
   });
 
+  it("astra round 5: a built-in or global replaced through a mutation API, not an assignment", () => {
+    for (const line of [
+      'Object.defineProperty(Headers.prototype, "set", { value: observe });',
+      "Object.assign(Headers.prototype, { set: observe });",
+      'Object.defineProperties(Request.prototype, { headers: { get: observe } });',
+      'Object.defineProperty(navigator, "sendBeacon", { value: observe });',
+      "Object.setPrototypeOf(Headers.prototype, Spy.prototype);",
+    ]) {
+      expect(caught(line), line).toContain("global-write");
+    }
+  });
+
   it("the syntax rules let through what the app does", () => {
     for (const [code, rel] of [
       ['window.location.href = "/";', "pages/Probe.ts"],
