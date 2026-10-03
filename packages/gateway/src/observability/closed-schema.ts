@@ -288,6 +288,24 @@ export function closedMessage(message: unknown, ...args: unknown[]): string {
   return keyedHash(text);
 }
 
+// ── The telemetry key at boot ──────────────────────────────────────────────
+
+/**
+ * What boot says about the telemetry key (round 2, MEDIUM 4). Without a valid PCC_TELEMETRY_KEY every
+ * hash uses a per-process key; in production that is one loud warning naming what breaks. The
+ * gateway still starts: refusing to is the operator's decision (#5708).
+ */
+export function telemetryKeyWarning(nodeEnv: string | undefined, ephemeral = TELEMETRY_KEY_EPHEMERAL): { level: "error" | "warn"; message: Declared } | undefined {
+  if (!ephemeral) return undefined;
+  if (nodeEnv === "production") {
+    return {
+      level: "error",
+      message: lit("[observability] WARNING: NODE_ENV=production and PCC_TELEMETRY_KEY is unset or shorter than 32 characters. Every telemetry hash uses a key this process made: after a restart, audit rows it wrote are no longer found by actor, trace or report id, and PostHog and Sentry ids no longer join across restarts. Set PCC_TELEMETRY_KEY (32+ characters) to keep them."),
+    };
+  }
+  return { level: "warn", message: lit("[observability] PCC_TELEMETRY_KEY is not set: telemetry hashes use a per-process key and do not correlate across restarts.") };
+}
+
 // ── Request scope ──────────────────────────────────────────────────────────
 
 /** Set for the lifetime of each request (an onRequest hook): request-path console output is closed. */

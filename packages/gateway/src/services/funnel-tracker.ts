@@ -29,9 +29,9 @@
 
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import { trace } from "@opentelemetry/api";
-import { auditService } from "./audit-service.js";
+import { auditService, isStoredId, storedIdKey } from "./audit-service.js";
 import { identifyAgent, trackServerEvent } from "./posthog-service.js";
-import { declare, declaredRoute, isDeclared, keyedHash, lit, routeTemplates, type Declared } from "../observability/closed-schema.js";
+import { declare, declaredRoute, isDeclared, lit, routeTemplates, type Declared } from "../observability/closed-schema.js";
 
 // ── Stages ───────────────────────────────────────────────────────────────────
 
@@ -208,10 +208,10 @@ export interface FunnelStageRow {
 export function getFunnelForTraceId(traceId: string): FunnelStageRow[] {
   const rows = auditService.query({ eventType: FUNNEL_AUDIT_EVENT, limit: 10000 });
   const out: FunnelStageRow[] = [];
-  // The audit log keeps the trace id as its keyed hash (N107b): compare the same way.
-  const traceKey = keyedHash(traceId);
+  // The closed audit log keeps the trace id as its keyed hash (N107b); a row written before it
+  // keeps the id itself (round 2, MEDIUM 4). Either is this trace's.
   for (const r of rows) {
-    if (r.resourceId !== traceKey) continue;
+    if (!isStoredId(r.resourceId, traceId)) continue;
     const meta = (r.metadata ?? {}) as Record<string, unknown>;
     const stage = asStage(r.action) ?? asStage(meta.stage);
     if (!stage) continue;
@@ -253,9 +253,10 @@ export function getCohortFunnel(opts: { since?: string } = {}): FunnelCohortRow[
   for (const r of rows) {
     const meta = (r.metadata ?? {}) as Record<string, unknown>;
     const stage = asStage(r.action) ?? asStage(meta.stage);
-    const traceId = r.resourceId;
-    if (!stage || !traceId) continue;
-    perStage.get(stage)!.add(traceId);
+    // One key per trace, whichever schema wrote its rows (round 2, MEDIUM 4).
+    const traceKey = storedIdKey(r.resourceId);
+    if (!stage || !traceKey) continue;
+    perStage.get(stage)!.add(traceKey);
   }
 
   const entry = perStage.get("provision")!.size;

@@ -6,6 +6,8 @@
  *   MEDIUM 2    a child logger's nested bindings passed the line check untouched;
  *   MEDIUM 3    trust came from a value's spelling or key: an ISO timestamp, a number under a
  *               metric-like key, or a value equal to one of the gateway's literals left raw;
+ *   MEDIUM 4    rows written before the closed audit log (raw actor and trace ids) were no longer
+ *               found by the actor query, the funnel or the journey view.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { Writable } from "node:stream";
@@ -248,14 +250,25 @@ describe("MEDIUM 3: no value leaves raw because of its spelling or its key; a pr
   });
 });
 
-describe("MEDIUM 3 (audit): the closed audit log", () => {
+describe("MEDIUM 3 (audit) and MEDIUM 4: the closed audit log, and the rows written before it", () => {
+  const LEGACY_ACTOR = mark("legacy-actor");
+  const LEGACY_TRACE = "tr_" + ["0123", "4567", "89ab", "cdef"].join("");
+
   beforeAll(async () => {
     process.env.PCC_DB_PATH = ":memory:";
     const db = await import("../../db.js");
     db.initStore({ seed: false });
+    // Rows as the audit log held them before N107b: raw actor, trace and report ids.
+    const repos = db.getRepos();
+    const at = new Date().toISOString();
+    repos.auditLog.insert({ timestamp: at, eventType: "http.write", actor: LEGACY_ACTOR, resourceType: "http", resourceId: null, action: "post", metadata: null, ip: null, userAgent: null } as never);
+    repos.auditLog.insert({ timestamp: at, eventType: "agent.funnel", actor: LEGACY_TRACE, resourceType: "agent_journey", resourceId: LEGACY_TRACE, action: "provision", metadata: { stage: "provision", route: "/api/auth/provision", status: 201, ts: at }, ip: null, userAgent: null } as never);
+    repos.auditLog.insert({ timestamp: at, eventType: "agent.report", actor: null, resourceType: "report", resourceId: "rep_legacy", action: "report", metadata: { trace_id: LEGACY_TRACE, summary: "legacy" }, ip: null, userAgent: null } as never);
   });
   afterAll(async () => {
     (await import("../../db.js")).closeStore();
+    delete process.env.PCC_FUNNEL_ENABLED;
+    delete process.env.PCC_OBSERVABILITY_ADMINS;
   });
 
   it("MEDIUM 3: a request-derived number or timestamp in audit metadata is not stored raw; a declared field is", async () => {
@@ -268,4 +281,52 @@ describe("MEDIUM 3 (audit): the closed audit log", () => {
     expect(declared).toMatchObject({ eventType: "n107b.declared", action: "probe", metadata: { count: 5 } });
   });
 
+  it("MEDIUM 4: a legacy row is still found by actor, by the funnel and by the journey view", async () => {
+    const { auditService } = await import("../../services/audit-service.js");
+    expect(auditService.query({ actor: LEGACY_ACTOR }), "the actor query").toHaveLength(1);
+    const { getFunnelForTraceId } = await import("../../services/funnel-tracker.js");
+    expect(getFunnelForTraceId(LEGACY_TRACE).map((s) => s.stage), "the funnel").toEqual(["provision"]);
+
+    process.env.PCC_FUNNEL_ENABLED = "true";
+    process.env.PCC_OBSERVABILITY_ADMINS = "n107b-r2-admin";
+    const app = Fastify({ logger: false });
+    app.addHook("onRequest", async (req) => {
+      (req as unknown as { operatorId: string }).operatorId = "n107b-r2-admin";
+    });
+    const { adminObservabilityRoutes } = await import("../../routes/admin-observability.js");
+    await app.register(adminObservabilityRoutes);
+    await app.ready();
+    const res = await app.inject({ method: "GET", url: `/api/admin/observability/journey/${LEGACY_TRACE}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.funnel_stages.map((s: { stage: string }) => s.stage), "the journey's funnel").toEqual(["provision"]);
+    expect(body.reports, "the journey's reports").toHaveLength(1);
+    await app.close();
+  });
+
+  it("MEDIUM 4: a journey that spans the change counts once: a legacy row and a closed row of one trace", async () => {
+    const { recordStage, getCohortFunnel, getFunnelForTraceId } = await import("../../services/funnel-tracker.js");
+    const before = getCohortFunnel().find((s) => s.stage === "provision")!.count;
+    recordStage(LEGACY_TRACE, "provision", "/api/auth/provision", 201);
+    recordStage(LEGACY_TRACE, "discover", "/api/capabilities/types", 200);
+    const cohort = getCohortFunnel();
+    expect(cohort.find((s) => s.stage === "provision")!.count, "the same trace, written raw and hashed, is one").toBe(before);
+    expect(getFunnelForTraceId(LEGACY_TRACE).map((s) => s.stage)).toEqual(["provision", "provision", "discover"]);
+  });
+
+  it("MEDIUM 4: without a telemetry key, production boot logs one loud warning naming the consequence, and still starts", async () => {
+    const loud = schema.telemetryKeyWarning("production", true)!;
+    expect(loud.level).toBe("error");
+    const text = schema.closedText(loud.message);
+    expect(text).toContain("PCC_TELEMETRY_KEY");
+    expect(text).toContain("after a restart, audit rows it wrote are no longer found");
+    expect(schema.telemetryKeyWarning("development", true)!.level).toBe("warn");
+    expect(schema.telemetryKeyWarning("production", false)).toBeUndefined();
+    // It reaches the log as written: the message is declared.
+    const { lines, stream } = capture();
+    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream } });
+    app.log[loud.level](loud.message);
+    expect(lines.join("")).toContain("NODE_ENV=production and PCC_TELEMETRY_KEY is unset");
+    await app.close();
+  });
 });

@@ -30,8 +30,11 @@ const h = vi.hoisted(() => {
 // The audit writer's contract (N107b, round 2): a code is stored as its producer declared it (or
 // as its keyed hash), the actor and the resource id as keyed hashes, the metadata closed.
 vi.mock("../services/audit-service.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/audit-service.js")>("../services/audit-service.js");
   const { closedId, closedText, closeValue } = await import("../observability/closed-schema.js");
   return {
+  isStoredId: actual.isStoredId,
+  storedIdKey: actual.storedIdKey,
   auditService: {
     log: (e: Record<string, unknown>) => {
       h.logged.push({

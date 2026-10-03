@@ -6,7 +6,7 @@ initSentry();
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 initPostHog();
 import { closeConsole, gatewayLoggerOptions, issueRequestId } from "./observability/closed-sinks.js";
-import { declare, declaredRoute, lit, METHODS, openRequestScope, TELEMETRY_KEY_EPHEMERAL, trackRouteTemplates } from "./observability/closed-schema.js";
+import { declare, declaredRoute, lit, METHODS, openRequestScope, telemetryKeyWarning, trackRouteTemplates } from "./observability/closed-schema.js";
 // Request-path console output leaves under the closed observability schema (N107b).
 closeConsole();
 import { randomBytes } from "node:crypto";
@@ -200,9 +200,10 @@ export async function createGateway(port = 3200) {
   // scope that closes request-path console output. Both before any route or plugin.
   trackRouteTemplates(app);
   app.addHook("onRequest", openRequestScope);
-  if (TELEMETRY_KEY_EPHEMERAL) {
-    app.log.warn(lit("[observability] PCC_TELEMETRY_KEY is not set: telemetry hashes use a per-process key and do not correlate across restarts."));
-  }
+  // Without a valid PCC_TELEMETRY_KEY every hash uses a per-process key: one warning, loud in
+  // production (round 2, MEDIUM 4). The gateway still starts; refusing to is the operator's call (#5708).
+  const keyWarning = telemetryKeyWarning(process.env.NODE_ENV);
+  if (keyWarning) app.log[keyWarning.level](keyWarning.message);
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
