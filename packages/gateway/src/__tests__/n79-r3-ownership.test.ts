@@ -112,7 +112,7 @@ import { escrowRoutes } from "../routes/escrow.js";
 import { settlementRoutes } from "../routes/settlement.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
-import { escrowForJob, recordMilestoneReleased, setJobStatusWithRefund } from "../services/escrow-refund.js";
+import { escrowForJob, recordChainSettlement, setJobStatusWithRefund } from "../services/escrow-refund.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { runKeeperSweep } from "../services/settlement-keeper.js";
 import { driveSettlement } from "../services/settlement-crank.js";
@@ -381,14 +381,19 @@ describe("N79 round 3: settlement ownership is exclusive, and a settlement never
     expect(escrowState(jobId)).toEqual({ escrow: "refund_pending", milestones: ["refund_pending"] });
   });
 
-  it("F2: recordMilestoneReleased never turns a refund_pending escrow into completed", async () => {
+  it("F2: recordChainSettlement never turns a refund_pending escrow into completed (was: recordMilestoneReleased)", async () => {
     const jobId = await submitPaidJob(app, "user-n79r3-f2-unit");
     pointEscrowAtChain(jobId, addr(0xe5c104), "v2");
     const escrow = escrowForJob(jobId)!;
+    const stepId = getRepos().jobs.findById(jobId)!.stepId;
     expect(setJobStatusWithRefund(jobId, "failed").escrowRefund?.outcome).toBe("refund_pending");
 
-    // A release that was confirmed on-chain reports in late, holding a claim the refund long outlived.
-    recordMilestoneReleased(0, { escrowId: escrow.id, token: Symbol("late-release"), leasedStatus: "completing" } as never);
+    // A release that was confirmed on-chain reports in late, holding a claim the refund long outlived. The
+    // chain mapping matches (no drift) — the point of this case is that the escrow is already given back.
+    recordChainSettlement(
+      { escrowId: escrow.id, token: Symbol("late-release"), leasedStatus: "completing" } as never,
+      { stepIds: [keccak256(toBytes(stepId))], statuses: [chain.MilestoneStatusV2.Released], releasedStatus: chain.MilestoneStatusV2.Released },
+    );
 
     expect(getRepos().escrows.findById(escrow.id)!.status).toBe("refund_pending");
   });

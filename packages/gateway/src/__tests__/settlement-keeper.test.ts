@@ -39,14 +39,27 @@ vi.mock("../services/settlement-crank.js", () => ({
 // N79 round 3: the keeper claims each escrow through the ownership module (escrow-refund.ts), which works on the gateway's
 // GLOBAL store, while runKeeperSweep takes its repos by injection (production passes getRepos(), the same store). These
 // tests inject fake repos, so the ownership module is faked here with simple fakes: every escrow can be claimed, nothing is
-// handed back, and recording a completion reports success. The real-store proof of the keeper's ownership (a refund during
-// the drive, a busy escrow, a hand-back, the lease never leaking) is n79-r3-ownership.test.ts (F1) and n79-r3-lease.test.ts.
+// handed back on its own, and the mapping check always reports no drift (a test that needs drift overrides it). The
+// real-store proof of the keeper's ownership (a refund during the drive, a busy escrow, a hand-back, the lease never
+// leaking) is n79-r3-ownership.test.ts (F1) and n79-r3-lease.test.ts; the real-store proof of the mapping check and the
+// guarded writer themselves (drift quarantine, partial hand-back, full completion) is n79-r5-review.test.ts and
+// n79-r3-lease.test.ts.
+//
+// N79 round 6 (addendum 1, P1, "whichever leaves fewer doors"): `recordEscrowReleased` / `recordMilestoneRowReleased`
+// are REMOVED from escrow-refund.ts (the keeper no longer calls them — see settlement-keeper.ts). Faked here instead:
+// `checkChainMapping` (the P4 compare) and `recordChainSettlement` (the ONE guarded writer, P1), which the keeper now
+// calls UNCONDITIONALLY once per escrow whenever the mapping is clean — not only when every milestone turns out
+// Released. The fake mirrors just enough of the real logic (no DB, no drift unless a test asks for it) to keep
+// `result.reconciledCompleted` meaningful: completed iff every status in the chain set equals `releasedStatus`.
 vi.mock("../services/escrow-refund.js", () => ({
   beginSettlement: vi.fn(), // its default implementation (claim everything) is set in beforeEach below
   endSettlement: vi.fn(),
   releaseEscrowFromSettlement: vi.fn(),
-  recordEscrowReleased: vi.fn(() => true),
-  recordMilestoneRowReleased: vi.fn(),
+  checkChainMapping: vi.fn(() => ({ ok: true, chainCount: 0, localCount: 0 })),
+  recordChainSettlement: vi.fn((_claim: unknown, chain: { statuses: number[]; releasedStatus: number }) => ({
+    ok: true,
+    completed: chain.statuses.length > 0 && chain.statuses.every((s) => s === chain.releasedStatus),
+  })),
 }));
 
 import {
@@ -57,7 +70,7 @@ import {
   type OnChainEscrowStateV2,
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
-import { beginSettlement, recordEscrowReleased } from "../services/escrow-refund.js";
+import { beginSettlement, releaseEscrowFromSettlement, recordChainSettlement } from "../services/escrow-refund.js";
 import { runKeeperSweep } from "../services/settlement-keeper.js";
 import type { IRepositories } from "@pcc/store";
 
@@ -65,7 +78,8 @@ const mState = vi.mocked(getEscrowStateV2);
 const mWriteEnabled = vi.mocked(isWriteEnabled);
 const mDrive = vi.mocked(driveSettlement);
 const mBegin = vi.mocked(beginSettlement);
-const mRecord = vi.mocked(recordEscrowReleased);
+const mRecord = vi.mocked(recordChainSettlement); // was recordEscrowReleased (round 6, P1: one guarded writer)
+const mHandBack = vi.mocked(releaseEscrowFromSettlement);
 
 const NOW = 5_000_000_000;
 const PAST = NOW - 1_000; // window already closed
@@ -199,7 +213,13 @@ describe("runKeeperSweep — release-past-window (the core self-heal)", () => {
     expect(mDrive).not.toHaveBeenCalled();
     expect(r.milestones[0].disposition).toBe("pending_window");
     expect(r.released).toBe(0);
-    expect(mRecord).not.toHaveBeenCalled();
+    // N79 round 6 (P1): the keeper now calls recordChainSettlement UNCONDITIONALLY once per (mapping-clean)
+    // escrow — it decides completion/hand-back internally, rather than the keeper gating the call on
+    // `allReleased` first (old: recordEscrowReleased was never called for anything but a full release; the
+    // hand-back went through the separate releaseEscrowFromSettlement instead). Not released → not completed.
+    expect(mRecord).toHaveBeenCalledTimes(1);
+    expect(r.reconciledCompleted).toBe(0);
+    expect(mHandBack).not.toHaveBeenCalled(); // the hand-back is recordChainSettlement's own job now
   });
 
   it("leaves a below-Attested milestone untouched (fund/evidence/attest are not the keeper's job)", async () => {
@@ -227,8 +247,11 @@ describe("runKeeperSweep — terminal-other is surfaced, never settled", () => {
     expect(r.released).toBe(0);
     expect(r.milestones[0].disposition).toBe("terminal_other");
     expect(r.milestones[0].reason).toBe("disputed");
-    // Money frozen → NOT reconciled to completed.
-    expect(mRecord).not.toHaveBeenCalled();
+    // Money frozen → NOT reconciled to completed. N79 round 6 (P1): recordChainSettlement is still called (it
+    // now runs unconditionally once per mapping-clean escrow) but reports no completion.
+    expect(mRecord).toHaveBeenCalledTimes(1);
+    expect(r.reconciledCompleted).toBe(0);
+    expect(mHandBack).not.toHaveBeenCalled();
   });
 
   it("counts terminal_other (not released) when a dispute lands mid-drive (crank confirming read)", async () => {
@@ -248,7 +271,10 @@ describe("runKeeperSweep — terminal-other is surfaced, never settled", () => {
     expect(r.terminalOther).toBe(1);
     expect(r.released).toBe(0);
     expect(r.milestones[0].disposition).toBe("terminal_other");
-    expect(mRecord).not.toHaveBeenCalled(); // never reconciled off a non-release
+    // N79 round 6 (P1): called, but reports no completion (the dispute means NOT every status is Released).
+    expect(mRecord).toHaveBeenCalledTimes(1);
+    expect(r.reconciledCompleted).toBe(0);
+    expect(mHandBack).not.toHaveBeenCalled();
   });
 
   it("counts awaiting (not released) when the crank defers on a chain-clock lag", async () => {
@@ -319,7 +345,9 @@ describe("runKeeperSweep — idempotency & multi-milestone reconciliation", () =
     const r = await runKeeperSweep(repos, { nowSeconds: NOW });
 
     expect(r.released).toBe(1);
-    expect(mRecord).not.toHaveBeenCalled();
+    // N79 round 6 (P1): called once (idx1 is still Evidenced, so not every status is Released — no completion).
+    expect(mRecord).toHaveBeenCalledTimes(1);
+    expect(mHandBack).not.toHaveBeenCalled();
     expect(r.reconciledCompleted).toBe(0);
   });
 });
@@ -472,6 +500,10 @@ describe("runKeeperSweep — filtering & resilience", () => {
     expect(r.blocked).toBe(1);
     expect(r.released).toBe(0);
     expect(r.milestones[0].disposition).toBe("blocked");
-    expect(mRecord).not.toHaveBeenCalled(); // never reconciled on a failed drive
+    // N79 round 6 (P1): called (mapping is still clean — only the drive itself failed), but reports no
+    // completion (the chain-throw-blocked milestone's status never advanced to Released).
+    expect(mRecord).toHaveBeenCalledTimes(1);
+    expect(r.reconciledCompleted).toBe(0);
+    expect(mHandBack).not.toHaveBeenCalled();
   });
 });

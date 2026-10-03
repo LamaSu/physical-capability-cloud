@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SettlementService, resetSettlementService } from "../services/settlement-service.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import type { EvidenceBundle } from "@pcc/spec";
 import type { OracleAttestation } from "@pcc/contracts";
 
@@ -169,6 +169,21 @@ describe("Settlement Pipeline Telemetry", () => {
     initStore({ seed: true });
     resetSettlementService();
     vi.clearAllMocks();
+    // N79 round 6 (P2, bind-first): processEvidence now requires an authoritative job matching the bundle's
+    // own jobId/stepId/kernelId/assuranceTier. This fixture used no real job row at all; give it one, with
+    // the SAME fields makeBundle() already uses. Fixture only — no assertion in this file changed.
+    const repos = getRepos();
+    const capability = repos.capabilities.findAll()[0]!;
+    repos.jobs.insert({
+      id: "job-settle-telemetry-001",
+      stepId: "step-1",
+      cwmId: "cwm-settle-telemetry-001",
+      capabilityId: capability.id,
+      kernelId: "kernel-test",
+      status: "in_progress",
+      assignedDevices: [],
+      assuranceTier: 0,
+    });
   });
 
   afterEach(() => {

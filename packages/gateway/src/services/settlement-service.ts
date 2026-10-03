@@ -14,21 +14,23 @@
 import type { EvidenceBundle } from "@pcc/spec";
 import { isFabricated } from "@pcc/spec";
 import { isAddress, getAddress } from "viem";
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
-import { getRepos } from "../db.js";
+import { getRepos, getStore } from "../db.js";
 import {
   beginSettlement,
   endSettlement,
   escrowForJob,
   givenBackEscrow,
-  recordMilestoneReleased,
+  recordChainSettlement,
   releaseEscrowFromSettlement,
 } from "./escrow-refund.js";
 import {
   submitEvidence as onChainSubmitEvidence,
   releaseMilestone as onChainReleaseMilestone,
+  getEscrowState as getEscrowStateV1,
   isWriteEnabled,
+  MilestoneStatus,
 } from "../contracts/escrow-client.js";
 import { Sentry } from "../sentry.js";
 import { traceCollector, TraceCollector } from "../trace-collector.js";
@@ -113,6 +115,52 @@ export class SettlementService {
       evidenceBundleId: bundle.id,
       settled: false,
     };
+
+    // ── Bind first (N79 round 6, H1-B / addendum 1 P2) ──────────────────────
+    // BEFORE Step 1 — before any persistence or chain activity — the bundle's job, step, kernel and tier must
+    // all name THIS call's own authoritative job, and a supplied contractAddress must name that job's OWN
+    // escrow (when it has one). Without this, a bundle legitimately produced for one job could be persisted
+    // under a different job's identity and settled against a completely different escrow (astra 126f H1-B:
+    // `processEvidence(bundleForA, jobB, {contractAddress: escrowB})` persisted A's row, submitted to B's
+    // escrow, and pointed B at A's evidence). Checked every producer of bundles (kernel-service.ts's two
+    // auto-release call sites) already passes the job's own step/kernel/tier and `autoReleaseContractAddress`
+    // (the job's own escrow, or the env default when it has none) — neither is loosened or bypassed by this.
+    // Lead addendum 2: this lookup (and the escrow-target lookup below it) must never throw OUT of
+    // processEvidence — a store that will not open used to propagate as an uncaught exception here, where
+    // every caller before this round got a result object back. Touch nothing on failure: no persistence, no
+    // chain activity — which the early return already guarantees.
+    try {
+      const authoritativeJob = getRepos().jobs.findById(jobId);
+      if (
+        !authoritativeJob ||
+        bundle.jobId !== jobId ||
+        bundle.stepId !== authoritativeJob.stepId ||
+        bundle.kernelId !== authoritativeJob.kernelId ||
+        bundle.assuranceTier !== (authoritativeJob.assuranceTier ?? 0)
+      ) {
+        return { ...result, error: "evidence_job_mismatch" };
+      }
+      if (contractAddress) {
+        const jobOwnEscrow = escrowForJob(jobId);
+        if (jobOwnEscrow) {
+          let targetIsJobsOwnEscrow = false;
+          try {
+            targetIsJobsOwnEscrow =
+              contractAddress === jobOwnEscrow.contractAddress ||
+              (isAddress(contractAddress) &&
+                isAddress(jobOwnEscrow.contractAddress) &&
+                getAddress(contractAddress) === getAddress(jobOwnEscrow.contractAddress));
+          } catch {
+            targetIsJobsOwnEscrow = false;
+          }
+          if (!targetIsJobsOwnEscrow) {
+            return { ...result, error: "escrow_mismatch" };
+          }
+        }
+      }
+    } catch {
+      return { ...result, error: "evidence_job_unverifiable" };
+    }
 
     // ── Fabrication gate (detector side, coord #312/#316) ───────────────────
     // A bundle carrying any mock/simulated event must NOT settle as real. This
@@ -220,65 +268,94 @@ export class SettlementService {
             async () => {
               try {
                 const repos = getRepos();
+                const storeDb = getStore().db;
 
-                try {
-                  repos.evidence.insert({
-                    id: bundle.id,
-                    jobId: bundle.jobId,
-                    stepId: bundle.stepId,
-                    kernelId: bundle.kernelId,
-                    assuranceTier: bundle.assuranceTier,
-                    bundleHash: bundle.bundleHash,
-                    kernelSignature: bundle.kernelSignature,
-                    createdAt: bundle.createdAt,
-                  });
-                  bundlePersisted = true;
-                } catch (insertErr) {
-                  // N79 round 5 (R5-H1, astra 126e Q2 HIGH): the insert can throw because `bundle.id` already
-                  // exists — most often an EXACT re-delivery of the same bundle (idempotent: a retried call, a
-                  // duplicate network delivery), which must proceed exactly as a fresh insert would. Anything else
-                  // under that same id — a different job/step/kernel/tier, or (loudest) a DIFFERENT hash — is a
-                  // genuine conflict: this call's evidence was NOT persisted, so it must not be submitted on-chain
-                  // or pointed at by the job. A row that cannot even be re-read throws to the outer catch below:
-                  // a bare persistence failure, same consequence.
-                  const existing = repos.evidence.findById(bundle.id);
-                  const exactReDelivery =
-                    existing !== undefined &&
-                    existing.jobId === bundle.jobId &&
-                    existing.stepId === bundle.stepId &&
-                    existing.kernelId === bundle.kernelId &&
-                    existing.assuranceTier === bundle.assuranceTier &&
-                    existing.bundleHash === bundle.bundleHash;
-                  if (exactReDelivery) {
-                    bundlePersisted = true;
-                    console.warn(`[settlement] Evidence bundle ${bundle.id} already persisted identically — idempotent re-delivery, proceeding.`);
-                  } else {
-                    result.error = existing ? "evidence_bundle_conflict" : "evidence_persistence_failed";
-                    console.warn(
-                      `[settlement] DB persistence failed for bundle ${bundle.id}: ${
-                        existing
-                          ? `an existing row under this id does not match this bundle (job/step/kernel/tier/hash) — refusing to settle on it`
-                          : insertErr instanceof Error
-                            ? insertErr.message
-                            : String(insertErr)
-                      }`,
-                    );
-                  }
-                }
+                // N79 round 6 (H1-A / addendum 1 P3): the header row and all its events are written in ONE
+                // transaction, and `bundlePersisted` is set only once it COMMITS. Before this, the header insert
+                // and the events insert were two separate writes: a header that landed followed by an events
+                // write that threw left `bundlePersisted` true forever (nothing ever reset it), so the job still
+                // settled — on-chain submission and auto-release both included — on evidence this call never
+                // actually finished persisting (astra 126f H1-A). Re-delivery now must match the header AND the
+                // stored events (the same set of (event id, event hash)) to count as exact: a header whose events
+                // are missing or different (a LEGACY partial row, possibly from before this fix existed) is a
+                // conflict, not an idempotent retry — healing it silently here would let a call settle on
+                // evidence it did not itself commit. Deliberately NOT wrapped in its own try/catch: any throw
+                // (the deliberate re-throws below, or anything unanticipated, e.g. a re-read that itself fails)
+                // propagates to the SAME outer catch the original two-write version relied on, so it skips
+                // `bundlePersisted = true` AND the unconditional status marker below exactly as before — the
+                // outer catch's own fallback (`if (!bundlePersisted && !result.error) ...`) still applies.
+                storeDb.transaction(() => {
+                  try {
+                    repos.evidence.insert({
+                        id: bundle.id,
+                        jobId: bundle.jobId,
+                        stepId: bundle.stepId,
+                        kernelId: bundle.kernelId,
+                        assuranceTier: bundle.assuranceTier,
+                        bundleHash: bundle.bundleHash,
+                        kernelSignature: bundle.kernelSignature,
+                        createdAt: bundle.createdAt,
+                      });
+                    } catch (insertErr) {
+                      // A PRE-EXISTING row under this id (from a prior call, possibly a different bundle
+                      // entirely). Exact only when the header AND every stored event match this bundle's.
+                      const existing = repos.evidence.findById(bundle.id);
+                      const existingEvents = existing ? repos.evidence.findEventsByBundle(bundle.id) : [];
+                      const exactReDelivery =
+                        existing !== undefined &&
+                        existing.jobId === bundle.jobId &&
+                        existing.stepId === bundle.stepId &&
+                        existing.kernelId === bundle.kernelId &&
+                        existing.assuranceTier === bundle.assuranceTier &&
+                        existing.bundleHash === bundle.bundleHash &&
+                        existingEvents.length === bundle.events.length &&
+                        bundle.events.every((ev) => existingEvents.some((e) => e.id === ev.id && e.hash === ev.hash));
+                      if (exactReDelivery) {
+                        console.warn(`[settlement] Evidence bundle ${bundle.id} already persisted identically — idempotent re-delivery, proceeding.`);
+                        return; // nothing to write; the transaction commits as a no-op.
+                      }
+                      result.error = existing ? "evidence_bundle_conflict" : "evidence_persistence_failed";
+                      console.warn(
+                        `[settlement] DB persistence failed for bundle ${bundle.id}: ${
+                          existing
+                            ? `an existing row under this id does not match this bundle (job/step/kernel/tier/hash/events) — refusing to settle on it`
+                            : insertErr instanceof Error
+                              ? insertErr.message
+                              : String(insertErr)
+                        }`,
+                      );
+                      throw insertErr instanceof Error ? insertErr : new Error(String(insertErr)); // roll back: no header row survives an unverified persistence failure.
+                    }
 
-                if (bundlePersisted && bundle.events.length > 0) {
-                  repos.evidence.insertEvents(
-                    bundle.events.map((ev) => ({
-                      id: ev.id,
-                      bundleId: bundle.id,
-                      type: ev.type,
-                      timestamp: ev.timestamp,
-                      source: ev.source,
-                      payload: ev.payload as Record<string, unknown>,
-                      hash: ev.hash,
-                    })),
-                  );
-                }
+                    // The header was freshly inserted by THIS call. Write its events in the SAME transaction.
+                    if (bundle.events.length > 0) {
+                      try {
+                        repos.evidence.insertEvents(
+                          bundle.events.map((ev) => ({
+                            id: ev.id,
+                            bundleId: bundle.id,
+                            type: ev.type,
+                            timestamp: ev.timestamp,
+                            source: ev.source,
+                            payload: ev.payload as Record<string, unknown>,
+                            hash: ev.hash,
+                          })),
+                        );
+                      } catch (eventsErr) {
+                        // This call's OWN attempt failed partway — not a conflict with anything pre-existing (no
+                        // such row was found a moment ago). Roll back the header too: partial persistence must
+                        // never settle.
+                        result.error = "evidence_persistence_failed";
+                        console.warn(
+                          `[settlement] DB persistence failed for bundle ${bundle.id}: ${
+                            eventsErr instanceof Error ? eventsErr.message : String(eventsErr)
+                          }`,
+                        );
+                        throw eventsErr instanceof Error ? eventsErr : new Error(String(eventsErr));
+                      }
+                    }
+                });
+                bundlePersisted = true; // reached only if the transaction committed (returned without throwing).
 
                 // This generic step marker is unconditional, as it always was: it commits the job to nothing
                 // (unlike Step 3's `evidence_submitted` + `evidenceBundleId`, which IS gated on `bundlePersisted`
@@ -630,11 +707,30 @@ export class SettlementService {
       released = true;
 
       if (claim) {
+        // N79 round 6 (H2-A(b) / addendum 1 P4): read the chain mapping right after this write, through the
+        // SAME ABI that performed the release (V1), and record through recordChainSettlement ONLY — never the
+        // old index-only writer, which could complete the escrow from local rows alone with no idea how many
+        // milestones the chain actually has (astra 126f: one local row, chain has two — the old writer
+        // completed the escrow anyway). A failed read is treated exactly like a failed write: the release
+        // already landed on-chain, so it is never reported as failed and the claim is never handed back (no
+        // refund can land on funds that moved) — the caller is told it was not recorded (F5).
         try {
-          recordMilestoneReleased(milestoneIndex, claim);
+          const chainState = await getEscrowStateV1(contractAddress as Address);
+          const outcome = recordChainSettlement(claim, {
+            stepIds: chainState.milestones.map((m) => m.stepId as Hex),
+            statuses: chainState.milestones.map((m) => m.status),
+            releasedStatus: MilestoneStatus.Released,
+          });
+          if (!outcome.ok) {
+            recordFailed = true;
+            console.error("[escrow] settlement_record_failed", {
+              escrowId: claim.escrowId,
+              milestoneIndex,
+              txHash: writeResult.transactionHash,
+              error: outcome.drifted ? "chain_mapping_drift" : "milestone_row_write_failed",
+            });
+          }
         } catch (recordErr) {
-          // The release happened on-chain, so it is not reported as failed, and the claim is NOT handed back (the escrow
-          // stays owned: no refund can land on funds that moved). But the caller is told it was not recorded (F5).
           recordFailed = true;
           console.error("[escrow] settlement_record_failed", {
             escrowId: claim.escrowId,

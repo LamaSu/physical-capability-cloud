@@ -373,80 +373,177 @@ export function releaseEscrowFromSettlement(claim: SettlementClaim, jobId?: stri
 }
 
 /**
- * Record a release that went through on-chain: the milestone at `milestoneIndex` reads `released`, because that is the
- * chain's truth, whoever holds the escrow. The ESCROW row changes only for the claim that holds the lease: once every
- * milestone reads `released` it becomes `completed` (a compare-and-set from what the claim holds it as); otherwise an
- * `acquired` claim hands it back to its `prior` status. It never writes over `refund_pending` or `refunded`. One
- * transaction. It throws if a write fails; the caller must say so (F5), not swallow it.
+ * A chain read's ordered milestone identity + status set, as the mapping check needs it. `stepIds[i]` is the
+ * chain's raw bytes32 stepId at index i (production writes `keccak256(toBytes(localRow.stepId))` on-chain —
+ * paid-job-flow.ts, V2 and V3 `addMilestone`); `statuses[i]` is that same index's current on-chain status.
  */
-export function recordMilestoneReleased(milestoneIndex: number, claim: SettlementClaim): void {
-  const repos = getRepos();
-  storeDb().transaction(() => {
-    const milestone = repos.escrows.findMilestonesByEscrow(claim.escrowId)[milestoneIndex];
-    if (milestone) repos.escrows.updateMilestoneStatus(milestone.id, "released");
-    if (settlementLeases.get(claim.escrowId) !== claim.token) return;
-    const all = repos.escrows.findMilestonesByEscrow(claim.escrowId);
-    if (all.length > 0 && all.every((m) => m.status === "released")) {
-      casEscrowStatus(claim.escrowId, claim.leasedStatus, "completed");
-    } else if (claim.prior) {
-      casEscrowStatus(claim.escrowId, SETTLEMENT_OWNED_ESCROW_STATUS, claim.prior);
+export interface ChainMapping {
+  stepIds: readonly Hex[];
+  statuses: readonly number[];
+}
+
+/** The result of comparing an escrow's local rows against a chain read's ordered set (P4). */
+export interface ChainMappingCheck {
+  ok: boolean;
+  chainCount: number;
+  localCount: number;
+  /** The first index (local or chain) where cardinality or identity disagrees. Set only when `!ok`. */
+  firstMismatch?: number;
+}
+
+/**
+ * P4 (N79 round 6, addendum 1 — "fix the PROPERTY, not the cases"): the full ordered identity + cardinality
+ * compare between an escrow's LOCAL milestone rows (in index order) and a chain read's ordered `stepIds` /
+ * `statuses`. Pure — no DB writes, no escrow-status change, and no reference to STATUS values: a drift is a
+ * drift whether every chain milestone is already Released or every one is still Funded. Round 5 validated this
+ * mapping only at the moment a row was about to be WRITTEN (a Released milestone, or whole-escrow completion);
+ * round 6's finding H2-B is that a drift below Released is invisible under that rule and the escrow can be
+ * handed back toward a refund with the drift never detected. This helper is meant to run immediately after
+ * EVERY authoritative chain read that feeds a settlement decision, before any drive or any write.
+ *
+ * The count must be equal, and every index must satisfy `keccak256(toBytes(localRow.stepId)) === chain.stepIds[i]`
+ * (compared case-insensitively, since stepId hex arrives in mixed case from different callers).
+ *
+ * Takes `escrowId`, not pre-fetched rows: like every other write path in this module, it reads the GLOBAL
+ * store itself (`getRepos()`), so a caller never needs its own repos access just to run this check — and a
+ * test can replace this ONE function (mock) to exercise a caller's drift-handling with no real store at all.
+ */
+export function checkChainMapping(escrowId: string, chain: ChainMapping): ChainMappingCheck {
+  const localRows = getRepos().escrows.findMilestonesByEscrow(escrowId);
+  const chainCount = chain.stepIds.length;
+  const localCount = localRows.length;
+  if (chainCount !== localCount) {
+    return { ok: false, chainCount, localCount, firstMismatch: Math.min(chainCount, localCount) };
+  }
+  for (let i = 0; i < localCount; i++) {
+    if (keccak256(toBytes(localRows[i]!.stepId)).toLowerCase() !== chain.stepIds[i]!.toLowerCase()) {
+      return { ok: false, chainCount, localCount, firstMismatch: i };
     }
+  }
+  return { ok: true, chainCount, localCount };
+}
+
+/** `chain` plus the version-specific "fully paid" status value (V1/V2/V3 all currently encode Released=5, but
+ *  this module takes no dependency on any one version's enum — the caller names it explicitly). */
+export interface ChainSettlementInput extends ChainMapping {
+  releasedStatus: number;
+}
+
+/** The outcome of {@link recordChainSettlement}. */
+export interface ChainSettlementResult {
+  ok: boolean;
+  /** True only on an identity/cardinality drift: nothing was written; the escrow stays `completing`. */
+  drifted?: boolean;
+  /** True once every chain-reported milestone is `releasedStatus` and the escrow compare-and-set to `completed` won. */
+  completed?: boolean;
+  /** True when no drift but not every milestone was released: the escrow was handed back to `claim.prior`. */
+  handedBack?: boolean;
+  /** Set when a row write failed partway through (R4-H3, generalized): the escrow stays `completing`, and
+   *  nothing — no further row, no completion, no hand-back — is attempted after this index. */
+  recordFailedIndex?: number;
+}
+
+/**
+ * P1 (N79 round 6, addendum 1): the ONE function that changes chain-backed settlement state — a milestone row to
+ * `released`, an escrow row to `completed`, or the hand-back after a chain read. `chain` is REQUIRED: there is no
+ * optional-mapping form and no index-only form — that absence is exactly what let H2-A's older per-index writers
+ * complete an escrow from local rows alone, blind to how many milestones the chain actually has. Every
+ * chain-backed call site (the settlement keeper, {@link SettlementService.releaseMilestone}, the raw escrow
+ * release route, and resume-settlement) calls ONLY this writer; `recordMilestoneReleased`,
+ * `recordMilestoneRowReleased` and `recordEscrowReleased` below are retained only as the lower-level primitives
+ * this function is built from (and because round 5's tests pin their standalone behaviour directly) — nothing in
+ * production calls them directly anymore.
+ *
+ * Order of operations:
+ *   1. {@link checkChainMapping} FIRST, before any write. On drift: write NOTHING, log
+ *      `[escrow] settlement_mapping_mismatch`, and return `{ok:false, drifted:true}`. The escrow stays exactly
+ *      as the claim found it (`completing`) — the caller's `finally` must end the lease WITHOUT a hand-back, the
+ *      same quarantine R4-H3 already applied to a failed row write, now applied to an unexplained mapping drift
+ *      too: known drift must never permit a refund.
+ *   2. No drift: stamp every local row whose chain status is `releasedStatus` (identity already confirmed by
+ *      step 1), skipping any row that already reads `released`. A single write failure (a genuine DB error, not
+ *      a drift) stops here: nothing further is attempted, and the result says which index, so the caller logs
+ *      `settlement_record_failed` and leaves the escrow `completing` — money that already moved on-chain must
+ *      never be reopened to a refund because its bookkeeping lagged.
+ *   3. Complete the escrow — compare-and-set from `claim.leasedStatus` to `completed` — ONLY when every chain
+ *      status equals `releasedStatus`.
+ *   4. Otherwise (no drift, partly released): hand back an `acquired` claim to `claim.prior`, exactly as
+ *      {@link releaseEscrowFromSettlement} always did — including the same immediate refund when the escrow's
+ *      job (`claim.jobId`) already ended without completing while this settlement held it. An `adopted`/`leased`
+ *      claim (no `prior`) holds the escrow `completing` — nothing to hand back to.
+ *
+ * One transaction: the row stamps, the completion compare-and-set (or the hand-back and its refund check) all
+ * commit together. A caught write failure (step 2) does not THROW out of the transaction — it returns the
+ * failure in the result instead — so whatever stamps already landed before it are kept (a partly paid escrow's
+ * rows still tell the truth) while nothing further (no completion, no hand-back) is attempted.
+ */
+export function recordChainSettlement(claim: SettlementClaim, chain: ChainSettlementInput): ChainSettlementResult {
+  const repos = getRepos();
+  const localRows = repos.escrows.findMilestonesByEscrow(claim.escrowId);
+  const mapping = checkChainMapping(claim.escrowId, chain);
+  if (!mapping.ok) {
+    console.error("[escrow] settlement_mapping_mismatch", {
+      escrowId: claim.escrowId,
+      chainCount: mapping.chainCount,
+      localCount: mapping.localCount,
+      firstMismatch: mapping.firstMismatch,
+    });
+    return { ok: false, drifted: true };
+  }
+
+  return storeDb().transaction(() => {
+    for (let i = 0; i < localRows.length; i++) {
+      if (chain.statuses[i] !== chain.releasedStatus) continue;
+      if (localRows[i]!.status === "released") continue;
+      try {
+        repos.escrows.updateMilestoneStatus(localRows[i]!.id, "released");
+      } catch (err) {
+        console.error("[escrow] settlement_record_failed", {
+          escrowId: claim.escrowId,
+          milestoneIndex: i,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { ok: false, recordFailedIndex: i };
+      }
+    }
+
+    // The lease may have been lost between this call starting and the loop above finishing (it never awaits, so
+    // in practice this only guards against a caller that itself raced two claims) — never complete or hand back
+    // for a claim that is no longer the live holder.
+    if (settlementLeases.get(claim.escrowId) !== claim.token) return { ok: true, completed: false };
+
+    const allReleased = chain.statuses.length > 0 && chain.statuses.every((s) => s === chain.releasedStatus);
+    if (allReleased) {
+      const completed = casEscrowStatus(claim.escrowId, claim.leasedStatus, "completed");
+      return { ok: true, completed };
+    }
+
+    if (!claim.prior) return { ok: true, completed: false, handedBack: false };
+    const handedBack = casEscrowStatus(claim.escrowId, SETTLEMENT_OWNED_ESCROW_STATUS, claim.prior);
+    // Drop the lease BEFORE the refund check, exactly as releaseEscrowFromSettlement does: the refund path's own
+    // "is any lease live" guard (refundEscrowForTerminalJob) would otherwise see this claim's own still-live
+    // lease and wrongly skip a refund this hand-back just made legitimate. The caller's later `endSettlement`
+    // is idempotent and no-ops once the lease is already gone.
+    if (handedBack) settlementLeases.delete(claim.escrowId);
+    if (handedBack && claim.jobId) {
+      const job = repos.jobs.findById(claim.jobId);
+      if (job && TERMINAL_FAILURE_JOB_STATUSES.has(job.status)) refundEscrowForTerminalJob(claim.jobId);
+    }
+    return { ok: true, completed: false, handedBack };
   });
 }
 
 /**
- * Record ONE milestone's release on its row, and nothing else. The keeper calls it the moment the chain shows a milestone
- * Released (a drive that settled, or a pre-read that already read Released), so the rows of a partly paid escrow tell the
- * truth at once and a later refund finds `milestone_past_funding` instead of giving back money that moved. It writes only
- * the milestone row: it never touches the escrow row or the lease. {@link recordMilestoneReleased} mid-loop would hand the
- * claim back (restore `prior`), and the final compare-and-set to `completed` would then miss.
- *
- * N79 round 5 (R5-H2, astra 126e Q3 HIGH): THROWS when `milestoneIndex` has no local row — it used to silently
- * return, which meant a chain index past the local array's end (cardinality drift) recorded nothing AND reported no
- * failure, so the caller's `unrecordedRelease`-style tracking never engaged. The caller (the keeper's `recordRow`)
- * already wraps this in try/catch for exactly this reason.
- *
- * N79 round 5 follow-up (R5-H2b, astra 126e Q3 HIGH, identity): `chainStepId`, when given, must equal
- * `keccak256(toBytes(localRow.stepId))` — the same mapping production writes on-chain (paid-job-flow.ts, V2 and
- * V3 `addMilestone`). A mismatch is an identity drift (same index, different obligation) and THROWS exactly like
- * a missing row: same count is not the same milestone.
+ * Mock-only completion (N79 round 6, addendum 1, P1): mocks have no chain identities, so there is nothing for
+ * {@link recordChainSettlement} to compare against — calling it for a mock escrow would always report drift.
+ * Call this ONLY under `isMockSettlement()`. Marks every local milestone row released and completes the escrow,
+ * exactly as the old unguarded writer did for every caller; safe here because a mock escrow was never real money
+ * and never had a chain mapping to drift from.
  */
-export function recordMilestoneRowReleased(escrowId: string, milestoneIndex: number, chainStepId?: Hex): void {
-  const repos = getRepos();
-  const milestone = repos.escrows.findMilestonesByEscrow(escrowId)[milestoneIndex];
-  if (!milestone) {
-    throw new Error(`no local milestone row at index ${milestoneIndex} for escrow ${escrowId} (chain/local cardinality drift)`);
-  }
-  if (chainStepId !== undefined && keccak256(toBytes(milestone.stepId)).toLowerCase() !== chainStepId.toLowerCase()) {
-    throw new Error(`local milestone row at index ${milestoneIndex} for escrow ${escrowId} does not match the chain's stepId (identity drift)`);
-  }
-  if (milestone.status !== "released") repos.escrows.updateMilestoneStatus(milestone.id, "released");
-}
-
-/**
- * Record that EVERY milestone of the escrow was released on-chain (the keeper, once the chain reads all Released): every
- * milestone row reads `released`, and the escrow, for the claim that holds the lease, becomes `completed`. Returns
- * whether the escrow row was completed. Same rules as {@link recordMilestoneReleased}: never over a refund.
- *
- * N79 round 5 (R5-H2, astra 126e Q3 HIGH; identity follow-up R5-H2b): `chain`, when given, must agree with the
- * escrow's CURRENT local milestone rows both in COUNT and, per index, in IDENTITY — `keccak256(toBytes(stepId))`
- * equal to the chain's ordered `stepIds[i]` — or this refuses (returns `false`, writes nothing) instead of marking
- * every local row released. A DB with extra, unpaid milestone rows must never have all of them stamped `released`
- * just because the chain's set happened to be fully released (cardinality); nor may a same-count DB whose rows
- * are not the SAME obligations the chain confirmed (identity). The keeper (which reads the chain) passes it; other
- * callers with no chain-confirmed set to check against (e.g. `/complete`'s own completion path) omit it and keep
- * their existing behavior exactly.
- */
-export function recordEscrowReleased(claim: SettlementClaim, chain?: { stepIds: readonly Hex[] }): boolean {
+export function recordMockEscrowReleased(claim: SettlementClaim): boolean {
   const repos = getRepos();
   return storeDb().transaction(() => {
     const milestones = repos.escrows.findMilestonesByEscrow(claim.escrowId);
-    if (chain !== undefined) {
-      if (milestones.length !== chain.stepIds.length) return false;
-      for (let i = 0; i < milestones.length; i++) {
-        if (keccak256(toBytes(milestones[i]!.stepId)).toLowerCase() !== chain.stepIds[i]!.toLowerCase()) return false;
-      }
-    }
     for (const m of milestones) {
       if (m.status !== "released") repos.escrows.updateMilestoneStatus(m.id, "released");
     }
@@ -454,6 +551,15 @@ export function recordEscrowReleased(claim: SettlementClaim, chain?: { stepIds: 
     return casEscrowStatus(claim.escrowId, claim.leasedStatus, "completed");
   });
 }
+
+// N79 round 6 (addendum 1, P1, "whichever leaves fewer doors", steward #5849): the three per-index/per-row
+// writers that used to live here — `recordMilestoneReleased`, `recordMilestoneRowReleased`, `recordEscrowReleased`
+// — are REMOVED, not merely superseded. Each took an optional or index-only chain argument, which is exactly
+// H2-A's finding: an escrow could complete from local rows alone, blind to the chain's true milestone count.
+// `recordChainSettlement` above is the only function anywhere in this module that writes a milestone row to
+// `released` or compare-and-sets an escrow row to `completed` from a chain-backed caller (the mock-only
+// `recordMockEscrowReleased` is the other, for callers under `isMockSettlement()`). Nothing else needs a
+// private equivalent of these three — `recordChainSettlement` reimplements the stamp-then-decide logic itself.
 
 function storeDb() {
   return getStore().db;

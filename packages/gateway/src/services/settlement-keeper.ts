@@ -89,9 +89,9 @@ import {
 import { driveSettlement, type DriveOutcome } from "./settlement-crank.js";
 import {
   beginSettlement,
+  checkChainMapping,
   endSettlement,
-  recordEscrowReleased,
-  recordMilestoneRowReleased,
+  recordChainSettlement,
   releaseEscrowFromSettlement,
   type SettlementClaim,
 } from "./escrow-refund.js";
@@ -169,6 +169,10 @@ export interface KeeperSweepResult {
   blocked: number;
   /** escrows reconciled to DB status "completed" (all milestones Released). */
   reconciledCompleted: number;
+  /** N79 round 6 (H2-B / addendum 1 P4): escrows whose chain/local mapping drifted (cardinality or identity) on
+   *  this pass's authoritative read, BEFORE any drive — quarantined in `completing`, never driven, never
+   *  reconciled, never handed back. Logged as `[escrow] settlement_mapping_mismatch`. */
+  mappingMismatch: number;
   /** true when the sweep did no work because writes are disabled (no signer). */
   writeDisabled: boolean;
   milestones: KeeperMilestoneResult[];
@@ -221,6 +225,7 @@ export async function runKeeperSweep(
     terminalOther: 0,
     blocked: 0,
     reconciledCompleted: 0,
+    mappingMismatch: 0,
     writeDisabled: false,
     milestones: [],
   };
@@ -303,47 +308,25 @@ export async function runKeeperSweep(
     const claim = takeOwnership(recordEscrowLevelSkip);
     if (!claim) continue; // busy, given-back-or-completed, or claim construction failed — already counted above
 
-    // Track whether EVERY milestone ends this pass Released (gates DB reconcile). Stays false — the safe,
-    // hand-back default — until a successful read says otherwise.
-    let allReleased = false;
-    // N79 round 4 (R4-H3, astra 126c HIGH): set the moment a CONFIRMED release's row write fails. Money that
-    // already moved on-chain must never be reopened to a refund because its bookkeeping lagged — so once this is
-    // set, the `finally` below leaves the escrow durably as the claim found it (still `completing`) instead of
-    // reconciling or handing it back. The index of the first such failure, for the escrow-level log line.
-    let unrecordedRelease: number | undefined;
-    // The chain's ordered stepIds, once a read has succeeded — passed to `recordEscrowReleased` below (R5-H2,
-    // identity follow-up R5-H2b) so it can refuse to complete an escrow whose local rows have since drifted from
-    // what was actually read, in COUNT or in per-index IDENTITY.
-    let chainStepIds: Hex[] | undefined;
-
-    /**
-     * Mark one milestone's row `released` at once, the moment the chain shows it paid (a drive that settled, or a pre-read
-     * that already read Released). The milestone row only: it never touches the escrow row, which is completed or handed
-     * back below when this sweep holds it, and it needs no claim (it records a chain fact, so it can run before the first
-     * drive). A partly paid escrow's rows then tell the truth, and a later refund stops at `milestone_past_funding`.
-     * Best-effort, like the reconcile: the money already moved, and the next sweep repeats it — EXCEPT that a
-     * failure here now also blocks the hand-back/reconcile below (R4-H3): the money moved regardless of whether
-     * this row write succeeded. `chainStepId` (R5-H2b) is the chain's stepId for this SAME index — identity, not
-     * only cardinality.
-     */
-    const recordRow = (idx: number, chainStepId: Hex): void => {
-      try {
-        recordMilestoneRowReleased(escrow.id, idx, chainStepId);
-      } catch (err) {
-        logger?.warn?.(
-          `[settlement-keeper] could not record ${escrow.id}#${idx} as released: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        if (unrecordedRelease === undefined) unrecordedRelease = idx;
-        console.error("[escrow] settlement_record_failed", { escrowId: escrow.id, milestoneIndex: idx });
-      }
-    };
+    // N79 round 6 (H2-B / addendum 1 P4): set when this pass's authoritative chain read disagrees with the local
+    // rows in cardinality or identity — independent of status, so a drift where every milestone is still below
+    // Released (invisible before this round: nothing used to check until a row was about to be WRITTEN) is
+    // caught too. Quarantines the escrow in `completing`: no drive, no record, no hand-back.
+    let mappingDrifted = false;
+    // Whether this pass's chain READ itself succeeded. A read failure is the pre-existing, unrelated case (one
+    // unreadable escrow must not abort the sweep): the escrow is handed back exactly as before, since this pass
+    // learned nothing about it.
+    let readSucceeded = false;
+    // N79 round 4 (R4-H3, astra 126c HIGH), generalized: set when `recordChainSettlement` reports a row-write
+    // failure. Money that already moved on-chain must never be reopened to a refund because its bookkeeping
+    // lagged — the `finally` below leaves the escrow durably as the claim found it (still `completing`).
+    let recordFailed = false;
 
     try {
       // ── One authoritative on-chain read: the escrow's full milestone set. Protected by the claim taken above: a
       // refund attempted while this read is in flight sees the escrow already `completing`/leased and is skipped
       // (`settlement_in_progress`), not landed, instead of racing it. A read that throws is soft-failed (one
-      // unreadable escrow must not abort the sweep) — `allReleased` stays false, so the `finally` below hands the
-      // claim back exactly as it would for an escrow found to have nothing to do. ──
+      // unreadable escrow must not abort the sweep) — handled in the `finally` below exactly as before. ──
       let onChain: Awaited<ReturnType<typeof getEscrowStateV2>> | undefined;
       try {
         onChain = await getEscrowStateV2(address);
@@ -356,123 +339,143 @@ export async function runKeeperSweep(
         );
       }
       if (onChain) {
-        // N79 round 5 (R5-H2 cardinality, R5-H2b identity, astra 126e Q3 HIGH): the mapping is validated where
-        // milestone rows are WRITTEN (escrow-refund.ts), so every write path is covered, not only this one. The
-        // keeper passes the chain's ordered stepIds; `recordMilestoneRowReleased` and `recordEscrowReleased`
-        // refuse on a cardinality OR an identity mismatch (a same-index row that is not the same obligation).
-        allReleased = onChain.milestones.length > 0;
-        chainStepIds = onChain.milestones.map((cm) => cm.stepId as Hex); // OnChainMilestone types stepId as a plain string; at runtime it is always 0x-hex.
+        readSucceeded = true;
 
-        for (let idx = 0; idx < onChain.milestones.length; idx++) {
-          const m: OnChainMilestoneV2 = onChain.milestones[idx];
-          const statusBefore = milestoneStatusV2Name(m.status);
-          const record = (over: Partial<KeeperMilestoneResult>): void => {
-            result.milestones.push({
-              escrowId: escrow.id,
-              escrowAddress: address,
-              milestoneIdx: idx,
-              statusBefore,
-              disposition: "not_ready",
-              ...over,
-            });
-          };
+        // P4: the full ordered identity + cardinality compare runs IMMEDIATELY after the read, BEFORE any drive
+        // and BEFORE any write — not only when a row is about to be marked released (round 5's rule; H2-B's
+        // finding is that it leaves a below-Released drift invisible, since nothing below Released ever reaches
+        // a record call at all).
+        // `checkChainMapping` reads the local rows itself (the GLOBAL store, like every write path in
+        // escrow-refund.ts) — NOT the `repos` parameter this sweep is injected with (that parameter is used
+        // only for the top-level `findAll()` enumeration above; see the module header on why the two are the
+        // same store in production). A test that fakes the whole ownership module (settlement-keeper.test.ts)
+        // fakes this ONE function too, so it never needs real repos access either.
+        const mapping = checkChainMapping(escrow.id, {
+          stepIds: onChain.milestones.map((cm) => cm.stepId as Hex), // OnChainMilestone types stepId as a plain string; at runtime it is always 0x-hex.
+          statuses: onChain.milestones.map((cm) => cm.status),
+        });
+        if (!mapping.ok) {
+          mappingDrifted = true;
+          result.mappingMismatch += 1;
+          console.error("[escrow] settlement_mapping_mismatch", {
+            escrowId: escrow.id,
+            chainCount: mapping.chainCount,
+            localCount: mapping.localCount,
+            firstMismatch: mapping.firstMismatch,
+          });
+          result.milestones.push({
+            escrowId: escrow.id,
+            escrowAddress: address,
+            milestoneIdx: -1,
+            statusBefore: "unread",
+            disposition: "blocked",
+            reason: "settlement_mapping_mismatch",
+          });
+        } else {
+          // This pass's post-drive status per index — Released where a drive below settles it or the pre-read
+          // already showed it, unchanged otherwise — so the single end-of-pass `recordChainSettlement` call
+          // sees this pass's TRUE result, not the stale pre-read snapshot.
+          const postPassStatuses: number[] = onChain.milestones.map((cm) => cm.status);
 
-          if (m.status === MilestoneStatusV2.Released) {
-            record({ disposition: "already_released" });
-            recordRow(idx, m.stepId as Hex);
-            continue;
-          }
-          if (isTerminalOtherStatus(m.status)) {
-            // Money frozen/refunded — surface, never drive toward release.
-            allReleased = false;
-            result.terminalOther += 1;
-            record({ disposition: "terminal_other", reason: statusBefore.toLowerCase() });
-            continue;
-          }
-          if (m.status !== MilestoneStatusV2.Attested) {
-            // Below Attested — fund/evidence/attest are owed to /complete, not the keeper.
-            allReleased = false;
-            record({ disposition: "not_ready" });
-            continue;
-          }
-          // Attested. Pre-check the window from the read we already hold, so we don't
-          // spend a crank call on a milestone whose window is plainly still open. The
-          // crank re-checks against the chain and is the authority for the rest.
-          if (nowSeconds < m.challengeWindowEnd) {
-            allReleased = false;
-            record({ disposition: "pending_window" });
-            continue;
-          }
+          for (let idx = 0; idx < onChain.milestones.length; idx++) {
+            const m: OnChainMilestoneV2 = onChain.milestones[idx];
+            const statusBefore = milestoneStatusV2Name(m.status);
+            const record = (over: Partial<KeeperMilestoneResult>): void => {
+              result.milestones.push({
+                escrowId: escrow.id,
+                escrowAddress: address,
+                milestoneIdx: idx,
+                statusBefore,
+                disposition: "not_ready",
+                ...over,
+              });
+            };
 
-          // ── Hand the release to the crank. The claim taken above (R4-M1) already covers this await — no new
-          //    ownership step needed here. skipFund + no evidence/uid keeps the keeper a pure release-leg closer;
-          //    the crank owns every safety check. ──
-          try {
-            const drive = await driveSettlement(address, idx, { skipFund: true, nowSeconds });
-            if (drive.settled) {
-              result.released += 1;
-              record({ disposition: "released", driveOutcome: drive.outcome });
-              recordRow(idx, m.stepId as Hex);
-            } else if (drive.outcome === "terminal_other") {
-              // A dispute/slash landed between our read and the drive — the crank's
-              // confirming read caught it. Surface, do not count as released.
-              allReleased = false;
-              result.terminalOther += 1;
-              record({ disposition: "terminal_other", driveOutcome: drive.outcome, reason: drive.reason });
-            } else if (drive.outcome === "awaiting_challenge_window") {
-              // Chain clock is behind our off-chain gate; heals on a later sweep.
-              allReleased = false;
-              record({ disposition: "awaiting", driveOutcome: drive.outcome });
-            } else {
-              // blocked / advanced / needs_input — not settled this pass.
-              allReleased = false;
-              result.blocked += 1;
-              record({ disposition: "blocked", driveOutcome: drive.outcome, reason: drive.reason });
+            if (m.status === MilestoneStatusV2.Released) {
+              record({ disposition: "already_released" });
+              continue;
             }
-          } catch (err) {
-            // An UNEXPECTED crank error (RPC down, unmapped revert). The crank does not
-            // swallow real errors; the keeper does not either — but one milestone's
-            // failure must not abort the sweep. Log, mark blocked, move on. The next
-            // sweep re-reads fresh state and retries.
-            allReleased = false;
-            result.blocked += 1;
-            record({
-              disposition: "blocked",
-              reason: err instanceof Error ? err.message : String(err),
-            });
-            logger?.warn?.(
-              `[settlement-keeper] drive failed for ${escrow.id}#${idx}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
+            if (isTerminalOtherStatus(m.status)) {
+              // Money frozen/refunded — surface, never drive toward release.
+              result.terminalOther += 1;
+              record({ disposition: "terminal_other", reason: statusBefore.toLowerCase() });
+              continue;
+            }
+            if (m.status !== MilestoneStatusV2.Attested) {
+              // Below Attested — fund/evidence/attest are owed to /complete, not the keeper.
+              record({ disposition: "not_ready" });
+              continue;
+            }
+            // Attested. Pre-check the window from the read we already hold, so we don't
+            // spend a crank call on a milestone whose window is plainly still open. The
+            // crank re-checks against the chain and is the authority for the rest.
+            if (nowSeconds < m.challengeWindowEnd) {
+              record({ disposition: "pending_window" });
+              continue;
+            }
+
+            // ── Hand the release to the crank. The claim taken above (R4-M1) already covers this await — no new
+            //    ownership step needed here. skipFund + no evidence/uid keeps the keeper a pure release-leg closer;
+            //    the crank owns every safety check. ──
+            try {
+              const drive = await driveSettlement(address, idx, { skipFund: true, nowSeconds });
+              if (drive.settled) {
+                result.released += 1;
+                postPassStatuses[idx] = MilestoneStatusV2.Released;
+                record({ disposition: "released", driveOutcome: drive.outcome });
+              } else if (drive.outcome === "terminal_other") {
+                // A dispute/slash landed between our read and the drive — the crank's
+                // confirming read caught it. Surface, do not count as released.
+                result.terminalOther += 1;
+                record({ disposition: "terminal_other", driveOutcome: drive.outcome, reason: drive.reason });
+              } else if (drive.outcome === "awaiting_challenge_window") {
+                // Chain clock is behind our off-chain gate; heals on a later sweep.
+                record({ disposition: "awaiting", driveOutcome: drive.outcome });
+              } else {
+                // blocked / advanced / needs_input — not settled this pass.
+                result.blocked += 1;
+                record({ disposition: "blocked", driveOutcome: drive.outcome, reason: drive.reason });
+              }
+            } catch (err) {
+              // An UNEXPECTED crank error (RPC down, unmapped revert). The crank does not
+              // swallow real errors; the keeper does not either — but one milestone's
+              // failure must not abort the sweep. Log, mark blocked, move on. The next
+              // sweep re-reads fresh state and retries.
+              result.blocked += 1;
+              record({
+                disposition: "blocked",
+                reason: err instanceof Error ? err.message : String(err),
+              });
+              logger?.warn?.(
+                `[settlement-keeper] drive failed for ${escrow.id}#${idx}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            }
+          }
+
+          // P1: the ONE guarded writer, chain-required. `postPassStatuses` already carries this pass's TRUE
+          // result; identity + cardinality were already confirmed above.
+          const outcome = recordChainSettlement(claim, {
+            stepIds: onChain.milestones.map((cm) => cm.stepId as Hex),
+            statuses: postPassStatuses,
+            releasedStatus: MilestoneStatusV2.Released,
+          });
+          if (!outcome.ok) {
+            recordFailed = true;
+          } else if (outcome.completed) {
+            result.reconciledCompleted += 1;
           }
         }
       }
     } finally {
-      // N79 round 4 (R4-H3, astra 126c HIGH): a confirmed release whose row write failed leaves the escrow durably
-      // as the claim found it (still `completing`) — NOT reconciled (its row state does not actually say every
-      // milestone released) and NOT handed back (that would reopen money that already moved to a refund). Only the
-      // lease ends, so the next V2 sweep (or any other claim) adopts the still-`completing` row and recounts from
-      // chain truth. `settlement_record_failed` was already logged by `recordRow` above. R5-H2's cardinality
-      // defense (a chain-has-more drift) comes through this SAME flag: `recordMilestoneRowReleased` now throws
-      // when the chain's index has no local row, which `recordRow` turns into `unrecordedRelease` exactly like any
-      // other failed record. A local-has-more drift is instead caught below, in `recordEscrowReleased` itself.
-      if (unrecordedRelease !== undefined) {
-        endSettlement(claim);
-      } else {
-        // ── Reconcile the escrow row ONLY when every milestone is Released, and only under the claim ──
-        // Monotonic + chain-confirmed (settled=true is F1-guaranteed real): every milestone row reads `released` and the
-        // escrow `completed`, as a compare-and-set that never writes over a refund. Otherwise the escrow is handed back
-        // (to the payer, if its job ended meanwhile). Jobs are left to the existing settle paths + Step-3 projection.
+      if (!readSucceeded) {
+        // The read itself failed (or the escrow was skipped before one ran) — this pass learned nothing. Hand
+        // the escrow back exactly as before (the safe default for "nothing to do this pass").
         try {
-          if (allReleased) {
-            if (recordEscrowReleased(claim, chainStepIds ? { stepIds: chainStepIds } : undefined)) result.reconciledCompleted += 1;
-          } else {
-            releaseEscrowFromSettlement(claim, claim.jobId);
-          }
+          releaseEscrowFromSettlement(claim, claim.jobId);
         } catch (err) {
-          // Reconciliation is best-effort — the on-chain release already happened,
-          // which is the load-bearing outcome. A failed DB write is logged, not fatal.
+          // Reconciliation is best-effort — logged, not fatal.
           logger?.warn?.(
             `[settlement-keeper] DB reconcile failed for ${escrow.id}: ${
               err instanceof Error ? err.message : String(err)
@@ -481,6 +484,15 @@ export async function runKeeperSweep(
         } finally {
           endSettlement(claim);
         }
+      } else if (mappingDrifted || recordFailed) {
+        // Quarantine (P4 / R4-H3 generalized): never hand back, never reconcile — `checkChainMapping` or
+        // `recordChainSettlement` already logged why. Only the lease ends, so the next claim adopts the
+        // still-`completing` row and recounts from chain truth.
+        endSettlement(claim);
+      } else {
+        // `recordChainSettlement` already completed the escrow, or handed it back (with its own refund check),
+        // inside its own transaction. Only the lease ends here.
+        endSettlement(claim);
       }
     }
   }

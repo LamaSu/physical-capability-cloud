@@ -56,8 +56,7 @@ import {
   beginSettlement,
   endSettlement,
   setJobStatusWithRefund,
-  recordMilestoneRowReleased,
-  recordEscrowReleased,
+  recordChainSettlement,
 } from "../services/escrow-refund.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { runKeeperSweep } from "../services/settlement-keeper.js";
@@ -355,7 +354,7 @@ describe("N79 round 5: the review's findings, reproduced", () => {
     expect(after.evidenceBundleId).toBe(before.evidenceBundleId);
   });
 
-  it("R5-H2 (a): a chain index past the local array's end is never silently dropped — nothing is recorded, and the escrow cannot be refunded", async () => {
+  it("R5-H2 (a): a chain index past the local array's end is never silently dropped — nothing is recorded, and the escrow cannot be refunded (round 6: detected at read)", async () => {
     const { jobId, escrowId, address } = seed({ milestones: ["funded"] }); // ONE local row
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     vi.mocked(chain.getEscrowStateV2).mockResolvedValue(chainState(address, [chain.MilestoneStatusV2.Evidenced, chain.MilestoneStatusV2.Released]));
@@ -366,12 +365,13 @@ describe("N79 round 5: the review's findings, reproduced", () => {
       result = await runKeeperSweep(getRepos(), { nowSeconds: NOW });
       expect(driveSettlement).not.toHaveBeenCalled();
       // (asserted here, BEFORE mockRestore — Vitest's mockRestore also clears recorded calls)
-      // `recordMilestoneRowReleased` throws for the chain index (1) past the local array's end (length 1); the
-      // keeper's `recordRow` turns that into exactly the same `settlement_record_failed` signal + `completing`
-      // hand-back refusal a failed write already gets (R4-H3), extended to cover a cardinality drift (R5-H2).
+      // N79 round 6 (addendum 1, P4): the mapping is now checked IMMEDIATELY after the read, before any drive
+      // or record — a cardinality drift (chain reports 2, local has 1) is `settlement_mapping_mismatch`, not
+      // the write-time `settlement_record_failed` round 5 logged when the write itself was attempted and
+      // discovered the missing row.
       expect(errors).toHaveBeenCalledWith(
-        "[escrow] settlement_record_failed",
-        expect.objectContaining({ escrowId, milestoneIndex: 1 }),
+        "[escrow] settlement_mapping_mismatch",
+        expect.objectContaining({ escrowId, chainCount: 2, localCount: 1, firstMismatch: 1 }),
       );
     } finally {
       errors.mockRestore();
@@ -384,19 +384,32 @@ describe("N79 round 5: the review's findings, reproduced", () => {
     );
   });
 
-  it("R5-H2 (b): an extra local row the chain never reports is never marked released, and the escrow never completes", async () => {
+  it("R5-H2 (b): an extra local row the chain never reports is never marked released, and the escrow never completes (round 6: detected at read — nothing is stamped, not even the matching row)", async () => {
     const { escrowId, address } = seed({ milestones: ["funded", "funded"] }); // TWO local rows
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     vi.mocked(chain.getEscrowStateV2).mockResolvedValue(chainState(address, [chain.MilestoneStatusV2.Released])); // chain: ONE
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const result = await runKeeperSweep(getRepos(), { nowSeconds: NOW });
+    let result;
+    try {
+      result = await runKeeperSweep(getRepos(), { nowSeconds: NOW });
+      // N79 round 6 (addendum 1, P4, "fix the property, not the cases"): round 5 let the ONE chain-confirmed row
+      // stamp anyway, trusting it in isolation from the cardinality drift it was found alongside — exactly the
+      // narrow, per-case patch the lead's addendum was commissioned to stop. Round 6's property is that ANY
+      // drift (identity OR cardinality, in EITHER direction) quarantines the WHOLE escrow and writes NOTHING,
+      // because an unexplained drift means this local escrow association is no longer known to represent the
+      // obligation being advanced — not even the parts that happen to look right.
+      expect(errors).toHaveBeenCalledWith(
+        "[escrow] settlement_mapping_mismatch",
+        expect.objectContaining({ escrowId, chainCount: 1, localCount: 2, firstMismatch: 1 }),
+      );
+    } finally {
+      errors.mockRestore();
+    }
 
-    // The ONE chain-confirmed row is still recorded (a partly paid escrow's rows must tell the truth) — but
-    // `recordEscrowReleased`'s `expectedCount` (R5-H2) refuses to complete the ESCROW, because the local row count
-    // (2) does not match what the chain actually confirmed (1): the second row is never stamped released, and the
-    // escrow stays owned rather than being wrongly marked `completed`.
     expect(result.reconciledCompleted).toBe(0);
-    expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["released", "funded"] });
+    expect(result.mappingMismatch).toBe(1);
+    expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["funded", "funded"] });
     // The lease ended (refused, not left dangling): the next claim adopts the still-`completing` row.
     const next = beginSettlement({ escrowId }, { leaseOnly: true });
     expect(next.disposition).toBe("adopted");
@@ -440,24 +453,30 @@ describe("N79 round 5: the review's findings, reproduced", () => {
     expect(chain.releaseMilestone).not.toHaveBeenCalled();
   });
 
-  it("R5-H2 (direct): recordMilestoneRowReleased throws for a chain index with no local row, called directly and uncaught", () => {
-    // n79-r3-lease.test.ts used to call `recordMilestoneRowReleased(escrowId, 9)` as a silent no-op; that call is
-    // removed there, and the throw that replaced the no-op is pinned here. The keeper's own call site (`recordRow`
-    // in settlement-keeper.ts) catches it and keeps the escrow `completing`, as R5-H2 (a) shows.
-    const { escrowId } = seed({ milestones: ["funded", "funded"] });
-    const claim = beginSettlement({ escrowId }, { leaseOnly: true });
+  // N79 round 6 (addendum 1, P1, "whichever leaves fewer doors"): the four tests below called the now-REMOVED
+  // `recordMilestoneRowReleased` / `recordEscrowReleased` directly. Converted to `recordChainSettlement`
+  // (chain mapping REQUIRED), preserving each one's original intent: a missing row, an identity mismatch, or a
+  // count mismatch in either direction all drift — nothing written, escrow stays `completing`.
+  it("R5-H2 (direct): recordChainSettlement refuses a chain index with no local row — drifted, nothing written (round 6: detected at read; was: recordMilestoneRowReleased)", () => {
+    const { escrowId } = seed({ milestones: ["funded", "funded"] }); // TWO local rows
+    const begun = beginSettlement({ escrowId }, { leaseOnly: true });
+    const claim = "claim" in begun ? begun.claim : (undefined as never);
     try {
-      expect(() => recordMilestoneRowReleased(escrowId, 9)).toThrow(/no local milestone row at index 9/);
-      // The valid index right beside it is unaffected: still writable, still idempotent.
-      recordMilestoneRowReleased(escrowId, 0);
-      recordMilestoneRowReleased(escrowId, 0);
-      expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["released", "funded"] });
+      // THREE chain entries (index 2 has no local row) against TWO local rows: a cardinality drift, chain-has-more.
+      const outcome = recordChainSettlement(claim, {
+        stepIds: [keccak256(toBytes("step-1")), keccak256(toBytes("step-2")), keccak256(toBytes("step-3"))],
+        statuses: [chain.MilestoneStatusV2.Funded, chain.MilestoneStatusV2.Funded, chain.MilestoneStatusV2.Released],
+        releasedStatus: chain.MilestoneStatusV2.Released,
+      });
+      expect(outcome.drifted).toBe(true);
+      // Nothing was recorded — not even the two valid-looking indices beside the missing one.
+      expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["funded", "funded"] });
     } finally {
-      if ("claim" in claim) endSettlement(claim.claim);
+      if (claim) endSettlement(claim);
     }
   });
 
-  it("R5-H2b (i): a chain stepId that does not match the local row's keccak256 is an identity drift, not a recordable release", () => {
+  it("R5-H2b (i): a chain stepId that does not match the local row's keccak256 is an identity drift, not a recordable release (round 6: detected at read; was: recordMilestoneRowReleased)", () => {
     // Lead follow-up to R5-H2: cardinality alone is not identity. The chain milestone at this index is a
     // DIFFERENT obligation than the local row at the same index claims to be — recording it as released would
     // mark the WRONG row paid. Same count (1 and 1): this is purely an identity mismatch.
@@ -465,49 +484,66 @@ describe("N79 round 5: the review's findings, reproduced", () => {
     const realStepId = keccak256(toBytes("step-1"));
     const wrongChainStepId = keccak256(toBytes("step-SOMETHING-ELSE")) as Hex;
     expect(wrongChainStepId).not.toBe(realStepId); // sanity: genuinely a different hash
-    const claim = beginSettlement({ escrowId }, { leaseOnly: true });
+    const begun = beginSettlement({ escrowId }, { leaseOnly: true });
+    const claim = "claim" in begun ? begun.claim : (undefined as never);
     try {
-      expect(() => recordMilestoneRowReleased(escrowId, 0, wrongChainStepId)).toThrow(/identity/i);
+      const outcome = recordChainSettlement(claim, {
+        stepIds: [wrongChainStepId],
+        statuses: [chain.MilestoneStatusV2.Released],
+        releasedStatus: chain.MilestoneStatusV2.Released,
+      });
+      expect(outcome.drifted).toBe(true);
       // Nothing was recorded.
       expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["funded"] });
     } finally {
-      if ("claim" in claim) endSettlement(claim.claim);
+      if (claim) endSettlement(claim);
     }
   });
 
-  it("R5-H2b (ii): the SAME count with a different stepId at index 0 must refuse to complete the escrow", () => {
+  it("R5-H2b (ii): the SAME count with a different stepId at index 0 must refuse to complete the escrow (round 6: detected at read; was: recordEscrowReleased)", () => {
     // At 986b1789 `recordEscrowReleased` took no chain set at all and completed this escrow (returned true). The
     // round-5 mutation pass shows the per-index identity comparison, not the count, is what makes this refuse.
+    // Round 6 collapses this and R5-H2b (i) through the SAME guarded writer — the two tests now pin the same
+    // invariant from what used to be two different entry points.
     const { escrowId } = seed({ milestones: ["funded"] }); // ONE local row, stepId "step-1"
     const wrongChainStepId = keccak256(toBytes("step-SOMETHING-ELSE")) as Hex;
     const begun = beginSettlement({ escrowId }, { leaseOnly: true });
     const claim = "claim" in begun ? begun.claim : (undefined as never);
     try {
       // Same LENGTH (1) as the local row count — this is purely an identity mismatch, not a cardinality one.
-      const completed = recordEscrowReleased(claim, { stepIds: [wrongChainStepId] });
-      expect(completed).toBe(false);
+      const outcome = recordChainSettlement(claim, {
+        stepIds: [wrongChainStepId],
+        statuses: [chain.MilestoneStatusV2.Released],
+        releasedStatus: chain.MilestoneStatusV2.Released,
+      });
+      expect(outcome.completed).toBeFalsy();
       expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["funded"] });
     } finally {
-      endSettlement(claim);
+      if (claim) endSettlement(claim);
     }
   });
 
-  it("R5-H2 (c): the chain confirming MORE milestones than the local rows refuses to complete the escrow", () => {
-    // The keeper never reaches this call on that drift (its record of the extra index throws first, R5-H2 (a)), so
-    // the count check is pinned directly: identity agrees at every local index, and only the count differs.
+  it("R5-H2 (c): the chain confirming MORE milestones than the local rows refuses to complete the escrow (round 6: detected at read; was: recordEscrowReleased)", () => {
+    // Round 6: the keeper's own pre-drive compare now catches this drift before any record call is even
+    // reached (R5-H2 (a) above) — the count check is still pinned directly here, identity agreeing at the one
+    // local index and only the count differing.
     const { escrowId } = seed({ milestones: ["funded"] }); // ONE local row, stepId "step-1"
     const begun = beginSettlement({ escrowId }, { leaseOnly: true });
     const claim = "claim" in begun ? begun.claim : (undefined as never);
     try {
-      const completed = recordEscrowReleased(claim, { stepIds: [keccak256(toBytes("step-1")), keccak256(toBytes("step-2"))] });
-      expect(completed).toBe(false);
+      const outcome = recordChainSettlement(claim, {
+        stepIds: [keccak256(toBytes("step-1")), keccak256(toBytes("step-2"))],
+        statuses: [chain.MilestoneStatusV2.Released, chain.MilestoneStatusV2.Released],
+        releasedStatus: chain.MilestoneStatusV2.Released,
+      });
+      expect(outcome.completed).toBeFalsy();
       expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["funded"] });
     } finally {
-      endSettlement(claim);
+      if (claim) endSettlement(claim);
     }
   });
 
-  it("R5-H2b (keeper): a Released chain milestone whose stepId is not the local row's is never recorded, and the escrow cannot be refunded", async () => {
+  it("R5-H2b (keeper): a Released chain milestone whose stepId is not the local row's is never recorded, and the escrow cannot be refunded (round 6: detected at read)", async () => {
     const { jobId, escrowId, address } = seed({ milestones: ["funded"] }); // ONE local row, stepId "step-1"
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     vi.mocked(chain.getEscrowStateV2).mockResolvedValue(
@@ -519,9 +555,11 @@ describe("N79 round 5: the review's findings, reproduced", () => {
     try {
       result = await runKeeperSweep(getRepos(), { nowSeconds: NOW });
       // (asserted BEFORE mockRestore, which also clears recorded calls)
+      // N79 round 6: detected at the read, before any record call — `settlement_mapping_mismatch`, not the
+      // write-time `settlement_record_failed`.
       expect(errors).toHaveBeenCalledWith(
-        "[escrow] settlement_record_failed",
-        expect.objectContaining({ escrowId, milestoneIndex: 0 }),
+        "[escrow] settlement_mapping_mismatch",
+        expect.objectContaining({ escrowId, chainCount: 1, localCount: 1, firstMismatch: 0 }),
       );
     } finally {
       errors.mockRestore();

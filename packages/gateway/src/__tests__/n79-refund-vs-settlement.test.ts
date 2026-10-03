@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { getAddress } from "viem";
+import { getAddress, keccak256, toBytes } from "viem";
 
 // Test-controlled pauses inside /complete, so another write can land mid-flight.
 const gates = vi.hoisted(() => ({
@@ -71,6 +71,8 @@ vi.mock("../contracts/escrow-client.js", async (importActual) => {
     isWriteEnabled: vi.fn(() => false),
     releaseMilestone: vi.fn(),
     releaseMilestoneV2: vi.fn(),
+    getEscrowState: vi.fn(),
+    getEscrowStateV2: vi.fn(),
   };
 });
 
@@ -147,6 +149,42 @@ function escrowState(jobId: string) {
   };
 }
 
+/**
+ * N79 round 6: the chain mapping these tests' escrows must now read as (H2-A's post-release read). `stepIds`
+ * are the LOCAL rows' own stepIds (NOT the `step-N` convention other fixtures use — submitPaidJob gives the
+ * job's own milestone a RANDOM stepId, `step-${uuid}`, when no explicit milestones are requested), hashed the
+ * same way production writes them on-chain. Fixture only.
+ */
+const padAddr = (hex: string) => `0x${hex.padStart(40, "0")}`;
+
+function chainStateFor(address: string, stepIds: string[], statuses: number[]) {
+  return {
+    address,
+    payer: padAddr("1"),
+    arbiter: padAddr("b"),
+    token: padAddr("c"),
+    cwmId: `0x${"00".repeat(32)}`,
+    funded: true,
+    totalAmount: "10",
+    milestoneCount: statuses.length,
+    milestones: statuses.map((status, i) => ({
+      stepId: keccak256(toBytes(stepIds[i]!)),
+      operator: padAddr("d"),
+      amount: "10",
+      operatorBond: "0",
+      status,
+      statusName: "",
+      evidenceBundleHash: `0x${"00".repeat(32)}`,
+      verifierAttestationHash: `0x${"00".repeat(32)}`,
+      challengeWindowEnd: 0,
+      challengeWindowSeconds: 0,
+      requiredTier: 0,
+      jobIdHash: `0x${"00".repeat(32)}`,
+      verifierAttestationUid: `0x${"00".repeat(32)}`,
+    })),
+  } as never;
+}
+
 describe("N79 round 2: a refund never lands underneath a settlement in flight", () => {
   let app: FastifyInstance;
 
@@ -157,6 +195,8 @@ describe("N79 round 2: a refund never lands underneath a settlement in flight", 
     vi.mocked(chain.isWriteEnabled).mockReset().mockReturnValue(false);
     vi.mocked(chain.releaseMilestone).mockReset();
     vi.mocked(chain.releaseMilestoneV2).mockReset();
+    vi.mocked(chain.getEscrowState).mockReset();
+    vi.mocked(chain.getEscrowStateV2).mockReset();
     delete process.env.PCC_USE_EAS_V2;
     app = await buildApp();
   });
@@ -262,6 +302,9 @@ describe("N79 round 2: a refund never lands underneath a settlement in flight", 
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     const released = deferred<{ transactionHash: string; status: "submitted" }>();
     vi.mocked(chain.releaseMilestone).mockReturnValue(released.promise as never);
+    // N79 round 6: the post-release mapping read (H2-A), V1 ABI — fixture only; no assertion below changed.
+    const stepId = getRepos().jobs.findById(jobId)!.stepId;
+    vi.mocked(chain.getEscrowState).mockResolvedValue(chainStateFor(address, [stepId], [chain.MilestoneStatusV2.Released]) as never);
 
     const attestation = { escrowAddress: address, evidenceHash: `0x${"cd".repeat(32)}` } as never;
     const releasing = getSettlementService().releaseMilestone(jobId, 0, attestation, address);
@@ -291,6 +334,9 @@ describe("N79 round 2: a refund never lands underneath a settlement in flight", 
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     const released = deferred<{ transactionHash: string; status: "submitted" }>();
     vi.mocked(chain.releaseMilestoneV2).mockReturnValue(released.promise as never);
+    // N79 round 6: the post-release mapping read (H2-A), V2 ABI — fixture only; no assertion below changed.
+    const stepId = getRepos().jobs.findById(jobId)!.stepId;
+    vi.mocked(chain.getEscrowStateV2).mockResolvedValue(chainStateFor(address, [stepId], [chain.MilestoneStatusV2.Released]));
 
     const releasing = app.inject({ method: "POST", url: `/api/escrow/chain/${address}/release/0`, payload: {} });
     await vi.waitFor(() => expect(chain.releaseMilestoneV2).toHaveBeenCalled());
@@ -322,6 +368,12 @@ describe("N79 round 2: a refund never lands underneath a settlement in flight", 
     });
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     vi.mocked(chain.releaseMilestone).mockResolvedValue({ transactionHash: "0xone", status: "submitted" } as never);
+    // N79 round 6: the post-release mapping read (H2-A), V1 ABI — fixture only; no assertion below changed. Index
+    // 0 is the job's own (random) stepId, now Released; index 1 is the manually-inserted "step-2", still Funded.
+    const stepId = getRepos().jobs.findById(jobId)!.stepId;
+    vi.mocked(chain.getEscrowState).mockResolvedValue(
+      chainStateFor(address, [stepId, "step-2"], [chain.MilestoneStatusV2.Released, chain.MilestoneStatusV2.Funded]) as never,
+    );
 
     const out = await getSettlementService().releaseMilestone(jobId, 0, { escrowAddress: address } as never, address);
     expect(out.status).toBe("released");

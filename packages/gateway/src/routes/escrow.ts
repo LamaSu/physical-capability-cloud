@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
-import { getAddress, isAddress, type Address } from "viem";
+import { getAddress, isAddress, type Address, type Hex } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getSettlementFacade } from "../facades/index.js";
 import type { DisputeInput } from "../facades/index.js";
@@ -20,13 +20,17 @@ import {
   releaseMilestoneV3,
   isWriteEnabled as escrowWriteEnabled,
   encodeApproveAndReleaseV3,
+  getEscrowState as getEscrowStateV1,
+  getEscrowStateV2,
+  getMilestoneMappingV3,
+  MilestoneStatus,
 } from "../contracts/escrow-client.js";
 import { getRepos } from "../db.js";
 import {
   beginSettlement,
   endSettlement,
   NON_RELEASABLE_ESCROW_STATUSES,
-  recordMilestoneReleased,
+  recordChainSettlement,
   releaseEscrowFromSettlement,
   type SettlementClaim,
 } from "../services/escrow-refund.js";
@@ -57,17 +61,48 @@ function findEscrowRow(contractAddress: string) {
 }
 
 /**
- * Record a release that went through. It happened on-chain, so a failed bookkeeping write is never raised and never
- * reported as a failed release; but it is not hidden either (astra round 3, F5): it is logged as an error and the caller
- * is told (`false`), so the response can say `recorded: false, reconcile: "required"`. The claim is NOT handed back
- * after a confirmed release: the escrow stays owned, so no refund can land on funds that moved. Nothing here heals a V1
- * or V3 escrow left that way; the keeper reconciles V2 only. Returns whether the release was recorded.
+ * Record a release that went through, via the ONE guarded writer (N79 round 6, addendum 1 P1): a fresh,
+ * SAME-version chain-mapping read right after this write, then `recordChainSettlement`. Superseded the
+ * index-only `recordMilestoneReleased(milestoneIndex, claim)` call this function used to make, which could
+ * complete the escrow from local rows alone with no idea how many milestones the chain actually has (H2-A(c):
+ * the same drift as releaseMilestone's H2-A(b) — one local row, chain has two — reaches this same bug through
+ * the raw route). It happened on-chain, so a failed read or a failed write is never raised and never reported
+ * as a failed release; but it is not hidden either (astra round 3, F5): it is logged as an error and the caller
+ * is told (`false`), so the response can say `recorded: false, reconcile: "required"`. The claim is NOT handed
+ * back after a confirmed release: the escrow stays owned, so no refund can land on funds that moved. Returns
+ * whether the release was recorded.
  */
-function recordRelease(milestoneIndex: number, claim: SettlementClaim | undefined, result: unknown): boolean {
+async function recordRelease(
+  milestoneIndex: number,
+  claim: SettlementClaim | undefined,
+  result: unknown,
+  version: "v1" | "v2" | "v3",
+  contractAddress: Address,
+): Promise<boolean> {
   if (!claim) return true; // an escrow the gateway does not know has no row to record on
   try {
-    recordMilestoneReleased(milestoneIndex, claim);
-    return true;
+    const chain =
+      version === "v3"
+        ? await getMilestoneMappingV3(contractAddress)
+        : version === "v2"
+          ? await getEscrowStateV2(contractAddress).then((s) => ({
+              stepIds: s.milestones.map((m) => m.stepId as Hex),
+              statuses: s.milestones.map((m) => m.status),
+            }))
+          : await getEscrowStateV1(contractAddress).then((s) => ({
+              stepIds: s.milestones.map((m) => m.stepId as Hex),
+              statuses: s.milestones.map((m) => m.status),
+            }));
+    const outcome = recordChainSettlement(claim, { ...chain, releasedStatus: MilestoneStatus.Released });
+    if (outcome.ok) return true;
+    const tx = (result ?? {}) as { transactionHash?: string; txHash?: string };
+    console.error("[escrow] settlement_record_failed", {
+      escrowId: claim.escrowId,
+      milestoneIndex,
+      txHash: tx.transactionHash ?? tx.txHash,
+      error: outcome.drifted ? "chain_mapping_drift" : "milestone_row_write_failed",
+    });
+    return false;
   } catch (err) {
     const tx = (result ?? {}) as { transactionHash?: string; txHash?: string };
     console.error("[escrow] settlement_record_failed", {
@@ -459,7 +494,7 @@ export async function escrowRoutes(app: FastifyInstance) {
                 ? await releaseMilestoneV3(idx, address as Address)
                 : await releaseMilestoneV2(idx, address as Address);
             released = true;
-            const recorded = recordRelease(idx, claim, result);
+            const recorded = await recordRelease(idx, claim, result, version, address as Address);
             return {
               ...result,
               action: "release",
@@ -501,7 +536,7 @@ export async function escrowRoutes(app: FastifyInstance) {
           return sendActivityError(reply, activityResult.error);
         }
         released = true;
-        if (recordRelease(idx, claim, activityResult.value)) return activityResult.value;
+        if (await recordRelease(idx, claim, activityResult.value, "v1", address as Address)) return activityResult.value;
         return {
           ...(typeof activityResult.value === "object" && activityResult.value !== null ? activityResult.value : { result: activityResult.value }),
           recorded: false,

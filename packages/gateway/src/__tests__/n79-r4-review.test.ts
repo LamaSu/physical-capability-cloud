@@ -51,6 +51,7 @@ vi.mock("../contracts/escrow-client.js", async (importActual) => {
     submitEvidence: vi.fn(),
     releaseMilestone: vi.fn(),
     releaseMilestoneV2: vi.fn(),
+    getEscrowState: vi.fn(),
     getEscrowStateV2: vi.fn(),
   };
 });
@@ -309,6 +310,7 @@ describe("N79 round 4: the review's findings, reproduced", () => {
     vi.mocked(chain.submitEvidence).mockReset();
     vi.mocked(chain.releaseMilestone).mockReset();
     vi.mocked(chain.releaseMilestoneV2).mockReset();
+    vi.mocked(chain.getEscrowState).mockReset();
     vi.mocked(chain.getEscrowStateV2).mockReset();
     vi.mocked(driveSettlement).mockReset();
     vi.mocked(verifyWithOracle).mockClear();
@@ -365,6 +367,14 @@ describe("N79 round 4: the review's findings, reproduced", () => {
     process.env.ESCROW_CONTRACT_ADDRESS = addr(0xe5c4ff); // some other, global escrow
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     vi.mocked(chain.releaseMilestone).mockResolvedValue({ transactionHash: "0xr4default", status: "submitted" } as never);
+    // N79 round 6: the post-release mapping read (H2-A), V1 ABI — fixture only; no assertion below changed.
+    // submitPaidJob (no explicit milestones) gives the job a RANDOM stepId (paid-job-flow.ts: `step-${uuid}`),
+    // not the `step-1` convention seed()-based fixtures use — read it back rather than assuming it, and build
+    // the chain state inline (chainState() above hardcodes the step-N convention).
+    const jobAStepId = getRepos().jobs.findById(jobA)!.stepId;
+    const jobAChainState = chainState(addressA, [chain.MilestoneStatusV2.Released]) as unknown as { milestones: Array<{ stepId: string }> };
+    jobAChainState.milestones[0]!.stepId = keccak256(toBytes(jobAStepId));
+    vi.mocked(chain.getEscrowState).mockResolvedValue(jobAChainState as never);
 
     const out = await getSettlementService().releaseMilestone(jobA, 0, ATTESTATION(addressA));
 

@@ -16,7 +16,7 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result, Signature } from "@pcc/spec";
-import { createWalletClient, createPublicClient, http, keccak256, toBytes, decodeEventLog, parseUnits } from "viem";
+import { createWalletClient, createPublicClient, http, keccak256, toBytes, decodeEventLog, parseUnits, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { PCCProtocolABI, PCCProtocolV2ABI, getDeployment, getContractAddress } from "@pcc/contracts";
 import { MilestoneEscrowV2ABI, MilestoneEscrowV3ABI, MockUSDCABI } from "@pcc/contracts/abi";
@@ -42,10 +42,12 @@ import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js
 import { getKernelService } from "../services/kernel-service.js";
 import {
   beginSettlement,
+  checkChainMapping,
   endSettlement,
   escrowForJob,
   NON_RELEASABLE_ESCROW_STATUSES,
-  recordEscrowReleased,
+  recordChainSettlement,
+  recordMockEscrowReleased,
   releaseEscrowFromSettlement,
   TERMINAL_FAILURE_JOB_STATUSES,
   type SettlementClaim,
@@ -62,6 +64,8 @@ import {
   submitEvidenceV3,
   waitForReceipt,
   GAS_LIMITS,
+  getEscrowStateV2,
+  MilestoneStatusV2,
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
 import {
@@ -100,19 +104,63 @@ export function isMockSettlement(): boolean {
 }
 
 /**
- * Complete the escrow a settlement holds: every milestone row `released` and the escrow `completed`, as a compare-and-set
- * under the claim's lease (N79 round 3; these four sites used to write `completed` bare). A row that no longer reads what
- * the claim holds it as is left alone, never overwritten, and logged. `escrowId` is set only when the job's escrow was found
- * by the same job -> session -> cwm lookup the claim was taken with, so a claim is in scope at every site; one that is not
- * is logged rather than written around.
+ * Complete the REAL (non-mock) escrow a settlement holds, via the ONE guarded writer (N79 round 6, addendum 1
+ * P1): a fresh V2 mapping read, then `recordChainSettlement`. Superseded `completeClaimedEscrow` (N79 round 3),
+ * which completed the escrow from local rows alone via `recordEscrowReleased(claim)` with NO chain argument —
+ * exactly H2-A's finding (two local rows, the chain has one Released milestone; this call stamped both rows and
+ * completed the escrow anyway). `escrowId` is set only when the job's escrow was found by the same job -> session
+ * -> cwm lookup the claim was taken with, so a claim is in scope at every site; one that is not is logged rather
+ * than written around.
  */
-function completeClaimedEscrow(claim: SettlementClaim | undefined, escrowId: string | null, jobId: string): void {
+async function completeClaimedEscrowFromChain(
+  claim: SettlementClaim | undefined,
+  escrowId: string | null,
+  jobId: string,
+  escrowAddress: string,
+): Promise<void> {
   if (!escrowId) return;
   if (!claim) {
     console.error("[escrow] settlement_record_failed", { escrowId, jobId, error: "settled without a claim on the escrow" });
     return;
   }
-  if (!recordEscrowReleased(claim)) {
+  try {
+    const chainState = await getEscrowStateV2(escrowAddress as `0x${string}`);
+    const outcome = recordChainSettlement(claim, {
+      stepIds: chainState.milestones.map((m) => m.stepId as Hex),
+      statuses: chainState.milestones.map((m) => m.status),
+      releasedStatus: MilestoneStatusV2.Released,
+    });
+    if (!outcome.ok) {
+      console.error("[escrow] settlement_record_failed", {
+        escrowId: claim.escrowId,
+        jobId,
+        error: outcome.drifted ? "chain_mapping_drift" : "milestone_row_write_failed",
+      });
+    }
+  } catch (err) {
+    // The chain-mapping read itself failed (RPC error, etc.) — treated exactly like a failed write: the escrow
+    // stays `completing`, never handed back, and the caller is told to reconcile.
+    console.error("[escrow] settlement_record_failed", {
+      escrowId: claim.escrowId,
+      jobId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Complete a MOCK escrow a settlement holds (N79 round 6, addendum 1 P1): mocks have no chain identities, so
+ * `recordMockEscrowReleased` — not `recordChainSettlement` — is the correct writer here. Same shape as
+ * {@link completeClaimedEscrowFromChain}: `escrowId` set only when the claim is in scope; a claim that is not
+ * is logged rather than written around.
+ */
+function completeClaimedMockEscrow(claim: SettlementClaim | undefined, escrowId: string | null, jobId: string): void {
+  if (!escrowId) return;
+  if (!claim) {
+    console.error("[escrow] settlement_record_failed", { escrowId, jobId, error: "settled without a claim on the escrow" });
+    return;
+  }
+  if (!recordMockEscrowReleased(claim)) {
     console.error("[escrow] settlement_record_failed", {
       escrowId: claim.escrowId,
       jobId,
@@ -1514,7 +1562,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         settledAt = now;
         settlementStatus = "settled";
 
-        completeClaimedEscrow(escrowClaim, escrowId, jobId);
+        completeClaimedMockEscrow(escrowClaim, escrowId, jobId);
       } else {
         // Real settlement: update status to evidence_submitted and wait for challenge window
         repos.jobs.updateStatus(jobId, "evidence_submitted");
@@ -1802,6 +1850,66 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         !!escrowAddress && escrowAddress.startsWith("0x") && !escrowAddress.startsWith("mock");
       const v2ChainDrive = useEasV2() && hasRealEscrow && escrowWriteEnabled();
 
+      // N79 round 6 (H2-B(c) / addendum 1 P4): read the mapping and compare BEFORE the first drive — resume
+      // used to drive the crank with no idea whether this job's local rows even agreed with the chain's true
+      // milestone set. A drift here means driving anything off this read would advance (or claim to advance)
+      // an obligation this resume cannot verify is the escrow's own. Quarantine in `completing`: no drive at
+      // all, and a 409 naming the drift. The job itself goes back to `priorStatus` so a later resume (once the
+      // drift is reconciled) can try again; the escrow does NOT — it stays exactly as the claim found it.
+      if (v2ChainDrive && escrowId) {
+        let preDriveChain: Awaited<ReturnType<typeof getEscrowStateV2>> | undefined;
+        let preDriveReadFailed = false;
+        try {
+          preDriveChain = await getEscrowStateV2(escrowAddress as `0x${string}`);
+        } catch (readErr) {
+          preDriveReadFailed = true;
+          pipelineTelemetry.emit(jobId, "settlement_claim", "failed", {
+            metadata: { path: "resume-mapping-read", error: readErr instanceof Error ? readErr.message : String(readErr) },
+          });
+        }
+        // Lead addendum 2: a failed read is UNVERIFIED, not "no drift" — driving off it would advance an
+        // obligation this resume never actually confirmed matches the escrow's local rows. Fail closed exactly
+        // like a confirmed drift, except the escrow is hand-back-able here (nothing is actually known to be
+        // wrong with it, unlike a confirmed drift, which must never be handed back toward a refund).
+        if (preDriveReadFailed) {
+          repos.jobs.updateStatus(jobId, priorStatus);
+          resumedFrom = undefined;
+          if (escrowClaim) {
+            try {
+              releaseEscrowFromSettlement(escrowClaim, jobId);
+            } catch {
+              // best-effort, like every other hand-back in this route
+            }
+          }
+          return reply.status(503).send({
+            error: "escrow_mapping_unverified",
+            message: "The chain mapping could not be read before driving settlement; refusing to proceed unverified.",
+            escrowId,
+          });
+        }
+        if (preDriveChain) {
+          const mapping = checkChainMapping(escrowId, {
+            stepIds: preDriveChain.milestones.map((m) => m.stepId as Hex),
+            statuses: preDriveChain.milestones.map((m) => m.status),
+          });
+          if (!mapping.ok) {
+            console.error("[escrow] settlement_mapping_mismatch", {
+              escrowId,
+              chainCount: mapping.chainCount,
+              localCount: mapping.localCount,
+              firstMismatch: mapping.firstMismatch,
+            });
+            repos.jobs.updateStatus(jobId, priorStatus);
+            resumedFrom = undefined;
+            return reply.status(409).send({
+              error: "escrow_mapping_drift",
+              message: "This escrow's local rows do not match the chain's true milestone set; refusing to drive settlement.",
+              escrowId,
+            });
+          }
+        }
+      }
+
       // First chain pass: read the milestone's TRUE on-chain state and advance it —
       // fund + submit evidence if they never landed, and (the core recovery) RELEASE
       // an already-Attested milestone whose challenge window has closed, which needs
@@ -1835,7 +1943,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       if (v2ChainDrive && chainSettled) {
         const nowIso = new Date().toISOString();
         repos.jobs.updateStatus(jobId, "settled");
-        completeClaimedEscrow(escrowClaim, escrowId, jobId);
+        await completeClaimedEscrowFromChain(escrowClaim, escrowId, jobId, escrowAddress as string);
         resumedFrom = undefined;
         pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
           metadata: {
@@ -1931,12 +2039,12 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         repos.jobs.updateStatus(jobId, "settled");
         settledAt = nowIso;
         settlementStatus = "settled";
-        completeClaimedEscrow(escrowClaim, escrowId, jobId);
+        completeClaimedMockEscrow(escrowClaim, escrowId, jobId);
       } else if (chainSettled) {
         repos.jobs.updateStatus(jobId, "settled");
         settledAt = nowIso;
         settlementStatus = "settled";
-        completeClaimedEscrow(escrowClaim, escrowId, jobId);
+        await completeClaimedEscrowFromChain(escrowClaim, escrowId, jobId, escrowAddress as string);
       } else {
         repos.jobs.updateStatus(jobId, priorStatus);
         settlementStatus = priorStatus;

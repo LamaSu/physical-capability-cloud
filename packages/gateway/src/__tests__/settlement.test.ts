@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { settlementRoutes } from "../routes/settlement.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { resetSettlementService, getSettlementService } from "../services/settlement-service.js";
 import { closeWorkflowStore } from "../workflow-store.js";
 import type { EvidenceBundle } from "@pcc/spec";
@@ -345,6 +345,10 @@ describe("SettlementService", () => {
     it("refuses to settle a fabricated bundle at a paid tier (>=1): no on-chain submit or release", async () => {
       const escrowMod = await import("../contracts/escrow-client.js");
       vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+      // N79 round 6 (P2, bind-first): the bundle's assuranceTier (1) must match the authoritative job's. The
+      // shared job-004 seed fixture has no tier set (reads as 0) — give it a real, matching tier for this
+      // test only (initStore reseeds fresh every test). Fixture only; no assertion below changed.
+      getRepos().jobs.update("job-004", { assuranceTier: 1 });
 
       const service = getSettlementService();
       const result = await service.processEvidence(makeFabricatedBundle(1), "job-004", {
@@ -363,6 +367,8 @@ describe("SettlementService", () => {
     it("still submits on-chain for an HONEST paid-tier bundle (real passes)", async () => {
       const escrowMod = await import("../contracts/escrow-client.js");
       vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+      // N79 round 6 (P2, bind-first): fixture only — see the fabricated-bundle test above.
+      getRepos().jobs.update("job-004", { assuranceTier: 1 });
 
       const service = getSettlementService();
       const result = await service.processEvidence(
