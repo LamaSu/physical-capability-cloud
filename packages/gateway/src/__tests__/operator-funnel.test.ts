@@ -46,6 +46,20 @@ vi.mock("../services/audit-service.js", () => ({
       h.logged.push({ ...e });
       return true;
     },
+    // Mirrors AuditService.logOnce: atomic check-then-insert over h.logged,
+    // keyed on (eventType, resourceType, resourceId, action) — #469 round 2 R4a.
+    logOnce: (e: Record<string, unknown>) => {
+      const exists = h.logged.some(
+        (r) =>
+          r.eventType === e.eventType &&
+          r.resourceType === e.resourceType &&
+          r.resourceId === e.resourceId &&
+          r.action === e.action,
+      );
+      if (exists) return "exists";
+      h.logged.push({ ...e });
+      return "written";
+    },
     query: (opts: { eventType?: string; resourceType?: string; resourceId?: string }) =>
       h.logged.filter(
         (r) =>
