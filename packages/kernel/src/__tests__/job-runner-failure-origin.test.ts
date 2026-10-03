@@ -12,9 +12,24 @@ import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
 import type { JobResult } from "../job-runner.js";
 
+/**
+ * A span the test names fails once: "before" throws before it runs its callback, "after" throws
+ * once its callback's promise has settled (astra pack 214). Otherwise a span just runs it.
+ */
+const spans = vi.hoisted(() => ({ failing: null as { name: string; when: "before" | "after" } | null }));
+
 // Plain functions, not vi.fn(), so vi.restoreAllMocks() cannot strip them.
 vi.mock("@sentry/node", () => ({
-  startSpan: (_opts: unknown, fn: () => unknown) => fn(),
+  startSpan: (opts: { name?: string }, fn: () => unknown) => {
+    const failing = spans.failing;
+    if (failing === null || failing.name !== opts.name) return fn();
+    spans.failing = null;
+    if (failing.when === "before") throw Object.create(null);
+    return Promise.resolve(fn()).then(
+      () => Promise.reject(Object.create(null)),
+      () => Promise.reject(Object.create(null)),
+    );
+  },
   addBreadcrumb: () => {},
   captureException: () => {},
 }));
@@ -132,6 +147,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  spans.failing = null;
 });
 
 /** A sensor whose start or stop the test decides; it emits nothing. */
@@ -288,6 +304,27 @@ describe("JobResult.failure: where a failed run failed (#5417)", () => {
     expect.soft(console.error, "the failed stop, logged").toHaveBeenCalledWith(expect.stringMatching(/stopping sensor \(unreadable id\) after a failed run/), expect.anything());
   });
 
+  it("a config that cannot be read, a sensor list that cannot be iterated, and ids that are not text: origin configuration", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const unreadable = new Proxy(job("job-origin-config", 76, 0), {
+      get(target, property) {
+        if (property === "jobId") throw Object.create(null);
+        return Reflect.get(target, property);
+      },
+    });
+    expect.soft((await new JobRunner(testMachine("m-origin-config"), [], null, emitter).run(unreadable)).failure, "the config").toEqual({ origin: "configuration" });
+    const list = new Proxy([] as SensorAdapter[], {
+      get(target, property) {
+        if (property === Symbol.iterator) throw Object.create(null);
+        return Reflect.get(target, property);
+      },
+    });
+    expect.soft((await new JobRunner(testMachine("m-origin-list"), list, null, emitter).run(job("job-origin-list", 77, 0))).failure, "the sensor list").toEqual({ origin: "configuration" });
+    const notText = await new JobRunner(testMachine("m-origin-ids"), [], null, emitter).run({ ...job("job-origin-ids", 78, 0), jobId: 7 as unknown as string });
+    expect.soft(notText.error, "why").toBe("the run's job id and step id must be text");
+    expect.soft(notText.failure, "the ids").toEqual({ origin: "configuration" });
+  });
+
   it("a successful run, and a busy refusal, name no failure", async () => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const ok = await new JobRunner(testMachine("m-origin-ok"), [], null, emitter).run(job("job-origin-ok", 71, 0));
@@ -302,5 +339,90 @@ describe("JobResult.failure: where a failed run failed (#5417)", () => {
     await runA;
     expect.soft(b.busy?.reason).toBe("adapter");
     expect.soft(b.failure).toBeUndefined();
+  });
+});
+
+describe("observability never changes a run's outcome, nor charges a device (astra pack 214)", () => {
+  /** Runs `body`, and counts every rejection Node reports as unhandled meanwhile. */
+  async function counting<T>(body: () => Promise<T>): Promise<{ value: T | null; unhandled: number }> {
+    let unhandled = 0;
+    const on = () => void (unhandled += 1);
+    process.on("unhandledRejection", on);
+    try {
+      const value = await body().then((r) => r, () => null);
+      await new Promise((r) => setTimeout(r, 30));
+      return { value, unhandled };
+    } finally {
+      process.off("unhandledRejection", on);
+    }
+  }
+
+  it.each([
+    ["job.run", "before"],
+    ["job.load_gcode", "before"],
+    ["job.start_sensors", "before"],
+    ["job.start_execution", "before"],
+    ["job.wait_for_completion", "before"],
+    ["job.stop_sensors", "before"],
+    ["job.finalize_bundle", "before"],
+    ["job.run", "after"],
+    ["job.start_sensors", "after"],
+    ["job.finalize_bundle", "after"],
+  ] as const)("the %s span fails %s its work: the run's work still runs, and it succeeds", async (name, when) => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine(`m-span-${name}-${when}`);
+    let started = 0;
+    const sensor = sensorOf(`sensor-span-${name}-${when}`, {
+      start: async () => {
+        started += 1;
+      },
+    });
+    spans.failing = { name, when };
+    const result = await new JobRunner(machine, [sensor], null, emitter).run(job(`job-span-${name}-${when}`, 80));
+    expect.soft(spans.failing, "the span failed").toBeNull();
+    expect.soft(result.success, `the run (${result.error ?? "ok"})`).toBe(true);
+    expect.soft(result.failure, "no failure").toBeUndefined();
+    expect.soft(started, "the sensor started, once").toBe(1);
+    expect.soft(machine.commands, "the machine's commands, each once").toEqual(["load_gcode", "start"]);
+  });
+
+  it("the span fails, or the sensor fails, inside the same phase: only the sensor's failure fails the run, charged to the sensor", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    spans.failing = { name: "job.start_sensors", when: "before" };
+    const telemetry = await new JobRunner(testMachine("m-span-vs-sensor-1"), [sensorOf("sensor-span-vs-1")], null, emitter).run(job("job-span-vs-1", 81));
+    expect.soft(telemetry.success, "a span that fails").toBe(true);
+    const device = await new JobRunner(testMachine("m-span-vs-sensor-2"), [sensorOf("sensor-span-vs-2", { start: async () => Promise.reject(new Error("sensor offline")) })], null, emitter).run(job("job-span-vs-2", 82));
+    expect.soft(device.failure, "a sensor that fails").toEqual({ origin: "sensor", adapterId: "sensor-span-vs-2" });
+  });
+
+  it("an onPhase that throws on evidence_capture/completed: the run succeeds with its bundle", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const onPhase = vi.fn((_jobId: string, phase: string, status: string) => {
+      if (phase === "evidence_capture" && status === "completed") throw Object.create(null);
+    });
+    const result = await new JobRunner(testMachine("m-phase-completed"), [], null, emitter).run({ ...job("job-phase-completed", 83, 0), onPhase });
+    expect.soft(onPhase, "onPhase was told").toHaveBeenCalledWith("job-phase-completed", "evidence_capture", "completed", expect.anything());
+    expect.soft(result.success, `the run (${result.error ?? "ok"})`).toBe(true);
+    expect.soft(result.bundleId, "its bundle").toEqual(expect.any(String));
+    expect.soft(result.failure, "no failure").toBeUndefined();
+  });
+
+  it("an onPhase that throws on evidence_capture/failed: the run fails with its own reason, origin evidence", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const onPhase = () => {
+      throw Object.create(null);
+    };
+    const machine = testMachine("m-phase-failed", { onLoad: () => [] }); // it reports nothing
+    const result = await new JobRunner(machine, [], cameraOf("camera-phase-failed"), emitter).run({ ...job("job-phase-failed", 84, 2), onPhase });
+    expect.soft(result.error ?? "", "why").toMatch(/^Tier 2 requirements not met/);
+    expect.soft(result.failure, "where").toEqual({ origin: "evidence" });
+  });
+
+  it("an onPhase whose promise rejects: nothing is left unhandled, and the run succeeds", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const onPhase = (() => Promise.reject(Object.create(null))) as unknown as () => void;
+    const out = await counting(() => new JobRunner(testMachine("m-phase-async"), [], null, emitter).run({ ...job("job-phase-async", 85, 0), onPhase }));
+    expect.soft(out.value?.success, "the run").toBe(true);
+    expect.soft(out.unhandled, "unhandled rejections").toBe(0);
   });
 });

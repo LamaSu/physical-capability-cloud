@@ -80,6 +80,47 @@ function release(jobId: string, what: string, step: () => void): void {
   }
 }
 
+/**
+ * Run `work` in a Sentry span. Observability never changes a run's outcome, nor the device it
+ * charges (astra pack 214): a span that fails before it runs the work runs it untraced, and one that
+ * fails once the work has run leaves the work's own outcome.
+ */
+async function traced<T>(options: Parameters<typeof Sentry.startSpan>[0], work: () => Promise<T>): Promise<T> {
+  let entered = false;
+  let outcome: Promise<T> | undefined;
+  let thrown: unknown;
+  try {
+    await Sentry.startSpan(options, () => {
+      entered = true;
+      outcome = work();
+      return outcome;
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  // The work's own outcome, whatever the span did with it.
+  if (outcome !== undefined) return outcome;
+  // The span never ran the work: run it untraced.
+  if (!entered) return work();
+  // The work threw before it returned a promise: that is its own failure.
+  throw thrown;
+}
+
+/**
+ * Tell the caller's onPhase (the gateway relays it to telemetry). What it throws, or its promise
+ * rejects with, is logged: it never becomes the run's outcome (astra pack 214).
+ */
+function notifyPhase(onPhase: OnPhaseCallback | undefined, ...args: Parameters<OnPhaseCallback>): void {
+  if (onPhase === undefined) return;
+  const [jobId, phase, status] = args;
+  const logFailed = (err: unknown) => console.error(`[job-runner] job ${jobId}: onPhase(${phase}, ${status}) failed: ${failureText(err)}`);
+  try {
+    Promise.resolve(onPhase(...args) as unknown).catch(logFailed);
+  } catch (err) {
+    logFailed(err);
+  }
+}
+
 export interface JobResult {
   success: boolean;
   bundleId?: string;
@@ -180,7 +221,10 @@ export class JobRunner {
 
     // Fail closed: without its quiesceEvidence() an adapter cannot say when a job's
     // evidence is complete, and nothing else binds an event to the job (round 3b).
-    const adapters = [this.machine, ...this.sensors, ...(this.camera ? [this.camera] : [])];
+    // The caller's sensor list is read once, here: every later loop reads this copy, so nothing
+    // but a collaborator's own call can throw inside the run (astra pack 214).
+    const sensors = [...this.sensors];
+    const adapters = [this.machine, ...sensors, ...(this.camera ? [this.camera] : [])];
     // An adapter that throws while it is checked, or while the session opens (its onEvidence),
     // fails the run with a result, never a rejection. Nothing is held yet: the session takes
     // its claim only once every adapter is tapped (astra pack 209).
@@ -293,7 +337,7 @@ export class JobRunner {
     let actor: { origin: JobFailureOrigin; adapterId?: string } = { origin: "machine", adapterId: adapterIdOf(this.machine) };
     const machineActor = (): { origin: JobFailureOrigin; adapterId?: string } => ({ origin: "machine", adapterId: adapterIdOf(this.machine) });
     try {
-      const result = await Sentry.startSpan(
+      const result = await traced(
         {
           name: "job.run",
           op: "job.run",
@@ -306,7 +350,7 @@ export class JobRunner {
         async () => {
           // 1. Load G-code
           actor = machineActor();
-          const loadResult = await Sentry.startSpan(
+          const loadResult = await traced(
             { name: "job.load_gcode", op: "job.phase", attributes: { "job.id": jobId } },
             async () =>
               this.machine.execute({
@@ -322,10 +366,10 @@ export class JobRunner {
 
           // 2. Start sensors (Tier 1+)
           if (assuranceTier >= 1) {
-            await Sentry.startSpan(
-              { name: "job.start_sensors", op: "job.phase", attributes: { "job.id": jobId, "sensor.count": this.sensors.length } },
+            await traced(
+              { name: "job.start_sensors", op: "job.phase", attributes: { "job.id": jobId, "sensor.count": sensors.length } },
               async () => {
-                for (const sensor of this.sensors) {
+                for (const sensor of sensors) {
                   actor = { origin: "sensor", adapterId: adapterIdOf(sensor) };
                   // Before the await: a start that throws may still have begun recording.
                   recording.add(sensor);
@@ -338,7 +382,7 @@ export class JobRunner {
           // 3. Take before-snapshot (Tier 2+)
           if (assuranceTier >= 2 && this.camera) {
             actor = { origin: "camera", adapterId: adapterIdOf(this.camera) };
-            await Sentry.startSpan(
+            await traced(
               { name: "job.before_snapshot", op: "job.phase", attributes: { "job.id": jobId } },
               async () => this.camera!.captureSnapshot(),
             );
@@ -346,7 +390,7 @@ export class JobRunner {
 
           // 4. Start execution
           actor = machineActor();
-          const startResult = await Sentry.startSpan(
+          const startResult = await traced(
             { name: "job.start_execution", op: "job.phase", attributes: { "job.id": jobId } },
             async () => this.machine.execute({ type: "start", payload: { jobId } }),
           );
@@ -355,17 +399,17 @@ export class JobRunner {
           }
 
           // 5. Wait for completion
-          await Sentry.startSpan(
+          await traced(
             { name: "job.wait_for_completion", op: "job.phase", attributes: { "job.id": jobId } },
             async () => this.waitForCompletion(),
           );
 
           // 6. Stop sensors and collect summaries (Tier 1+)
           if (assuranceTier >= 1) {
-            await Sentry.startSpan(
+            await traced(
               { name: "job.stop_sensors", op: "job.phase", attributes: { "job.id": jobId } },
               async () => {
-                for (const sensor of this.sensors) {
+                for (const sensor of sensors) {
                   actor = { origin: "sensor", adapterId: adapterIdOf(sensor) };
                   await sensor.stopRecording();
                   // Only once stopped: a stop that fails is made again on the failure path.
@@ -378,7 +422,7 @@ export class JobRunner {
           // 7. Run CV inspection (Tier 2+)
           if (assuranceTier >= 2 && this.camera) {
             actor = { origin: "camera", adapterId: adapterIdOf(this.camera) };
-            await Sentry.startSpan(
+            await traced(
               { name: "job.cv_inspection", op: "job.phase", attributes: { "job.id": jobId } },
               async () => this.camera!.runInspection(),
             );
@@ -413,7 +457,7 @@ export class JobRunner {
           if (!check.met) {
             // For tier >= 2, unmet requirements are a hard failure
             if (assuranceTier >= 2) {
-              onPhase?.(jobId, "evidence_capture", "failed", { missing: check.missing });
+              notifyPhase(onPhase, jobId, "evidence_capture", "failed", { missing: check.missing });
               return failed(`Tier ${assuranceTier} requirements not met: ${check.missing.join(", ")}`, "evidence");
             }
             // For tier 0-1, warn but continue (self-attested/sensor-only)
@@ -422,13 +466,13 @@ export class JobRunner {
 
           // 9. Finalize evidence bundle. The chain is closed and settled, so the step
           // cannot change while the bundle is hashed, signed and copied.
-          const bundle = await Sentry.startSpan(
+          const bundle = await traced(
             { name: "job.finalize_bundle", op: "job.phase", attributes: { "job.id": jobId } },
             async () => this.evidenceEmitter.finalizeBundle(jobId, stepId),
           );
 
           // Emit phase callback for evidence capture so kernel-service can relay to telemetry
-          onPhase?.(jobId, "evidence_capture", "completed", {
+          notifyPhase(onPhase, jobId, "evidence_capture", "completed", {
             eventCount: bundle.events.length,
             bundleHash: bundle.bundleHash,
           });
