@@ -1841,7 +1841,7 @@
     return null;
   }
   var provStates = /* @__PURE__ */ new Map();
-  function provenanced(node, el2, paint, clear, fingerprint) {
+  function provenanced(node, el2, prepare, clear, fingerprint) {
     const prov = provenanceOf(node);
     const host = wrapEl(el2);
     let st = provStates.get(node.id);
@@ -1884,13 +1884,14 @@
       onData: (data) => {
         const now = Date.now();
         const src = sourceAsOf(data, now);
-        const incomingFingerprint = fingerprint(data);
-        if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src, state.fingerprint, incomingFingerprint))) return;
-        const painted = paint(data, src);
-        if (painted !== true) {
-          failed(painted);
+        const prepared = prepare(data, src);
+        if (typeof prepared === "string") {
+          failed(prepared);
           return;
         }
+        const incomingFingerprint = fingerprint(data);
+        if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src, state.fingerprint, incomingFingerprint))) return;
+        prepared();
         state.shown = true;
         state.fingerprint = incomingFingerprint;
         if (src !== null) {
@@ -1964,8 +1965,9 @@
         if (cur === MISSING) return "missing field";
         const text = bindScalar(node, data);
         if (text === UNAVAILABLE) return "mistyped field";
-        slot.textContent = text;
-        return true;
+        return () => {
+          slot.textContent = text;
+        };
       }, () => {
         slot.textContent = "";
       }, (data) => {
@@ -1981,7 +1983,16 @@
       const schema = node.bind?.schema;
       if (!schema) return;
       const slots = Array.from(el2.querySelectorAll(".pcc-value"));
-      const pv = provenanced(node, el2, (data) => bindSchemaCard(schema, data, slots) ? true : schemaCardFailure(schema, data) ?? "payload does not match schema", () => {
+      const pv = provenanced(node, el2, (data) => {
+        const staging = slots.map(() => ({ textContent: "" }));
+        if (!bindSchemaCard(schema, data, staging)) return schemaCardFailure(schema, data) ?? "payload does not match schema";
+        return () => {
+          staging.forEach((s, j) => {
+            const sl = slots[j];
+            if (sl) sl.textContent = s.textContent;
+          });
+        };
+      }, () => {
         for (const sl of slots) sl.textContent = "";
       }, (data) => {
         const staging = slots.map(() => ({ textContent: "" }));
@@ -1999,8 +2010,7 @@
         if (rows.length === 0 && src === null) return "empty result without a source time";
         const staging = document.createElement("div");
         bindListRows(rdoc, wrapEl(staging), node, rows);
-        el2.replaceChildren(...Array.from(staging.childNodes));
-        return true;
+        return () => el2.replaceChildren(...Array.from(staging.childNodes));
       }, () => {
         el2.replaceChildren();
       }, (data) => {

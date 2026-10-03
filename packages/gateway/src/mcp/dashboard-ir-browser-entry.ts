@@ -224,16 +224,23 @@ function shapeOf(n: Node): unknown {
  *    until the route's budget runs out: a timer marks it stale on its own, and a resume
  *    re-checks it. Data without a source time is shown with "source time not reported" and is
  *    never presented as fresh (receipt time is kept separate).
- *  - No regression: an update older than the ordering watermark, or without a source time
- *    once a timed datum has been accepted, is dropped. The watermark is kept apart from
- *    whether a value is currently shown, and it survives binding restarts.
+ *  - No regression: an update older than the ordering watermark, or untimed once a timed datum
+ *    was accepted, is dropped. This applies ONLY to VALID data; an invalid update is a failed
+ *    read that clears the view (astra 28f H1). The watermark is kept apart from whether a value
+ *    is currently shown, and it survives binding restarts.
  *  - One state and one metadata line per bound node, kept across restarts (hide/show).
- *  `paint(data, sourceAsOf)` must validate the complete route-specific payload and paint ONLY
- *  if it fits; otherwise it returns a short fixed reason and leaves the DOM untouched.
+ *  `prepare(data, sourceAsOf)` validates the complete route-specific payload WITHOUT writing to
+ *  the real DOM: if it fits, it returns a COMMIT function that paints the already-validated,
+ *  already-staged result into the real DOM; otherwise it returns a short fixed reason and
+ *  leaves the DOM untouched. Validation (prepare) always runs BEFORE the ordering gate, so an
+ *  off-contract, partial, mistyped or unreadable refresh is a failed read whatever its
+ *  timestamp — it can never be dropped silently behind a stale-but-valid watermark while an
+ *  older fresh value (or a fresh "none") stays on screen (astra 28f H1). Ordering applies only
+ *  to data `prepare` has already proven valid; only the commit (the actual DOM write) waits on it.
  *  `clear()` removes shown values. */
 interface ProvState { meta: HTMLElement; watermark: string | null; fingerprint: string | null; shown: boolean; timeKnown: boolean; expiry: ReturnType<typeof setTimeout> | null }
 const provStates = new Map<string, ProvState>();
-function provenanced(node: IrNode, el: HTMLElement, paint: (data: unknown, src: string | null) => true | string, clear: () => void, fingerprint: (data: unknown) => string | null): { onData: (d: unknown) => void; onStale: (why: string) => void; onEnded: (why: string) => void } {
+function provenanced(node: IrNode, el: HTMLElement, prepare: (data: unknown, src: string | null) => string | (() => void), clear: () => void, fingerprint: (data: unknown) => string | null): { onData: (d: unknown) => void; onStale: (why: string) => void; onEnded: (why: string) => void } {
   const prov = provenanceOf(node);
   const host = wrapEl(el) as unknown as RElement;
   let st = provStates.get(node.id);
@@ -268,12 +275,16 @@ function provenanced(node: IrNode, el: HTMLElement, paint: (data: unknown, src: 
     onData: (data) => {
       const now = Date.now();
       const src = sourceAsOf(data, now);
+      // astra 28f H1: VALIDATE FIRST. An off-contract, partial, mistyped or unreadable payload is a
+      // failed read whatever its timestamp: it CLEARS the view and says why. Ordering (no
+      // regression, untimed-after-timed, equal-time fingerprints) applies ONLY to valid data.
+      const prepared = prepare(data, src);
+      if (typeof prepared === "string") { failed(prepared); return; } // not data for this route
       const incomingFingerprint = fingerprint(data);
       // Never roll back; an equal-timestamp duplicate whose payload differs from what is
       // shown is ALSO rejected — see acceptsNewer (M3: undecidable by time alone).
       if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src, state.fingerprint, incomingFingerprint))) return;
-      const painted = paint(data, src);
-      if (painted !== true) { failed(painted); return; } // not data for this route
+      prepared();
       state.shown = true;
       state.fingerprint = incomingFingerprint;
       if (src !== null) { state.watermark = src; state.timeKnown = true; markFresh(); }
@@ -339,8 +350,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
       if (cur === MISSING) return "missing field";
       const text = bindScalar(node, data);
       if (text === UNAVAILABLE) return "mistyped field";
-      slot.textContent = text;
-      return true;
+      return () => { slot.textContent = text; }; // commit: write only after validation AND ordering accept it (astra 28f H1)
     }, () => { slot.textContent = ""; }, (data) => {
       // M3 fingerprint: the scalar itself — the one thing this sink shows.
       const cur = selectPath(data, select);
@@ -356,7 +366,14 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     const el = schemaEls[i]; if (!el) return;
     const schema = node.bind?.schema; if (!schema) return;
     const slots = Array.from(el.querySelectorAll<HTMLElement>(".pcc-value"));
-    const pv = provenanced(node, el, (data) => (bindSchemaCard(schema, data, slots) ? true : (schemaCardFailure(schema, data) ?? "payload does not match schema")), () => { for (const sl of slots) sl.textContent = ""; }, (data) => {
+    const pv = provenanced(node, el, (data) => {
+      // Validate into THROWAWAY staging slots first (never the real DOM) — same pattern the
+      // fingerprint below already uses. Only a commit (after ordering also accepts) copies the
+      // validated text into the real slots (astra 28f H1).
+      const staging = slots.map(() => ({ textContent: "" }));
+      if (!bindSchemaCard(schema, data, staging)) return schemaCardFailure(schema, data) ?? "payload does not match schema";
+      return () => { staging.forEach((s, j) => { const sl = slots[j]; if (sl) sl.textContent = s.textContent; }); };
+    }, () => { for (const sl of slots) sl.textContent = ""; }, (data) => {
       // M3 fingerprint: "the selected fields" — bindSchemaCard run into THROWAWAY slots
       // (never the real DOM), so fingerprinting a to-be-rejected duplicate never paints.
       const staging = slots.map(() => ({ textContent: "" }));
@@ -373,10 +390,9 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     // Empty-read policy: "none" is shown only when the SOURCE vouches for when it read the
     // empty set; an empty result without a source time is not evidence of absence.
     if (rows.length === 0 && src === null) return "empty result without a source time";
-    const staging = document.createElement("div"); // paint off-DOM: a rejected payload never touches the view
+    const staging = document.createElement("div"); // stage off-DOM: committed only after ordering also accepts it (astra 28f H1)
     bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows);
-    el.replaceChildren(...Array.from(staging.childNodes));
-    return true;
+    return () => el.replaceChildren(...Array.from(staging.childNodes));
   }, () => { el.replaceChildren(); }, (data) => {
     // M3 fingerprint: shapeOf(staging) — a framed structural shape of the same rows, staged
     // off-DOM (never touching `el`), not raw concatenated text (astra 28e M3: row/cell

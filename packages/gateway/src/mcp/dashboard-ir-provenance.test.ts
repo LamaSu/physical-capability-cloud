@@ -687,4 +687,28 @@ describe("astra r4 (#348 @3e615620): reproduced findings (verify before fix)", (
       s.close();
     });
   }
+
+  // Positive control: validate-first does not fail closed forever. Once an invalid refresh has
+  // cleared a list to unavailable, a LATER valid response with a newer asOf still repaints it
+  // (rows shown, not unavailable, a fresh "source read" line) — astra 28f H1 only changes what
+  // happens to INVALID data; ordering over VALID data is unchanged.
+  it("H1 (refresh) positive control: after an invalid refresh clears a list, a later VALID newer response repaints it", async () => {
+    const s = scene([
+      { status: 200, json: { items: [{ name: "A", type: "t", available: true }], asOf: iso(T0 - 10_000) } }, // valid, timed
+      { status: 200, json: {} }, // invalid: off-contract -> clears to unavailable
+      { status: 200, json: { items: [{ name: "B", type: "u", available: false }], asOf: iso(T0 - 1_000) } }, // valid, NEWER
+    ], T0);
+    s.deliver(listManifest); await s.settle();
+    expect(s.q(".pcc-list").className).not.toContain("pcc-unavail");
+    await s.nextPoll();
+    const cleared = s.q(".pcc-list");
+    expect(cleared.className).toContain("pcc-unavail");
+    expect(s.lineOf(cleared).textContent).toBe("unavailable · unexpected response shape");
+    await s.nextPoll();
+    const repainted = s.q(".pcc-list");
+    expect(repainted.className).not.toContain("pcc-unavail");
+    expect(repainted.querySelectorAll(".pcc-row").length).toBe(1);
+    expect(s.lineOf(repainted).textContent).toContain("source read");
+    s.close();
+  });
 });
