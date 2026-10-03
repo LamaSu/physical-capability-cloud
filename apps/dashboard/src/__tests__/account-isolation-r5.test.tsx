@@ -52,6 +52,12 @@ const gateway = {
   siweCookie: false,
   calls: [] as string[],
   zkCommit: null as null | ((r: Response) => void),
+  /** When set, GET /api/auth/me waits; each waiting request is answered by the test. */
+  deferMe: false,
+  meWaiting: [] as Array<(r: Response) => void>,
+  /** When set, POST /api/auth/logout waits for the test to answer it. */
+  deferLogout: false,
+  logoutWaiting: [] as Array<() => void>,
 };
 
 function json(body: unknown, status = 200) {
@@ -72,6 +78,10 @@ beforeEach(() => {
   gateway.siweCookie = false;
   gateway.calls = [];
   gateway.zkCommit = null;
+  gateway.deferMe = false;
+  gateway.meWaiting = [];
+  gateway.deferLogout = false;
+  gateway.logoutWaiting = [];
   disconnectWallet();
   vi.stubGlobal(
     "fetch",
@@ -81,10 +91,17 @@ beforeEach(() => {
       const method = (init?.method ?? "GET").toUpperCase();
       gateway.calls.push(`${method} ${path}`);
       if (path === "/api/auth/validate") return json({ valid: true });
-      if (path === "/api/auth/me") return gateway.siweCookie ? json({ address: A_WALLET }) : json({ error: "Not authenticated" }, 401);
+      if (path === "/api/auth/me") {
+        if (gateway.deferMe) return new Promise<Response>((resolve) => gateway.meWaiting.push(resolve));
+        return gateway.siweCookie ? json({ address: A_WALLET }) : json({ error: "Not authenticated" }, 401);
+      }
       if (path === "/api/auth/logout" && method === "POST") {
-        gateway.siweCookie = false;
-        return json({ ok: true });
+        const done = () => {
+          gateway.siweCookie = false;
+          return json({ ok: true });
+        };
+        if (gateway.deferLogout) return new Promise<Response>((resolve) => gateway.logoutWaiting.push(() => resolve(done())));
+        return done();
       }
       if (path === "/api/zk/commit") return new Promise<Response>((resolve) => (gateway.zkCommit = resolve));
       throw new TypeError("Failed to fetch");
@@ -120,10 +137,16 @@ async function waitForText(text: string, ms = 8_000): Promise<boolean> {
   return (container.textContent ?? "").includes(text);
 }
 
-async function renderAt(path: string) {
+/**
+ * Sign in as A and render `path`. `before` runs once A's account boundary has
+ * settled, so a wallet it connects isn't ended by A's own sign-in teardown.
+ */
+async function renderAt(path: string, before?: () => void) {
   window.history.replaceState(null, "", path);
   const { useAuthStore } = await import("../stores/auth-store.js");
   useAuthStore.setState({ isAuthenticated: true, apiKey: "pcc_test_key" });
+  await settle(5); // the account change, if this is one, ends the previous wallet session
+  before?.();
   const { App } = await import("../App.js");
   await act(async () => {
     root.render(<App />);
@@ -139,11 +162,12 @@ function click(text: string) {
 
 describe("C1: A's wallet and SIWE session never carry over to B (astra 19d)", () => {
   async function signInAWithWallet() {
-    wallet.address = A_WALLET;
-    wallet.isConnected = true;
-    wallet.chainId = 84532;
-    gateway.siweCookie = true;
-    await renderAt("/dashboard");
+    await renderAt("/dashboard", () => {
+      wallet.address = A_WALLET;
+      wallet.isConnected = true;
+      wallet.chainId = 84532;
+      gateway.siweCookie = true;
+    });
     const { useAuthStore } = await import("../stores/auth-store.js");
     expect(useAuthStore.getState().address, "A's wallet is connected").toBe(A_WALLET);
     expect(useAuthStore.getState().sessionToken, "A's SIWE session is adopted").toBe("cookie");
@@ -162,6 +186,66 @@ describe("C1: A's wallet and SIWE session never carry over to B (astra 19d)", ()
     expect(useAuthStore.getState().sessionToken).toBeNull();
     expect(gateway.siweCookie, "the gateway's SIWE cookie was destroyed").toBe(false);
     expect(wallet.isConnected, "wagmi was disconnected").toBe(false);
+  }, 20_000);
+
+  it("B's shell neither mounts nor asks the gateway anything until A's SIWE cookie is gone", async () => {
+    const useAuthStore = await signInAWithWallet();
+    gateway.deferLogout = true;
+    const before = gateway.calls.length;
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    await settle();
+    expect(gateway.logoutWaiting.length, "A's session teardown is waiting on the gateway").toBeGreaterThanOrEqual(1);
+    expect(container.textContent).toContain("Signing out of the previous account");
+    // While the switch is pending, before any ConnectWallet mounts, the store holds no wallet of A's.
+    expect(useAuthStore.getState().address).toBeNull();
+    expect(useAuthStore.getState().sessionToken).toBeNull();
+    const meanwhile = gateway.calls.slice(before).filter((c) => !c.startsWith("POST /api/auth/logout") && !c.startsWith("GET /api/auth/validate"));
+    expect(meanwhile, "nothing of B's went out while A's cookie was live").toEqual([]);
+    await act(async () => {
+      for (const answer of gateway.logoutWaiting.splice(0)) answer();
+    });
+    await settle();
+    expect(container.textContent).not.toContain("Signing out of the previous account");
+    expect(useAuthStore.getState().sessionToken).toBeNull();
+    expect(useAuthStore.getState().address).toBeNull();
+  }, 20_000);
+
+  it("where no ConnectWallet renders (/app), B still starts with no wallet and no SIWE session", async () => {
+    await renderAt("/app", () => {
+      gateway.siweCookie = true;
+    });
+    const { useAuthStore } = await import("../stores/auth-store.js");
+    await act(async () => useAuthStore.getState().setAddress(A_WALLET)); // A's wallet, adopted earlier
+    await act(async () => useAuthStore.getState().setSession("cookie"));
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    await settle();
+    expect(useAuthStore.getState().address).toBeNull();
+    expect(useAuthStore.getState().sessionToken).toBeNull();
+  }, 20_000);
+
+  it("A's session check, answered after B signs in, is dropped", async () => {
+    await renderAt("/dashboard", () => {
+      gateway.siweCookie = true;
+      gateway.deferMe = true; // A's ConnectWallet asks /api/auth/me; the answer is held
+    });
+    expect(gateway.meWaiting.length, "A's session check is in flight").toBeGreaterThanOrEqual(1);
+    const asA = gateway.meWaiting.splice(0);
+    const { useAuthStore } = await import("../stores/auth-store.js");
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    await settle();
+    // A's check now gets the answer A's cookie earned; B's own checks find no session.
+    await act(async () => {
+      for (const answer of asA) answer(json({ address: A_WALLET }));
+      for (const answer of gateway.meWaiting.splice(0)) answer(json({ error: "Not authenticated" }, 401));
+    });
+    await settle();
+    expect(useAuthStore.getState().sessionToken).toBeNull();
   }, 20_000);
 
   it("a different key while signed in (A to B) also ends A's wallet session before B's shell renders", async () => {

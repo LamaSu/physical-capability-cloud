@@ -33,8 +33,20 @@ beforeAll(() => {
   }));
 });
 
+/** The gateway answers POST /api/auth/logout {ok: true} whether or not a SIWE session exists; an account change waits on it. */
+function isSiweLogout(input: RequestInfo | URL, init?: RequestInit): boolean {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  return url.replace(/^https?:\/\/[^/]+/, "").split("?")[0] === "/api/auth/logout" && (init?.method ?? "GET").toUpperCase() === "POST";
+}
+
 beforeEach(() => {
-  vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (isSiweLogout(input, init)) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      throw new TypeError("Failed to fetch");
+    }),
+  );
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -130,6 +142,7 @@ describe("one account's cached reads never reach the next (astra round 2, #354 f
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (isSiweLogout(input, init)) return new Response(JSON.stringify({ ok: true }), { status: 200 });
         if (!url.includes("/api/jobs")) throw new TypeError("Failed to fetch");
         const key = (new Headers(init?.headers).get("Authorization") ?? "").replace(/^Bearer /, "");
         const id = jobsFor[key];
@@ -250,6 +263,7 @@ describe("one account's in-memory state never reaches the next (astra 19c)", () 
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
         if (url.includes("/api/auth/validate")) return json({ valid: true });
+        if (isSiweLogout(input, init)) return json({ ok: true });
         const path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0];
         if (path === "/api/capabilities") return json({ items: [], total: 0, offset: 0, limit: 200 });
         if (path === "/api/kernels") return json({ kernels: [] });

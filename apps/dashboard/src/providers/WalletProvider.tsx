@@ -35,4 +35,4 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-export { config as wagmiConfig };
+export { config as wagmiConfig, wagmiQueryClient };

@@ -6,6 +6,7 @@ import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
 import { useAuthStore, onIdentityChange, onAccountChange } from "./stores/auth-store.js";
 import { resetAccountScopedState } from "./lib/account-scope.js";
+import { endWalletSession } from "./lib/wallet-session.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -122,31 +123,78 @@ const queryClient = new QueryClient({
 // identity changes, so the next identity never sees the previous one's jobs or money.
 onIdentityChange(() => queryClient.clear());
 
-// Everything else held in memory belongs to the account too (astra 19c).
-// - Every account-scoped store goes back to its initial state: the spatial
-//   chat, open panels, notifications, wizard and builder input
-//   (lib/account-scope.ts). This happens inside the set() that changed the
-//   key, before anything renders for the next account.
-// - The signed-in shell remounts under a new key. That drops component state,
-//   and gives every mounted query a fresh observer: clearing the cache alone
-//   left a mounted page showing the previous account's data until it
-//   happened to re-render.
-let accountEpoch = 0;
+// Everything else the browser holds belongs to the account too (astra 19c,
+// 19d). When the API account changes (a key signed in or out, or another key):
+// 1. Inside the set() that changed the key, before anything renders:
+//    - every account-scoped store goes back to its initial state, and every
+//      store action read under the previous account stops working
+//      (lib/account-scope.ts);
+//    - the previous wallet's address and SIWE session leave the auth store.
+// 2. The signed-in shell unmounts, and stays unmounted while the wallet half
+//    of the identity ends: wagmi disconnects and the gateway destroys its SIWE
+//    cookie (lib/wallet-session.ts). Both live above this boundary, and the
+//    next account's ConnectWallet used to re-adopt them.
+// 3. The shell mounts again under a new key, for the new account. That drops
+//    component state, and gives every query a fresh observer. If the gateway
+//    can't confirm the cookie is gone, the next account doesn't load (fail
+//    closed), and the page offers a retry.
+type AccountTransition = "settled" | "ending" | "failed";
+let account: { epoch: number; transition: AccountTransition } = { epoch: 0, transition: "settled" };
 const accountListeners = new Set<() => void>();
+let teardownRun = 0;
+
+function setAccount(next: typeof account): void {
+  account = next;
+  for (const listener of accountListeners) listener();
+}
+
+function endPreviousWallet(): void {
+  const run = ++teardownRun;
+  setAccount({ ...account, transition: "ending" });
+  void endWalletSession().then((ended) => {
+    if (run !== teardownRun) return; // a later account change owns the transition now
+    setAccount({ epoch: account.epoch + 1, transition: ended ? "settled" : "failed" });
+  });
+}
+
 onAccountChange(() => {
   resetAccountScopedState();
-  accountEpoch += 1;
-  for (const listener of accountListeners) listener();
+  useAuthStore.setState({ address: null, sessionToken: null, isVerifying: false });
+  endPreviousWallet();
 });
 
-/** Changes whenever the signed-in account changes; the shell is keyed by it. */
-function useAccountEpoch(): number {
+/** The account boundary: its epoch keys the shell; while it is in transition the shell isn't mounted. */
+function useAccountBoundary(): typeof account {
   return useSyncExternalStore(
     (onChange) => {
       accountListeners.add(onChange);
       return () => accountListeners.delete(onChange);
     },
-    () => accountEpoch,
+    () => account,
+  );
+}
+
+/** Shown between accounts, instead of the shell. */
+function AccountTransitionScreen({ failed }: { failed: boolean }) {
+  return (
+    <div role="status" className="min-h-screen flex items-center justify-center px-6 text-center text-sm text-white/60">
+      {failed ? (
+        <div className="space-y-3 max-w-md">
+          <p>
+            Couldn't confirm that the previous wallet session ended. Nothing of this account loads until it has, so the
+            previous wallet can't act for it.
+          </p>
+          <button
+            onClick={endPreviousWallet}
+            className="px-3 py-1.5 rounded-lg text-xs border border-white/[0.12] text-white/80 hover:bg-white/[0.04]"
+          >
+            Try again
+          </button>
+        </div>
+      ) : (
+        <p>Signing out of the previous account…</p>
+      )}
+    </div>
   );
 }
 
@@ -438,7 +486,7 @@ function Shell() {
 }
 
 export function App() {
-  const accountEpoch = useAccountEpoch();
+  const boundary = useAccountBoundary();
   return (
     // Sentry.ErrorBoundary captures errors to Sentry before falling through
     // to the local ErrorBoundary for display. When VITE_SENTRY_DSN is not set,
@@ -448,7 +496,11 @@ export function App() {
         <WalletProvider>
           <QueryClientProvider client={queryClient}>
             <BrowserRouter>
-              <Shell key={accountEpoch} />
+              {boundary.transition === "settled" ? (
+                <Shell key={boundary.epoch} />
+              ) : (
+                <AccountTransitionScreen failed={boundary.transition === "failed"} />
+              )}
             </BrowserRouter>
           </QueryClientProvider>
         </WalletProvider>

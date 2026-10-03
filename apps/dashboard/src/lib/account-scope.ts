@@ -9,6 +9,12 @@
  * in or out, or a different key), App returns each one to its initial state,
  * before anything renders for the next account (App.tsx, onAccountChange).
  *
+ * Each store's actions are also bound to the account they were read under
+ * (astra 19d). An action reference that A's component captured, and calls
+ * after the switch (a late fetch result, a timer), does nothing. Only actions
+ * read after the switch write. A reset alone would leave A's closures able to
+ * refill B's store.
+ *
  * auth-store is the one store that doesn't register: it is the identity itself.
  * __tests__/account-scope.test.ts holds every other store to registering.
  */
@@ -20,6 +26,32 @@ interface Store<S> {
 }
 
 const resets: Array<() => void> = [];
+
+/** Which account's state the stores hold now. It changes on every reset. */
+let epoch = 0;
+
+/** The account epoch now: async work can compare it before acting on a result. */
+export function currentAccountEpoch(): number {
+  return epoch;
+}
+
+/**
+ * `state` with each action (function) wrapped to run only while the account
+ * epoch is still `at`. A call through a reference read under an earlier
+ * account returns undefined and changes nothing.
+ */
+function bindToEpoch<S>(state: S, at: number): S {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(state as Record<string, unknown>)) {
+    out[key] =
+      typeof value === "function"
+        ? function (this: unknown, ...args: unknown[]) {
+            return epoch === at ? (value as (...a: unknown[]) => unknown).apply(this, args) : undefined;
+          }
+        : value;
+  }
+  return out as S;
+}
 
 /** A copy of a data value; functions (store actions) are kept as they are. */
 function copy(value: unknown): unknown {
@@ -46,12 +78,17 @@ function snapshot<S>(state: S): S {
  * can't alter what the next reset restores.
  */
 export function accountScoped<S>(store: Store<S>): void {
-  const initial = snapshot(store.getState());
-  resets.push(() => store.setState(snapshot(initial), true));
+  const initial = snapshot(store.getState()); // the store's own actions, unwrapped
+  store.setState(bindToEpoch(snapshot(initial), epoch), true);
+  resets.push(() => store.setState(bindToEpoch(snapshot(initial), epoch), true));
 }
 
-/** Return every registered store to its initial state. */
+/**
+ * A new account: every registered store returns to its initial state, and
+ * every action reference read before this call stops working.
+ */
 export function resetAccountScopedState(): void {
+  epoch += 1;
   for (const reset of resets) reset();
 }
 
