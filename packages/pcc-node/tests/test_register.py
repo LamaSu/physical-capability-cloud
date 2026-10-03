@@ -76,28 +76,158 @@ class TestRegisterKernel:
 
 
 class TestAnnounceCapabilities:
+    def _body(self, mock_pcc):
+        return mock_pcc.call_args[1].get("body") or mock_pcc.call_args[0][2]
+
+    # A minimal, valid declared-terms pair reused across tests below. #3560:
+    # announce_capabilities now derives capabilities from each device's OWN
+    # declared assuranceTiers/pricing (pcc_node.declared_terms), not from an
+    # ad hoc device-type map with an invented "assuranceTiers: [0]" default.
+    # A device that declares nothing offers nothing, so every test that
+    # expects an actual announcement must declare terms.
+    TERMS = {
+        "assuranceTiers": [0],
+        "pricing": {"currency": "USDC", "baseCost": "5", "minimum": "5"},
+    }
+
     def test_with_opentrons(self):
-        devices = [{"type": "opentrons", "url": "http://localhost:31950"}]
+        devices = [{"type": "opentrons", "url": "http://localhost:31950", **self.TERMS}]
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
-            mock_pcc.return_value = (200, {})
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 2})
             announce_capabilities("http://pcc", "key", "k1", devices)
         mock_pcc.assert_called_once()
-        body = mock_pcc.call_args[1].get("body") or mock_pcc.call_args[0][2]
-        assert "liquid-handler" in body["capabilities"]
+        assert mock_pcc.call_args[0][1] == "/api/kernels/k1/heartbeat"
+        types = [c["type"] for c in self._body(mock_pcc)["capabilities"]]
+        assert "liquid-handler" in types
+        assert "pipette-transfer" in types
+
+    def test_never_uses_the_store_nothing_announce_stub(self):
+        """Bus #2622 item 3: /api/kernels/<id>/capabilities acknowledges and
+        stores nothing; a node announced through it stayed undiscoverable.
+
+        Needs a device that declares terms (#3560): without terms nothing is
+        announced at all, and pcc_request is never called -- which would
+        make the assertion below vacuously true regardless of this
+        invariant, so it would stop actually guarding it."""
+        devices = [{"type": "octoprint", "url": "http://10.0.0.20:5000", **self.TERMS}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 2})
+            announce_capabilities("http://pcc", "key", "k1", devices)
+        mock_pcc.assert_called_once()
+        paths = [call[0][1] for call in mock_pcc.call_args_list]
+        assert "/api/kernels/k1/capabilities" not in paths
+
+    def test_device_credentials_never_leave_the_node(self):
+        devices = [{
+            "type": "octoprint", "url": "http://10.0.0.20:5000", "api_key": "OCTO-SECRET-KEY",
+            **self.TERMS,
+        }]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 2})
+            announce_capabilities("http://pcc", "key", "k1", devices)
+        body = self._body(mock_pcc)
+        assert "devices" not in body
+        assert "OCTO-SECRET-KEY" not in repr(body)
+        assert "10.0.0.20" not in repr(body)
+
+    def test_a_short_acknowledgement_is_logged(self, caplog):
+        devices = [{"type": "opentrons", **self.TERMS}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 0})
+            with caplog.at_level("WARNING"):
+                announce_capabilities("http://pcc", "key", "k1", devices)
+        # opentrons now offers 2 types (liquid-handler, pipette-transfer) via
+        # CAPABILITY_PROTOCOL_MAP -- not the old ad hoc 3-slug cap_map.
+        assert "recorded 0 of 2" in caplog.text
 
     def test_empty_devices(self):
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
             announce_capabilities("http://pcc", "key", "k1", [])
         mock_pcc.assert_not_called()
 
+    def test_no_device_declares_terms_sends_nothing(self):
+        """A device with no assuranceTiers/pricing at all announces nothing
+        -- the replacement for the old test_empty_devices-adjacent case
+        that used to rely on an unknown device type mapping to nothing."""
+        devices = [{"type": "opentrons"}, {"type": "octoprint"}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            summary = announce_capabilities("http://pcc", "key", "k1", devices)
+        mock_pcc.assert_not_called()
+        assert summary["announced"] == []
+        assert len(summary["notAnnounced"]) == 2
+
     def test_with_signature(self):
-        devices = [{"type": "camera", "path": "/dev/video0"}]
+        devices = [{"type": "octoprint", "path": "/dev/video0", **self.TERMS}]
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc, \
+             mock.patch("pcc_node.register._ED25519_AVAILABLE", True), \
              mock.patch("pcc_node.register.sign_announcement", return_value="deadbeef"):
             mock_pcc.return_value = (200, {})
             announce_capabilities("http://pcc", "key", "k1", devices, secret_key="ab" * 32)
-        body = mock_pcc.call_args[1].get("body") or mock_pcc.call_args[0][2]
-        assert body["signature"] == "deadbeef"
+        assert self._body(mock_pcc)["signature"] == "deadbeef"
+
+    def test_declared_terms_are_forwarded_verbatim_not_an_invented_tier_0(self):
+        """Gateway review of #390, note 2 (superseded by #3560): the node
+        used to claim a hardcoded `assuranceTiers: [0]` for every
+        capability, itself an invented default. Now every capability
+        carries exactly its device's own declared terms -- nothing
+        invented, and types are still sorted."""
+        ot_terms = {"assuranceTiers": [0], "pricing": {"currency": "USDC", "baseCost": "5", "minimum": "5"}}
+        op_terms = {"assuranceTiers": [1, 2], "pricing": {"currency": "USDC", "baseCost": "12.50", "minimum": "10"}}
+        devices = [
+            {"type": "opentrons", **ot_terms},
+            {"type": "octoprint", **op_terms},
+            {"type": "opentrons", **ot_terms},  # same terms as the first: one row, not a conflict
+        ]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 4})
+            announce_capabilities("http://pcc", "key", "k1", devices)
+        caps = self._body(mock_pcc)["capabilities"]
+        types = [c["type"] for c in caps]
+        assert types == sorted(types) == sorted(set(types))
+        by_type = {c["type"]: c for c in caps}
+        assert by_type["liquid-handler"]["assuranceTiers"] == [0]
+        assert by_type["pipette-transfer"]["assuranceTiers"] == [0]
+        assert by_type["3d-print"]["assuranceTiers"] == [1, 2]
+        assert by_type["3d-print"]["pricing"] == op_terms["pricing"]
+        assert by_type["fdm-fabrication"]["pricing"] == op_terms["pricing"]
+
+    @pytest.mark.skipif(not _HAS_NACL, reason="pynacl required")
+    def test_signature_verifies_over_what_is_sent(self):
+        """Gateway review of #390, note 1: a verifier must be able to rebuild
+        the signed message from the request alone. #3560: the signed
+        "capabilities" is now the full list of {type, assuranceTiers,
+        pricing} objects exactly as sent -- not just the bare type slugs."""
+        import json
+        import nacl.signing
+
+        seed = "deadbeef" * 8
+        verify_key = nacl.signing.SigningKey(bytes.fromhex(seed)).verify_key
+        devices = [
+            {"type": "octoprint", **self.TERMS},
+            {"type": "camera"},  # no protocol maps to a capability: not announced
+        ]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {})
+            announce_capabilities("http://pcc", "key", "k1", devices, secret_key=seed)
+        path = mock_pcc.call_args[0][1]
+        body = self._body(mock_pcc)
+        rebuilt = {
+            "kernelId": path.split("/")[3],
+            "capabilities": body["capabilities"],
+            "timestamp": body["timestamp"],
+        }
+        message = json.dumps(rebuilt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        verify_key.verify(message, bytes.fromhex(body["signature"]))
+
+    def test_no_hmac_stand_in_without_pynacl(self):
+        devices = [{"type": "octoprint", **self.TERMS}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc, \
+             mock.patch("pcc_node.register._ED25519_AVAILABLE", False), \
+             mock.patch("pcc_node.register.sign_announcement") as signer:
+            mock_pcc.return_value = (200, {})
+            announce_capabilities("http://pcc", "key", "k1", devices, secret_key="ab" * 32)
+        signer.assert_not_called()
+        assert self._body(mock_pcc)["signature"] == ""
 
 
 class TestSendHeartbeat:
@@ -182,3 +312,31 @@ class TestRegisterSigningKey:
             with pytest.raises(LogSigningRefused):
                 register_signing_key("http://pcc", "key", "k1", pub, sec)
         mock_pcc.assert_not_called()
+
+
+class TestAdvertisedAdapterType:
+    """kits #3777 / refvertical #3571: devices are advertised under the kernel's
+    AdapterType names, so a generic-http kit matches a pcc-node HTTP device."""
+
+    @pytest.mark.parametrize("device,expected", [
+        ({"protocol": "http", "url": "http://10.0.0.9"}, "generic-http"),
+        ({"protocol": "generic"}, "generic-http"),
+        ({"type": "printer", "host": "10.0.0.5"}, "ipp"),
+        ({"protocol": "ipp"}, "ipp"),
+        ({"type": "octoprint"}, "octoprint"),
+        ({"protocol": "opentrons"}, "opentrons"),
+        ({"adapterType": "generic-http", "protocol": "http"}, "generic-http"),
+        ({"type": "camera"}, "camera"),
+        ({}, "unknown"),
+    ])
+    def test_advertised_names(self, device, expected):
+        from pcc_node.register import advertised_adapter_type
+        assert advertised_adapter_type(device) == expected
+
+    def test_register_devices_sends_the_adapter_type_name(self):
+        from pcc_node.register import register_devices, ADAPTER_TYPES
+        with mock.patch("pcc_node.register.pcc_request", return_value=(201, {})) as m:
+            register_devices("http://pcc", "key", "k1", [{"protocol": "http", "url": "http://10.0.0.9"}])
+        body = m.call_args.kwargs.get("body") or m.call_args.args[2]
+        assert body["adapterType"] == "generic-http"
+        assert "generic-http" in ADAPTER_TYPES and "mock" not in ADAPTER_TYPES

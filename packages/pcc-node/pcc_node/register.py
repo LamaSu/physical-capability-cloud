@@ -8,10 +8,12 @@ Handles:
 
 import logging
 import time
+from urllib.parse import urlsplit
 
 from .http_util import pcc_request
-from .crypto import sign_announcement
+from .crypto import sign_announcement, _HAS_NACL as _ED25519_AVAILABLE
 from .log_capture import sign_ed25519_utf8, LogSigningRefused
+from .declared_terms import announcement_plan, skipped_by_gateway
 
 log = logging.getLogger("pcc-node.register")
 
@@ -128,12 +130,15 @@ def register_kernel(pcc_base, api_key, config):
     dict
         Registration response, or error dict.
     """
+    # No "devices" and no "pricing": the gateway's CreateKernelInput reads
+    # neither, and they carried the raw device dicts (credentials such as an
+    # OctoPrint api_key included) and a price nobody declared.  Devices go
+    # through register_devices (public fields only); terms go with each
+    # capability announcement, as the operator declared them (#3560).
     payload = {
         "id": config.kernel_id,
         "name": config.kernel_name,
-        "devices": config.devices,
         "approvalMode": config.approval_mode,
-        "pricing": config.pricing,
         "publicKey": config.public_key,
         "registeredAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -153,8 +158,45 @@ def register_kernel(pcc_base, api_key, config):
     return data if isinstance(data, dict) else {"raw": data, "status": status}
 
 
+# The only device fields register_devices sends as adapterConfig.  The gateway
+# stores adapterConfig and GET /api/devices/:kernelId returns it unredacted, so
+# a credential (an OctoPrint api_key, a token in a URL) must never be in it.
+PUBLIC_DEVICE_FIELDS = ("type", "protocol", "model", "name", "host", "ip", "port", "url", "path")
+
+# The kernel's AdapterType names (packages/kernel/src/kernel-config.ts, minus
+# "mock", which a node never advertises).  Kit manifests match devices by these
+# names in compatibility.interfaces (kits #3407 A4), so pcc-node advertises its
+# devices under them: its own labels "http"/"generic" are the kernel's
+# "generic-http" and "printer" is "ipp" (kits #3777, refvertical #3571).  A
+# label with no AdapterType (a camera, a serial port) is advertised unchanged,
+# and so matches no kit.
+ADAPTER_TYPES = ("octoprint", "modbus", "opcua", "sila", "ipp", "opentrons", "hamilton", "generic-http")
+_ADAPTER_TYPE_SYNONYMS = {"http": "generic-http", "generic": "generic-http", "printer": "ipp"}
+
+
+def advertised_adapter_type(device):
+    """The adapter type a device is advertised under: an AdapterType name
+    when one applies (:data:`ADAPTER_TYPES`), else its own label."""
+    label = device.get("adapterType") or device.get("protocol") or device.get("type", "unknown")
+    return _ADAPTER_TYPE_SYNONYMS.get(label, label)
+
+
+def public_device_config(device):
+    """The device's non-secret fields: :data:`PUBLIC_DEVICE_FIELDS` only, and a
+    URL only when it carries no user info (``user:pass@``)."""
+    public = {key: device[key] for key in PUBLIC_DEVICE_FIELDS if key in device}
+    url = public.get("url")
+    if isinstance(url, str) and "@" in urlsplit(url).netloc:
+        del public["url"]
+    return public
+
+
 def register_devices(pcc_base, api_key, kernel_id, devices):
-    """Register detected devices after their owning kernel exists."""
+    """Register the node's devices after their owning kernel exists.
+
+    Only :func:`public_device_config` is sent as ``adapterConfig``; the
+    device's own ``adapterConfig`` and any credential stay on the node.
+    """
     results = []
     for index, device in enumerate(devices):
         device_type = device.get("type", "unknown")
@@ -168,8 +210,8 @@ def register_devices(pcc_base, api_key, kernel_id, devices):
             "id": device_id,
             "type": device_type,
             "model": device.get("model") or device.get("name") or device_type,
-            "adapterType": device.get("adapterType") or device.get("protocol") or device_type,
-            "adapterConfig": device.get("adapterConfig", device),
+            "adapterType": advertised_adapter_type(device),
+            "adapterConfig": public_device_config(device),
             "capabilities": device.get("capabilities", []),
         }
         status, data = pcc_request(
@@ -187,10 +229,34 @@ def register_devices(pcc_base, api_key, kernel_id, devices):
 
 
 def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
-    """Announce capabilities derived from detected devices.
+    """Announce the capabilities whose terms the operator DECLARED.
 
-    Each device type maps to one or more capabilities.  Announcements are
-    optionally signed with the node's Ed25519 key.
+    The announcement goes to the kernel HEARTBEAT (``POST
+    /api/kernels/<id>/heartbeat``), the route that actually writes the
+    capability catalog.  ``POST /api/kernels/<id>/capabilities`` is a stub
+    that answers ``acknowledged`` and stores nothing, so a node registered
+    through it stayed undiscoverable (bus #2622 item 3).  No raw device dict
+    is sent: URLs and credentials such as an OctoPrint ``api_key`` never
+    leave the node through this call.
+
+    Each capability carries its device's DECLARED terms and nothing else,
+    ``{"type", "assuranceTiers", "pricing"}``, from
+    :func:`pcc_node.declared_terms.announcement_plan` (board N23, #3560).
+    There are no default terms: a device that declares none announces
+    nothing, and the log names it.  The gateway registers only declared,
+    well-formed terms (#437) and lists what it refused in
+    ``capabilitiesSkipped``; each refusal is logged as well.  The gateway
+    keeps a capability's terms from its FIRST registration: a later
+    announcement only refreshes the row.
+
+    Signature (canonical form, so a verifier can rebuild it from the
+    request): Ed25519 over the compact, key-sorted JSON of ``{"kernelId":
+    <the kernel id in the path>, "capabilities": <the body's capability
+    list, terms included>, "timestamp": <the body's timestamp>}``: exactly
+    what is sent.  Every value in it is an ASCII string (types, currency
+    codes, decimal amounts) or an integer, so these are also the bytes of TS
+    ``canonicalize()``.  Without PyNaCl the announcement goes unsigned: an
+    HMAC is not a signature anyone else can verify.
 
     Parameters
     ----------
@@ -201,63 +267,71 @@ def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
     kernel_id : str
         This node's kernel ID.
     devices : list[dict]
-        Detected devices (from detect_all()).
+        The node's devices: the configured ones, with their declared terms,
+        plus any detected ones (which never have terms).
     secret_key : str
         Hex-encoded secret key for signing (optional).
+
+    Returns
+    -------
+    dict
+        ``{"announced": [types], "notAnnounced": [{"device", "reason"}],
+        "skipped": [{"type", "reason"}]}``; ``skipped`` is the gateway's.
     """
-    # Map device types to capability slugs
-    cap_map = {
-        "opentrons": ["liquid-handler", "pipette-transfer", "plate-reader"],
-        "octoprint": ["3d-print", "fdm-fabrication"],
-        "camera": ["visual-inspection", "photo-evidence"],
-        "serial": ["serial-instrument"],
-        "mdns": ["network-instrument"],
-    }
-
-    capabilities = []
-    for dev in devices:
-        dtype = dev.get("type", "")
-        slugs = cap_map.get(dtype, [dtype] if dtype else [])
-        for slug in slugs:
-            capabilities.append({
-                "slug": slug,
-                "device": dev,
-            })
-
+    capabilities, not_announced = announcement_plan(devices)
+    for entry in not_announced:
+        log.warning("Not announcing device %s: %s", entry["device"], entry["reason"])
+    summary = {"announced": [], "notAnnounced": not_announced, "skipped": []}
     if not capabilities:
-        log.info("No capabilities to announce")
-        return
+        log.info("No capabilities to announce: no device declares terms")
+        return summary
 
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     announcement = {
         "kernelId": kernel_id,
-        "capabilities": [c["slug"] for c in capabilities],
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "capabilities": capabilities,
+        "timestamp": timestamp,
     }
 
     signature = ""
-    if secret_key:
+    if secret_key and _ED25519_AVAILABLE:
         signature = sign_announcement(announcement, secret_key)
+    elif secret_key:
+        log.info("PyNaCl is not installed: sending the capability announcement unsigned")
 
     payload = {
-        **announcement,
+        "status": "online",
+        "capabilities": capabilities,
+        "timestamp": timestamp,
         "signature": signature,
-        "devices": [c["device"] for c in capabilities],
     }
 
     status, data = pcc_request(
-        "POST", f"/api/kernels/{kernel_id}/capabilities",
+        "POST", f"/api/kernels/{kernel_id}/heartbeat",
         body=payload,
         base_url=pcc_base,
         api_key=api_key,
     )
 
-    if status in (200, 201):
-        log.info(
-            f"Announced {len(capabilities)} capabilities: "
-            f"{', '.join(c['slug'] for c in capabilities)}"
+    types = [cap["type"] for cap in capabilities]
+    if status not in (200, 201):
+        log.warning(f"Capability announcement failed (HTTP {status}): {data}")
+        return summary
+    skipped = skipped_by_gateway(data)
+    for entry in skipped:
+        log.warning("The gateway did not register capability %s: %s", entry["type"], entry["reason"])
+    refused = {entry["type"] for entry in skipped}
+    summary["announced"] = [t for t in types if t not in refused]
+    summary["skipped"] = skipped
+    received = data.get("capabilitiesReceived") if isinstance(data, dict) else None
+    if isinstance(received, int) and not isinstance(received, bool) and received < len(types):
+        log.warning(
+            "Capability announcement: the gateway recorded %d of %d capabilities (%s)",
+            received, len(types), ", ".join(types),
         )
     else:
-        log.warning(f"Capability announcement failed (HTTP {status}): {data}")
+        log.info(f"Announced {len(types)} capabilities: {', '.join(types)}")
+    return summary
 
 
 def send_heartbeat(pcc_base, api_key, kernel_id, status_str="online"):

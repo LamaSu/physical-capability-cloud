@@ -29,7 +29,10 @@ class TestNodeConfig:
         assert d["kernel_id"] == "k1"
         assert d["kernel_name"] == "test"
         assert isinstance(d["devices"], list)
-        assert isinstance(d["pricing"], dict)
+        # #3560: no kernel-wide "pricing" field any more (it used to default
+        # to {"base": 10, "per_minute": 0.15}, a price nobody declared).
+        # Terms are declared per device (assuranceTiers/pricing).
+        assert "pricing" not in d
 
     def test_from_dict(self):
         d = {
@@ -45,18 +48,41 @@ class TestNodeConfig:
         assert cfg.pcc_base == "http://localhost:3000"
         assert cfg.approval_mode == "auto"
 
+    def test_from_dict_ignores_an_old_files_kernel_wide_pricing(self):
+        """An old config file may still have the removed top-level
+        "pricing" key; from_dict drops unknown keys, so it is ignored
+        rather than raising a TypeError."""
+        d = {
+            "kernel_id": "k2b",
+            "kernel_name": "old-file",
+            "pricing": {"base": 10, "per_minute": 0.15},
+        }
+        cfg = NodeConfig.from_dict(d)
+        assert cfg.kernel_id == "k2b"
+        assert not hasattr(cfg, "pricing")
+
     def test_roundtrip(self):
+        """#3560: terms now live per-device (assuranceTiers/pricing), not as
+        a kernel-wide "pricing" field (NodeConfig no longer accepts that
+        kwarg at all). to_dict/from_dict must round-trip a device's declared
+        terms exactly, and the file has no top-level "pricing" key."""
         cfg = NodeConfig(
             kernel_id="k3",
             kernel_name="roundtrip",
-            devices=[{"type": "camera", "path": "/dev/video0"}],
-            pricing={"base": 20, "per_minute": 0.5},
+            devices=[{
+                "type": "camera",
+                "path": "/dev/video0",
+                "assuranceTiers": [0, 1],
+                "pricing": {"currency": "USDC", "baseCost": "5", "minimum": "5"},
+            }],
         )
         d = cfg.to_dict()
+        assert "pricing" not in d
         cfg2 = NodeConfig.from_dict(d)
         assert cfg2.kernel_id == cfg.kernel_id
         assert cfg2.devices == cfg.devices
-        assert cfg2.pricing == cfg.pricing
+        assert cfg2.devices[0]["assuranceTiers"] == [0, 1]
+        assert cfg2.devices[0]["pricing"] == {"currency": "USDC", "baseCost": "5", "minimum": "5"}
 
 
 class TestGenerateConfig:

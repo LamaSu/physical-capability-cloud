@@ -25,6 +25,7 @@ from .crypto import load_or_create_keys
 from .discovery import discover_network, device_to_adapter_config
 from .job_executor import JobExecutor
 from .register import register_kernel, announce_capabilities
+from .declared_terms import DeclaredTermsError, announcement_plan
 from .ws_client import PCCGatewayClient
 
 log = logging.getLogger("pcc-node.daemon")
@@ -48,8 +49,12 @@ def _remove_pid():
         pass
 
 
-def _write_state(config, start_time, jobs_completed):
-    """Write current state for the status command."""
+def _write_state(config, start_time, jobs_completed, announcement=None):
+    """Write current state for the status command.
+
+    ``announcement``: what the node announced, what it did not and why, and
+    what the gateway refused (``pcc-node status`` prints it).
+    """
     state = {
         "pid": os.getpid(),
         "kernel_id": config.kernel_id,
@@ -59,6 +64,7 @@ def _write_state(config, start_time, jobs_completed):
         "jobs_completed": jobs_completed,
         "camera_device": config.camera_device,
         "last_update": time.time(),
+        "announcement": announcement or {},
     }
     try:
         with open(STATE_FILE, "w") as f:
@@ -102,43 +108,6 @@ def is_running():
         # Stale PID file
         _remove_pid()
         return False, None
-
-
-def _build_capabilities_from_devices(devices):
-    """Build capability announcement list from device dicts.
-
-    Maps device types / protocols to PCC capability slugs.
-    """
-    cap_map = {
-        "opentrons": [{"type": "liquid-handler"}, {"type": "pipette-transfer"}],
-        "octoprint": [{"type": "3d-print"}, {"type": "fdm-fabrication"}],
-        "printer": [{"type": "document-printing"}],
-        "ipp": [{"type": "document-printing"}],
-        "camera": [{"type": "visual-inspection"}, {"type": "photo-evidence"}],
-        "serial": [{"type": "serial-instrument"}],
-        "modbus": [{"type": "plc-control"}],
-        "generic": [{"type": "generic-http"}],
-        "http": [{"type": "generic-http"}],
-        "mdns": [{"type": "network-instrument"}],
-    }
-
-    capabilities = []
-    seen_types = set()
-
-    for dev in devices:
-        protocol = dev.get("protocol") or dev.get("type") or "generic"
-        caps = cap_map.get(protocol, [{"type": f"{protocol}-device"}])
-        for cap in caps:
-            cap_type = cap["type"]
-            if cap_type not in seen_types:
-                seen_types.add(cap_type)
-                capabilities.append({
-                    **cap,
-                    "deviceId": dev.get("id") or dev.get("host") or dev.get("ip", ""),
-                    "protocol": protocol,
-                })
-
-    return capabilities
 
 
 def run_daemon(config: NodeConfig):
@@ -212,18 +181,33 @@ def run_daemon(config: NodeConfig):
     # ------------------------------------------------------------------
     # 4. Build capabilities + announce
     # ------------------------------------------------------------------
-    capabilities = _build_capabilities_from_devices(all_devices)
-
+    # Only DECLARED terms are announced (board N23, #3560): a device without
+    # them offers nothing, and there are no default terms to fall back on.
     try:
-        announce_capabilities(
-            config.pcc_base,
-            config.pcc_api_key,
-            config.kernel_id,
-            all_devices,
-            secret_key=secret_key,
-        )
-    except Exception as e:
-        log.warning(f"Capability announcement failed: {e}")
+        capabilities, not_announced = announcement_plan(all_devices)
+    except DeclaredTermsError as e:
+        log.error(f"Announcing no capabilities: {e}")
+        capabilities, not_announced = [], [{"device": "*", "reason": str(e)}]
+    announcement = {
+        "announced": [],
+        "notAnnounced": not_announced,
+        "skipped": [],
+    }
+
+    if capabilities:
+        try:
+            announcement = announce_capabilities(
+                config.pcc_base,
+                config.pcc_api_key,
+                config.kernel_id,
+                all_devices,
+                secret_key=secret_key,
+            )
+        except Exception as e:
+            log.warning(f"Capability announcement failed: {e}")
+    else:
+        for entry in not_announced:
+            log.warning("Not announcing device %s: %s", entry["device"], entry["reason"])
 
     # ------------------------------------------------------------------
     # 5. Create gateway client + job executor
@@ -314,16 +298,22 @@ def run_daemon(config: NodeConfig):
                     log.warning(f"Camera push failed: {e}")
                 camera_counter = 0
 
-            # Re-announce capabilities every 60s (heartbeat)
+            # Every 60s: re-announce the declared capabilities, or -- when no
+            # device declares terms -- a plain heartbeat that keeps the kernel
+            # online without offering anything.
             if time.time() - last_announce > announce_interval:
                 try:
-                    gateway_client.announce_capabilities(capabilities)
+                    if capabilities:
+                        gateway_client.announce_capabilities(capabilities)
+                        announcement["skipped"] = list(gateway_client.capabilities_skipped)
+                    else:
+                        gateway_client.send_heartbeat("online")
                 except Exception as e:
                     log.warning(f"Heartbeat announce failed: {e}")
                 last_announce = time.time()
 
             # Update state file
-            _write_state(config, start_time, jobs_completed)
+            _write_state(config, start_time, jobs_completed, announcement)
 
             # Reset error counter on successful loop iteration
             consecutive_errors = 0
