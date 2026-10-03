@@ -21,6 +21,7 @@ import { parseEd25519SignatureHex, signingPreimage } from "../evidence/signing-p
 import { compileOperationalEnvelope } from "../onboarding/operational-envelope.js";
 import { canonicalJson, fixedHexBytes } from "../onboarding/primordials.js";
 import {
+  commandMapProfileIssue,
   compileSafetyEnvelope,
   confirmSafetyEnvelope,
   draftSafetyEnvelope,
@@ -86,7 +87,7 @@ function register(c: ConfirmedSafetyEnvelope): SafetyEnvelopeRegistration {
   return { ...statement, signature: Buffer.from(sign(null, registrationSigningPreimage(statement), REGISTRY.privateKey)).toString("hex") };
 }
 
-type Stage = "draft" | "confirmed" | "csd" | "runtime" | "cannotSetConfirmed" | "cannotSetCsd" | "cannotSetRuntime" | "refusals";
+type Stage = "draft" | "confirmed" | "csd" | "runtime" | "cannotSetConfirmed" | "cannotSetCsd" | "cannotSetRuntime" | "refusals" | "profile";
 
 /**
  * Digests that are well formed except for their digits, and a draft input that
@@ -147,6 +148,15 @@ const SIM_PR1_DECISION = {
     { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "status.temperature_c" },
     { quantity: "read_duration", enforcement: "telemetry" as const, channel: "config.run_seconds" },
   ],
+};
+/** SIM-PR1's profile operations (ADK #471), for the map-against-profile check (steward #5363); built before any patch. */
+const SIM_PR1_OPERATIONS = {
+  runPlate: { request: { method: "POST", path: "/runs", body: { plateFormat: "{plateFormat}", wavelengthNm: "{wavelengthNm}" } } },
+  stop: { request: { method: "POST", path: "/estop", body: {} } },
+};
+const SIM_PR1_OPERATIONS_EXTRA_SLOT = {
+  runPlate: { request: { method: "POST", path: "/runs", body: { plateFormat: "{plateFormat}", wavelengthNm: "{wavelengthNm}", lamp: ["{lampPower}"] } } },
+  stop: { request: { method: "POST", path: "/estop", body: {} } },
 };
 /** Round 3 refusals, built before any patch: a channel the map does not declare, a cutoff, and a value set out of order. */
 const UNRESOLVED_DECISION = {
@@ -229,6 +239,11 @@ function runStages(): Record<Stage, unknown> {
     refusal(() => compileSafetyEnvelope(tampered as unknown as ConfirmedSafetyEnvelope, registration, verifyRegistry));
   }
   out.refusals = refusals;
+  // The map against the profile (steward #5363): one match, one refusal, each decided the same under every patch.
+  out.profile = [
+    commandMapProfileIssue(SIM_PR1_INPUT.commandMap, SIM_PR1_OPERATIONS, "lab-plate-reader"),
+    commandMapProfileIssue(SIM_PR1_INPUT.commandMap, SIM_PR1_OPERATIONS_EXTRA_SLOT, "lab-plate-reader"),
+  ];
   return out;
 }
 
@@ -243,6 +258,7 @@ const CLEAN = (() => {
     cannotSetCsd: JSON.stringify(stages.cannotSetCsd),
     cannotSetRuntime: JSON.stringify(stages.cannotSetRuntime),
     refusals: JSON.stringify(stages.refusals),
+    profile: JSON.stringify(stages.profile),
   };
 })();
 
@@ -305,6 +321,9 @@ const PATCHES: Patch[] = [
   ["String.prototype.trim", String.prototype, "trim", () => () => "x"],
   ["String.prototype.toLowerCase", String.prototype, "toLowerCase", () => () => "x"],
   ["String.prototype.charCodeAt", String.prototype, "charCodeAt", () => () => 0x30],
+  // astra pack 183: templateSlotName cuts a slot's name with the slice captured at load. A replaced slice
+  // that names every slot "lampPower" must not change the map-against-profile decision.
+  ["String.prototype.slice", String.prototype, "slice", () => () => "lampPower"],
   ["RegExp.prototype.exec", RegExp.prototype, "exec", () => () => null],
   ["RegExp.prototype.test", RegExp.prototype, "test", () => () => true],
   ["Number.isFinite", Number, "isFinite", () => () => true],
@@ -338,6 +357,8 @@ describe("astra 164 CRITICAL: an intrinsic replaced after load cannot change wha
     }
     expect(CLEAN.cannotSetRuntime).toContain('"telemetryChannels"');
     expect(CLEAN.refusals).not.toContain("ACCEPTED");
+    expect(JSON.parse(CLEAN.profile)[0]).toBeNull();
+    expect(JSON.parse(CLEAN.profile)[1]).toMatch(/the slot \{lampPower\} has no parameter in the map/);
     expect(JSON.parse(CLEAN.refusals)).toHaveLength(9);
   });
 
@@ -374,6 +395,7 @@ describe("astra 164 CRITICAL: an intrinsic replaced after load cannot change wha
       expect(JSON.stringify(produced.confirmed)).toBe(CLEAN.confirmed);
       expect(JSON.stringify(produced.csd)).toBe(CLEAN.csd);
       expect(JSON.stringify(produced.refusals)).toBe(CLEAN.refusals);
+      expect(JSON.stringify(produced.profile)).toBe(CLEAN.profile);
       expect(JSON.stringify(produced.cannotSetConfirmed)).toBe(CLEAN.cannotSetConfirmed);
       expect(JSON.stringify(produced.cannotSetCsd)).toBe(CLEAN.cannotSetCsd);
       const cannotSetRuntime = JSON.stringify(produced.cannotSetRuntime);
