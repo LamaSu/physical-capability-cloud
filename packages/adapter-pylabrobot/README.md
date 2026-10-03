@@ -203,10 +203,9 @@ emitted only after its call returns — and `backend.run` awaits (drains) every 
 of those evidence writes before it reports success (R39 HIGH5): completion never
 outruns, or silently drops, the evidence it claims to have recorded; a write
 failure there means the run does not report clean success. Every run result and
-every op event carries
-`executionMode` (`hardware`, `simulated`, `unverified` or `stub`). **The
-backend's declared name never proves physical
-execution** (R39 CRIT1): `hardware` is never asserted by Phase 1's sidecar — no
+every op event carries `executionMode` (`hardware`, `simulated`, `unverified` or
+`stub`). **The backend's declared name never proves physical execution**
+(R39 CRIT1): `hardware` is never asserted by Phase 1's sidecar — no
 hardware-identity provenance check exists yet (D1, queue item 19) — so `ot2`
 reports `unverified`, the same bucket as a simulator. Anything but an exact
 `hardware` is also marked `mock: true` (the TypeScript adapter normalizes any
