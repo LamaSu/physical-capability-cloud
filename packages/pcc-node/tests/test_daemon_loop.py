@@ -192,7 +192,7 @@ class TestRunDaemonLoop:
 
     def test_the_daemon_keeps_the_kernel_online_without_taking_jobs(self):
         client, _, _ = self._run_once(self._config())
-        client.send_heartbeat.assert_any_call("online")
+        client.send_heartbeat.assert_any_call("online", accepting_jobs=False)
         client.poll_for_jobs.assert_not_called()
         client.mark_job_seen.assert_not_called()
 

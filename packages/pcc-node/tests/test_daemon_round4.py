@@ -70,3 +70,31 @@ def test_start_announces_no_capabilities(tmp_path):
     announce.assert_not_called()
     announce_module.assert_not_called()
     assert "does not take jobs" in result.output
+
+
+def test_the_heartbeat_says_the_node_takes_no_jobs(monkeypatch, tmp_path):
+    # Verdict 68d, finding 3: a heartbeat must not keep this kernel's listings alive.
+    # The gateway honours acceptingJobs:false once WP-C (#445) merges; until then
+    # it ignores the field.
+    client = mock.MagicMock()
+    monkeypatch.setattr(daemon, "PCCGatewayClient", lambda **kwargs: client)
+    monkeypatch.setattr(daemon, "register_kernel", mock.MagicMock())
+    monkeypatch.setattr(daemon, "load_or_create_keys", lambda *a, **k: ("ab" * 32, "cd" * 32))
+    monkeypatch.setattr(daemon, "detect_camera_device", lambda: None)
+    monkeypatch.setattr(daemon, "discover_network", lambda timeout=0.5: [])
+    monkeypatch.setattr("pcc_node.ui_server.start_ui_server", lambda **kwargs: None)
+    monkeypatch.setattr(daemon, "PID_FILE", str(tmp_path / "pid"))
+    monkeypatch.setattr(daemon, "STATE_FILE", str(tmp_path / "state.json"))
+
+    def stop(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(daemon.time, "sleep", stop)
+    config = NodeConfig(kernel_id="k1", pcc_base="https://gw.example.test", pcc_api_key="k",
+                        devices=[], poll_interval=1, diagnostics_mode="off")
+    with pytest.raises(KeyboardInterrupt):
+        daemon.run_daemon(config)
+
+    beats = client.send_heartbeat.call_args_list
+    assert beats, "the daemon sent no heartbeat"
+    assert all(call.kwargs.get("accepting_jobs") is False for call in beats), beats

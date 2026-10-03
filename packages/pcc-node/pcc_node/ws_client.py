@@ -201,19 +201,26 @@ class PCCGatewayClient:
         new_jobs = [j for j in jobs if j.get("id") not in self._seen_jobs]
         return new_jobs
 
-    def send_heartbeat(self, status_str: str = "online") -> bool:
-        """POST heartbeat to keep the kernel marked online."""
+    def send_heartbeat(self, status_str: str = "online", accepting_jobs: Optional[bool] = None) -> bool:
+        """POST heartbeat to keep the kernel marked online.
+
+        ``accepting_jobs=False`` tells the gateway this node takes no jobs, so
+        the heartbeat keeps the kernel alive without refreshing its capability
+        listings (verdict 68d, finding 3). A gateway without the field ignores it.
+        """
+        marker = {} if accepting_jobs is None else {"acceptingJobs": bool(accepting_jobs)}
         payload = {
             "kernelId": self.kernel_id,
             "status": status_str,
             "timestamp": time.time(),
+            **marker,
         }
         http_status, _ = self._post("/api/operator/heartbeat", payload)
         if http_status not in (200, 201):
             # Fall back to the standard kernel heartbeat endpoint
             http_status, _ = self._post(
                 f"/api/kernels/{self.kernel_id}/heartbeat",
-                {"status": status_str},
+                {"status": status_str, **marker},
             )
         return http_status in (200, 201)
 

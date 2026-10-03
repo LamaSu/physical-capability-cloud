@@ -192,3 +192,18 @@ class TestRound4Transport:
         finally:
             gateway.close()
             catcher.close()
+
+
+class TestHeartbeatSaysNoJobs:
+    """Verdict 68d, finding 3 (node side): the heartbeat carries acceptingJobs:false."""
+
+    def test_both_heartbeat_routes_carry_the_marker(self):
+        failing = Recorder(answer=(404, {}))
+        try:
+            client = PCCGatewayClient(failing.url, api_key=KEY, kernel_id="k1")
+            client.send_heartbeat("online", accepting_jobs=False)
+            bodies = [json.loads(r[3]) for r in failing.requests]
+            assert [r[1] for r in failing.requests] == ["/api/operator/heartbeat", "/api/kernels/k1/heartbeat"]
+            assert all(b["acceptingJobs"] is False for b in bodies), bodies
+        finally:
+            failing.close()

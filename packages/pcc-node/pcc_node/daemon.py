@@ -275,7 +275,7 @@ def run_daemon(config: NodeConfig):
     )
 
     # Send initial heartbeat
-    gateway_client.send_heartbeat("online")
+    gateway_client.send_heartbeat("online", accepting_jobs=False)
 
     while running:
         try:
@@ -293,7 +293,7 @@ def run_daemon(config: NodeConfig):
             # Heartbeat about once a minute (no capabilities: see step 4)
             if time.time() - last_heartbeat > heartbeat_interval:
                 try:
-                    gateway_client.send_heartbeat("online")
+                    gateway_client.send_heartbeat("online", accepting_jobs=False)
                 except Exception as e:
                     log.warning(f"Heartbeat failed: {e}")
                 last_heartbeat = time.time()
@@ -381,7 +381,7 @@ def run_daemon(config: NodeConfig):
     # ------------------------------------------------------------------
     log.info("Shutting down daemon...")
     try:
-        gateway_client.send_heartbeat("offline")
+        gateway_client.send_heartbeat("offline", accepting_jobs=False)
     except Exception:
         pass
     _remove_pid()
