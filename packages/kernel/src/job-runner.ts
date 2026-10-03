@@ -46,6 +46,21 @@ export interface JobConfig {
   onPhase?: OnPhaseCallback;
 }
 
+/**
+ * Where a failed run failed, so a caller can charge the right device, never the machine for a
+ * sensor's fault (astra pack 190, MEDIUM (d); the breaker policy is the gateway's, #5417):
+ *   - "machine": the machine adapter `adapterId`: its commands, or the wait for its completion;
+ *   - "sensor": the sensor `adapterId`: its start or its stop;
+ *   - "camera": the camera `adapterId`: a snapshot or an inspection;
+ *   - "evidence": the run's evidence, not one device: the adapters did not quiesce, the chain did
+ *     not settle, an event could not be recorded, the tier's requirements were not met, or the
+ *     step could not be registered;
+ *   - "configuration": the run's own set-up could not be used: an adapter has no quiesceEvidence(),
+ *     or threw while it was checked or while the run's evidence session opened; or the caller's
+ *     config, its ids or its adapter list could not be read.
+ */
+export type JobFailureOrigin = "machine" | "sensor" | "camera" | "evidence" | "configuration";
+
 /** An adapter's id, read without throwing: undefined when it cannot be read or is not text. */
 function adapterIdOf(adapter: unknown): string | undefined {
   try {
@@ -65,11 +80,54 @@ function release(jobId: string, what: string, step: () => void): void {
   }
 }
 
+/**
+ * Run `work` in a Sentry span. Observability never changes a run's outcome, nor the device it
+ * charges (astra pack 214): a span that fails before it runs the work runs it untraced, and one that
+ * fails once the work has run leaves the work's own outcome.
+ */
+async function traced<T>(options: Parameters<typeof Sentry.startSpan>[0], work: () => Promise<T>): Promise<T> {
+  let entered = false;
+  let outcome: Promise<T> | undefined;
+  let thrown: unknown;
+  try {
+    await Sentry.startSpan(options, () => {
+      entered = true;
+      outcome = work();
+      return outcome;
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  // The work's own outcome, whatever the span did with it.
+  if (outcome !== undefined) return outcome;
+  // The span never ran the work: run it untraced.
+  if (!entered) return work();
+  // The work threw before it returned a promise: that is its own failure.
+  throw thrown;
+}
+
+/**
+ * Tell the caller's onPhase (the gateway relays it to telemetry). What it throws, or its promise
+ * rejects with, is logged: it never becomes the run's outcome (astra pack 214).
+ */
+function notifyPhase(onPhase: OnPhaseCallback | undefined, ...args: Parameters<OnPhaseCallback>): void {
+  if (onPhase === undefined) return;
+  const [jobId, phase, status] = args;
+  const logFailed = (err: unknown) => console.error(`[job-runner] job ${jobId}: onPhase(${phase}, ${status}) failed: ${failureText(err)}`);
+  try {
+    Promise.resolve(onPhase(...args) as unknown).catch(logFailed);
+  } catch (err) {
+    logFailed(err);
+  }
+}
+
 export interface JobResult {
   success: boolean;
   bundleId?: string;
   bundleHash?: string;
   error?: string;
+  /** Set on every failed run, never on a busy refusal: where it failed (see JobFailureOrigin). */
+  failure?: { origin: JobFailureOrigin; adapterId?: string };
   /**
    * Set when the run was refused before it started: nothing ran, no step was registered
    * and nothing was recorded. The device is not at fault, so a caller should queue or
@@ -130,7 +188,8 @@ export class JobRunner {
     try {
       return await this.runOnce(config, startTime);
     } catch (err) {
-      return { success: false, error: failureText(err), durationMs: Date.now() - startTime };
+      // Only the caller's config and adapter list are read outside runOnce()'s own handling.
+      return { success: false, error: failureText(err), failure: { origin: "configuration" }, durationMs: Date.now() - startTime };
     }
   }
 
@@ -140,7 +199,7 @@ export class JobRunner {
     // included: ids that are not text could throw from any of those, so they are refused
     // before anything is held (astra pack 212).
     if (typeof jobId !== "string" || typeof stepId !== "string") {
-      return { success: false, error: "the run's job id and step id must be text", durationMs: Date.now() - startTime };
+      return { success: false, error: "the run's job id and step id must be text", failure: { origin: "configuration" }, durationMs: Date.now() - startTime };
     }
 
     // addEvent hashes asynchronously before it stores an event, so each one is
@@ -162,27 +221,33 @@ export class JobRunner {
 
     // Fail closed: without its quiesceEvidence() an adapter cannot say when a job's
     // evidence is complete, and nothing else binds an event to the job (round 3b).
-    const adapters = [this.machine, ...this.sensors, ...(this.camera ? [this.camera] : [])];
+    // The caller's sensor list is read once, here: every later loop reads this copy, so nothing
+    // but a collaborator's own call can throw inside the run (astra pack 214).
+    const sensors = [...this.sensors];
+    const adapters = [this.machine, ...sensors, ...(this.camera ? [this.camera] : [])];
     // An adapter that throws while it is checked, or while the session opens (its onEvidence),
     // fails the run with a result, never a rejection. Nothing is held yet: the session takes
     // its claim only once every adapter is tapped (astra pack 209).
-    const setupFailed = (what: string, err: unknown): JobResult => ({
+    // Every failed result names where it failed (JobFailureOrigin), so the caller charges the
+    // right device (#5417).
+    const failed = (error: string, origin: JobFailureOrigin, adapterId?: string): JobResult => ({
       success: false,
-      error: `${what}: ${failureText(err)}`,
+      error,
+      failure: adapterId === undefined ? { origin } : { origin, adapterId },
       durationMs: Date.now() - startTime,
     });
+    const setupFailed = (what: string, err: unknown, origin: JobFailureOrigin, adapterId?: string): JobResult =>
+      failed(`${what}: ${failureText(err)}`, origin, adapterId);
+    let checking: unknown = undefined;
     try {
       for (const adapter of adapters) {
+        checking = adapter;
         if (typeof (adapter as { quiesceEvidence?: unknown }).quiesceEvidence !== "function") {
-          return {
-            success: false,
-            error: `adapter ${adapter.id} has no quiesceEvidence(), so its evidence cannot be bound to a job`,
-            durationMs: Date.now() - startTime,
-          };
+          return failed(`adapter ${adapter.id} has no quiesceEvidence(), so its evidence cannot be bound to a job`, "configuration", adapterIdOf(adapter));
         }
       }
     } catch (err) {
-      return setupFailed("the run's adapters could not be checked", err);
+      return setupFailed("the run's adapters could not be checked", err, "configuration", adapterIdOf(checking));
     }
 
     const stepKey = `${jobId}:${stepId}`; // the emitter's own key for the step
@@ -221,7 +286,7 @@ export class JobRunner {
         },
       );
     } catch (err) {
-      return setupFailed("the run's evidence session could not open", err);
+      return setupFailed("the run's evidence session could not open", err, "configuration");
     }
     if (!opened.ok) {
       const { reason, adapterId, jobId: holder } = opened.busy;
@@ -244,7 +309,7 @@ export class JobRunner {
       release(jobId, "closing the evidence session", () => session.close());
       release(jobId, "detaching the step", () => this.evidenceEmitter.cleanup(jobId, stepId));
       if (leases.get(stepKey) === lease) leases.delete(stepKey);
-      return setupFailed("the run's step could not be registered", err);
+      return setupFailed("the run's step could not be registered", err, "evidence");
     }
 
     // Wait for the chain, but not forever: an addEvent may never settle.
@@ -267,8 +332,12 @@ export class JobRunner {
     let quiesceAsked = false;
     // Sensors this run started and has not stopped: a failed run stops them (see finally).
     const recording = new Set<SensorAdapter>();
+    // The collaborator the run is waiting on: a throw that reaches the catch below is charged
+    // to it (#5417).
+    let actor: { origin: JobFailureOrigin; adapterId?: string } = { origin: "machine", adapterId: adapterIdOf(this.machine) };
+    const machineActor = (): { origin: JobFailureOrigin; adapterId?: string } => ({ origin: "machine", adapterId: adapterIdOf(this.machine) });
     try {
-      const result = await Sentry.startSpan(
+      const result = await traced(
         {
           name: "job.run",
           op: "job.run",
@@ -280,7 +349,8 @@ export class JobRunner {
         },
         async () => {
           // 1. Load G-code
-          const loadResult = await Sentry.startSpan(
+          actor = machineActor();
+          const loadResult = await traced(
             { name: "job.load_gcode", op: "job.phase", attributes: { "job.id": jobId } },
             async () =>
               this.machine.execute({
@@ -291,15 +361,16 @@ export class JobRunner {
               }),
           );
           if (!loadResult.success) {
-            return { success: false, error: `Failed to load G-code: ${loadResult.message}`, durationMs: Date.now() - startTime };
+            return failed(`Failed to load G-code: ${loadResult.message}`, "machine", adapterIdOf(this.machine));
           }
 
           // 2. Start sensors (Tier 1+)
           if (assuranceTier >= 1) {
-            await Sentry.startSpan(
-              { name: "job.start_sensors", op: "job.phase", attributes: { "job.id": jobId, "sensor.count": this.sensors.length } },
+            await traced(
+              { name: "job.start_sensors", op: "job.phase", attributes: { "job.id": jobId, "sensor.count": sensors.length } },
               async () => {
-                for (const sensor of this.sensors) {
+                for (const sensor of sensors) {
+                  actor = { origin: "sensor", adapterId: adapterIdOf(sensor) };
                   // Before the await: a start that throws may still have begun recording.
                   recording.add(sensor);
                   await sensor.startRecording(jobId);
@@ -310,33 +381,36 @@ export class JobRunner {
 
           // 3. Take before-snapshot (Tier 2+)
           if (assuranceTier >= 2 && this.camera) {
-            await Sentry.startSpan(
+            actor = { origin: "camera", adapterId: adapterIdOf(this.camera) };
+            await traced(
               { name: "job.before_snapshot", op: "job.phase", attributes: { "job.id": jobId } },
               async () => this.camera!.captureSnapshot(),
             );
           }
 
           // 4. Start execution
-          const startResult = await Sentry.startSpan(
+          actor = machineActor();
+          const startResult = await traced(
             { name: "job.start_execution", op: "job.phase", attributes: { "job.id": jobId } },
             async () => this.machine.execute({ type: "start", payload: { jobId } }),
           );
           if (!startResult.success) {
-            return { success: false, error: `Failed to start: ${startResult.message}`, durationMs: Date.now() - startTime };
+            return failed(`Failed to start: ${startResult.message}`, "machine", adapterIdOf(this.machine));
           }
 
           // 5. Wait for completion
-          await Sentry.startSpan(
+          await traced(
             { name: "job.wait_for_completion", op: "job.phase", attributes: { "job.id": jobId } },
             async () => this.waitForCompletion(),
           );
 
           // 6. Stop sensors and collect summaries (Tier 1+)
           if (assuranceTier >= 1) {
-            await Sentry.startSpan(
+            await traced(
               { name: "job.stop_sensors", op: "job.phase", attributes: { "job.id": jobId } },
               async () => {
-                for (const sensor of this.sensors) {
+                for (const sensor of sensors) {
+                  actor = { origin: "sensor", adapterId: adapterIdOf(sensor) };
                   await sensor.stopRecording();
                   // Only once stopped: a stop that fails is made again on the failure path.
                   recording.delete(sensor);
@@ -347,7 +421,8 @@ export class JobRunner {
 
           // 7. Run CV inspection (Tier 2+)
           if (assuranceTier >= 2 && this.camera) {
-            await Sentry.startSpan(
+            actor = { origin: "camera", adapterId: adapterIdOf(this.camera) };
+            await traced(
               { name: "job.cv_inspection", op: "job.phase", attributes: { "job.id": jobId } },
               async () => this.camera!.runInspection(),
             );
@@ -358,13 +433,10 @@ export class JobRunner {
           // prove an adapter is done (a poll loop may report the completion later). Bounded:
           // an adapter that does not confirm in time fails the run, at every tier, and
           // nothing is finalized; its device stays unavailable until it does.
+          actor = { origin: "evidence" };
           quiesceAsked = true;
           if (!(await session.quiesce(this.evidenceQuiesceTimeoutMs))) {
-            return {
-              success: false,
-              error: `evidence did not quiesce within ${this.evidenceQuiesceTimeoutMs} ms`,
-              durationMs: Date.now() - startTime,
-            };
+            return failed(`evidence did not quiesce within ${this.evidenceQuiesceTimeoutMs} ms`, "evidence");
           }
 
           // Then stop accepting evidence, so the chain stops growing, and wait for it. An
@@ -372,19 +444,11 @@ export class JobRunner {
           session.close();
           if (!(await settle())) {
             settleTimedOut = true;
-            return {
-              success: false,
-              error: `evidence recording did not settle within ${this.evidenceSettleTimeoutMs} ms`,
-              durationMs: Date.now() - startTime,
-            };
+            return failed(`evidence recording did not settle within ${this.evidenceSettleTimeoutMs} ms`, "evidence");
           }
           const lost = unrecorded.first;
           if (lost !== null) {
-            return {
-              success: false,
-              error: `a ${lost.type} event of this job could not be recorded (${lost.error}), so its evidence is incomplete`,
-              durationMs: Date.now() - startTime,
-            };
+            return failed(`a ${lost.type} event of this job could not be recorded (${lost.error}), so its evidence is incomplete`, "evidence");
           }
 
           // Check tier requirements are met, over every event the run accepted
@@ -393,12 +457,8 @@ export class JobRunner {
           if (!check.met) {
             // For tier >= 2, unmet requirements are a hard failure
             if (assuranceTier >= 2) {
-              onPhase?.(jobId, "evidence_capture", "failed", { missing: check.missing });
-              return {
-                success: false,
-                error: `Tier ${assuranceTier} requirements not met: ${check.missing.join(", ")}`,
-                durationMs: Date.now() - startTime,
-              };
+              notifyPhase(onPhase, jobId, "evidence_capture", "failed", { missing: check.missing });
+              return failed(`Tier ${assuranceTier} requirements not met: ${check.missing.join(", ")}`, "evidence");
             }
             // For tier 0-1, warn but continue (self-attested/sensor-only)
             console.warn(`[job-runner] Tier ${assuranceTier} partially met: ${check.missing.join(", ")}`);
@@ -406,13 +466,13 @@ export class JobRunner {
 
           // 9. Finalize evidence bundle. The chain is closed and settled, so the step
           // cannot change while the bundle is hashed, signed and copied.
-          const bundle = await Sentry.startSpan(
+          const bundle = await traced(
             { name: "job.finalize_bundle", op: "job.phase", attributes: { "job.id": jobId } },
             async () => this.evidenceEmitter.finalizeBundle(jobId, stepId),
           );
 
           // Emit phase callback for evidence capture so kernel-service can relay to telemetry
-          onPhase?.(jobId, "evidence_capture", "completed", {
+          notifyPhase(onPhase, jobId, "evidence_capture", "completed", {
             eventCount: bundle.events.length,
             bundleHash: bundle.bundleHash,
           });
@@ -428,7 +488,7 @@ export class JobRunner {
       succeeded = result.success;
       return result;
     } catch (err) {
-      return { success: false, error: failureText(err), durationMs: Date.now() - startTime };
+      return failed(failureText(err), actor.origin, actor.adapterId);
     } finally {
       // Every exit quiesces before it releases. A run that ended before step 8 first stops
       // the sensors it started (else a recording never ends and its device never frees),

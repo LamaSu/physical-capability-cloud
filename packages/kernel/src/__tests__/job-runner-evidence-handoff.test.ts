@@ -439,7 +439,7 @@ describe("Quiescence: a job's window stays open until its adapters are done", ()
     expect(run.outcome, "resolved before 15 s").toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
 
-    expect(run.outcome).toEqual({ success: false, error: "evidence did not quiesce within 15000 ms", durationMs: 15_000 });
+    expect(run.outcome).toEqual({ success: false, error: "evidence did not quiesce within 15000 ms", failure: { origin: "evidence" }, durationMs: 15_000 });
     expect(bundles).toEqual([]);
     expect(emitter.getEvents(`job-hook-stuck-${tier}`, STEP), "the failed step, detached").toEqual([]);
     expect(machine.quiesceCalls, "asked once: the finally does not ask again").toBe(1);
@@ -480,7 +480,7 @@ describe("Quiescence: a job's window stays open until its adapters are done", ()
     const machine = testMachine("machine-hook-rejects", { quiesceEvidence: async () => (++calls === 1 ? Promise.reject(new Error("printer offline")) : undefined) });
 
     const result = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-hook-rejects", stepId: STEP, gcodeHash: gcode(203), assuranceTier: 1 }));
-    expect(result).toEqual({ success: false, error: "printer offline", durationMs: expect.any(Number) });
+    expect(result).toEqual({ success: false, error: "printer offline", failure: { origin: "evidence" }, durationMs: expect.any(Number) });
     expect(bundles).toEqual([]);
 
     const next = { jobId: "job-hook-rejects-next", stepId: STEP, gcodeHash: gcode(208), assuranceTier: 1 as const };
@@ -517,7 +517,7 @@ describe("Quiescence: a job's window stays open until its adapters are done", ()
 
     const result = await drive(new JobRunner(machine, [sensor as never], camera, emitter).run({ jobId: "job-no-hook", stepId: STEP, gcodeHash: gcode(209), assuranceTier: 2 }));
 
-    expect(result).toEqual({ success: false, error: `adapter ${String(target.id)} has no quiesceEvidence(), so its evidence cannot be bound to a job`, durationMs: 0 });
+    expect(result).toEqual({ success: false, error: `adapter ${String(target.id)} has no quiesceEvidence(), so its evidence cannot be bound to a job`, failure: { origin: "configuration", adapterId: String(target.id) }, durationMs: 0 });
     expect(machine.commands, "commands sent").toEqual([]);
     expect(sensor.startRecording).not.toHaveBeenCalled();
     expect(sensor.onEvidence, "listeners registered (a session opened)").not.toHaveBeenCalled();

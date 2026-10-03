@@ -150,7 +150,7 @@ describe("R11: astra's recipe, with a delay longer than round 3's quiet period, 
     const payloadsOf = (jobId: string) => emitter.getEvents(jobId, STEP).map((e) => e.payload);
     expect.soft(payloadsOf("job-r11-B"), "payloads recorded under job B").not.toContainEqual(expect.objectContaining({ of: "job A" }));
     expect.soft(b.success && typesOf(emitter, "job-r11-B").includes("execution_completed"), "job B passed Tier 1 on a completion").toBe(false);
-    const refusal = { success: false, error: "adapter machine-r11 has no quiesceEvidence(), so its evidence cannot be bound to a job", durationMs: 0 };
+    const refusal = { success: false, error: "adapter machine-r11 has no quiesceEvidence(), so its evidence cannot be bound to a job", failure: { origin: "configuration", adapterId: "machine-r11" }, durationMs: 0 };
     expect.soft(a, "job A's result").toEqual(refusal);
     expect.soft(b, "job B's result").toEqual({ ...refusal });
   });
@@ -293,7 +293,7 @@ describe("a failed run stops the sensors it started, so their hooks can answer",
     const failing = handshakeMachine("machine-fails-start", { hook: async () => {}, failStart: true });
 
     const a = await drive(new JobRunner(failing, [power], null, emitter).run({ jobId: "job-left-A", stepId: STEP, gcodeHash: gcode(141), assuranceTier: 1 }));
-    expect(a).toEqual({ success: false, error: "Failed to start: start refused", durationMs: 0 });
+    expect(a).toEqual({ success: false, error: "Failed to start: start refused", failure: { origin: "machine", adapterId: "machine-fails-start" }, durationMs: 0 });
     expect(emittedByPower, "the sensor's summary, from the stop the failed run made").toEqual(["power_profile_summary"]);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(emittedByPower, "samples after the failed run returned").toEqual(["power_profile_summary"]);
@@ -347,7 +347,7 @@ describe("astra pack 184 MEDIUM: a sensor stop that fails is never forgotten, an
     const machine = handshakeMachine("machine-stop-retry", { hook: async () => {} });
 
     const a = await drive(new JobRunner(machine, [sensor], null, emitter).run({ jobId: "job-stop-A", stepId: STEP, gcodeHash: gcode(151), assuranceTier: 1 }));
-    expect.soft(a, "job A's result").toEqual({ success: false, error: "stop failed once", durationMs: 0 });
+    expect.soft(a, "job A's result").toEqual({ success: false, error: "stop failed once", failure: { origin: "sensor", adapterId: "sensor-stop-retry" }, durationMs: 0 });
     expect.soft(sensor.stops, "stopRecording() calls: step 6's, then the failure path's").toBe(2);
 
     await vi.advanceTimersByTimeAsync(60_000);
@@ -367,7 +367,7 @@ describe("astra pack 184 MEDIUM: a sensor stop that fails is never forgotten, an
     const a = await drive(new JobRunner(machine, [sensor], null, emitter).run({ jobId: "job-throw-A", stepId: STEP, gcodeHash: gcode(161), assuranceTier: 1 })).catch(
       (err: unknown) => ({ rejectedWith: err instanceof Error ? err.message : String(err) }),
     );
-    expect.soft(a, "job A's result").toEqual({ success: false, error: "Failed to start: start refused", durationMs: 0 });
+    expect.soft(a, "job A's result").toEqual({ success: false, error: "Failed to start: start refused", failure: { origin: "machine", adapterId: "machine-stop-throws" }, durationMs: 0 });
     expect.soft(sensor.stops, "stopRecording() calls").toBe(1);
 
     const free = handshakeMachine("machine-stop-throws", { hook: async () => {} });

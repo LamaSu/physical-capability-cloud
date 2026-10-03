@@ -347,7 +347,7 @@ describe("R3: an addEvent that never settles", () => {
     const runner = new JobRunner(machine, [], camera, emitter, { evidenceSettleTimeoutMs: 200 });
     const outcome = await withinGuard(runner.run({ jobId: "job-r3", stepId: STEP, gcodeHash: gcode(3), assuranceTier: 2 }));
 
-    expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 200 ms", durationMs: expect.any(Number) });
+    expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 200 ms", failure: { origin: "evidence" }, durationMs: expect.any(Number) });
     expect(emitter.stuckCalls, "addEvent calls still stuck when the run returned").toBe(1);
     expect(bundles).toEqual([]);
   });
@@ -750,7 +750,7 @@ describe("the settle timer", () => {
       expect(outcome, "resolved before 30 s").toBeUndefined();
       await vi.advanceTimersByTimeAsync(1);
       await turn();
-      expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 30000 ms", durationMs: expect.any(Number) });
+      expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 30000 ms", failure: { origin: "evidence" }, durationMs: expect.any(Number) });
     } finally {
       vi.useRealTimers();
     }

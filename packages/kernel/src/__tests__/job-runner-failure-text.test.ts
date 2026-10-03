@@ -157,7 +157,9 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("JobRunner: a collaborator that rejects with a reason that has no text form", () => {
   // Each case has its own device: a device whose hook rejected stays quiescing, and would refuse the next case's session.

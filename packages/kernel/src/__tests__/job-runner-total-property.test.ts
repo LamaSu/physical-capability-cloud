@@ -14,6 +14,12 @@
  * leave nothing unhandled; then the same step must run again on the same collaborators and
  * succeed (after at most two "quiescing" refusals, which a rejected hook earns by design), so no
  * lease, session or device is left held.
+ *
+ * And no single fault charges the wrong device (JobResult.failure, #5417; astra pack 214): a failed
+ * run names an origin; a fault in the machine, a sensor or the camera is charged to that device or
+ * to no device ("evidence", "configuration"), never to another; a fault in the config, the sensor
+ * list, the emitter or onPhase is charged to no device; and onPhase, which only relays telemetry,
+ * never changes the outcome.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvidenceBundle, EvidenceEvent, EvidenceSource, SHA256 } from "@pcc/spec";
@@ -221,6 +227,7 @@ function rig(caseId: string, inj: Injector) {
       reach(inj, `call onPhase#${++phases}`);
     },
   };
+  const ids: Record<string, string> = { machine: `m-${caseId}`, sensor: `s-${caseId}`, camera: `c-${caseId}` };
   const runner = new JobRunner(
     instrument("machine", machine, inj),
     instrument("sensors", [instrument("sensor", sensor, inj)], inj),
@@ -228,7 +235,7 @@ function rig(caseId: string, inj: Injector) {
     emitter,
     { evidenceQuiesceTimeoutMs: 500, evidenceSettleTimeoutMs: 500 },
   );
-  return { runner, config: instrument("config", config, inj), bundles };
+  return { runner, config: instrument("config", config, inj), bundles, ids };
 }
 
 /** Runs `body`, and collects every rejection Node reports as unhandled meanwhile. */
@@ -264,7 +271,7 @@ describe("JobRunner: whatever one collaborator throws, wherever, run() resolves 
   /** Runs one plan; returns what went wrong (empty when nothing did), and the sites touched after its first fault. */
   async function check(plan: Fault[], caseId: string): Promise<{ failures: string[]; afterFirst: string[] }> {
     const inj = injector(plan);
-    const { runner, config, bundles } = rig(caseId, inj);
+    const { runner, config, bundles, ids } = rig(caseId, inj);
     const label = plan.map((f) => `${f.how} at ${f.site}`).join(", then ");
     const failures: string[] = [];
     const out = await catchingUnhandled(() => runner.run(config));
@@ -282,6 +289,16 @@ describe("JobRunner: whatever one collaborator throws, wherever, run() resolves 
       }
     }
     if (out.unhandled > 0) failures.push(`${label}: ${out.unhandled} unhandled rejection(s)`);
+    // Who is charged. Only for one fault: with two, the first may be harmless and the second fail the run.
+    if (result !== undefined && plan.length === 1) {
+      const owner = /^(?:read|call) (\w+)/.exec(plan[0].site)?.[1] ?? "";
+      const failure = result.failure;
+      if (!result.success && result.busy === undefined && failure === undefined) failures.push(`${label}: a failure with no origin`);
+      if (failure !== undefined && (failure.origin === "machine" || failure.origin === "sensor" || failure.origin === "camera")) {
+        if (failure.origin !== owner || failure.adapterId !== ids[owner]) failures.push(`${label}: charged ${failure.origin} ${failure.adapterId ?? "(no id)"} for a fault of the ${owner}`);
+      }
+      if (owner === "onPhase" && !result.success) failures.push(`${label}: onPhase changed the outcome`);
+    }
     // Every fault has fired once; the same step runs again on the same collaborators.
     let again: { value?: JobResult; rejected: boolean; unhandled: number } | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
