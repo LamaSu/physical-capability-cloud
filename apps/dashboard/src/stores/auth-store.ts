@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { beginAccountChange } from "../lib/account-generation.js";
 
 const API = import.meta.env.VITE_PCC_URL ?? "";
 const STORAGE_KEY = "pcc-api-key";
@@ -26,7 +27,7 @@ interface AuthState {
   setError: (e: string | null) => void;
 }
 
-export const useAuthStore = create<AuthState>((set) => {
+export const useAuthStore = create<AuthState>((set, get) => {
   // Hydrate API key from localStorage on store creation
   const storedKey = localStorage.getItem(STORAGE_KEY);
 
@@ -42,6 +43,8 @@ export const useAuthStore = create<AuthState>((set) => {
         });
         if (res.ok) {
           localStorage.setItem(STORAGE_KEY, key);
+          // In this same task: every tab now sees the account change (lib/account-generation.ts).
+          if (key !== get().apiKey) beginAccountChange();
           set({ apiKey: key, isAuthenticated: true });
           return true;
         }
@@ -53,6 +56,7 @@ export const useAuthStore = create<AuthState>((set) => {
 
     logout: () => {
       localStorage.removeItem(STORAGE_KEY);
+      if (get().apiKey !== null) beginAccountChange();
       set({ apiKey: null, isAuthenticated: false, address: null, sessionToken: null, error: null });
     },
 

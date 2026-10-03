@@ -27,6 +27,8 @@ import { installFakeWebLocks } from "./fake-web-locks.js";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const wallet = vi.hoisted(() => ({ address: undefined as string | undefined, isConnected: false, chainId: undefined as number | undefined }));
+/** When set, the wallet's signature waits for the test to give it. */
+const signing = vi.hoisted(() => ({ hold: false, waiting: [] as Array<() => void> }));
 const disconnectWallet = vi.hoisted(() => () => {
   wallet.address = undefined;
   wallet.isConnected = false;
@@ -38,7 +40,10 @@ vi.mock("wagmi", async (importOriginal) => {
     useAccount: () => ({ address: wallet.address, isConnected: wallet.isConnected, chainId: wallet.chainId }),
     useDisconnect: () => ({ disconnect: disconnectWallet, disconnectAsync: async () => disconnectWallet() }),
     useConnect: () => ({ connectors: [], connect: () => {} }),
-    useSignMessage: () => ({ signMessageAsync: async () => "0xsig" }),
+    useSignMessage: () => ({
+      signMessageAsync: () =>
+        signing.hold ? new Promise<string>((resolve) => signing.waiting.push(() => resolve("0xsig"))) : Promise.resolve("0xsig"),
+    }),
   };
 });
 vi.mock("wagmi/actions", async (importOriginal) => {
@@ -59,6 +64,7 @@ const KEY_B = ["pcc", "test", "xtabB0123456789abcdef"].join("_");
  */
 const gateway = {
   siweCookie: false,
+  verifies: 0,
   verifyWaiting: [] as Array<() => void>,
   logoutsToAnswer: Number.POSITIVE_INFINITY,
   logoutWaiting: [] as Array<() => void>,
@@ -90,11 +96,14 @@ beforeAll(() => {
     addListener: () => {}, removeListener: () => {},
     addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
   }));
-  installFakeWebLocks();
 });
 
 beforeEach(() => {
+  installFakeWebLocks(); // one lock manager for every tab, fresh per test
   gateway.siweCookie = false;
+  gateway.verifies = 0;
+  signing.hold = false;
+  signing.waiting = [];
   gateway.verifyWaiting = [];
   gateway.logoutsToAnswer = Number.POSITIVE_INFINITY;
   gateway.logoutWaiting = [];
@@ -116,6 +125,7 @@ beforeEach(() => {
       if (path === "/api/auth/me") return gateway.siweCookie ? json({ address: A_WALLET }) : json({ error: "Not authenticated" }, 401);
       if (path === "/api/auth/nonce") return json({ nonce: "nonce-1" });
       if (path === "/api/auth/verify" && method === "POST") {
+        gateway.verifies += 1;
         return new Promise<Response>((resolve, reject) => {
           let aborted = false;
           init?.signal?.addEventListener("abort", () => {
@@ -208,11 +218,12 @@ async function aVerifiesWhileBSwitches() {
   await act(async () => click(a, "Sign In"));
   await settle(5);
   expect(gateway.verifyWaiting, "A's verification is on the wire").toHaveLength(1);
-  gateway.logoutsToAnswer = 1; // the first logout is answered; any later one waits
+  gateway.logoutsToAnswer = 1; // a logout during the switch is answered
   await act(async () => {
     expect(await b.store.getState().login(KEY_B)).toBe(true);
   });
   await settle();
+  gateway.logoutsToAnswer = 0; // any later one waits for everythingSettles()
   return { a, b };
 }
 
@@ -241,6 +252,32 @@ describe("19f CRITICAL X1: another tab's verification can't set A's cookie besid
     expect(violations).toEqual([]);
     expect(gateway.siweCookie, "A's cookie is gone in the end").toBe(false);
     for (const tab of tabs) expect(transitioning(tab), `${tab.name} ends in its shell`).toBe(false);
+  }, 30_000);
+});
+
+describe("19f CRITICAL X1, another way in: a sign-in from before another tab's switch", () => {
+  it("a sign-in whose wallet was still signing when another tab switched sends no verification", async () => {
+    const a = await openTab("A");
+    const b = await openTab("B");
+    signing.hold = true;
+    await act(async () => click(a, "Sign In"));
+    await settle(5);
+    expect(signing.waiting, "A's wallet is signing").toHaveLength(1);
+    await act(async () => {
+      expect(await b.store.getState().login(KEY_B)).toBe(true);
+    });
+    await settle();
+    await act(async () => {
+      for (const sign of signing.waiting.splice(0)) sign();
+    });
+    await act(async () => {
+      for (const complete of gateway.verifyWaiting.splice(0)) complete(); // if A sent one after all, it lands now
+    });
+    await settle();
+    expect(gateway.verifies, "A sent no verification after the switch").toBe(0);
+    await everythingSettles();
+    expect(violations).toEqual([]);
+    expect(gateway.siweCookie).toBe(false);
   }, 30_000);
 });
 

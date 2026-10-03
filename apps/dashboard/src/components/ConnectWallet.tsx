@@ -2,7 +2,7 @@ import React from "react";
 import { useAccount, useConnect, useDisconnect, useSignMessage } from "wagmi";
 import { GlassPanel } from "@pcc/ui";
 import { useAuthStore } from "../stores/auth-store.js";
-import { beginSignIn, verifySignIn } from "../lib/wallet-session.js";
+import { beginSignIn, signInCurrent, verifySignIn } from "../lib/wallet-session.js";
 
 /**
  * Build an EIP-4361 SIWE message string.
@@ -128,7 +128,7 @@ export function ConnectWallet() {
 
       // 4. Verify with gateway (it sets the session cookie), unless the
       // account changed while the wallet was signing
-      const verifyRes = await verifySignIn(JSON.stringify({ message, signature }), signIn.signal);
+      const verifyRes = await verifySignIn(JSON.stringify({ message, signature }), signIn);
 
       if (!verifyRes.ok) {
         const err = await verifyRes.json().catch(() => ({}));
@@ -136,9 +136,10 @@ export function ConnectWallet() {
       }
 
       const data = await verifyRes.json();
-      // The account changed after the gateway answered: the teardown that
-      // waited for this verification destroys its cookie. Adopt nothing.
-      if (signIn.signal.aborted) return;
+      // The account changed after the gateway answered, here or in another
+      // tab: the teardown that waited for this verification destroys its
+      // cookie. Adopt nothing.
+      if (!signInCurrent(signIn)) return;
       // Session cookie is set automatically; also store the bearer token
       setSession(data.token ?? "cookie");
     } catch (err) {

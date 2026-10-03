@@ -23,6 +23,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
 import type { GestureEvent } from "../features/gestures/GestureRecognizer.js";
+import { installFakeWebLocks } from "./fake-web-locks.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -70,7 +71,7 @@ const gateway = {
   calls: [] as string[],
   logoutMode: "ok" as LogoutMode,
   logouts: 0,
-  logoutWaiting: [] as Array<() => void>,
+  logoutWaiting: [] as Array<(answer?: boolean) => void>,
   verifyWaiting: [] as Array<() => void>,
   /** When set, a verification already on the wire completes even if the page aborts it. */
   verifyIgnoresAbort: false,
@@ -94,6 +95,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  installFakeWebLocks(); // a SIWE sign-in needs Web Locks (lib/wallet-session.ts); jsdom has none. Fresh per test.
   gateway.siweCookie = false;
   gateway.calls = [];
   gateway.logoutMode = "ok";
@@ -151,7 +153,9 @@ beforeEach(() => {
           case "200-html":
             return new Response("<!doctype html><title>PCC</title>", { status: 200, headers: { "Content-Type": "text/html" } }); // a fallback page, cookie kept
           case "hold":
-            return new Promise<Response>((resolve) => gateway.logoutWaiting.push(() => resolve(destroy())));
+            return new Promise<Response>((resolve, reject) =>
+              gateway.logoutWaiting.push((answer = true) => (answer ? resolve(destroy()) : reject(new TypeError("Failed to fetch")))),
+            );
         }
       }
       throw new TypeError("Failed to fetch");
@@ -250,8 +254,11 @@ describe("19e C1b: a reload while the teardown is pending doesn't skip it", () =
     await settle();
     expect(gateway.logoutWaiting.length, "the teardown's logout is pending").toBeGreaterThanOrEqual(1);
 
-    // The page reloads before the gateway answers. A fresh page: fresh modules, B's key from storage.
+    // The page reloads before the gateway answers. Its request dies with it, unanswered: the cookie stays live, and
+    // the page's lock is released (a browser releases a closed page's locks). A fresh page: fresh modules, B's key
+    // from storage.
     await act(async () => root.unmount());
+    for (const drop of gateway.logoutWaiting.splice(0)) drop(false);
     vi.resetModules();
     const React2 = await import("react");
     const { createRoot: createRoot2 } = await import("react-dom/client");
@@ -278,7 +285,8 @@ describe("19e C1b: a reload while the teardown is pending doesn't skip it", () =
     expect(logoutAt, "the reloaded page logged A's wallet session out").toBeGreaterThanOrEqual(0);
     const meAt = reloaded.indexOf("GET /api/auth/me");
     if (meAt >= 0) expect(meAt, "B's session check came after the logout").toBeGreaterThan(logoutAt);
-    expect(localStorage.getItem("pcc-wallet-session-ending"), "the confirmed teardown cleared its mark").toBeNull();
+    const { walletSessionEnding } = await import("../lib/account-generation.js");
+    expect(walletSessionEnding(), "the confirmed teardown recorded its generation as ended").toBe(false);
     await React2.act(async () => root2.unmount());
     host.remove();
   }, 20_000);
@@ -445,7 +453,8 @@ describe("19e C1b, the parts", () => {
       expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
     });
     await settle();
-    expect(localStorage.getItem("pcc-wallet-session-ending")).toBeNull();
+    const { walletSessionEnding } = await import("../lib/account-generation.js");
+    expect(walletSessionEnding(), "nothing pending once the teardown confirmed").toBe(false);
     await act(async () => root.unmount());
     vi.resetModules();
     const React2 = await import("react");

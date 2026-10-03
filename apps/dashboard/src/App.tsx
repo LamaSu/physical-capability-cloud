@@ -6,7 +6,8 @@ import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
 import { useAuthStore, onIdentityChange, onAccountChange } from "./stores/auth-store.js";
 import { resetAccountScopedState } from "./lib/account-scope.js";
-import { clearWalletSessionEnding, endWalletSession, markWalletSessionEnding, walletSessionEnding } from "./lib/wallet-session.js";
+import { endWalletSession } from "./lib/wallet-session.js";
+import { walletSessionEnding } from "./lib/account-generation.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -138,11 +139,12 @@ onIdentityChange(() => queryClient.clear());
 //    component state, and gives every query a fresh observer. If the gateway
 //    can't confirm the cookie is gone, the next account doesn't load (fail
 //    closed), and the page offers a retry.
-// 4. Until the gateway confirms, a mark in localStorage says a teardown is
-//    unfinished (astra 19e). The next account's key is already stored, so a
-//    page reloaded or reopened before then would otherwise mount the next
-//    account straight away, beside the previous account's cookie. A page that
-//    loads with the mark finishes the teardown before it mounts anything.
+// 4. Until a teardown confirms it, the account change is pending for the
+//    whole browser (astra 19e, 19f; lib/account-generation.ts). The next
+//    account's key is already stored, so a page reloaded or opened before
+//    then would otherwise mount the next account straight away, beside the
+//    previous account's cookie. A page that loads while it is pending
+//    finishes the teardown before it mounts anything.
 type AccountTransition = "settled" | "ending" | "failed";
 /** The last page started a teardown and never saw it confirmed. */
 let endingAtLoad = walletSessionEnding();
@@ -160,13 +162,11 @@ function endPreviousWallet(): void {
   setAccount({ ...account, transition: "ending" });
   void endWalletSession().then((ended) => {
     if (run !== teardownRun) return; // a later account change owns the transition now
-    if (ended) clearWalletSessionEnding();
     setAccount({ epoch: account.epoch + 1, transition: ended ? "settled" : "failed" });
   });
 }
 
 onAccountChange(() => {
-  markWalletSessionEnding(); // in the task that stored the next key: no reload can come between them
   resetAccountScopedState();
   useAuthStore.setState({ address: null, sessionToken: null, isVerifying: false });
   endPreviousWallet();

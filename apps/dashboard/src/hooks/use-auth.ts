@@ -9,7 +9,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { useAccount, useSignMessage } from "wagmi";
 import { useAuthStore } from "../stores/auth-store.js";
-import { beginSignIn, verifySignIn } from "../lib/wallet-session.js";
+import { beginSignIn, signInCurrent, verifySignIn } from "../lib/wallet-session.js";
 
 /**
  * Build an EIP-4361 SIWE message string.
@@ -113,7 +113,7 @@ export function useAuth() {
       const signature = await signMessageAsync({ message });
 
       // 4. Verify with gateway
-      const verifyRes = await verifySignIn(JSON.stringify({ message, signature }), signIn.signal);
+      const verifyRes = await verifySignIn(JSON.stringify({ message, signature }), signIn);
 
       if (!verifyRes.ok) {
         const err = await verifyRes.json().catch(() => ({}));
@@ -121,7 +121,7 @@ export function useAuth() {
       }
 
       const data = await verifyRes.json();
-      if (signIn.signal.aborted) return;
+      if (!signInCurrent(signIn)) return;
       // Session cookie is set automatically; also store the bearer token
       setSession(data.token ?? "cookie");
     } catch (err) {
