@@ -657,6 +657,16 @@ describe("the rules catch each known way around them (self-test)", () => {
     }
   });
 
+  it("a protected object handed to a helper, which could change it inside (self-found, A03f F1's family)", () => {
+    for (const code of [
+      'function patch(t) { Object.defineProperty(t, "sendBeacon", { value: observe }); }\npatch(navigator);',
+      "const nav = navigator;\ninstrument(nav);",
+      "wrap(Headers);",
+    ]) {
+      expect(caught(code), code).toContain("global-write");
+    }
+  });
+
   it("the syntax rules let through what the app does", () => {
     for (const [code, rel] of [
       ['window.location.href = "/";', "pages/Probe.ts"],
@@ -674,6 +684,7 @@ describe("the rules catch each known way around them (self-test)", () => {
       ["const items = Array.prototype.slice.call(list);", "pages/Probe.ts"],
       ['const doc = document;\nconst el = doc.createElement("div");', "pages/Probe.ts"],
       ["let state = initial;\nstate = Object.assign({}, state, update);", "pages/Probe.ts"],
+      ["const w = window.innerWidth;\nconst width = Math.max(w, 1);", "pages/Probe.ts"],
     ]) {
       expect(caught(code, rel), code).toEqual([]);
     }
