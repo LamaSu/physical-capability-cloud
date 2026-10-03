@@ -32,7 +32,7 @@ import {
 import type { CsdRegistry } from "../../csd/registry.js";
 import { contentHashSchema, httpsUrl, nonBlankText } from "../citation-rules.js";
 import { intakeValueHash, isConfirmationRequired } from "./confirmation.js";
-import { joinPath, pathSegment, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
+import { joinPath, pathSegment, rawKeysOf, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
 import {
   ESTOP_NONE_APPROVED_CAPABILITIES,
   checkSafetyLimits,
@@ -412,9 +412,10 @@ function hasNonAscii(key: string): boolean {
 
 /** A zod issue as `path: description`. Only the issue code, static text and
  *  type names are used — never `issue.message` for built-in issues, because
- *  zod's own messages can quote the offending value. */
-function describeIssue(issue: z.ZodIssue): string {
-  const where = issue.path.length === 0 ? "(root)" : joinPath(issue.path.map(String));
+ *  zod's own messages can quote the offending value. `reserved` is every raw key
+ *  of the input (rawKeysOf), so no path token reproduces one (astra pack 120e). */
+function describeIssue(issue: z.ZodIssue, reserved: ReadonlySet<string>): string {
+  const where = issue.path.length === 0 ? "(root)" : joinPath(issue.path.map(String), reserved);
   switch (issue.code) {
     case z.ZodIssueCode.invalid_type:
       return `${where}: expected ${issue.expected}, received ${issue.received}`;
@@ -429,7 +430,7 @@ function describeIssue(issue: z.ZodIssue): string {
 
 /** Checks that read the RAW input, so they hold whether or not it parses (and
  *  see what a parse would drop, e.g. an `answers["__proto__"]` entry). */
-function scanRawInput(input: unknown, report: IntakeValidationReport): void {
+function scanRawInput(input: unknown, report: IntakeValidationReport, reserved: ReadonlySet<string>): void {
   report.secretsInText.push(...scanIntakeStrings(input));
 
   const answers = isRecordObject(input) && isRecordObject(input.answers) ? input.answers : {};
@@ -437,10 +438,10 @@ function scanRawInput(input: unknown, report: IntakeValidationReport): void {
   const unknownFields = new Set<string>();
   const nonAsciiKeys = new Set<string>();
   for (const [fieldId, answer] of Object.entries(answers)) {
-    const shownId = pathSegment(fieldId);
+    const shownId = pathSegment(fieldId, reserved);
     if (isForbiddenKey(fieldId)) forbiddenKeyHits.add(canonicalForbiddenKey(fieldId));
     if (!FIELD_INDEX.has(fieldId)) unknownFields.add(shownId);
-    if (hasNonAscii(fieldId)) nonAsciiKeys.add(joinPath(["answers", fieldId]));
+    if (hasNonAscii(fieldId)) nonAsciiKeys.add(joinPath(["answers", fieldId], reserved));
     if (!isRecordObject(answer)) continue;
 
     // Keys inside the answer's value and source: a forbidden concept (reported
@@ -449,7 +450,7 @@ function scanRawInput(input: unknown, report: IntakeValidationReport): void {
       walkValue(answer[part], {
         key: (key, path) => {
           if (isForbiddenKey(key)) forbiddenKeyHits.add(`${shownId}.${canonicalForbiddenKey(key)}`);
-          if (hasNonAscii(key)) nonAsciiKeys.add(joinPath(["answers", fieldId, part, ...path()]));
+          if (hasNonAscii(key)) nonAsciiKeys.add(joinPath(["answers", fieldId, part, ...path()], reserved));
         },
       });
     }
@@ -690,11 +691,13 @@ export function validateIntake(
     const milestoneKnown = (INTAKE_MILESTONES as readonly string[]).includes(milestone);
     if (!milestoneKnown) report.structuralErrors.push("milestone: not a known intake milestone");
 
-    scanRawInput(input, report);
+    // Every raw key in the input: no token in this report may equal one (astra pack 120e).
+    const reserved = rawKeysOf(input);
+    scanRawInput(input, report, reserved);
 
     const parsed = IntakeRecordSchema.safeParse(input);
     if (!parsed.success) {
-      report.structuralErrors.push(...parsed.error.issues.map(describeIssue));
+      report.structuralErrors.push(...parsed.error.issues.map((issue) => describeIssue(issue, reserved)));
     } else if (milestoneKnown) {
       checkParsedRecord(parsed.data, milestone, authority, report);
     }

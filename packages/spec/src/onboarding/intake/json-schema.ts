@@ -19,7 +19,7 @@
  */
 
 import { z } from "zod";
-import { CONTENT_HASH_PATTERN } from "../citation-rules.js";
+import { CONTENT_HASH_LENGTH, CONTENT_HASH_PATTERN } from "../citation-rules.js";
 import { isConfirmationRequired } from "./confirmation.js";
 import { INTAKE_FIELDS, INTAKE_PROVENANCE_VALUES, type IntakeFieldDef } from "./fields.js";
 
@@ -206,7 +206,14 @@ export function buildIntakeJsonSchema(): Record<string, unknown> {
             // IntakeSourceSchema also requires https and no credentials; not represented here.
             url: { type: "string", format: "uri", $comment: "refinements not represented" },
             // The same format IntakeSourceSchema and a research citation accept (astra pack 120d).
-            contentHash: { type: "string", pattern: CONTENT_HASH_PATTERN.source },
+            // The length bound keeps it exact in every regex dialect: some validators treat `$` as
+            // matching before a final newline (Python's re.search), which JavaScript's does not (120e).
+            contentHash: {
+              type: "string",
+              pattern: CONTENT_HASH_PATTERN.source,
+              minLength: CONTENT_HASH_LENGTH,
+              maxLength: CONTENT_HASH_LENGTH,
+            },
           },
           required: ["doc"],
           additionalProperties: false,

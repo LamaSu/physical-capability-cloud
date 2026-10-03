@@ -295,22 +295,46 @@ export function secretKindsOf(text: string): IntakeSecretKind[] {
 
 const MAX_SEGMENT_LENGTH = 80;
 
+const NO_KEYS: ReadonlySet<string> = new Set();
+const TOKEN_SEPARATOR = String.fromCharCode(0);
+
+/**
+ * Every object key anywhere in `value` (array indices are not keys). A report
+ * or a redacted copy of `value` never shows a token equal to one of them, so a
+ * token cannot reproduce a raw key the caller wrote (astra pack 120e).
+ */
+export function rawKeysOf(value: unknown): ReadonlySet<string> {
+  const keys = new Set<string>();
+  walkValue(value, { key: (key) => keys.add(key) });
+  return keys;
+}
+
+/** `#` plus 12 hex of sha256(raw); re-derived (sha256 of raw, NUL, n) until `taken` refuses it no longer. */
+function tokenOf(raw: string, taken: (candidate: string) => boolean): string {
+  for (let n = 0; ; n++) {
+    const material = n === 0 ? raw : `${raw}${TOKEN_SEPARATOR}${n}`;
+    const candidate = `#${bytesToHex(sha256(new TextEncoder().encode(material))).slice(0, 12)}`;
+    if (!taken(candidate)) return candidate;
+  }
+}
+
 /**
  * One path segment, safe to put in a report or a log line. Only a real array
  * index (a NUMBER, as the walker records one) or an object key in the closed
  * intake vocabulary (INTAKE_KEY_VOCABULARY) is shown verbatim, with `~` and `/`
  * escaped (RFC 6901) and anything outside printable ASCII written as `\u{hex}`.
  * Every other object key, including a numeric-looking one such as "123456", is
- * written as `#` plus the first 12 hex digits of its SHA-256: one-way, so a
- * credential or PIN pasted as a key, in a format no detector knows, is never
- * echoed (astra packs 120c and 120d), yet the same key always gets the same
- * token. Internal: shared with validateIntake's reports.
+ * written as a one-way token: `#` plus the first 12 hex digits of its SHA-256,
+ * so a credential or PIN pasted as a key, in a format no detector knows, is
+ * never echoed (astra packs 120c and 120d). `reserved` holds every raw key of
+ * the input being reported (rawKeysOf); a token equal to one of them is
+ * re-derived, so no token ever reproduces a key the caller wrote (astra pack
+ * 120e). Without collisions, the same key always gets the same token.
+ * Internal: shared with validateIntake's reports.
  */
-export function pathSegment(raw: WalkPathSegment): string {
+export function pathSegment(raw: WalkPathSegment, reserved: ReadonlySet<string> = NO_KEYS): string {
   if (typeof raw === "number") return Number.isSafeInteger(raw) && raw >= 0 ? String(raw) : "#index";
-  if (!INTAKE_KEY_VOCABULARY.has(raw)) {
-    return `#${bytesToHex(sha256(new TextEncoder().encode(raw))).slice(0, 12)}`;
-  }
+  if (!INTAKE_KEY_VOCABULARY.has(raw)) return tokenOf(raw, (candidate) => reserved.has(candidate));
   const escaped = raw
     .replace(/~/g, "~0")
     .replace(/\//g, "~1")
@@ -318,8 +342,8 @@ export function pathSegment(raw: WalkPathSegment): string {
   return escaped.length > MAX_SEGMENT_LENGTH ? `${escaped.slice(0, MAX_SEGMENT_LENGTH)}...` : escaped;
 }
 
-export function joinPath(segments: readonly WalkPathSegment[]): string {
-  return segments.map(pathSegment).join("/");
+export function joinPath(segments: readonly WalkPathSegment[], reserved: ReadonlySet<string> = NO_KEYS): string {
+  return segments.map((segment) => pathSegment(segment, reserved)).join("/");
 }
 
 // ── Scanning ─────────────────────────────────────────────────────────────
@@ -345,12 +369,13 @@ function isSourceContentHash(text: string, path: readonly WalkPathSegment[]): bo
  */
 export function scanIntakeStrings(value: unknown): IntakeSecretHit[] {
   const hits: IntakeSecretHit[] = [];
+  const reserved = rawKeysOf(value);
   walkValue(value, {
     string: (text, path) => {
       if (isSourceContentHash(text, path())) return;
       const kinds = secretKindsOf(text);
       if (kinds.length === 0) return;
-      const where = joinPath(path());
+      const where = joinPath(path(), reserved);
       for (const kind of kinds) hits.push({ path: where, kind });
     },
   });
@@ -380,9 +405,11 @@ function setOwn(target: object, key: string, value: unknown): void {
  * A deep copy of `record` in which every string that matches a detector has
  * each match replaced by `[redacted:<kind>]` (a PEM block is replaced through
  * its footer). An object key outside the closed intake vocabulary is renamed
- * to its `pathSegment` token (`#` plus 12 hex digits of its SHA-256), suffixed
- * `-2`, `-3`, ... if that would collide, so an unknown key never reaches a log
- * verbatim, whatever its format; a numeric-looking key ("123456") is a key,
+ * to its `pathSegment` token (`#` plus 12 hex digits of its SHA-256). A token
+ * never equals any raw key anywhere in `record`, nor another key's token in the
+ * same object: on a collision it is re-derived. So an unknown key never reaches
+ * a log verbatim, whatever its format, and no token reproduces a raw key (astra
+ * pack 120e); a numeric-looking key ("123456") is a key,
  * not an array index, and is renamed too (astra pack 120d). The typed digest at
  * answers/<field>/source/contentHash is kept as it is, exactly as the scan
  * exempts it. Arrays and objects are copied (an object that is not a plain
@@ -397,6 +424,7 @@ function setOwn(target: object, key: string, value: unknown): void {
 export function redactIntakeSecrets<T>(record: T): T {
   const copies = new Map<object, unknown>();
   const pending: { source: object; target: object; path: WalkPathSegment[] }[] = [];
+  const reserved = rawKeysOf(record);
 
   const copyOf = (node: unknown, path: WalkPathSegment[]): unknown => {
     if (typeof node === "string") return isSourceContentHash(node, path) ? node : redactText(node);
@@ -423,9 +451,7 @@ export function redactIntakeSecrets<T>(record: T): T {
     for (const { key, value, kept } of entries) {
       let outKey = key;
       if (!kept) {
-        const token = pathSegment(key);
-        outKey = token;
-        for (let n = 2; usedKeys.has(outKey); n++) outKey = `${token}-${n}`;
+        outKey = tokenOf(key, (candidate) => reserved.has(candidate) || usedKeys.has(candidate));
         usedKeys.add(outKey);
       }
       setOwn(target, outKey, copyOf(value, [...path, key]));

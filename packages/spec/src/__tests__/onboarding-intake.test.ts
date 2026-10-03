@@ -3410,6 +3410,84 @@ describe("astra pack 120b", () => {
 // verifierStatus does not change readiness" (the stub-primitive gate is
 // removed, item 4).
 
+describe("astra pack 120e", () => {
+  const digest = "sha256:" + "ab".repeat(32);
+  const fakeKey = () => "sk-" + "proj-" + "A".repeat(40);
+  const answer = { value: "x", provenance: "human" };
+  /** Every "/"-separated segment of every path-like string in a report. */
+  const segmentsOf = (strings: readonly string[]) => strings.flatMap((s) => s.split(/[/.: ]/));
+
+  it("CRITICAL 1 (astra's case): a raw key equal to another key's token never appears in unknownFields", () => {
+    const tokenKey = unknownKeyToken("bogus-id");
+    expect(tokenKey).toBe("#7949dd6d3f1d");
+    const report = validateIntake({ schema: "pcc.device-intake.v1", answers: { "bogus-id": answer, [tokenKey]: answer } }, "register");
+    expect(report.unknownFields).not.toContain(tokenKey);
+    expect(report.unknownFields).toHaveLength(2);
+  });
+
+  it("CRITICAL 1 (astra's case): ... nor among redactIntakeSecrets' output keys", () => {
+    const tokenKey = unknownKeyToken("bogus-id");
+    const out = redactIntakeSecrets({ schema: "pcc.device-intake.v1", answers: { "bogus-id": { value: "x" }, [tokenKey]: { value: "x" } } }) as {
+      answers: Record<string, unknown>;
+    };
+    expect(Object.keys(out.answers)).not.toContain(tokenKey);
+    expect(Object.keys(out.answers)).toHaveLength(2);
+  });
+
+  it("the reserved set is the WHOLE input: a token-shaped key placed deep in a value still cannot be reproduced", () => {
+    const deepToken = unknownKeyToken("k1");
+    const record = {
+      schema: "pcc.device-intake.v1",
+      answers: {
+        "safety.estop": { value: { mechanism: "button", k1: fakeKey() }, provenance: "human" },
+        "device.description": { value: "x", provenance: "human", source: { doc: "m", [deepToken]: "y" } },
+      },
+    };
+    const hits = scanIntakeStrings(record);
+    expect(hits.length).toBeGreaterThan(0);
+    expect(segmentsOf(hits.map((h) => h.path))).not.toContain(deepToken);
+    const report = validateIntake(record, "register");
+    expect(segmentsOf([...report.secretsInText.map((h) => h.path), ...report.structuralErrors, ...report.nonAsciiKeys])).not.toContain(deepToken);
+  });
+
+  it("structural error paths never reproduce a raw key either", () => {
+    const tokenKey = unknownKeyToken("bogus-id");
+    const report = validateIntake(
+      { schema: "pcc.device-intake.v1", answers: { "bogus-id": { value: "x", provenance: "garbage" }, [tokenKey]: answer } },
+      "register",
+    );
+    expect(report.structuralErrors.length).toBeGreaterThan(0);
+    expect(segmentsOf(report.structuralErrors)).not.toContain(tokenKey);
+  });
+
+  it("without a collision, a key keeps the same token in the report and in redaction", () => {
+    const record = { schema: "pcc.device-intake.v1", answers: { "bogus-id": answer } };
+    const report = validateIntake(record, "register");
+    const out = redactIntakeSecrets(record) as { answers: Record<string, unknown> };
+    expect(report.unknownFields).toEqual([unknownKeyToken("bogus-id")]);
+    expect(Object.keys(out.answers)).toEqual([unknownKeyToken("bogus-id")]);
+  });
+
+  it("contentHash: JavaScript's $ matches only at the end, so the runtime, the scan and redaction all refuse a trailing newline", () => {
+    for (const bad of [digest + "\n", digest + "\r\n", digest + "\u2028"]) {
+      expect(IntakeSourceSchema.safeParse({ doc: "manual", contentHash: bad }).success, JSON.stringify(bad)).toBe(false);
+      const record = { schema: "pcc.device-intake.v1", answers: { "device.description": { value: "x", provenance: "research", source: { doc: "manual", contentHash: bad } } } };
+      expect(scanIntakeStrings(record).length, JSON.stringify(bad)).toBeGreaterThan(0);
+      expect((redactIntakeSecrets(record) as typeof record).answers["device.description"].source.contentHash).not.toBe(bad);
+    }
+  });
+
+  it("contentHash: the generated schema bounds the length, so a dialect whose $ matches before a newline still refuses it", () => {
+    const schema = buildIntakeJsonSchema() as {
+      properties: { answers: { properties: Record<string, { properties: { source: { properties: Record<string, { minLength?: number; maxLength?: number }> } } }> } };
+    };
+    const prop = schema.properties.answers.properties["device.description"]!.properties.source.properties.contentHash!;
+    expect(prop.minLength).toBe(digest.length);
+    expect(prop.maxLength).toBe(digest.length);
+    expect((digest + "\n").length).toBeGreaterThan(prop.maxLength!);
+  });
+});
+
 describe("astra pack 120d", () => {
   const numericKey = "123456";
   const fakeKey = () => "sk-" + "proj-" + "A".repeat(40);
@@ -3455,11 +3533,16 @@ describe("astra pack 120d", () => {
       properties: { answers: { properties: Record<string, { properties: { source: { properties: Record<string, { pattern?: string }> } } }> } };
     };
     for (const [fieldId, field] of Object.entries(schema.properties.answers.properties)) {
-      expect(field.properties.source.properties.contentHash, fieldId).toEqual({ type: "string", pattern: "^sha256:[0-9a-f]{64}$" });
+      expect(field.properties.source.properties.contentHash, fieldId).toEqual({
+        type: "string",
+        pattern: "^sha256:[0-9a-f]{64}$",
+        minLength: 71,
+        maxLength: 71,
+      });
     }
     // The pattern the JSON Schema documents accepts exactly what IntakeSourceSchema accepts.
     const pattern = new RegExp(schema.properties.answers.properties["device.description"]!.properties.source.properties.contentHash!.pattern!);
-    for (const candidate of [digest, digest.toUpperCase(), "sha256:" + "ab".repeat(31), digest + "0", "SHA256:" + "ab".repeat(32)]) {
+    for (const candidate of [digest, digest.toUpperCase(), "sha256:" + "ab".repeat(31), digest + "0", "SHA256:" + "ab".repeat(32), digest + "\n", digest + "\r\n"]) {
       expect(pattern.test(candidate), candidate).toBe(IntakeSourceSchema.safeParse({ doc: "manual", contentHash: candidate }).success);
     }
   });

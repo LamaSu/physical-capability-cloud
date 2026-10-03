@@ -32,6 +32,8 @@ export const httpsUrl = z.string().refine(isHttpsWithoutCredentials, {
 /** The one contentHash format: `sha256:` + 64 lowercase hex. The zod schema, the
  *  secret scan's exemption and the generated JSON Schema all read this pattern. */
 export const CONTENT_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
+/** The exact length of a contentHash ("sha256:" plus 64 hex digits), for projections whose regex dialect may differ. */
+export const CONTENT_HASH_LENGTH = "sha256:".length + 64;
 
 /** A digest of the cited text, `sha256:` + 64 lowercase hex, so the citation can be checked later.
  *  Shared, so a research finding's citation copies into an answer's source unchanged. */
