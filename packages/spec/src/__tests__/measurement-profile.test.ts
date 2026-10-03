@@ -13,7 +13,7 @@ import { describe, it, expect, vi } from "vitest";
 
 import {
   MEASUREMENT_PROFILE_DOMAIN,
-  MEASUREMENT_PROFILE_DIGEST_PATTERN,
+  isMeasurementProfileDigest,
   computeMeasurementProfileDigest,
   validateMeasurementProfile,
   profileGoverns,
@@ -152,7 +152,7 @@ describe("measurement profile — digest is the commitment family over the produ
 
   it("is 0x + 64 lowercase hex, never the sha256:-tagged evidence-event family", () => {
     const digest = computeMeasurementProfileDigest(printPilotProfile());
-    expect(digest).toMatch(MEASUREMENT_PROFILE_DIGEST_PATTERN);
+    expect(isMeasurementProfileDigest(digest)).toBe(true);
     expect(digest.startsWith("sha256:")).toBe(false);
   });
 
@@ -619,17 +619,17 @@ describe("plain-data boundary: the proxy check is Node's, and the module stays b
     expect(isProxy!({})).toBe(false);
   });
 
-  it("plain-data.ts has no static node:util import (the dashboard's browser build has no node:util; CI run 37090398492)", () => {
+  it("plain-data.ts binds the check with a static node:util import; the dashboard aliases node:util to a shim (astra pack 170; CI run 37090398492)", () => {
     const source = readFileSync(fileURLToPath(new URL("../util/plain-data.ts", import.meta.url)), "utf8");
-    expect(source).not.toMatch(/from\s+["']node:util["']|require\(\s*["']node:util["']\s*\)/);
+    expect(source).toMatch(/from\s+["']node:util["']/);
+    const viteConfig = readFileSync(fileURLToPath(new URL("../../../../apps/dashboard/vite.config.ts", import.meta.url)), "utf8");
+    expect(viteConfig).toMatch(/"node:util":\s*path\.resolve\(__dirname,\s*"\.\/src\/lib\/node-util-shim\.ts"\)/);
   });
 
-  it("without a trap-free proxy check (a browser, or Node before 20.16), every object is refused, never copied unchecked", async () => {
-    const runtime = process as unknown as { getBuiltinModule?: unknown };
-    const original = runtime.getBuiltinModule;
-    runtime.getBuiltinModule = undefined;
+  it("without a trap-free proxy check (the dashboard's node:util shim offers none), every object is refused, never copied unchecked", async () => {
+    vi.resetModules();
+    vi.doMock("node:util", () => ({ types: {} }));
     try {
-      vi.resetModules();
       const fresh = await import("../util/plain-data.js");
       expect(fresh.isProxy).toBeNull();
       const copy = fresh.plainDataCopy({ a: 1 });
@@ -637,7 +637,7 @@ describe("plain-data boundary: the proxy check is Node's, and the module stays b
       expect(copy.ok ? "" : copy.reason).toMatch(/no trap-free proxy check/);
       expect(fresh.plainDataCopy("text")).toEqual({ ok: true, value: "text" });
     } finally {
-      runtime.getBuiltinModule = original;
+      vi.doUnmock("node:util");
       vi.resetModules();
     }
   });

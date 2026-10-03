@@ -38,7 +38,8 @@
 import type { EvidenceEvent, EvidenceEventType } from "../types/evidence.js";
 import { isFabricated } from "./is-fabricated.js";
 
-export const EVIDENCE_LEVELS = ["submitted", "device_reported", "inspected_output"] as const;
+/** Frozen: profile validation reads it (as ACCEPTANCE_LEVELS), so nothing may add a level after load (astra pack 170). */
+export const EVIDENCE_LEVELS = Object.freeze(["submitted", "device_reported", "inspected_output"] as const);
 
 export type EvidenceLevel = (typeof EVIDENCE_LEVELS)[number];
 

@@ -1446,17 +1446,16 @@ describe("profile admission: the proxy check is loaded at runtime, and fails clo
       verifyPrimitiveInstance: () => true,
     };
     expect(codes(await profileAdmitsBundle(input))).not.toContain("input-unreadable");
-    const runtime = process as unknown as { getBuiltinModule?: unknown };
-    const original = runtime.getBuiltinModule;
-    runtime.getBuiltinModule = undefined;
+    // No trap-free proxy check, as in the dashboard's browser build: node:util offers no isProxy there.
+    vi.resetModules();
+    vi.doMock("node:util", () => ({ types: {} }));
     try {
-      vi.resetModules();
       const fresh = await import("../evidence/profile-admission.js");
       const r = await fresh.profileAdmitsBundle(input);
       expect(r.decision).toBe("reject");
       expect(codes(r)).toEqual(["input-unreadable"]);
     } finally {
-      runtime.getBuiltinModule = original;
+      vi.doUnmock("node:util");
       vi.resetModules();
     }
   });
