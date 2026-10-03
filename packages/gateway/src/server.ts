@@ -170,6 +170,7 @@ import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
 import { ProducerManager } from "./sse/producers.js";
 import { getOrCreateSession } from "./session.js";
+import { normalizeClientIp } from "./middleware/client-ip.js";
 
 export async function createGateway(port = 3200) {
   // Initialize SQLite store — only seed demo data in dev (not production)
@@ -185,6 +186,12 @@ export async function createGateway(port = 3200) {
     bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
+
+  // Normalize client IP (Cloudflare edge -> real visitor) as the FIRST onRequest hook,
+  // so every downstream rate limiter, audit log, and SSE guard that reads req.ip keys
+  // on the true client. Non-regressing: a request that didn't transit Cloudflare is
+  // left unchanged. See middleware/client-ip.ts.
+  app.addHook("onRequest", normalizeClientIp);
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers

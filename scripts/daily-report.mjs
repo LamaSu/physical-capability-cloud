@@ -26,6 +26,15 @@ const REPORTS_DIR = path.join(PROJECT_ROOT, "ai", "reports");
 
 const BASE = process.env.PCC_URL ?? "https://capability.network";
 
+// Credentials: env var first, else a durable file next to the reports. The daily
+// scheduled task runs with no env vars set, so these files are what keep auth working
+// — without the API key every /api/analytics/* call returns 401 and the whole report
+// reads all-zero. Drop the admin token in ai/reports/.admin-token to also enable the
+// feedback section (currently 403 without it).
+const readIfExists = (p) => (fs.existsSync(p) ? fs.readFileSync(p, "utf8").trim() : undefined);
+const PCC_API_KEY = process.env.PCC_API_KEY ?? readIfExists(path.join(REPORTS_DIR, ".analytics-key"));
+const WAITLIST_ADMIN_TOKEN = process.env.WAITLIST_ADMIN_TOKEN ?? readIfExists(path.join(REPORTS_DIR, ".admin-token"));
+
 // ---------------------------------------------------------------------------
 // CLI args
 // ---------------------------------------------------------------------------
@@ -89,9 +98,9 @@ async function getJSON(path) {
   // that don't need them (r-p3 #3 / r2 #2).
   const headers = {};
   if (path.startsWith("/api/admin/")) {
-    if (process.env.WAITLIST_ADMIN_TOKEN) headers["X-Admin-Token"] = process.env.WAITLIST_ADMIN_TOKEN;
+    if (WAITLIST_ADMIN_TOKEN) headers["X-Admin-Token"] = WAITLIST_ADMIN_TOKEN;
   } else if (path.startsWith("/api/analytics/")) {
-    if (process.env.PCC_API_KEY) headers["Authorization"] = `Bearer ${process.env.PCC_API_KEY}`;
+    if (PCC_API_KEY) headers["Authorization"] = `Bearer ${PCC_API_KEY}`;
   }
   try {
     const res = await fetch(`${BASE}${path}`, { headers });
