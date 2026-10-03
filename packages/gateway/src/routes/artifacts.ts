@@ -849,6 +849,10 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
       a.loadCount += 1;
       a.updatedAt = new Date().toISOString();
       saveArtifact(a);
+      // A private dashboard is served to its owner only: never stored, so a session switch in one browser,
+      // or an intermediary, cannot replay it to another identity (astra pack 146c). Public and unlisted
+      // dashboards are the same for every viewer.
+      if (a.visibility !== "public" && a.visibility !== "unlisted") reply.header("cache-control", "private, no-store");
       return reply.type("text/html; charset=utf-8").send(renderShell(a));
     }
 
@@ -862,11 +866,13 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
     if (publicLookupThrottled(rateKey)) {
       return reply
         .status(429)
+        .header("cache-control", "private, no-store") // identity- and caller-dependent (astra pack 146c)
         .type("text/html; charset=utf-8")
         .send(htmlMessage("Too many requests", "Please slow down and try again shortly."));
     }
     return reply
       .status(404)
+      .header("cache-control", "private, no-store") // the owner would get 200 at this URL: identity-dependent (astra pack 146c)
       .type("text/html; charset=utf-8")
       .send(htmlMessage("Dashboard not found", "No dashboard exists at this link, or it is no longer available."));
   });

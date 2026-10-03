@@ -254,17 +254,21 @@ export async function createGateway(port = 3200) {
   // making the package's "any 5xx carries report_hint" contract actually true. The
   // status gate is cheap (only 5xx pay the parse cost) and it skips /api/feedback
   // itself. See ai/research/agent-feedback-auto-design.md.
-  // Default cache policy for API responses (astra packs 146 and 146b). Most /api
-  // responses are computed for the CALLER (its own channels, jobs, keys; an admin
-  // view), and a browser or intermediary that stores one can replay it to another
-  // identity after a session switch. So every /api response that sets no
-  // Cache-Control of its own is "private, no-store". A route that is deliberately
-  // cacheable sets its own header, which this never overrides.
+  // Default cache policy (astra packs 146, 146b and 146c). A response computed for
+  // the CALLER (its own channels, jobs, keys, a private dashboard; an admin view)
+  // that a browser or intermediary stores can be replayed to another identity after
+  // a session switch. So every response that sets no Cache-Control of its own is
+  // "private, no-store" when it is under /api (most of which is per-caller) OR the
+  // request carries credentials (Authorization, a cookie, an API or admin key), on
+  // any path. A route that is deliberately cacheable sets its own header, which
+  // this never overrides; anonymous requests outside /api are left alone.
   app.addHook("onSend", async (request, reply, payload) => {
+    if (reply.hasHeader("cache-control")) return payload;
     const path = request.url;
-    if ((path === "/api" || path.startsWith("/api/") || path.startsWith("/api?")) && !reply.hasHeader("cache-control")) {
-      reply.header("cache-control", "private, no-store");
-    }
+    const underApi = path === "/api" || path.startsWith("/api/") || path.startsWith("/api?");
+    const h = request.headers;
+    const credentialed = Boolean(h.authorization || h.cookie || h["x-api-key"] || h["x-admin-key"] || h["x-admin-token"]);
+    if (underApi || credentialed) reply.header("cache-control", "private, no-store");
     return payload;
   });
 
