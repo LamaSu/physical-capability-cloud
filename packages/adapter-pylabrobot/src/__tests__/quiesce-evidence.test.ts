@@ -13,6 +13,20 @@ async function tick(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
 
+/** Answer the sidecar call the adapter sent last, as a sidecar that succeeds would; return its method. */
+function answerLast(transport: InMemoryTransport, deviceId: string, jobId: string): string {
+  const sent = transport.lastSent() as { id: string; method: string };
+  const results: Record<string, unknown> = {
+    "backend.init": { ok: true, deviceId, plrBackend: "chatterbox" },
+    "evidence.startRecording": { ok: true },
+    "backend.run": { ok: true, jobId, opCount: 1, durationMs: 10 },
+    "evidence.stopRecording": { ok: true },
+    "backend.shutdown": { ok: true },
+  };
+  transport.respondSuccess(sent.id, results[sent.method]);
+  return sent.method;
+}
+
 /** Ask the adapter to quiesce; note whether it resolved, and the events it had emitted by then. */
 function ask(adapter: PyLabRobotAdapter, events: AdapterEvidenceEvent[]): { resolved: boolean; seen?: string[] } {
   const state: { resolved: boolean; seen?: string[] } = { resolved: false };
@@ -88,5 +102,134 @@ describe("PyLabRobotAdapter.quiesceEvidence", () => {
     await expect(statusP).resolves.toBe("idle");
     await tick();
     expect(hook).toMatchObject({ resolved: true, seen: ["device_birth"] });
+  });
+});
+
+describe("astra pack 186 HIGH: a job-bound notification after its job's window is never forwarded", () => {
+  it("(sidecar) astra's recipe: an aspirate of job j-q that arrives after evidence.stopRecording answered, and after the hook resolved, is dropped", async () => {
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-late", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+
+    const startP = adapter.execute({ type: "start", payload: { jobId: "j-q" } });
+    const hook = ask(adapter, events);
+    for (const method of ["backend.init", "evidence.startRecording", "backend.run", "evidence.stopRecording"]) {
+      await tick();
+      expect(answerLast(transport, "dev-q-late", "j-q")).toBe(method);
+    }
+    await startP;
+    await tick();
+    expect(hook.resolved).toBe(true);
+
+    const atResolution = events.map((e) => e.type);
+    transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-late", jobId: "j-q", timestamp: new Date().toISOString(), payload: { well: "A1" } });
+    await tick();
+    expect(events.map((e) => e.type), "events emitted after the hook resolved").toEqual(atResolution);
+  });
+
+  it("(sidecar) a late notification of job A that arrives while job B is recording is never recorded under B", async () => {
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-ab", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+
+    const runA = adapter.execute({ type: "start", payload: { jobId: "j-a" } });
+    for (const method of ["backend.init", "evidence.startRecording", "backend.run", "evidence.stopRecording"]) {
+      await tick();
+      expect(answerLast(transport, "dev-q-ab", "j-a")).toBe(method);
+    }
+    await runA;
+
+    const runB = adapter.execute({ type: "start", payload: { jobId: "j-b" } });
+    const fromB = events.length;
+    await tick();
+    expect(answerLast(transport, "dev-q-ab", "j-b")).toBe("evidence.startRecording");
+    await tick();
+    transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-ab", jobId: "j-a", timestamp: new Date().toISOString(), payload: { well: "A1", of: "job A" } });
+    await tick();
+    for (const method of ["backend.run", "evidence.stopRecording"]) {
+      expect(answerLast(transport, "dev-q-ab", "j-b")).toBe(method);
+      await tick();
+    }
+    await runB;
+
+    const duringB = events.slice(fromB);
+    expect(duringB.map((e) => e.type), "B's events").toEqual(["execution_started", "execution_completed"]);
+    expect(duringB.map((e) => e.payload), "B's payloads").not.toContainEqual(expect.objectContaining({ of: "job A" }));
+  });
+});
+
+describe("astra pack 186 HIGH: the sidecar's stopRecording answer is the barrier, and nothing skips it", () => {
+  it("(sidecar) a notification of the job that arrives after backend.run answered, before the barrier's answer, comes before execution_completed and is counted", async () => {
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-order", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+
+    const startP = adapter.execute({ type: "start", payload: { jobId: "j-o" } });
+    for (const method of ["backend.init", "evidence.startRecording", "backend.run"]) {
+      await tick();
+      expect(answerLast(transport, "dev-q-order", "j-o")).toBe(method);
+    }
+    await tick();
+    // Written by the sidecar before it answers the barrier.
+    transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-order", jobId: "j-o", timestamp: new Date().toISOString(), payload: { well: "A1" } });
+    await tick();
+    expect(answerLast(transport, "dev-q-order", "j-o")).toBe("evidence.stopRecording");
+    await startP;
+
+    expect(events.map((e) => e.type)).toEqual(["device_birth", "execution_started", "instrument_result", "execution_completed"]);
+    expect(events.at(-1)?.payload, "execution_completed").toMatchObject({ jobId: "j-o", opCount: 1 });
+  });
+
+  it("(sidecar) a failed run's notification that arrives before the barrier's answer is recorded, before execution_failed", async () => {
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-fail", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+
+    const startP = adapter.execute({ type: "start", payload: { jobId: "j-f" } });
+    for (const method of ["backend.init", "evidence.startRecording"]) {
+      await tick();
+      expect(answerLast(transport, "dev-q-fail", "j-f")).toBe(method);
+    }
+    await tick();
+    const run = transport.lastSent() as { id: string; method: string };
+    expect(run.method).toBe("backend.run");
+    transport.respondError(run.id, -32001, "protocol failed: tip collision");
+    await tick();
+    // Written by the sidecar before it answers the barrier.
+    transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-fail", jobId: "j-f", timestamp: new Date().toISOString(), payload: { well: "A1" } });
+    await tick();
+    expect(answerLast(transport, "dev-q-fail", "j-f")).toBe("evidence.stopRecording");
+    const result = await startP;
+
+    expect(result.success).toBe(false);
+    expect(events.map((e) => e.type)).toEqual(["device_birth", "execution_started", "instrument_result", "execution_failed"]);
+  });
+
+  it("(sidecar) when the sidecar is recycled after a job, the old sidecar answers the barrier first", async () => {
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-recycle", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar, restartAfterJobs: 1 });
+    await sidecar.start();
+
+    const startP = adapter.execute({ type: "start", payload: { jobId: "j-r" } });
+    const methods: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      await tick();
+      methods.push(answerLast(transport, "dev-q-recycle", "j-r"));
+    }
+    await startP;
+    expect(methods).toEqual(["backend.init", "evidence.startRecording", "backend.run", "evidence.stopRecording", "backend.shutdown"]);
   });
 });

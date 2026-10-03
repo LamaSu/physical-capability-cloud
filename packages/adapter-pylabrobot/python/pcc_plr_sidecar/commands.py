@@ -233,6 +233,10 @@ class Commands:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
         window = self.evidence.stop_recording(device_id, job_id)
+        # A barrier: every notification scheduled before the window closed is written
+        # before this answer, so once the TS adapter has it, it has all of the job's
+        # evidence (astra pack 186). Notifications scheduled later are not waited for.
+        await self.evidence.drain_through(self.evidence.watermark())
         return {
             "ok": True,
             "jobId": job_id,

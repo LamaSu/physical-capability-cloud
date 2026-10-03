@@ -79,6 +79,7 @@ vi.mock("../contracts/batch-settlement.js", () => ({
 
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
 import { initStore, closeStore } from "../db.js";
+import { Sentry } from "../sentry.js";
 import { KernelService } from "../services/kernel-service.js";
 import {
   getSafetyGateway,
@@ -141,8 +142,52 @@ class OfflineAdapter implements MachineAdapter {
   async dispose(): Promise<void> {}
 }
 
+/** Released by the test: until then, the held job's device stays claimed by it. */
+let releaseHeld: () => void = () => {};
+let held: Promise<void> = Promise.resolve();
+
+/**
+ * Runs every job to completion at once (reporting it as evidence), but its quiesceEvidence()
+ * answers only once the test releases it, so the first job holds the device and every later
+ * job is refused busy.
+ */
+class HeldAdapter implements MachineAdapter {
+  readonly id: string;
+  readonly type = "fdm" as const;
+  readonly source: MachineAdapter["source"];
+  readonly commands: string[] = [];
+  private readonly listeners: Array<Parameters<MachineAdapter["onEvidence"]>[0]> = [];
+  constructor(id: string, kernelId: string) {
+    this.id = id;
+    this.source = { deviceId: id, deviceType: "controller", kernelId };
+  }
+  async getStatus(): ReturnType<MachineAdapter["getStatus"]> {
+    return "busy";
+  }
+  async execute(command: Parameters<MachineAdapter["execute"]>[0]): ReturnType<MachineAdapter["execute"]> {
+    this.commands.push(command.type);
+    if (command.type === "start") {
+      const event = { type: "execution_completed" as const, timestamp: new Date().toISOString(), source: this.source, payload: {} };
+      for (const listener of this.listeners) listener(event);
+    }
+    return { success: true };
+  }
+  async getProgress(): Promise<number> {
+    return 100;
+  }
+  onEvidence(cb: Parameters<MachineAdapter["onEvidence"]>[0]): void {
+    this.listeners.push(cb);
+  }
+  quiesceEvidence(): Promise<void> {
+    return held;
+  }
+  async dispose(): Promise<void> {}
+}
+
 const FAIL_TYPE = "test-fail-load-ks-safety";
 const OFFLINE_TYPE = "test-offline-ks-safety";
+const HELD_TYPE = "test-held-ks-safety";
+let heldAdapter: HeldAdapter | undefined;
 
 async function waitFor(pred: () => boolean, timeoutMs = 2_000): Promise<void> {
   const start = Date.now();
@@ -160,11 +205,14 @@ beforeAll(() => {
   try { unregisterMachineAdapter(OFFLINE_TYPE); } catch { /* not registered */ }
   registerMachineAdapter(FAIL_TYPE, (device, _cfg, kernelId) => new FailingLoadAdapter(device.id, kernelId));
   registerMachineAdapter(OFFLINE_TYPE, (device, _cfg, kernelId) => new OfflineAdapter(device.id, kernelId));
+  try { unregisterMachineAdapter(HELD_TYPE); } catch { /* not registered */ }
+  registerMachineAdapter(HELD_TYPE, (device, _cfg, kernelId) => (heldAdapter = new HeldAdapter(device.id, kernelId)));
 });
 
 afterAll(() => {
   try { unregisterMachineAdapter(FAIL_TYPE); } catch { /* already gone */ }
   try { unregisterMachineAdapter(OFFLINE_TYPE); } catch { /* already gone */ }
+  try { unregisterMachineAdapter(HELD_TYPE); } catch { /* already gone */ }
 });
 
 beforeEach(() => {
@@ -211,6 +259,71 @@ describe("KernelService.submitJob — real device failures trip the breaker", ()
     ).rejects.toThrow(/circuit_open|denied/i);
   });
 });
+
+describe("KernelService.submitJob — a busy refusal is not a device failure (#5205)", () => {
+  it.each([
+    ["with the Sentry lifecycle span", false],
+    ["on the fallback path, when Sentry cannot start a span", true],
+  ])("jobs refused because another job holds the device never open its breaker, and the next job is still admitted (%s)", async (_path, withoutSentry) => {
+    const startSpanManual = vi.mocked(Sentry.startSpanManual);
+    if (withoutSentry) {
+      startSpanManual.mockImplementation(() => {
+        throw new Error("Sentry not initialised");
+      });
+    }
+    try {
+      await busyRefusalsAreNotFailures(withoutSentry ? "kernel-ks-safety-busy-fallback" : "kernel-ks-safety-busy");
+      expect(startSpanManual, "submissions that tried Sentry's span").toHaveBeenCalledTimes(4);
+    } finally {
+      startSpanManual.mockImplementation((_o: unknown, cb: (span: object) => void) => {
+        cb({ end: vi.fn(), setStatus: vi.fn() });
+      });
+    }
+  });
+});
+
+/** Job 1 holds the device; jobs 2 to 4 are refused busy, and none of it reaches the breaker. */
+async function busyRefusalsAreNotFailures(kernelId: string): Promise<void> {
+  initSafetyGateway({ circuitBreaker: { failureThreshold: 2, cooldownMs: 60_000 } });
+  const gw = getSafetyGateway();
+  held = new Promise<void>((resolve) => {
+    releaseHeld = resolve;
+  });
+  const svc = new KernelService({
+    kernelId,
+    mockMode: false,
+    devices: [{ id: "dev-held", type: "machine", adapterType: HELD_TYPE, config: {} }],
+  });
+  const done = async (jobId: string) => (await svc.getJobStatus(jobId)).status !== "executing";
+  const waitDone = async (jobId: string) => {
+    const start = Date.now();
+    while (!(await done(jobId))) {
+      if (Date.now() - start > 2_000) throw new Error(`job ${jobId} is still executing`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  };
+
+  // Job 1 runs, and holds the device until its adapter answers.
+  await svc.submitJob({ jobId: "ks-busy-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+  // Jobs 2 and 3 are refused busy: twice the breaker's threshold, were refusals failures.
+  for (const jobId of ["ks-busy-2", "ks-busy-3"]) {
+    await svc.submitJob({ jobId, stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+    await waitDone(jobId);
+  }
+  expect(heldAdapter?.commands, "commands the device received: job 1's only").toEqual(["load_gcode", "start"]);
+  expect(await done("ks-busy-1"), "job 1, still holding the device").toBe(false);
+  expect.soft(gw.getStatus().circuits.get("dev-held")?.failures ?? 0, "device failures recorded").toBe(0);
+  expect.soft(gw.getStatus().circuits.get("dev-held")?.state ?? "closed", "the breaker").toBe("closed");
+  await expect.soft(
+    svc.submitJob({ jobId: "ks-busy-4", stepId: "s", assuranceTier: 0, deviceId: "dev-held" }),
+    "job 4's admission",
+  ).resolves.toMatchObject({ status: "accepted" });
+  await waitDone("ks-busy-4").catch(() => {});
+
+  releaseHeld();
+  await waitDone("ks-busy-1");
+  expect(gw.getStatus().circuits.get("dev-held")?.failures ?? 0, "device failures, after job 1 completed").toBe(0);
+}
 
 // ── listDevices reports real health ───────────────────────────────────────────
 

@@ -15,7 +15,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvidenceBundle, EvidenceEvent, EvidenceSource, SHA256 } from "@pcc/spec";
 
-import type { MachineAdapter, MachineCommand, MachineCommandResult } from "../adapters/types.js";
+import type { MachineAdapter, MachineCommand, MachineCommandResult, SensorAdapter } from "../adapters/types.js";
 import { OctoPrintAdapter } from "../adapters/octoprint-adapter.js";
 import { fakeOctoPrintServer } from "./helpers/fake-octoprint-server.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
@@ -300,5 +300,82 @@ describe("a failed run stops the sensors it started, so their hooks can answer",
 
     const machine = handshakeMachine("machine-after-left", { hook: async () => {} });
     expect(await drive(new JobRunner(machine, [power], null, emitter).run({ jobId: "job-left-B", stepId: STEP, gcodeHash: gcode(142), assuranceTier: 1 }))).toMatchObject({ success: true });
+  });
+});
+
+/**
+ * A sensor whose stop can fail. Its stopRecording() is `stop`, given the call's number (1, 2,
+ * ...), which may reject or throw synchronously. Its quiesceEvidence() answers only once a stop
+ * has succeeded, as an honest hook with a recording still running must.
+ */
+function stoppableSensor(id: string, stop: (call: number) => Promise<Emitted>): SensorAdapter & { readonly stops: number } {
+  let stopped = { promise: Promise.resolve(), resolve: () => {} };
+  let calls = 0;
+  return {
+    id,
+    type: "power_monitor",
+    source: { deviceId: id, deviceType: "power_monitor", kernelId: KERNEL_ID },
+    get stops() {
+      return calls;
+    },
+    async startRecording() {
+      stopped = deferred();
+    },
+    stopRecording() {
+      calls += 1;
+      return stop(calls).then((summary) => {
+        stopped.resolve();
+        return summary;
+      });
+    },
+    async getCurrentReading() {
+      return {};
+    },
+    onEvidence() {},
+    quiesceEvidence: () => stopped.promise,
+    async dispose() {},
+  };
+}
+
+describe("astra pack 184 MEDIUM: a sensor stop that fails is never forgotten, and cannot abort the cleanup", () => {
+  it("astra's recipe: a stop that rejects in step 6 is made again on the failure path, so the hook answers and the next job runs", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const sensor = stoppableSensor("sensor-stop-retry", async (call) => {
+      if (call === 1) throw new Error("stop failed once");
+      return evidence("power_profile_summary", "sensor-stop-retry");
+    });
+    const machine = handshakeMachine("machine-stop-retry", { hook: async () => {} });
+
+    const a = await drive(new JobRunner(machine, [sensor], null, emitter).run({ jobId: "job-stop-A", stepId: STEP, gcodeHash: gcode(151), assuranceTier: 1 }));
+    expect.soft(a, "job A's result").toEqual({ success: false, error: "stop failed once", durationMs: 0 });
+    expect.soft(sensor.stops, "stopRecording() calls: step 6's, then the failure path's").toBe(2);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    const next = handshakeMachine("machine-stop-retry-next", { hook: async () => {} });
+    const b = await drive(new JobRunner(next, [sensor], null, emitter).run({ jobId: "job-stop-B", stepId: STEP, gcodeHash: gcode(152), assuranceTier: 1 }));
+    expect.soft(b.busy, "the next job on the sensor, a minute later").toBeUndefined();
+    expect.soft(b, "the next job's result").toMatchObject({ success: true });
+  });
+
+  it("a stop that throws synchronously on the failure path is contained: the run returns its own failure, closes, and frees the machine", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const sensor = stoppableSensor("sensor-stop-throws", () => {
+      throw new Error("stop threw synchronously");
+    });
+    const machine = handshakeMachine("machine-stop-throws", { hook: async () => {}, failStart: true });
+
+    const a = await drive(new JobRunner(machine, [sensor], null, emitter).run({ jobId: "job-throw-A", stepId: STEP, gcodeHash: gcode(161), assuranceTier: 1 })).catch(
+      (err: unknown) => ({ rejectedWith: err instanceof Error ? err.message : String(err) }),
+    );
+    expect.soft(a, "job A's result").toEqual({ success: false, error: "Failed to start: start refused", durationMs: 0 });
+    expect.soft(sensor.stops, "stopRecording() calls").toBe(1);
+
+    const free = handshakeMachine("machine-stop-throws", { hook: async () => {} });
+    const b = await drive(new JobRunner(free, [], null, emitter).run({ jobId: "job-throw-B", stepId: STEP, gcodeHash: gcode(162), assuranceTier: 0 }));
+    expect.soft(b.busy, "the next job on the machine").toBeUndefined();
+    expect.soft(b, "the next job's result").toMatchObject({ success: true });
+    // The sensor never stopped, so its honest hook never answers: its device stays held (fail closed).
+    const held = await new JobRunner(free, [sensor], null, emitter).run({ jobId: "job-throw-C", stepId: STEP, gcodeHash: gcode(163), assuranceTier: 1 });
+    expect.soft(held.busy, "a job on the sensor that never stopped").toEqual({ reason: "quiescing", adapterId: "sensor-stop-throws", jobId: "job-throw-A" });
   });
 });

@@ -457,7 +457,9 @@ export class ${adapter.className} {
   private config: ${adapter.className}Config;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private samples: Array<{ timestamp: string; value: number }> = [];
+  // The recording running now. A read keeps the recording it was started for, and a read
+  // of a recording that was replaced is dropped: its value belongs to neither job.
+  private current: { jobId: string; samples: Array<{ timestamp: string; value: number }> } | null = null;
   private endRecording: (() => void) | null = null;
 
   constructor(id: string, config: ${adapter.className}Config) {
@@ -474,25 +476,27 @@ export class ${adapter.className} {
   // The recording is outstanding work from here until stopRecording; each read in flight too.
   async startRecording(jobId: string): Promise<void> {
     this.stopSampling();
-    this.samples = [];
+    const recording = { jobId, samples: [] as Array<{ timestamp: string; value: number }> };
+    this.current = recording;
     this.endRecording = this.begin();
     this.pollTimer = setInterval(() => {
-      void this.track(this.sample(jobId));
+      void this.track(this.sample(recording));
     }, this.config.sampleIntervalMs ?? 1000);
   }
 
-  private async sample(jobId: string): Promise<void> {
+  private async sample(recording: { jobId: string; samples: Array<{ timestamp: string; value: number }> }): Promise<void> {
     try {
       // TODO: Read from your sensor's API
       const value = this.config.mockMode
         ? Math.random() * 500 + 100
         : await this.readSensor();
-      this.samples.push({ timestamp: new Date().toISOString(), value });
+      if (this.current !== recording) return; // replaced while this read was in flight
+      recording.samples.push({ timestamp: new Date().toISOString(), value });
       this.emit({
         type: "sensor_reading",
         timestamp: new Date().toISOString(),
         source: this.source,
-        payload: { value, jobId },
+        payload: { value, jobId: recording.jobId },
       });
     } catch {}
   }
@@ -505,7 +509,8 @@ export class ${adapter.className} {
 
   async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
     this.stopSampling();
-    const values = this.samples.map(s => s.value);
+    const samples = this.current?.samples ?? [];
+    const values = samples.map(s => s.value);
     return {
       type: "sensor_data_summary",
       timestamp: new Date().toISOString(),
@@ -517,7 +522,7 @@ export class ${adapter.className} {
           max: Math.max(...values),
           mean: values.reduce((a, b) => a + b, 0) / values.length,
         } : {},
-        samples: this.samples,
+        samples,
       },
     };
   }
