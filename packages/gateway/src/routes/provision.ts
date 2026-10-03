@@ -116,15 +116,15 @@ export async function provisionRoutes(app: FastifyInstance) {
 
       if (!record) return reply.status(500).send({ error: "provision_failed" });
       auditService.log({
-        eventType: "auth.key_provisioned",
+        eventType: lit("auth.key_provisioned"),
         actor: operatorId,
-        resourceType: "api_key",
-        resourceId: record.id,
-        action: "create",
+        resourceType: lit("api_key"),
+        resourceId: declare.id(record.id),
+        action: lit("create"),
         metadata: {
-          name: body.name,
-          capability: body.capability,
-          ed25519_keypair_source: ed25519 ? "server-minted" : "byok",
+          name: declare.id(body.name),
+          capability: declare.id(body.capability),
+          ed25519_keypair_source: declare.code(ed25519 ? "server-minted" : "byok", ["server-minted", "byok"]),
         },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
@@ -205,12 +205,17 @@ export async function provisionRoutes(app: FastifyInstance) {
             chainId: onchain.chainId,
           };
           auditService.log({
-            eventType: "auth.onchain_identity_written",
+            eventType: lit("auth.onchain_identity_written"),
             actor: operatorId,
-            resourceType: "api_key",
-            resourceId: record.id,
-            action: "create",
-            metadata: onchainResult,
+            resourceType: lit("api_key"),
+            resourceId: declare.id(record.id),
+            action: lit("create"),
+            metadata: {
+              agentId: declare.id(onchainResult.agentId),
+              txHash: declare.id(onchainResult.txHash),
+              registryAddress: declare.id(onchainResult.registryAddress),
+              chainId: declare.id(onchainResult.chainId),
+            },
             ip: req.ip,
             userAgent: req.headers["user-agent"],
           });
@@ -249,15 +254,15 @@ export async function provisionRoutes(app: FastifyInstance) {
               operatorWalletResponse.onchain_status = "written";
               operatorWalletResponse.onchain_tx_hash = walletResult.txHash;
               auditService.log({
-                eventType: "auth.agent_wallet_written",
+                eventType: lit("auth.agent_wallet_written"),
                 actor: operatorId,
-                resourceType: "api_key",
-                resourceId: record.id,
-                action: "update",
+                resourceType: lit("api_key"),
+                resourceId: declare.id(record.id),
+                action: lit("update"),
                 metadata: {
-                  agent_wallet: opWallet.address,
-                  tx_hash: walletResult.txHash,
-                  agent_id: String(onchain.agentId),
+                  agent_wallet: declare.id(opWallet.address),
+                  tx_hash: declare.id(walletResult.txHash),
+                  agent_id: declare.id(String(onchain.agentId)),
                 },
                 ip: req.ip,
                 userAgent: req.headers["user-agent"],
@@ -279,8 +284,8 @@ export async function provisionRoutes(app: FastifyInstance) {
               operatorWalletResponse.onchain_status = "failed";
               operatorWalletResponse.onchain_error = walletErrMsg.slice(0, 256);
               req.log?.warn(
-                { keyId: record.id, error: walletErrMsg },
-                "setAgentWallet best-effort failed — off-chain wallet preserved",
+                { keyId: declare.id(record.id), err: walletErr },
+                lit("setAgentWallet best-effort failed — off-chain wallet preserved"),
               );
             }
           } catch (opWalletErr) {
@@ -289,8 +294,8 @@ export async function provisionRoutes(app: FastifyInstance) {
             // revert the sponsored-mint success record. Off-chain identity
             // continues to work; operator wallet is a future retry.
             req.log?.warn(
-              { keyId: record.id, err: opWalletErr instanceof Error ? opWalletErr.message : String(opWalletErr) },
-              "operator wallet generation failed — sponsored mint still succeeded",
+              { keyId: declare.id(record.id), err: opWalletErr },
+              lit("operator wallet generation failed — sponsored mint still succeeded"),
             );
           }
         } catch (onchainErr) {
@@ -302,16 +307,18 @@ export async function provisionRoutes(app: FastifyInstance) {
             // Non-fatal: DB write failure doesn't block HTTP response
           }
           req.log?.warn(
-            { keyId: record.id, error: errMsg },
-            "ERC-8004 on-chain identity write failed — will retry",
+            { keyId: declare.id(record.id), err: onchainErr },
+            lit("ERC-8004 on-chain identity write failed — will retry"),
           );
           auditService.log({
-            eventType: "auth.onchain_identity_failed",
+            eventType: lit("auth.onchain_identity_failed"),
             actor: operatorId,
-            resourceType: "api_key",
-            resourceId: record.id,
-            action: "create",
-            metadata: { error: errMsg.slice(0, 256) },
+            resourceType: lit("api_key"),
+            resourceId: declare.id(record.id),
+            action: lit("create"),
+            // The raw error (not its pre-extracted message) so closeField's Error-instanceof
+            // branch reduces it to class/code — never a free-text message in the clear.
+            metadata: { error: onchainErr },
             ip: req.ip,
             userAgent: req.headers["user-agent"],
           });
