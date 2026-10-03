@@ -111,9 +111,10 @@ function makeSimulatedLogProvider(): LogProvider {
  *                             first poll succeeded, the start installs no timer and the stop
  *                             goes on as from recording; if it failed, the stop refuses
  *                             ("no recording to stop") and the state is idle.
- *     recording, stopFailed -> stopping: it waits for the timer's poll in flight, checks the
- *                             latch, makes the final poll and emits the summary -> idle; or
- *                             fails, emitting no summary -> stopFailed.
+ *     recording, stopFailed -> stopping: it waits for the timer's poll in flight, even one
+ *                             whose log provider call asked for this stop, checks the latch,
+ *                             makes the final poll and emits the summary -> idle; or fails,
+ *                             emitting no summary -> stopFailed.
  *     idle                 -> refused: there is no summary without a recording.
  *     disposed             -> refused.
  *   dispose()
@@ -164,7 +165,10 @@ export class PrinterLogAdapter implements SensorAdapter {
   private readonly work = new OutstandingWork();
   /** Ends the recording's own piece of `work`. */
   private endRecording: (() => void) | null = null;
-  /** Polls the timer started that have not finished: stopRecording waits for them. At most one. */
+  /**
+   * Polls the timer started that have not finished: stopRecording waits for them. At most one.
+   * Each is here before it calls the log provider, and until its failure, if any, is latched.
+   */
   private readonly polls = new Set<Promise<void>>();
   /** The first timer poll of this recording that failed: its chain may lack lines. */
   private pollFailure: string | null = null;
@@ -288,13 +292,23 @@ export class PrinterLogAdapter implements SensorAdapter {
       // One poll at a time: a tick that finds one in flight is skipped, so a slow poll is
       // never overtaken and the chain keeps the log's order (astra pack 190).
       if (this.polls.size > 0) return;
-      const poll = this.poll(jobId).catch((err: unknown) => {
-        // The chain may now lack the lines this poll would have read: latched, so the
-        // stop refuses to vouch for it (astra pack 190).
-        this.pollFailure ??= err instanceof Error ? err.message : String(err);
+      // The poll is in `polls` and outstanding work BEFORE poll() runs: it calls the log
+      // provider synchronously, and the provider may re-enter the adapter. A stopRecording()
+      // from inside that call must find this poll to wait for, so the summary covers its line,
+      // or its failure refuses the summary (astra pack 199).
+      let done!: () => void;
+      const poll = new Promise<void>((resolve) => {
+        done = resolve;
       });
       this.polls.add(poll);
       void this.work.track(poll).then(() => this.polls.delete(poll));
+      void this.poll(jobId)
+        .catch((err: unknown) => {
+          // The chain may now lack the lines this poll would have read: latched, so the
+          // stop refuses to vouch for it (astra pack 190).
+          this.pollFailure ??= err instanceof Error ? err.message : String(err);
+        })
+        .finally(done);
     }, this.pollIntervalMs);
   }
 

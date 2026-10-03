@@ -712,6 +712,67 @@ describe("PrinterLogAdapter: a collaborator that re-enters during the first poll
   });
 });
 
+describe("PrinterLogAdapter: a stop asked from inside a timer poll (astra pack 199)", () => {
+  /** A log whose first poll answers "first", whose timer poll asks for the stop and holds its answer, and whose final poll answers "final". */
+  function timerPollThatStops(id: string) {
+    const held = deferredLine();
+    let log!: PrinterLogAdapter;
+    const asked: { stop?: Promise<{ value?: Emitted; error?: string }>; hook?: { resolved: boolean; seen?: number } } = {};
+    let calls = 0;
+    const logProvider = (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve("first");
+      if (calls === 2) {
+        asked.stop = settle(log.stopRecording());
+        asked.hook = ask(log, events);
+        return held.promise;
+      }
+      if (calls === 3) return Promise.resolve("final");
+      return Promise.resolve(null);
+    };
+    log = new PrinterLogAdapter(id, KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 1_000, logProvider });
+    const events = record(log);
+    return { log, held, asked, events, calls: () => calls };
+  }
+
+  it("astra's recipe: the stop waits for the timer's poll, so its line is in the chain and the summary is the last event", async () => {
+    const t = timerPollThatStops("log-reenter-timer");
+    await t.log.startRecording("job-t");
+    await vi.advanceTimersByTimeAsync(1_000); // the timer's poll asks for the stop; its line is held
+
+    expect.soft(t.calls(), "log polls while the timer's poll is held: the first and the timer's, no final poll yet").toBe(2);
+    expect.soft(summaries(t.events), "summaries while the timer's poll is held").toEqual([]);
+    expect.soft(t.asked.hook?.resolved, "quiesceEvidence(), asked from inside the timer's poll, while it is held").toBe(false);
+
+    t.held.resolve("late");
+    const outcome = await t.asked.stop!;
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(outcome.error, "the stop's refusal").toBeUndefined();
+    expect.soft(entries(t.events), "entries, in the log's order").toEqual(["first", "late", "final"]);
+    expect.soft(t.events.at(-1)?.type, "the last event").toBe("printer_job_verified");
+    expect.soft(outcome.value?.payload, "the summary").toMatchObject({ jobId: "job-t", chainLength: 3 });
+    expect.soft(t.asked.hook?.resolved, "quiesceEvidence(), once stopped").toBe(true);
+    expect.soft(t.asked.hook?.seen, "events emitted when it answered").toBe(t.events.length);
+    expect.soft(vi.getTimerCount(), "timers left").toBe(0);
+  });
+
+  it("the timer's poll then fails: the stop refuses, and no summary vouches for the chain", async () => {
+    const t = timerPollThatStops("log-reenter-timer-fails");
+    await t.log.startRecording("job-f");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    t.held.reject(new Error("log source dropped"));
+    const outcome = await t.asked.stop!;
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(outcome.error ?? "resolved", "the stop").toMatch(/a log poll failed during the recording \(log source dropped\)/);
+    expect.soft(summaries(t.events), "summaries").toEqual([]);
+    expect.soft(entries(t.events), "entries").toEqual(["first"]);
+    expect.soft(t.calls(), "log polls: no final poll").toBe(2);
+    expect.soft(t.asked.hook?.resolved, "quiesceEvidence(), once the stop failed").toBe(true);
+    expect.soft(vi.getTimerCount(), "timers left").toBe(0);
+  });
+});
+
 describe("PrinterLogAdapter under JobRunner (astra pack 196): its start at step 2, its stop at step 6, and the stop its failure path retries", () => {
   it("each run's calls meet the lifecycle: a summary per recorded run, a failed stop retried before the run returns, and a failed start's stop refused", async () => {
     vi.useRealTimers(); // real hashing (crypto.subtle) and a real run, as in job-runner-evidence-settled.test.ts
