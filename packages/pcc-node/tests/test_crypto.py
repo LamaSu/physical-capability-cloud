@@ -180,7 +180,9 @@ class TestKeyFileSafety:
         expected = os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
         assert crypto.default_keys_path() == expected
 
-    def test_a_0_1_x_key_file_is_adopted_not_replaced(self, tmp_path, monkeypatch, caplog):
+    def test_a_0_1_x_key_file_is_kept_only_by_an_explicit_move(self, tmp_path, monkeypatch):
+        # Verdict 105c, finding 2: a key file in the working directory is never
+        # adopted automatically. The operator keeps it by moving it into place.
         work = tmp_path / "checkout"
         work.mkdir()
         monkeypatch.chdir(work)
@@ -189,14 +191,14 @@ class TestKeyFileSafety:
         new_path = tmp_path / "home" / "keys.json"
         monkeypatch.setenv("PCC_NODE_KEYS_FILE", str(new_path))
 
-        with caplog.at_level(logging.WARNING, logger="pcc-node.crypto"):
-            assert load_or_create_keys() == (legacy_pub, legacy_sec)
-        assert "delete it once the node runs" in caplog.text
-        assert os.path.isfile(LEGACY_KEYS_PATH)  # left for the operator to delete
-        if os.name != "nt":
-            assert (os.stat(new_path).st_mode & 0o777) == 0o600
+        with pytest.raises(KeyFileError, match="move it into place yourself"):
+            load_or_create_keys()
+        assert not new_path.exists()
+        assert os.path.isfile(LEGACY_KEYS_PATH)  # left as it was
 
-        os.remove(LEGACY_KEYS_PATH)
+        # The explicit adoption the message describes.
+        new_path.parent.mkdir(mode=0o700)
+        os.replace(LEGACY_KEYS_PATH, new_path)
         assert load_or_create_keys() == (legacy_pub, legacy_sec)
 
     def test_a_broken_0_1_x_key_file_stops_the_node_rather_than_minting_a_new_identity(self, tmp_path, monkeypatch):

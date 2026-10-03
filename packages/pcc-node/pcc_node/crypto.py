@@ -126,8 +126,9 @@ def verify_signature(announcement, signature_hex, public_key_hex):
 #: (packages/pcc-node/pcc-keys.json was, N35a).
 DEFAULT_KEYS_PATH = os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
 
-#: Where pcc-node 0.1.x wrote it. Adopted once, so an upgrade keeps the
-#: node's registered identity.
+#: Where pcc-node 0.1.x wrote it. Never adopted automatically: a checkout or
+#: an archive can carry a key someone else knows (verdict 105c, finding 2). If
+#: one is found, the node stops and says how to move it into place.
 LEGACY_KEYS_PATH = "pcc-keys.json"
 
 
@@ -140,6 +141,14 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 # open(O_NOFOLLOW) on a symlink fails with ELOOP (Linux, macOS) or EMLINK (FreeBSD).
 _SYMLINK_ERRNOS = (errno.ELOOP, errno.EMLINK)
+# fsync on a directory that the filesystem cannot sync; anything else is a real failure.
+_FSYNC_UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
+
+_WINDOWS_REFUSAL = (
+    "pcc-node 0.1.1 does not keep a node key on Windows: it cannot yet make the key file private "
+    "there (no owner-only ACL, and no-follow opens are unavailable). Run the node on Linux or macOS "
+    "(WSL works)."
+)
 
 
 def default_keys_path():
@@ -232,16 +241,39 @@ def _parse_keys(path, text):
 
 
 def _fsync_dir(directory):
-    """Make a new directory entry durable (POSIX; best effort where unsupported)."""
+    """Make new entries in *directory* durable (POSIX).
+
+    A filesystem that cannot sync a directory is tolerated; any other fsync
+    error, such as EIO, is raised (verdict 105c, finding 7).
+    """
     if not _POSIX:
         return
-    fd = os.open(directory, os.O_RDONLY)
+    fd = os.open(directory, os.O_RDONLY | _CLOEXEC)
     try:
         os.fsync(fd)
-    except OSError:
-        pass
+    except OSError as exc:
+        if exc.errno not in _FSYNC_UNSUPPORTED:
+            raise
     finally:
         os.close(fd)
+
+
+def _make_dirs(directory):
+    """Create *directory* and any missing parents (0700), each made durable in its parent."""
+    missing = []
+    current = os.path.abspath(directory)
+    while not os.path.lexists(current):
+        missing.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    for path in reversed(missing):
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            continue  # another process made it first
+        _fsync_dir(os.path.dirname(path))
 
 
 def _create_exclusive(path, public_hex, secret_hex):
@@ -250,10 +282,12 @@ def _create_exclusive(path, public_hex, secret_hex):
     The pair is written and fsynced to a private temporary file, then linked
     into place: a failed write leaves no partial key file, and the link fails
     rather than replace a key another process created first (verdict 105b,
-    finding 8).
+    finding 8). A filesystem that refuses the hard link gets no fallback: a
+    check-then-rename could replace an identity created in between, so the key
+    is not installed at all (verdict 105c, finding 4).
     """
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, mode=0o700, exist_ok=True)
+    directory = os.path.dirname(os.path.abspath(path))
+    _make_dirs(directory)
     _check_dir(directory)
     tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC, 0o600)
@@ -266,11 +300,12 @@ def _create_exclusive(path, public_hex, secret_hex):
             os.link(tmp, path)
         except FileExistsError:
             return False
-        except OSError:
-            # A filesystem without hard links: rename, unless the key appeared meanwhile.
-            if os.path.lexists(path):
-                return False
-            os.replace(tmp, path)
+        except OSError as exc:
+            raise KeyFileError(
+                f"cannot install {path} atomically: the filesystem refused a hard link "
+                f"({errno.errorcode.get(exc.errno, exc.errno)}). Keep the key on a local filesystem, "
+                f"for example with PCC_NODE_KEYS_FILE."
+            ) from None
     finally:
         try:
             os.unlink(tmp)
@@ -280,31 +315,40 @@ def _create_exclusive(path, public_hex, secret_hex):
     return True
 
 
-def _adopt_legacy(legacy, path):
-    """Copy a 0.1.x key file from the working directory to *path*, owner-only.
+def _refuse_legacy(legacy, path):
+    """Stop, rather than adopt a 0.1.x key file found in the working directory.
 
-    Only a regular file that this account owns and no one else can read, in a
-    directory no one else can write, is adopted (verdict 105b, finding 5).
-    The legacy file, private as required, is left in place for the operator
-    to delete, and nothing is copied unless it holds a matching key pair.
+    Ownership and mode say who controls a file, not where its key came from: a
+    checkout or an archive can carry a valid pair someone else knows (verdict
+    105c, finding 2). Adoption is the operator's explicit act: moving the file
+    into place. The round-2 checks still come first: a legacy file in a
+    directory others can write, a symlink, another account's file, or one
+    others could read (restricted to 0600 first) gets its specific refusal.
+    Always raises KeyFileError.
     """
-    _check_dir(os.path.dirname(os.path.abspath(legacy)))
-    public_hex, secret_hex = _parse_keys(legacy, _read_key_file(legacy, legacy=True))
-    if _create_exclusive(path, public_hex, secret_hex):
-        old = os.path.abspath(legacy)
-        log.warning(
-            "Copied this node's keys from %s to %s. The old file still holds the secret "
-            "key: delete it once the node runs (rm %s).", old, path, old,
-        )
+    old = os.path.abspath(legacy)
+    _check_dir(os.path.dirname(old))
+    _read_key_file(legacy, legacy=True)
+    directory = os.path.dirname(os.path.abspath(path))
+    raise KeyFileError(
+        f"{old} is a pcc-node 0.1.x key file. pcc-node no longer adopts a key from the working "
+        f"directory by itself, because a checkout or an archive can carry a key someone else knows. "
+        f"If it is this node's own key, move it into place yourself: "
+        f"mkdir -p -m 700 {directory} && mv {old} {path}. Otherwise move it aside, and pcc-node "
+        f"creates a new identity (then register the node again)."
+    )
 
 
 def load_or_create_keys(path=None):
     """Load this node's key pair, creating it once.
 
     The default file is ~/.pcc-node/keys.json (or PCC_NODE_KEYS_FILE), never
-    the working directory. A key file that pcc-node 0.1.x left in the working
-    directory is adopted once if it is plainly this account's, so the node
-    keeps its registered identity.
+    the working directory. If that file does not exist yet and pcc-node 0.1.x
+    left a key file in the working directory, the node stops and says how to
+    move it into place: it is never adopted automatically.
+
+    On Windows no key is kept: KeyFileError, until the file can be made
+    private there (verdict 105c, finding 3).
 
     A new file is created atomically and owner-only (0600, in a 0700
     directory). KeyFileError is raised for a key file that is a symlink, is
@@ -317,10 +361,12 @@ def load_or_create_keys(path=None):
     tuple[str, str]
         (public_key_hex, secret_key_hex)
     """
+    if not _POSIX:
+        raise KeyFileError(_WINDOWS_REFUSAL)
     if path is None:
         path = default_keys_path()
         if not os.path.lexists(path) and os.path.lexists(LEGACY_KEYS_PATH):
-            _adopt_legacy(LEGACY_KEYS_PATH, path)
+            _refuse_legacy(LEGACY_KEYS_PATH, path)
     abs_path = os.path.abspath(path)
 
     if not os.path.lexists(abs_path):

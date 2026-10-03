@@ -17,6 +17,15 @@ from typing import List, Dict, Any
 
 log = logging.getLogger("pcc-node.config")
 
+_POSIX = os.name != "nt"
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+_WINDOWS_REFUSAL = (
+    "pcc-node 0.1.1 does not keep an API key in a config file on Windows: it cannot yet make the "
+    "file private there. Run the node on Linux or macOS (WSL works)."
+)
+
 
 class ConfigFileError(Exception):
     """The config file exists but must not be used as it is."""
@@ -111,14 +120,20 @@ def save_config(config: NodeConfig, path: str = "./pcc-node.json") -> str:
     the target and renamed over it: an existing readable config, or a symlink
     at *path*, is replaced rather than written through, and a failed write
     leaves the old config (or nothing) instead of a partial file.
+
+    On Windows a config that holds a key is refused with ConfigFileError: the
+    file cannot yet be made private there (verdict 105c, finding 3).
     """
+    data = config.to_dict()
+    if not _POSIX and _holds_a_key(data):
+        raise ConfigFileError(_WINDOWS_REFUSAL)
     abs_path = os.path.abspath(path)
     directory = os.path.dirname(abs_path)
     tmp_path = os.path.join(directory, f".{os.path.basename(abs_path)}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(config.to_dict(), f, indent=2)
+            json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, abs_path)
@@ -131,19 +146,28 @@ def save_config(config: NodeConfig, path: str = "./pcc-node.json") -> str:
     return abs_path
 
 
-def load_config(path: str = "./pcc-node.json") -> NodeConfig:
-    """Load config from a JSON file.
+def load_config_data(path: str = "./pcc-node.json") -> dict:
+    """The config file's JSON object, read through one checked descriptor.
 
-    Raises FileNotFoundError if the file does not exist. The file is read
-    through one no-follow descriptor, so a symlink is refused, and it must be
-    a regular file. A config that holds an API key must belong to this
-    account; if other users could read it, it is restricted to 0600 before
-    use and the operator is told to rotate the key (verdict 105b, finding 7).
+    Raises FileNotFoundError if the file does not exist, and ValueError if it
+    is not JSON. The file is read through one no-follow descriptor, so a
+    symlink is refused, and it must be a regular file holding a JSON object.
+
+    A config decides where the operator's key is sent (its pcc_base), so it
+    must belong to this account, and no other user may be able to write it.
+    That holds even when the file holds no key. A writable file is refused,
+    not repaired: fchmod would not revoke a descriptor another account
+    already holds open, and the contents may already be someone else's
+    (verdict 105c, finding 5). A key-bearing config that others could only
+    read is restricted to 0600 before use, and the operator is told to rotate
+    the key (verdict 105b, finding 7).
+
+    On Windows a config that holds a key is refused (verdict 105c, finding 3).
     ConfigFileError says why a config was refused; the key is never printed.
     """
     abs_path = os.path.abspath(path)
     try:
-        fd = os.open(abs_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(abs_path, os.O_RDONLY | _NOFOLLOW | _CLOEXEC)
     except OSError as exc:
         # open(O_NOFOLLOW) on a symlink fails with ELOOP (Linux, macOS) or EMLINK (FreeBSD).
         if exc.errno in (errno.ELOOP, errno.EMLINK):
@@ -154,17 +178,35 @@ def load_config(path: str = "./pcc-node.json") -> NodeConfig:
         if not stat.S_ISREG(st.st_mode):
             raise ConfigFileError(f"{abs_path} is not a regular file")
         data = json.load(f)
-        if os.name != "nt" and _holds_a_key(data):
-            if st.st_uid != os.getuid():
-                raise ConfigFileError(f"{abs_path} holds an API key but is owned by another account (uid {st.st_uid})")
-            mode = st.st_mode & 0o777
-            if mode & 0o077:
-                os.fchmod(f.fileno(), 0o600)
-                log.warning(
-                    "%s holds an API key and other users could read it (mode %s). It is now 0600; "
-                    "rotate the key if other accounts on this machine may have read it.", abs_path, oct(mode),
-                )
-    return NodeConfig.from_dict(data)
+        if not isinstance(data, dict):
+            raise ConfigFileError(f"{abs_path} is not a pcc-node config: it is not a JSON object")
+        if not _POSIX:
+            if _holds_a_key(data):
+                raise ConfigFileError(_WINDOWS_REFUSAL)
+            return data
+        if st.st_uid != os.getuid():
+            raise ConfigFileError(f"{abs_path} is owned by another account (uid {st.st_uid})")
+        mode = st.st_mode & 0o777
+        if mode & 0o022:
+            raise ConfigFileError(
+                f"{abs_path} can be written by other users (mode {oct(mode)}). Another account may "
+                f"already hold it open, so restricting it now would not stop changes, and it may "
+                f"already have been changed. Check its contents, then write it to a new file, for "
+                f"example: cp {abs_path} {abs_path}.new && chmod 600 {abs_path}.new && "
+                f"mv {abs_path}.new {abs_path}. If it holds an API key, rotate the key."
+            )
+        if mode & 0o077 and _holds_a_key(data):
+            os.fchmod(f.fileno(), 0o600)
+            log.warning(
+                "%s holds an API key and other users could read it (mode %s). It is now 0600; "
+                "rotate the key if other accounts on this machine may have read it.", abs_path, oct(mode),
+            )
+    return data
+
+
+def load_config(path: str = "./pcc-node.json") -> NodeConfig:
+    """Load the config at *path*: load_config_data's checks, as a NodeConfig."""
+    return NodeConfig.from_dict(load_config_data(path))
 
 
 def _holds_a_key(data: dict) -> bool:
