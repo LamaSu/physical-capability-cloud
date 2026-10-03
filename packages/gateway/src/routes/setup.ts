@@ -709,8 +709,8 @@ export async function setupRoutes(app: FastifyInstance) {
     //   - a deviceless self-attestation is never reported as a pass.
     // The reply carries ran/passed. `ran` is true only when the device's
     // adapter executed in this gateway. `passed` is true only when that run
-    // completed AND the adapter was not serving simulation
-    // (deviceIsSimulated, read after the run). Neither proves which physical
+    // completed AND the adapter it ran on was not serving simulation
+    // (jobRanSimulated, read after the run). Neither proves which physical
     // machine is attached: the route checks recorded ownership and local
     // dispatch. A run verified against the kernel's registered key (D4a, #428)
     // will tighten `passed` when it lands; this route never loosens it.
@@ -925,12 +925,15 @@ export async function setupRoutes(app: FastifyInstance) {
     }
 
     // The device's adapter ran here (ran:true). It passes only when that run
-    // reached "completed" AND the adapter was not serving simulation. N59 F2:
-    // a mock, mockMode or downgraded adapter's completion is not a hardware
-    // pass. This is judged now, after the run, from the adapter's own
-    // source.simulated marker. "failed", "unknown" (ran without DB tracking)
-    // and a poll timeout are not passes either.
-    const simulated = deviceRow.adapterType === "mock" || svc.deviceIsSimulated(deviceId);
+    // reached "completed" AND the adapter it ran on was not serving simulation.
+    // N59 F2: a mock, mockMode or downgraded adapter's completion is not a
+    // hardware pass. This is judged now, after the run, on the adapter
+    // instance the job was dispatched to (not one a refresh installed since),
+    // from its source.simulated marker; an adapter that leaves the marker out
+    // counts as real only if it is a built-in known to set it whenever it
+    // simulates (see adapterIsSimulated). "failed", "unknown" (ran without DB
+    // tracking) and a poll timeout are not passes either.
+    const simulated = deviceRow.adapterType === "mock" || svc.jobRanSimulated(jobId);
     return {
       jobId,
       deviceId: submitResult.deviceId,

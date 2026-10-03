@@ -46,7 +46,7 @@ vi.mock("../services/kernel-service.js", async (importOriginal) => {
     // whether the loaded runner is a simulator (a mock never passes).
     hasRunner: vi.fn().mockReturnValue(true),
     refreshDeviceFromDb: vi.fn().mockReturnValue({ installed: true }),
-    deviceIsSimulated: vi.fn().mockReturnValue(false),
+    jobRanSimulated: vi.fn().mockReturnValue(false),
   };
 
   return {
@@ -694,7 +694,7 @@ describe("Setup API", () => {
       hasRunner: ReturnType<typeof vi.fn>;
       getJobStatus: ReturnType<typeof vi.fn>;
       submitJob: ReturnType<typeof vi.fn>;
-      deviceIsSimulated: ReturnType<typeof vi.fn>;
+      jobRanSimulated: ReturnType<typeof vi.fn>;
     } })._mockService;
     const GW_KERNEL = "kernel-setup-test"; // the kernel this gateway's service runs
     const owner = { "x-test-key": OWNER };
@@ -706,7 +706,7 @@ describe("Setup API", () => {
       _svc.hasRunner.mockReturnValue(true);
       _svc.getJobStatus.mockResolvedValue({ status: "completed", progress: 100 });
       _svc.submitJob.mockResolvedValue({ jobId: "test-job-mock", deviceId: "dev-owned", status: "accepted" });
-      _svc.deviceIsSimulated.mockReturnValue(false);
+      _svc.jobRanSimulated.mockReturnValue(false);
     });
 
     it("requires kernelId", async () => {
@@ -781,7 +781,7 @@ describe("Setup API", () => {
       expect(byType.statusCode).toBe(200);
       expect(byType.json()).toMatchObject({ status: "completed", ran: true, passed: false, simulated: true });
       // ...and by the runner reporting itself simulated, even for a non-mock adapterType.
-      _svc.deviceIsSimulated.mockReturnValue(true);
+      _svc.jobRanSimulated.mockReturnValue(true);
       const byRunner = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" });
       expect(byRunner.json()).toMatchObject({ ran: true, passed: false, simulated: true });
     });

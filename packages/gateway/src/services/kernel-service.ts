@@ -12,6 +12,7 @@ import { createAdaptersFromConfig, loadKernelConfig } from "@pcc/kernel";
 import { initSafetyGateway, getSafetyGateway } from "@pcc/kernel";
 import type { KernelConfig } from "@pcc/kernel";
 import type { MachineAdapter } from "@pcc/kernel";
+import { IppAdapter, OctoPrintAdapter, OPCUAAdapter, OpentronsMachineAdapter, SiLAAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
@@ -63,12 +64,56 @@ interface RunningJob {
 // KernelService
 // ---------------------------------------------------------------------------
 
+/**
+ * The built-in machine adapters whose every simulating path sets
+ * `source.simulated: true`, checked per class (N59 round 4): mockMode (and
+ * SiLA's mock), IPP's default mock, and IPP's runtime downgrade. An instance
+ * of EXACTLY one of these classes with no marker is driving its real
+ * transport. Any other adapter (an extension registered at runtime, a
+ * subclass, a built-in not listed here such as Hamilton, which @pcc/kernel
+ * does not export) counts as real only when its source says
+ * `simulated: false`.
+ */
+const MARKS_ITS_OWN_SIMULATION: ReadonlySet<object> = new Set<object>([
+  IppAdapter.prototype,
+  OctoPrintAdapter.prototype,
+  OPCUAAdapter.prototype,
+  OpentronsMachineAdapter.prototype,
+  SiLAAdapter.prototype,
+]);
+
+const MOCK_LIKE_CLASS = /mock|chatterbox|stub|simulat|fake/i;
+
+/**
+ * Whether `machine` is serving simulation, as far as the gateway can tell.
+ * Fail closed: no adapter, no evidence source, a mock-like class name, a
+ * marker that is anything but a clean boolean, or no marker on an adapter
+ * outside MARKS_ITS_OWN_SIMULATION all count as simulated. This says what the
+ * adapter reports about itself, not what hardware is attached: physical
+ * verification against the kernel's registered key is D4a, #428.
+ */
+export function adapterIsSimulated(machine: MachineAdapter | undefined): boolean {
+  if (!machine) return true;
+  if (MOCK_LIKE_CLASS.test(machine.constructor?.name ?? "")) return true;
+  const source: unknown = machine.source;
+  if (typeof source !== "object" || source === null) return true; // nothing to read a marker from
+  const marker = (source as { simulated?: unknown }).simulated;
+  if (marker === false) return false; // the adapter says, affirmatively, that it is real
+  if (marker !== undefined) return true; // true, or anything but a clean boolean
+  return !MARKS_ITS_OWN_SIMULATION.has(Object.getPrototypeOf(machine) as object);
+}
+
+/** How many finished jobs keep the adapter that ran them; an evicted one reads as simulated. */
+const JOB_ADAPTER_MEMORY = 1000;
+
 export class KernelService {
   private runners: Map<string, JobRunner> = new Map();
   private machines: Map<string, MachineAdapter> = new Map();
   private emitter: EvidenceEmitter;
   private config: KernelConfig;
   private runningJobs: Map<string, RunningJob> = new Map();
+  /** The adapter each dispatched job ran on, for jobRanSimulated (the newest JOB_ADAPTER_MEMORY jobs). */
+  private jobAdapters: Map<string, MachineAdapter | undefined> = new Map();
   /** Cache of finalized evidence bundles, keyed by jobId */
   private completedBundles: Map<string, EvidenceBundle> = new Map();
 
@@ -86,7 +131,7 @@ export class KernelService {
     this.initAdapters();
     // Also load any DB-registered devices for this kernel so test-job runs the
     // adapter registered for the operator's device, not the KERNEL_CONFIG mock
-    // fallback. (Whether that adapter is serving real I/O is deviceIsSimulated.)
+    // fallback. (Whether that adapter served real I/O for a job is jobRanSimulated.)
     this.loadDbDevicesIntoRuntime();
     // Cache finalized bundles so we can pass them to the settlement service
     this.emitter.onBundle((bundle) => {
@@ -222,28 +267,16 @@ export class KernelService {
   }
 
   /**
-   * Whether the loaded runner for `deviceId` is serving simulation right now.
-   * Used by /api/setup/test-job so a simulated completion is never reported
-   * as passed (N59 round 3). The authoritative marker is the adapter's own
-   * evidence source, `source.simulated`. Every mock adapter sets it, and so
-   * does any adapter in mockMode (OctoPrint, IPP and the rest). IPP also sets
-   * it at the moment it downgrades to mock because its real transport is
-   * missing. So the caller reads this AFTER the run, and a downgrade during
-   * the run counts. An unknown device, an adapter with no evidence source, a
-   * non-boolean marker, or a mock-like class name also counts as simulated
-   * (fail closed). This says what the adapter is doing, not what hardware is
-   * attached: physical verification against the kernel's registered key is
-   * D4a, #428.
+   * Whether the job `jobId` ran on an adapter serving simulation, judged on the
+   * adapter instance submitJob dispatched it to, read now. So an IPP downgrade
+   * during the run counts, and an adapter a refresh installs under the same
+   * device id meanwhile does not stand in for the one that ran (N59 round 4).
+   * A job this service did not dispatch, or no longer remembers, counts as
+   * simulated (fail closed).
    */
-  deviceIsSimulated(deviceId: string): boolean {
-    const machine = this.machines.get(deviceId);
-    if (!machine) return true;
-    const source: unknown = machine.source;
-    if (typeof source !== "object" || source === null) return true; // nothing to read a marker from
-    const marker = (source as { simulated?: unknown }).simulated;
-    if (marker === true) return true;
-    if (marker !== undefined && marker !== false) return true; // anything but a clean false is not "real"
-    return /mock|chatterbox|stub|simulat|fake/i.test(machine.constructor?.name ?? "");
+  jobRanSimulated(jobId: string): boolean {
+    if (!this.jobAdapters.has(jobId)) return true;
+    return adapterIsSimulated(this.jobAdapters.get(jobId));
   }
 
   /**
@@ -280,6 +313,10 @@ export class KernelService {
     }
 
     const runner = this.runners.get(deviceId)!;
+    // The adapter this runner drives, captured with it in this same turn (both
+    // maps are only ever set together): the post-run simulation check must
+    // judge the adapter that ran, whatever a refresh installs meanwhile.
+    const machine = this.machines.get(deviceId);
 
     // ── Safety gateway pre-flight ──────────────────────────────────────────
     // Build a PhysicalCommand descriptor for this job. Jobs submitted without
@@ -315,6 +352,10 @@ export class KernelService {
 
     // Track in-memory
     this.runningJobs.set(jobId, { jobId, deviceId, startedAt: Date.now() });
+    this.jobAdapters.set(jobId, machine);
+    if (this.jobAdapters.size > JOB_ADAPTER_MEMORY) {
+      this.jobAdapters.delete(this.jobAdapters.keys().next().value as string);
+    }
 
     // Telemetry: job accepted by a device
     pipelineTelemetry.emit(jobId, "job_accepted", "completed", {

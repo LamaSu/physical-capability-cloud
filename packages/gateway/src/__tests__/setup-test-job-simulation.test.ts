@@ -7,11 +7,13 @@
  * ../__tests__/setup.test.ts covers this route end-to-end against a MOCKED
  * KernelService (see that file's own header comment: real background timers
  * from fire-and-forget jobs can SIGABRT during test teardown). That tradeoff
- * is wrong for F2 specifically — F2 is about what deviceIsSimulated() does
+ * is wrong for F2 specifically — F2 is about what the simulation check does
  * against a REAL adapter instance (an IppAdapter defaulting to mock, an
  * OctoPrintAdapter in mockMode, an IppAdapter that downgrades from real to
  * mock at runtime because the optional 'ipp' package isn't installed). A
- * mocked KernelService can't exercise any of that.
+ * mocked KernelService can't exercise any of that. Round 4 adds an adapter
+ * replaced mid-run (the check must judge the adapter that RAN) and a
+ * registered extension that leaves the marker out (it must count as simulated).
  *
  * So this file does NOT call vi.mock() on "../services/kernel-service.js".
  * It constructs one real KernelService — via the exact same
@@ -19,9 +21,8 @@
  * itself uses — wired to real @pcc/kernel adapters (IppAdapter,
  * OctoPrintAdapter, plus one hand-written neutral MachineAdapter double for
  * the control case), and drives it through the real HTTP route with
- * app.inject(). deviceIsSimulated() is also exercised directly (unit-style)
- * by injecting fakes into the service's private `machines` map via a typed
- * cast — the seam the task asked for.
+ * app.inject(). adapterIsSimulated() is also exercised directly (unit-style)
+ * on fakes, and jobRanSimulated() on a job id the service never dispatched.
  *
  * To avoid the documented SIGABRT risk from background work outliving a
  * test, every adapter that can hang past its own test is forced to
@@ -33,8 +34,15 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { setupRoutes } from "../routes/setup.js";
 import { initStore, closeStore, getRepos } from "../db.js";
-import { initKernelService, resetKernelService } from "../services/kernel-service.js";
-import { JobRunner, EvidenceEmitter, resetSafetyGateway } from "@pcc/kernel";
+import { adapterIsSimulated, initKernelService, resetKernelService } from "../services/kernel-service.js";
+import {
+  JobRunner,
+  EvidenceEmitter,
+  OctoPrintAdapter,
+  resetSafetyGateway,
+  registerMachineAdapter,
+  unregisterMachineAdapter,
+} from "@pcc/kernel";
 import type { MachineAdapter, MachineCommand, MachineCommandResult } from "@pcc/kernel";
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 
@@ -189,10 +197,22 @@ class NeutralBenchAdapter implements MachineAdapter {
 }
 
 /**
- * Two minimal doubles for deviceIsSimulated()'s unit tests. Only `.source`
- * and `.constructor.name` are ever read by that method, so these don't need
- * to implement MachineAdapter at all — injected via a typed cast straight
- * into the service's `machines` map, as the task's seam suggestion.
+ * A registered extension that simulates a job but never says so: its source has
+ * no `simulated` marker at all, and its class name is neutral (round 4's NEW
+ * HIGH). Built by the real adapter factory from a DB row, like any extension.
+ */
+class UnmarkedBenchAdapter extends NeutralBenchAdapter {
+  constructor(id: string, kernelId: string) {
+    super(id, kernelId);
+    delete (this.source as { simulated?: boolean }).simulated;
+  }
+}
+const UNMARKED_EXTENSION_TYPE = "bench-unmarked-extension";
+
+/**
+ * Two minimal doubles for adapterIsSimulated()'s unit tests. Only `.source`,
+ * `.constructor.name` and the prototype are ever read by that function, so
+ * these don't need to implement MachineAdapter at all (a typed cast).
  */
 class RealishBenchDouble {
   constructor(public source: Record<string, unknown>) {}
@@ -231,6 +251,11 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     // An adapterType with NO registered factory on purpose — see the
     // "install manually" step below for why.
     seedDevice("dev-bench-neutral", KERNEL_ID, "bench-neutral-test-double");
+    // Round 4: an IPP default-mock device whose adapter is replaced mid-run.
+    seedDevice("dev-ipp-swap", KERNEL_ID, "ipp");
+    // Round 4: a registered extension whose source omits the marker.
+    registerMachineAdapter(UNMARKED_EXTENSION_TYPE, (device, _cfg, kernelId) => new UnmarkedBenchAdapter(device.id, kernelId));
+    seedDevice("dev-unmarked-ext", KERNEL_ID, UNMARKED_EXTENSION_TYPE);
 
     resetKernelService();
     resetSafetyGateway();
@@ -310,7 +335,7 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
   afterAll(async () => {
     // Belt-and-suspenders: stop any adapter-internal timers (IPP's mock job
     // timer / poll timer) regardless of per-test cleanup below.
-    for (const id of ["dev-ipp-default", "dev-octoprint-mock", "dev-ipp-downgrade", "dev-bench-neutral"]) {
+    for (const id of ["dev-ipp-default", "dev-octoprint-mock", "dev-ipp-downgrade", "dev-bench-neutral", "dev-ipp-swap", "dev-unmarked-ext"]) {
       try {
         await svcInternals.machines.get(id)?.dispose();
       } catch {
@@ -320,6 +345,7 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     await app.close();
     closeStore();
     resetKernelService();
+    unregisterMachineAdapter(UNMARKED_EXTENSION_TYPE);
   });
 
   const post = (payload: unknown) =>
@@ -399,53 +425,85 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     }, 20_000);
   });
 
-  // ── 4. deviceIsSimulated() unit tests on the real service ────────────────
+  // ── 3b. Round 4: the adapter judged must be the adapter that ran ─────────
 
-  describe("deviceIsSimulated — direct unit tests via the service's machines map", () => {
-    it("an unregistered/unknown device is simulated (fail closed)", () => {
-      expect(svc.deviceIsSimulated("dev-totally-unregistered-n59r3")).toBe(true);
+  describe("an adapter replaced under the same device id while the job runs (round 4, F2)", () => {
+    it("[F] the IPP mock run is judged by the adapter that ran, not the real-mode one installed meanwhile", async () => {
+      const pending = post({ kernelId: KERNEL_ID, deviceId: "dev-ipp-swap", assuranceTier: 0 });
+      await sleep(300); // submitJob has captured the IPP runner; its mock job is still printing
+      getRepos().kernels.updateDevice("dev-ipp-swap", {
+        adapterType: "octoprint",
+        adapterConfig: JSON.stringify({ mockMode: false, url: "http://127.0.0.1:9" }),
+        lastUpdated: new Date().toISOString(),
+      } as never);
+      expect(svc.refreshDeviceFromDb("dev-ipp-swap")).toEqual({ installed: true });
+      expect(svcInternals.machines.get("dev-ipp-swap")?.constructor?.name).toBe("OctoPrintAdapter");
+      const body = (await pending).json();
+      expect(body).toMatchObject({ ran: true, simulated: true, passed: false });
+    }, 20_000);
+  });
+
+  // ── 3c. Round 4: an extension must say it is real ────────────────────────
+
+  describe("a registered extension whose source omits the simulated marker (round 4, NEW HIGH)", () => {
+    it("[F] its completed run is reported simulated:true, passed:false", async () => {
+      const machine = svcInternals.machines.get("dev-unmarked-ext");
+      expect(machine?.constructor?.name).toBe("UnmarkedBenchAdapter"); // built by the real factory
+      expect("simulated" in (machine?.source ?? {})).toBe(false);
+      const body = (await post({ kernelId: KERNEL_ID, deviceId: "dev-unmarked-ext", assuranceTier: 0 })).json();
+      expect(body).toMatchObject({ ran: true, status: "completed", simulated: true, passed: false });
+    }, 20_000);
+  });
+
+  // ── 4. adapterIsSimulated() / jobRanSimulated() unit tests ──────────────
+
+  describe("adapterIsSimulated and jobRanSimulated — direct unit tests", () => {
+    const asAdapter = (x: unknown) => x as MachineAdapter;
+    const realModeOctoPrint = () =>
+      new OctoPrintAdapter("dev-unit-octoprint", { url: "http://127.0.0.1:9", apiKey: "", kernelId: KERNEL_ID, mockMode: false });
+
+    it("a job id this service never dispatched is simulated (fail closed)", () => {
+      expect(svc.jobRanSimulated("job-never-dispatched-n59r4")).toBe(true);
+    });
+
+    it("no adapter at all is simulated (fail closed)", () => {
+      expect(adapterIsSimulated(undefined)).toBe(true);
     });
 
     it("source.simulated === true is simulated", () => {
-      svcInternals.machines.set(
-        "dev-u1",
-        new RealishBenchDouble({ simulated: true }) as unknown as MachineAdapter,
-      );
-      expect(svc.deviceIsSimulated("dev-u1")).toBe(true);
+      expect(adapterIsSimulated(asAdapter(new RealishBenchDouble({ simulated: true })))).toBe(true);
     });
 
-    it("a non-boolean truthy marker (source.simulated === 'yes') is simulated", () => {
-      svcInternals.machines.set(
-        "dev-u2",
-        new RealishBenchDouble({ simulated: "yes" }) as unknown as MachineAdapter,
-      );
-      expect(svc.deviceIsSimulated("dev-u2")).toBe(true);
+    it("a non-boolean marker (source.simulated === 'yes') is simulated", () => {
+      expect(adapterIsSimulated(asAdapter(new RealishBenchDouble({ simulated: "yes" })))).toBe(true);
     });
 
-    it("a neutral class with source.simulated === false is NOT simulated", () => {
-      svcInternals.machines.set(
-        "dev-u3",
-        new RealishBenchDouble({ simulated: false }) as unknown as MachineAdapter,
-      );
-      expect(svc.deviceIsSimulated("dev-u3")).toBe(false);
+    it("a neutral class that says source.simulated === false is NOT simulated", () => {
+      expect(adapterIsSimulated(asAdapter(new RealishBenchDouble({ simulated: false })))).toBe(false);
     });
 
-    it("a neutral class with source.simulated absent is NOT simulated", () => {
-      svcInternals.machines.set(
-        "dev-u4",
-        new RealishBenchDouble({}) as unknown as MachineAdapter,
-      );
-      expect(svc.deviceIsSimulated("dev-u4")).toBe(false);
+    it("[F] a neutral class with NO marker is simulated: only a listed built-in may leave it out (round 4)", () => {
+      expect(adapterIsSimulated(asAdapter(new RealishBenchDouble({})))).toBe(true);
+    });
+
+    it("an exact built-in that sets the marker whenever it simulates, in real mode with no marker, is NOT simulated", () => {
+      const adapter = realModeOctoPrint();
+      expect("simulated" in adapter.source).toBe(false);
+      expect(adapterIsSimulated(adapter)).toBe(false);
+    });
+
+    it("a SUBCLASS of that built-in with no marker is simulated: the list matches exact classes only", () => {
+      class LooksLikeOctoPrint extends OctoPrintAdapter {}
+      const adapter = new LooksLikeOctoPrint("dev-unit-sub", { url: "http://127.0.0.1:9", apiKey: "", kernelId: KERNEL_ID, mockMode: false });
+      expect(adapterIsSimulated(adapter)).toBe(true);
     });
 
     it("an adapter with no evidence source at all is simulated (fail closed)", () => {
-      svcInternals.machines.set("dev-u6", {} as unknown as MachineAdapter);
-      expect(svc.deviceIsSimulated("dev-u6")).toBe(true);
+      expect(adapterIsSimulated(asAdapter({}))).toBe(true);
     });
 
-    it("a class named FakeBench with no marker is simulated via the class-name fallback", () => {
-      svcInternals.machines.set("dev-u5", new FakeBench({}) as unknown as MachineAdapter);
-      expect(svc.deviceIsSimulated("dev-u5")).toBe(true);
+    it("a mock-like class name is simulated even when its marker says false", () => {
+      expect(adapterIsSimulated(asAdapter(new FakeBench({ simulated: false })))).toBe(true);
     });
   });
 
