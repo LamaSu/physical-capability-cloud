@@ -22,8 +22,8 @@
  * Written self-contained (siblings-by-name only) so it can be inlined into the view
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
-import type { IrDoc, IrNode, IrNodeType, BindSchema } from "./dashboard-ir.js";
-import { LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, isMoneyClaim } from "./dashboard-ir.js";
+import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind } from "./dashboard-ir.js";
+import { LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, isMoneyClaim, LIST_FIELD_KINDS } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -168,7 +168,12 @@ function readField(data: unknown, f: SchemaField): FieldRead {
       return typeof raw === "string" && raw.length > 0
         ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
     case "amount":
-      if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) return { ok: true, text: String(raw) };
+      // A number must ALSO satisfy the canonical string grammar (astra r4 finding 3): the public
+      // Amount contract is a string (spec/types/common.ts), so a JS number is only accepted when
+      // its String() form is one PCC itself could have produced. 1e100 stringifies to "1e+100",
+      // which AMOUNT_STR_RE refuses — the whole card fails closed, never an off-contract value
+      // displayed in a PCC-owned money card. Strings are unchanged (same grammar, directly).
+      if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && AMOUNT_STR_RE.test(String(raw))) return { ok: true, text: String(raw) };
       if (typeof raw === "string" && AMOUNT_STR_RE.test(raw)) return { ok: true, text: raw };
       return { ok: false };
     case "currency":
@@ -293,69 +298,127 @@ const LIST_FIELD_LABELS: Readonly<Record<string, string>> = {
 /** The PCC-owned label for a list field; an unknown field falls back to the field path itself. */
 export function listFieldLabel(field: string): string { return LIST_FIELD_LABELS[field] ?? field; }
 
-/** Schema-validated dynamic ROW rendering for a list node: read ONLY the declared selectors from
- * each fetched row via own-property traversal; drop rows that yield no title. Every value reaches
- * the DOM via textContent, framed by its own trusted PCC label (title/meta/status keep their
- * original heading/meta/badge classes on the VALUE element; the label is a separate, trusted,
- * untrusted-free sibling). Row-level backstop (astra r3 H2): a claim split across this row's OWN
- * bound fields ("$" as the title, "100" as a meta value) is caught here by joining the row's
- * non-status values post-boundValueText and re-checking the joined text, even though neither value
- * alone was a claim. Skipped when a value was already withheld individually — nothing left to
- * catch, and it avoids re-triggering on WITHHELD_FIELD's own text. */
+// Grammars for the list field kinds (astra r4 on #344, finding 1). Each is a closed identifier/
+// timestamp/version shape — none admits arbitrary prose, so a hostile "Your payment" can never
+// pass as an id, and a hostile "completed" can never pass as a bool.
+const LIST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const LIST_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+const LIST_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$/;
+type ListFieldRead = { ok: true; text: string; raw: unknown } | { ok: false };
+
+/** Read + type-validate ONE list field from a fetched row, by its CLOSED kind (LIST_FIELD_KINDS,
+ * dashboard-ir.ts) — never by the selector's name or its ROLE (title/meta/statusFrom; astra r4
+ * finding 1: a `statusFrom` like "available" is validated as its OWN kind, bool, not waved through
+ * as an ordinary string just because its name doesn't end in "status"). Modelled on readField
+ * above. Absent or null is MISSING, not mistyped — the field is simply not shown ({ok:true,
+ * text:""}). A PRESENT value that does not match its kind's grammar is MISTYPED → {ok:false}; the
+ * caller (bindListRows) fails the WHOLE ROW closed, mirroring bindSchemaCard for cards — never a
+ * partial row built from one off-kind value. A well-typed value's TEXT still passes through
+ * boundValueText (id/text/capType) or boundStatusText (status) — content-checked, same as any
+ * bound value — except bool/time/version/count, which carry no prose grammar and are shown as-is. */
+function readListField(row: unknown, field: string): ListFieldRead {
+  const raw = readOwnPath(row, field);
+  if (raw === undefined || raw === null) return { ok: true, text: "", raw };
+  const kind: ListFieldKind | undefined = LIST_FIELD_KINDS[field];
+  switch (kind) {
+    case "id":
+      return typeof raw === "string" && LIST_ID_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+    case "text":
+      return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+    case "status":
+      return typeof raw === "string" && raw.length > 0 && raw.length <= 64 ? { ok: true, text: boundStatusText(raw), raw } : { ok: false };
+    case "bool":
+      return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No", raw } : { ok: false };
+    case "time":
+      return typeof raw === "string" && LIST_TIME_RE.test(raw) ? { ok: true, text: raw, raw } : { ok: false };
+    case "version":
+      return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? { ok: true, text: raw, raw } : { ok: false };
+    case "count":
+      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 1_000_000 ? { ok: true, text: String(raw), raw } : { ok: false };
+    case "capType":
+      return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+    default:
+      return { ok: false }; // not in the exhaustive kind map — listProfileViolation already refuses this field before render
+  }
+}
+
+/** Schema-validated dynamic ROW rendering for a list node: every field a list profile allows has
+ * exactly ONE closed KIND (LIST_FIELD_KINDS, dashboard-ir.ts), read and type-validated by
+ * `readListField`, never by the selector's name or its role (title/meta/statusFrom — astra r4
+ * finding 1). An ABSENT field (undefined/null) is simply not shown; a PRESENT but MISTYPED field
+ * fails the WHOLE ROW closed — every displayed value becomes UNAVAILABLE, including the title,
+ * though the row's PCC-owned labels still render (mirrors bindSchemaCard for cards: never a
+ * partial row built from one off-kind value). Every value still reaches the DOM via textContent,
+ * framed by its own trusted PCC label (title/meta/status keep their original heading/meta/badge
+ * classes on the VALUE element; the label is a separate, trusted, untrusted-free sibling).
+ * Row-level backstop (astra r3 H2; astra r4 finding 2, "without the escape"): a claim split across
+ * this row's OWN bound fields ("$" as the title, "100" as a meta value) is caught by joining every
+ * DISPLAYED value that is not already WITHHELD_FIELD and re-checking the joined text, even though
+ * neither value alone was a claim. A status-kind value (by KIND, never by name or role) joins its
+ * RAW value and is never itself withheld here — boundStatusText already qualifies it. There is no
+ * row-wide `alreadyWithheld` escape: excluding an already-withheld FRAGMENT from the join is enough
+ * on its own, so one individually-withheld value never disables the check for the rest of the row.
+ * This is the structural boundary; the lexical claim/pair detectors it calls (isMoneyClaim,
+ * boundStatusText's SAFE_STATUS_WORDS) remain defense in depth, not the only gate. */
 export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[]): void {
   const rowTitle = String(node.props?.rowTitle ?? "");
   const rowMeta = Array.isArray(node.props?.rowMeta) ? (node.props!.rowMeta as string[]) : [];
   const statusFrom = typeof node.props?.statusFrom === "string" ? node.props!.statusFrom : "";
   // Hard DOM-node cap whatever the manifest says: omitting `limit` must not lift it.
   const limit = Math.min(typeof node.props?.limit === "number" ? node.props!.limit : LIST_ROW_CAP, LIST_ROW_CAP);
+  const isStatusKind = (field: string): boolean => LIST_FIELD_KINDS[field] === "status";
+  type Cell = { field: string; read: ListFieldRead };
   let shown = 0;
   for (const row of rows) {
     if (shown >= limit) break;
     if (row === null || typeof row !== "object") continue;
-    // Every bound value passes boundValueText: a record's status word is qualified (#3013); any other
-    // value that states money or verification is withheld (astra r2 F2).
-    const title = boundValueText(rowTitle, readSelector(row, rowTitle));
-    if (title === "") continue; // drop malformed row (no valid title)
-    const meta = rowMeta
-      .map((field) => ({ field, text: boundValueText(field, readSelector(row, field)) }))
-      .filter((m) => m.text !== "");
-    const statusText = statusFrom ? boundValueText(statusFrom, readSelector(row, statusFrom)) : "";
 
-    // The join excludes any field NAMED status (even one reached via rowMeta, not statusFrom): that
-    // text is already PCC-qualified (RECORD_STATUS_NOTE / RECORD_CLAIM_NOTE) by boundValueText's own
-    // status branch, and re-running the claim detector over PCC's OWN disclaimer wording is both
-    // redundant and unsafe — the disclaimer itself talks about confirmation/settlement and must not
-    // be able to trip the backstop into withholding an already-safe value.
-    const isStatusField = (field: string): boolean => /(^|\.)status$/.test(field);
-    const nonStatus = [{ field: rowTitle, text: title }, ...meta.filter((m) => !isStatusField(m.field))];
-    const alreadyWithheld = nonStatus.some((v) => v.text === WITHHELD_FIELD);
-    // A status's RAW value still joins the check (genui review of #344 r4): a title "Your payment"
-    // beside a status "completed" reads as one claim, though neither is one alone. The raw value is
-    // used, never PCC's note. A claim the statuses make on their own is already noted by
-    // boundValueText, so it never withholds an innocent title.
-    const statusRaw = [...rowMeta.filter(isStatusField), ...(statusFrom ? [statusFrom] : [])]
-      .map((field) => readSelector(row, field))
-      .filter((v) => v !== "");
-    const joined = [...nonStatus.map((v) => v.text), ...statusRaw];
-    let finalTitle = title;
-    let finalMeta = meta;
-    const nonStatusClaim = nonStatus.length > 1 && isMoneyClaim(nonStatus.map((v) => v.text).join(" "));
-    const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
-    if (!alreadyWithheld && (nonStatusClaim || crossClaim)) {
-      finalTitle = isStatusField(rowTitle) ? title : WITHHELD_FIELD;
-      finalMeta = meta.map((m) => (isStatusField(m.field) ? m : { field: m.field, text: WITHHELD_FIELD }));
+    const titleRead = readListField(row, rowTitle);
+    if (titleRead.ok && titleRead.text === "") continue; // drop row: title ABSENT (never a mistyped one)
+
+    const metaCells: Cell[] = rowMeta
+      .map((field) => ({ field, read: readListField(row, field) }))
+      .filter((c) => !(c.read.ok && c.read.text === "")); // an absent meta field is simply not shown
+    const statusReadRaw = statusFrom ? readListField(row, statusFrom) : null;
+    const statusCell: Cell | null = statusReadRaw && !(statusReadRaw.ok && statusReadRaw.text === "") ? { field: statusFrom, read: statusReadRaw } : null;
+
+    const titleCell: Cell = { field: rowTitle, read: titleRead };
+    const allCells = statusCell ? [titleCell, ...metaCells, statusCell] : [titleCell, ...metaCells];
+    // A mistyped field fails the WHOLE ROW closed (astra r4 finding 1), mirroring bindSchemaCard
+    // for cards: never a partial row built from one off-kind value. The row's PCC labels still
+    // render; every value shows UNAVAILABLE instead.
+    const rowOk = allCells.every((c) => c.read.ok);
+    const texts = new Map<Cell, string>(allCells.map((c) => [c, rowOk && c.read.ok ? c.read.text : UNAVAILABLE]));
+
+    if (rowOk) {
+      // The row backstop (astra r3 H2; astra r4 finding 2 "without the escape"). A field is
+      // "status" by its CLOSED KIND (LIST_FIELD_KINDS), never by role or selector name: its RAW
+      // value joins the check below, never boundStatusText's note, and it is never withheld by
+      // this backstop — it is already qualified. A claim the statuses make on their own is
+      // already noted by boundStatusText, so it never withholds an innocent title (the
+      // `!isMoneyClaim(statusRaw...)` guard on crossClaim, unchanged from the prior design).
+      const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
+      const statusRaw = allCells
+        .filter((c) => isStatusKind(c.field) && c.read.ok)
+        .map((c) => (c.read as { ok: true; raw: unknown }).raw)
+        .filter((r): r is string => typeof r === "string");
+      const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
+      const joined = [...nonStatusDisplayed.map((c) => texts.get(c)!), ...statusRaw];
+      const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map((c) => texts.get(c)!).join(" "));
+      const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
+      if (nonStatusClaim || crossClaim) for (const c of nonStatusCells) texts.set(c, WITHHELD_FIELD);
     }
 
     const line = el(doc, CLS.row);
     line.appendChild(el(doc, CLS.fieldname, listFieldLabel(rowTitle) + ":"));
-    line.appendChild(el(doc, CLS.heading, finalTitle, true));
-    for (const m of finalMeta) {
-      line.appendChild(el(doc, CLS.fieldname, listFieldLabel(m.field) + ":"));
-      line.appendChild(el(doc, CLS.meta, m.text, true));
+    line.appendChild(el(doc, CLS.heading, texts.get(titleCell)!, true));
+    for (const c of metaCells) {
+      line.appendChild(el(doc, CLS.fieldname, listFieldLabel(c.field) + ":"));
+      line.appendChild(el(doc, CLS.meta, texts.get(c)!, true));
     }
-    if (statusFrom && statusText !== "") {
+    if (statusCell) {
       line.appendChild(el(doc, CLS.fieldname, listFieldLabel(statusFrom) + ":"));
-      line.appendChild(el(doc, CLS.badge, statusText, true));
+      line.appendChild(el(doc, CLS.badge, texts.get(statusCell)!, true));
     }
     listEl.appendChild(line);
     shown++;

@@ -271,14 +271,24 @@ function isSafeStatusWord(value: string): boolean { return SAFE_STATUS_WORDS.has
 // here — they are now type-validated instead (dashboard-ir-renderer.ts readField).
 export const RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
 export const WITHHELD_FIELD = "withheld: stated money or verification";
+/** The CLOSED status treatment (4 cases, checked in order) — factored out of `boundValueText` so
+ *  it can be applied BY ROLE (astra r4 finding 1): any value the caller already knows is a status
+ *  WORD by its list field KIND (LIST_FIELD_KINDS below, "status"), wherever that field appears —
+ *  title, meta or statusFrom — gets this, not only a field whose NAME happens to end in "status".
+ *  (1) a value that states an amount or mentions the notice is WITHHELD_FIELD; (2) a
+ *  SAFE_STATUS_WORDS word is shown bare; (3) a money state (isMoneyState) gets RECORD_STATUS_NOTE;
+ *  (4) ANY other value gets RECORD_CLAIM_NOTE — never shown bare just because it wasn't
+ *  independently recognised as a claim. */
+export function boundStatusText(value: string): string {
+  if (value === "") return value;
+  if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD; // 1
+  if (isSafeStatusWord(value)) return value; // 2
+  if (isMoneyState(value)) return value + RECORD_STATUS_NOTE; // 3
+  return value + RECORD_CLAIM_NOTE; // 4 - fail closed, not "bare unless recognised"
+}
 export function boundValueText(field: string, value: string): string {
   if (value === "") return value;
-  if (/(^|\.)status$/.test(field)) {
-    if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD; // 1
-    if (isSafeStatusWord(value)) return value; // 2
-    if (isMoneyState(value)) return value + RECORD_STATUS_NOTE; // 3
-    return value + RECORD_CLAIM_NOTE; // 4 - fail closed, not "bare unless recognised"
-  }
+  if (/(^|\.)status$/.test(field)) return boundStatusText(value);
   return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
 }
 
@@ -286,11 +296,32 @@ export function boundValueText(field: string, value: string): string {
 // A list may show ONLY these fields of each allowlisted collection route; a selector is never
 // "safe because it parses". Money amounts, prices and payment state are not listable: they
 // appear only in schema cards. Escrow is not a list route at all.
-const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
+export const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
   "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
   "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
   "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] },
 };
+
+// ── A closed TYPE for every list field (the structural boundary; astra r4 on #344) ───────
+// The list row stops relying on selector NAMES: every field ANY LIST_PROFILES entry allows
+// (title, meta or status) gets exactly one KIND here, read and validated by the renderer's
+// readListField BY THAT KIND, whatever role it plays (title, meta or statusFrom — finding 1). The
+// map is exhaustive over LIST_PROFILES in both directions (checked by a test): a field that is not
+// here cannot be listed at all — listProfileViolation already refuses it before the renderer ever
+// sees it, so an entry here with no profile use would be dead, and a profile field with no entry
+// here would have no validated kind.
+export type ListFieldKind = "id" | "text" | "status" | "bool" | "time" | "version" | "count" | "capType";
+export const LIST_FIELD_KINDS: Readonly<Record<string, ListFieldKind>> = {
+  id: "id", capabilityId: "id", kernelId: "id",
+  name: "text", "location.label": "text",
+  status: "status",
+  available: "bool",
+  createdAt: "time", updatedAt: "time",
+  version: "version",
+  capabilityCount: "count",
+  type: "capType",
+};
+
 function listProfileViolation(path: string, props: Record<string, unknown>): string | null {
   const prof = LIST_PROFILES[path];
   if (!prof) return `no list field profile for ${path}`;

@@ -350,20 +350,36 @@
   }
   var RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
   var WITHHELD_FIELD = "withheld: stated money or verification";
+  function boundStatusText(value) {
+    if (value === "") return value;
+    if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD;
+    if (isSafeStatusWord(value)) return value;
+    if (isMoneyState(value)) return value + RECORD_STATUS_NOTE;
+    return value + RECORD_CLAIM_NOTE;
+  }
   function boundValueText(field, value) {
     if (value === "") return value;
-    if (/(^|\.)status$/.test(field)) {
-      if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD;
-      if (isSafeStatusWord(value)) return value;
-      if (isMoneyState(value)) return value + RECORD_STATUS_NOTE;
-      return value + RECORD_CLAIM_NOTE;
-    }
+    if (/(^|\.)status$/.test(field)) return boundStatusText(value);
     return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
   }
   var LIST_PROFILES = {
     "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
     "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
     "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] }
+  };
+  var LIST_FIELD_KINDS = {
+    id: "id",
+    capabilityId: "id",
+    kernelId: "id",
+    name: "text",
+    "location.label": "text",
+    status: "status",
+    available: "bool",
+    createdAt: "time",
+    updatedAt: "time",
+    version: "version",
+    capabilityCount: "count",
+    type: "capType"
   };
   function listProfileViolation(path, props) {
     const prof = LIST_PROFILES[path];
@@ -1105,7 +1121,7 @@
       case "status":
         return typeof raw === "string" && raw.length > 0 ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
       case "amount":
-        if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) return { ok: true, text: String(raw) };
+        if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && AMOUNT_STR_RE.test(String(raw))) return { ok: true, text: String(raw) };
         if (typeof raw === "string" && AMOUNT_STR_RE.test(raw)) return { ok: true, text: raw };
         return { ok: false };
       case "currency":
@@ -1236,42 +1252,72 @@
   function listFieldLabel(field) {
     return LIST_FIELD_LABELS[field] ?? field;
   }
+  var LIST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+  var LIST_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+  var LIST_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$/;
+  function readListField(row, field) {
+    const raw = readOwnPath(row, field);
+    if (raw === void 0 || raw === null) return { ok: true, text: "", raw };
+    const kind = LIST_FIELD_KINDS[field];
+    switch (kind) {
+      case "id":
+        return typeof raw === "string" && LIST_ID_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+      case "text":
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+      case "status":
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 64 ? { ok: true, text: boundStatusText(raw), raw } : { ok: false };
+      case "bool":
+        return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No", raw } : { ok: false };
+      case "time":
+        return typeof raw === "string" && LIST_TIME_RE.test(raw) ? { ok: true, text: raw, raw } : { ok: false };
+      case "version":
+        return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? { ok: true, text: raw, raw } : { ok: false };
+      case "count":
+        return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 1e6 ? { ok: true, text: String(raw), raw } : { ok: false };
+      case "capType":
+        return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+      default:
+        return { ok: false };
+    }
+  }
   function bindListRows(doc, listEl, node, rows) {
     const rowTitle = String(node.props?.rowTitle ?? "");
     const rowMeta = Array.isArray(node.props?.rowMeta) ? node.props.rowMeta : [];
     const statusFrom = typeof node.props?.statusFrom === "string" ? node.props.statusFrom : "";
     const limit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
+    const isStatusKind = (field) => LIST_FIELD_KINDS[field] === "status";
     let shown = 0;
     for (const row of rows) {
       if (shown >= limit) break;
       if (row === null || typeof row !== "object") continue;
-      const title = boundValueText(rowTitle, readSelector(row, rowTitle));
-      if (title === "") continue;
-      const meta = rowMeta.map((field) => ({ field, text: boundValueText(field, readSelector(row, field)) })).filter((m) => m.text !== "");
-      const statusText = statusFrom ? boundValueText(statusFrom, readSelector(row, statusFrom)) : "";
-      const isStatusField = (field) => /(^|\.)status$/.test(field);
-      const nonStatus = [{ field: rowTitle, text: title }, ...meta.filter((m) => !isStatusField(m.field))];
-      const alreadyWithheld = nonStatus.some((v) => v.text === WITHHELD_FIELD);
-      const statusRaw = [...rowMeta.filter(isStatusField), ...statusFrom ? [statusFrom] : []].map((field) => readSelector(row, field)).filter((v) => v !== "");
-      const joined = [...nonStatus.map((v) => v.text), ...statusRaw];
-      let finalTitle = title;
-      let finalMeta = meta;
-      const nonStatusClaim = nonStatus.length > 1 && isMoneyClaim(nonStatus.map((v) => v.text).join(" "));
-      const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
-      if (!alreadyWithheld && (nonStatusClaim || crossClaim)) {
-        finalTitle = isStatusField(rowTitle) ? title : WITHHELD_FIELD;
-        finalMeta = meta.map((m) => isStatusField(m.field) ? m : { field: m.field, text: WITHHELD_FIELD });
+      const titleRead = readListField(row, rowTitle);
+      if (titleRead.ok && titleRead.text === "") continue;
+      const metaCells = rowMeta.map((field) => ({ field, read: readListField(row, field) })).filter((c) => !(c.read.ok && c.read.text === ""));
+      const statusReadRaw = statusFrom ? readListField(row, statusFrom) : null;
+      const statusCell = statusReadRaw && !(statusReadRaw.ok && statusReadRaw.text === "") ? { field: statusFrom, read: statusReadRaw } : null;
+      const titleCell = { field: rowTitle, read: titleRead };
+      const allCells = statusCell ? [titleCell, ...metaCells, statusCell] : [titleCell, ...metaCells];
+      const rowOk = allCells.every((c) => c.read.ok);
+      const texts = new Map(allCells.map((c) => [c, rowOk && c.read.ok ? c.read.text : UNAVAILABLE]));
+      if (rowOk) {
+        const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
+        const statusRaw = allCells.filter((c) => isStatusKind(c.field) && c.read.ok).map((c) => c.read.raw).filter((r) => typeof r === "string");
+        const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
+        const joined = [...nonStatusDisplayed.map((c) => texts.get(c)), ...statusRaw];
+        const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map((c) => texts.get(c)).join(" "));
+        const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
+        if (nonStatusClaim || crossClaim) for (const c of nonStatusCells) texts.set(c, WITHHELD_FIELD);
       }
       const line = el(doc, CLS.row);
       line.appendChild(el(doc, CLS.fieldname, listFieldLabel(rowTitle) + ":"));
-      line.appendChild(el(doc, CLS.heading, finalTitle, true));
-      for (const m of finalMeta) {
-        line.appendChild(el(doc, CLS.fieldname, listFieldLabel(m.field) + ":"));
-        line.appendChild(el(doc, CLS.meta, m.text, true));
+      line.appendChild(el(doc, CLS.heading, texts.get(titleCell), true));
+      for (const c of metaCells) {
+        line.appendChild(el(doc, CLS.fieldname, listFieldLabel(c.field) + ":"));
+        line.appendChild(el(doc, CLS.meta, texts.get(c), true));
       }
-      if (statusFrom && statusText !== "") {
+      if (statusCell) {
         line.appendChild(el(doc, CLS.fieldname, listFieldLabel(statusFrom) + ":"));
-        line.appendChild(el(doc, CLS.badge, statusText, true));
+        line.appendChild(el(doc, CLS.badge, texts.get(statusCell), true));
       }
       listEl.appendChild(line);
       shown++;

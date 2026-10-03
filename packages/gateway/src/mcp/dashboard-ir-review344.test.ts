@@ -18,7 +18,7 @@ import {
   EFFECT_REVIEWED_READS, bindPolicyRouteSources, reviewedRouteSource,
   RECORD_STATUS_NOTE, isMoneyState, recordValueText,
   WITHHELD_FIELD, RECORD_CLAIM_NOTE, boundValueText, isProseClaim, statesAmount, mentionsWithheld,
-  SAFE_STATUS_WORDS,
+  SAFE_STATUS_WORDS, LIST_PROFILES, LIST_FIELD_KINDS,
 } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
 import { bindListRows, bindScalar, bindSchemaCard, renderIrDoc, UNAVAILABLE } from "./dashboard-ir-renderer.js";
@@ -42,6 +42,15 @@ function withheldOf(n: IrNode | undefined): number {
   if (!n) return 0;
   return (n.props?.withheld === true ? 1 : 0) + (n.children ?? []).reduce((a, c) => a + withheldOf(c), 0);
 }
+
+// Module-scope fake DOM + text-flattener, moved up from the "astra r3 (#344 @e909337a) and #348 r2
+// F1" describe (unchanged) so every describe — including astra r4's below — can reuse one copy.
+type FakeEl = RElement & { attrs: Record<string, string> };
+const fdoc: RDocument = { createElement(): RElement {
+  const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+  return e;
+} };
+const textOf = (e: RElement): string => e.textContent + (e.children as RElement[]).map(textOf).join(" ");
 
 describe("#344 money: manifest prose cannot present money", () => {
   it("amounts and payment/verification claims are withheld in every prose slot", () => {
@@ -521,13 +530,7 @@ describe("astra r2 (#344): the checks stay linear at the manifest's size limits"
   }
 });
 describe("astra r3 (#344 @e909337a) and #348 r2 F1: reproduced findings (verify before fix)", () => {
-  type FakeEl = RElement & { attrs: Record<string, string> };
-  const fdoc: RDocument = { createElement(): RElement {
-    const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
-    return e;
-  } };
-  const textOf = (e: RElement): string => e.textContent + (e.children as RElement[]).map(textOf).join(" ");
-
+  // fdoc/textOf are module-scope now (see top of file) — reused here unchanged.
   it("H1 (lexical): obvious claim spellings, confusables and extra currencies bypass the detector", () => {
     expect(isProseClaim("Payment complete")).toBe(true);
     expect(boundValueText("status", "Verification passed")).not.toBe("Verification passed");
@@ -621,5 +624,161 @@ describe("astra r3 H1: SAFE_STATUS_WORDS is a closed vocabulary with no payment 
       expect(isMoneyClaim(w), w).toBe(false);
       expect(isMoneyState(w), w).toBe(false);
     }
+  });
+});
+
+describe("astra r4 (#344 @6773e870): findings 1-3 reproduced (verify before fix)", () => {
+  it("F1 (HIGH): a statusFrom named 'available' is not rendered bare when its value is a hostile string", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", statusFrom: "available" }, bind: { path: "/api/capabilities" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ name: "Your payment", available: "completed" }]);
+    const text = textOf(listEl);
+    expect(text).not.toContain("Your payment");
+    expect(text).not.toContain("Available: completed");
+  });
+
+  it("F2 (HIGH): one already-withheld field must not disable the backstop for the rest of the row", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["kernelId"], statusFrom: "status" }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ id: "verified", kernelId: "Your payment", status: "completed" }]);
+    expect(textOf(listEl)).not.toContain("Your payment");
+  });
+
+  it("F2 (control): an innocent row of the same shape (a VALID kernelId) still renders", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["kernelId"], statusFrom: "status" }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ id: "verified", kernelId: "k-1", status: "completed" }]);
+    expect(textOf(listEl)).toContain("k-1");
+  });
+
+  it("F3 (MEDIUM): a capability card whose only bad field is an off-grammar amount number fails closed on every slot", () => {
+    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    const okFlag = bindSchemaCard(
+      "capability-summary-v1",
+      { name: "Arm", type: "arm", pricing: { baseCost: 1e100, currency: "USDC" }, assuranceTiers: [1], available: true },
+      slots,
+    );
+    for (const t of slots.map((s) => s.textContent)) expect(t).toBe(UNAVAILABLE);
+    expect(okFlag).toBe(false);
+  });
+});
+
+describe("astra r4 (#344 @6773e870): the fix — a closed type for every list field", () => {
+  it("LIST_FIELD_KINDS is exhaustive over every field named anywhere in LIST_PROFILES (title, meta and status)", () => {
+    const profileFields = new Set<string>();
+    for (const prof of Object.values(LIST_PROFILES)) for (const f of [...prof.title, ...prof.meta, ...prof.status]) profileFields.add(f);
+    expect(profileFields.size).toBeGreaterThan(0);
+    for (const f of profileFields) expect(LIST_FIELD_KINDS[f], f).toBeDefined();
+    // bidirectional: no stale LIST_FIELD_KINDS entry that no profile actually uses, either.
+    expect(new Set(Object.keys(LIST_FIELD_KINDS))).toEqual(profileFields);
+  });
+
+  it("a bool-kind field (available: true) renders 'Yes', not a mistype", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", statusFrom: "available" }, bind: { path: "/api/capabilities" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ name: "Gripper", available: true }]);
+    const texts = (listEl.children[0] as RElement).children as RElement[];
+    expect(texts.map((c) => c.textContent)).toEqual(["Name:", "Gripper", "Available:", "Yes"]);
+  });
+
+  it("a mistyped id ('Your payment', not a valid id shape) fails the WHOLE row: every value UNAVAILABLE, labels kept", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["kernelId"], statusFrom: "status" }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ id: "Your payment", kernelId: "k-1", status: "completed" }]);
+    expect(listEl.children.length).toBe(1); // the row is NOT dropped (title was PRESENT, just mistyped)
+    const texts = (listEl.children[0] as RElement).children as RElement[];
+    expect(texts.map((c) => c.textContent)).toEqual(["ID:", UNAVAILABLE, "Kernel:", UNAVAILABLE, "Status:", UNAVAILABLE]);
+  });
+
+  it("'status' in META uses the closed vocabulary (boundStatusText applies by KIND, not just as statusFrom)", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["status"] }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ id: "j-1", status: "settled" }, { id: "j-2", status: "weirdWord" }]);
+    const texts = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
+    expect(texts).toEqual([
+      ["ID:", "j-1", "Status:", "settled" + RECORD_STATUS_NOTE],
+      ["ID:", "j-2", "Status:", "weirdWord" + RECORD_CLAIM_NOTE],
+    ]);
+  });
+
+  it("a row with a withheld title and two OTHER fields that jointly claim still withholds them (finding 2's general case)", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["capabilityId", "kernelId"] }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    // "id" is individually withheld (a claim word on its own); capabilityId+kernelId jointly pair
+    // ("payment" + "complete") though neither is a claim alone. The OLD `alreadyWithheld` escape
+    // would have let the pair through once the title was already withheld; it must not now.
+    bindListRows(fdoc, listEl, node, [{ id: "verified", capabilityId: "Payment", kernelId: "complete" }]);
+    const text = textOf(listEl);
+    expect(text).not.toContain("Payment");
+    expect(text).not.toMatch(/\bcomplete\b/);
+    expect(text).toContain(WITHHELD_FIELD);
+  });
+
+  // Mutation survivors (Step 3): each kind's grammar needs its OWN present-but-off-grammar value
+  // pinned, since the exhaustive kind-map test only checks that a kind EXISTS, not that its
+  // grammar actually rejects a bad value. (id/bool already pinned above by the astra r4 tests.)
+  it("mutation survivor — text kind: a present empty string is MISTYPED (not absent), fails the row closed", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["location.label"] }, bind: { path: "/api/capabilities" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ name: "Arm", location: { label: "" } }]);
+    expect(listEl.children.length).toBe(1);
+    const texts = (listEl.children[0] as RElement).children as RElement[];
+    expect(texts.map((c) => c.textContent)).toEqual(["Name:", UNAVAILABLE, "Location:", UNAVAILABLE]);
+  });
+
+  it("mutation survivor — status kind: a present empty string is MISTYPED, fails the row closed", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["status"] }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ id: "j-1", status: "" }]);
+    const texts = (listEl.children[0] as RElement).children as RElement[];
+    expect(texts.map((c) => c.textContent)).toEqual(["ID:", UNAVAILABLE, "Status:", UNAVAILABLE]);
+  });
+
+  it("mutation survivor — time kind: a valid timestamp is shown as-is; a non-timestamp string fails the row closed", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["createdAt"] }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ id: "j-1", createdAt: "2026-09-24T10:00:00Z" }, { id: "j-2", createdAt: "yesterday" }]);
+    const rows = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
+    expect(rows).toEqual([
+      ["ID:", "j-1", "Created:", "2026-09-24T10:00:00Z"],
+      ["ID:", UNAVAILABLE, "Created:", UNAVAILABLE],
+    ]);
+  });
+
+  it("mutation survivor — version kind: a valid version is shown as-is; a hostile string fails the row closed", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["version"] }, bind: { path: "/api/kernels" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ name: "K1", version: "1.2.3" }, { name: "K2", version: "not a version!" }]);
+    const rows = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
+    expect(rows).toEqual([
+      ["Name:", "K1", "Version:", "1.2.3"],
+      ["Name:", UNAVAILABLE, "Version:", UNAVAILABLE],
+    ]);
+  });
+
+  it("mutation survivor — count kind: a string number is MISTYPED (brief's own example); so is an out-of-range or non-integer number; a valid integer is shown with String()", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["capabilityCount"] }, bind: { path: "/api/kernels" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [
+      { name: "K1", capabilityCount: 5 },
+      { name: "K2", capabilityCount: "5" }, // a string number (brief's own example)
+      { name: "K3", capabilityCount: 2.5 }, // a number, but not an integer
+      { name: "K4", capabilityCount: 1_000_001 }, // a number, but over the 0..1,000,000 bound
+    ]);
+    const rows = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
+    expect(rows).toEqual([
+      ["Name:", "K1", "Capabilities:", "5"],
+      ["Name:", UNAVAILABLE, "Capabilities:", UNAVAILABLE],
+      ["Name:", UNAVAILABLE, "Capabilities:", UNAVAILABLE],
+      ["Name:", UNAVAILABLE, "Capabilities:", UNAVAILABLE],
+    ]);
+  });
+
+  it("mutation survivor — capType kind: a hostile (space-bearing) type value fails the row closed", () => {
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["type"] }, bind: { path: "/api/capabilities" } } as unknown as IrNode;
+    const listEl = fdoc.createElement("div");
+    bindListRows(fdoc, listEl, node, [{ name: "Arm", type: "not a type!" }]);
+    const texts = (listEl.children[0] as RElement).children as RElement[];
+    expect(texts.map((c) => c.textContent)).toEqual(["Name:", UNAVAILABLE, "Type:", UNAVAILABLE]);
   });
 });
