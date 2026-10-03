@@ -18,6 +18,10 @@ export * from "./evidence/index.js";
 // ROLE_TAGS — single-source-of-truth keccak256 hashes for ContributorRole
 // (off-chain TS side; on-chain Solidity side codegen'd into RoleTags.sol)
 export * from "./payouts.js";
+
+// Economic agreements v1 (docs/ECONOMIC_AGREEMENTS.md). Namespaced because its schema names
+// (Unit, AmountSchema, ...) are generic; also importable directly as `@pcc/spec/economics`.
+export * as economics from "./economics/index.js";
 // Canonical money-status display map (browser-safe) — the ONE exact escrow /
 // settlement state -> tone + honest label table every surface renders from.
 export * from "./money/money-status.js";
