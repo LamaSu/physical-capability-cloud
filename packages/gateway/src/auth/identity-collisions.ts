@@ -42,15 +42,24 @@ const SOURCES: ReadonlyArray<{ source: string; sql: string }> = [
 ];
 
 /**
- * A read failure that POSITIVELY identifies a missing table or column (SQLite's
- * "no such table: ..." / "no such column: ..."). Only this kind of failure may be
- * excused by PCC_COLLISION_AUDIT_ALLOW_ABSENT. Any other error (corruption, I/O,
- * locking, a failure part-way through .all()) means the data EXISTS but was not
- * read, and must never be allowlisted away (AZ-9 round 2, astra pack 95b).
+ * A read failure that POSITIVELY identifies a missing table or column. It must be
+ * a GENUINE SQLite error, exactly as better-sqlite3 (the store's driver) throws it
+ * when a statement names a table or column that does not exist: an Error whose
+ * code is exactly "SQLITE_ERROR" and whose message is SQLite's own exact form,
+ * "no such table: <name>" or "no such column: <name>". Only this may be excused by
+ * PCC_COLLISION_AUDIT_ALLOW_ABSENT. Anything else means the data may EXIST and was
+ * not read, so it is never allowlisted away: an absence-looking message with any
+ * other code (SQLITE_CORRUPT, ...), a thrown string or non-Error, a reworded,
+ * re-cased or wrapped message, corruption, I/O, locking, or a failure while the
+ * rows are read or processed (AZ-9 rounds 2 and 3, astra packs 95b and 95c). A
+ * genuine absence that does not match is reported as `failed`, which only blocks
+ * the audit (fail closed).
  */
+const SQLITE_ABSENCE_MESSAGE = /^no such (table|column): \S+$/;
 function isConfirmedAbsence(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
-  return /^no such (table|column)\b/i.test(message.trim());
+  if (!(err instanceof Error)) return false;
+  if ((err as { code?: unknown }).code !== "SQLITE_ERROR") return false;
+  return SQLITE_ABSENCE_MESSAGE.test(err.message);
 }
 
 export function findIdentityCollisions(db: Reader): {
@@ -66,22 +75,29 @@ export function findIdentityCollisions(db: Reader): {
   const skipped: string[] = [];
   const failed: string[] = [];
   for (const { source, sql } of SOURCES) {
-    let rows: unknown[];
+    // Reading AND processing the rows are one step: a source counts as read only if
+    // every row was taken in; any failure on the way leaves nothing behind and lands
+    // in `failed` (or `skipped`, for a genuine absence) instead of escaping the audit.
+    const found: Array<{ spelling: string; normalized: string }> = [];
     try {
-      rows = db.prepare(sql).all();
+      const rows = db.prepare(sql).all();
+      for (const row of rows as Array<{ v?: unknown }>) {
+        const spelling = row.v;
+        if (typeof spelling !== "string") continue;
+        const normalized = normalizeIdentity(spelling);
+        if (!normalized) continue;
+        found.push({ spelling, normalized });
+      }
     } catch (err) {
       if (isConfirmedAbsence(err)) skipped.push(source); // table or column absent in this deployment
       else failed.push(source); // present but unreadable: never excusable
       continue;
     }
     read.push(source);
-    for (const row of rows as Array<{ v?: unknown }>) {
-      if (typeof row.v !== "string") continue;
-      const normalized = normalizeIdentity(row.v);
-      if (!normalized) continue;
+    for (const { spelling, normalized } of found) {
       let g = groups.get(normalized);
       if (!g) groups.set(normalized, (g = { spellings: new Set(), sources: new Set() }));
-      g.spellings.add(row.v);
+      g.spellings.add(spelling);
       g.sources.add(source);
     }
   }

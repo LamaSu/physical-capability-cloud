@@ -80,7 +80,8 @@ describe("collisionAuditExit — the pre-deploy audit fails closed (AZ-9)", () =
   ];
 
   it("[neg] a Reader whose prepare() always throws skips every source, and the exit is 4 (not 0)", () => {
-    const throwing = { prepare() { throw new Error("no such table"); } };
+    // A genuine SQLite absence (AZ-9 round 3: only this shape is an absence; anything else is failed).
+    const throwing = { prepare() { throw Object.assign(new Error("no such table: absent_everywhere"), { code: "SQLITE_ERROR" }); } };
     const { collisions, read, skipped } = findIdentityCollisions(throwing);
     expect(collisions).toEqual([]);
     expect(read).toEqual([]);
