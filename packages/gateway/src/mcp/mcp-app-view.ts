@@ -1473,9 +1473,8 @@ export interface McpAppResourceOptions {
   /**
    * When provided, each ui:// resource read first calls this guard; a non-null
    * return message makes the read throw that message as a JSON-RPC error (the
-   * `/mcp/apps` prod domain gate — gates 5/6). Omitted on the full `/mcp` surface,
-   * so its reads behave exactly as before (#262 stands — the gateway never
-   * crashes; only the FEATURE degrades).
+   * prod domain gate, gates 5/6). Both `/mcp/apps` and the full `/mcp` pass it.
+   * #262 stands: the gateway never crashes; only the FEATURE degrades.
    */
   surfaceGuard?: () => string | null;
 }
@@ -1488,8 +1487,9 @@ function assertResourceSurfaceAvailable(options?: McpAppResourceOptions): void {
 
 /** Register the three fixed UI resources (render, saved, gallery) + the per-slug
  * public share template. One entry point so http-mcp-server wires them together.
- * `options.surfaceGuard`, when set (the read-only `/mcp/apps` surface), gates every
- * resource read behind the prod domain check; absent (full `/mcp`) → unchanged. */
+ * `options.surfaceGuard` gates every resource read behind the prod domain check. Both
+ * surfaces pass it (/mcp/apps and the full /mcp), so no MCP App view is served in
+ * production without a unique per-view origin (D14); absent → unguarded. */
 export function registerMcpAppResources(
   server: McpServer,
   options?: McpAppResourceOptions,
