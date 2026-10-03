@@ -43,6 +43,8 @@ function machine(events: Emitted[]): MachineAdapter {
     onEvidence: (cb) => {
       listeners.push(cb);
     },
+    // It emits only inside load_gcode: nothing is left once a command returns.
+    quiesceEvidence: async () => {},
     dispose: async () => {},
   } as MachineAdapter;
 }
@@ -68,6 +70,8 @@ function lateCamera(): CameraAdapter & { emitted: Emitted[] } {
     onEvidence: (cb) => {
       listeners.push(cb);
     },
+    // It emits only inside runInspection: nothing is left once that returns.
+    quiesceEvidence: async () => {},
     dispose: async () => {},
   };
 }

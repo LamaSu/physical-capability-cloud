@@ -17,7 +17,6 @@ import { verifyBundleHash } from "@pcc/spec";
 
 import type { CameraAdapter, MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus, SensorAdapter } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
-import { setEvidenceClock } from "../evidence-session.js";
 import { JobRunner } from "../job-runner.js";
 import type { JobResult } from "../job-runner.js";
 
@@ -33,8 +32,6 @@ type DeviceType = EvidenceSource["deviceType"];
 
 const KERNEL_ID = "kernel-scope-test";
 const STEP = "step-1";
-/** A quiet period short enough to wait out in real time (the default is 1 s). */
-const QUIET_MS = 20;
 const GUARD_MS = 2_000;
 const STILL_PENDING = `run() still pending after ${GUARD_MS} ms`;
 
@@ -128,6 +125,9 @@ function testMachine(
         else waiters.push({ n, resolve });
       });
     },
+    // It emits inside the command that causes it; an event a test sends through emit()
+    // later is one this hook did not cover (a device breaking its contract).
+    async quiesceEvidence() {},
     async dispose() {},
   };
   return machine;
@@ -167,6 +167,8 @@ function testCamera(id: string, inspectionsThatEmit = Number.POSITIVE_INFINITY):
     emit(event) {
       for (const listener of [...listeners]) listener(event);
     },
+    // It emits inside runInspection; nothing is left once that returns.
+    async quiesceEvidence() {},
     async dispose() {},
   };
   return camera;
@@ -201,6 +203,8 @@ function testSensor(id: string): TestSensor {
     emit(event) {
       for (const listener of [...listeners]) listener(event);
     },
+    // It emits its summary inside stopRecording; nothing is left once that returns.
+    async quiesceEvidence() {},
     async dispose() {},
   };
   return sensor;
@@ -255,11 +259,8 @@ describe("R1: a finished job records nothing from later jobs on the same adapter
   ])("%s", async (_how, sameRunner) => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const addEvent = vi.spyOn(emitter, "addEvent");
-    // A device per case, and a short quiet period: since #502 round 3 a device stays
-    // unavailable to the next job until it has been quiet that long.
     const machine = testMachine(`machine-r1-${sameRunner ? "one-runner" : "runner-per-job"}`);
-    const options = { evidenceQuietMs: QUIET_MS };
-    const runnerA = new JobRunner(machine, [], null, emitter, options);
+    const runnerA = new JobRunner(machine, [], null, emitter);
     const a = await runnerA.run({ jobId: "job-r1-A", stepId: STEP, gcodeHash: gcode(1), assuranceTier: 1 });
     expect(a.success).toBe(true);
     await addEventsSettled(addEvent);
@@ -267,15 +268,13 @@ describe("R1: a finished job records nothing from later jobs on the same adapter
     const callsForA = namingA();
     const eventsOfA = emitter.getEvents("job-r1-A", STEP).length;
 
-    // An event between the two jobs, then job B on the same machine. B is refused until the
-    // machine has been quiet again: that event could still be job A's.
+    // An event between the two jobs, after A's adapter confirmed its work was done, then
+    // job B on the same machine. The event is dropped, and does not hold B up: since round
+    // 3b the device is free on its adapter's word, not after a quiet period.
     machine.emit(evidence("execution_progress", machine.id, "controller", { between: "A and B" }));
-    const runnerB = sameRunner ? runnerA : new JobRunner(machine, [], null, emitter, options);
-    const tooSoon = await runnerB.run({ jobId: "job-r1-B", stepId: STEP, gcodeHash: gcode(2), assuranceTier: 1 });
-    expect(tooSoon.busy).toEqual({ reason: "quiescing", adapterId: machine.id, jobId: "job-r1-A" });
-    await new Promise((resolve) => setTimeout(resolve, QUIET_MS + 5));
+    const runnerB = sameRunner ? runnerA : new JobRunner(machine, [], null, emitter);
     const b = await runnerB.run({ jobId: "job-r1-B", stepId: STEP, gcodeHash: gcode(2), assuranceTier: 1 });
-    expect(b.success).toBe(true);
+    expect(b.success, "job B runs at once").toBe(true);
     await addEventsSettled(addEvent);
 
     expect.soft(namingA(), "addEvent calls naming job A, after A returned").toBe(callsForA);
@@ -372,15 +371,14 @@ class EchoEmitter extends EvidenceEmitter {
 }
 
 describe("R4: a device that emits again whenever an event is recorded", () => {
-  // Since #502 round 3 a job's window stays open until its devices are quiet, and this
-  // device never is: the run fails at the quiesce bound, at every tier, and finalizes
-  // nothing. (In round 2 the window closed after step 7 and the run passed on its events.)
+  // The device answers quiesceEvidence() at once (it has no work of its own outstanding),
+  // so the window closes at step 8 and the flood is dropped from then on. (Round 3's quiet
+  // period never saw this device quiet, so the run failed at the quiesce bound.)
   it.each([
     ["the run ends as soon as the flood starts", false],
     ["the flood runs for the whole of a 500 ms execution", true],
-  ])("run() resolves, as a failure, and nothing is recorded after it returns (%s)", async (_when, longRun) => {
+  ])("run() resolves, and nothing is recorded after the bundle (%s)", async (_when, longRun) => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    setEvidenceClock(() => Date.now());
     // setImmediate is real: the flood runs as fast as real hashing, between clock steps.
     const turn = () => new Promise((resolve) => setImmediate(resolve));
     const emitter = new EchoEmitter(KERNEL_ID);
@@ -403,32 +401,29 @@ describe("R4: a device that emits again whenever an event is recorded", () => {
     };
     try {
       let outcome: JobResult | undefined;
-      const options = { evidenceSettleTimeoutMs: 1_000, evidenceQuiesceTimeoutMs: 2_000 };
-      void new JobRunner(machine, [], null, emitter, options)
+      void new JobRunner(machine, [], null, emitter, { evidenceSettleTimeoutMs: 1_000 })
         .run({ jobId: "job-r4", stepId: STEP, gcodeHash: gcode(4), assuranceTier: 1 })
         .then((result) => {
           outcome = result;
         });
-      // The fake clock moves 50 ms per event the device emits, so on that clock it is
-      // never quiet for 1 s, however fast or slow the real hashing that drives it runs.
+      // The fake clock moves 50 ms per event the device emits, so waitForCompletion's poll
+      // comes after ten of them, however fast or slow the real hashing that drives it runs.
       const deadline = performance.now() + 4_000;
       while (outcome === undefined && performance.now() < deadline) {
         const before = emitted;
         await turn();
         if (emitted > before) await vi.advanceTimersByTimeAsync(50);
       }
-      expect(outcome, "run()'s result").toEqual({ success: false, error: "evidence did not quiesce within 2000 ms", durationMs: expect.any(Number) });
+      expect(outcome, "run()'s result").toEqual(expect.objectContaining({ success: true }));
 
-      const callsAtReturn = emitter.calls.length;
       await Promise.allSettled(emitter.calls);
       for (let i = 0; i < 5; i++) await turn();
-      expect(emitter.calls.length, "addEvent calls started after run() returned").toBe(callsAtReturn);
-      expect(bundle).toBeUndefined();
-      expect(emitter.getEvents("job-r4", STEP), "events recorded under the job, after it returned").toEqual([]);
+      expect(bundle).toBeDefined();
+      expect(emitter.getEvents("job-r4", STEP), "events recorded under the job, after it returned").toHaveLength(bundle!.events.length);
+      expect(await verifyBundleHash(bundle!)).toBe(true);
     } finally {
       // Stop the device: at 5a3386b5 run() never returns while it emits.
       emitter.echo = null;
-      setEvidenceClock();
       vi.useRealTimers();
     }
   });
@@ -631,22 +626,21 @@ describe("Busy: an adapter serves one job at a time", () => {
     ["the Tier 2 check fails", (_m, c) => void (c.inspectionsThatEmit = 0)],
     ["evidence recording does not settle", (_m, c) => void (c.afterInspection = () => c.emit(evidence("camera_snapshot", c.id, "camera")))],
     ["finalizeBundle throws", (_m, _c, e) => void vi.spyOn(e, "finalizeBundle").mockRejectedValueOnce(new Error("signer offline"))],
-  ])("after a run that ends because %s, the adapters are free for the next job once they have been quiet", async (why, breakIt) => {
+  ])("after a run that ends because %s, the adapters are free for the next job as soon as it returns", async (why, breakIt) => {
     const emitter = new StuckEmitter("camera_snapshot");
-    // Devices per case, and a short quiet period: since #502 round 3 a device stays
-    // unavailable to the next job until it has been quiet that long.
+    // Every exit quiesces before it returns, so the next job needs no wait (round 3 waited
+    // out a quiet period). A device per case keeps the cases apart.
     const slug = why.replace(/\W+/g, "-");
     const machine = testMachine(`machine-free-${slug}`);
     const camera = testCamera(`camera-free-${slug}`);
     breakIt(machine, camera, emitter);
-    const options = { evidenceSettleTimeoutMs: 100, evidenceQuietMs: QUIET_MS };
+    const options = { evidenceSettleTimeoutMs: 100 };
 
     const first = await new JobRunner(machine, [], camera, emitter, options).run({ jobId: "job-free-1", stepId: STEP, gcodeHash: gcode(14), assuranceTier: 2 });
     expect(first.success).toBe(false);
 
     Object.assign(machine, { failing: null, progress: () => 100, status: "busy" });
     Object.assign(camera, { inspectionsThatEmit: Number.POSITIVE_INFINITY, afterInspection: null });
-    await new Promise((resolve) => setTimeout(resolve, QUIET_MS + 5));
     const second = await new JobRunner(machine, [], camera, emitter, options).run({ jobId: "job-free-2", stepId: STEP, gcodeHash: gcode(15), assuranceTier: 2 });
     expect(second).toMatchObject({ success: true });
   });
@@ -709,41 +703,30 @@ describe("Sealed: a failed run never writes an event still queued", () => {
 });
 
 describe("the settle timer", () => {
-  // Since #502 round 3 a run first quiesces, on the evidence clock: these tests put that
-  // clock on the fake one (Date), and move it on.
   it.each([
     ["a run that succeeds", null],
     ["a run whose load fails", "load_gcode"],
-  ] as const)("is cleared, with the quiescence timers, when %s returns", async (_how, failing) => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    setEvidenceClock(() => Date.now());
-    // setImmediate is real: hashing finishes, and every microtask runs, between clock steps.
-    const turn = () => new Promise((resolve) => setImmediate(resolve));
+  ] as const)("is cleared, with the quiesce timer, when %s returns", async (_how, failing) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const machine = testMachine(`machine-timer-${failing ?? "ok"}`);
       machine.failing = failing;
-      let outcome: JobResult | undefined;
-      void new JobRunner(machine, [], null, new EvidenceEmitter(KERNEL_ID))
-        .run({ jobId: "job-timer", stepId: STEP, gcodeHash: gcode(17), assuranceTier: 1 })
-        .then((result) => {
-          outcome = result;
-        });
-      // The quiet period, once (the events all came at load); then only real turns, so
-      // however long the real hashing takes, no other timer comes due.
-      await vi.advanceTimersByTimeAsync(1_000);
-      const deadline = performance.now() + 4_000;
-      while (outcome === undefined && performance.now() < deadline) await turn();
-      expect(outcome?.success).toBe(failing === null);
+      // Its adapter answers at once, so the run needs no clock: it is awaited as it is.
+      const result = await new JobRunner(machine, [], null, new EvidenceEmitter(KERNEL_ID)).run({
+        jobId: "job-timer",
+        stepId: STEP,
+        gcodeHash: gcode(17),
+        assuranceTier: 1,
+      });
+      expect(result.success).toBe(failing === null);
       expect(vi.getTimerCount(), "timers left pending").toBe(0);
     } finally {
-      setEvidenceClock();
       vi.useRealTimers();
     }
   });
 
   it("defaults to 30 s, and a run that times out waits for it once, not twice", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    setEvidenceClock(() => Date.now());
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     // setImmediate is real: hashing finishes, and every microtask runs, between checks.
     const turn = () => new Promise((resolve) => setImmediate(resolve));
     try {
@@ -756,12 +739,10 @@ describe("the settle timer", () => {
         .then((result) => {
           outcome = result;
         });
-      // Advance only once the stuck addEvent is in flight; earlier, the queued events
-      // would just be sealed.
-      while (emitter.stuckCalls === 0) await turn();
-      // The snapshot was the last event: one default quiet period (1 s) later the run
-      // closes its window and sets the settle's timer, by then its only timer.
-      await vi.advanceTimersByTimeAsync(1_000);
+      // Advance only once the settle's timer is set and the stuck addEvent is in flight;
+      // earlier, the queued events would just be sealed. The adapters answer at once, so the
+      // quiesce timer is cleared before then: the settle's is the run's only timer.
+      while (vi.getTimerCount() === 0 || emitter.stuckCalls === 0) await turn();
       expect(vi.getTimerCount(), "timers pending once the run has quiesced").toBe(1);
 
       await vi.advanceTimersByTimeAsync(29_999);
@@ -771,7 +752,6 @@ describe("the settle timer", () => {
       await turn();
       expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 30000 ms", durationMs: expect.any(Number) });
     } finally {
-      setEvidenceClock();
       vi.useRealTimers();
     }
   });

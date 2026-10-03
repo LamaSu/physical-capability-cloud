@@ -21,7 +21,6 @@ import type { EvidenceBundle, EvidenceEvent, EvidenceSource, SHA256 } from "@pcc
 
 import type { CameraAdapter, MachineAdapter, MachineCommand, MachineCommandResult } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
-import { setEvidenceClock } from "../evidence-session.js";
 import { JobRunner } from "../job-runner.js";
 import type { JobResult } from "../job-runner.js";
 
@@ -123,7 +122,7 @@ function testMachine(
     holdStart?: Map<number, Promise<void>>;
     /** Called as the nth start is accepted. */
     onStart?: (machine: TestMachine, n: number) => void;
-    /** Give the adapter a quiesceEvidence() that does this. */
+    /** Its quiesceEvidence() does this. Default: resolve at once (it emits inside its commands). */
     quiesceEvidence?: (machine: TestMachine) => Promise<void>;
   } = {},
 ): TestMachine {
@@ -170,12 +169,10 @@ function testMachine(
       });
     },
     quiesceCalls: 0,
-    ...(options.quiesceEvidence && {
-      quiesceEvidence() {
-        machine.quiesceCalls += 1;
-        return options.quiesceEvidence!(machine);
-      },
-    }),
+    quiesceEvidence() {
+      machine.quiesceCalls += 1;
+      return options.quiesceEvidence ? options.quiesceEvidence(machine) : Promise.resolve();
+    },
     async dispose() {},
   };
   return machine;
@@ -197,6 +194,8 @@ function testCamera(id: string, emits = true): CameraAdapter {
     onEvidence(callback) {
       listeners.push(callback);
     },
+    // It emits inside runInspection; nothing is left once that returns.
+    async quiesceEvidence() {},
     async dispose() {},
   };
 }
@@ -225,9 +224,6 @@ const ZERO_SIGNER = "0x0000000000000000000000000000000000000000";
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-  // The evidence clock reads the fake Date, so quiet periods run on the fake clock.
-  // (Optional call: c87eff47, where R7-R9 were reproduced, has no evidence clock.)
-  setEvidenceClock?.(() => Date.now());
   // The test signer, the tier warning and dropped events all warn; keep the output readable.
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -235,7 +231,6 @@ beforeEach(() => {
 
 afterEach(() => {
   hashing.gate = null;
-  setEvidenceClock?.();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -243,7 +238,8 @@ afterEach(() => {
 describe("R7: an event that arrives late is recorded under its own job, never under the next", () => {
   // A's machine reports 100% before its own poll loop emits execution_completed, LATE_MS
   // later, after A's run has passed step 7, as OctoPrint's does (octoprint-adapter.ts:225-277).
-  // Only A completes that way: job B emits no completion of its own.
+  // Its quiesceEvidence() covers that completion, as OctoPrint's does since round 3b: it
+  // resolves once the completion is emitted. Only A completes that way: B emits none.
   const LATE_MS = 300;
 
   it.each([
@@ -259,13 +255,21 @@ describe("R7: an event that arrives late is recorded under its own job, never un
     const bundles: EvidenceBundle[] = [];
     emitter.onBundle((bundle) => bundles.push(bundle));
     const releaseB = deferred();
-    // A device per case: a device stays unavailable while it is quiet for less than the quiet period.
+    let owed: Promise<void> = Promise.resolve();
     const machine = testMachine(`machine-r7-${when}`, {
       onLoad: (id, hash) => tier1(id, hash).filter((e) => e.type !== "execution_completed"),
       holdStart: new Map([[2, releaseB.promise]]),
       onStart: (m, n) => {
-        if (n === 1) setTimeout(() => m.emit(evidence("execution_completed", m.id, "controller", { gcodeHash: gcode(71), late: true })), LATE_MS);
+        if (n === 1) {
+          owed = new Promise<void>((resolve) =>
+            setTimeout(() => {
+              m.emit(evidence("execution_completed", m.id, "controller", { gcodeHash: gcode(71), late: true }));
+              resolve();
+            }, LATE_MS),
+          );
+        }
       },
+      quiesceEvidence: () => owed,
     });
 
     const a = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-r7-A", stepId: STEP, gcodeHash: gcode(71), assuranceTier: 1 }));
@@ -396,11 +400,11 @@ function track(run: Promise<JobResult>): { readonly outcome: JobResult | undefin
 }
 
 describe("Quiescence: a job's window stays open until its adapters are done", () => {
-  it("waits for an adapter's quiesceEvidence, records what it emits until then, and adds no quiet period after it", async () => {
+  it("waits for each adapter's quiesceEvidence (5 s here), records what it emits until then, and adds no wait after it", async () => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const bundles: EvidenceBundle[] = [];
     emitter.onBundle((bundle) => bundles.push(bundle));
-    // The device reports its completion 5 s after it is asked to quiesce, far past the quiet period.
+    // The device reports its completion 5 s after it is asked to quiesce.
     const machine = testMachine("machine-hook", {
       onLoad: (id, hash) => tier1(id, hash).filter((e) => e.type !== "execution_completed"),
       quiesceEvidence: (m) =>
@@ -418,7 +422,7 @@ describe("Quiescence: a job's window stays open until its adapters are done", ()
     expect(result).toMatchObject({ success: true });
     expect(machine.quiesceCalls).toBe(1);
     expect(bundles.map((bundle) => bundle.events.map((e) => e.type))).toEqual([["gcode_hash_verified", "power_profile_summary", "execution_completed"]]);
-    expect(Date.now() - started, "fake time the run took: the hook's, with no quiet period after it").toBe(5_000);
+    expect(Date.now() - started, "fake time the run took: the hook's, and nothing after it").toBe(5_000);
   });
 
   it.each([0, 1, 2] as const)("fails a Tier %s run, finalizing nothing, when quiesceEvidence never resolves: after evidenceQuiesceTimeoutMs, 15 s by default", async (tier) => {
@@ -438,89 +442,136 @@ describe("Quiescence: a job's window stays open until its adapters are done", ()
     expect(run.outcome).toEqual({ success: false, error: "evidence did not quiesce within 15000 ms", durationMs: 15_000 });
     expect(bundles).toEqual([]);
     expect(emitter.getEvents(`job-hook-stuck-${tier}`, STEP), "the failed step, detached").toEqual([]);
+    expect(machine.quiesceCalls, "asked once: the finally does not ask again").toBe(1);
   });
 
-  it("fails the run with the error of a quiesceEvidence that rejects, finalizing nothing", async () => {
+  it("a hook still pending at the bound keeps the device quiescing, with no time-based release: B is refused, with no command and no registerStep, until it resolves; then B runs", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const registerStep = vi.spyOn(emitter, "registerStep");
+    const answer = deferred();
+    let calls = 0;
+    const machine = testMachine("machine-hook-late", { quiesceEvidence: () => (++calls === 1 ? answer.promise : Promise.resolve()) });
+    const a = await drive(new JobRunner(machine, [], null, emitter, { evidenceQuiesceTimeoutMs: 1_000 }).run({ jobId: "job-hook-late-A", stepId: STEP, gcodeHash: gcode(206), assuranceTier: 1 }));
+    expect(a).toMatchObject({ success: false, error: "evidence did not quiesce within 1000 ms" });
+    const commandsOfA = [...machine.commands];
+    const jobB = { jobId: "job-hook-late-B", stepId: STEP, gcodeHash: gcode(207), assuranceTier: 1 as const };
+
+    expect(await drive(new JobRunner(machine, [], null, emitter).run(jobB))).toEqual({
+      success: false,
+      error: "adapter machine-hook-late is still quiescing after job job-hook-late-A",
+      busy: { reason: "quiescing", adapterId: "machine-hook-late", jobId: "job-hook-late-A" },
+      durationMs: 0,
+    });
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect((await drive(new JobRunner(machine, [], null, emitter).run(jobB))).busy?.reason, "an hour on").toBe("quiescing");
+    expect(machine.commands, "commands sent while the device was quiescing").toEqual(commandsOfA);
+    expect(registerStep.mock.calls.map(([jobId]) => jobId), "steps registered").toEqual(["job-hook-late-A"]);
+
+    answer.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await drive(new JobRunner(machine, [], null, emitter).run(jobB))).toMatchObject({ success: true });
+  });
+
+  it("fails the run with the error of a quiesceEvidence that rejects; the next attempt asks again, and runs once that resolves", async () => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const bundles: EvidenceBundle[] = [];
     emitter.onBundle((bundle) => bundles.push(bundle));
-    const machine = testMachine("machine-hook-rejects", { quiesceEvidence: async () => Promise.reject(new Error("printer offline")) });
+    let calls = 0;
+    const machine = testMachine("machine-hook-rejects", { quiesceEvidence: async () => (++calls === 1 ? Promise.reject(new Error("printer offline")) : undefined) });
 
     const result = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-hook-rejects", stepId: STEP, gcodeHash: gcode(203), assuranceTier: 1 }));
-
     expect(result).toEqual({ success: false, error: "printer offline", durationMs: expect.any(Number) });
     expect(bundles).toEqual([]);
+
+    const next = { jobId: "job-hook-rejects-next", stepId: STEP, gcodeHash: gcode(208), assuranceTier: 1 as const };
+    expect((await drive(new JobRunner(machine, [], null, emitter).run(next))).busy?.reason, "the device is quiescing; the refusal asks again").toBe("quiescing");
+    expect(calls).toBe(2);
+    expect(await drive(new JobRunner(machine, [], null, emitter).run(next))).toMatchObject({ success: true });
   });
 
-  it.each([
-    ["1000 ms by default", undefined, 1_000],
-    ["as configured", 250, 250],
-  ] as const)("without quiesceEvidence, waits until the device has been quiet for evidenceQuietMs: %s", async (_how, evidenceQuietMs, quietMs) => {
+  type Missing = "machine" | "sensor" | "camera";
+  it.each<[Missing, unknown]>([
+    ["machine", undefined],
+    ["sensor", undefined],
+    ["camera", undefined],
+    ["machine", "yes"],
+  ])("refuses a %s object whose quiesceEvidence is %s, before any session, command or registerStep", async (which, hook) => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
-    const machine = testMachine(`machine-quiet-${quietMs}`); // its only events come at load, at once
+    const registerStep = vi.spyOn(emitter, "registerStep");
+    const machine = testMachine(`machine-no-hook-${which}-${String(hook)}`);
+    const sensor = {
+      id: `sensor-no-hook-${which}-${String(hook)}`,
+      type: "power_monitor" as const,
+      source: { deviceId: `sensor-no-hook-${which}-${String(hook)}`, deviceType: "power_monitor" as const, kernelId: KERNEL_ID },
+      startRecording: vi.fn(async () => {}),
+      stopRecording: vi.fn(async () => evidence("power_profile_summary", "sensor", "power_monitor")),
+      getCurrentReading: async () => ({}),
+      onEvidence: vi.fn(),
+      quiesceEvidence: async () => {},
+      dispose: async () => {},
+    };
+    const camera = testCamera(`camera-no-hook-${which}-${String(hook)}`);
+    const target = (which === "machine" ? machine : which === "sensor" ? sensor : camera) as unknown as Record<string, unknown>;
+    if (hook === undefined) delete target.quiesceEvidence;
+    else target.quiesceEvidence = hook;
 
-    const run = track(new JobRunner(machine, [], null, emitter, { evidenceQuietMs }).run({ jobId: "job-quiet", stepId: STEP, gcodeHash: gcode(204), assuranceTier: 1 }));
-    await vi.advanceTimersByTimeAsync(quietMs - 1);
-    expect(run.outcome, "resolved before the quiet period").toBeUndefined();
-    await vi.advanceTimersByTimeAsync(1);
+    const result = await drive(new JobRunner(machine, [sensor as never], camera, emitter).run({ jobId: "job-no-hook", stepId: STEP, gcodeHash: gcode(209), assuranceTier: 2 }));
 
-    expect(run.outcome).toMatchObject({ success: true, durationMs: quietMs });
+    expect(result).toEqual({ success: false, error: `adapter ${String(target.id)} has no quiesceEvidence(), so its evidence cannot be bound to a job`, durationMs: 0 });
+    expect(machine.commands, "commands sent").toEqual([]);
+    expect(sensor.startRecording).not.toHaveBeenCalled();
+    expect(sensor.onEvidence, "listeners registered (a session opened)").not.toHaveBeenCalled();
+    expect(registerStep).not.toHaveBeenCalled();
   });
 
-  it("fails a run on a device that never goes quiet, at the quiesce bound; the device then stays unavailable until it is quiet", async () => {
+  it("a device that keeps emitting does not hold up a run whose adapter has nothing outstanding: what it emits after the window closes is dropped, and the next job runs at once", async () => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
-    const bundles: EvidenceBundle[] = [];
-    emitter.onBundle((bundle) => bundles.push(bundle));
     const machine = testMachine("machine-noisy");
     const noise = setInterval(() => machine.emit(evidence("execution_progress", machine.id, "controller", { tick: true })), 200);
-    const options = { evidenceQuiesceTimeoutMs: 3_000 };
 
-    const result = await drive(new JobRunner(machine, [], null, emitter, options).run({ jobId: "job-noisy", stepId: STEP, gcodeHash: gcode(205), assuranceTier: 1 }));
-    expect(result).toEqual({ success: false, error: "evidence did not quiesce within 3000 ms", durationMs: 3_000 });
-    expect(bundles).toEqual([]);
-    expect(emitter.getEvents("job-noisy", STEP), "the failed step, detached").toEqual([]);
-
-    const next = { jobId: "job-noisy-next", stepId: STEP, gcodeHash: gcode(206), assuranceTier: 1 as const };
-    expect((await drive(new JobRunner(machine, [], null, emitter, options).run(next))).busy).toEqual({ reason: "quiescing", adapterId: "machine-noisy", jobId: "job-noisy" });
-    clearInterval(noise);
+    const a = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-noisy", stepId: STEP, gcodeHash: gcode(205), assuranceTier: 1 }));
+    expect(a, "round 3 failed this run at the quiesce bound: the device was never quiet").toMatchObject({ success: true, durationMs: 0 });
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(await drive(new JobRunner(machine, [], null, emitter, options).run(next))).toMatchObject({ success: true });
+    expect(emitter.getEvents("job-noisy", STEP).map((e) => e.payload), "payloads recorded under the job").not.toContainEqual({ tick: true });
+
+    const next = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-noisy-next", stepId: STEP, gcodeHash: gcode(206), assuranceTier: 1 }));
+    clearInterval(noise);
+    expect(next).toMatchObject({ success: true });
   });
 
-  type End = "succeeded, then its device emitted once more" | "failed at start, just after its device emitted";
-  it.each<End>(["succeeded, then its device emitted once more", "failed at start, just after its device emitted"])(
-    "after a job %s, that event is dropped, and the device is refused (quiescing) until it has been quiet for the quiet period",
-    async (end) => {
-      const emitter = new EvidenceEmitter(KERNEL_ID);
-      const registerStep = vi.spyOn(emitter, "registerStep");
-      const machine = testMachine(`machine-late-${end.startsWith("succeeded") ? "ok" : "failed"}`);
-      if (end.startsWith("failed")) machine.failing = "start";
-      const a = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-late-A", stepId: STEP, gcodeHash: gcode(207), assuranceTier: 1 }));
-      expect(a.success).toBe(end.startsWith("succeeded"));
-      if (end.startsWith("succeeded")) machine.emit(evidence("execution_completed", machine.id, "controller", { late: "after close" }));
-      machine.failing = null;
-      const commandsOfA = [...machine.commands];
-      const jobB = { jobId: "job-late-B", stepId: STEP, gcodeHash: gcode(208), assuranceTier: 1 as const };
+  it("a run that fails before step 8 returns only once its adapters have answered (bounded), and its devices are free when it returns", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("machine-fails-then-quiesces", {
+      // The failed start leaves the device something to finish: it answers 500 ms later.
+      quiesceEvidence: () => new Promise<void>((resolve) => setTimeout(resolve, 500)),
+    });
+    machine.failing = "start";
+    const started = Date.now();
 
-      const tooSoon = await drive(new JobRunner(machine, [], null, emitter).run(jobB));
-      expect(tooSoon).toEqual({
-        success: false,
-        error: `adapter ${machine.id} is still quiescing after job job-late-A`,
-        busy: { reason: "quiescing", adapterId: machine.id, jobId: "job-late-A" },
-        durationMs: 0,
-      });
-      await vi.advanceTimersByTimeAsync(999);
-      expect((await drive(new JobRunner(machine, [], null, emitter).run(jobB))).busy?.reason, "999 ms after its last event").toBe("quiescing");
-      expect(machine.commands, "commands sent while the device was quiescing").toEqual(commandsOfA);
-      expect(registerStep.mock.calls.map(([jobId]) => jobId), "steps registered").toEqual(["job-late-A"]);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(await drive(new JobRunner(machine, [], null, emitter).run(jobB)), "1000 ms after its last event").toMatchObject({ success: true });
+    const a = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-fails-then-quiesces", stepId: STEP, gcodeHash: gcode(210), assuranceTier: 1 }));
+    expect(a).toMatchObject({ success: false, error: "Failed to start: start refused" });
+    expect(Date.now() - started, "run() returned after the hook").toBe(500);
+    expect(machine.quiesceCalls).toBe(1);
 
-      const payloads = ["job-late-A", "job-late-B"].flatMap((jobId) => emitter.getEvents(jobId, STEP).map((e) => e.payload));
-      expect(payloads, "payloads recorded under either job").not.toContainEqual({ late: "after close" });
-      if (end.startsWith("succeeded")) expect(console.warn).toHaveBeenCalledWith(`[evidence-session] dropped a execution_completed event from adapter ${machine.id}: no job is recording it`);
-    },
-  );
+    machine.failing = null;
+    expect(await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-fails-then-quiesces-next", stepId: STEP, gcodeHash: gcode(211), assuranceTier: 1 }))).toMatchObject({
+      success: true,
+    });
+  });
+
+  it("after a job that succeeded, an event its device emits later is dropped and does not hold the next job up", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("machine-late-after-success");
+    const a = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-late-A", stepId: STEP, gcodeHash: gcode(212), assuranceTier: 1 }));
+    expect(a.success).toBe(true);
+    machine.emit(evidence("execution_completed", machine.id, "controller", { late: "after close" }));
+    expect(console.warn).toHaveBeenCalledWith(`[evidence-session] dropped a execution_completed event from adapter ${machine.id}: no job is recording it`);
+
+    const b = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-late-B", stepId: STEP, gcodeHash: gcode(213), assuranceTier: 1 }));
+    expect(b, "round 3 refused B for a quiet period after that event").toMatchObject({ success: true });
+    const payloads = ["job-late-A", "job-late-B"].flatMap((jobId) => emitter.getEvents(jobId, STEP).map((e) => e.payload));
+    expect(payloads, "payloads recorded under either job").not.toContainEqual({ late: "after close" });
+  });
 });
 
 describe("Step lease: an active (jobId, stepId) is refused, never overwritten", () => {
@@ -618,27 +669,37 @@ describe("Device lock: an adapter's device is its evidence source's (kernelId, d
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const device: EvidenceSource = { deviceId: "camera-shared-device", deviceType: "camera", kernelId: KERNEL_ID };
     const stream = deviceStream();
-    /** A camera object on the shared device, hearing its stream. */
-    const cameraOnDevice = (id: string): CameraAdapter => ({ ...testCamera(id), source: device, onEvidence: (callback) => void stream.listeners.push(callback) });
+    const answer = deferred();
+    /** A camera object on the shared device, hearing its stream; its hook answers when `answers` does. */
+    const cameraOnDevice = (id: string, answers: Promise<void> = Promise.resolve()): CameraAdapter => ({
+      ...testCamera(id),
+      source: device,
+      onEvidence: (callback) => void stream.listeners.push(callback),
+      quiesceEvidence: () => answers,
+    });
     const releaseA = deferred();
     const machineA = testMachine("machine-device-A", { holdStart: new Map([[1, releaseA.promise]]) });
     const machineB = testMachine("machine-device-B");
     const job = (n: number) => ({ jobId: `job-device-${n}`, stepId: STEP, gcodeHash: gcode(400 + n), assuranceTier: 1 as const });
 
-    const runA = new JobRunner(machineA, [], cameraOnDevice("camera-object-A"), emitter).run(job(1));
+    // Job A's camera does not confirm in time: A fails at the bound, and the device stays quiescing.
+    const runA = new JobRunner(machineA, [], cameraOnDevice("camera-object-A", answer.promise), emitter, { evidenceQuiesceTimeoutMs: 1_000 }).run(job(1));
     await drive(machineA.started(1));
     const held = await drive(new JobRunner(machineB, [], cameraOnDevice("camera-object-B"), emitter).run(job(2)));
     expect(held.busy).toEqual({ reason: "adapter", adapterId: "camera-object-B", jobId: "job-device-1" });
     expect(machineB.commands, "commands sent to the refused job's machine").toEqual([]);
 
     releaseA.resolve();
-    expect(await drive(runA)).toMatchObject({ success: true });
-    stream.emit(evidence("cv_inspection_result", device.deviceId, "camera", { late: true })); // after job A: dropped
+    expect(await drive(runA)).toMatchObject({ success: false, error: "evidence did not quiesce within 1000 ms" });
     // A machine object that says it is the same device.
-    const machineOnDevice = testMachine("machine-object", { source: device, stream, onLoad: () => [] });
+    const machineOnDevice = testMachine("machine-object", { source: device, stream });
     const quiescing = await drive(new JobRunner(machineOnDevice, [], null, emitter).run(job(3)));
     expect(quiescing.busy).toEqual({ reason: "quiescing", adapterId: "machine-object", jobId: "job-device-1" });
     expect(machineOnDevice.commands, "commands sent through the machine object").toEqual([]);
+
+    answer.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await drive(new JobRunner(machineOnDevice, [], null, emitter).run(job(3)))).toMatchObject({ success: true });
   });
 
   it("lets adapters on different devices run at once, including one deviceId under two kernelIds", async () => {

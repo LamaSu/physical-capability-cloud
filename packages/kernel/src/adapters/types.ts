@@ -5,16 +5,21 @@
  * and exposes a standard interface for the kernel to control it and
  * collect evidence.
  *
- * Evidence timing contract (#502 round 3). The kernel assigns an evidence event to a job
- * by when it arrives, so a job's evidence window stays open until the adapter is done:
- *   - an adapter WITH quiesceEvidence() resolves it once it has emitted every event of the
- *     work it was given, and emits nothing for that work afterwards;
- *   - an adapter WITHOUT it must not emit a job's evidence later than the runner's
- *     evidenceQuietMs (default 1000 ms) after that job's previous event. A later event is
- *     dropped, or, if the next job's window is open by then, recorded under that job.
- * A completion that a poll loop reports one poll interval after the device finished (OctoPrint,
- * IPP and Hamilton poll every 2-3 s) can break the second rule: such an adapter should
- * implement quiesceEvidence (one final poll, then stop polling).
+ * The evidence handshake, quiesceEvidence() (#502 round 3b). The kernel records an event
+ * under whichever job's window is open when it arrives, so a job's window closes, and its
+ * devices pass to the next job, only on the adapter's word that it is done. Every adapter
+ * must implement it, and the JobRunner refuses one that does not. The contract:
+ *   - it resolves once the adapter has emitted every evidence event of the work it was
+ *     given, and the adapter emits nothing for that work afterwards;
+ *   - it must NOT resolve while given work can still emit: a running poll or execution loop
+ *     that may still report a completion or failure, a sampling timer, an async callback or
+ *     command in flight;
+ *   - called again with no new work, it resolves at once.
+ * The runner calls it at the end of every run, success or failure, bounded by its
+ * evidenceQuiesceTimeoutMs; a device whose hook has not resolved stays unavailable to the
+ * next job until it does (fail closed). An adapter that cannot know when it is done waits
+ * for the strongest signal it has. OutstandingWork (outstanding-work.ts) counts what is
+ * outstanding for an adapter that tracks its own work.
  */
 
 import type { EvidenceEvent, EvidenceEventType, EvidenceSource } from "@pcc/spec";
@@ -54,12 +59,11 @@ export interface MachineAdapter {
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void;
 
   /**
-   * Optional. Resolves once this adapter has emitted every evidence event of the work it
-   * was given; it emits nothing for that work afterwards. Without it, the adapter must not
-   * emit a job's evidence later than evidenceQuietMs after that job's previous event (see
-   * the contract at the top of this file).
+   * Resolves once this adapter has emitted every evidence event of the work it was given,
+   * and never while that work can still emit; it emits nothing for that work afterwards.
+   * Required: see the contract at the top of this file.
    */
-  quiesceEvidence?(): Promise<void>;
+  quiesceEvidence(): Promise<void>;
 
   /** Disconnect / cleanup */
   dispose(): Promise<void>;
@@ -83,8 +87,8 @@ export interface SensorAdapter {
   /** Subscribe to evidence events */
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void;
 
-  /** Optional: see MachineAdapter.quiesceEvidence. */
-  quiesceEvidence?(): Promise<void>;
+  /** Required: see MachineAdapter.quiesceEvidence and the contract at the top of this file. */
+  quiesceEvidence(): Promise<void>;
 
   dispose(): Promise<void>;
 }
@@ -108,8 +112,8 @@ export interface CameraAdapter {
   /** Subscribe to evidence events */
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void;
 
-  /** Optional: see MachineAdapter.quiesceEvidence. */
-  quiesceEvidence?(): Promise<void>;
+  /** Required: see MachineAdapter.quiesceEvidence and the contract at the top of this file. */
+  quiesceEvidence(): Promise<void>;
 
   dispose(): Promise<void>;
 }

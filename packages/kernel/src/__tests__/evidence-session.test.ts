@@ -1,6 +1,7 @@
 /**
  * openEvidenceSession: one permanent tap per adapter instance, one open session per
- * adapter, and nothing delivered once a session is closed (#502 round 2, astra pack 168).
+ * device, nothing delivered once a session is closed (#502 round 2, astra pack 168), and
+ * a device handed to the next session only on its adapter's quiesceEvidence() (round 3b).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +10,7 @@ import type { SHA256 } from "@pcc/spec";
 
 import type { CameraAdapter, MachineAdapter, SensorAdapter } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
-import { DEFAULT_EVIDENCE_QUIET_MS, openEvidenceSession, setEvidenceClock } from "../evidence-session.js";
+import { openEvidenceSession } from "../evidence-session.js";
 import type { EmittedEvidence } from "../evidence-session.js";
 import { JobRunner } from "../job-runner.js";
 
@@ -25,9 +26,23 @@ function evidence(type: EmittedEvidence["type"], deviceId: string, payload: Reco
   return { type, timestamp: new Date().toISOString(), source: { deviceId, deviceType: "controller", kernelId: KERNEL_ID }, payload };
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void; reject: (err: Error) => void } {
+  let resolve!: () => void;
+  let reject!: (err: Error) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 let devices = 0;
 
-/** An adapter on a device of its own, unless it is given one (a session locks the device). */
+/**
+ * An adapter on a device of its own, unless it is given one (a session locks the device).
+ * Its quiesceEvidence() resolves at once (it emits only when the test says so); a test
+ * makes it wait with quiesceEvidence.mockImplementation.
+ */
 function fakeAdapter(id: string, deviceId = `${id}-device-${++devices}`) {
   const listeners: Array<(event: EmittedEvidence) => void> = [];
   return {
@@ -36,6 +51,7 @@ function fakeAdapter(id: string, deviceId = `${id}-device-${++devices}`) {
     onEvidence: vi.fn((callback: (event: EmittedEvidence) => void) => {
       listeners.push(callback);
     }),
+    quiesceEvidence: vi.fn(async (): Promise<void> => {}),
     emit(event: EmittedEvidence) {
       for (const listener of [...listeners]) listener(event);
     },
@@ -51,13 +67,16 @@ function mustOpen(...args: Parameters<typeof openEvidenceSession>) {
   return opened.session;
 }
 
+/** Let settled hooks report back (their answers settle on microtasks). */
+const answered = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 let warn: MockInstance;
+let error: MockInstance;
 beforeEach(() => {
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-  vi.spyOn(console, "error").mockImplementation(() => {});
+  error = vi.spyOn(console, "error").mockImplementation(() => {});
 });
 afterEach(() => {
-  setEvidenceClock();
   vi.restoreAllMocks();
 });
 
@@ -74,9 +93,7 @@ describe("openEvidenceSession", () => {
     expect(deliver.mock.calls.map(([e]) => e.type)).toEqual(["execution_started", "power_profile_sample"]);
   });
 
-  it("dedupes an adapter passed twice: one listener, one delivery per event, one claim to release", () => {
-    let now = 0;
-    setEvidenceClock(() => now);
+  it("dedupes an adapter passed twice: one listener, one delivery per event, one hook call, one claim to release", async () => {
     const a = fakeAdapter("adapter-a");
     const deliver = vi.fn();
     const session = mustOpen([a, a], owner("job-1"), deliver);
@@ -86,8 +103,9 @@ describe("openEvidenceSession", () => {
     expect(deliver).toHaveBeenCalledTimes(1);
 
     session.close();
-    // Once its device has been quiet for the quiet period (#502 round 3).
-    now += DEFAULT_EVIDENCE_QUIET_MS;
+    // Its device is free once its one hook call has answered (round 3: once quiet for 1 s).
+    await answered();
+    expect(a.quiesceEvidence).toHaveBeenCalledTimes(1);
     expect(openEvidenceSession([a], owner("job-2"), vi.fn()).ok).toBe(true);
   });
 
@@ -101,17 +119,20 @@ describe("openEvidenceSession", () => {
 
     // Nothing was opened on c: another job can take it, and only that job sees its events.
     expect(c.onEvidence).not.toHaveBeenCalled();
+    expect(c.quiesceEvidence, "hooks asked by a refused session").not.toHaveBeenCalled();
     const deliverC = vi.fn();
     mustOpen([c], owner("job-3"), deliverC);
     c.emit(evidence("execution_started", "adapter-c"));
     expect(deliverC).toHaveBeenCalledTimes(1);
   });
 
-  it("close is idempotent, and a stale close never touches a later session on the same adapter", () => {
+  it("close is idempotent, and a stale close never touches a later session on the same adapter", async () => {
     const a = fakeAdapter("adapter-a");
     const first = mustOpen([a], owner("job-1"), vi.fn());
     first.close();
     first.close();
+    await answered();
+    expect(a.quiesceEvidence, "hook calls by two closes of one session").toHaveBeenCalledTimes(1);
 
     const deliver = vi.fn();
     mustOpen([a], owner("job-2"), deliver);
@@ -119,6 +140,7 @@ describe("openEvidenceSession", () => {
 
     a.emit(evidence("execution_started", "adapter-a"));
     expect(deliver).toHaveBeenCalledTimes(1);
+    expect(a.quiesceEvidence, "hook calls by the stale close").toHaveBeenCalledTimes(1);
     expect(openEvidenceSession([a], owner("job-3"), vi.fn())).toEqual({ ok: false, busy: { reason: "adapter", adapterId: "adapter-a", jobId: "job-2" } });
   });
 
@@ -137,21 +159,25 @@ describe("openEvidenceSession", () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain("payload-must-not-be-logged");
   });
 
-  it("registers one listener per adapter however many sessions open on it", () => {
+  it("registers one listener per adapter however many sessions open on it", async () => {
     const a = fakeAdapter("adapter-a");
-    for (let i = 0; i < 3; i++) mustOpen([a], owner(`job-${i}`), vi.fn()).close();
+    for (let i = 0; i < 3; i++) {
+      mustOpen([a], owner(`job-${i}`), vi.fn()).close();
+      await answered();
+    }
     expect(a.onEvidence).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("JobRunner over shared adapters", () => {
-  it("registers exactly one onEvidence listener per adapter after 3 sequential runs", async () => {
+  it("registers exactly one onEvidence listener per adapter after 3 sequential runs, and asks each adapter to quiesce once per run", async () => {
     const machineListeners: Array<(e: EmittedEvidence) => void> = [];
     const sensorListeners: Array<(e: EmittedEvidence) => void> = [];
     const cameraListeners: Array<(e: EmittedEvidence) => void> = [];
     const emitTo = (listeners: Array<(e: EmittedEvidence) => void>, e: EmittedEvidence) => {
       for (const listener of [...listeners]) listener(e);
     };
+    // Each emits only inside the call that causes it, so its hook has nothing to wait for.
     const machine: MachineAdapter = {
       id: "machine-3runs",
       type: "fdm",
@@ -166,6 +192,7 @@ describe("JobRunner over shared adapters", () => {
         return { success: true };
       },
       onEvidence: vi.fn((cb) => void machineListeners.push(cb)),
+      quiesceEvidence: vi.fn(async () => {}),
       dispose: async () => {},
     };
     const sensor: SensorAdapter = {
@@ -180,6 +207,7 @@ describe("JobRunner over shared adapters", () => {
       },
       getCurrentReading: async () => ({}),
       onEvidence: vi.fn((cb) => void sensorListeners.push(cb)),
+      quiesceEvidence: vi.fn(async () => {}),
       dispose: async () => {},
     };
     const camera: CameraAdapter = {
@@ -191,6 +219,7 @@ describe("JobRunner over shared adapters", () => {
         return { passed: true, confidence: 100, findings: [], imageHash: "sha256:none" };
       },
       onEvidence: vi.fn((cb) => void cameraListeners.push(cb)),
+      quiesceEvidence: vi.fn(async () => {}),
       dispose: async () => {},
     };
     const emitter = new EvidenceEmitter(KERNEL_ID);
@@ -209,130 +238,147 @@ describe("JobRunner over shared adapters", () => {
     expect(machine.onEvidence).toHaveBeenCalledTimes(1);
     expect(sensor.onEvidence).toHaveBeenCalledTimes(1);
     expect(camera.onEvidence).toHaveBeenCalledTimes(1);
+    expect([machine.quiesceEvidence, sensor.quiesceEvidence, camera.quiesceEvidence].map((hook) => vi.mocked(hook).mock.calls.length)).toEqual([3, 3, 3]);
   });
 });
 
-describe("quiesce, the handoff guard and the device lock (#502 round 3)", () => {
+describe("quiesce and the handoff guard: the adapter's word, never a clock (#502 round 3b)", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-    // The injected evidence clock reads the fake Date, so quiet periods run on the fake clock.
-    setEvidenceClock(() => Date.now());
   });
   afterEach(() => {
     vi.useRealTimers();
   });
 
   /** session.quiesce(), plus its result once it has one. */
-  function quiescing(session: ReturnType<typeof mustOpen>, quietMs: number, timeoutMs: number): { readonly result: boolean | undefined } {
+  function quiescing(session: ReturnType<typeof mustOpen>, timeoutMs: number): { readonly result: boolean | undefined } {
     const tracked: { result: boolean | undefined } = { result: undefined };
-    void session.quiesce(quietMs, timeoutMs).then((result) => {
+    void session.quiesce(timeoutMs).then((result) => {
       tracked.result = result;
     });
     return tracked;
   }
 
-  it("quiesce resolves true once every device has been quiet for quietMs, and still delivers what arrives meanwhile", async () => {
+  it("quiesce resolves true once every adapter's hook has resolved, however late, and still delivers what arrives meanwhile", async () => {
     const a = fakeAdapter("adapter-a");
     const b = fakeAdapter("adapter-b");
+    const doneA = deferred();
+    const doneB = deferred();
+    a.quiesceEvidence.mockImplementation(() => doneA.promise);
+    b.quiesceEvidence.mockImplementation(() => doneB.promise);
     const deliver = vi.fn();
     const session = mustOpen([a, b], owner("job-1"), deliver);
-    a.emit(evidence("execution_started", "adapter-a")); // t = 0
 
-    const quiet = quiescing(session, 1_000, 10_000);
-    await vi.advanceTimersByTimeAsync(600);
-    b.emit(evidence("execution_progress", "adapter-b")); // t = 600: b's device is quiet from t = 1600
-    await vi.advanceTimersByTimeAsync(999);
-    expect(quiet.result, "at t = 1599").toBeUndefined();
-    await vi.advanceTimersByTimeAsync(1);
+    const quiet = quiescing(session, 60_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    a.emit(evidence("execution_completed", "adapter-a")); // a's late completion, 5 s on
+    doneA.resolve();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(quiet.result, "b has not answered").toBeUndefined();
+    b.emit(evidence("power_profile_summary", "adapter-b"));
+    doneB.resolve();
+    await vi.advanceTimersByTimeAsync(0);
 
-    expect(quiet.result, "at t = 1600").toBe(true);
-    expect(deliver.mock.calls.map(([e]) => e.type)).toEqual(["execution_started", "execution_progress"]);
+    expect(quiet.result).toBe(true);
+    expect(deliver.mock.calls.map(([e]) => e.type)).toEqual(["execution_completed", "power_profile_summary"]);
+    expect([a.quiesceEvidence.mock.calls.length, b.quiesceEvidence.mock.calls.length]).toEqual([1, 1]);
     expect(vi.getTimerCount(), "timers left pending").toBe(0);
   });
 
-  it("quiesce waits until every device is quiet at the same moment", async () => {
+  it("quiesce resolves false at timeoutMs for a hook that never resolves, and leaves no timer", async () => {
     const a = fakeAdapter("adapter-a");
-    const b = fakeAdapter("adapter-b");
-    const session = mustOpen([a, b], owner("job-1"), vi.fn());
-    a.emit(evidence("execution_started", "adapter-a")); // t = 0: a quiet from 1000
-    b.emit(evidence("execution_started", "adapter-b")); // t = 0
-
-    const quiet = quiescing(session, 1_000, 10_000);
-    await vi.advanceTimersByTimeAsync(900);
-    b.emit(evidence("execution_progress", "adapter-b")); // t = 900: b quiet from 1900
-    await vi.advanceTimersByTimeAsync(600);
-    a.emit(evidence("execution_progress", "adapter-a")); // t = 1500, after a was quiet: a quiet from 2500
-    await vi.advanceTimersByTimeAsync(999);
-    expect(quiet.result, "at t = 2499").toBeUndefined();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(quiet.result, "at t = 2500").toBe(true);
-  });
-
-  it("quiesce resolves false at timeoutMs for a device that never goes quiet, and leaves no timer", async () => {
-    const a = fakeAdapter("adapter-a");
+    a.quiesceEvidence.mockImplementation(() => new Promise<void>(() => {}));
     const session = mustOpen([a], owner("job-1"), vi.fn());
-    a.emit(evidence("execution_started", "adapter-a")); // t = 0 (a device that never emitted is quiet at once)
-    const noise = setInterval(() => a.emit(evidence("execution_progress", "adapter-a")), 100);
 
-    const quiet = quiescing(session, 1_000, 3_000);
+    const quiet = quiescing(session, 3_000);
     await vi.advanceTimersByTimeAsync(2_999);
     expect(quiet.result).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
     expect(quiet.result).toBe(false);
-    clearInterval(noise);
     expect(vi.getTimerCount(), "timers left pending").toBe(0);
   });
 
-  it("quiesce awaits quiesceEvidence instead of a quiet period, for an adapter that has one", async () => {
-    let finish!: () => void;
-    const a = Object.assign(fakeAdapter("adapter-a"), {
-      quiesceEvidence: vi.fn(() => new Promise<void>((resolve) => (finish = resolve))),
-    });
-    const session = mustOpen([a], owner("job-1"), vi.fn());
-
-    const quiet = quiescing(session, 1_000, 10_000);
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(quiet.result, "before quiesceEvidence resolves").toBeUndefined();
-    a.emit(evidence("execution_completed", "adapter-a"));
-    finish();
+  it("a second quiesce waits on the same answers: each adapter is asked once per session", async () => {
+    const a = fakeAdapter("adapter-a");
+    const done = deferred();
+    a.quiesceEvidence.mockImplementation(() => done.promise);
+    const session = mustOpen([a, a], owner("job-1"), vi.fn());
+    const first = quiescing(session, 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(first.result).toBe(false);
+    const second = quiescing(session, 1_000);
+    done.resolve();
     await vi.advanceTimersByTimeAsync(0);
-
-    expect(quiet.result, "as soon as it resolves, with no quiet period after its last event").toBe(true);
+    expect(second.result).toBe(true);
     expect(a.quiesceEvidence).toHaveBeenCalledTimes(1);
   });
 
   it("quiesce rejects with the error of a quiesceEvidence that rejects", async () => {
-    const a = Object.assign(fakeAdapter("adapter-a"), { quiesceEvidence: () => Promise.reject(new Error("camera offline")) });
+    const a = fakeAdapter("adapter-a");
+    a.quiesceEvidence.mockImplementation(() => Promise.reject(new Error("camera offline")));
     const session = mustOpen([a], owner("job-1"), vi.fn());
-    await expect(session.quiesce(1_000, 10_000)).rejects.toThrow("camera offline");
+    await expect(session.quiesce(10_000)).rejects.toThrow("camera offline");
     expect(vi.getTimerCount(), "timers left pending").toBe(0);
   });
 
-  it("after close, an event is dropped and restarts its device's quiet clock: another adapter object on that device is refused, quiescing, until quiet", async () => {
+  it("after close, a device whose hook is pending refuses every adapter object on it (quiescing), with no time-based release, until the hook resolves", async () => {
     const a = fakeAdapter("adapter-a");
     const sameDevice = fakeAdapter("adapter-a2", a.source.deviceId);
-    const session = mustOpen([a], owner("job-1"), vi.fn(), { quietMs: 300 });
-    a.emit(evidence("execution_started", "adapter-a")); // t = 0, delivered
-    await vi.advanceTimersByTimeAsync(5_000);
-    session.close(); // its device has been quiet for 5 s
-    a.emit(evidence("execution_completed", "adapter-a")); // t = 5000, dropped
+    const done = deferred();
+    a.quiesceEvidence.mockImplementation(() => done.promise);
+    const session = mustOpen([a], owner("job-1"), vi.fn());
+    const quiesced = session.quiesce(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await quiesced, "the run's quiesce timed out").toBe(false);
+    session.close();
+    a.emit(evidence("execution_completed", "adapter-a")); // dropped: no job is recording it
     expect(warn).toHaveBeenCalledWith("[evidence-session] dropped a execution_completed event from adapter adapter-a: no job is recording it");
 
     expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn())).toEqual({ ok: false, busy: { reason: "quiescing", adapterId: "adapter-a2", jobId: "job-1" } });
-    await vi.advanceTimersByTimeAsync(299);
-    expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn()).ok, "299 ms after the dropped event").toBe(false);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(openEvidenceSession([a], owner("job-2"), vi.fn()).ok, "an hour on, the hook still pending").toBe(false);
     expect(sameDevice.onEvidence, "listeners registered by a refused session").not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn()).ok, "300 ms after it: the closed session's quiet period").toBe(true);
+    expect(a.quiesceEvidence, "a pending hook is not asked again").toHaveBeenCalledTimes(1);
+    done.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn()).ok, "once the hook resolved").toBe(true);
   });
 
-  it("a device already quiet for the quiet period is free as soon as its session closes", () => {
+  it("a device whose adapter already answered is free as soon as its session closes", async () => {
     const a = fakeAdapter("adapter-a");
-    const session = mustOpen([a], owner("job-1"), vi.fn(), { quietMs: 300 });
-    a.emit(evidence("execution_started", "adapter-a"));
-    vi.setSystemTime(Date.now() + 300);
+    const session = mustOpen([a], owner("job-1"), vi.fn());
+    expect(await session.quiesce(1_000)).toBe(true);
     session.close();
     expect(openEvidenceSession([a], owner("job-2"), vi.fn()).ok).toBe(true);
+    expect(a.quiesceEvidence, "close does not ask again").toHaveBeenCalledTimes(1);
+  });
+
+  it("close() asks an adapter that was never asked, and its device is quiescing until it answers", async () => {
+    const a = fakeAdapter("adapter-a");
+    const done = deferred();
+    a.quiesceEvidence.mockImplementation(() => done.promise);
+    mustOpen([a], owner("job-1"), vi.fn()).close();
+    expect(a.quiesceEvidence).toHaveBeenCalledTimes(1);
+    expect(openEvidenceSession([a], owner("job-2"), vi.fn())).toEqual({ ok: false, busy: { reason: "quiescing", adapterId: "adapter-a", jobId: "job-1" } });
+    done.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(openEvidenceSession([a], owner("job-2"), vi.fn()).ok).toBe(true);
+  });
+
+  it("a hook that rejected keeps the device quiescing; the next attempt to open asks it again, and the device is free once that call resolves", async () => {
+    const a = fakeAdapter("adapter-a");
+    a.quiesceEvidence.mockImplementationOnce(() => Promise.reject(new Error("printer unreachable")));
+    const session = mustOpen([a], owner("job-1"), vi.fn());
+    await expect(session.quiesce(1_000)).rejects.toThrow("printer unreachable");
+    session.close();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+
+    // Refused, and the refusal asks the hook again (which now resolves).
+    expect(openEvidenceSession([a], owner("job-2"), vi.fn())).toEqual({ ok: false, busy: { reason: "quiescing", adapterId: "adapter-a", jobId: "job-1" } });
+    expect(a.quiesceEvidence).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(openEvidenceSession([a], owner("job-2"), vi.fn()).ok).toBe(true);
+    expect(error).not.toHaveBeenCalled();
   });
 
   it("locks the device, not the object: a second object on a held device is refused; the same deviceId under another kernelId is another device", () => {
@@ -343,19 +389,5 @@ describe("quiesce, the handoff guard and the device lock (#502 round 3)", () => 
 
     expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn())).toEqual({ ok: false, busy: { reason: "adapter", adapterId: "adapter-a2", jobId: "job-1" } });
     expect(openEvidenceSession([otherKernel], owner("job-3"), vi.fn()).ok).toBe(true);
-  });
-});
-
-describe("an adapter passed twice (#502 round 3)", () => {
-  it("is asked to quiesce once", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    try {
-      const a = Object.assign(fakeAdapter("adapter-a"), { quiesceEvidence: vi.fn(async () => {}) });
-      const session = mustOpen([a, a], owner("job-1"), vi.fn());
-      expect(await session.quiesce(1_000, 10_000)).toBe(true);
-      expect(a.quiesceEvidence).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });

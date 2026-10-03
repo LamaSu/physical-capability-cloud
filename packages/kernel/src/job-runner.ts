@@ -9,7 +9,7 @@
 import type { AssuranceTier, SHA256 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
-import { DEFAULT_EVIDENCE_QUIET_MS, openEvidenceSession } from "./evidence-session.js";
+import { openEvidenceSession } from "./evidence-session.js";
 import * as Sentry from "@sentry/node";
 
 /**
@@ -55,8 +55,8 @@ export interface JobResult {
    * and nothing was recorded. The device is not at fault, so a caller should queue or
    * retry the job, never count a device failure.
    *   - "adapter": the device of adapter `adapterId` is recording job `jobId`'s evidence;
-   *   - "quiescing": that device has not been quiet since job `jobId` ended, so what it
-   *     emits now could still be that job's evidence;
+   *   - "quiescing": that adapter has not yet confirmed, through its quiesceEvidence(),
+   *     that job `jobId`'s work is done, so what it emits now could still be that job's;
    *   - "step": this run's (jobId, stepId) is already running on this evidence emitter.
    */
   busy?: { jobId: string; adapterId?: string; stepId?: string; reason: "adapter" | "step" | "quiescing" };
@@ -70,12 +70,10 @@ export interface JobRunnerOptions {
    */
   evidenceSettleTimeoutMs?: number;
   /**
-   * How long an adapter without quiesceEvidence must have been silent before the run
-   * takes its evidence to be complete; also how long a device stays unavailable to the
-   * next job after its last event. Default 1000 ms.
+   * How long a run waits for its adapters' quiesceEvidence() before it fails, on every
+   * exit. Default 15 s. A device whose hook is still pending then stays unavailable to the
+   * next job until it resolves.
    */
-  evidenceQuietMs?: number;
-  /** How long a run waits for its adapters to quiesce before it fails. Default 15 s. */
   evidenceQuiesceTimeoutMs?: number;
 }
 
@@ -85,7 +83,6 @@ export class JobRunner {
   private camera: CameraAdapter | null;
   private evidenceEmitter: EvidenceEmitter;
   private evidenceSettleTimeoutMs: number;
-  private evidenceQuietMs: number;
   private evidenceQuiesceTimeoutMs: number;
 
   constructor(
@@ -100,7 +97,6 @@ export class JobRunner {
     this.camera = camera;
     this.evidenceEmitter = evidenceEmitter;
     this.evidenceSettleTimeoutMs = options?.evidenceSettleTimeoutMs ?? 30_000;
-    this.evidenceQuietMs = options?.evidenceQuietMs ?? DEFAULT_EVIDENCE_QUIET_MS;
     this.evidenceQuiesceTimeoutMs = options?.evidenceQuiesceTimeoutMs ?? 15_000;
   }
 
@@ -120,6 +116,20 @@ export class JobRunner {
     // Every refusal below comes before any adapter command, and before registerStep,
     // which would overwrite the step of a job already running under the same ids. The
     // checks, the session's claim and the step key's lease are one synchronous block.
+
+    // Fail closed: without its quiesceEvidence() an adapter cannot say when a job's
+    // evidence is complete, and nothing else binds an event to the job (round 3b).
+    const adapters = [this.machine, ...this.sensors, ...(this.camera ? [this.camera] : [])];
+    for (const adapter of adapters) {
+      if (typeof (adapter as { quiesceEvidence?: unknown }).quiesceEvidence !== "function") {
+        return {
+          success: false,
+          error: `adapter ${adapter.id} has no quiesceEvidence(), so its evidence cannot be bound to a job`,
+          durationMs: Date.now() - startTime,
+        };
+      }
+    }
+
     const stepKey = `${jobId}:${stepId}`; // the emitter's own key for the step
     let leases = activeSteps.get(this.evidenceEmitter);
     if (leases === undefined) {
@@ -139,7 +149,7 @@ export class JobRunner {
     // A listener per run could not be removed, so it went on recording later and
     // overlapping jobs' events into this run's step (astra pack 168).
     const opened = openEvidenceSession(
-      [this.machine, ...this.sensors, ...(this.camera ? [this.camera] : [])],
+      adapters,
       { jobId, stepId },
       (event) => {
         recorded = recorded.then(async () => {
@@ -151,7 +161,6 @@ export class JobRunner {
           }
         });
       },
-      { quietMs: this.evidenceQuietMs },
     );
     if (!opened.ok) {
       const { reason, adapterId, jobId: holder } = opened.busy;
@@ -183,6 +192,10 @@ export class JobRunner {
 
     let succeeded = false;
     let settleTimedOut = false;
+    // Set once the run has asked its adapters to quiesce (step 8, or the finally).
+    let quiesceAsked = false;
+    // Sensors this run started and has not stopped: a failed run stops them (see finally).
+    const recording = new Set<SensorAdapter>();
     try {
       const result = await Sentry.startSpan(
         {
@@ -214,6 +227,8 @@ export class JobRunner {
               { name: "job.start_sensors", op: "job.phase", attributes: { "job.id": jobId, "sensor.count": this.sensors.length } },
               async () => {
                 for (const sensor of this.sensors) {
+                  // Before the await: a start that throws may still have begun recording.
+                  recording.add(sensor);
                   await sensor.startRecording(jobId);
                 }
               },
@@ -249,6 +264,7 @@ export class JobRunner {
               { name: "job.stop_sensors", op: "job.phase", attributes: { "job.id": jobId } },
               async () => {
                 for (const sensor of this.sensors) {
+                  recording.delete(sensor);
                   await sensor.stopRecording();
                 }
               },
@@ -263,11 +279,13 @@ export class JobRunner {
             );
           }
 
-          // 8. Wait, still recording, until the adapters have emitted all of this job's
-          // evidence: returning from step 5, 6 or 7 does not prove an adapter is done (a
-          // poll loop may report the completion later). Bounded: a device that never goes
-          // quiet fails the run, at every tier, and nothing is finalized.
-          if (!(await session.quiesce(this.evidenceQuietMs, this.evidenceQuiesceTimeoutMs))) {
+          // 8. Wait, still recording, until every adapter confirms (quiesceEvidence) that it
+          // has emitted all of this job's evidence: returning from step 5, 6 or 7 does not
+          // prove an adapter is done (a poll loop may report the completion later). Bounded:
+          // an adapter that does not confirm in time fails the run, at every tier, and
+          // nothing is finalized; its device stays unavailable until it does.
+          quiesceAsked = true;
+          if (!(await session.quiesce(this.evidenceQuiesceTimeoutMs))) {
             return {
               success: false,
               error: `evidence did not quiesce within ${this.evidenceQuiesceTimeoutMs} ms`,
@@ -276,8 +294,7 @@ export class JobRunner {
           }
 
           // Then stop accepting evidence, so the chain stops growing, and wait for it. An
-          // event emitted from here on is dropped, with a warning, and keeps its device
-          // from the next job until it has been quiet again.
+          // event emitted from here on is dropped, with a warning.
           session.close();
           if (!(await settle())) {
             settleTimedOut = true;
@@ -332,6 +349,22 @@ export class JobRunner {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, error: message, durationMs: Date.now() - startTime };
     } finally {
+      // Every exit quiesces before it releases. A run that ended before step 8 first stops
+      // the sensors it started (else a recording never ends and its device never frees),
+      // then waits, bounded, for every adapter's word that its work is done; events that
+      // arrive meanwhile still reach this run's (soon detached) step. A hook still pending
+      // at the bound keeps its device quiescing until it resolves.
+      if (!quiesceAsked) {
+        quiesceAsked = true;
+        for (const sensor of recording) {
+          sensor.stopRecording().catch((err: unknown) => console.error(`[job-runner] stopping sensor ${sensor.id} after a failed run:`, err));
+        }
+        try {
+          await session.quiesce(this.evidenceQuiesceTimeoutMs);
+        } catch (err) {
+          console.error(`[job-runner] job ${jobId}: an adapter could not confirm its evidence is complete:`, err);
+        }
+      }
       // Every exit closes the window. A failed run also seals the chain, so an event
       // still queued is never written; waits, bounded, for the addEvent in flight; and
       // then detaches its step (cleanup), so getEvents() for it is empty from then on.

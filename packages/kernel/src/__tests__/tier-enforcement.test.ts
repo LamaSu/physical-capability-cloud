@@ -81,6 +81,8 @@ function makeMockMachine(eventsToEmit: Array<Omit<EvidenceEvent, "id" | "hash">>
       }
       return { success: true, message: "ok" };
     }),
+    // Every event is emitted inside the call that causes it: nothing is left once a call returns.
+    quiesceEvidence: vi.fn().mockResolvedValue(undefined),
     onEvidence: vi.fn().mockImplementation((cb: (e: Omit<EvidenceEvent, "id" | "hash">) => void) => {
       listeners.push(cb);
     }),
@@ -102,6 +104,8 @@ function makeMockSensor(eventsToEmit: Array<Omit<EvidenceEvent, "id" | "hash">> 
       payload: { avgWatts: 90, peakWatts: 200 },
     }),
     getCurrentReading: vi.fn().mockResolvedValue({ watts: 90 }),
+    // Every event is emitted inside the call that causes it: nothing is left once a call returns.
+    quiesceEvidence: vi.fn().mockResolvedValue(undefined),
     onEvidence: vi.fn().mockImplementation((cb: (e: Omit<EvidenceEvent, "id" | "hash">) => void) => {
       for (const ev of eventsToEmit) {
         cb(ev);
@@ -139,6 +143,8 @@ function makeMockCamera(): CameraAdapter {
       }
       return { passed: true, confidence: 0.95, findings: [], imageHash: "sha256:cam_inspect" };
     }),
+    // Every event is emitted inside the call that causes it: nothing is left once a call returns.
+    quiesceEvidence: vi.fn().mockResolvedValue(undefined),
     onEvidence: vi.fn().mockImplementation((cb: (e: Omit<EvidenceEvent, "id" | "hash">) => void) => {
       listeners.push(cb);
     }),
@@ -512,6 +518,7 @@ describe("JobRunner — tier gating", () => {
         getProgress: vi.fn().mockResolvedValue(0),
         execute: vi.fn().mockResolvedValue({ success: false, message: "Load failed" }),
         onEvidence: vi.fn(),
+        quiesceEvidence: vi.fn().mockResolvedValue(undefined),
         dispose: vi.fn().mockResolvedValue(undefined),
       };
 
