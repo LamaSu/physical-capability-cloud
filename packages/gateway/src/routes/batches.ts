@@ -16,7 +16,51 @@ interface BatchSlotClaim {
   amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
-import { gateJobRead, gateKernelRead, kernelScopeOf, refuseJobRead } from "../readmodels/job-read-gate.js";
+
+import {
+  gateJobRead,
+  gateKernelRead,
+  jobPartScopeOf,
+  keepAsSent,
+  kernelScopeOf,
+  refuseJobRead,
+} from "../readmodels/job-read-gate.js";
+import { jobReadCallerOf, operatedKernelsOf, precheckJobRead, JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
+import { batchEventVisible, batchViewFor } from "../readmodels/batch-read.js";
+import { getStore } from "../db.js";
+import { tenantOpts } from "../config/tenant-enforce.js";
+
+/**
+ * The public face of a shared batch (cross-family review r3 of #403, CRITICAL): the opportunity to
+ * join it (its kernel, capability, protocol, price, timing, status and how many slots are taken),
+ * never its claims. A claim names its agent, sample labels, amount and escrow address.
+ */
+function sharedBatchFace(b: SharedBatch) {
+  const { claimedSlots, evidenceBundleId: _evidence, ...opportunity } = b;
+  return { ...opportunity, claimedSlotCount: claimedSlots.reduce((n, c) => n + c.slotIndices.length, 0) };
+}
+
+/**
+ * Who may see a shared batch's claims: an admin without a tenant (claims carry no tenant, so a
+ * tenant-scoped admin sees the public face), or the operator of the batch's kernel as a proven
+ * wallet. Anyone else, including a caller with no credential, sees the public face. A failed read
+ * of the caller's kernels also gives the public face.
+ */
+function sharedClaimsReaderOf(req: import("fastify").FastifyRequest): (kernelId: string) => boolean {
+  const pre = precheckJobRead(jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }));
+  if (!pre.proceed) return () => false;
+  if (pre.as === "admin") {
+    const allKernels = tenantOpts(req as any) === undefined;
+    return () => allKernels;
+  }
+  let operated: ReadonlySet<string>;
+  try {
+    operated = operatedKernelsOf(pre.wallet, getStore().repos);
+  } catch {
+    return () => false;
+  }
+  return (kernelId) => operated.has(kernelId);
+}
 
 // ── In-memory shared batch storage ────────────────────────────────
 const sharedBatches = new Map<string, SharedBatch>();
@@ -31,9 +75,14 @@ export async function batchRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const scope = kernelScopeOf(req);
       if (!scope.ok) return refuseJobRead(reply, scope);
+      // Each batch as this caller may see it, judged as sent (readmodels/batch-read.ts).
+      const parts = jobPartScopeOf(req);
+      if (!parts.ok) return refuseJobRead(reply, parts);
       const batches = batchTracker
         .getAllBatches({ kernelId: req.query.kernelId, status: req.query.status as any })
-        .filter((batch) => scope.kernels === null || scope.kernels.has(batch.kernelId));
+        .filter((batch) => scope.kernels === null || scope.kernels.has(batch.kernelId))
+        .map((batch) => batchViewFor(batch, parts)?.batch)
+        .filter((batch) => batch !== undefined);
       return { batches };
     },
   );
@@ -44,7 +93,17 @@ export async function batchRoutes(app: FastifyInstance) {
     if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
     const batch = gate.ok ? batchTracker.getBatch(req.params.batchId) : undefined;
     if (!batch) return { error: "not_found" };
-    return { batch, events: batchTracker.getEvents(req.params.batchId) };
+    // The batch and its events as this caller may see them, judged as sent (readmodels/batch-read.ts;
+    // reviews r3 and r4 of #403): slots of jobs it may not read, the runConfig and batch-level
+    // events of a batch it does not see whole, and the sample events of withheld slots are left out.
+    const parts = jobPartScopeOf(req);
+    if (!parts.ok) return refuseJobRead(reply, parts);
+    const view = batchViewFor(batch, parts);
+    if (!view) return { error: "not_found" };
+    return {
+      batch: view.batch,
+      events: keepAsSent(batchTracker.getEvents(req.params.batchId), (event) => batchEventVisible(event, view, parts)),
+    };
   });
 
   // Batches containing a specific job's samples. They are that job's records, so the job
@@ -55,11 +114,16 @@ export async function batchRoutes(app: FastifyInstance) {
     const gate = gateJobRead(req, req.params.jobId);
     if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
     if (!gate.ok) return { batches: [] };
+    const parts = jobPartScopeOf(req);
+    if (!parts.ok) return refuseJobRead(reply, parts);
     const whole = (batch: { kernelId: string }) =>
       gate.as === "admin" || (gate.as === "kernel_operator" && batch.kernelId === gate.job.kernelId);
-    const batches = batchTracker.getBatchesForJob(req.params.jobId).map((batch) =>
-      whole(batch) ? batch : { ...batch, slots: batch.slots.filter((slot) => slot.jobId === req.params.jobId) },
-    );
+    // The operator of the batch's kernel and an admin: the batch as they may see it; a buyer: only
+    // this job's slots (and so, in a shared batch, no runConfig or batch-level event). Judged as sent.
+    const batches = batchTracker
+      .getBatchesForJob(req.params.jobId)
+      .map((batch) => batchViewFor(batch, parts, whole(batch) ? undefined : (slot) => slot.jobId === req.params.jobId)?.batch)
+      .filter((batch) => batch !== undefined);
     return { batches };
   });
 
@@ -119,7 +183,10 @@ export async function batchRoutes(app: FastifyInstance) {
     return { batch };
   });
 
-  /** GET /api/batches/shared/open — List open batches available to join */
+  /**
+   * GET /api/batches/shared/open — List open batches available to join. Anyone sees the
+   * opportunity (sharedBatchFace); the claims are the kernel operator's and an admin's.
+   */
   app.get("/api/batches/shared/open", async (req) => {
     const { kernelId, capabilityType } = req.query as { kernelId?: string; capabilityType?: string };
     let batches = [...sharedBatches.values()].filter(
@@ -127,7 +194,8 @@ export async function batchRoutes(app: FastifyInstance) {
     );
     if (kernelId) batches = batches.filter((b) => b.kernelId === kernelId);
     if (capabilityType) batches = batches.filter((b) => b.capabilityType === capabilityType);
-    return { batches };
+    const claimsReader = sharedClaimsReaderOf(req);
+    return { batches: batches.map((b) => (claimsReader(b.kernelId) ? b : sharedBatchFace(b))) };
   });
 
   /** GET /api/batches/shared/:batchId — Get batch details including all claims */
@@ -137,7 +205,7 @@ export async function batchRoutes(app: FastifyInstance) {
 
     const claimedCount = batch.claimedSlots.reduce((sum: number, c: BatchSlotClaim) => sum + c.slotIndices.length, 0);
     return {
-      batch,
+      batch: sharedClaimsReaderOf(req)(batch.kernelId) ? batch : sharedBatchFace(batch),
       summary: {
         totalSlots: batch.totalSlots,
         claimedSlots: claimedCount,
@@ -224,11 +292,24 @@ export async function batchRoutes(app: FastifyInstance) {
   app.delete<{ Params: { batchId: string; claimId: string } }>(
     "/api/batches/shared/:batchId/claim/:claimId",
     async (req, reply) => {
+      // Releasing a claim reads and removes it (review r4 of #403, HIGH): identity first (401 without
+      // a credential, 403 without a proven wallet), then only the batch's kernel operator, an admin
+      // without a tenant, or the claimant the claim names (a proven wallet equal to its agentId) may
+      // release it. Anyone else gets the answer a missing claim gets.
+      const pre = precheckJobRead(jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }));
+      if (!pre.proceed) {
+        const refusal = JOB_READ_REFUSAL[pre.reason];
+        return reply.status(refusal.status).send(refusal.body);
+      }
       const batch = sharedBatches.get(req.params.batchId);
       if (!batch) return reply.status(404).send({ error: "Batch not found" });
 
       const claimIdx = batch.claimedSlots.findIndex((c) => c.id === req.params.claimId);
-      if (claimIdx === -1) return reply.status(404).send({ error: "Claim not found" });
+      const claimant = claimIdx === -1 ? undefined : batch.claimedSlots[claimIdx]!.agentId;
+      const mayRelease =
+        sharedClaimsReaderOf(req)(batch.kernelId) ||
+        (pre.as === "proven" && typeof claimant === "string" && claimant.trim().toLowerCase() === pre.wallet);
+      if (claimIdx === -1 || !mayRelease) return reply.status(404).send({ error: "Claim not found" });
 
       if (batch.status === "running" || batch.status === "completed") {
         return reply.status(409).send({ error: `Cannot release slots from a ${batch.status} batch` });
@@ -262,11 +343,16 @@ export async function batchRoutes(app: FastifyInstance) {
         claimed: claimedIndices.size,
         available: availableIndices.length,
         availableIndices,
-        claimedBy: batch.claimedSlots.map((c) => ({
-          agentId: c.agentId,
-          slotCount: c.slotIndices.length,
-          indices: c.slotIndices,
-        })),
+        // Who claimed which slots is the kernel operator's and an admin's to see.
+        ...(sharedClaimsReaderOf(req)(batch.kernelId)
+          ? {
+              claimedBy: batch.claimedSlots.map((c) => ({
+                agentId: c.agentId,
+                slotCount: c.slotIndices.length,
+                indices: c.slotIndices,
+              })),
+            }
+          : {}),
         pricePerSlot: batch.pricePerSlot,
         currency: batch.currency,
       };

@@ -44,9 +44,9 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   });
 }
 
-/** The job read gate on an evidence bundle's job. */
+/** The job read gate on an evidence bundle's job, judged first from the bundle's own job and kernel. */
 const gateBundleRead = (req: FastifyRequest, bundleId: string) =>
-  gateJobRecordRead(req, () => (getRepos().evidence.findById(bundleId) as { jobId?: string } | undefined)?.jobId);
+  gateJobRecordRead(req, () => getRepos().evidence.findById(bundleId) as { jobId?: string; kernelId?: string } | undefined);
 
 /** The compliance facade's body for a bundle that does not exist (NotFoundError, base.facade.ts). */
 const bundleNotFound = (bundleId: string) => ({

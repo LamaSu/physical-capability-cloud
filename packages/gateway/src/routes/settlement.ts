@@ -277,7 +277,8 @@ export async function settlementRoutes(app: FastifyInstance) {
       // Anyone else gets exactly what an unknown hash gets: the job-id form's answer below.
       const repos = getRepos();
       const found: { bundle?: ReturnType<typeof repos.evidence.findByHash> } = {};
-      const lookup = () => (found.bundle = repos.evidence.findByHash(param))?.jobId;
+      // The bundle row is the record: gateJobRecordRead judges it by its own job, kernel and tenant first.
+      const lookup = () => (found.bundle = repos.evidence.findByHash(param));
       const verifier = hasValidVerifierReadKey(req as unknown as { headers: Record<string, unknown> });
       if (verifier) {
         try {

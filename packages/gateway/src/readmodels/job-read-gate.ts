@@ -56,6 +56,7 @@ import {
   jobsReadableBy,
   operatedKernelsOf,
   precheckJobRead,
+  type JobReader,
   type JobRow,
 } from "./job-execution.js";
 
@@ -94,24 +95,45 @@ export function gateJobRead(req: FastifyRequest, jobId: string): JobReadGate {
 }
 
 /**
- * The gate for a record found by its own id (an evidence bundle) whose job decides who may
- * read it. Identity comes first, as in gateJobRead, before the record is looked up; then the
- * record's job is gated. A missing record, or one with no job, is not_found after the same
- * job and authorization reads a stranger's record costs.
+ * The gate for a record found by its own id (an evidence bundle) whose job decides who may read
+ * it. Identity first, as in gateJobRead, before the record is looked up. Then (cross-family review
+ * r3 of #403, MEDIUM): a proven wallet that is not a party to the record's job, judged from the
+ * record's own job and kernel with the caller's wallet-keyed reader, is refused before any job row
+ * is read. So a refusal makes the same reads whether the record exists or not, beyond the record's
+ * own lookup. A party, or an admin, then goes through gateJobRead on the record's job: the job row,
+ * its tenant and its kernel decide, as for any job read. A missing record, or one naming no job,
+ * is not_found.
  */
-export function gateJobRecordRead(req: FastifyRequest, jobIdOfRecord: () => string | null | undefined): JobReadGate {
+export function gateJobRecordRead(
+  req: FastifyRequest,
+  recordOf: () => { jobId?: unknown; kernelId?: unknown; tenantId?: unknown } | null | undefined,
+): JobReadGate {
   const pre = precheckJobRead(jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }));
   if (!pre.proceed) return { ok: false, kind: pre.reason };
-  let jobId: string | null | undefined;
+  let record: { jobId?: unknown; kernelId?: unknown; tenantId?: unknown } | null | undefined;
+  let reader: JobReader | null = null;
   try {
-    jobId = jobIdOfRecord();
+    const store = getStore();
+    if (pre.as !== "admin") reader = jobReaderOf(pre.wallet, store.repos, store.db);
+    record = recordOf();
   } catch (error) {
     req.log.error({ err: error }, "job read gate: record read failed");
     return { ok: false, kind: "unavailable" };
   }
-  const gate = gateJobRead(req, jobId ?? "");
-  if (!jobId && gate.ok) return { ok: false, kind: "not_found" };
-  return gate;
+  const jobId = typeof record?.jobId === "string" && record.jobId !== "" ? record.jobId : undefined;
+  if (!jobId) return { ok: false, kind: "not_found" };
+  // Under TENANT_ENFORCE a record that carries its own tenant is refused on it before any job row is
+  // read (review r4 of #403, MEDIUM): a tenant-scoped admin's refusal then makes the same reads
+  // whether the record exists or not. The job row's tenant is still checked after (gateJobRead).
+  const tenant = tenantOpts(req as any);
+  if (tenant && record && Object.prototype.hasOwnProperty.call(record, "tenantId") && (record.tenantId ?? null) !== tenant.tenantId) {
+    return { ok: false, kind: "not_found" };
+  }
+  if (reader) {
+    const kernelId = typeof record?.kernelId === "string" ? record.kernelId : "";
+    if (!decideJobRead({ id: jobId, kernelId }, reader).allow) return { ok: false, kind: "not_found" };
+  }
+  return gateJobRead(req, jobId);
 }
 
 /**
@@ -216,6 +238,72 @@ export function jobReadScopeOf(req: FastifyRequest): JobReadScope {
 /** May a caller with this scope read the records of the job with this id? */
 export function scopeAllows(scope: Extract<JobReadScope, { ok: true }>, jobId: unknown): boolean {
   return scope.jobIds === null || (typeof jobId === "string" && scope.jobIds.has(jobId));
+}
+
+/**
+ * A record exactly as it will be sent (cross-family review r3 of #403, HIGH): its JSON text, and
+ * that text parsed back. Every filter here judges the parsed form, and every route sends that form
+ * (or that text), never the live object: a getter or a toJSON could make the two differ.
+ * Undefined when the record does not serialize; it is then not sent.
+ */
+export function asSent(record: unknown): { text: string; value: unknown } | undefined {
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(record);
+  } catch {
+    return undefined;
+  }
+  return text === undefined ? undefined : { text, value: JSON.parse(text) };
+}
+
+/** The records `keep` allows, each as it will be sent (asSent's parsed form). */
+export function keepAsSent(records: readonly unknown[], keep: (record: unknown) => boolean): unknown[] {
+  const out: unknown[] = [];
+  for (const record of records) {
+    const sent = asSent(record);
+    if (sent && keep(sent.value)) out.push(sent.value);
+  }
+  return out;
+}
+
+/**
+ * For a stream the caller was allowed to open (a job's, or a kernel's, device's or batch's), and
+ * for a kernel record's events: drops an event that names, at any depth, a job the caller may not
+ * read, or whose bindings are malformed (cross-family review r3 of #403, CRITICAL). The job rule is
+ * tenant-aware (jobReadScopeOf), so under TENANT_ENFORCE a kernel's stream carries only the jobs of
+ * the caller's tenant. An event naming no job is the topic's own. An admin without a tenant keeps
+ * every event. Judge the event as sent (asSent).
+ */
+export type StreamEventFilter =
+  | { ok: true; keep: (event: unknown) => boolean }
+  | { ok: false; kind: "unavailable" | "unauthenticated" | "identity_unverified" };
+
+export function streamEventFilterOf(req: FastifyRequest): StreamEventFilter {
+  const scope = jobReadScopeOf(req);
+  if (!scope.ok) return scope;
+  if (scope.jobIds === null) return { ok: true, keep: () => true };
+  return {
+    ok: true,
+    keep: (event) => {
+      const bound = recordBindingsOf(event);
+      return !bound.malformed && bound.jobs.every((jobId) => scopeAllows(scope, jobId));
+    },
+  };
+}
+
+/**
+ * Which job-bound parts of a kernel's record (its batches' slots) this caller may see (cross-family
+ * review r3 of #403, CRITICAL): the parts whose job it may read under the tenant-aware job rule.
+ * `all` is true only for an admin without a tenant, who sees every part.
+ */
+export type JobPartScope =
+  | { ok: true; all: boolean; keep: (jobId: unknown) => boolean }
+  | { ok: false; kind: "unavailable" | "unauthenticated" | "identity_unverified" };
+
+export function jobPartScopeOf(req: FastifyRequest): JobPartScope {
+  const scope = jobReadScopeOf(req);
+  if (!scope.ok) return scope;
+  return { ok: true, all: scope.jobIds === null, keep: (jobId) => scopeAllows(scope, jobId) };
 }
 
 /** Keys that bind a record to jobs or kernels, in any of the shapes producers use. */
