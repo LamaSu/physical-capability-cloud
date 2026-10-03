@@ -10,12 +10,21 @@ import logging
 import pytest
 
 
+# The serial number the test robot reports (tests/test_plr_dispatch.py's ROBOT).
+TEST_ROBOT_SERIAL = "OT2CEP20200217B03"
+
+
 @pytest.fixture(autouse=True)
-def _private_endpoint_locks(tmp_path, monkeypatch):
-    """Each test gets its own PCC_PLR_LOCK_DIR (R39 r4). A test's Server is
-    dropped without a shutdown, so its OT-2 endpoint lock would otherwise
-    outlive it and refuse the next test's init of the same endpoint."""
-    monkeypatch.setenv("PCC_PLR_LOCK_DIR", str(tmp_path / "plr-endpoint-locks"))
+def _private_robot_locks_and_one_test_robot(tmp_path, monkeypatch):
+    """Each test gets its own robot-lock namespace (R39 r4, r6). A test's Server
+    is dropped without a shutdown, so its OT-2 lock would otherwise outlive it
+    and refuse the next test's init of the same robot. And no test reaches the
+    network: every OT-2 address answers as one test robot unless the test
+    installs its own robots."""
+    from pcc_plr_sidecar import backend_loader
+
+    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(tmp_path / "robot-locks"))
+    monkeypatch.setattr(backend_loader, "_robot_serial", lambda host, port: TEST_ROBOT_SERIAL)
 
 
 @pytest.fixture(autouse=True)

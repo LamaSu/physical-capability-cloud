@@ -8,6 +8,7 @@ skips unless it is installed.
 """
 
 from __future__ import annotations
+import contextlib
 import json
 import os
 import subprocess
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from pcc_plr_sidecar.backend_loader import _robot_serial as real_robot_serial  # before conftest stubs it
 from pcc_plr_sidecar.backend_loader import checked_layout
 from pcc_plr_sidecar.dispatcher import RPC_ERROR_CODES
 from pcc_plr_sidecar.server import Server
@@ -95,6 +97,27 @@ async def init(server: Server, out: Out, **config) -> dict:
 def _server():
     out = Out()
     return Server(stdout=out), out
+
+
+# The OT-2 every test address reaches unless a test installs its own robots
+# (conftest.py answers with it); an ot2 device names it as its robotSerial.
+ROBOT = "OT2CEP20200217B03"
+
+
+def _robots(monkeypatch, serial_by_host):
+    """The robots on the test network: the serial each locator's robot-server reports."""
+    from pcc_plr_sidecar import backend_loader
+
+    asked = []
+
+    def robot_serial(host, port):
+        asked.append((host, port))
+        if host not in serial_by_host:
+            raise ValueError(f"no OT-2 answered at {host}:{port}")
+        return serial_by_host[host]
+
+    monkeypatch.setattr(backend_loader, "_robot_serial", robot_serial, raising=False)
+    return asked
 
 
 # ── deck loading ─────────────────────────────────────────────────────────────
@@ -460,25 +483,23 @@ async def test_shutdown_during_setup_waits_and_no_second_machine_is_built(fake_p
 
 
 @pytest.mark.parametrize("second_url", ["10.0.0.5", "http://10.0.0.5:31950"])
-async def test_two_device_ids_cannot_bind_one_ot2_endpoint(fake_plr, tmp_path, monkeypatch, second_url):
-    # R39 r4 (CRIT2): exclusivity is the physical endpoint, not the caller's deviceId.
-    monkeypatch.setenv("PCC_PLR_LOCK_DIR", str(tmp_path / "locks"))
+async def test_two_device_ids_cannot_bind_one_ot2_endpoint(fake_plr, second_url):
+    # R39 r4 (CRIT2): exclusivity is the physical robot, not the caller's deviceId.
     s, out = _server()
     a = await call(s, out, "backend.init", {"deviceId": "ot-a", "plrBackend": "ot2", "backendConfig": {
-        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}}, "80")
+        "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}}, "80")
     assert "error" not in a, a
     b = await call(s, out, "backend.init", {"deviceId": "ot-b", "plrBackend": "ot2", "backendConfig": {
-        "ot2Url": second_url, "deckLayout": dict(DECK, type="OTDeck")}}, "81")
+        "ot2Url": second_url, "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}}, "81")
     assert b.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], b
 
 
-async def test_two_sidecars_cannot_drive_one_ot2_until_the_first_lets_go(fake_plr, tmp_path, monkeypatch):
+async def test_two_sidecars_cannot_drive_one_ot2_until_the_first_lets_go(fake_plr):
     # R39 r4 (CRIT2): two sidecars (two Servers, each its own loader) on one host share an OS lock
-    # per OT-2 endpoint.
-    monkeypatch.setenv("PCC_PLR_LOCK_DIR", str(tmp_path / "locks"))
+    # per robot.
     s1, out1 = _server()
     s2, out2 = _server()
-    cfg = {"ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}
+    cfg = {"ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}
     a = await call(s1, out1, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "82")
     assert "error" not in a, a
     b = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "83")
@@ -521,7 +542,7 @@ async def test_stop_recording_never_closes_another_jobs_window(fake_plr):
 async def test_every_accepted_ot2_address_spelling_is_one_locked_endpoint(fake_plr, first, second):
     # R39 r5 (CRIT2): _create_ot2 accepts ot2Url, host and url; the endpoint lock must too.
     s, out = _server()
-    deck = {"deckLayout": dict(DECK, type="OTDeck")}
+    deck = {"robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}
     a = await call(s, out, "backend.init", {"deviceId": "ot-a", "plrBackend": "ot2", "backendConfig": {**first, **deck}}, "86")
     assert "error" not in a, a
     b = await call(s, out, "backend.init", {"deviceId": "ot-b", "plrBackend": "ot2", "backendConfig": {**second, **deck}}, "87")
@@ -531,11 +552,304 @@ async def test_every_accepted_ot2_address_spelling_is_one_locked_endpoint(fake_p
 async def test_two_sidecars_cannot_drive_one_ot2_named_by_host(fake_plr):
     s1, out1 = _server()
     s2, out2 = _server()
-    cfg = {"host": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}
+    cfg = {"host": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}
     a = await call(s1, out1, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "88")
     assert "error" not in a, a
     b = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "89")
     assert b.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], b
+
+
+# ── R39 r6 (CRIT2): the lock is the robot itself, not a spelling or a directory ──
+
+@pytest.mark.parametrize("knob", ["PCC_PLR_LOCK_DIR", "tempdir"])
+async def test_two_sidecars_configured_with_different_lock_dirs_share_one_robots_lock(fake_plr, tmp_path, monkeypatch, knob):
+    # R39 r6 (CRIT2): no sidecar setting can split the lock namespace for one robot.
+    import tempfile
+
+    _robots(monkeypatch, {"10.0.0.5": ROBOT})
+    cfg = {"ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}
+
+    def configure(side):
+        if knob == "PCC_PLR_LOCK_DIR":
+            monkeypatch.setenv("PCC_PLR_LOCK_DIR", str(tmp_path / f"locks-{side}"))
+        else:
+            monkeypatch.delenv("PCC_PLR_LOCK_DIR", raising=False)
+            (tmp_path / f"tmp-{side}").mkdir(exist_ok=True)
+            monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / f"tmp-{side}"))
+
+    s1, out1 = _server()
+    configure("a")
+    a = await call(s1, out1, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "100")
+    assert "error" not in a, a
+    s2, out2 = _server()
+    configure("b")
+    b = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "101")
+    assert b.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], b
+
+
+@pytest.mark.parametrize("first_host,second_host", [("ot2.local", "10.0.0.5"), ("10.0.0.5", "169.254.10.20")])
+async def test_two_locators_of_one_robot_are_one_lock(fake_plr, monkeypatch, first_host, second_host):
+    # R39 r6 (CRIT2): a hostname and its IP, or the robot's Wi-Fi and USB addresses, reach one
+    # robot, so they are one lock, in one sidecar or two.
+    _robots(monkeypatch, {first_host: ROBOT, second_host: ROBOT})
+    deck = dict(DECK, type="OTDeck")
+    s1, out1 = _server()
+    s2, out2 = _server()
+    a = await call(s1, out1, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "host": first_host, "robotSerial": ROBOT, "deckLayout": deck}}, "102")
+    assert "error" not in a, a
+    b = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "host": second_host, "robotSerial": ROBOT, "deckLayout": deck}}, "103")
+    assert b.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], b
+    c = await call(s1, out1, "backend.init", {"deviceId": "ot-2", "plrBackend": "ot2", "backendConfig": {
+        "host": second_host, "robotSerial": ROBOT, "deckLayout": deck}}, "104")
+    assert c.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], c
+
+
+async def test_an_ot2_device_must_name_its_robot(fake_plr, monkeypatch):
+    # R39 r6: no robotSerial, or a malformed one, is refused before any lock, question or build.
+    asked = _robots(monkeypatch, {"10.0.0.5": ROBOT})
+    deck = dict(DECK, type="OTDeck")
+    for bad in (None, "", " " + ROBOT, "OT2/../x", "x" * 65, 17):
+        s, out = _server()
+        cfg = {"ot2Url": "10.0.0.5", "deckLayout": deck}
+        if bad is not None:
+            cfg["robotSerial"] = bad
+        resp = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "110")
+        assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+        assert "robotSerial" in resp["error"]["message"]
+        assert not s.loader.has("ot")
+    assert asked == [] and _deserialized(fake_plr) == []
+    s, out = _server()  # and nothing was left locked
+    ok = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": deck}}, "111")
+    assert "error" not in ok, ok
+    assert ok["result"]["metadata"]["robotSerial"] == ROBOT
+    assert asked == [("10.0.0.5", 31950)]
+
+
+async def test_the_robot_at_the_address_must_be_the_configured_robot(fake_plr, monkeypatch):
+    # R39 r6: a device configured with another serial for this robot gets its own lock name, but the
+    # robot's own answer refuses it, so two configurations of one robot never both drive it.
+    _robots(monkeypatch, {"10.0.0.5": ROBOT})
+    deck = dict(DECK, type="OTDeck")
+    other = {"host": "10.0.0.5", "robotSerial": "OT2CEM20210907A09", "deckLayout": deck}
+    s1, out1 = _server()
+    wrong = await call(s1, out1, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": other}, "112")
+    assert wrong["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], wrong
+    assert "reports serial number 'OT2CEP20200217B03'" in wrong["error"]["message"]
+    assert not s1.loader.has("ot") and _deserialized(fake_plr) == []
+    s2, out2 = _server()
+    right = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "host": "10.0.0.5", "robotSerial": ROBOT.lower(), "deckLayout": deck}}, "113")
+    assert "error" not in right, right  # serials compare case-insensitively...
+    again = await call(s1, out1, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": other}, "114")
+    assert again["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], again
+    same = await call(s1, out1, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": deck}}, "115")
+    assert same["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], same  # ...and lock as one robot
+
+
+@pytest.mark.parametrize("failure", ["unreachable", "slow"])
+async def test_a_robot_that_cannot_confirm_its_serial_is_never_driven(fake_plr, monkeypatch, failure):
+    import time
+
+    from pcc_plr_sidecar import backend_loader
+
+    if failure == "unreachable":
+        _robots(monkeypatch, {})
+    else:
+        monkeypatch.setattr(backend_loader, "ROBOT_IDENTITY_DEADLINE_S", 0.2)
+        monkeypatch.setattr(backend_loader, "_robot_serial", lambda host, port: (time.sleep(1.0), ROBOT)[1])
+    cfg = {"ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}
+    s, out = _server()
+    started = time.monotonic()
+    resp = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "116")
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert time.monotonic() - started < 0.9
+    assert not s.loader.has("ot") and _deserialized(fake_plr) == []
+    _robots(monkeypatch, {"10.0.0.5": ROBOT})  # its lock was released
+    s2, out2 = _server()
+    ok = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "117")
+    assert "error" not in ok, ok
+
+
+# The lock namespace is the host's, and it is checked before it is trusted.
+
+def test_the_lock_namespace_refuses_a_symlink_in_its_place(tmp_path, monkeypatch):
+    from pcc_plr_sidecar import backend_loader
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "ns").symlink_to(elsewhere)
+    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(tmp_path / "ns"))
+    with pytest.raises(backend_loader.DeviceBusy, match="unusable"):
+        backend_loader.EndpointLock.acquire("ot2-serial:x")
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_lock_namespace_others_can_write_must_be_sticky(tmp_path, monkeypatch):
+    from pcc_plr_sidecar import backend_loader
+
+    ns = tmp_path / "ns"
+    ns.mkdir()
+    os.chmod(ns, 0o777)
+    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(ns))
+    real_euid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_euid + 1)  # as if another user created it
+    with pytest.raises(backend_loader.DeviceBusy, match="not sticky"):
+        backend_loader.EndpointLock.acquire("ot2-serial:x")
+    assert list(ns.iterdir()) == []
+
+
+def test_our_lock_namespace_and_lock_files_are_shared_by_every_sidecar_user(tmp_path, monkeypatch):
+    from pcc_plr_sidecar import backend_loader
+
+    ns = tmp_path / "ns"
+    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(ns))
+    old_umask = os.umask(0o077)
+    try:
+        lock = backend_loader.EndpointLock.acquire("ot2-serial:x")
+    finally:
+        os.umask(old_umask)
+    try:
+        import stat as st
+
+        assert st.S_IMODE(ns.stat().st_mode) == 0o1777
+        assert st.S_IMODE((ns / backend_loader._lock_file_name("ot2-serial:x")).stat().st_mode) == 0o644
+    finally:
+        lock.release()
+
+
+def test_a_lock_file_that_is_not_a_regular_file_is_refused_without_hanging(tmp_path, monkeypatch):
+    import threading
+
+    from pcc_plr_sidecar import backend_loader
+
+    ns = tmp_path / "ns"
+    ns.mkdir()
+    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(ns))
+    key = "ot2-serial:x"
+    lock_path = ns / backend_loader._lock_file_name(key)
+    os.mkfifo(lock_path)
+    outcome: list = []
+
+    def acquire():
+        try:
+            backend_loader.EndpointLock.acquire(key)
+            outcome.append("acquired")
+        except backend_loader.DeviceBusy as e:
+            outcome.append(str(e))
+
+    worker = threading.Thread(target=acquire, daemon=True)
+    worker.start()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive(), "opening a FIFO lock file blocked"
+    assert "not a regular file" in outcome[0], outcome
+    lock_path.unlink()
+    lock_path.symlink_to(tmp_path / "target")
+    with pytest.raises(backend_loader.DeviceBusy, match="cannot lock"):
+        backend_loader.EndpointLock.acquire(key)
+    assert not (tmp_path / "target").exists()
+
+
+# The identity check itself (the real _robot_serial, over HTTP on 127.0.0.1).
+
+@contextlib.contextmanager
+def _robot_server(routes):
+    """An HTTP server on 127.0.0.1 answering routes {path: (status, headers, body)}; it records
+    each request's path and headers."""
+    import http.server
+    import threading
+
+    seen: list = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            seen.append((self.path, dict(self.headers)))
+            status, headers, body = routes.get(self.path, (404, {}, b"{}"))
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1], seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _health(**fields) -> tuple:
+    return (200, {"Content-Type": "application/json"}, json.dumps(fields).encode())
+
+
+def test_the_identity_check_reads_the_robot_servers_serial():
+    with _robot_server({"/health": _health(name="ot2", robot_serial=ROBOT)}) as (port, seen):
+        assert real_robot_serial("127.0.0.1", port) == ROBOT
+    assert [path for path, _ in seen] == ["/health"]
+    assert seen[0][1].get("Opentrons-Version") == "*"
+
+
+def test_the_identity_check_falls_back_to_the_update_servers_serial():
+    routes = {"/health": _health(robot_serial=None), "/server/update/health": _health(serialNumber=ROBOT)}
+    with _robot_server(routes) as (port, seen):
+        assert real_robot_serial("127.0.0.1", port) == ROBOT
+    assert [path for path, _ in seen] == ["/health", "/server/update/health"]
+
+
+@pytest.mark.parametrize("routes, why", [
+    ({"/health": _health(robot_serial=None), "/server/update/health": _health()}, "reports no serial"),
+    ({"/health": _health(robot_serial=None)}, "HTTP 404"),
+    ({"/health": _health(robot_serial="OT2 CEP")}, "malformed"),
+    ({"/health": _health(robot_serial=17)}, "malformed"),
+    ({"/health": (200, {}, b"[]")}, "JSON object"),
+    ({"/health": (200, {}, b"not json")}, "did not answer JSON"),
+    ({"/health": (200, {}, b"{" + b" " * 70_000 + b"}")}, "more than"),
+    ({"/health": (500, {}, b"{}")}, "HTTP 500"),
+    ({"/health": (302, {"Location": "/elsewhere"}, b"")}, "HTTP 302"),
+])
+def test_the_identity_check_refuses_anything_but_one_well_formed_serial(routes, why):
+    routes = dict(routes, **{"/elsewhere": _health(robot_serial=ROBOT)})
+    with _robot_server(routes) as (port, seen):
+        with pytest.raises(ValueError, match=why):
+            real_robot_serial("127.0.0.1", port)
+    assert "/elsewhere" not in [path for path, _ in seen]  # a redirect is never followed
+
+
+def test_the_identity_check_never_goes_through_a_proxy(monkeypatch):
+    with _robot_server({}) as (proxy_port, proxy_seen):
+        for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            monkeypatch.setenv(name, f"http://127.0.0.1:{proxy_port}")
+        for name in ("no_proxy", "NO_PROXY"):
+            monkeypatch.delenv(name, raising=False)
+        with _robot_server({"/health": _health(robot_serial=ROBOT)}) as (port, seen):
+            assert real_robot_serial("127.0.0.1", port) == ROBOT
+        assert proxy_seen == [] and [path for path, _ in seen] == ["/health"]
+
+
+def test_the_identity_check_gives_up_on_a_robot_that_never_answers(monkeypatch):
+    import socket
+
+    from pcc_plr_sidecar import backend_loader
+
+    monkeypatch.setattr(backend_loader, "ROBOT_IDENTITY_TIMEOUT_S", 0.3)
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(1)
+    try:
+        with pytest.raises(ValueError, match="failed"):
+            real_robot_serial("127.0.0.1", silent.getsockname()[1])
+    finally:
+        silent.close()
 
 
 async def test_no_job_can_close_or_restart_the_window_while_a_run_holds_the_lease(fake_plr):
@@ -726,7 +1040,7 @@ async def test_every_result_and_event_says_how_the_ops_were_executed(fake_plr):
 
     s, out = _server()
     await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
-        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}})
+        "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}})
     await call(s, out, "evidence.startRecording", {"deviceId": "ot", "jobId": "j"}, "3b")
     run = await call(s, out, "backend.run", {
         "deviceId": "ot", "jobId": "j", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]]}, "4")
@@ -844,7 +1158,7 @@ async def test_a_function_bearing_layout_on_ot2_is_refused(fake_plr):
         "type": "function", "code": "e30=", "name": "evil"}), DECK["children"][2]])
     s, out = _server()
     resp = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
-        "ot2Url": "10.0.0.5", "deckLayout": layout}})
+        "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": layout}})
     assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
     # the declared layout is never mutated and then initialized: no deserialize call at all.
     assert _deserialized(fake_plr) == []
@@ -1080,7 +1394,7 @@ async def test_tracking_can_be_switched_off_on_the_simulator_but_not_on_hardware
     for tracking in ({"tips": False}, {"volume": False}):
         s, out = _server()
         hw = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
-            "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck"), "tracking": tracking}})
+            "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck"), "tracking": tracking}})
         assert hw["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], hw
     for bad in ({"tips": "yes"}, {"speed": True}, ["tips"]):
         s, out = _server()
@@ -1095,7 +1409,7 @@ async def test_loading_a_simulator_cannot_weaken_tracking_while_hardware_is_load
 
     s, out = _server()
     await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
-        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}})
+        "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}})
     assert TRACKING == {"tips": True, "volume": True}
 
     weakened = await call(s, out, "backend.init", {"deviceId": "lh1", "plrBackend": "chatterbox", "backendConfig": {
@@ -1116,7 +1430,7 @@ async def test_an_ot2_run_reasserts_tracking_even_if_something_flipped_it(fake_p
 
     s, out = _server()
     await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
-        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}})
+        "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}})
     # Something flipped the global switch between runs (a race, a bug, a future
     # code path -- CRIT3 doesn't need to know what).
     set_volume_tracking(False)
@@ -1134,7 +1448,7 @@ async def test_an_ot2_run_refuses_if_tracking_cannot_be_verified(fake_plr, monke
 
     s, out = _server()
     await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
-        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}})
+        "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}})
     monkeypatch.setattr(plr_resources, "does_volume_tracking", lambda: False)
     run = await call(s, out, "backend.run", {
         "deviceId": "ot", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
@@ -1166,7 +1480,7 @@ async def test_initial_liquids_declare_what_the_operator_loaded(fake_plr):
 async def test_ot2_uses_opentrons_ot2_backend_with_host_and_port(fake_plr, url, host, port):
     s, out = _server()
     ot_deck = dict(DECK, type="OTDeck")
-    resp = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {"ot2Url": url, "deckLayout": ot_deck}})
+    resp = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {"ot2Url": url, "robotSerial": ROBOT, "deckLayout": ot_deck}})
     assert "error" not in resp, resp
     backend = s.loader.get("ot").machine.backend
     assert type(backend).__name__ == "OpentronsOT2Backend"
@@ -1175,10 +1489,10 @@ async def test_ot2_uses_opentrons_ot2_backend_with_host_and_port(fake_plr, url, 
 
 async def test_ot2_needs_a_url_and_an_ot_deck(fake_plr):
     s, out = _server()
-    no_url = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {"deckLayout": dict(DECK, type="OTDeck")}})
+    no_url = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {"robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}})
     assert no_url["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"]
     s, out = _server()
-    plain = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {"ot2Url": "10.0.0.5", "deckLayout": DECK}})
+    plain = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {"ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": DECK}})
     assert plain["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"]
     assert "expected OTDeck" in plain["error"]["message"]
 

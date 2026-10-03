@@ -68,6 +68,7 @@ Register a PLR-driven device via your `KERNEL_CONFIG`:
         "plrBackend": "ot2",
         "backendConfig": {
           "ot2Url": "http://192.168.1.50:31950",
+          "robotSerial": "OT2CEP20200217B03",
           "deckLayoutPath": "ot2-dilution.json",
           "initialLiquids": { "src": { "A1": 1500 } }
         },
@@ -97,7 +98,7 @@ Per-device overrides via `config.pythonPath`, `config.rpcTimeoutMs`,
 | Backend       | Config keys                          | Notes |
 |---------------|--------------------------------------|-------|
 | `chatterbox`  | `deckLayout` or `deckLayoutPath` (required), `numChannels?` (1–96), `maxVolumeUL?`, `initialLiquids?`, `tracking?` | PLR's `LiquidHandlerChatterboxBackend`: an in-memory digital twin of the declared deck. Dry-run only: `executionMode: "simulated"`, and its evidence is marked `mock: true`. |
-| `ot2`         | `ot2Url`, `deckLayout` or `deckLayoutPath` (an `OTDeck`, required), `maxVolumeUL?`, `initialLiquids?` | Opentrons OT-2 via PLR's `OpentronsOT2Backend(host, port)`: `executionMode: "unverified"` — the backend name alone never proves physical execution (R39 CRIT1); no hardware-identity provenance check exists yet (D1, queue item 19), so `ot2` evidence stays marked `mock: true` too, same as a simulator. Requires the `[ot2]` extra (PLR's own `opentrons` extra). Tip and volume tracking are always on. |
+| `ot2`         | `ot2Url`, `robotSerial`, `deckLayout` or `deckLayoutPath` (an `OTDeck`, required), `maxVolumeUL?`, `initialLiquids?` | Opentrons OT-2 via PLR's `OpentronsOT2Backend(host, port)`. `robotSerial` is the robot's serial number, as its robot-server reports it (`GET http://<robot>:31950/health`, `robot_serial`). Before anything is built, the sidecar takes this host's lock for that serial (in `/run/lock/pcc-plr-robots` on Linux, `/tmp/pcc-plr-robots` elsewhere; no setting moves it), and the robot at `ot2Url` must report that very serial. So no two devices or sidecars on a host drive one robot, whatever address, alias or interface each uses (R39 r6). A host where that directory can't be used refuses to drive hardware. `executionMode: "unverified"` — the backend name alone never proves physical execution (R39 CRIT1); no hardware-identity provenance check exists yet (D1, queue item 19), so `ot2` evidence stays marked `mock: true` too, same as a simulator. Requires the `[ot2]` extra (PLR's own `opentrons` extra). Tip and volume tracking are always on. |
 | `stub`        | (none)                               | Pure-stdlib test backend, used only when `plrBackend` is `"stub"`; nothing falls back to it. `executionMode: "stub"`, evidence marked `mock: true`. |
 
 Phase 2 extends with `flex`, `star`, `vantage`, `evo`, `hamilton-hhs`, `inheco-thermoshake`. Phase 3 adds `clariostar`, `cytation5`, `inheco-odtc`, `vspin`. Phase 4 adds `cytomat-2`, `cytomat-6`, `liconic-stx`.
@@ -113,6 +114,7 @@ const adapter = new PyLabRobotAdapter({
   plrBackend: "ot2",
   backendConfig: {
     ot2Url: "http://192.168.1.50:31950",
+    robotSerial: "OT2CEP20200217B03", // the robot's own serial: the sidecar checks and locks it
     deckLayoutPath: "/etc/pcc/decks/ot2-dilution.json", // a serialized PLR OTDeck
   },
   sidecarConfig: {

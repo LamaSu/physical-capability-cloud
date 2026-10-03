@@ -24,7 +24,7 @@
  *       "plrBackend": "ot2",
  *       "backendConfig": {
  *         "ot2Url": "http://192.168.1.50:31950",
- *         "ot2ApiKey": "..."
+ *         "robotSerial": "OT2CEP20200217B03"
  *       },
  *       "pythonPath": "auto"
  *     },

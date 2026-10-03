@@ -40,6 +40,12 @@ be switched off explicitly with ``backendConfig.tracking``; on hardware it can't
 Each backend is loaded lazily via inline imports so an operator can install
 just the extras they need (``pip install pcc-plr-sidecar[ot2]``).
 
+An ``ot2`` device names the robot it drives by ``backendConfig.robotSerial``
+(operator-provisioned). Before anything is built, the sidecar takes the host's
+lock for that serial and the robot at the configured address must report that
+very serial, so no two devices or sidecars on a host can drive one robot,
+whatever address spelling, alias or interface each uses (R39 r6).
+
 A small ``stub`` backend exists for tests. It is used only when ``plrBackend``
 is ``"stub"``, never as a fallback, and every result it gives says
 ``executionMode: "stub"``.
@@ -48,12 +54,16 @@ is ``"stub"``, never as a fallback, and every result it gives says
 from __future__ import annotations
 import asyncio
 import hashlib
+import http.client
 import json
 import logging
 import math
 import os
+import re
 import stat
-import tempfile
+import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -185,48 +195,217 @@ def _ot2_address(config: dict[str, Any]) -> tuple[str, int]:
     return _parse_ot2_url(ot2_url)
 
 
-def _hardware_endpoint(plr_backend: str, config: dict[str, Any]) -> Optional[str]:
-    """The physical endpoint a hardware-capable backend drives, normalized, or
-    None for a simulator or the stub. Every spelling of one OT-2 is one endpoint.
-    Raises ValueError, as _create_ot2 would, when the config names no OT-2."""
+# ── R39 r6: the lock is the robot itself ────────────────────────────────────
+# A network locator is only a spelling: a hostname and its IP, or the OT-2's
+# Wi-Fi and USB addresses, reach one robot. So an OT-2 device must name the
+# robot it drives by its serial number (``backendConfig.robotSerial``,
+# operator-provisioned), the lock is keyed by that serial, and before anything
+# is built the robot at the locator must report that very serial. A device
+# configured with another serial for the same robot is refused by the robot's
+# own answer, so every configuration of one robot meets at one lock.
+
+ROBOT_SERIAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+ROBOT_IDENTITY_TIMEOUT_S = 5.0  # each socket operation of the identity check
+ROBOT_IDENTITY_DEADLINE_S = 10.0  # the whole identity check
+ROBOT_IDENTITY_MAX_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class RobotIdentity:
+    """The physical robot an OT-2 device drives: its operator-provisioned serial,
+    and where it is reached."""
+
+    serial: str
+    host: str
+    port: int
+
+    @property
+    def lock_key(self) -> str:
+        return f"ot2-serial:{self.serial.casefold()}"
+
+
+def _hardware_identity(plr_backend: str, config: dict[str, Any]) -> Optional[RobotIdentity]:
+    """The robot a hardware-capable backend drives, or None for a simulator or
+    the stub. Raises ValueError, before anything is locked, asked or built, when
+    the config names no OT-2 or no valid ``robotSerial``."""
     if plr_backend.strip().lower() != "ot2":
         return None
     host, port = _ot2_address(config)
-    return f"ot2://{host.lower()}:{port}"
+    serial = config.get("robotSerial")
+    if not isinstance(serial, str) or not ROBOT_SERIAL_RE.fullmatch(serial):
+        raise ValueError(
+            "OT-2 backendConfig must include 'robotSerial': the serial number of the robot this "
+            "device drives, as its robot-server reports it (GET http://<robot>:31950/health, "
+            "robot_serial)",
+        )
+    return RobotIdentity(serial=serial, host=host, port=port)
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect could hand the identity question to another machine: refuse it
+    (urllib then raises HTTPError for the 3xx itself)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def _robot_json(opener: urllib.request.OpenerDirector, url: str) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"Opentrons-Version": "*", "Accept": "application/json"})
+    try:
+        with opener.open(request, timeout=ROBOT_IDENTITY_TIMEOUT_S) as response:
+            raw = response.read(ROBOT_IDENTITY_MAX_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"the OT-2 identity check at {url} answered HTTP {e.code}") from e
+    except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, resets
+        raise ValueError(f"the OT-2 identity check at {url} failed ({type(e).__name__})") from e
+    if len(raw) > ROBOT_IDENTITY_MAX_BYTES:
+        raise ValueError(f"the OT-2 identity check at {url} answered more than {ROBOT_IDENTITY_MAX_BYTES} bytes")
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except ValueError as e:  # bad UTF-8 or bad JSON
+        raise ValueError(f"the OT-2 identity check at {url} did not answer JSON") from e
+    if not isinstance(body, dict):
+        raise ValueError(f"the OT-2 identity check at {url} did not answer a JSON object")
+    return body
+
+
+def _robot_serial(host: str, port: int) -> str:
+    """The serial number the OT-2 at ``host:port`` reports about itself (blocking).
+
+    The robot-server's ``GET /health`` carries ``robot_serial``; where that is
+    null, its update server's ``GET /server/update/health`` carries
+    ``serialNumber`` (the robot-server's documented fallback). One direct
+    request per endpoint: no proxy from the environment, no redirect, bounded
+    time and size. Any failure, or no well-formed serial, raises ValueError.
+    """
+    netloc = f"[{host}]" if ":" in host else host
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRedirects())
+    for path, field_name in (("/health", "robot_serial"), ("/server/update/health", "serialNumber")):
+        reported = _robot_json(opener, f"http://{netloc}:{port}{path}").get(field_name)
+        if reported is None:
+            continue
+        if not isinstance(reported, str) or not ROBOT_SERIAL_RE.fullmatch(reported):
+            raise ValueError(f"the OT-2 at {host}:{port} reports a malformed serial number; refusing to drive it")
+        return reported
+    raise ValueError(f"the OT-2 at {host}:{port} reports no serial number; refusing to drive it")
+
+
+async def _confirm_robot(identity: RobotIdentity) -> str:
+    """The robot at the configured locator must be the configured robot."""
+    try:
+        reported = await asyncio.wait_for(
+            asyncio.to_thread(_robot_serial, identity.host, identity.port), ROBOT_IDENTITY_DEADLINE_S,
+        )
+    except asyncio.TimeoutError as e:
+        raise ValueError(
+            f"the OT-2 at {identity.host}:{identity.port} did not report its serial number within "
+            f"{ROBOT_IDENTITY_DEADLINE_S:g} s; refusing to drive it",
+        ) from e
+    if reported.casefold() != identity.serial.casefold():
+        raise ValueError(
+            f"the OT-2 at {identity.host}:{identity.port} reports serial number {reported!r}, not the "
+            f"configured robotSerial {identity.serial!r}; refusing to drive it",
+        )
+    return reported
+
+
+# R39 r6: ONE lock namespace per host. No environment variable or temp-dir
+# setting can move it, so two sidecars on a host can never hold two locks on
+# one robot. Linux uses its lock directory, /run/lock (the FHS /var/lock): one
+# tmpfs shared by every process on the host, outside systemd's PrivateTmp, and
+# sticky world-writable (1777) on Debian and Ubuntu. Other POSIX systems use
+# /tmp. A host where it can't be used refuses to drive hardware.
+_LOCK_NAMESPACE = "/run/lock/pcc-plr-robots" if sys.platform.startswith("linux") else "/tmp/pcc-plr-robots"
+
+
+def _lock_file_name(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] + ".lock"
+
+
+def _open_lock_namespace(path: str) -> int:
+    """Open (creating if needed) the host's lock directory, returning its fd.
+
+    It is shared by every sidecar user on the host (1777: sticky, so no one can
+    remove or replace another's lock file). A symlink in its place, or a
+    directory others may write to without the sticky bit, is refused.
+    """
+    parent, leaf = os.path.split(path)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        dir_fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+    try:
+        info = os.fstat(dir_fd)
+        if info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) != 0o1777:
+            os.fchmod(dir_fd, 0o1777)
+            info = os.fstat(dir_fd)
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError(f"{path} is not a directory")
+        if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+            raise OSError(f"{path} is writable by others but not sticky")
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
 
 
 class EndpointLock:
-    """An exclusive OS lock on one physical endpoint, held for a handle's life
-    (R39 r4). ``flock`` locks belong to an open file description, so a second
-    device id in this sidecar, or a second sidecar on this host, cannot take it
-    while it is held, and a crashed process releases it with its fds. The lock
-    files live in ``PCC_PLR_LOCK_DIR`` (default: a private directory under the
-    system temp directory). Two hosts driving one robot are outside it: the
-    robot-server's own single current run is the guard there."""
+    """An exclusive OS lock on one physical robot, held for a handle's life
+    (R39 r4; keyed by the robot's serial since r6). ``flock`` locks belong to an
+    open file description, so a second device id in this sidecar, or any other
+    sidecar on this host, cannot take it while it is held, and a crashed
+    process releases it with its fds. Lock files live in the host's one lock
+    namespace (``_LOCK_NAMESPACE``) and are never deleted, so a lock is always
+    one inode. Two hosts driving one robot are outside it: the robot-server's
+    own single current run is the guard there."""
 
-    def __init__(self, fd: int, endpoint: str) -> None:
+    def __init__(self, fd: int, key: str) -> None:
         self._fd: Optional[int] = fd
-        self.endpoint = endpoint
+        self.key = key
 
     @classmethod
-    def acquire(cls, endpoint: str) -> "EndpointLock":
+    def acquire(cls, key: str) -> "EndpointLock":
         try:
             import fcntl
         except ImportError as e:  # Windows: no flock -> refuse to drive hardware
-            raise DeviceBusy(f"this platform cannot lock {endpoint}; refusing to drive it") from e
-        root = os.environ.get("PCC_PLR_LOCK_DIR") or os.path.join(tempfile.gettempdir(), "pcc-plr-endpoint-locks")
-        name = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:32] + ".lock"
+            raise DeviceBusy(f"this platform cannot lock {key}; refusing to drive it") from e
         try:
-            os.makedirs(root, mode=0o700, exist_ok=True)
-            fd = os.open(os.path.join(root, name), os.O_RDWR | os.O_CREAT, 0o600)
+            dir_fd = _open_lock_namespace(_LOCK_NAMESPACE)
+        except (OSError, NotImplementedError) as e:
+            raise DeviceBusy(
+                f"the host lock directory {_LOCK_NAMESPACE} is unusable ({e}); refusing to drive hardware",
+            ) from e
+        try:
+            # O_RDONLY is enough for flock, and lets every sidecar user open a
+            # lock file another user created; O_NONBLOCK so a FIFO planted in its
+            # place can't hang the open.
+            fd = os.open(
+                _lock_file_name(key), os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644,
+                dir_fd=dir_fd,
+            )
         except OSError as e:
-            raise DeviceBusy(f"cannot lock {endpoint} ({e.strerror}); refusing to drive it") from e
+            raise DeviceBusy(f"cannot lock {key} ({e.strerror}); refusing to drive it") from e
+        finally:
+            os.close(dir_fd)
         try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise DeviceBusy(f"the lock file for {key} is not a regular file; refusing to drive it")
+            if info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) != 0o644:
+                os.fchmod(fd, 0o644)  # readable by every sidecar user, whatever the umask
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except DeviceBusy:
+            os.close(fd)
+            raise
         except OSError as e:
             os.close(fd)
-            raise DeviceBusy(f"{endpoint} is already driven by another device or sidecar") from e
-        return cls(fd, endpoint)
+            raise DeviceBusy(f"{key} is already driven by another device or sidecar") from e
+        return cls(fd, key)
 
     def release(self) -> None:
         if self._fd is None:
@@ -296,7 +475,7 @@ class BackendLoader:
     ) -> tuple[BackendHandle, bool]:
         """Never two machines for one device: a load while that device is being
         built, or while its shutdown waits for a run, is refused (R39 r3 review);
-        and never two handles for one physical endpoint (R39 r4)."""
+        and never two handles for one physical robot (R39 r4, r6)."""
         if device_id in self._loading:
             raise DeviceBusy(f"deviceId {device_id} is being loaded")
         if device_id in self._handles:
@@ -315,15 +494,21 @@ class BackendLoader:
         # R39 CRIT3: does any OTHER handle already in this process make tracking
         # hardware-sensitive? If so, this load may not weaken it.
         other_hardware_loaded = any(h.hardware_capable for h in self._handles.values())
-        endpoint = _hardware_endpoint(plr_backend, backend_config)
+        identity = _hardware_identity(plr_backend, backend_config)
         self._loading.add(device_id)
         lock: Optional[EndpointLock] = None
         try:
-            # R39 r4: the physical endpoint first, before anything is built for it.
-            lock = EndpointLock.acquire(endpoint) if endpoint else None
+            robot_serial: Optional[str] = None
+            if identity is not None:
+                # R39 r4/r6: the robot first, before anything is built for it:
+                # its lock, then its own confirmation that it is that robot.
+                lock = EndpointLock.acquire(identity.lock_key)
+                robot_serial = await _confirm_robot(identity)
             machine, metadata, hardware_capable = await _create_machine(
                 plr_backend, backend_config, other_hardware_loaded,
             )
+            if robot_serial is not None:
+                metadata = {**metadata, "robotSerial": robot_serial}
         except BaseException:
             if lock is not None:
                 lock.release()
@@ -838,8 +1023,9 @@ def _parse_ot2_url(url: str) -> tuple[str, int]:
 async def _create_ot2(config: dict[str, Any], other_hardware_loaded: bool) -> tuple[Any, dict[str, Any]]:
     """Opentrons OT-2 via PLR's ``OpentronsOT2Backend(host, port)``.
 
-    Requires ``ot2Url`` (for example ``http://192.168.1.50:31950``) and a
-    declared ``OTDeck`` layout. ``OpentronsBackend`` does not exist in
+    Requires ``ot2Url`` (for example ``http://192.168.1.50:31950``), the
+    robot's ``robotSerial`` (checked and locked by ``BackendLoader`` before this
+    runs) and a declared ``OTDeck`` layout. ``OpentronsBackend`` does not exist in
     pylabrobot 0.2.2, and the backend takes no API key.
     """
     from pylabrobot.liquid_handling import LiquidHandler
