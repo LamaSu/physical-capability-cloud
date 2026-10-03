@@ -697,27 +697,22 @@ describe("A (ruling 4): Approve/Deny are kit-owned; a manifest label never label
     expect(document.body.textContent).not.toContain("nothing was sent");
   });
 
-  it("after a FAILED approval, Approve may retry with the SAME key but Deny stays locked (a request was sent)", async () => {
-    // astra r4 F1 on #342: an identical retry after an unresolved outcome now needs a durably
-    // idempotent endpoint (the money intent is the whole view, not just this one) -- switched the
-    // approve path from the fund route to a DURABLY_IDEMPOTENT_MONEY_WRITES entry so the retry-reuses-
-    // key behaviour under test still holds; Deny-locks-once-sent does not depend on which endpoint.
-    const quoteWin = { ...approvalWin, approve: { ...approvalWin.approve, path: "/api/capabilities/quote" } };
+  it("after a FAILED approval, a retry is refused and Deny stays locked (a request was sent)", async () => {
+    // astra r5 F1/F2 on #342: once a money request was sent and not accepted, every further money
+    // request from the view is refused, an identical retry included (no status proves "no effect", and
+    // no money route is durably idempotent): the user reloads and checks the outcome first.
     let fail = true;
     const calls = installFetch((c) => (c.method === "GET" ? { status: 200, body: { summary: "Pizza" } } : fail ? { status: 503 } : { status: 200 }));
-    boot(man([quoteWin]));
+    boot(man([approvalWin]));
     await flush();
     btn("Approve").click();
     await flush();
-    expect(btn("Approve").disabled).toBe(false);
     expect(btn("Deny").disabled).toBe(true);
     fail = false;
     btn("Approve").click();
     await flush();
-    const ps = posts(calls, "/api/capabilities/quote");
-    expect(ps.length).toBe(2);
-    expect(ps[1]!.headers["Idempotency-Key"]).toBe(ps[0]!.headers["Idempotency-Key"]);
-    expect(btn("Approve").disabled).toBe(true); // accepted: the approval is consumed
+    expect(posts(calls).length).toBe(1);
+    expect(document.body.textContent).toContain("already sent and its outcome is not confirmed");
   });
 });
 
@@ -956,49 +951,51 @@ describe("D: every write entry point goes through the same policy (chain Plan)",
   };
   const planned = { steps: [{ capabilityType: "oven", estimatedPriceUSD: 12 }], totalPriceUSD: 12 };
 
-  it("chain Plan is a gated write: its click opens ONE Approval gate and sends nothing", () => {
+  // astra r5 F3 on #342: Plan used to be an unallowlisted (so money) write and consumed the view's one
+  // money intent, so Execute could never be sent. POST /api/compose is now an effect-reviewed,
+  // allowlisted non-money write (it plans and stores a proposal; it moves no money); Execute stays money.
+  it("chain Plan is an allowlisted non-money write: one click sends ONE POST /api/compose and renders the plan", async () => {
     const calls = installFetch(() => ({ status: 201, body: planned }));
     boot(man([chainWin]));
-    expect(btn("Plan").textContent).toBe("Plan · needs approval");
+    expect(btn("Plan").textContent).toBe("Plan · sends now");
     btn("Plan").click();
-    btn("Plan").click();
-    expect(overlays()).toBe(1);
-    expect(posts(calls).length).toBe(0);
-  });
-
-  it("after Approve, Plan sends exactly ONE POST /api/compose (the displayed URL, an Idempotency-Key) and renders the plan", async () => {
-    const calls = installFetch(() => ({ status: 201, body: planned }));
-    boot(man([chainWin]));
-    btn("Plan").click();
-    const shown = text(".pcc-overlay .pcc-realreq-dest");
-    gateApproveBtn()!.click();
-    gateApproveBtn()!.click();
     await flush();
+    expect(overlays()).toBe(0);
     const ps = posts(calls);
     expect(ps.length).toBe(1);
     expect(ps[0]!.url).toBe(`${PCC}/api/compose`);
-    expect(ps[0]!.url).toBe(shown);
     expect(ps[0]!.headers["Idempotency-Key"]).toMatch(/^idem-/);
     expect(ps[0]!.body).toMatchObject({ outcomeType: "pizza", budgetUSD: 25, minAssuranceTier: 0 });
     expect(document.body.textContent).toContain("oven");
     expect(document.body.textContent).toContain("total 12.00 USDC");
+    // Execute is still a money write: it needs the kit-owned approval.
+    expect((Array.from(document.querySelectorAll("button")) as HTMLButtonElement[]).find((b) => (b.textContent || "").indexOf("Execute") === 0)!.textContent).toBe("Execute · needs approval");
   });
 
-  it("Plan is busy-guarded and one-shot: in flight -> 'Already submitted'; once accepted nothing more is sent", async () => {
+  it("only the EXACT route is non-money: /api/compose/c1/execute and /api/compose?x=1 stay money", () => {
+    expect(/var NON_MONEY_WRITES = \[([\s\S]*?)\];/.exec(kitSrc)![1]).toContain("'POST /api/compose'");
+    installFetch(() => ({ status: 200 }));
+    boot(man([{ kind: "actions", actions: [
+      { id: "x1", label: "Exec", kind: "post", path: "/api/compose/c1/execute", body: {} },
+      { id: "x2", label: "Query", kind: "post", path: "/api/compose?x=1", body: {} },
+    ] }]));
+    expect(btn("Exec").textContent).toBe("Exec · needs approval");
+    expect(btn("Query").textContent).toBe("Query · needs approval");
+  });
+
+  it("Plan is busy-guarded while in flight; once accepted, a NEW plan may be requested (non-money)", async () => {
     const f = pendingFetch();
     boot(man([chainWin]));
     btn("Plan").click();
-    gateApproveBtn()!.click();
-    gateBtn("Cancel")!.click();
     btn("Plan").click(); // while the request is in flight
-    expect(overlays()).toBe(0);
     expect(document.body.textContent).toContain("Already submitted");
     f.release();
     await flush();
-    btn("Plan").click(); // an accepted money write is one-shot
+    btn("Plan").click(); // a non-money 2xx consumes its key: a re-send goes under a NEW key
     await flush();
-    expect(overlays()).toBe(0);
-    expect(f.calls.filter((c) => c.method === "POST").length).toBe(1);
+    const ps = f.calls.filter((c) => c.method === "POST");
+    expect(ps.length).toBe(2);
+    expect(ps[1]!.headers["Idempotency-Key"]).not.toBe(ps[0]!.headers["Idempotency-Key"]);
   });
 
   it("in snapshot mode Plan hands back the intent chip, never a request", () => {
@@ -1072,25 +1069,19 @@ describe("E: idempotency intents (kit-owned, per body fingerprint) and money one
     expect(k[3]).toBe(k[1]);
   });
 
-  it("A/B/A through the Approval gate (a money form): B is refused while A's outcome is unknown; A's retry reuses A's key", async () => {
-    // astra r4 F1 on #342: the intent is now the WHOLE VIEW, and an identical retry after an unknown
-    // outcome is honoured only on a durably idempotent endpoint -- switched from the fund route (not
-    // durable) to a DURABLY_IDEMPOTENT_MONEY_WRITES entry so "A's retry reuses A's key" still holds;
-    // B's refusal is still "a different request while the outcome is unknown", with the new wording.
+  it("A/B/A through the Approval gate (a money form): once A is sent and not accepted, B AND A's retry are refused", async () => {
+    // astra r5 F1/F2 on #342: one money request per view, with no retry exception.
     const calls = installFetch(() => ({ status: 503 }));
-    boot(noteForm("/api/capabilities/quote"));
+    boot(noteForm("/api/escrow/chain/0xabc/fund"));
     for (const v of ["A", "B", "A"]) {
       setNote(v);
       btn("Send").click();
       gateApproveBtn()!.click();
       await flush();
-      if (v === "B") expect(document.body.textContent).toContain("an earlier money request's outcome is unknown");
+      if (v === "B") expect(document.body.textContent).toContain("already sent and its outcome is not confirmed");
       gateBtn("Cancel")!.click();
     }
-    const k = posts(calls, "/api/capabilities/quote").map((c) => c.headers["Idempotency-Key"]);
-    expect(k.length).toBe(2);
-    expect(posts(calls, "/api/capabilities/quote").map((c) => c.body!["note"])).toEqual(["A", "A"]);
-    expect(k[1]).toBe(k[0]);
+    expect(posts(calls).map((c) => c.body!["note"])).toEqual(["A"]);
   });
 
   it("a 2xx consumes only THAT fingerprint's key: B keeps its key; A re-sends under a NEW key (non-money)", async () => {
@@ -1158,11 +1149,10 @@ describe("E: idempotency intents (kit-owned, per body fingerprint) and money one
 
 describe("F: Approval-gate cleanup is instance-specific", () => {
   it("approve, cancel, reopen, then the OLD gate's delayed close fires: the newer gate's guard survives", async () => {
-    // astra r4 F1 on #342: the retry this test ends with now needs a durably idempotent endpoint (an
-    // unresolved money outcome blocks a retry everywhere except the closed durable list); the gate-
-    // instance-cleanup behaviour under test does not depend on which endpoint is used.
+    // astra r5 F1/F2 on #342: gate 2's Approve now REFUSES (a money request from this view was already
+    // sent); the gate-instance-cleanup behaviour under test does not depend on what Approve then does.
     const calls = installFetch(() => ({ status: 503 })); // a failed attempt keeps the action re-openable
-    boot(act({ path: "/api/capabilities/quote", body: { amount: 1 } }));
+    boot(act({ path: "/api/escrow/chain/0xabc/fund", body: { amount: 1 } }));
     btn("Go").click();
     gateApproveBtn()!.click();
     await flush(); // settled: gate 1 schedules its own close in 1.2 s
@@ -1173,12 +1163,11 @@ describe("F: Approval-gate cleanup is instance-specific", () => {
     await new Promise((r) => setTimeout(r, 1300)); // gate 1's stale timer fires now
     btn("Go").click(); // must NOT stack a third gate on gate 2
     expect(overlays()).toBe(1);
-    // gate 2 still works, and retries the unresolved body under the SAME key
+    // gate 2 still works: its Approve runs, and refuses (nothing more is sent)
     gateApproveBtn()!.click();
     await flush();
-    const ps = posts(calls);
-    expect(ps.length).toBe(2);
-    expect(ps[1]!.headers["Idempotency-Key"]).toBe(ps[0]!.headers["Idempotency-Key"]);
+    expect(posts(calls).length).toBe(1);
+    expect(document.body.textContent).toContain("already sent and its outcome is not confirmed");
   });
 });
 
@@ -1691,8 +1680,8 @@ describe("astra r4 (#342 @36aee944): F1 reproduced (verify before fix)", () => {
   // never effect identity: two different endpoints can move the exact same money (an integer-parsed
   // path alias, a cross-route alias), and the gateway's generic Idempotency-Key middleware covers only
   // three capability routes, so an identical retry is not safe everywhere either. The design: ONE money
-  // intent per VIEW, regardless of endpoint; an identical retry is honoured only on a kit-owned closed
-  // list the gateway actually dedupes (DURABLY_IDEMPOTENT_MONEY_WRITES).
+  // intent per VIEW, regardless of endpoint. (astra r5 then withdrew the durable-retry exception and the
+  // definite-rejection clearing: see the "astra r5 (#342 @d21af0ee)" describe below.)
   const releaseBtns = () => buttons().filter((b) => (b.textContent || "").indexOf("Release") === 0);
   // Ports the r3 openBothApproveAll shape (above) to two DIFFERENT endpoints instead of two spellings
   // of the SAME one: open both, approve every enabled gate, then once more sequentially (a gate that
@@ -1737,34 +1726,14 @@ describe("astra r4 (#342 @36aee944): F1 reproduced (verify before fix)", () => {
     await flush(); // 500: unknown outcome, the key is kept
     gateBtn("Cancel")!.click(); // close gate 1 by hand so gate 2 can open (astra r3 F pattern)
     btn("Stake").click(); // gate 2: an identical retry
-    gateApproveBtn()!.click(); // /api/pool/stake is not in DURABLY_IDEMPOTENT_MONEY_WRITES: refused
+    gateApproveBtn()!.click(); // no money route is exempt: refused
     await flush();
     expect(posts(calls, "/api/pool/stake").length).toBe(1);
-    expect(document.body.textContent).toMatch(/outcome is unknown/);
+    expect(document.body.textContent).toContain("already sent and its outcome is not confirmed");
   });
 
-  it("the positive control: an identical retry after a 500 on a DURABLY idempotent route (/api/capabilities/quote) resends the SAME key", async () => {
-    // /api/capabilities/quote is not on NON_MONEY_WRITES (and a query would disqualify it anyway): money.
-    expect(/var NON_MONEY_WRITES = \[([\s\S]*?)\];/.exec(kitSrc)![1]).not.toContain("/api/capabilities/quote");
-    let n = 0;
-    const calls = installFetch((c) => (c.method === "POST" ? { status: n++ === 0 ? 500 : 200 } : { status: 200 }));
-    boot(act({ label: "Quote", path: "/api/capabilities/quote", body: { amount: 5 } }));
-    btn("Quote").click();
-    gateApproveBtn()!.click();
-    await flush(); // 500: unknown outcome, the key is kept
-    gateBtn("Cancel")!.click(); // close gate 1 by hand so gate 2 can open
-    btn("Quote").click(); // gate 2: an identical retry to a DURABLY_IDEMPOTENT_MONEY_WRITES entry
-    gateApproveBtn()!.click();
-    await flush();
-    const ps = posts(calls, "/api/capabilities/quote");
-    expect(ps.length).toBe(2);
-    expect(ps[1]!.headers["Idempotency-Key"]).toBe(ps[0]!.headers["Idempotency-Key"]);
-  });
-
-  it("F1: a DEFINITE REJECTION (404) on a money write has NO effect: a DIFFERENT money request in the same view still succeeds", async () => {
-    // Mutation check (342-r5): disabling the isDefiniteRejection clearing in doPost survives the rest
-    // of this file -- nothing else in the suite sends a money write to a 400/401/403/404/405/422 and
-    // then tries a DIFFERENT money request afterward. This test exists to kill that mutant.
+  it("a 404 on a money write does not unlock the view: a DIFFERENT money request is refused too (astra r5 F2)", async () => {
+    // astra r5 F2 on #342: no status code proves "no effect" (a route can mutate, then answer 4xx).
     let rejected = false;
     const calls = installFetch((c) => {
       if (c.method !== "POST") return { status: 200 };
@@ -1776,13 +1745,13 @@ describe("astra r4 (#342 @36aee944): F1 reproduced (verify before fix)", () => {
     boot(man([{ kind: "actions", actions: [fund, stake] }]));
     btn("Fund").click();
     gateApproveBtn()!.click();
-    await flush(); // 404: a DEFINITE REJECTION -- no effect, so the key is cleared
+    await flush(); // 404: the request was sent; its effect is not confirmed
     gateBtn("Cancel")!.click();
-    btn("Stake").click(); // a DIFFERENT money request: allowed, because Fund's 404 had no effect
+    btn("Stake").click(); // a DIFFERENT money request: refused
     gateApproveBtn()!.click();
     await flush();
-    expect(posts(calls, "/api/pool/stake").length).toBe(1);
-    expect(document.body.textContent).toContain("Submitted - awaiting network confirmation");
+    expect(posts(calls, "/api/pool/stake").length).toBe(0);
+    expect(document.body.textContent).toContain("already sent and its outcome is not confirmed");
   });
 
   it("after an ACCEPTED money request, a DIFFERENT money request to ANOTHER endpoint in the same view is refused", async () => {
@@ -1800,5 +1769,79 @@ describe("astra r4 (#342 @36aee944): F1 reproduced (verify before fix)", () => {
     expect(overlays()).toBe(0); // refused before a gate could open: no new gate, and the old one is closed
     expect(posts(calls).length).toBe(1);
     expect(document.body.textContent).toContain("Already submitted");
+  });
+});
+
+describe("astra r5 (#342 @d21af0ee): F1-F3 reproduced (verify before fix)", () => {
+  // F1: the "durable" retry list named routes the gateway does not dedupe in production (the
+  // idempotency middleware is never registered outside tests, is in-memory, and re-runs a 5xx).
+  // F2: a 4xx is not proof of "no effect" (the settlement route can mutate, then answer 400).
+  // F3: chain Plan, an unallowlisted POST, consumed the view's one money intent, so Execute could
+  // never be sent.
+  const fund = { id: "fund", label: "Fund", kind: "post", path: "/api/escrow/chain/0xabc/fund", body: { amount: 1 } };
+  const stake = { id: "stake", label: "Stake", kind: "post", path: "/api/pool/stake", body: { amount: 5 } };
+
+  it("F1 (HIGH): an identical retry after a 500 is refused on EVERY money route, /api/capabilities/quote included", async () => {
+    let n = 0;
+    const calls = installFetch((c) => (c.method === "POST" ? { status: n++ === 0 ? 500 : 200 } : { status: 200 }));
+    boot(act({ label: "Quote", path: "/api/capabilities/quote", body: { amount: 5 } }));
+    btn("Quote").click();
+    gateApproveBtn()!.click();
+    await flush(); // 500: the outcome is unknown
+    gateBtn("Cancel")!.click();
+    btn("Quote").click(); // an identical retry
+    const g = gateApproveBtn();
+    if (g) g.click();
+    await flush();
+    expect(posts(calls, "/api/capabilities/quote").length).toBe(1);
+  });
+
+  it("F2 (HIGH): after a 400 on a money write, a DIFFERENT money request from the view is refused", async () => {
+    let first = true;
+    const calls = installFetch((c) => (c.method !== "POST" ? { status: 200 } : first ? ((first = false), { status: 400 }) : { status: 200 }));
+    boot(man([{ kind: "actions", actions: [fund, stake] }]));
+    btn("Fund").click();
+    gateApproveBtn()!.click();
+    await flush(); // 400: not proof that nothing happened
+    gateBtn("Cancel")!.click();
+    btn("Stake").click();
+    const g = gateApproveBtn();
+    if (g) g.click();
+    await flush();
+    expect(posts(calls, "/api/pool/stake").length).toBe(0);
+  });
+
+  it("F2 (HIGH): after a 400 on a money write, an IDENTICAL retry is refused too", async () => {
+    let first = true;
+    const calls = installFetch((c) => (c.method !== "POST" ? { status: 200 } : first ? ((first = false), { status: 400 }) : { status: 200 }));
+    boot(man([{ kind: "actions", actions: [fund] }]));
+    btn("Fund").click();
+    gateApproveBtn()!.click();
+    await flush();
+    gateBtn("Cancel")!.click();
+    btn("Fund").click();
+    const g = gateApproveBtn();
+    if (g) g.click();
+    await flush();
+    expect(posts(calls, "/api/escrow/chain/0xabc/fund").length).toBe(1);
+  });
+
+  it("F3 (MEDIUM): chain Plan then Execute: Execute can still be approved and sent once", async () => {
+    const chainWin = {
+      kind: "chain",
+      composeRef: { outcomeType: "pizza", budgetUSD: 25, minAssuranceTier: 0 },
+      execute: { id: "exec", label: "Execute", kind: "post", path: "/api/compose/c1/execute", body: {} },
+    };
+    const calls = installFetch(() => ({ status: 201, body: { steps: [{ capabilityType: "oven", estimatedPriceUSD: 12 }], totalPriceUSD: 12 } }));
+    boot(man([chainWin]));
+    btn("Plan").click();
+    const pg = gateApproveBtn();
+    if (pg) pg.click();
+    await flush();
+    expect(document.body.textContent).toContain("oven");
+    (Array.from(document.querySelectorAll("button")) as HTMLButtonElement[]).find((b) => (b.textContent || "").indexOf("Execute") === 0)!.click();
+    gateApproveBtn()!.click();
+    await flush();
+    expect(posts(calls, "/api/compose/c1/execute").length).toBe(1);
   });
 });

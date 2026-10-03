@@ -65,7 +65,11 @@
     'POST /api/csd/validate',          // validate a CSD document
     'POST /api/csd/resolve',           // resolve a CSD by canonical URL
     'POST /api/feedback',              // product feedback
-    'POST /api/feedback/agent-report'  // an agent's feedback report
+    'POST /api/feedback/agent-report', // an agent's feedback report
+    // chain Plan (astra r5 F3 on #342). Effect review: routes/compose.ts POST /api/compose validates the
+    // request, plans it (planComposition) and stores the proposal row (status "proposed"); it moves no
+    // money and is not payment-gated. Only POST /api/compose/:id/execute acts, and that stays money.
+    'POST /api/compose'
   ];
   // Kit-owned per-action EXECUTION state (ruling 5). It lives in a WeakMap keyed by the action
   // object, never ON the action: an action is untrusted manifest JSON, and a manifest must not be
@@ -99,17 +103,14 @@
   //   - accepted (2xx): the intent is done. Every further money request this render is refused --
   //     reload to make another. (A NON-money write is unaffected: a 2xx only consumes THAT write's own
   //     key, exactly as before.)
-  //   - unresolved (no 2xx yet, and not a definite rejection): every further money request is refused,
-  //     INCLUDING an identical retry -- under the kept key the server might replay instead of acting,
-  //     and under a new key it might move money twice. The ONE exception: an identical retry (the same
-  //     requestFingerprint) to an endpoint the kit knows the GATEWAY dedupes on its own
-  //     (DURABLY_IDEMPOTENT_MONEY_WRITES) reuses the kept key.
-  //   - a DEFINITE REJECTION (HTTP 400/401/403/404/405/422): the request had NO effect, so the key is
-  //     cleared and a fresh money request may be made. Any other failure (5xx, a throw, a network
-  //     error) is UNRESOLVED, not a rejection: the request might already have taken effect server-side.
-  // This is coarser than per-endpoint (astra r3) and fails closed the same way: a second, genuinely
-  // different payment anywhere in the view needs a reload. Effect-level identity and idempotency are
-  // the SERVER's to enforce; the kit cannot see past the wire, only guard it.
+  //   - sent but not accepted (any other status, a throw, a network error): every further money request
+  //     is refused, INCLUDING an identical retry, until a reload (astra r5 F1, F2 on #342). No status
+  //     code proves "no effect": a route can mutate state and still answer 400. And no money route is
+  //     durably idempotent today: the gateway's Idempotency-Key middleware is not registered in
+  //     production, is in-memory, and re-runs a 5xx.
+  // So one view sends at most ONE money request. Effect-level identity and idempotency are the SERVER's
+  // to enforce; the kit cannot see past the wire, only guard it. A reload is the user's checkpoint:
+  // check the earlier request's outcome, then decide.
   // A NON-money write (the allowlist) keeps the exact canonical request as its intent, UNCHANGED: object
   // keys sorted at every depth; the decoded pathname the gateway routes (desc.canonical) plus the
   // decoded query parameters, sorted by NAME only, so repeated values keep their order (?r=A&r=B is not
@@ -133,32 +134,6 @@
     return desc.canonical + (qs ? '?' + qs : '');
   }
   function requestFingerprint(desc) { return desc.method + ' ' + canonicalTarget(desc) + '\n' + canonicalJson(desc.body); }
-  // The kit's own CLOSED list of money writes the GATEWAY treats as durably idempotent -- its generic
-  // Idempotency-Key middleware (packages/gateway/src/middleware/idempotency.ts, IDEMPOTENCY_ROUTES).
-  // Pinned equal to that set by a gateway-side test (ui-kit-idempotent-endpoints.test.ts) so the two
-  // lists cannot silently drift apart. Matched on method + desc.canonical EXACTLY, no normalization: a
-  // durable match must be the real route the gateway dedupes, never a spelling the kit merely tolerates.
-  var DURABLY_IDEMPOTENT_MONEY_WRITES = [
-    'POST /api/capabilities/quote',
-    'POST /api/capabilities/simulate',
-    'POST /api/capabilities/route'
-  ];
-  function isDurablyIdempotentMoneyWrite(desc) {
-    var key = desc.method + ' ' + desc.canonical;
-    for (var i = 0; i < DURABLY_IDEMPOTENT_MONEY_WRITES.length; i++) {
-      if (DURABLY_IDEMPOTENT_MONEY_WRITES[i] === key) return true;
-    }
-    return false;
-  }
-  // HTTP statuses the kit treats as a DEFINITE REJECTION of a money write (astra r4 F1 on #342): the
-  // gateway refused the request before any money moved, so it had no effect and the key may be
-  // cleared for a fresh attempt. Everything else (5xx, or a status outside this closed list) is an
-  // UNKNOWN outcome: the request may already have taken effect server-side.
-  var DEFINITE_REJECTION_STATUSES = [400, 401, 403, 404, 405, 422];
-  function isDefiniteRejection(status) {
-    for (var i = 0; i < DEFINITE_REJECTION_STATUSES.length; i++) { if (DEFINITE_REJECTION_STATUSES[i] === status) return true; }
-    return false;
-  }
   // One shared intent for EVERY money request this render, regardless of endpoint (astra r4 F1 on
   // #342): the kit cannot tell a genuinely new payment from an aliased retry of the same one, so it
   // fails closed over the whole view instead of trusting endpoint spelling. A NON-money write keeps
@@ -1863,11 +1838,10 @@
     // while its outcome is UNRESOLVED. For a NON-money write the intent is its own canonical request
     // (method, decoded route + sorted query, sorted-key body), so A (unknown outcome) -> B -> retry A
     // resends A's key and the server dedupes instead of double-charging, and a CLONED action for the
-    // same request reuses it too. For a MONEY write the intent is the WHOLE VIEW (see INTENT_STATE): a
-    // DIFFERENT money request while the outcome is unresolved is always refused, and so is an IDENTICAL
-    // retry unless the endpoint is one the kit knows the gateway dedupes on its own
-    // (DURABLY_IDEMPOTENT_MONEY_WRITES). A 2xx consumes the key (a non-money write may then re-send
-    // under a new key; an accepted MONEY write is one-shot for the whole view). A form reference
+    // same request reuses it too. For a MONEY write the intent is the WHOLE VIEW (see INTENT_STATE):
+    // once a money request was sent, every further one is refused, an identical retry included. A 2xx
+    // consumes the key (a non-money write may then re-send under a new key; an accepted MONEY write is
+    // one-shot for the whole view). A form reference
     // (idempotencyFrom) DERIVES the key from (method, canonical target with its query, reference,
     // body): the same logical intent dedupes even across a reload, and never shares a key with another
     // target or body.
@@ -1876,11 +1850,9 @@
     if (it.key && it.request !== null) {
       var sameRequest = it.request === request;
       if (desc.money) {
-        if (!sameRequest || !isDurablyIdempotentMoneyWrite(desc)) {
-          show('pcc-action-status st-failed', "Refused: an earlier money request's outcome is unknown. Reload and check it before sending another - nothing was sent.");
-          return null;
-        }
-        // an identical retry to a durably-idempotent endpoint: fall through and reuse it.key below
+        // a money request from this view was already sent and not accepted (astra r5 F1, F2)
+        show('pcc-action-status st-failed', "Refused: a money request from this view was already sent and its outcome is not confirmed. Reload and check it before sending another - nothing was sent.");
+        return null;
       } else if (!sameRequest) {
         // a DIFFERENT request to this endpoint whose earlier request has an unknown outcome
         show('pcc-action-status st-failed', 'Refused: an earlier request to this endpoint has an unknown outcome. Reload to check it before sending a different one - nothing was sent.');
@@ -1924,11 +1896,8 @@
         else show('pcc-action-status st-ack', 'Done' + trace);
         if (typeof opts.onSuccess === 'function') opts.onSuccess(res, desc);
       } else {
-        // A DEFINITE REJECTION (astra r4 F1 on #342) means the request had NO effect: the key is
-        // cleared so a fresh money request may be made. Any other failure (5xx, or a status outside
-        // this closed list) is an UNKNOWN outcome: the key is kept, so a different money request is
-        // refused and an identical retry is refused unless the endpoint is durably idempotent.
-        if (desc.money && isDefiniteRejection(res.status)) { it.key = null; it.request = null; }
+        // Not accepted: the key is KEPT. No status proves the request had no effect (astra r5 F2), so
+        // a money intent stays locked and every further money request from this view is refused.
         show('pcc-action-status st-failed', postErrorText(res, desc));
       }
       return { ok: !!res.ok, sent: !res.refused };

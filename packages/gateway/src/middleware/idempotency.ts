@@ -25,9 +25,7 @@ const PRUNE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // Routes subject to idempotency protection — must match payment gate routes.
 // GET routes are excluded here; the onRequest hook also double-checks the method.
-// Exported (astra r4 F1 on #342) so a kit-side test can pin pcc-ui.js's own closed
-// DURABLY_IDEMPOTENT_MONEY_WRITES list to this one and catch drift between them.
-export const IDEMPOTENCY_ROUTES = new Set([
+const IDEMPOTENCY_ROUTES = new Set([
   "POST /api/capabilities/quote",
   "POST /api/capabilities/simulate",
   "POST /api/capabilities/route",
