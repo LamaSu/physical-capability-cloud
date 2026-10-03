@@ -24,7 +24,9 @@ const PUBLIC_PREFIXES = [
   "/api/admin/feedback",        // Admin feedback export — gated by X-Admin-Token (adminOk),
                                 // NOT the API-key system, so it must bypass apiGate here.
                                 // Mirrors the waitlist admin-token pattern.
-  "/api/onboard/identify-device", // Device identification is public (install.html landing)
+  // NOTE: "/api/onboard/identify-device" moved to PUBLIC_EXACT below. As a
+  // startsWith PREFIX it also made "/api/onboard/identify-device-<anything>"
+  // public (escrow #1652); it is a single POST route, so exact-match is correct.
   "/api/onboard/check/",        // Invite code validation is public
   "/api/onboard/chat",          // Layperson conversational onboarding (coord dc4d1ec8)
                                 // Public so anyone with a browser can register a capability
@@ -39,6 +41,11 @@ const PUBLIC_PREFIXES = [
 ];
 
 const PUBLIC_EXACT = [
+  "/api/onboard/identify-device", // EXACT (not a prefix): the anonymous device-ID
+                                  // endpoint spends model $, and a startsWith prefix
+                                  // leaked its "-*" siblings public (escrow #1652).
+                                  // Single POST route; cost guard is in
+                                  // routes/identify-device.ts (per-IP + global ceiling).
   "/api/capabilities/types",   // Discovery is public (see what's available)
   "/api/capabilities",         // Capability listing is public
   "/api/agents/status",        // Network status is public

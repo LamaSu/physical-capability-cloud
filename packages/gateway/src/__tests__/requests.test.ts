@@ -23,6 +23,7 @@ import { requestRoutes, resetRequestsStore } from "../routes/requests.js";
 import { detectTemplateName } from "../services/request-decomposer.js";
 import { initStore, closeStore } from "../db.js";
 import { initJobOffersStore, _resetJobOffersStoreForTests } from "../services/job-offers-store.js";
+import { __resetCallerRateForTest } from "../middleware/security-hardening.js";
 
 // Wave 5 — requests now live in SQLite. Boot an in-memory store once for
 // the whole test file; resetRequestsStore() truncates + re-seeds per test.
@@ -40,6 +41,14 @@ beforeAll(() => {
 afterAll(() => {
   closeStore();
   _resetJobOffersStoreForTests();
+});
+
+// Reset the per-caller rate limiter before EVERY test. POST /api/requests now
+// carries a per-caller cap (routes/requests.ts, escrow #1623-B); without this the
+// module-level counter accumulates across this file's many POSTs and 429s the
+// later tests. Mirrors the existing __reset*ForTest hooks.
+beforeEach(() => {
+  __resetCallerRateForTest();
 });
 
 // ---------------------------------------------------------------------------
