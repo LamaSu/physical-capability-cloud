@@ -7,7 +7,7 @@ import { useUIStore } from "./stores/ui-store.js";
 import { useAuthStore, onIdentityChange, onAccountChange } from "./stores/auth-store.js";
 import { resetAccountScopedState } from "./lib/account-scope.js";
 import { endWalletSession } from "./lib/wallet-session.js";
-import { walletSessionEnding } from "./lib/account-generation.js";
+import { onAccountChangePending, walletSessionEnding } from "./lib/account-generation.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -166,10 +166,19 @@ function endPreviousWallet(): void {
   });
 }
 
-onAccountChange(() => {
+function accountChanged(): void {
   resetAccountScopedState();
   useAuthStore.setState({ address: null, sessionToken: null, isVerifying: false });
   endPreviousWallet();
+}
+
+onAccountChange(accountChanged);
+
+// Another tab's change can reach this tab as the generation's move alone, before
+// its key does (lib/account-generation.ts). It is a change all the same: end the
+// wallet session before this tab shows anything more (astra 19g).
+onAccountChangePending(() => {
+  if (account.transition === "settled") accountChanged();
 });
 
 /** The account boundary: its epoch keys the shell; while it is in transition the shell isn't mounted. */

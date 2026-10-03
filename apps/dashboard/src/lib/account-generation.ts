@@ -1,11 +1,13 @@
 /**
- * Which account this browser is on, as every tab sees it (astra 19f).
+ * Which account this browser is on, as every tab sees it (astra 19f, 19g).
  *
  * The API key and the gateway's SIWE cookie belong to the browser, not to a
- * tab, and so does this: a token in localStorage that changes in the task
- * that stores a different API key, whichever tab stores it (auth-store login
- * and logout). A SIWE sign-in carries the generation it began under, and it is
- * refused once the generation has moved (lib/wallet-session.ts).
+ * tab, and so does this: a token in localStorage that moves BEFORE a
+ * different API key is stored, whichever tab stores it (auth-store login), so
+ * a tab that sees the next key also sees the change pending. Two writes in
+ * one task aren't atomic for another renderer: a tab can load, or hear of the
+ * first, between them. A SIWE sign-in carries the generation it began under,
+ * and it is refused once the generation has moved (lib/wallet-session.ts).
  *
  * A second token records the last generation for which a teardown confirmed
  * that the previous wallet session ended. Until the two agree, a teardown is
@@ -25,13 +27,30 @@ export function accountGeneration(): string | null {
   }
 }
 
-/** Moves the generation on. Called in the task that stores a different API key. */
-export function beginAccountChange(): void {
+/**
+ * Moves the generation on, before a different API key is stored. False when
+ * storage refused it: then no other tab would see the change pending, so the
+ * caller must not store the next key (fail closed).
+ */
+export function beginAccountChange(): boolean {
   try {
     localStorage.setItem("pcc-account-generation", newToken());
+    return true;
   } catch {
-    // Without storage the next key isn't kept past this page either (auth-store).
+    return false;
   }
+}
+
+/**
+ * Calls `onPending` when another tab moves the generation and the change is
+ * pending. Its storage event comes before the key's, and can arrive alone for
+ * a while; the tab then ends its wallet session before anything else (App).
+ */
+export function onAccountChangePending(onPending: () => void): void {
+  if (typeof window === "undefined") return;
+  window.addEventListener("storage", (event) => {
+    if (event.key === "pcc-account-generation" && walletSessionEnding()) onPending();
+  });
 }
 
 /** Whether a teardown is pending: the generation moved past the last one confirmed. When storage can't be read, it may be (fail closed). */

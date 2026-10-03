@@ -42,9 +42,10 @@ export const useAuthStore = create<AuthState>((set, get) => {
           headers: { Authorization: `Bearer ${key}` },
         });
         if (res.ok) {
+          // The generation moves first, so a tab that sees this key sees the change pending (astra 19g).
+          // If it can't move, no tab would know: store nothing (fail closed).
+          if (key !== get().apiKey && !beginAccountChange()) return false;
           localStorage.setItem(STORAGE_KEY, key);
-          // In this same task: every tab now sees the account change (lib/account-generation.ts).
-          if (key !== get().apiKey) beginAccountChange();
           set({ apiKey: key, isAuthenticated: true });
           return true;
         }
