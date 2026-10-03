@@ -382,11 +382,12 @@
   };
   function listRowsOf(path, data) {
     const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path].rows : void 0;
-    if (key && data !== null && typeof data === "object" && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, key)) {
-      const v = data[key];
-      if (Array.isArray(v)) return v;
-    }
-    return [];
+    if (!key) return null;
+    if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+    if (!Object.prototype.hasOwnProperty.call(data, key)) return null;
+    const v = data[key];
+    if (!Array.isArray(v)) return null;
+    return v;
   }
   var LIST_FIELD_KINDS = {
     id: "id",
@@ -1202,18 +1203,31 @@
         return { ok: false };
     }
   }
-  function bindSchemaCard(schema, data, slots) {
+  function readSchemaCard(schema, data) {
     const spec = SCHEMA_FIELDS[schema];
-    if (!spec) return false;
+    if (!spec) return null;
     const reads = spec.fields.map((f) => readField(data, f));
     const missingRequired = spec.fields.some((f, i) => f.required && reads[i].ok && reads[i].text === UNAVAILABLE);
-    const allOk = !missingRequired && reads.every((r) => r.ok);
-    reads.forEach((r, i) => {
+    return { reads, missingRequired };
+  }
+  function bindSchemaCard(schema, data, slots) {
+    const r = readSchemaCard(schema, data);
+    if (!r) return false;
+    const { reads, missingRequired } = r;
+    const allOk = !missingRequired && reads.every((x) => x.ok);
+    reads.forEach((x, i) => {
       const slot = slots[i];
       if (!slot) return;
-      slot.textContent = allOk && r.ok ? r.text : UNAVAILABLE;
+      slot.textContent = allOk && x.ok ? x.text : UNAVAILABLE;
     });
     return allOk;
+  }
+  function schemaCardFailure(schema, data) {
+    const r = readSchemaCard(schema, data);
+    if (!r) return "unknown schema";
+    if (r.missingRequired) return "missing required fields";
+    if (r.reads.some((x) => !x.ok)) return "mistyped field";
+    return null;
   }
   function paintChildren(doc, node, into) {
     if (node.children) for (const c of node.children) into.appendChild(paintNode(doc, c));
@@ -1817,6 +1831,15 @@
     }
     return cur;
   }
+  function shapeOf(n) {
+    if (n.nodeType === 3) return n.textContent;
+    if (n.nodeType === 1) {
+      const e = n;
+      const attrs = Array.from(e.attributes).map((a) => [a.name, a.value]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+      return [e.tagName, attrs, ...Array.from(e.childNodes).map(shapeOf)];
+    }
+    return null;
+  }
   var provStates = /* @__PURE__ */ new Map();
   function provenanced(node, el2, paint, clear, fingerprint) {
     const prov = provenanceOf(node);
@@ -1958,7 +1981,7 @@
       const schema = node.bind?.schema;
       if (!schema) return;
       const slots = Array.from(el2.querySelectorAll(".pcc-value"));
-      const pv = provenanced(node, el2, (data) => bindSchemaCard(schema, data, slots) ? true : "missing required fields", () => {
+      const pv = provenanced(node, el2, (data) => bindSchemaCard(schema, data, slots) ? true : schemaCardFailure(schema, data) ?? "payload does not match schema", () => {
         for (const sl of slots) sl.textContent = "";
       }, (data) => {
         const staging = slots.map(() => ({ textContent: "" }));
@@ -1971,6 +1994,7 @@
       if (!el2) return;
       const pv = provenanced(node, el2, (data, src) => {
         const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+        if (rows === null) return "unexpected response shape";
         if (!listRowsReadable(node, rows)) return "partial collection";
         if (rows.length === 0 && src === null) return "empty result without a source time";
         const staging = document.createElement("div");
@@ -1981,10 +2005,11 @@
         el2.replaceChildren();
       }, (data) => {
         const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+        if (rows === null) return null;
         if (!listRowsReadable(node, rows)) return null;
         const staging = document.createElement("div");
         bindListRows(rdoc, wrapEl(staging), node, rows);
-        return staging.textContent;
+        return JSON.stringify(shapeOf(staging));
       });
       push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });

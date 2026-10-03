@@ -25,7 +25,7 @@
  */
 import { dashboardManifestToIr, listRowsOf, validateIr, provenanceOf } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
-import { bootIrView, bindScalar, bindListRows, listRowsReadable, bindSchemaCard, applyFreshness, applyUnavailable, applyUnknownTime, UNAVAILABLE } from "./dashboard-ir-renderer.js";
+import { bootIrView, bindScalar, bindListRows, listRowsReadable, bindSchemaCard, schemaCardFailure, applyFreshness, applyUnavailable, applyUnknownTime, UNAVAILABLE } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 import { startBind, sourceAsOf, isStale, acceptsNewer } from "./dashboard-ir-binder.js";
 import type { BinderDeps, GetResult } from "./dashboard-ir-binder.js";
@@ -202,6 +202,20 @@ function selectPath(data: unknown, select: string): unknown | typeof MISSING {
   }
   return cur;
 }
+/** A framed structural shape of a DOM subtree (astra 28e M3): a text node gives its text; an
+ *  element gives [tagName, its attributes as [name,value] pairs sorted by name, ...its child
+ *  nodes' shapes]; anything else (comment, etc.) is null. Row/cell boundaries, field labels
+ *  (classes), kinds and values are then all part of the shape, so two structurally different
+ *  lists can never share a fingerprint — unlike the old unframed textContent concatenation. */
+function shapeOf(n: Node): unknown {
+  if (n.nodeType === 3) return n.textContent;
+  if (n.nodeType === 1) {
+    const e = n as Element;
+    const attrs = Array.from(e.attributes).map((a) => [a.name, a.value] as [string, string]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    return [e.tagName, attrs, ...Array.from(e.childNodes).map(shapeOf)];
+  }
+  return null;
+}
 /** PX-4 provenance gate for one bound node (hardened per cross-family review #2524).
  *  - Absence is not evidence: a failed, errored, timed-out, off-schema, partial or unreadable
  *    read CLEARS what was shown and says "unavailable · <why>". Nothing last-known or default
@@ -342,7 +356,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     const el = schemaEls[i]; if (!el) return;
     const schema = node.bind?.schema; if (!schema) return;
     const slots = Array.from(el.querySelectorAll<HTMLElement>(".pcc-value"));
-    const pv = provenanced(node, el, (data) => (bindSchemaCard(schema, data, slots) ? true : "missing required fields"), () => { for (const sl of slots) sl.textContent = ""; }, (data) => {
+    const pv = provenanced(node, el, (data) => (bindSchemaCard(schema, data, slots) ? true : (schemaCardFailure(schema, data) ?? "payload does not match schema")), () => { for (const sl of slots) sl.textContent = ""; }, (data) => {
       // M3 fingerprint: "the selected fields" — bindSchemaCard run into THROWAWAY slots
       // (never the real DOM), so fingerprinting a to-be-rejected duplicate never paints.
       const staging = slots.map(() => ({ textContent: "" }));
@@ -351,13 +365,9 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
   });
   lists.forEach((node, i) => { const el = listEls[i]; if (!el) return; const pv = provenanced(node, el, (data, src) => {
-    // #344's listRowsOf reads the route's own rows key ("jobs"/"kernels"/"items" —
-    // dashboard-ir.ts LIST_PROFILES), never a guessed `.items`. It always returns an array
-    // ([] for an unrecognized shape too), so "unexpected response shape" is no longer
-    // distinguishable from "genuinely empty" by the rows alone; listRowsReadable + the
-    // empty-without-a-source-time gate below still fail a non-collection payload closed in
-    // the common case (an error body rarely carries a valid source-read timestamp).
+    // #344's listRowsOf reads the route's own rows key; null (no collection at all) is rejected below, before listRowsReadable (astra 28e H1).
     const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+    if (rows === null) return "unexpected response shape";
     // A partial collection (any unreadable row) is not data.
     if (!listRowsReadable(node, rows)) return "partial collection";
     // Empty-read policy: "none" is shown only when the SOURCE vouches for when it read the
@@ -368,13 +378,16 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     el.replaceChildren(...Array.from(staging.childNodes));
     return true;
   }, () => { el.replaceChildren(); }, (data) => {
-    // M3 fingerprint: "the row texts" — the same rows, staged off-DOM (never touching `el`),
-    // read back as their combined text; a readable-but-empty collection fingerprints too.
+    // M3 fingerprint: shapeOf(staging) — a framed structural shape of the same rows, staged
+    // off-DOM (never touching `el`), not raw concatenated text (astra 28e M3: row/cell
+    // boundaries, field labels, kinds and values are then all part of the fingerprint, so a
+    // structurally different payload can never collide with what is shown).
     const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+    if (rows === null) return null;
     if (!listRowsReadable(node, rows)) return null;
     const staging = document.createElement("div");
     bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows);
-    return staging.textContent;
+    return JSON.stringify(shapeOf(staging));
   }); push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded)); });
 }
 function stopBinds(): void {

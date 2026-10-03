@@ -38,13 +38,15 @@ export interface RenderDatum<T = unknown> {
   readonly sourceClass: RenderSourceClass;
   /** Which read-model schema the payload conforms to (e.g. "run-summary-v1"). */
   readonly schemaId: string;
-  /** ISO-8601 UTC time the SOURCE observed this state. Never falls back to receipt time:
-   *  when the source does not report one, the view shows "source time not reported" instead
-   *  of this field — receipt time is not a substitute for a source read time. */
-  readonly asOf: string;
+  /** The SOURCE's read time, ISO-8601 UTC. ABSENT when the source reported none: the datum is
+   *  time-unknown, shown with "source time not reported", never as fresh, and never ordered
+   *  against a timed datum. Never falls back to receipt time. */
+  readonly asOf?: string;
   /** True only when the data is older than its source's freshness budget — nothing more. A
    *  refresh FAILURE is a separate, stronger state: it clears the shown value entirely and
-   *  marks it unavailable, rather than leaving a stale value on screen. */
+   *  marks it unavailable, rather than leaving a stale value on screen. False for a
+   *  time-unknown datum: with no source time it cannot be measured against the budget (and is
+   *  never called fresh either). */
   readonly stale: boolean;
   readonly payload: T;
 }

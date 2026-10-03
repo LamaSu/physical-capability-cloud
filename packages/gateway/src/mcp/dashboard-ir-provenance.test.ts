@@ -625,6 +625,22 @@ describe("astra r3 (#348 @c2edf196): reproduced findings (verify before fix)", (
     s.close();
   });
 
+  // M3 for lists (fix confirmation, astra 28e): the framed shapeOf fingerprint still accepts a
+  // structurally IDENTICAL payload at the same asOf — mirrors astra r2's stat "IDENTICAL
+  // payload" test above (M3, line ~531): rows stay, the list is never marked unavailable.
+  it("M3 (lists): an equal-asOf poll with an IDENTICAL payload is accepted (rows stay, never unavailable)", async () => {
+    const at = iso(T0 - 5_000);
+    const payload = { items: [{ name: "A", type: "t", available: true }, { name: "B", type: "u", available: false }], asOf: at };
+    const s = scene([{ status: 200, json: payload }, { status: 200, json: payload }], T0);
+    s.deliver(listManifest); await s.settle();
+    expect(s.q(".pcc-list").querySelectorAll(".pcc-row").length).toBe(2);
+    expect(s.q(".pcc-list").className).not.toContain("pcc-unavail");
+    await s.nextPoll();
+    expect(s.q(".pcc-list").querySelectorAll(".pcc-row").length).toBe(2);
+    expect(s.q(".pcc-list").className).not.toContain("pcc-unavail");
+    s.close();
+  });
+
   // L2: a card that fails only because an OPTIONAL field is mistyped is not "missing required fields".
   it("L2: a card with a mistyped optional field says 'mistyped field', not 'missing required fields'", async () => {
     const s = scene([{ status: 200, json: { name: "Alpha", type: "t", pricing: { baseCost: "abc" }, asOf: iso(T0) } }], T0);

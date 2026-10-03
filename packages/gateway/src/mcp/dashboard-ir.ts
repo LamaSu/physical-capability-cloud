@@ -339,15 +339,21 @@ export const LIST_PROFILES: Readonly<Record<string, { rows: string; title: reado
   "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"] },
 };
 /** The rows of a list response, read ONLY by the route's PCC-owned rows key (an own property;
- * never a manifest selector, never a bare top-level array — astra r5 F3). A bare array, or any
- * other shape, gives no rows: rows come from the route's own envelope key or not at all. */
-export function listRowsOf(path: string, data: unknown): unknown[] {
+ * never a manifest selector, never a bare top-level array — astra r5 F3). Returns **null** when
+ * there is no collection at all: the path has no LIST_PROFILES entry; `data` is not a non-null,
+ * non-array object; the route's own rows key is not an OWN property of `data`; or its value is
+ * not an array. Returns `[]` ONLY when the route's own rows key holds an empty array — the
+ * source explicitly returned an empty collection. A caller must never treat null as []: an
+ * off-contract envelope is unavailable, never a fresh "none" (astra 28e H1: absence is not
+ * evidence). */
+export function listRowsOf(path: string, data: unknown): unknown[] | null {
   const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path]!.rows : undefined;
-  if (key && data !== null && typeof data === "object" && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, key)) {
-    const v = (data as Record<string, unknown>)[key];
-    if (Array.isArray(v)) return v;
-  }
-  return [];
+  if (!key) return null; // no LIST_PROFILES entry for this path
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null; // not a non-null, non-array object
+  if (!Object.prototype.hasOwnProperty.call(data, key)) return null; // the route's own rows key is not an own property
+  const v = (data as Record<string, unknown>)[key];
+  if (!Array.isArray(v)) return null; // present but not an array
+  return v; // [] here means the source explicitly returned an empty collection
 }
 
 // ── A closed TYPE for every list field (the structural boundary; astra r4 on #344) ───────

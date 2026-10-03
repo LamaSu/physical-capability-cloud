@@ -202,6 +202,20 @@ function readField(data: unknown, f: SchemaField): FieldRead {
   }
 }
 
+/** Read + type-validate every fixed-schema field of `schema` from fetched data (no DOM writes).
+ *  null for an unknown schema. Otherwise the per-field reads (in field order) plus whether a
+ *  REQUIRED field was simply absent (readField reports an absent field as `{ok:true,
+ *  text:UNAVAILABLE}`, which is not itself "mistyped" — missingRequired is how the caller tells
+ *  the two apart). Shared by bindSchemaCard (paints) and schemaCardFailure (reports why, astra
+ *  28e L2), so the two can never disagree about what counts as a passing card. */
+function readSchemaCard(schema: BindSchema, data: unknown): { reads: FieldRead[]; missingRequired: boolean } | null {
+  const spec = SCHEMA_FIELDS[schema];
+  if (!spec) return null;
+  const reads = spec.fields.map((f) => readField(data, f));
+  const missingRequired = spec.fields.some((f, i) => f.required && reads[i]!.ok && (reads[i] as { ok: true; text: string }).text === UNAVAILABLE);
+  return { reads, missingRequired };
+}
+
 /** Fill a fixed-schema card's value slots from fetched data (text-only). PCC owns the field set +
  * order; slot[i] <- the i-th field's fixed key. If ANY present field is mistyped for its `kind`,
  * EVERY slot is set to UNAVAILABLE and this returns false — never a partial card built from one
@@ -211,17 +225,28 @@ function readField(data: unknown, f: SchemaField): FieldRead {
  * card with "Name: —". Otherwise every slot is filled and this returns true. The caller
  * (dashboard-ir-browser-entry.ts) may ignore the boolean. */
 export function bindSchemaCard(schema: BindSchema, data: unknown, slots: Array<{ textContent: string }>): boolean {
-  const spec = SCHEMA_FIELDS[schema];
-  if (!spec) return false;
-  const reads = spec.fields.map((f) => readField(data, f));
-  const missingRequired = spec.fields.some((f, i) => f.required && reads[i]!.ok && (reads[i] as { ok: true; text: string }).text === UNAVAILABLE);
-  const allOk = !missingRequired && reads.every((r) => r.ok);
-  reads.forEach((r, i) => {
+  const r = readSchemaCard(schema, data);
+  if (!r) return false;
+  const { reads, missingRequired } = r;
+  const allOk = !missingRequired && reads.every((x) => x.ok);
+  reads.forEach((x, i) => {
     const slot = slots[i];
     if (!slot) return;
-    slot.textContent = allOk && r.ok ? r.text : UNAVAILABLE;
+    slot.textContent = allOk && x.ok ? x.text : UNAVAILABLE;
   });
   return allOk;
+}
+
+/** Why a fixed-schema card is unavailable — an honest browser-side reason (astra 28e L2),
+ *  rather than always reporting "missing required fields" even when every required field is
+ *  present and only an OPTIONAL field is mistyped. null means the card is fine (bindSchemaCard
+ *  would return true for the same (schema, data)). */
+export function schemaCardFailure(schema: BindSchema, data: unknown): "missing required fields" | "mistyped field" | "unknown schema" | null {
+  const r = readSchemaCard(schema, data);
+  if (!r) return "unknown schema";
+  if (r.missingRequired) return "missing required fields";
+  if (r.reads.some((x) => !x.ok)) return "mistyped field";
+  return null;
 }
 
 // ── Frozen painter dispatch — exactly the 14 catalog types, immutable ─────────────
