@@ -91,6 +91,28 @@ describe("E11c HIGH — the order of events never drives EvidenceVerifier's verd
     expect(verdicts[0]!.result).toBe("invalid");
   });
 
+  it("a completion between two starts fails closed in every order (the latest start counts)", async () => {
+    const gcode = await sealed({ type: "gcode_hash_verified", timestamp: T(0), source, payload: { hash: "abc" } }, "ev-gcode");
+    const first = await sealed({ type: "execution_started", timestamp: T(0), source, payload: { attempt: 1 } }, "ev-s1");
+    const second = await sealed({ type: "execution_started", timestamp: T(10), source, payload: { attempt: 2 } }, "ev-s2");
+    const done = await sealed({ type: "execution_completed", timestamp: T(5), source, payload: { success: true } }, "ev-done");
+    const a = verdictOf(await verifier.verify(await bundleOf([gcode, first, second, done])));
+    const b = verdictOf(await verifier.verify(await bundleOf([gcode, second, first, done])));
+    expect(b).toEqual(a);
+    expect(a.findings).toContain("execution_duration_positive:false:critical");
+  });
+
+  it("two power summaries with the same timestamp are told apart by their hash, not their position", async () => {
+    const gcode = await sealed({ type: "gcode_hash_verified", timestamp: T(0), source, payload: { hash: "abc" } }, "ev-gcode");
+    const started = await sealed({ type: "execution_started", timestamp: T(0), source, payload: {} }, "ev-start");
+    const done = await sealed({ type: "execution_completed", timestamp: T(10), source, payload: { success: true } }, "ev-done");
+    const p1 = await sealed({ type: "power_profile_summary", timestamp: T(11), source, payload: { durationSeconds: 10 } }, "ev-p1");
+    const p2 = await sealed({ type: "power_profile_summary", timestamp: T(11), source, payload: { durationSeconds: 100 } }, "ev-p2");
+    const a = verdictOf(await verifier.verify(await bundleOf([gcode, started, done, p1, p2])));
+    const b = verdictOf(await verifier.verify(await bundleOf([gcode, started, done, p2, p1])));
+    expect(b).toEqual(a);
+  });
+
   it("the power summary checked does not depend on the order of events", async () => {
     const gcode = await sealed({ type: "gcode_hash_verified", timestamp: T(0), source, payload: { hash: "abc" } }, "ev-gcode");
     const started = await sealed({ type: "execution_started", timestamp: T(0), source, payload: {} }, "ev-start");
