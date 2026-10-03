@@ -32,6 +32,7 @@ import { getSettlementService } from "../services/settlement-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 import {
   readEscrow,
   getEscrowEvents,
@@ -318,7 +319,7 @@ export class SettlementFacade extends BaseFacade {
         ? await chainFundEscrowV2(address)
         : await chainFundEscrow(address);
       pipelineTelemetry.emit(address, "escrow_fund", "completed", { metadata: { escrow: address } });
-      trackServerEvent("escrow_funded", { amount: result?.toString?.() ?? address }, actorId);
+      trackServerEvent(lit("escrow_funded"), { amount: declare.id(result?.toString?.() ?? address) }, actorId);
       auditService.log({
         eventType: "escrow.funded",
         actor: actorId,
