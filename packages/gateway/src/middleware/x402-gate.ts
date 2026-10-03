@@ -109,10 +109,11 @@ const mppRoutes = buildMppRoutes();
 const middleware = new X402Middleware(x402Config, protectedRoutes);
 
 /**
- * A paid request's path with no query and no fragment (N107): their values (OAuth codes, one-time
- * tokens) are the caller's, and recentPayments is shown to other callers.
+ * The route a payment was for, as the app declared it (N107): its pattern, never the caller's path.
+ * A path can carry a value (a query, a fragment, an encoded separator, a token in a segment), and
+ * recentPayments is shown to an admin who is not the payer.
  */
-const pathOnly = (url: string) => url.split(/[?#]/, 1)[0] ?? "";
+const routeOf = (req: FastifyRequest) => req.routeOptions?.url ?? "unmatched";
 
 /** Payment stats tracking */
 interface PaymentStats {
@@ -222,7 +223,7 @@ export async function paymentGate(app: FastifyInstance) {
         // Payment verified — track and continue
         stats.paidRequests++;
         stats.recentPayments.unshift({
-          path: pathOnly(req.url),
+          path: routeOf(req),
           payer: "mpp-verified",
           amount: check.routeConfig.amount,
           timestamp: new Date().toISOString(),
@@ -267,7 +268,7 @@ export async function paymentGate(app: FastifyInstance) {
             if (verification.valid) {
               stats.paidRequests++;
               stats.recentPayments.unshift({
-                path: pathOnly(req.url),
+                path: routeOf(req),
                 payer: verification.payer ?? "unknown",
                 amount: payload.accepted.amount,
                 timestamp: new Date().toISOString(),

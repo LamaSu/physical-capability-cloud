@@ -104,7 +104,8 @@ describe("CRITICAL 2 (N107): the security monitor sends PostHog no request conte
     await settle();
     const honeypot = events.slice(start).find((e) => e.name === "honeypot_triggered");
     expect(honeypot, "the honeypot was reported").toBeDefined();
-    expect(String(honeypot!.props.referer)).toContain("r.test/cb");
+    // A Referer is reported as a kind (r1 of #514): never its text.
+    expect(honeypot!.props.referer).toBe("cross_origin");
     for (const secret of secrets) expect(sentSince(start)).not.toContain(secret);
   });
 });

@@ -8,6 +8,8 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { createHmac, randomBytes } from "node:crypto";
+import { isIP } from "node:net";
 
 // ---------------------------------------------------------------------------
 // Attack Signatures
@@ -93,7 +95,7 @@ function detectBot(req: FastifyRequest): BotSignal | null {
 
   // Known headless/automation frameworks
   if (/headlesschrome|headless/i.test(ua)) signals.push({ type: "headless", confidence: 0.95, reason: "HeadlessChrome in UA" });
-  if (/puppeteer|playwright|selenium|webdriver|cypress/i.test(ua)) signals.push({ type: "automation", confidence: 0.95, reason: `Automation framework in UA: ${ua.slice(0, 80)}` });
+  if (/puppeteer|playwright|selenium|webdriver|cypress/i.test(ua)) signals.push({ type: "automation", confidence: 0.95, reason: "Automation framework in UA" });
   if (/phantomjs|slimerjs|splash/i.test(ua)) signals.push({ type: "headless", confidence: 0.9, reason: "Legacy headless browser" });
 
   // Stealth browsers (camoufox, undetected-chromedriver, etc.)
@@ -124,17 +126,17 @@ function detectBot(req: FastifyRequest): BotSignal | null {
 
   // Known AI agent patterns
   if (/claude|anthropic|openai|chatgpt|gpt-4|langchain|autogpt|babyagi/i.test(ua)) {
-    signals.push({ type: "ai_agent", confidence: 0.9, reason: `AI agent in UA: ${ua.slice(0, 80)}` });
+    signals.push({ type: "ai_agent", confidence: 0.9, reason: "AI agent in UA" });
   }
 
   // Known scanners
   if (/nmap|nikto|sqlmap|burp|zap|nuclei|gobuster|dirbuster|wfuzz|ffuf|feroxbuster|masscan|shodan|censys/i.test(ua)) {
-    signals.push({ type: "known_scanner", confidence: 0.95, reason: `Security scanner: ${ua.slice(0, 80)}` });
+    signals.push({ type: "known_scanner", confidence: 0.95, reason: "Security scanner in UA" });
   }
 
   // Scrapers
   if (/scrapy|httpclient|python-requests|python-urllib|go-http-client|axios|node-fetch|got\//i.test(ua)) {
-    signals.push({ type: "scraper", confidence: 0.5, reason: `HTTP library UA: ${ua.slice(0, 80)}` });
+    signals.push({ type: "scraper", confidence: 0.5, reason: "HTTP library in UA" });
   }
 
   // No UA at all
@@ -250,40 +252,99 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 
 /**
- * A URL with no query and no fragment (N107): the query and fragment carry values (OAuth codes,
- * one-time tokens), and no value of a request leaves the gateway through this monitor.
+ * The route a request matched, as the app declared it (N107): its pattern, never the caller's
+ * path. A path can carry a value (a token or code in a segment, an encoded query); a pattern
+ * cannot.
  */
-const pathOnly = (url: string) => url.split(/[?#]/, 1)[0] ?? "";
+const routeOf = (req: FastifyRequest) => req.routeOptions?.url ?? "unmatched";
+
+/** The client's address when it is one; anything else in its place is not reported. */
+const clientIpOf = (req: FastifyRequest) => (isIP(req.ip) ? req.ip : "invalid");
+
+/**
+ * The client's identity as PostHog sees it (N107): a keyed hash of the address, under a key that
+ * lives only in this process. Events from one client correlate; no address leaves the gateway.
+ */
+const IDENTITY_KEY = randomBytes(32);
+const identityOf = (ip: string) => (ip === "invalid" ? "invalid" : createHmac("sha256", IDENTITY_KEY).update(ip).digest("hex").slice(0, 16));
+
+const headerText = (value: unknown) => (typeof value === "string" ? value : Array.isArray(value) ? value.join(",") : "");
+
+/** The kinds of client the monitor tells apart: a closed set, never the User-Agent's text. */
+type UaClass = "none" | "headless" | "automation" | "ai_agent" | "scanner" | "http_library" | "browser" | "other";
+
+function uaClassOf(ua: string): UaClass {
+  if (ua.length < 5) return "none";
+  if (/headlesschrome|headless|phantomjs|slimerjs|splash/i.test(ua)) return "headless";
+  if (/puppeteer|playwright|selenium|webdriver|cypress/i.test(ua)) return "automation";
+  if (/claude|anthropic|openai|chatgpt|gpt-4|langchain|autogpt|babyagi/i.test(ua)) return "ai_agent";
+  if (/nmap|nikto|sqlmap|burp|zap|nuclei|gobuster|dirbuster|wfuzz|ffuf|feroxbuster|masscan|shodan|censys/i.test(ua)) return "scanner";
+  if (/scrapy|httpclient|python-requests|python-urllib|go-http-client|axios|node-fetch|got\/|curl\/|wget\//i.test(ua)) return "http_library";
+  if (/mozilla\/|chrome\/|firefox\/|safari\//i.test(ua)) return "browser";
+  return "other";
+}
+
+const METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
+const MEDIA_TYPES: ReadonlySet<string> = new Set([
+  "application/json", "application/x-www-form-urlencoded", "multipart/form-data", "text/plain",
+  "text/html", "application/xml", "text/xml", "application/octet-stream",
+]);
+
+/** Where a request came from, as a kind: never the Referer's text (it can hold userinfo or values). */
+function refererKindOf(req: FastifyRequest): "direct" | "same_origin" | "cross_origin" | "invalid" {
+  const referer = headerText(req.headers["referer"]);
+  if (!referer) return "direct";
+  try {
+    return new URL(referer).host === headerText(req.headers.host) ? "same_origin" : "cross_origin";
+  } catch {
+    return "invalid";
+  }
+}
 
 /**
  * What an attack event says about the content that matched (N107): its type, where it was, the
- * request's path and how long the content was. Never the content: a URL, cookie or body that
- * matched a pattern can also hold the caller's credentials.
+ * route and how long the content was. Never the content: a URL, cookie or body that matched a
+ * pattern can also hold the caller's credentials.
  */
 function attackSummary(req: FastifyRequest, attackType: AttackType, attackSource: string, content: string) {
-  const path = pathOnly(req.url);
   return {
     attackType,
     attackSource,
     attackLength: content.length,
-    attackPayload: `${attackType} in ${attackSource}, ${content.length} chars, at ${path}`,
+    attackPayload: `${attackType} in ${attackSource}, ${content.length} chars, at ${routeOf(req)}`,
   };
 }
 
+/**
+ * A request's fingerprint as the security events carry it (r1 of #514, CRITICAL 1): a closed
+ * schema of derived values. No header's text, no address and no path value leaves the gateway:
+ * the client is a keyed hash, the User-Agent a class, the language its primary subtag, the
+ * Referer a kind, the content type an allowlisted media type, the country an ISO code, the edge
+ * an enum and the forwarding chain a count.
+ */
 function buildFingerprint(req: FastifyRequest) {
-  const referer = req.headers["referer"];
+  const ua = headerText(req.headers["user-agent"]);
+  const lang = headerText(req.headers["accept-language"]).trim();
+  const primaryLang = /^([a-z]{2,3})(?![a-z])/i.exec(lang)?.[1]?.toLowerCase();
+  const media = headerText(req.headers["content-type"]).split(";", 1)[0]!.trim().toLowerCase();
+  const country = headerText(req.headers["cf-ipcountry"] ?? req.headers["x-vercel-ip-country"]).trim().toUpperCase();
+  const forwarded = headerText(req.headers["x-forwarded-for"]);
   return {
-    ip: req.ip,
-    method: req.method,
-    path: pathOnly(req.url),
-    userAgent: req.headers["user-agent"] ?? "unknown",
-    referer: typeof referer === "string" ? pathOnly(referer) : "direct",
-    acceptLanguage: req.headers["accept-language"] ?? "unknown",
-    contentType: req.headers["content-type"] ?? "none",
-    cfCountry: req.headers["cf-ipcountry"] ?? req.headers["x-vercel-ip-country"] ?? "unknown",
-    cfRay: req.headers["cf-ray"] ?? null,
-    xForwardedFor: req.headers["x-forwarded-for"] ?? null,
-    railwayEdge: req.headers["x-railway-edge"] ?? null,
+    clientId: identityOf(clientIpOf(req)),
+    method: METHODS.has(req.method) ? req.method : "OTHER",
+    path: routeOf(req),
+    uaClass: uaClassOf(ua),
+    uaLength: ua.length,
+    referer: refererKindOf(req),
+    acceptLanguage: lang ? primaryLang ?? "other" : "none",
+    contentType: media ? (MEDIA_TYPES.has(media) ? media : "other") : "none",
+    cfCountry: /^[A-Z]{2}$/.test(country) ? country : "unknown",
+    edge:
+      req.headers["cf-ray"] !== undefined ? "cloudflare"
+        : req.headers["x-railway-edge"] !== undefined ? "railway"
+        : req.headers["x-vercel-ip-country"] !== undefined ? "vercel"
+        : "none",
+    forwardedHops: forwarded ? forwarded.split(",").length : 0,
     timestamp: new Date().toISOString(),
   };
 }
@@ -313,7 +374,7 @@ async function emitSecurityEvent(name: string, props: Record<string, unknown>) {
     }
     // Sanitize all props to prevent XSS when attacker-controlled data is viewed in dashboards
     const safeProps = sanitize(props) as Record<string, unknown>;
-    _trackServerEvent(name, safeProps, `security:${safeProps.ip ?? "unknown"}`);
+    _trackServerEvent(name, safeProps, `security:${safeProps.clientId ?? "unknown"}`);
   } catch {
     // PostHog not initialized — non-fatal
   }
@@ -333,7 +394,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         honeypotPath: path,
         severity: "high",
       });
-      app.log.warn({ msg: "HONEYPOT", ip: req.ip, path, ua: req.headers["user-agent"] });
+      app.log.warn({ msg: "HONEYPOT", ip: clientIpOf(req), path, uaClass: fp.uaClass });
       // Add random delay (50-200ms) to match real 404 timing — prevents timing side-channel
       await new Promise((r) => setTimeout(r, 50 + Math.random() * 150));
       return reply.status(404).send({ error: "not_found" });
@@ -356,7 +417,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         ...attackSummary(req, urlAttack, "url", req.url),
         severity: "critical",
       });
-      app.log.warn({ msg: "ATTACK_DETECTED", type: urlAttack, ip: req.ip, source: "url", path: fp.path });
+      app.log.warn({ msg: "ATTACK_DETECTED", type: urlAttack, ip: clientIpOf(req), source: "url", path: fp.path });
       // BLOCK known attacks — detection-only is insufficient for tonight
       return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
     }
@@ -368,7 +429,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         const attack = detectAttack(str);
         if (attack) {
           emitSecurityEvent("attack_detected", { ...fp, ...attackSummary(req, attack, "query", str), severity: "critical" });
-          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "query", path: fp.path });
+          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: clientIpOf(req), source: "query", path: fp.path });
           return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
         }
       }
@@ -381,7 +442,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         const attack = detectAttack(val);
         if (attack) {
           emitSecurityEvent("attack_detected", { ...fp, ...attackSummary(req, attack, `header:${h}`, val), severity: "critical" });
-          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: `header:${h}` });
+          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: clientIpOf(req), source: `header:${h}`, path: fp.path });
           return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
         }
       }
@@ -398,7 +459,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         severity: bot.confidence >= 0.8 ? "high" : "medium",
       });
       if (bot.confidence >= 0.7) {
-        app.log.warn({ msg: "BOT_DETECTED", type: bot.type, ip: req.ip, reason: bot.reason });
+        app.log.warn({ msg: "BOT_DETECTED", type: bot.type, ip: clientIpOf(req), reason: bot.reason });
       }
     }
 
@@ -411,7 +472,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         windowMs: RATE_WINDOW_MS,
         severity: "medium",
       });
-      app.log.warn({ msg: "RATE_LIMIT", ip: req.ip, count: rate.count });
+      app.log.warn({ msg: "RATE_LIMIT", ip: clientIpOf(req), count: rate.count });
     }
   });
 
@@ -434,7 +495,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         ...attackSummary(req, attack, "body", bodyStr),
         severity: "critical",
       });
-      app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "body", path: fp.path });
+      app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: clientIpOf(req), source: "body", path: fp.path });
       return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
     }
   });
