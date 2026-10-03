@@ -189,7 +189,8 @@ describe("MEDIUM (review r3 of #389): a word outside the milestone record's own 
   });
 
   it("an escrow-only or V-next word placed in the milestone field is unknown, whatever it would mean on the escrow", () => {
-    for (const status of ["REFUND_ALLOCATED", "RELEASE_ALLOCATED", "SETTLED_RELEASED", "SETTLED_REFUNDED", "PRIMARY_ASSERTED", "CREATED", "PENDING", "ACTIVE"]) {
+    // PENDING is not here: the gateway's writer puts it in a milestone (px7-515-r1.test.ts).
+    for (const status of ["REFUND_ALLOCATED", "RELEASE_ALLOCATED", "SETTLED_RELEASED", "SETTLED_REFUNDED", "PRIMARY_ASSERTED", "CREATED", "ACTIVE"]) {
       expect(fundingOf(kj(job(), linked(escrow(), [milestone({ status })]))), status).toBe("unknown");
     }
   });

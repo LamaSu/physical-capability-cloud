@@ -39,6 +39,7 @@ import { schema, eq, and } from "@pcc/store";
 import type { JobOffer, JobOfferEvent } from "../services/job-offers-store.js";
 import { extractRequirementsCoords } from "../services/job-offers-store.js";
 import {
+  MILESTONE_WORDS,
   buildSettlementAxis,
   resolveSettlement,
   type JobExecutionDb,
@@ -265,13 +266,6 @@ const ESCROW_HOLDS = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEA
  * and `escalation`), and a disputed escrow.
  */
 const ESCROW_CONTESTED = new Set(["PRIMARY_ASSERTED", "CHALLENGED", "BACKUP_PENDING", "BACKUP_ASSERTED", "DISPUTED"]);
-/**
- * The milestone record's own vocabulary: escrow_milestones.status is an EscrowStatus (@pcc/spec
- * types/common.ts; packages/db schema/settlement.ts). A word outside it is not a milestone status
- * (an escrow-only or V-next word placed in the legacy field), so it decides nothing (review r3 of
- * #389, MEDIUM).
- */
-const MILESTONE_WORDS = new Set(["UNFUNDED", "FUNDED", "LOCKED", "RELEASING", "RELEASED", "DISPUTED", "REFUNDED", "SLASHED"]);
 /** Milestone words (escrow_milestones.status) under which this job's milestone is funded and still open. */
 const MILESTONE_HOLDS = new Set(["FUNDED", "LOCKED", "RELEASING"]);
 /** Milestone words under which this job's milestone is held but contested. */
@@ -304,7 +298,8 @@ export interface FundingContest {
  * reconciliation, and from every other record that can contest the money: the job's own status
  * and the disputes on its milestone.
  *   the payout is unknown (conflicting, unrecognized or ambiguous records)    -> unknown
- *   the milestone's word is not a milestone status (MILESTONE_WORDS)          -> unknown
+ *   the milestone's word is not a milestone status (MILESTONE_WORDS, shared
+ *   with the payout rule in job-execution.ts; review r3 of #389, MEDIUM)      -> unknown
  *   either word says never funded, refunded or released                       -> not_held
  *   a refund to the payer is decided but not made                             -> refund_pending
  *   the words do not say the escrow holds the funds and the milestone is open -> unknown

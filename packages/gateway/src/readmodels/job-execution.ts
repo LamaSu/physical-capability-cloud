@@ -26,6 +26,7 @@
  */
 
 import {
+  EscrowStatusSchema,
   JOB_EXECUTION_SCHEMA_ID,
   JOB_EXECUTION_EVIDENCE_LIMIT,
   classifyMoneyStatus,
@@ -303,12 +304,24 @@ function moneyView(status: string, vocabulary: MoneyStateView["vocabulary"]): Mo
   return { sourceStatus: String(status ?? ""), vocabulary, tone: c.tone, label: c.label, known: c.known };
 }
 
+/**
+ * The milestone record's own vocabulary: every word escrow_milestones.status holds, normalized. The
+ * spec types the column as an EscrowStatus (@pcc/spec EscrowStatusSchema; packages/db
+ * schema/settlement.ts), and the gateway's writer adds two words of its own: paid-job-flow.ts
+ * inserts "pending" for the milestones of an escrow it has not funded, and writes
+ * "evidence_submitted" when evidence arrives. A word outside this set (an escrow-only word such as
+ * SETTLED_RELEASED, or a V-next unit word put in the milestone field) is not a milestone status, so
+ * it decides neither the payout nor the funding (review r1 of #515, residual MEDIUM).
+ */
+export const MILESTONE_WORDS: ReadonlySet<string> = new Set(
+  [...EscrowStatusSchema.options, "pending", "evidence_submitted"].map(normalizeMoneyStatus),
+);
 /** Milestone words (escrow_milestones.status) that claim this job's money was released. */
-const MILESTONE_RELEASED = new Set(["RELEASED", "SETTLED_RELEASED"]);
+const MILESTONE_RELEASED = new Set(["RELEASED"]);
 /** A milestone word that may or may not mean released: never read either way. */
 const MILESTONE_AMBIGUOUS = new Set(["COMPLETED"]);
 /** Milestone words that say the payer was refunded. */
-const MILESTONE_REFUNDED = new Set(["REFUNDED", "SETTLED_REFUNDED"]);
+const MILESTONE_REFUNDED = new Set(["REFUNDED"]);
 /** Escrow words (escrows.status) that claim everything in the escrow was released. */
 const ESCROW_ALL_RELEASED = new Set(["COMPLETED", "RELEASED", "SETTLED_RELEASED"]);
 /** Escrow words that contradict a release of this job's milestone. */
@@ -337,6 +350,8 @@ export type PayoutUnknownReason = NonNullable<SettlementAxis["payoutUnknownReaso
  *
  *   either status unrecognized                        -> unknown  (status_unrecognized)
  *   milestone COMPLETED (ambiguous for a milestone)   -> unknown  (status_ambiguous)
+ *   the milestone's word is not a milestone status (MILESTONE_WORDS), such as an
+ *   escrow-only SETTLED_RELEASED or SETTLED_REFUNDED  -> unknown  (status_unrecognized)
  *   milestone released + escrow refunded, settled_refunded, disputed, slashed or expired
  *                                                     -> unknown  (records_conflict)
  *   milestone released + any other escrow word        -> reported_released (never paid)
@@ -359,6 +374,7 @@ export function reconcilePayout(
   const e = normalizeMoneyStatus(escrow.sourceStatus);
   const conflict = { payout: "unknown", unknownReason: "records_conflict" } as const;
   if (MILESTONE_AMBIGUOUS.has(m)) return { payout: "unknown", unknownReason: "status_ambiguous" };
+  if (!MILESTONE_WORDS.has(m)) return { payout: "unknown", unknownReason: "status_unrecognized" };
   if (MILESTONE_RELEASED.has(m)) {
     return ESCROW_AGAINST_RELEASE.has(e) ? conflict : { payout: "reported_released", unknownReason: null };
   }
