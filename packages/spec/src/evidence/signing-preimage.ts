@@ -98,34 +98,49 @@ export const SIGNING_JSON_MAX_DEPTH = 64;
  *   - no NaN, Infinity or other non-standard token anywhere, including in
  *     fields the preimage ignores;
  *   - every number decodes to an IEEE-754 double;
- *   - at most SIGNING_JSON_MAX_DEPTH containers deep.
+ *   - at most SIGNING_JSON_MAX_DEPTH containers deep, measured on the TEXT
+ *     before decoding, so a duplicate key cannot hide a deeper value it
+ *     replaced (cross-family review A01b-q1).
  * pcc-node's `loads_strict` mirrors it, so both languages accept and refuse
  * the same texts (goldens.json `parity_vectors`). Never throws anything but
  * SigningPreimageError.
  */
 export function parseSigningInputJson(text: unknown): unknown {
   if (typeof text !== "string") throw new SigningPreimageError("malformed-json", "expected JSON text");
-  let value: unknown;
+  if (textNestingExceeds(text, SIGNING_JSON_MAX_DEPTH)) {
+    throw new SigningPreimageError("malformed-json", `nested deeper than ${SIGNING_JSON_MAX_DEPTH}`);
+  }
   try {
-    value = JSON.parse(text);
+    return JSON.parse(text);
   } catch {
     throw new SigningPreimageError("malformed-json", "not RFC 8259 JSON");
   }
-  if (nestingExceeds(value, SIGNING_JSON_MAX_DEPTH)) {
-    throw new SigningPreimageError("malformed-json", `nested deeper than ${SIGNING_JSON_MAX_DEPTH}`);
-  }
-  return value;
 }
 
-/** Is any container in `value` deeper than `limit`? Iterative, so any depth is safe to scan. */
-function nestingExceeds(value: unknown, limit: number): boolean {
-  const stack: Array<[unknown, number]> = [[value, 1]];
-  while (stack.length > 0) {
-    const [v, depth] = stack.pop()!;
-    if (typeof v !== "object" || v === null) continue;
-    if (depth > limit) return true;
-    for (const child of Array.isArray(v) ? v : Object.values(v)) {
-      if (typeof child === "object" && child !== null) stack.push([child, depth + 1]);
+/**
+ * Does the JSON text nest deeper than `limit` containers anywhere? Every `[` and
+ * `{` outside a string counts, including inside a value a later duplicate key
+ * replaces: decoding keeps only the last duplicate, so a scan of the decoded
+ * value cannot see the first one, while CPython's decoder still recurses into
+ * it. Only ASCII characters change the state, so iterating UTF-16 code units
+ * here and code points in pcc-node's mirror gives the same answer.
+ */
+function textNestingExceeds(text: string, limit: number): boolean {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === 0x5c) escaped = true; // backslash
+      else if (c === 0x22) inString = false; // quote
+    } else if (c === 0x22) {
+      inString = true;
+    } else if (c === 0x5b || c === 0x7b) {
+      if (++depth > limit) return true;
+    } else if (c === 0x5d || c === 0x7d) {
+      depth--;
     }
   }
   return false;

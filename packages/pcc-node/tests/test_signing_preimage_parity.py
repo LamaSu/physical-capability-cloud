@@ -325,6 +325,11 @@ def test_parity_vectors_cover_the_numeric_domain_and_empty_path():
         "revocation_ignored_depth_65",
         "revocation_ignored_depth_1200",
         "revocation_ignored_long_integer",
+        "revocation_ignored_shadowed_depth_64",
+        "revocation_ignored_shadowed_depth_65",
+        "revocation_ignored_shadowed_depth_20000",
+        "revocation_ignored_brackets_in_string",
+        "revocation_ignored_escaped_backslash_then_depth",
     ):
         assert required in names
 
@@ -355,6 +360,17 @@ class TestLoadsStrict:
         assert self._code(self.BASE % nest(20000)) == "malformed-json"
         assert self._code(nest(64)) == "ACCEPT"
         assert self._code(nest(65)) == "malformed-json"
+
+    def test_depth_is_measured_on_the_text_so_a_duplicate_cannot_hide_it(self):
+        nest = lambda n: "[" * n + "]" * n
+        shadowed = lambda n: self.BASE % (nest(n) + ',"unused":0')
+        assert self._code(shadowed(63)) == "ACCEPT"
+        for n in (64, 99, 19999):
+            assert self._code(shadowed(n)) == "malformed-json", n
+        # Brackets inside a string are not nesting, and escapes are honoured.
+        assert self._code(self.BASE % ('"' + "[" * 100 + '"')) == "ACCEPT"
+        assert self._code(self.BASE % ('"\\"' + "[" * 100 + '"')) == "ACCEPT"
+        assert self._code(self.BASE % ('["\\\\",' + nest(70) + "]")) == "malformed-json"
 
     def test_numbers_decode_as_doubles_and_non_json_refused(self):
         assert loads_strict(self.BASE % ("1" + "0" * 5000))["unused"] == float("inf")

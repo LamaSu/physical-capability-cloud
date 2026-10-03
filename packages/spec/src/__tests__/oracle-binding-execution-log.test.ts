@@ -540,7 +540,8 @@ describe("#52 binding — injected legs that throw are treated as failure, never
 });
 
 describe("#52 binding — snapshot integrity", () => {
-  it("an instance whose events property is a getter is read exactly once during the snapshot", async () => {
+  // Since astra pack 154: an instance carrying a getter is refused without the getter ever running.
+  it("an instance whose events property is a getter is refused, and the getter never runs", async () => {
     const real = await carrierABundle(await buildEntries(["a"]));
     let reads = 0;
     const instance = {
@@ -552,8 +553,8 @@ describe("#52 binding — snapshot integrity", () => {
       kernelSignature: real.kernelSignature,
     };
     const res = await v().verify(instance, PARAMS, CTX);
-    expect(res.met).toBe(true);
-    expect(reads).toBe(1);
+    expect(res.met).toBe(false);
+    expect(reads).toBe(0);
   });
 });
 

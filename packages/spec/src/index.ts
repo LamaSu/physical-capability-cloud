@@ -4,6 +4,7 @@ export { canonicalize, sha256, hashBundle, hashEvent, verifyBundleHash, verifyEv
 // RTP-absorption doc 03 — job lifecycle reducer + in-memory timeout registry (transport-independent)
 export * from "./util/job-lifecycle.js";
 export { ids, generateId } from "./util/ids.js";
+export { compareCodeUnits } from "./util/code-unit-order.js";
 // Identity types and browser-safe functions (no node:crypto)
 export * from "./identity/types.js";
 // ERC-8004 types (browser-safe)
@@ -17,3 +18,9 @@ export * from "./evidence/index.js";
 // ROLE_TAGS — single-source-of-truth keccak256 hashes for ContributorRole
 // (off-chain TS side; on-chain Solidity side codegen'd into RoleTags.sol)
 export * from "./payouts.js";
+// Canonical money-status display map (browser-safe) — the ONE exact escrow /
+// settlement state -> tone + honest label table every surface renders from.
+export * from "./money/money-status.js";
+// Product read models (browser-safe): typed DTOs product surfaces project without
+// inferring meaning. JobExecutionDTO first (PX-6).
+export * from "./readmodels/job-execution.js";
