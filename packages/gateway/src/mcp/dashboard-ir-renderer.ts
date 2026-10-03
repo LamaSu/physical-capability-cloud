@@ -23,7 +23,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind, MetricFieldKind } from "./dashboard-ir.js";
-import { LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource } from "./dashboard-ir.js";
+import { LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -157,7 +157,7 @@ function readField(data: unknown, f: SchemaField): FieldRead {
         ? { ok: true, text: reportedFieldText(foundKey, raw) } : { ok: false };
     case "capType":
       return typeof raw === "string" && CAP_TYPE_RE.test(raw)
-        ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+        ? { ok: true, text: identifierText(foundKey, raw) } : { ok: false };
     case "status":
       return typeof raw === "string" && raw.length > 0
         ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
@@ -340,7 +340,7 @@ function readListField(row: unknown, field: string): ListFieldRead {
   const kind: ListFieldKind | undefined = LIST_FIELD_KINDS[field];
   switch (kind) {
     case "id":
-      return typeof raw === "string" && LIST_ID_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+      return typeof raw === "string" && LIST_ID_RE.test(raw) ? { ok: true, text: identifierText(field, raw), raw } : { ok: false };
     case "text":
       // astra r5 F1: attributed, not bare — see reportedFieldText (dashboard-ir.ts).
       return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: reportedFieldText(field, raw), raw } : { ok: false };
@@ -355,7 +355,7 @@ function readListField(row: unknown, field: string): ListFieldRead {
     case "count":
       return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 1_000_000 ? { ok: true, text: String(raw), raw } : { ok: false };
     case "capType":
-      return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+      return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: identifierText(field, raw), raw } : { ok: false };
     default:
       return { ok: false }; // not in the exhaustive kind map — listProfileViolation already refuses this field before render
   }
@@ -480,7 +480,7 @@ export function bindScalar(node: IrNode, data: unknown): string {
     case "count":
       return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? String(raw) : UNAVAILABLE;
     case "id":
-      return typeof raw === "string" && LIST_ID_RE.test(raw) ? boundValueText(sel, raw) : UNAVAILABLE;
+      return typeof raw === "string" && LIST_ID_RE.test(raw) ? identifierText(sel, raw) : UNAVAILABLE;
     case "time":
       return typeof raw === "string" && timeRoundTrips(raw) ? raw : UNAVAILABLE;
     case "version":

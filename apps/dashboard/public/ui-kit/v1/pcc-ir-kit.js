@@ -259,6 +259,15 @@
     return false;
   }
   var scriptIn = (f) => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_RE.test(f.replace(/ /g, ""));
+  var IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
+  var IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
+  function identifierText(field, value) {
+    if (value === "") return value;
+    const t = boundValueText(field, value);
+    if (t === WITHHELD_FIELD) return t;
+    for (const v of views(foldForClaims(value))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
+    return t;
+  }
   function statesAmount(text) {
     return AMOUNT_RE.test(foldForClaims(text));
   }
@@ -1127,7 +1136,7 @@
       case "text":
         return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: reportedFieldText(foundKey, raw) } : { ok: false };
       case "capType":
-        return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+        return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: identifierText(foundKey, raw) } : { ok: false };
       case "status":
         return typeof raw === "string" && raw.length > 0 ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
       case "amount":
@@ -1280,7 +1289,7 @@
     const kind = LIST_FIELD_KINDS[field];
     switch (kind) {
       case "id":
-        return typeof raw === "string" && LIST_ID_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+        return typeof raw === "string" && LIST_ID_RE.test(raw) ? { ok: true, text: identifierText(field, raw), raw } : { ok: false };
       case "text":
         return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: reportedFieldText(field, raw), raw } : { ok: false };
       case "status":
@@ -1294,7 +1303,7 @@
       case "count":
         return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 1e6 ? { ok: true, text: String(raw), raw } : { ok: false };
       case "capType":
-        return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: boundValueText(field, raw), raw } : { ok: false };
+        return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: identifierText(field, raw), raw } : { ok: false };
       default:
         return { ok: false };
     }
@@ -1367,7 +1376,7 @@
       case "count":
         return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? String(raw) : UNAVAILABLE;
       case "id":
-        return typeof raw === "string" && LIST_ID_RE.test(raw) ? boundValueText(sel, raw) : UNAVAILABLE;
+        return typeof raw === "string" && LIST_ID_RE.test(raw) ? identifierText(sel, raw) : UNAVAILABLE;
       case "time":
         return typeof raw === "string" && timeRoundTrips(raw) ? raw : UNAVAILABLE;
       case "version":

@@ -19,6 +19,7 @@ import {
   RECORD_STATUS_NOTE, isMoneyState, recordValueText,
   WITHHELD_FIELD, RECORD_CLAIM_NOTE, boundValueText, isProseClaim, statesAmount, mentionsWithheld,
   SAFE_STATUS_WORDS, LIST_PROFILES, LIST_FIELD_KINDS, listRowsOf, REPORTED_PREFIX,
+  identifierText,
 } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
 import { bindListRows, bindScalar, bindSchemaCard, renderIrDoc, UNAVAILABLE } from "./dashboard-ir-renderer.js";
@@ -896,4 +897,30 @@ describe("astra r5 (#344 @c3e04dd9): findings 1-5 reproduced (verify before fix)
   // treats absence as "simply not shown", never a failure). reproduced: the producer test skips
   // absent fields (no assertion that each profile field is present). Fixed in that file's new
   // "every profile field is present, non-null, in at least one real row" test, not here.
+});
+
+describe("genui review of #344 r6 (@d9add4d3): an identifier cannot spell a claim the word window misses", () => {
+  const claim = "payment-from-the-remote-operator-received";
+  it("reproduced at d9add4d3: a hyphenated claim as a list kernelId is withheld, never bare", () => {
+    const l = fdoc.createElement("div");
+    bindListRows(fdoc, l, { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["kernelId"], statusFrom: "status" }, bind: { path: "/api/jobs" } } as unknown as IrNode, [{ id: "job-1", kernelId: claim, status: "running" }]);
+    expect(textOf(l)).not.toContain(claim);
+  });
+  it("reproduced at d9add4d3: the same claim as a capability type is withheld in a list and in a card", () => {
+    const l = fdoc.createElement("div");
+    bindListRows(fdoc, l, { type: "list", id: "n2", props: { rowTitle: "name", rowMeta: ["type"], statusFrom: "available" }, bind: { path: "/api/capabilities" } } as unknown as IrNode, [{ name: "Arm", type: claim, available: true }]);
+    expect(textOf(l)).not.toContain(claim);
+    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    bindSchemaCard("capability-summary-v1", { name: "Arm", type: claim, pricing: { baseCost: "1", currency: "USDC" }, assuranceTiers: [0], available: true }, slots);
+    expect(slots.map((x) => x.textContent)).not.toContain(claim);
+  });
+  it("the pair check has NO word window for identifiers (6 words between still withholds)", () => {
+    expect(identifierText("id", "payment-a-b-c-d-e-f-received")).toBe(WITHHELD_FIELD);
+    expect(identifierText("type", "fundsOfTheRemoteOperatorWereFullyReleased")).toBe(WITHHELD_FIELD); // camelCase too
+  });
+  it("real identifiers pass unchanged (no false positive on a single money noun or a hex segment)", () => {
+    for (const id of ["job-3f2a9c1e-fee", "job-3f2a9c1e-ada", "cap-kernel-nyc-fdm", "kernel-nyc", "liquid-transfer", "analytical-balance", "cnc-3axis"]) {
+      expect(identifierText("id", id), id).toBe(id);
+    }
+  });
 });
