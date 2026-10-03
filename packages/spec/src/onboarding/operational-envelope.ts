@@ -15,8 +15,12 @@
  *     the declared unit, inside that limit's [min, max] inclusive. A numeric
  *     string is refused, never coerced (G4). A value in another unit is
  *     refused; v1 defines no conversions. 0 is a bound like any other, never
- *     "no limit" (G1). A parameter declared `unbounded` passes unchecked; the
- *     adapter's committed map says why it sets no physical quantity.
+ *     "no limit" (G1). A parameter declared `unbounded` sets no physical
+ *     quantity (the committed map says why), and it passes only a value in its
+ *     `allowed` list, compared by type and value; there is no free-form
+ *     parameter.
+ *   - The adapter is the one the envelope commits: a runtime refuses an
+ *     adapter whose release manifest digest is not `adapterVersion`.
  *   - At most `maxCommandsPerMinute` commands in any 60-second window, per
  *     device. The stop command is exempt: a stop is always sent.
  *   - A job that runs past the confirmed maximum of `deadlineQuantity` is
@@ -27,14 +31,15 @@
  *     mutable runtime checks; this envelope does not replace them.
  *
  * `envelopeDigest` names the confirmed envelope this came from, the one the
- * registration record committed. A digest is not a signature: it proves
- * nothing by itself, and it matters where it is committed.
+ * registry's signed registration commits. A digest is not a signature: it
+ * proves nothing by itself, and it matters where it is committed.
  */
 
 import { z } from "zod";
 
 import { UnitSchema } from "../csd/composition.js";
 import {
+  ADAPTER_MANIFEST_DIGEST_PATTERN,
   DEVICE_CLASS_TEMPLATES,
   EnvelopeRefused,
   HAZARDS,
@@ -44,6 +49,8 @@ import {
   isTimeUnit,
   supervisionPolicy,
   type ConfirmedSafetyEnvelope,
+  type RegistrationVerifier,
+  type SafetyEnvelopeRegistration,
 } from "./safety-envelope.js";
 
 const NonBlank = z.string().refine((s) => s.trim().length > 0, { message: "must not be blank" });
@@ -65,6 +72,17 @@ export const OperationalEStopSchema = z.discriminatedUnion("mechanism", [
   z.object({ mechanism: z.literal("none") }).strict(),
 ]);
 
+/** A parameter that sets no physical quantity: why, and the only values it may carry. */
+export const OperationalUnboundedSchema = z
+  .object({
+    reason: NonBlank,
+    allowed: z
+      .array(z.union([NonBlank, z.number().finite()]))
+      .min(1)
+      .refine((values) => new Set(values.map((v) => JSON.stringify(v))).size === values.length, { message: "an allowed value is listed twice" }),
+  })
+  .strict();
+
 export const OperationalCommandSchema = z
   .object({
     name: NonBlank,
@@ -74,7 +92,7 @@ export const OperationalCommandSchema = z
           name: NonBlank,
           quantity: NonBlank.optional(),
           unit: UnitSchema.optional(),
-          unbounded: NonBlank.optional(),
+          unbounded: OperationalUnboundedSchema.optional(),
         })
         .strict(),
     ),
@@ -94,7 +112,8 @@ export const OperationalEnvelopeV1Schema = z
     deviceClass: NonBlank,
     deviceId: NonBlank,
     adapterType: NonBlank,
-    adapterVersion: NonBlank,
+    /** The adapter release manifest digest the envelope commits; a runtime refuses any other adapter. */
+    adapterVersion: z.string().regex(ADAPTER_MANIFEST_DIGEST_PATTERN, { message: "must be sha256: + 64 lowercase hex (the adapter's manifest digest)" }),
     strict: z.literal(true),
     limits: z.array(OperationalLimitSchema).min(1),
     commands: z.array(OperationalCommandSchema).min(1),
@@ -152,20 +171,26 @@ export const OperationalEnvelopeV1Schema = z
 export type OperationalEnvelopeV1 = z.infer<typeof OperationalEnvelopeV1Schema>;
 
 /**
- * Compile the envelope the registration record committed into the runtime
- * envelope. `committedDigest` must come from the registration record, never
- * from `confirmed` itself. Refuses anything confirm would refuse, and
- * anything the schema refuses.
+ * Compile the envelope the registry's signed registration commits into the
+ * runtime envelope. It reads only the snapshot `checkCommittedEnvelope`
+ * returns, never `confirmed` again, and refuses anything confirm would
+ * refuse, and anything the schema refuses.
  */
-export function compileOperationalEnvelope(confirmed: ConfirmedSafetyEnvelope, committedDigest: string): OperationalEnvelopeV1 {
-  const envelope = checkCommittedEnvelope(confirmed, committedDigest);
+export function compileOperationalEnvelope(
+  confirmed: ConfirmedSafetyEnvelope,
+  registration: SafetyEnvelopeRegistration,
+  verifyRegistration: RegistrationVerifier,
+): OperationalEnvelopeV1 {
+  const { envelope, envelopeDigest: committedDigest } = checkCommittedEnvelope(confirmed, registration, verifyRegistration);
   const template = DEVICE_CLASS_TEMPLATES[envelope.deviceClass]!;
   const eStop =
     envelope.eStop.mechanism === "adapter-stop"
       ? { mechanism: "adapter-stop" as const, stopCommand: envelope.eStop.stopCommand as string }
       : { mechanism: envelope.eStop.mechanism };
-  const parsed = OperationalEnvelopeV1Schema.safeParse({
-    envelopeVersion: 1,
+  // Built from the checked snapshot with literals and map only, which install
+  // values directly (no assignment a polluted prototype's setter could intercept).
+  const candidate = {
+    envelopeVersion: 1 as const,
     envelopeDigest: committedDigest,
     deviceClass: envelope.deviceClass,
     deviceId: envelope.device.deviceId,
@@ -176,17 +201,30 @@ export function compileOperationalEnvelope(confirmed: ConfirmedSafetyEnvelope, c
     commands: envelope.commandMap.commands.map((c) => ({
       name: c.name,
       params: c.params.map((p) =>
-        p.unbounded !== undefined ? { name: p.name, unbounded: p.unbounded } : { name: p.name, quantity: p.quantity, unit: p.unit },
+        p.unbounded !== undefined
+          ? { name: p.name, unbounded: { reason: p.unbounded.reason, allowed: [...p.unbounded.allowed] } }
+          : { name: p.name, quantity: p.quantity, unit: p.unit },
       ),
     })),
     deadlineQuantity: template.deadline,
     maxCommandsPerMinute: envelope.maxCommandsPerMinute,
     eStop,
     supervision: envelope.supervision,
-    hazards: envelope.hazards,
-  });
+    hazards: [...envelope.hazards],
+  };
+  const parsed = OperationalEnvelopeV1Schema.safeParse(candidate);
   if (!parsed.success) {
     throw new EnvelopeRefused(parsed.error.issues.map((i) => `${i.path.join(".") || "envelope"}: ${i.message}`));
   }
-  return parsed.data;
+  // What was built and validated is what is returned, frozen. Zod's parsed copy
+  // is not used: zod rebuilds objects and arrays by assignment.
+  return deepFreeze(candidate) as OperationalEnvelopeV1;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value)) deepFreeze(v);
+  }
+  return value;
 }

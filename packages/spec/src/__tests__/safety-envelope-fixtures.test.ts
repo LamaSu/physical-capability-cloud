@@ -9,7 +9,7 @@
  * what the reference produces now, so the file cannot drift from the code.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,14 +20,37 @@ import { compileOperationalEnvelope, OperationalEnvelopeV1Schema } from "../onbo
 import {
   computeSafetyEnvelopeDigest,
   confirmSafetyEnvelope,
-  draftSafetyEnvelope,
+  registrationSigningPreimage,
+  registrationStatementDigest,
   SAFETY_ENVELOPE_DOMAIN,
+  SAFETY_ENVELOPE_REGISTRATION_DOMAIN,
+  type ConfirmedSafetyEnvelope,
+  type RegistrationVerifier,
   type SafetyEnvelopeInput,
+  type SafetyEnvelopeRegistration,
 } from "../onboarding/safety-envelope.js";
 import { canonicalize } from "../util/canonical.js";
 
 const FIXTURE = resolve(dirname(fileURLToPath(import.meta.url)), "../../fixtures/onboarding/safety-envelope-v1.json");
 const AT = "2026-09-29T20:00:00Z";
+const REGISTERED_AT = "2026-09-29T20:05:00Z";
+
+/**
+ * An ephemeral registry key, generated per run: no key material is ever
+ * written to the fixture, which holds the registration statements and their
+ * signing preimages, never signatures.
+ */
+const REGISTRY = generateKeyPairSync("ed25519");
+const verifyRegistry: RegistrationVerifier = (preimage, signature) => verify(null, preimage, REGISTRY.publicKey, signature);
+
+function statementOf(c: ConfirmedSafetyEnvelope) {
+  return { deviceId: c.envelope.device.deviceId, envelopeDigest: c.envelopeDigest, registeredAt: REGISTERED_AT };
+}
+
+function register(c: ConfirmedSafetyEnvelope): SafetyEnvelopeRegistration {
+  const statement = statementOf(c);
+  return { ...statement, signature: Buffer.from(sign(null, registrationSigningPreimage(statement), REGISTRY.privateKey)).toString("hex") };
+}
 
 /** Full command maps: every required quantity of each template, mapped, plus a declared "stop". */
 const OT2_MAP = {
@@ -43,7 +66,13 @@ const OT2_MAP = {
 const PLATE_MAP = {
   commands: [
     { name: "setIncubation", params: [{ name: "celsius", quantity: "incubation_temperature", unit: "degC" }] },
-    { name: "read", params: [{ name: "seconds", quantity: "read_duration", unit: "s" }] },
+    {
+      name: "read",
+      params: [
+        { name: "seconds", quantity: "read_duration", unit: "s" },
+        { name: "wavelengthNm", unbounded: { reason: "an optical setting, not a safety quantity", allowed: [405, 450, 600] } },
+      ],
+    },
     { name: "runProtocol", params: [{ name: "minutes", quantity: "job_duration", unit: "min" }] },
     { name: "stop", params: [] },
   ],
@@ -52,7 +81,7 @@ const PLATE_MAP = {
 const INPUTS: Record<string, SafetyEnvelopeInput> = {
   "ot2-operator-answers": {
     deviceClass: "liquid-handler-ot2",
-    device: { deviceId: "ot2-sim-1", adapterType: "opentrons", adapterVersion: "2.1.0", vendor: "Opentrons", model: "OT-2" },
+    device: { deviceId: "ot2-sim-1", adapterType: "opentrons", adapterVersion: `sha256:${"21".repeat(32)}`, vendor: "Opentrons", model: "OT-2" },
     commandMap: OT2_MAP,
     intake: {
       limits: [
@@ -71,7 +100,7 @@ const INPUTS: Record<string, SafetyEnvelopeInput> = {
   // attended, not unattended: a device that moves or heats (both templates) cannot run unattended in v1.
   "plate-reader-reference-proposed": {
     deviceClass: "lab-plate-reader",
-    device: { deviceId: "pr-sim-1", adapterType: "generic-http", adapterVersion: "1.0.0" },
+    device: { deviceId: "pr-sim-1", adapterType: "generic-http", adapterVersion: `sha256:${"10".repeat(32)}` },
     commandMap: PLATE_MAP,
     intake: {
       limits: [
@@ -151,6 +180,13 @@ const INVALID: Array<[string, Change]> = [
   ],
   ["wrong-deadline-quantity", (e) => (e.deadlineQuantity = "aspirate_volume")],
   ["limits-out-of-order", (e) => (e.limits = [...e.limits].reverse())],
+  // Round 3 (astra pack 153): the adapter is named by its manifest digest, and no parameter is free-form.
+  ["adapter-version-not-a-manifest-digest", (e) => (e.adapterVersion = "2.1.0")],
+  ["unbounded-free-form-reason-only", (e) => e.commands[0].params.push({ name: "payload", unbounded: "device-specific" })],
+  ["unbounded-allowed-empty", (e) => e.commands[0].params.push({ name: "slot", unbounded: { reason: "a deck slot", allowed: [] } })],
+  ["unbounded-allowed-duplicate", (e) => e.commands[0].params.push({ name: "slot", unbounded: { reason: "a deck slot", allowed: [1, 1] } })],
+  ["unbounded-allowed-blank-string", (e) => e.commands[0].params.push({ name: "slot", unbounded: { reason: "a deck slot", allowed: [" "] } })],
+  ["unbounded-extra-key", (e) => e.commands[0].params.push({ name: "slot", unbounded: { reason: "a deck slot", allowed: [1], any: true } })],
   // Moved from `valid` (114b-10): the schema now refuses an unknown deviceClass outright, so this is
   // no longer "generic rules only" — it is refused before any per-class rule (even e-stop) is checked.
   [
@@ -171,9 +207,8 @@ function issuePaths(value: unknown): string[] {
 
 function buildFixtures() {
   const confirmed = Object.entries(INPUTS).map(([name, input]) => {
-    const draft = draftSafetyEnvelope(input);
-    const c = confirmSafetyEnvelope(draft, { confirmedBy: "operator:fixture", confirmedAt: AT });
-    return { name, confirmed: c, runtime: compileOperationalEnvelope(c, c.envelopeDigest) };
+    const c = confirmSafetyEnvelope(input, { confirmedBy: "operator:fixture", confirmedAt: AT });
+    return { name, confirmed: c, runtime: compileOperationalEnvelope(c, register(c), verifyRegistry) };
   });
   const ot2 = confirmed[0]!.runtime;
   return {
@@ -183,6 +218,8 @@ function buildFixtures() {
       "digest: envelopeDigest = '0x' + lowercase hex(sha256(UTF-8(preimage))), preimage = canonicalize({domain, envelope}) with the confirmed SafetyEnvelopeBody as envelope and packages/spec/src/util/canonical.ts as canonicalize (keys sorted, no whitespace, strings as JSON.stringify, numbers as JS Number#toString).",
       "operationalEnvelopeV1: a validator must accept every 'valid' envelope and refuse every 'invalid' one; 'paths' are the issue paths the TS schema reports. NaN and Infinity cannot appear in JSON, so they are not here; a JSON consumer never sees them.",
       "114b: the schema now refuses an unknown deviceClass outright (see 'unknown-class-generic-rules-only', moved here from 'valid'), limits must be in the template's exact order and units, an adapter-stop's command must be one of the declared commands, and deadlineQuantity must be the template's own deadline.",
+      "153 (round 3): adapterVersion is the adapter's release manifest digest (sha256: + 64 lowercase hex); an unbounded parameter is {reason, allowed}, and a runtime passes only a value in allowed (same type and value); a reference source carries the bound it cites (value) and its unit.",
+      "registration: the registry signs statementDigest = 'sha256:' + lowercase hex(sha256(UTF-8(canonicalize({domain, deviceId, envelopeDigest, registeredAt})))) with Ed25519; the signed message is the UTF-8 of statementDigest itself (LO-EV-1 signingPreimage, 71 bytes). Signatures are not in this file: verify with the registry's key.",
     ],
     digest: {
       domain: SAFETY_ENVELOPE_DOMAIN,
@@ -192,6 +229,18 @@ function buildFixtures() {
         preimage: canonicalize({ domain: SAFETY_ENVELOPE_DOMAIN, envelope: c.envelope }),
         envelopeDigest: c.envelopeDigest,
       })),
+    },
+    registration: {
+      domain: SAFETY_ENVELOPE_REGISTRATION_DOMAIN,
+      cases: confirmed.map(({ name, confirmed: c }) => {
+        const statement = statementOf(c);
+        return {
+          name,
+          statement,
+          preimage: canonicalize({ domain: SAFETY_ENVELOPE_REGISTRATION_DOMAIN, ...statement }),
+          statementDigest: registrationStatementDigest(statement),
+        };
+      }),
     },
     operationalEnvelopeV1: {
       valid: confirmed.map(({ name, runtime }) => ({ name, envelope: runtime })),
@@ -222,6 +271,14 @@ describe("safety envelope parity fixtures (for pcc-node)", () => {
       expect(canonicalize({ domain: fixtures.digest.domain, envelope: c.envelope }), c.name).toBe(c.preimage);
       expect(`0x${createHash("sha256").update(c.preimage, "utf8").digest("hex")}`, c.name).toBe(c.envelopeDigest);
       expect(computeSafetyEnvelopeDigest(c.envelope), c.name).toBe(c.envelopeDigest);
+    }
+  });
+
+  it("each registration case recomputes: preimage from the statement, digest from the preimage, and the signed bytes are the digest's UTF-8", () => {
+    for (const c of fixtures.registration.cases) {
+      expect(canonicalize({ domain: fixtures.registration.domain, ...c.statement }), c.name).toBe(c.preimage);
+      expect(`sha256:${createHash("sha256").update(c.preimage, "utf8").digest("hex")}`, c.name).toBe(c.statementDigest);
+      expect(Buffer.from(registrationSigningPreimage(c.statement)).toString("utf8"), c.name).toBe(c.statementDigest);
     }
   });
 

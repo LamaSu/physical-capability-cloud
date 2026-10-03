@@ -21,12 +21,29 @@
  *     envelope cannot be compiled.
  *
  * Authority. A digest anyone can recompute proves nothing by itself, so
- * compiling takes the digest the device's registration record committed when
- * the operator confirmed through an authenticated session, never the digest
- * carried by the object being compiled. The confirmation (who, when) is inside
- * the digested body, and confirm and both compilers run one shared set of
- * rules (`confirmedBodyProblems`), so a hand-built body can pass nothing that
- * confirm would refuse.
+ * compiling takes the device's REGISTRATION: the registry's signed statement
+ * that this device's confirmed envelope has this digest, made after the
+ * operator confirmed through an authenticated session. Its signature is
+ * checked by the integration's verifier, wired to the registry's pinned key
+ * (trusted code, like every verification callback). A body built and digested
+ * by the caller has no registry signature, so it compiles nothing. The
+ * confirmation (who, when) is inside the digested body, and confirm and both
+ * compilers run one shared set of rules (`confirmedBodyProblems`), so even a
+ * registered body passes nothing that confirm would refuse.
+ *
+ * One observation. Compiling never re-reads the object it was given. The
+ * envelope is copied once as plain JSON data, through property descriptors
+ * (no getter, proxy trap or other code supplied with it runs), serialized
+ * once, and hashed. Checks and compilation run on the copy parsed back from
+ * those same bytes, so what is compiled is exactly what the digest covers
+ * (astra pack 153).
+ *
+ * Provenance. Confirm re-drafts from the input; it never trusts a draft
+ * object. Each limit carries its sources, and a cited reference source carries
+ * the bound it cites. A limit looser than its cited bound must carry an
+ * override with the operator's reason, and a limit a reference proposed must
+ * be exactly that bound. Both compilers check this, so it holds for every
+ * body, however it was built.
  *
  * Safety policy in v1 (fail closed until safeguards are modeled):
  *   - a device that moves or heats cannot run unattended;
@@ -36,17 +53,22 @@
  *     runtime stops a job that runs past its confirmed maximum.
  *
  * The command surface. The adapter declares every command it can send and,
- * for each parameter, the template quantity it sets (checked against that
- * limit at runtime) or why it sets none. The map is committed in the digest,
- * and every bounded quantity must be set by some declared parameter, so a
- * strict runtime can refuse any command or parameter outside it.
+ * for each parameter, either the template quantity it sets (checked against
+ * that limit at runtime) or why it sets none, together with the finite set of
+ * values it may carry. There is no free-form parameter, so no opaque payload
+ * can carry a physical control. The map and the adapter's manifest digest
+ * (`device.adapterVersion`, `sha256:` of the reviewed adapter release) are
+ * committed in the digest. Every bounded quantity must be set by some declared
+ * parameter, so a strict runtime can refuse any command, parameter or value
+ * outside the map, and any adapter whose manifest digest differs.
  *
  * "Safety envelope" is this term exactly. It is not `evidence-envelope` (a
  * data-integrity wrapper) or onboard-kit's `workEnvelope` (part dimensions).
  *
  * Every function is pure and deterministic: no I/O, no clock, no randomness.
- * Units come only from the composition unit table (`KNOWN_UNITS`), the one
- * the prism compiler parses.
+ * The only code it calls that the caller supplies is the registration
+ * verifier. Units come only from the composition unit table (`KNOWN_UNITS`),
+ * the one the prism compiler parses.
  *
  * Inputs, by kits' permanent intake field ids (item 6, bus #4140):
  *   - `safety.limits` gives the operator's answers, one per template quantity (`intake.limits`);
@@ -65,14 +87,22 @@ import { createHash } from "node:crypto";
 
 import { KNOWN_UNITS, type ParameterDefinition, type PortType, type Unit } from "../csd/composition.js";
 import type { CsdEvidenceTier, CsdParameter } from "../csd/schema.js";
+import { parseEd25519SignatureHex, signingPreimage } from "../evidence/signing-preimage.js";
+import type { SHA256 } from "../types/common.js";
 import { canonicalize } from "../util/canonical.js";
 
 /** Domain separator: an envelope digest can never collide with another digest. */
 export const SAFETY_ENVELOPE_DOMAIN = "PCC:safety-envelope:v1";
 
+/** Domain separator of the registry's signed registration statement. */
+export const SAFETY_ENVELOPE_REGISTRATION_DOMAIN = "PCC:safety-envelope-registration:v1";
+
 /** A confirmed envelope's digest: `0x` + 64 lowercase hex (SHA-256), the commitment family. */
 export type SafetyEnvelopeDigest = `0x${string}`;
 const DIGEST_PATTERN = /^0x[0-9a-f]{64}$/;
+
+/** An adapter's manifest digest: `sha256:` + 64 lowercase hex of its reviewed release manifest. */
+export const ADAPTER_MANIFEST_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 const UNITS = new Set<string>(KNOWN_UNITS);
 /** Units a job deadline can be stated in. */
@@ -131,20 +161,32 @@ export interface EStopDeclaration {
 export interface DeviceIdentity {
   deviceId: string;
   adapterType: string;
-  /** The adapter version whose command map this envelope commits. */
+  /**
+   * The adapter release this envelope commits: `sha256:` + 64 lowercase hex
+   * of its reviewed release manifest (its code and this command map). The
+   * runtime refuses an adapter whose manifest digest differs.
+   */
   adapterVersion: string;
   vendor?: string;
   model?: string;
 }
 
-/** One parameter of an adapter command: the quantity it sets, or why it sets none. */
+/** Why a parameter sets no physical quantity, and the only values it may carry. */
+export interface UnboundedParam {
+  /** Why it sets no physical quantity (a well name, a labware id). */
+  reason: string;
+  /** Every value the runtime lets through, each a non-blank string or a finite number; nothing else passes. */
+  allowed: (string | number)[];
+}
+
+/** One parameter of an adapter command: the quantity it sets, or why it sets none and what it may carry. */
 export interface CommandParamSpec {
   name: string;
   /** The template quantity this parameter sets, in `unit`; the runtime checks it against that limit. */
   quantity?: string;
   unit?: Unit;
-  /** Why this parameter sets no physical quantity (a well name, a labware id); the runtime passes it unchecked. */
-  unbounded?: string;
+  /** A parameter that sets no physical quantity; the runtime passes only the values in `allowed`. */
+  unbounded?: UnboundedParam;
 }
 
 export interface CommandSpec {
@@ -298,9 +340,14 @@ export const DEVICE_CLASS_TEMPLATES: Readonly<Record<string, DeviceClassTemplate
 
 // ── The draft ───────────────────────────────────────────────────────
 
+/**
+ * Where a limit came from. A reference source carries the bound it cites, in
+ * the limit's unit, so the limit can be checked against it wherever the body
+ * is compiled; an override names the citations it overrides.
+ */
 export type LimitSource =
   | { kind: "operator"; field: string }
-  | { kind: "reference"; citation: Citation; retrievedAt: string; claim: string }
+  | { kind: "reference"; citation: Citation; retrievedAt: string; claim: string; value: { min?: number; max?: number }; unit: Unit }
   | { kind: "override"; reason: string; overrides: Citation[] };
 
 export interface EnvelopeLimit {
@@ -372,6 +419,135 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** The keys of `v` that are not in `allowed`, for closed shapes. */
+function extraKeys(v: Record<string, unknown>, allowed: readonly string[]): string[] {
+  return Object.keys(v).filter((k) => !allowed.includes(k));
+}
+
+// ── One observation: plain data, read once ──────────────────────────
+
+class NotPlainData extends Error {}
+
+const MAX_DEPTH = 64;
+
+/**
+ * A proxy check that runs no trap: Node's `util.types.isProxy`, loaded at
+ * module load without a static `node:util` import, so browser bundles of
+ * @pcc/spec still build (the dashboard has no `node:util`). Where there is
+ * none (a browser, or Node before 20.16) it is null, and every object is
+ * refused: a proxy cannot be told apart from plain data there without
+ * running its traps.
+ */
+const isProxy: ((value: object) => boolean) | null = (() => {
+  const runtime = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process;
+  const util = runtime?.getBuiltinModule?.("node:util") as { types?: { isProxy?: (value: unknown) => boolean } } | undefined;
+  const check = util?.types?.isProxy;
+  return typeof check === "function" ? (value: object) => check(value) : null;
+})();
+
+/**
+ * A one-pass copy of JSON data that runs no code supplied with it. Everything
+ * is read through property descriptors, so a getter is found and refused
+ * without being called. Refused: a proxy; an accessor; an array whose
+ * prototype is not Array.prototype, or with a hole; an object whose prototype
+ * is not Object.prototype or null; a function, symbol, bigint or non-finite
+ * number; undefined inside an array; a cycle; a key named `__proto__`; and
+ * nesting deeper than 64. An undefined member is dropped, and -0 becomes 0,
+ * both as `canonicalize` writes them. Copied objects have a null prototype,
+ * and copied array elements are installed with `Object.defineProperty`, so
+ * building the copy runs no inherited setter either.
+ */
+function plainCopy(value: unknown, path: string, ancestors: Set<object>, depth: number): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new NotPlainData(`${path}: ${String(value)} is not a finite number`);
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (typeof value !== "object") throw new NotPlainData(`${path}: a ${typeof value} is not JSON data`);
+  if (isProxy === null) throw new NotPlainData(`${path}: this runtime has no trap-free proxy check, so no object is copied as plain data`);
+  if (isProxy(value)) throw new NotPlainData(`${path}: a proxy`);
+  if (depth > MAX_DEPTH) throw new NotPlainData(`${path}: nested deeper than ${MAX_DEPTH}`);
+  if (ancestors.has(value)) throw new NotPlainData(`${path}: a cycle`);
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) throw new NotPlainData(`${path}: an array with a nonstandard prototype`);
+      const out: unknown[] = new Array(value.length);
+      for (let i = 0; i < value.length; i++) {
+        const element = Object.getOwnPropertyDescriptor(value, i);
+        if (element === undefined) throw new NotPlainData(`${path}[${i}]: a hole in an array`);
+        if (!("value" in element)) throw new NotPlainData(`${path}[${i}]: an accessor (a getter or setter)`);
+        if (element.value === undefined) throw new NotPlainData(`${path}[${i}]: undefined in an array`);
+        // Installed as the copy's own data property: an assignment or push would run a setter
+        // Array.prototype serves for this index (astra pack 158).
+        Object.defineProperty(out, i, { value: plainCopy(element.value, `${path}[${i}]`, ancestors, depth + 1), writable: true, enumerable: true, configurable: true });
+      }
+      return out;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new NotPlainData(`${path}: not a plain object`);
+    const out = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(value)) {
+      if (key === "__proto__") throw new NotPlainData(`${path}: a key named __proto__`);
+      const member = Object.getOwnPropertyDescriptor(value, key);
+      if (member === undefined) continue;
+      if (!("value" in member)) throw new NotPlainData(`${path}.${key}: an accessor (a getter or setter)`);
+      if (member.value === undefined) continue;
+      out[key] = plainCopy(member.value, `${path}.${key}`, ancestors, depth + 1);
+    }
+    return out;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+/** `value` as plain JSON data, copied once; `EnvelopeRefused` when it is anything else. */
+function plainSnapshot<T>(value: unknown, what: string): T {
+  try {
+    return plainCopy(value, what, new Set(), 0) as T;
+  } catch (err) {
+    if (err instanceof NotPlainData) {
+      throw new EnvelopeRefused([`${err.message}: ${what} must be plain JSON data, and no code supplied with it may run`]);
+    }
+    throw err;
+  }
+}
+
+function nullPrototype(_key: string, value: unknown): unknown {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? Object.assign(Object.create(null) as Record<string, unknown>, value)
+    : value;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value)) deepFreeze(v);
+  }
+  return value;
+}
+
+/** An envelope as it was hashed: the one copy that is checked and compiled, and its digest. */
+interface EnvelopeSnapshot {
+  body: SafetyEnvelopeBody;
+  digest: SafetyEnvelopeDigest;
+}
+
+/**
+ * Copy the envelope once as plain data, serialize the copy once, hash those
+ * bytes, and parse the same bytes back into the frozen body that is checked
+ * and compiled. Nothing afterwards reads the caller's object, so a value
+ * cannot change between hashing, checking and use (astra pack 153).
+ */
+function snapshotEnvelope(envelope: unknown): EnvelopeSnapshot {
+  const bytes = canonicalize(plainSnapshot(envelope, "envelope"));
+  // Exactly canonicalize({ domain, envelope }): "domain" sorts before "envelope".
+  const preimage = `{"domain":${JSON.stringify(SAFETY_ENVELOPE_DOMAIN)},"envelope":${bytes}}`;
+  const digest = `0x${createHash("sha256").update(preimage).digest("hex")}` as SafetyEnvelopeDigest;
+  const body = deepFreeze(JSON.parse(bytes, nullPrototype)) as SafetyEnvelopeBody;
+  return { body, digest };
+}
+
 /** Why a bound pair is unusable as a range, or null. */
 function rangeProblem(min: unknown, max: unknown): string | null {
   if (!finite(min) || !finite(max)) return "needs both a finite min and a finite max";
@@ -421,6 +597,26 @@ function boundProblem(value: unknown): string | null {
   return null;
 }
 
+/** A citation with exactly its own fields. */
+function citationOf(c: Citation): Citation {
+  return { doc: c.doc, section: c.section, ...(c.url !== undefined ? { url: c.url } : {}) };
+}
+
+/** A cited range with exactly the sides it gives. */
+function sidesOf(v: { min?: number; max?: number }): { min?: number; max?: number } {
+  return { ...(v.min !== undefined ? { min: v.min } : {}), ...(v.max !== undefined ? { max: v.max } : {}) };
+}
+
+/** The tightest bound cited references allow together: the largest given min and the smallest given max. */
+function tightestBound(values: readonly { min?: number; max?: number }[]): { min?: number; max?: number } {
+  const mins = values.flatMap((v) => (v.min === undefined ? [] : [v.min]));
+  const maxes = values.flatMap((v) => (v.max === undefined ? [] : [v.max]));
+  return {
+    ...(mins.length > 0 ? { min: Math.max(...mins) } : {}),
+    ...(maxes.length > 0 ? { max: Math.min(...maxes) } : {}),
+  };
+}
+
 function describeBound(bound: { min?: number; max?: number }, unit: string): string {
   if (bound.min !== undefined && bound.max !== undefined) return `${bound.min}..${bound.max} ${unit}`;
   return bound.min !== undefined ? `at least ${bound.min} ${unit}` : `at most ${bound.max} ${unit}`;
@@ -468,15 +664,41 @@ function supervisionPolicyProblem(
   return null;
 }
 
+/**
+ * Why an unbounded parameter's declaration is not a reason plus a finite set
+ * of allowed values, or null. A free-form parameter could carry anything (an
+ * opaque payload hiding a physical control), so v1 has none (astra pack 153).
+ */
+function unboundedProblem(unbounded: unknown, at: string): string | null {
+  if (!isRecord(unbounded) || extraKeys(unbounded, ["reason", "allowed"]).length > 0) {
+    return `parameter ${at} is unbounded, so it must be exactly {reason, allowed}`;
+  }
+  if (!nonEmpty(unbounded.reason)) return `parameter ${at} is unbounded without a reason`;
+  const allowed = unbounded.allowed;
+  if (!Array.isArray(allowed) || allowed.length === 0) {
+    return `parameter ${at} is unbounded, so it must list the values it may carry (allowed); a free-form parameter could carry anything`;
+  }
+  const seen = new Set<string>();
+  for (const value of allowed) {
+    if (!nonEmpty(value) && !finite(value)) return `parameter ${at}: every allowed value must be a non-blank string or a finite number`;
+    const key = JSON.stringify(value);
+    if (seen.has(key)) return `parameter ${at}: the allowed value ${key} is listed twice`;
+    seen.add(key);
+  }
+  return null;
+}
+
 /** Why a command map is malformed for this class, or null. Coverage gaps are `commandMapGaps`. */
 function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): string | null {
   if (!isRecord(commandMap) || !Array.isArray(commandMap.commands) || commandMap.commands.length === 0) {
     return "the command map must list at least one command";
   }
+  if (extraKeys(commandMap, ["commands"]).length > 0) return "the command map holds only commands";
   const units = new Map(template.requires.map((r) => [r.quantity, r.unit]));
   const commandNames = new Set<string>();
   for (const [i, command] of commandMap.commands.entries()) {
     if (!isRecord(command) || !nonEmpty(command.name)) return `command ${i} needs a name`;
+    if (extraKeys(command, ["name", "params"]).length > 0) return `command ${JSON.stringify(command.name)} has keys other than name and params`;
     if (commandNames.has(command.name)) return `command ${JSON.stringify(command.name)} is declared twice`;
     commandNames.add(command.name);
     if (!Array.isArray(command.params)) return `command ${JSON.stringify(command.name)} needs a params list`;
@@ -484,6 +706,7 @@ function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): 
     for (const param of command.params) {
       if (!isRecord(param) || !nonEmpty(param.name)) return `command ${JSON.stringify(command.name)} has a parameter without a name`;
       const at = `${command.name}.${param.name}`;
+      if (extraKeys(param, ["name", "quantity", "unit", "unbounded"]).length > 0) return `parameter ${at} has keys other than name, quantity, unit and unbounded`;
       if (paramNames.has(param.name)) return `parameter ${at} is declared twice`;
       paramNames.add(param.name);
       const mapped = param.quantity !== undefined || param.unit !== undefined;
@@ -495,8 +718,9 @@ function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): 
         if (param.unit !== units.get(param.quantity as string)) {
           return `parameter ${at} sets ${String(param.quantity)} in ${JSON.stringify(param.unit)}, not ${units.get(param.quantity as string)}`;
         }
-      } else if (!nonEmpty(param.unbounded)) {
-        return `parameter ${at} is unbounded without a reason`;
+      } else {
+        const problem = unboundedProblem(param.unbounded, at);
+        if (problem) return problem;
       }
     }
   }
@@ -517,7 +741,9 @@ function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate
   if (!template) reasons.push(`unknown deviceClass ${JSON.stringify(String(input?.deviceClass))}`);
   if (!nonEmpty(input?.device?.deviceId)) reasons.push("device.deviceId is required");
   if (!nonEmpty(input?.device?.adapterType)) reasons.push("device.adapterType is required");
-  if (!nonEmpty(input?.device?.adapterVersion)) reasons.push("device.adapterVersion is required");
+  if (typeof input?.device?.adapterVersion !== "string" || !ADAPTER_MANIFEST_DIGEST_PATTERN.test(input.device.adapterVersion)) {
+    reasons.push("device.adapterVersion must be the adapter's manifest digest, sha256: + 64 lowercase hex");
+  }
   if (!Array.isArray(input?.intake?.limits)) reasons.push("intake.limits must be an array");
   if (!Array.isArray(input?.references)) reasons.push("references must be an array");
   if (template && input?.commandMap !== undefined) {
@@ -532,7 +758,9 @@ function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate
  * Draft the envelope for one device. Throws `EnvelopeRefused` only for
  * malformed input; missing or conflicting information becomes `questions`.
  */
-export function draftSafetyEnvelope(input: SafetyEnvelopeInput): SafetyEnvelopeDraft {
+export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeDraft {
+  // Every later read is of this one plain copy, so the draft is one observation of the input.
+  const input = plainSnapshot<SafetyEnvelopeInput>(given, "input");
   const { template } = checkInput(input);
   const limits: EnvelopeLimit[] = [];
   const questions: EnvelopeQuestion[] = [];
@@ -562,6 +790,10 @@ export function draftSafetyEnvelope(input: SafetyEnvelopeInput): SafetyEnvelopeD
     for (const r of input.references.filter((x) => x?.quantity === req.quantity)) {
       if (!nonEmpty(r.citation?.doc) || !nonEmpty(r.citation?.section)) {
         dropped.push({ quantity: req.quantity, reason: "a reference without a citation (doc and section) cannot propose a limit" });
+      } else if (r.citation.url !== undefined && !nonEmpty(r.citation.url)) {
+        dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} has a blank url` });
+      } else if (!nonEmpty(r.claim)) {
+        dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} states no claim` });
       } else if (!nonEmpty(r.retrievedAt) || !Number.isFinite(Date.parse(r.retrievedAt))) {
         dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} has no valid retrievedAt` });
       } else if (r.unit !== req.unit) {
@@ -572,17 +804,16 @@ export function draftSafetyEnvelope(input: SafetyEnvelopeInput): SafetyEnvelopeD
         references.push(r);
       }
     }
+    // Each source keeps exactly what it cites, so the bound can be checked wherever the body is compiled.
     const referenceSources: LimitSource[] = references.map((r) => ({
       kind: "reference",
-      citation: r.citation,
+      citation: citationOf(r.citation),
       retrievedAt: r.retrievedAt,
       claim: r.claim,
+      value: sidesOf(r.value),
+      unit: req.unit,
     }));
-    // The tightest bound the references allow together: the max of the given mins, the min of the given maxes.
-    const mins = references.flatMap((r) => (r.value.min === undefined ? [] : [r.value.min]));
-    const maxes = references.flatMap((r) => (r.value.max === undefined ? [] : [r.value.max]));
-    const min = mins.length > 0 ? Math.max(...mins) : undefined;
-    const max = maxes.length > 0 ? Math.min(...maxes) : undefined;
+    const { min, max } = tightestBound(references.map((r) => r.value));
     if (references.length > 0) {
       referenceBounds.push({
         quantity: req.quantity,
@@ -783,16 +1014,113 @@ export interface ConfirmedSafetyEnvelope {
   envelopeDigest: SafetyEnvelopeDigest;
 }
 
-/** `"0x" + hex(sha256(canonicalize({ domain, envelope })))`. */
+/**
+ * `"0x" + hex(sha256(canonicalize({ domain, envelope })))`, over one plain
+ * copy of the envelope (anything that is not plain JSON data is refused).
+ */
 export function computeSafetyEnvelopeDigest(envelope: SafetyEnvelopeBody): SafetyEnvelopeDigest {
-  return `0x${createHash("sha256").update(canonicalize({ domain: SAFETY_ENVELOPE_DOMAIN, envelope })).digest("hex")}`;
+  return snapshotEnvelope(envelope).digest;
 }
+
+/** Why a citation is not exactly `{doc, section, url?}` with non-blank fields, or null. */
+function citationProblem(c: unknown): string | null {
+  if (!isRecord(c) || extraKeys(c, ["doc", "section", "url"]).length > 0) return "has a citation that is not exactly {doc, section, url?}";
+  if (!nonEmpty(c.doc) || !nonEmpty(c.section)) return "has a citation without a doc and a section";
+  if (c.url !== undefined && !nonEmpty(c.url)) return "has a citation with a blank url";
+  return null;
+}
+
+/** Why a limit source is malformed, for a limit in `unit`, or null. */
+function sourceProblem(source: unknown, unit: string): string | null {
+  if (!isRecord(source)) return "a source is not an object";
+  switch (source.kind) {
+    case "operator":
+      if (extraKeys(source, ["kind", "field"]).length > 0) return "an operator source holds only kind and field";
+      return nonEmpty(source.field) ? null : "an operator source needs the field it answered";
+    case "reference": {
+      if (extraKeys(source, ["kind", "citation", "retrievedAt", "claim", "value", "unit"]).length > 0) {
+        return "a reference source holds only kind, citation, retrievedAt, claim, value and unit";
+      }
+      const citation = citationProblem(source.citation);
+      if (citation) return `a reference source ${citation}`;
+      if (!nonEmpty(source.claim)) return "a reference source needs its claim";
+      if (!nonEmpty(source.retrievedAt) || !Number.isFinite(Date.parse(source.retrievedAt))) return "a reference source needs a valid retrievedAt";
+      if (source.unit !== unit) return `a reference source must cite the limit's unit ${unit} (got ${JSON.stringify(source.unit)})`;
+      const bound = boundProblem(source.value);
+      if (bound) return `a reference source ${bound}`;
+      if (extraKeys(source.value as Record<string, unknown>, ["min", "max"]).length > 0) return "a reference source's value holds only min and max";
+      return null;
+    }
+    case "override":
+      if (extraKeys(source, ["kind", "reason", "overrides"]).length > 0) return "an override source holds only kind, reason and overrides";
+      if (!nonEmpty(source.reason)) return "an override needs the operator's reason";
+      if (!Array.isArray(source.overrides) || source.overrides.length === 0) return "an override must name the citations it overrides";
+      for (const c of source.overrides) {
+        const problem = citationProblem(c);
+        if (problem) return `an override ${problem}`;
+      }
+      return null;
+    default:
+      return `a source of kind ${JSON.stringify(String(source.kind))} is not operator, reference or override`;
+  }
+}
+
+/**
+ * Why a limit's sources do not account for its range, or an empty list
+ * (astra pack 153: provenance is a rule of every confirmed body, not only of
+ * confirm):
+ *   - a limit a reference proposed comes from references alone, and is exactly
+ *     the tightest bound they cite;
+ *   - an operator's limit names exactly one operator source;
+ *   - a limit looser than the tightest cited bound, on either side, carries
+ *     exactly one override, with the operator's reason, naming exactly the
+ *     cited references in order; a limit within that bound carries none.
+ */
+function provenanceProblems(limit: Record<string, unknown>, quantity: string, unit: string): string[] {
+  const sources = limit.sources;
+  if (!Array.isArray(sources) || sources.length === 0) return [`${quantity}: a limit must name its sources`];
+  for (const source of sources) {
+    const problem = sourceProblem(source, unit);
+    if (problem) return [`${quantity}: ${problem}`];
+  }
+  const typed = sources as LimitSource[];
+  const operators = typed.filter((s) => s.kind === "operator");
+  const references = typed.flatMap((s) => (s.kind === "reference" ? [s] : []));
+  const overrides = typed.flatMap((s) => (s.kind === "override" ? [s] : []));
+  const bound = tightestBound(references.map((r) => r.value));
+  const min = limit.min as number;
+  const max = limit.max as number;
+  if (limit.proposedBy === "reference") {
+    if (operators.length > 0 || overrides.length > 0 || references.length === 0) {
+      return [`${quantity}: a limit a reference proposed must come from references alone`];
+    }
+    if (bound.min !== min || bound.max !== max) {
+      return [`${quantity}: a limit a reference proposed must be exactly the bound its references cite (${bound.min === undefined && bound.max === undefined ? "none" : describeBound(bound, unit)}), not ${min}..${max} ${unit}`];
+    }
+    return [];
+  }
+  const problems: string[] = [];
+  if (operators.length !== 1) problems.push(`${quantity}: an operator's limit names exactly one operator source`);
+  const loosens = (bound.min !== undefined && min < bound.min) || (bound.max !== undefined && max > bound.max);
+  if (loosens && overrides.length !== 1) {
+    problems.push(`${quantity}: ${min}..${max} ${unit} loosens the cited bound ${describeBound(bound, unit)}, so it must carry exactly one override with the operator's reason`);
+  } else if (loosens && canonicalize(overrides[0]!.overrides) !== canonicalize(references.map((r) => r.citation))) {
+    problems.push(`${quantity}: the override must name exactly the cited references, in order`);
+  } else if (!loosens && overrides.length > 0) {
+    problems.push(`${quantity}: an override is recorded, but ${min}..${max} ${unit} loosens no cited bound`);
+  }
+  return problems;
+}
+
+const BODY_KEYS = ["envelopeVersion", "deviceClass", "device", "limits", "eStop", "maxCommandsPerMinute", "supervision", "hazards", "commandMap", "confirmation"];
+const LIMIT_KEYS = ["quantity", "unit", "param", "min", "max", "proposedBy", "sources"];
 
 /**
  * Every rule a confirmed body must meet, whoever built it. Confirm runs it on
  * the body it produces, and both compilers run it on the body they are given,
  * so a hand-built body that matches its registered digest still passes only
- * what confirm would.
+ * what confirm would. Every shape is closed: a key the body does not define
+ * is refused, never committed and ignored.
  */
 export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
   const problems: string[] = [];
@@ -801,16 +1129,28 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
     ? DEVICE_CLASS_TEMPLATES[envelope.deviceClass]
     : undefined;
   if (!template) return [`unknown deviceClass ${JSON.stringify(String(envelope.deviceClass))}`];
+  const extra = extraKeys(envelope, BODY_KEYS);
+  if (extra.length > 0) problems.push(`the envelope holds keys it does not define: ${extra.join(", ")}`);
   if (envelope.envelopeVersion !== 1) problems.push("envelopeVersion must be 1");
   const device = (isRecord(envelope.device) ? envelope.device : {}) as Record<string, unknown>;
-  for (const key of ["deviceId", "adapterType", "adapterVersion"] as const) {
+  for (const key of ["deviceId", "adapterType"] as const) {
     if (!nonEmpty(device[key])) problems.push(`device.${key} is required`);
+  }
+  if (typeof device.adapterVersion !== "string" || !ADAPTER_MANIFEST_DIGEST_PATTERN.test(device.adapterVersion)) {
+    problems.push("device.adapterVersion must be the adapter's manifest digest, sha256: + 64 lowercase hex");
+  }
+  for (const key of ["vendor", "model"] as const) {
+    if (device[key] !== undefined && !nonEmpty(device[key])) problems.push(`device.${key}, when given, must not be blank`);
+  }
+  if (extraKeys(device, ["deviceId", "adapterType", "adapterVersion", "vendor", "model"]).length > 0) {
+    problems.push("device holds only deviceId, adapterType, adapterVersion, vendor and model");
   }
   const confirmation = (isRecord(envelope.confirmation) ? envelope.confirmation : {}) as Record<string, unknown>;
   if (!nonEmpty(confirmation.confirmedBy)) problems.push("confirmedBy is required");
   if (!nonEmpty(confirmation.confirmedAt) || !Number.isFinite(Date.parse(confirmation.confirmedAt as string))) {
     problems.push("confirmedAt must be an ISO-8601 time");
   }
+  if (extraKeys(confirmation, ["confirmedBy", "confirmedAt"]).length > 0) problems.push("confirmation holds only confirmedBy and confirmedAt");
   if (!Array.isArray(envelope.limits) || envelope.limits.length !== template.requires.length) {
     problems.push(`limits must hold exactly one limit per required quantity, in template order (${template.requires.map((r) => r.quantity).join(", ")})`);
   } else {
@@ -820,12 +1160,17 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
         problems.push(`limit ${i} must be ${req.quantity}`);
         return;
       }
+      if (extraKeys(limit, LIMIT_KEYS).length > 0) problems.push(`${req.quantity}: a limit holds only ${LIMIT_KEYS.join(", ")}`);
       if (limit.unit !== req.unit || !UNITS.has(limit.unit as string)) problems.push(`${req.quantity} must be in ${req.unit} (got ${JSON.stringify(limit.unit)})`);
       if (limit.param !== req.param) problems.push(`${req.quantity} must bound the parameter ${req.param}`);
       const range = rangeProblem(limit.min, limit.max);
       if (range) problems.push(`${req.quantity}: ${range}`);
       if (limit.proposedBy !== "operator" && limit.proposedBy !== "reference") problems.push(`${req.quantity}: proposedBy must be operator or reference`);
+      else if (!range) problems.push(...provenanceProblems(limit, req.quantity, req.unit));
     });
+  }
+  if (isRecord(envelope.eStop) && extraKeys(envelope.eStop, envelope.eStop.mechanism === "adapter-stop" ? ["mechanism", "stopCommand"] : ["mechanism"]).length > 0) {
+    problems.push("eStop holds only its mechanism, and an adapter stop's command");
   }
   const stop = eStopProblem(envelope.eStop, template, envelope.commandMap);
   if (stop) problems.push(stop);
@@ -846,8 +1191,10 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
 }
 
 /**
- * The operator's one confirmation. Edits answer questions or change proposed
- * values. Afterwards:
+ * The operator's one confirmation, of the draft `input` produces. Confirm
+ * drafts again from the input itself: it never trusts a draft object, whose
+ * cited bounds or questions a caller could have changed (astra pack 153).
+ * Edits answer questions or change proposed values. Afterwards:
  *   - every required quantity must have a limit;
  *   - the e-stop, command rate, supervision and hazards must be settled;
  *   - the adapter's command map must cover every bounded quantity;
@@ -855,7 +1202,9 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
  * An edit that loosens a cited reference bound needs `override.reason`.
  * Throws `EnvelopeRefused` otherwise.
  */
-export function confirmSafetyEnvelope(draft: SafetyEnvelopeDraft, decision: EnvelopeDecision): ConfirmedSafetyEnvelope {
+export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: EnvelopeDecision): ConfirmedSafetyEnvelope {
+  const draft = draftSafetyEnvelope(input);
+  const decision = plainSnapshot<EnvelopeDecision>(given, "decision");
   const reasons: string[] = [];
   const template = DEVICE_CLASS_TEMPLATES[draft.deviceClass];
   if (!template) throw new EnvelopeRefused([`unknown deviceClass ${JSON.stringify(draft.deviceClass)}`]);
@@ -864,7 +1213,7 @@ export function confirmSafetyEnvelope(draft: SafetyEnvelopeDraft, decision: Enve
     reasons.push("confirmedAt must be an ISO-8601 time");
   }
 
-  const bounds = new Map((draft.referenceBounds ?? []).map((b) => [b.quantity, b]));
+  const bounds = new Map(draft.referenceBounds.map((b) => [b.quantity, b]));
   const limits = new Map(draft.limits.map((l) => [l.quantity, l]));
   const answered = new Set<string>();
   const edited = new Set<string>();
@@ -948,31 +1297,141 @@ export function confirmSafetyEnvelope(draft: SafetyEnvelopeDraft, decision: Enve
     commandMap: draft.commandMap,
     confirmation: { confirmedBy: decision.confirmedBy, confirmedAt: decision.confirmedAt },
   };
-  const problems = confirmedBodyProblems(envelope);
+  // What confirm returns is the snapshot it hashed: frozen, and exactly what the digest covers.
+  const { body, digest } = snapshotEnvelope(envelope);
+  const problems = confirmedBodyProblems(body);
   if (problems.length > 0) throw new EnvelopeRefused(problems);
-  return { envelope, envelopeDigest: computeSafetyEnvelopeDigest(envelope) };
+  return { envelope: body, envelopeDigest: digest };
+}
+
+// ── Registration: the authority to compile ──────────────────────────
+
+/**
+ * What the registry signs once the operator has confirmed through an
+ * authenticated session: this device's confirmed envelope has this digest.
+ */
+export interface SafetyEnvelopeRegistrationStatement {
+  deviceId: string;
+  envelopeDigest: SafetyEnvelopeDigest;
+  /** ISO-8601 time the registry recorded it. */
+  registeredAt: string;
+}
+
+export interface SafetyEnvelopeRegistration extends SafetyEnvelopeRegistrationStatement {
+  /** Ed25519 signature, 128 hex characters, over `registrationSigningPreimage(statement)`. */
+  signature: string;
 }
 
 /**
- * The shared gate of both compilers: the body is the one the registration
- * record committed, and it meets every rule confirm enforces. `committedDigest`
- * must come from the device's registration record, never from the object being
- * compiled: a digest anyone can recompute is not a confirmation.
+ * The registry's signature check, wired by the integration to the registry's
+ * pinned public key. It is trusted code, like every verification callback:
+ * only `true` counts, and a throw counts as false.
  */
-export function checkCommittedEnvelope(confirmed: ConfirmedSafetyEnvelope, committedDigest: string): SafetyEnvelopeBody {
-  if (typeof committedDigest !== "string" || !DIGEST_PATTERN.test(committedDigest)) {
-    throw new EnvelopeRefused(["the committed digest must be 0x + 64 lowercase hex, read from the registration record"]);
+export type RegistrationVerifier = (preimage: Uint8Array, signature: Uint8Array) => boolean;
+
+function registrationStatementProblems(statement: Record<string, unknown>): string[] {
+  const problems: string[] = [];
+  if (!nonEmpty(statement.deviceId)) problems.push("the registration needs the deviceId");
+  if (typeof statement.envelopeDigest !== "string" || !DIGEST_PATTERN.test(statement.envelopeDigest)) {
+    problems.push("the registration's envelopeDigest must be 0x + 64 lowercase hex");
   }
-  const envelope = confirmed?.envelope;
-  if (computeSafetyEnvelopeDigest(envelope) !== confirmed.envelopeDigest) {
+  if (!nonEmpty(statement.registeredAt) || !Number.isFinite(Date.parse(statement.registeredAt))) {
+    problems.push("the registration's registeredAt must be an ISO-8601 time");
+  }
+  return problems;
+}
+
+function statementDigestOf(statement: Record<string, unknown>): SHA256 {
+  const canonical = canonicalize({
+    domain: SAFETY_ENVELOPE_REGISTRATION_DOMAIN,
+    deviceId: statement.deviceId,
+    envelopeDigest: statement.envelopeDigest,
+    registeredAt: statement.registeredAt,
+  });
+  return `sha256:${createHash("sha256").update(canonical).digest("hex")}` as SHA256;
+}
+
+/**
+ * `"sha256:" + hex(sha256(canonicalize({ domain, deviceId, envelopeDigest,
+ * registeredAt })))`, with the registration domain. Its signing preimage is
+ * LO-EV-1's: the UTF-8 of this tagged digest (`signingPreimage`).
+ */
+export function registrationStatementDigest(statement: SafetyEnvelopeRegistrationStatement): SHA256 {
+  const plain = plainSnapshot<Record<string, unknown>>(statement, "registration");
+  const problems = registrationStatementProblems(plain);
+  if (problems.length > 0) throw new EnvelopeRefused(problems);
+  return statementDigestOf(plain);
+}
+
+/** The bytes the registry signs: LO-EV-1's preimage of `registrationStatementDigest(statement)`. */
+export function registrationSigningPreimage(statement: SafetyEnvelopeRegistrationStatement): Uint8Array {
+  return signingPreimage(registrationStatementDigest(statement));
+}
+
+/**
+ * The shared gate of both compilers. It returns the one snapshot that is
+ * checked and compiled, after establishing that:
+ *   - the envelope is plain data, copied once, and its digest is the one it
+ *     was confirmed with;
+ *   - the registration is for this device and this digest, and the registry's
+ *     signature over it verifies. A digest the caller computed is not a
+ *     confirmation (astra pack 153);
+ *   - the body meets every rule confirm enforces.
+ */
+function committedSnapshot(
+  confirmed: ConfirmedSafetyEnvelope,
+  registration: SafetyEnvelopeRegistration,
+  verifyRegistration: RegistrationVerifier,
+): EnvelopeSnapshot {
+  if (typeof verifyRegistration !== "function") {
+    throw new EnvelopeRefused(["a registration verifier (the registry's signature check) is required"]);
+  }
+  const given = plainSnapshot<Record<string, unknown>>(confirmed, "confirmed");
+  const record = plainSnapshot<Record<string, unknown>>(registration, "registration");
+  const snapshot = snapshotEnvelope(given.envelope);
+  if (snapshot.digest !== given.envelopeDigest) {
     throw new EnvelopeRefused(["the envelope changed after it was confirmed; it must be confirmed again"]);
   }
-  if (confirmed.envelopeDigest !== committedDigest) {
+  const statement = registrationStatementProblems(record);
+  if (statement.length > 0) throw new EnvelopeRefused(statement);
+  if (record.envelopeDigest !== snapshot.digest) {
     throw new EnvelopeRefused(["this is not the envelope the registration record committed"]);
   }
-  const problems = confirmedBodyProblems(envelope);
+  if (record.deviceId !== snapshot.body.device?.deviceId) {
+    throw new EnvelopeRefused(["the registration is for another device"]);
+  }
+  let signature: Uint8Array;
+  try {
+    signature = parseEd25519SignatureHex(record.signature);
+  } catch {
+    throw new EnvelopeRefused(["the registration's signature is not an Ed25519 signature (128 hex characters)"]);
+  }
+  let verified = false;
+  try {
+    verified = verifyRegistration(signingPreimage(statementDigestOf(record)), signature) === true;
+  } catch {
+    verified = false;
+  }
+  if (!verified) {
+    throw new EnvelopeRefused(["the registration's signature does not verify against the registry's key"]);
+  }
+  const problems = confirmedBodyProblems(snapshot.body);
   if (problems.length > 0) throw new EnvelopeRefused(problems);
-  return envelope;
+  return snapshot;
+}
+
+/**
+ * The envelope the registry's signed registration commits, as one frozen
+ * snapshot that meets every rule confirm enforces, with its digest (see
+ * `committedSnapshot`). Compile from what this returns, never from the input.
+ */
+export function checkCommittedEnvelope(
+  confirmed: ConfirmedSafetyEnvelope,
+  registration: SafetyEnvelopeRegistration,
+  verifyRegistration: RegistrationVerifier,
+): ConfirmedSafetyEnvelope {
+  const { body, digest } = committedSnapshot(confirmed, registration, verifyRegistration);
+  return { envelope: body, envelopeDigest: digest };
 }
 
 // ── Compile ─────────────────────────────────────────────────────────
@@ -989,18 +1448,24 @@ export interface CompiledSafetyEnvelope {
 }
 
 /**
- * Compile the envelope the registration record committed (see
+ * Compile the envelope the registry's signed registration commits (see
  * `checkCommittedEnvelope`) into the CSD's typed I/O and its evidence tier.
+ * It reads only the snapshot it checked, never `confirmed` again.
  */
-export function compileSafetyEnvelope(confirmed: ConfirmedSafetyEnvelope, committedDigest: string): CompiledSafetyEnvelope {
-  const envelope = checkCommittedEnvelope(confirmed, committedDigest);
+export function compileSafetyEnvelope(
+  confirmed: ConfirmedSafetyEnvelope,
+  registration: SafetyEnvelopeRegistration,
+  verifyRegistration: RegistrationVerifier,
+): CompiledSafetyEnvelope {
+  const { body: envelope, digest: committedDigest } = committedSnapshot(confirmed, registration, verifyRegistration);
   const template = DEVICE_CLASS_TEMPLATES[envelope.deviceClass]!;
 
-  const parameters: CsdParameter[] = [];
-  const definitions: ParameterDefinition[] = [];
-  template.requires.forEach((req, i) => {
+  // Built with map, which installs each element directly: a push or an
+  // assignment would run a setter Array.prototype serves for that index, and
+  // could substitute a compiled bound.
+  const parameters: CsdParameter[] = template.requires.map((req, i) => {
     const limit = envelope.limits[i]!;
-    parameters.push({
+    return {
       key: req.param,
       label: req.label,
       description: `${req.why}. Confirmed range ${limit.min}..${limit.max} ${limit.unit}.`,
@@ -1010,15 +1475,18 @@ export function compileSafetyEnvelope(confirmed: ConfirmedSafetyEnvelope, commit
       max: limit.max,
       step: req.step,
       unit: limit.unit,
-    });
-    definitions.push({
+    };
+  });
+  const definitions: ParameterDefinition[] = template.requires.map((req, i) => {
+    const limit = envelope.limits[i]!;
+    return {
       name: req.param,
       semanticType: req.semanticType,
       required: true,
       unit: limit.unit,
       minimum: { value: limit.min, unit: limit.unit },
       maximum: { value: limit.max, unit: limit.unit },
-    });
+    };
   });
 
   return {

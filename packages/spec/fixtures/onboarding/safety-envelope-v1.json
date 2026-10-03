@@ -4,7 +4,9 @@
     "Regenerate: PCC_UPDATE_FIXTURES=1 npx vitest run src/__tests__/safety-envelope-fixtures.test.ts (in packages/spec).",
     "digest: envelopeDigest = '0x' + lowercase hex(sha256(UTF-8(preimage))), preimage = canonicalize({domain, envelope}) with the confirmed SafetyEnvelopeBody as envelope and packages/spec/src/util/canonical.ts as canonicalize (keys sorted, no whitespace, strings as JSON.stringify, numbers as JS Number#toString).",
     "operationalEnvelopeV1: a validator must accept every 'valid' envelope and refuse every 'invalid' one; 'paths' are the issue paths the TS schema reports. NaN and Infinity cannot appear in JSON, so they are not here; a JSON consumer never sees them.",
-    "114b: the schema now refuses an unknown deviceClass outright (see 'unknown-class-generic-rules-only', moved here from 'valid'), limits must be in the template's exact order and units, an adapter-stop's command must be one of the declared commands, and deadlineQuantity must be the template's own deadline."
+    "114b: the schema now refuses an unknown deviceClass outright (see 'unknown-class-generic-rules-only', moved here from 'valid'), limits must be in the template's exact order and units, an adapter-stop's command must be one of the declared commands, and deadlineQuantity must be the template's own deadline.",
+    "153 (round 3): adapterVersion is the adapter's release manifest digest (sha256: + 64 lowercase hex); an unbounded parameter is {reason, allowed}, and a runtime passes only a value in allowed (same type and value); a reference source carries the bound it cites (value) and its unit.",
+    "registration: the registry signs statementDigest = 'sha256:' + lowercase hex(sha256(UTF-8(canonicalize({domain, deviceId, envelopeDigest, registeredAt})))) with Ed25519; the signed message is the UTF-8 of statementDigest itself (LO-EV-1 signingPreimage, 71 bytes). Signatures are not in this file: verify with the registry's key."
   ],
   "digest": {
     "domain": "PCC:safety-envelope:v1",
@@ -12,83 +14,6 @@
       {
         "name": "ot2-operator-answers",
         "envelope": {
-          "envelopeVersion": 1,
-          "deviceClass": "liquid-handler-ot2",
-          "device": {
-            "deviceId": "ot2-sim-1",
-            "adapterType": "opentrons",
-            "adapterVersion": "2.1.0",
-            "vendor": "Opentrons",
-            "model": "OT-2"
-          },
-          "limits": [
-            {
-              "quantity": "aspirate_volume",
-              "unit": "uL",
-              "param": "aspirateVolume",
-              "min": 0.5,
-              "max": 300,
-              "proposedBy": "operator",
-              "sources": [
-                {
-                  "kind": "operator",
-                  "field": "safety.limits"
-                }
-              ]
-            },
-            {
-              "quantity": "dispense_volume",
-              "unit": "uL",
-              "param": "dispenseVolume",
-              "min": 0.5,
-              "max": 300,
-              "proposedBy": "operator",
-              "sources": [
-                {
-                  "kind": "operator",
-                  "field": "safety.limits"
-                }
-              ]
-            },
-            {
-              "quantity": "module_temperature",
-              "unit": "degC",
-              "param": "moduleTemperature",
-              "min": 4,
-              "max": 95,
-              "proposedBy": "operator",
-              "sources": [
-                {
-                  "kind": "operator",
-                  "field": "safety.limits"
-                }
-              ]
-            },
-            {
-              "quantity": "run_duration",
-              "unit": "min",
-              "param": "runDuration",
-              "min": 1,
-              "max": 120,
-              "proposedBy": "operator",
-              "sources": [
-                {
-                  "kind": "operator",
-                  "field": "safety.limits"
-                }
-              ]
-            }
-          ],
-          "eStop": {
-            "mechanism": "adapter-stop",
-            "stopCommand": "stop"
-          },
-          "maxCommandsPerMinute": 60,
-          "supervision": "attended",
-          "hazards": [
-            "heat",
-            "mechanical"
-          ],
           "commandMap": {
             "commands": [
               {
@@ -138,88 +63,93 @@
             ]
           },
           "confirmation": {
-            "confirmedBy": "operator:fixture",
-            "confirmedAt": "2026-09-29T20:00:00Z"
-          }
+            "confirmedAt": "2026-09-29T20:00:00Z",
+            "confirmedBy": "operator:fixture"
+          },
+          "device": {
+            "adapterType": "opentrons",
+            "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+            "deviceId": "ot2-sim-1",
+            "model": "OT-2",
+            "vendor": "Opentrons"
+          },
+          "deviceClass": "liquid-handler-ot2",
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "envelopeVersion": 1,
+          "hazards": [
+            "heat",
+            "mechanical"
+          ],
+          "limits": [
+            {
+              "max": 300,
+              "min": 0.5,
+              "param": "aspirateVolume",
+              "proposedBy": "operator",
+              "quantity": "aspirate_volume",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "uL"
+            },
+            {
+              "max": 300,
+              "min": 0.5,
+              "param": "dispenseVolume",
+              "proposedBy": "operator",
+              "quantity": "dispense_volume",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "uL"
+            },
+            {
+              "max": 95,
+              "min": 4,
+              "param": "moduleTemperature",
+              "proposedBy": "operator",
+              "quantity": "module_temperature",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "degC"
+            },
+            {
+              "max": 120,
+              "min": 1,
+              "param": "runDuration",
+              "proposedBy": "operator",
+              "quantity": "run_duration",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "min"
+            }
+          ],
+          "maxCommandsPerMinute": 60,
+          "supervision": "attended"
         },
-        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"aspirate\",\"params\":[{\"name\":\"volumeUl\",\"quantity\":\"aspirate_volume\",\"unit\":\"uL\"}]},{\"name\":\"dispense\",\"params\":[{\"name\":\"volumeUl\",\"quantity\":\"dispense_volume\",\"unit\":\"uL\"}]},{\"name\":\"setModuleTemp\",\"params\":[{\"name\":\"celsius\",\"quantity\":\"module_temperature\",\"unit\":\"degC\"}]},{\"name\":\"runProtocol\",\"params\":[{\"name\":\"minutes\",\"quantity\":\"run_duration\",\"unit\":\"min\"}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"opentrons\",\"adapterVersion\":\"2.1.0\",\"deviceId\":\"ot2-sim-1\",\"model\":\"OT-2\",\"vendor\":\"Opentrons\"},\"deviceClass\":\"liquid-handler-ot2\",\"eStop\":{\"mechanism\":\"adapter-stop\",\"stopCommand\":\"stop\"},\"envelopeVersion\":1,\"hazards\":[\"heat\",\"mechanical\"],\"limits\":[{\"max\":300,\"min\":0.5,\"param\":\"aspirateVolume\",\"proposedBy\":\"operator\",\"quantity\":\"aspirate_volume\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"uL\"},{\"max\":300,\"min\":0.5,\"param\":\"dispenseVolume\",\"proposedBy\":\"operator\",\"quantity\":\"dispense_volume\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"uL\"},{\"max\":95,\"min\":4,\"param\":\"moduleTemperature\",\"proposedBy\":\"operator\",\"quantity\":\"module_temperature\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"degC\"},{\"max\":120,\"min\":1,\"param\":\"runDuration\",\"proposedBy\":\"operator\",\"quantity\":\"run_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":60,\"supervision\":\"attended\"}}",
-        "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6"
+        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"aspirate\",\"params\":[{\"name\":\"volumeUl\",\"quantity\":\"aspirate_volume\",\"unit\":\"uL\"}]},{\"name\":\"dispense\",\"params\":[{\"name\":\"volumeUl\",\"quantity\":\"dispense_volume\",\"unit\":\"uL\"}]},{\"name\":\"setModuleTemp\",\"params\":[{\"name\":\"celsius\",\"quantity\":\"module_temperature\",\"unit\":\"degC\"}]},{\"name\":\"runProtocol\",\"params\":[{\"name\":\"minutes\",\"quantity\":\"run_duration\",\"unit\":\"min\"}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"opentrons\",\"adapterVersion\":\"sha256:2121212121212121212121212121212121212121212121212121212121212121\",\"deviceId\":\"ot2-sim-1\",\"model\":\"OT-2\",\"vendor\":\"Opentrons\"},\"deviceClass\":\"liquid-handler-ot2\",\"eStop\":{\"mechanism\":\"adapter-stop\",\"stopCommand\":\"stop\"},\"envelopeVersion\":1,\"hazards\":[\"heat\",\"mechanical\"],\"limits\":[{\"max\":300,\"min\":0.5,\"param\":\"aspirateVolume\",\"proposedBy\":\"operator\",\"quantity\":\"aspirate_volume\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"uL\"},{\"max\":300,\"min\":0.5,\"param\":\"dispenseVolume\",\"proposedBy\":\"operator\",\"quantity\":\"dispense_volume\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"uL\"},{\"max\":95,\"min\":4,\"param\":\"moduleTemperature\",\"proposedBy\":\"operator\",\"quantity\":\"module_temperature\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"degC\"},{\"max\":120,\"min\":1,\"param\":\"runDuration\",\"proposedBy\":\"operator\",\"quantity\":\"run_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":60,\"supervision\":\"attended\"}}",
+        "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc"
       },
       {
         "name": "plate-reader-reference-proposed",
         "envelope": {
-          "envelopeVersion": 1,
-          "deviceClass": "lab-plate-reader",
-          "device": {
-            "deviceId": "pr-sim-1",
-            "adapterType": "generic-http",
-            "adapterVersion": "1.0.0"
-          },
-          "limits": [
-            {
-              "quantity": "incubation_temperature",
-              "unit": "degC",
-              "param": "incubationTemperature",
-              "min": 25,
-              "max": 42.5,
-              "proposedBy": "reference",
-              "sources": [
-                {
-                  "kind": "reference",
-                  "citation": {
-                    "doc": "Betriebshandbuch",
-                    "section": "§4.2 – Betriebstemperatur",
-                    "url": "https://example.org/manual.pdf"
-                  },
-                  "retrievedAt": "2026-09-29",
-                  "claim": "Inkubation ab 25 °C"
-                },
-                {
-                  "kind": "reference",
-                  "citation": {
-                    "doc": "Datasheet Rev C",
-                    "section": "Table 3"
-                  },
-                  "retrievedAt": "2026-09-28T09:15:00Z",
-                  "claim": "incubator rated to 42.5 °C"
-                }
-              ]
-            },
-            {
-              "quantity": "read_duration",
-              "unit": "s",
-              "param": "readDuration",
-              "min": 1,
-              "max": 600,
-              "proposedBy": "operator",
-              "sources": [
-                {
-                  "kind": "operator",
-                  "field": "safety.limits"
-                }
-              ]
-            },
-            {
-              "quantity": "job_duration",
-              "unit": "min",
-              "param": "jobDuration",
-              "min": 1,
-              "max": 120,
-              "proposedBy": "operator",
-              "sources": [
-                {
-                  "kind": "operator",
-                  "field": "safety.limits"
-                }
-              ]
-            }
-          ],
-          "eStop": {
-            "mechanism": "hardware"
-          },
-          "maxCommandsPerMinute": 30,
-          "supervision": "attended",
-          "hazards": [],
           "commandMap": {
             "commands": [
               {
@@ -239,6 +169,17 @@
                     "name": "seconds",
                     "quantity": "read_duration",
                     "unit": "s"
+                  },
+                  {
+                    "name": "wavelengthNm",
+                    "unbounded": {
+                      "allowed": [
+                        405,
+                        450,
+                        600
+                      ],
+                      "reason": "an optical setting, not a safety quantity"
+                    }
                   }
                 ]
               },
@@ -259,12 +200,117 @@
             ]
           },
           "confirmation": {
-            "confirmedBy": "operator:fixture",
-            "confirmedAt": "2026-09-29T20:00:00Z"
-          }
+            "confirmedAt": "2026-09-29T20:00:00Z",
+            "confirmedBy": "operator:fixture"
+          },
+          "device": {
+            "adapterType": "generic-http",
+            "adapterVersion": "sha256:1010101010101010101010101010101010101010101010101010101010101010",
+            "deviceId": "pr-sim-1"
+          },
+          "deviceClass": "lab-plate-reader",
+          "eStop": {
+            "mechanism": "hardware"
+          },
+          "envelopeVersion": 1,
+          "hazards": [],
+          "limits": [
+            {
+              "max": 42.5,
+              "min": 25,
+              "param": "incubationTemperature",
+              "proposedBy": "reference",
+              "quantity": "incubation_temperature",
+              "sources": [
+                {
+                  "citation": {
+                    "doc": "Betriebshandbuch",
+                    "section": "§4.2 – Betriebstemperatur",
+                    "url": "https://example.org/manual.pdf"
+                  },
+                  "claim": "Inkubation ab 25 °C",
+                  "kind": "reference",
+                  "retrievedAt": "2026-09-29",
+                  "unit": "degC",
+                  "value": {
+                    "min": 25
+                  }
+                },
+                {
+                  "citation": {
+                    "doc": "Datasheet Rev C",
+                    "section": "Table 3"
+                  },
+                  "claim": "incubator rated to 42.5 °C",
+                  "kind": "reference",
+                  "retrievedAt": "2026-09-28T09:15:00Z",
+                  "unit": "degC",
+                  "value": {
+                    "max": 42.5
+                  }
+                }
+              ],
+              "unit": "degC"
+            },
+            {
+              "max": 600,
+              "min": 1,
+              "param": "readDuration",
+              "proposedBy": "operator",
+              "quantity": "read_duration",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "s"
+            },
+            {
+              "max": 120,
+              "min": 1,
+              "param": "jobDuration",
+              "proposedBy": "operator",
+              "quantity": "job_duration",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "min"
+            }
+          ],
+          "maxCommandsPerMinute": 30,
+          "supervision": "attended"
         },
-        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"setIncubation\",\"params\":[{\"name\":\"celsius\",\"quantity\":\"incubation_temperature\",\"unit\":\"degC\"}]},{\"name\":\"read\",\"params\":[{\"name\":\"seconds\",\"quantity\":\"read_duration\",\"unit\":\"s\"}]},{\"name\":\"runProtocol\",\"params\":[{\"name\":\"minutes\",\"quantity\":\"job_duration\",\"unit\":\"min\"}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"1.0.0\",\"deviceId\":\"pr-sim-1\"},\"deviceClass\":\"lab-plate-reader\",\"eStop\":{\"mechanism\":\"hardware\"},\"envelopeVersion\":1,\"hazards\":[],\"limits\":[{\"max\":42.5,\"min\":25,\"param\":\"incubationTemperature\",\"proposedBy\":\"reference\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"citation\":{\"doc\":\"Betriebshandbuch\",\"section\":\"§4.2 – Betriebstemperatur\",\"url\":\"https://example.org/manual.pdf\"},\"claim\":\"Inkubation ab 25 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-29\"},{\"citation\":{\"doc\":\"Datasheet Rev C\",\"section\":\"Table 3\"},\"claim\":\"incubator rated to 42.5 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-28T09:15:00Z\"}],\"unit\":\"degC\"},{\"max\":600,\"min\":1,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":120,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":30,\"supervision\":\"attended\"}}",
-        "envelopeDigest": "0x6e0cbac0c9b1077ff76a303ba8f5549e87a88ddecf19f4753121e47aec9dca3d"
+        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"setIncubation\",\"params\":[{\"name\":\"celsius\",\"quantity\":\"incubation_temperature\",\"unit\":\"degC\"}]},{\"name\":\"read\",\"params\":[{\"name\":\"seconds\",\"quantity\":\"read_duration\",\"unit\":\"s\"},{\"name\":\"wavelengthNm\",\"unbounded\":{\"allowed\":[405,450,600],\"reason\":\"an optical setting, not a safety quantity\"}}]},{\"name\":\"runProtocol\",\"params\":[{\"name\":\"minutes\",\"quantity\":\"job_duration\",\"unit\":\"min\"}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:1010101010101010101010101010101010101010101010101010101010101010\",\"deviceId\":\"pr-sim-1\"},\"deviceClass\":\"lab-plate-reader\",\"eStop\":{\"mechanism\":\"hardware\"},\"envelopeVersion\":1,\"hazards\":[],\"limits\":[{\"max\":42.5,\"min\":25,\"param\":\"incubationTemperature\",\"proposedBy\":\"reference\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"citation\":{\"doc\":\"Betriebshandbuch\",\"section\":\"§4.2 – Betriebstemperatur\",\"url\":\"https://example.org/manual.pdf\"},\"claim\":\"Inkubation ab 25 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-29\",\"unit\":\"degC\",\"value\":{\"min\":25}},{\"citation\":{\"doc\":\"Datasheet Rev C\",\"section\":\"Table 3\"},\"claim\":\"incubator rated to 42.5 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-28T09:15:00Z\",\"unit\":\"degC\",\"value\":{\"max\":42.5}}],\"unit\":\"degC\"},{\"max\":600,\"min\":1,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":120,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":30,\"supervision\":\"attended\"}}",
+        "envelopeDigest": "0xa9a7153eea36c8ec90ce2f45d57795361b94e93288fbab8395f6d81e4a120838"
+      }
+    ]
+  },
+  "registration": {
+    "domain": "PCC:safety-envelope-registration:v1",
+    "cases": [
+      {
+        "name": "ot2-operator-answers",
+        "statement": {
+          "deviceId": "ot2-sim-1",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "registeredAt": "2026-09-29T20:05:00Z"
+        },
+        "preimage": "{\"deviceId\":\"ot2-sim-1\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
+        "statementDigest": "sha256:0b8def76fe7586971c530706719c4715e5fba1934d5694325cca77da45197ba8"
+      },
+      {
+        "name": "plate-reader-reference-proposed",
+        "statement": {
+          "deviceId": "pr-sim-1",
+          "envelopeDigest": "0xa9a7153eea36c8ec90ce2f45d57795361b94e93288fbab8395f6d81e4a120838",
+          "registeredAt": "2026-09-29T20:05:00Z"
+        },
+        "preimage": "{\"deviceId\":\"pr-sim-1\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0xa9a7153eea36c8ec90ce2f45d57795361b94e93288fbab8395f6d81e4a120838\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
+        "statementDigest": "sha256:a8f5269dc8a17ff676869ea01d33d6011a9e98cec442c5734d769e2702b23307"
       }
     ]
   },
@@ -274,11 +320,11 @@
         "name": "ot2-operator-answers",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -369,11 +415,11 @@
         "name": "plate-reader-reference-proposed",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x6e0cbac0c9b1077ff76a303ba8f5549e87a88ddecf19f4753121e47aec9dca3d",
+          "envelopeDigest": "0xa9a7153eea36c8ec90ce2f45d57795361b94e93288fbab8395f6d81e4a120838",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-sim-1",
           "adapterType": "generic-http",
-          "adapterVersion": "1.0.0",
+          "adapterVersion": "sha256:1010101010101010101010101010101010101010101010101010101010101010",
           "strict": true,
           "limits": [
             {
@@ -413,6 +459,17 @@
                   "name": "seconds",
                   "quantity": "read_duration",
                   "unit": "s"
+                },
+                {
+                  "name": "wavelengthNm",
+                  "unbounded": {
+                    "reason": "an optical setting, not a safety quantity",
+                    "allowed": [
+                      405,
+                      450,
+                      600
+                    ]
+                  }
                 }
               ]
             },
@@ -446,11 +503,11 @@
         "name": "numeric-string-max",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -544,11 +601,11 @@
         "name": "min-above-max",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -642,11 +699,11 @@
         "name": "duplicate-quantity",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -746,11 +803,11 @@
         "name": "missing-required-quantity",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -840,11 +897,11 @@
         "name": "wrong-unit-for-class",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -938,11 +995,11 @@
         "name": "unit-not-in-table",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -1036,11 +1093,11 @@
         "name": "limits-empty",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [],
           "commands": [
@@ -1110,11 +1167,11 @@
         "name": "estop-none-on-a-device-that-moves-or-heats",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -1207,11 +1264,11 @@
         "name": "estop-none-unknown-class",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "unknown-robot",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -1286,11 +1343,11 @@
         "name": "adapter-stop-blank-command",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -1384,11 +1441,11 @@
         "name": "hardware-stop-with-a-command",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -1482,11 +1539,11 @@
         "name": "estop-unknown-mechanism",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -1579,11 +1636,11 @@
         "name": "strict-false",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": false,
           "limits": [
             {
@@ -1677,11 +1734,11 @@
         "name": "extra-key-defaults",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -1778,11 +1835,11 @@
         "name": "extra-key-in-a-limit",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -1877,11 +1934,11 @@
         "name": "rate-zero",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -1975,11 +2032,11 @@
         "name": "rate-fraction",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2073,11 +2130,11 @@
         "name": "rate-string",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2175,7 +2232,7 @@
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2273,7 +2330,7 @@
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2367,11 +2424,11 @@
         "name": "device-id-blank",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": " ",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2465,11 +2522,11 @@
         "name": "supervision-invalid",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2563,11 +2620,11 @@
         "name": "supervision-missing",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2660,11 +2717,11 @@
         "name": "hazards-unknown",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2757,11 +2814,11 @@
         "name": "hazards-duplicate",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2855,11 +2912,11 @@
         "name": "hazards-out-of-order",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -2953,11 +3010,11 @@
         "name": "hazards-missing",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -3047,11 +3104,11 @@
         "name": "missing-commands",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -3099,11 +3156,11 @@
         "name": "adapter-stop-undeclared-command",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -3197,11 +3254,11 @@
         "name": "supervision-unattended-policy",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -3295,11 +3352,11 @@
         "name": "remote-supervised-with-hardware-stop",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -3392,11 +3449,11 @@
         "name": "wrong-deadline-quantity",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -3490,11 +3547,11 @@
         "name": "limits-out-of-order",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
           "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
-          "adapterVersion": "2.1.0",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {
@@ -3588,14 +3645,645 @@
         ]
       },
       {
-        "name": "unknown-class-generic-rules-only",
+        "name": "adapter-version-not-a-manifest-digest",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x184839b1be04f6e85576ed6d54c6a90eac25d2b5121f196e40e1eaae0a9094d6",
-          "deviceClass": "unknown-robot",
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
           "deviceId": "ot2-sim-1",
           "adapterType": "opentrons",
           "adapterVersion": "2.1.0",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "adapterVersion"
+        ]
+      },
+      {
+        "name": "unbounded-free-form-reason-only",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                },
+                {
+                  "name": "payload",
+                  "unbounded": "device-specific"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands.0.params.1.unbounded"
+        ]
+      },
+      {
+        "name": "unbounded-allowed-empty",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                },
+                {
+                  "name": "slot",
+                  "unbounded": {
+                    "reason": "a deck slot",
+                    "allowed": []
+                  }
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands",
+          "commands.0.params.1.unbounded.allowed"
+        ]
+      },
+      {
+        "name": "unbounded-allowed-duplicate",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                },
+                {
+                  "name": "slot",
+                  "unbounded": {
+                    "reason": "a deck slot",
+                    "allowed": [
+                      1,
+                      1
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands",
+          "commands.0.params.1.unbounded.allowed"
+        ]
+      },
+      {
+        "name": "unbounded-allowed-blank-string",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                },
+                {
+                  "name": "slot",
+                  "unbounded": {
+                    "reason": "a deck slot",
+                    "allowed": [
+                      " "
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands",
+          "commands.0.params.1.unbounded.allowed.0"
+        ]
+      },
+      {
+        "name": "unbounded-extra-key",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                },
+                {
+                  "name": "slot",
+                  "unbounded": {
+                    "reason": "a deck slot",
+                    "allowed": [
+                      1
+                    ],
+                    "any": true
+                  }
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands.0.params.1.unbounded"
+        ]
+      },
+      {
+        "name": "unknown-class-generic-rules-only",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "unknown-robot",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [
             {

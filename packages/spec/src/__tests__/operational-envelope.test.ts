@@ -5,6 +5,8 @@
  * command surface is closed (bus #4074 G1-G4).
  */
 
+import { generateKeyPairSync, sign, verify } from "node:crypto";
+
 import { describe, it, expect } from "vitest";
 import {
   compileOperationalEnvelope,
@@ -14,13 +16,35 @@ import {
 import {
   computeSafetyEnvelopeDigest,
   confirmSafetyEnvelope,
-  draftSafetyEnvelope,
   EnvelopeRefused,
+  registrationSigningPreimage,
   type CommandMapV1,
   type ConfirmedSafetyEnvelope,
+  type RegistrationVerifier,
+  type SafetyEnvelopeInput,
+  type SafetyEnvelopeRegistration,
 } from "../onboarding/safety-envelope.js";
 
 const AT = "2026-09-29T20:00:00Z";
+
+/** Adapter release manifest digests (well-formed; the tests never resolve them). */
+const OT2_MANIFEST = `sha256:${"21".repeat(32)}`;
+const PLATE_MANIFEST = `sha256:${"10".repeat(32)}`;
+
+/** A test registry: its key signs registrations, and `verifyRegistry` is the integration's pinned check. */
+const REGISTRY = generateKeyPairSync("ed25519");
+const verifyRegistry: RegistrationVerifier = (preimage, signature) => verify(null, preimage, REGISTRY.publicKey, signature);
+
+/** The registry's signed statement that `confirmed` is the confirmed envelope of `deviceId` (its own device by default). */
+function register(confirmed: ConfirmedSafetyEnvelope, deviceId = confirmed.envelope.device.deviceId): SafetyEnvelopeRegistration {
+  const statement = { deviceId, envelopeDigest: confirmed.envelopeDigest, registeredAt: "2026-09-29T20:05:00Z" };
+  return { ...statement, signature: Buffer.from(sign(null, registrationSigningPreimage(statement), REGISTRY.privateKey)).toString("hex") };
+}
+
+/** Compile with the registry's signed registration of this very envelope. */
+function compileRegistered(confirmed: ConfirmedSafetyEnvelope, deviceId?: string): OperationalEnvelopeV1 {
+  return compileOperationalEnvelope(confirmed, register(confirmed, deviceId), verifyRegistry);
+}
 
 const OT2_MAP: CommandMapV1 = {
   commands: [
@@ -31,7 +55,7 @@ const OT2_MAP: CommandMapV1 = {
       name: "runProtocol",
       params: [
         { name: "minutes", quantity: "run_duration", unit: "min" },
-        { name: "labwareSlot", unbounded: "a deck position, not a safety quantity" },
+        { name: "labwareSlot", unbounded: { reason: "a deck position, not a safety quantity", allowed: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] } },
       ],
     },
     { name: "stop", params: [] },
@@ -45,7 +69,7 @@ const PLATE_MAP: CommandMapV1 = {
       name: "read",
       params: [
         { name: "seconds", quantity: "read_duration", unit: "s" },
-        { name: "wavelengthNm", unbounded: "an optical setting, not a safety quantity" },
+        { name: "wavelengthNm", unbounded: { reason: "an optical setting, not a safety quantity", allowed: [340, 405, 450, 600] } },
       ],
     },
     { name: "runProtocol", params: [{ name: "minutes", quantity: "job_duration", unit: "min" }] },
@@ -54,9 +78,9 @@ const PLATE_MAP: CommandMapV1 = {
 };
 
 function confirmedOt2(): ConfirmedSafetyEnvelope {
-  const draft = draftSafetyEnvelope({
+  const input: SafetyEnvelopeInput = ({
     deviceClass: "liquid-handler-ot2",
-    device: { deviceId: "ot2-sim-1", adapterType: "opentrons", adapterVersion: "2.1.0" },
+    device: { deviceId: "ot2-sim-1", adapterType: "opentrons", adapterVersion: OT2_MANIFEST },
     commandMap: OT2_MAP,
     intake: {
       limits: [
@@ -72,14 +96,14 @@ function confirmedOt2(): ConfirmedSafetyEnvelope {
     },
     references: [],
   });
-  return confirmSafetyEnvelope(draft, { confirmedBy: "op-1", confirmedAt: AT });
+  return confirmSafetyEnvelope(input, { confirmedBy: "op-1", confirmedAt: AT });
 }
 
 /** attended, not unattended: a device that moves or heats cannot run unattended in v1. */
 function confirmedPlateReader(): ConfirmedSafetyEnvelope {
-  const draft = draftSafetyEnvelope({
+  const input: SafetyEnvelopeInput = ({
     deviceClass: "lab-plate-reader",
-    device: { deviceId: "pr-sim-1", adapterType: "generic-http", adapterVersion: "1.0.0" },
+    device: { deviceId: "pr-sim-1", adapterType: "generic-http", adapterVersion: PLATE_MANIFEST },
     commandMap: PLATE_MAP,
     intake: {
       limits: [
@@ -94,7 +118,7 @@ function confirmedPlateReader(): ConfirmedSafetyEnvelope {
     },
     references: [],
   });
-  return confirmSafetyEnvelope(draft, { confirmedBy: "op-1", confirmedAt: AT });
+  return confirmSafetyEnvelope(input, { confirmedBy: "op-1", confirmedAt: AT });
 }
 
 /** A copy of `env` changed by `mutate`, and the schema's verdict on it. */
@@ -119,14 +143,14 @@ function redigested(c: ConfirmedSafetyEnvelope, mutate: (body: any) => void): Co
 describe("compileOperationalEnvelope: the confirmed envelope, projected for the runtime", () => {
   it("carries every confirmed limit by quantity, the rate, the stop, the command map and the digest", () => {
     const c = confirmedOt2();
-    const rt = compileOperationalEnvelope(c, c.envelopeDigest);
+    const rt = compileRegistered(c);
     expect(rt).toEqual({
       envelopeVersion: 1,
       envelopeDigest: c.envelopeDigest,
       deviceClass: "liquid-handler-ot2",
       deviceId: "ot2-sim-1",
       adapterType: "opentrons",
-      adapterVersion: "2.1.0",
+      adapterVersion: OT2_MANIFEST,
       strict: true,
       limits: [
         { quantity: "aspirate_volume", unit: "uL", min: 1, max: 300 },
@@ -146,7 +170,7 @@ describe("compileOperationalEnvelope: the confirmed envelope, projected for the 
 
   it("drops a stop command a hardware stop does not use, and names the plate reader's own deadline", () => {
     const c = confirmedPlateReader();
-    const rt = compileOperationalEnvelope(c, c.envelopeDigest);
+    const rt = compileRegistered(c);
     expect(rt.eStop).toEqual({ mechanism: "hardware" });
     expect(rt.limits.map((l) => l.quantity)).toEqual(["incubation_temperature", "read_duration", "job_duration"]);
     expect(rt.deadlineQuantity).toBe("job_duration");
@@ -155,12 +179,12 @@ describe("compileOperationalEnvelope: the confirmed envelope, projected for the 
   it("refuses an envelope changed after confirmation", () => {
     const c = structuredClone(confirmedOt2());
     c.envelope.limits[0]!.max = 3000;
-    expect(() => compileOperationalEnvelope(c, c.envelopeDigest)).toThrow(/changed after it was confirmed/);
+    expect(() => compileRegistered(c)).toThrow(/changed after it was confirmed/);
   });
 
   it("refuses a re-digested body confirmedBodyProblems would refuse, before ever reaching the runtime schema (10)", () => {
     const c = confirmedOt2();
-    const cases: Array<[string, (b: any) => void, RegExp]> = [
+    const cases: Array<[string, (b: any) => void, RegExp, string?]> = [
       ["a limit in another unit", (b) => (b.limits[0].unit = "mL"), /aspirate_volume must be in uL/],
       ["a required quantity missing", (b) => b.limits.splice(1, 1), /limits must hold exactly one limit per required quantity/],
       [
@@ -173,28 +197,28 @@ describe("compileOperationalEnvelope: the confirmed envelope, projected for the 
         (b) => (b.commandMap = { commands: b.commandMap.commands.filter((cmd: any) => cmd.name !== "runProtocol") }),
         /commandMap: no declared parameter sets run_duration/,
       ],
-      ["a device with a blank id", (b) => (b.device.deviceId = " "), /device\.deviceId is required/],
+      ["a device with a blank id (registered for the original device)", (b) => (b.device.deviceId = " "), /the registration is for another device/, "ot2-sim-1"],
     ];
-    for (const [label, mutate, reason] of cases) {
+    for (const [label, mutate, reason, deviceId] of cases) {
       const r = redigested(c, mutate);
-      expect(() => compileOperationalEnvelope(r, r.envelopeDigest), label).toThrow(reason);
+      expect(() => compileRegistered(r, deviceId), label).toThrow(reason);
     }
   });
 
   it("refuses a re-digested body whose hazards are duplicated, via the shared confirmedBodyProblems (not the runtime schema's own check)", () => {
     const c = redigested(confirmedPlateReader(), (b) => (b.hazards = ["heat", "heat"]));
-    expect(() => compileOperationalEnvelope(c, c.envelopeDigest)).toThrow(/hazards must each appear once, in canonical order/);
+    expect(() => compileRegistered(c)).toThrow(/hazards must each appear once, in canonical order/);
   });
 
   it("refuses a device class that has no template", () => {
     const c = redigested(confirmedOt2(), (b) => (b.deviceClass = "unknown-robot"));
-    expect(() => compileOperationalEnvelope(c, c.envelopeDigest)).toThrow(/unknown deviceClass/);
+    expect(() => compileRegistered(c)).toThrow(/unknown deviceClass/);
   });
 });
 
 describe("OperationalEnvelopeV1Schema: strict, no defaults", () => {
   const c0 = confirmedOt2();
-  const rt = compileOperationalEnvelope(c0, c0.envelopeDigest);
+  const rt = compileRegistered(c0);
 
   it("refuses a numeric string, NaN, Infinity, and min above max (G4)", () => {
     expect(messages(parseChanged(rt, (e) => (e.limits[0].max = "300")))).toMatch(/limits\.0\.max Expected number, received string/);
@@ -308,9 +332,9 @@ describe("OperationalEnvelopeV1Schema: strict, no defaults", () => {
 });
 
 describe("compileOperationalEnvelope: the projection carries only what the runtime enforces", () => {
-  it("drops a stray stop command from a re-digested hardware e-stop", () => {
+  it("refuses a stray stop command on a re-digested hardware e-stop: every shape is closed (astra pack 153)", () => {
     const c = redigested(confirmedPlateReader(), (b) => (b.eStop = { mechanism: "hardware", stopCommand: "POST /halt" }));
-    expect(compileOperationalEnvelope(c, c.envelopeDigest).eStop).toEqual({ mechanism: "hardware" });
+    expect(() => compileRegistered(c)).toThrow(/eStop holds only its mechanism/);
   });
 });
 
@@ -321,16 +345,16 @@ describe("compileOperationalEnvelope: the projection carries only what the runti
 describe("astra 114b findings", () => {
   it("1b a forged (but self-consistently re-digested) body vs the registered digest: compileOperationalEnvelope also refuses", () => {
     const c = confirmedOt2();
-    const REGISTERED = c.envelopeDigest;
+    const REGISTERED = register(c);
     const forged = redigested(c, (b) => {
       b.limits[0].max = 3000;
     });
-    expect(() => compileOperationalEnvelope(forged, REGISTERED)).toThrow(/not the envelope the registration record committed/);
+    expect(() => compileOperationalEnvelope(forged, REGISTERED, verifyRegistry)).toThrow(/not the envelope the registration record committed/);
   });
 
   it("8/9 the runtime envelope carries adapterVersion, commands and deadlineQuantity", () => {
     const c = confirmedOt2();
-    const rt = compileOperationalEnvelope(c, c.envelopeDigest);
+    const rt = compileRegistered(c);
     expect(Object.keys(rt).sort()).toEqual(
       [
         "adapterType",
@@ -354,7 +378,7 @@ describe("astra 114b findings", () => {
 
   it("10 the schema refuses an unknown class (full behavior covered by the dedicated 114b-10 tests above)", () => {
     const c = confirmedOt2();
-    const rt = compileOperationalEnvelope(c, c.envelopeDigest);
+    const rt = compileRegistered(c);
     expect(OperationalEnvelopeV1Schema.safeParse({ ...rt, deviceClass: "unknown-robot" }).success).toBe(false);
   });
 });
@@ -362,20 +386,112 @@ describe("astra 114b findings", () => {
 // ── Mutation-found gaps (round-2 mutation run) ──
 describe("mutation-found gaps: the runtime command surface", () => {
   it("the schema refuses an extra key on a command parameter", () => {
-    const rt = compileOperationalEnvelope(confirmedPlateReader(), confirmedPlateReader().envelopeDigest);
+    const rt = compileRegistered(confirmedPlateReader());
     const changed = structuredClone(rt) as any;
     changed.commands[0].params[0].fallback = 1;
     expect(OperationalEnvelopeV1Schema.safeParse(changed).success).toBe(false);
   });
 
-  it("an unbounded parameter keeps its reason in the runtime envelope", () => {
+  it("an unbounded parameter keeps its reason and its allowed values in the runtime envelope", () => {
     const c = confirmedPlateReader();
-    const rt = compileOperationalEnvelope(c, c.envelopeDigest);
+    const rt = compileRegistered(c);
     const unbounded = rt.commands.flatMap((cmd) => cmd.params).filter((p) => p.unbounded !== undefined);
     expect(unbounded.length).toBeGreaterThan(0);
     for (const p of unbounded) {
-      expect(p.unbounded!.trim().length).toBeGreaterThan(0);
+      expect(p.unbounded!.reason.trim().length).toBeGreaterThan(0);
+      expect(p.unbounded!.allowed).toEqual([340, 405, 450, 600]);
       expect(p.quantity).toBeUndefined();
     }
+  });
+});
+
+// ── astra pack 153 (round 3) on the runtime compiler ──
+describe("astra 153 CRITICAL: compileOperationalEnvelope compiles exactly what the digest covers", () => {
+  it("astra's recipe: a sources getter that raises max after canonicalize read it is refused, and never runs", () => {
+    const ok = confirmedPlateReader();
+    const registration = register(ok);
+    const live = structuredClone(ok) as unknown as { envelope: { limits: Array<Record<string, unknown>> } };
+    const limit = live.envelope.limits[0]!;
+    const sources = limit.sources;
+    let reads = 0;
+    Object.defineProperty(limit, "sources", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        if (++reads === 2) limit.max = 400;
+        return sources;
+      },
+    });
+    expect(() => compileOperationalEnvelope(live as unknown as ConfirmedSafetyEnvelope, registration, verifyRegistry)).toThrow(
+      /an accessor .* no code supplied with it may run/,
+    );
+    expect(reads).toBe(0);
+  });
+
+  it("a setter on Array.prototype[0] never yields a substituted limit: compile either throws or returns the confirmed one", () => {
+    // A realm polluted before the call is outside what an in-process check defends; here zod's own
+    // arrays are hit and it throws. The property that must hold is that no substituted limit is returned.
+    const ok = confirmedOt2();
+    const registration = register(ok);
+    let rt: OperationalEnvelopeV1 | undefined;
+    let threw = false;
+    Object.defineProperty(Array.prototype, "0", {
+      configurable: true,
+      set(this: unknown[]) {
+        Object.defineProperty(this, "0", { value: { quantity: "aspirate_volume", unit: "uL", min: 0, max: 1e9 }, writable: true, enumerable: true, configurable: true });
+      },
+    });
+    try {
+      rt = compileOperationalEnvelope(structuredClone(ok) as ConfirmedSafetyEnvelope, registration, verifyRegistry);
+    } catch {
+      threw = true;
+    } finally {
+      delete (Array.prototype as unknown as Record<string, unknown>)["0"];
+    }
+    if (!threw) expect(rt!.limits[0]).toEqual({ quantity: "aspirate_volume", unit: "uL", min: 1, max: 300 });
+    expect(threw || rt!.limits[0]!.max === 300).toBe(true);
+  });
+
+  it("the runtime envelope returned is the frozen object compile built and validated", () => {
+    const rt = compileRegistered(confirmedOt2());
+    expect(Object.isFrozen(rt)).toBe(true);
+    expect(Object.isFrozen(rt.limits[0])).toBe(true);
+    expect(Object.isFrozen(rt.commands[0]!.params)).toBe(true);
+  });
+
+  it("a forged body under a self-made registration key is refused", () => {
+    const c = confirmedOt2();
+    const forged = redigested(c, (b) => (b.limits[0].max = 3000));
+    const attacker = generateKeyPairSync("ed25519");
+    const statement = { deviceId: "ot2-sim-1", envelopeDigest: forged.envelopeDigest, registeredAt: "2026-09-29T20:05:00Z" };
+    const selfSigned = { ...statement, signature: Buffer.from(sign(null, registrationSigningPreimage(statement), attacker.privateKey)).toString("hex") };
+    expect(() => compileOperationalEnvelope(forged, selfSigned, verifyRegistry)).toThrow(/signature does not verify against the registry's key/);
+  });
+});
+
+describe("astra 153 HIGH 8: the runtime schema names the adapter by digest and has no free-form parameter", () => {
+  const rt = compileRegistered(confirmedOt2());
+
+  it("refuses an adapterVersion that is not a manifest digest", () => {
+    for (const bad of ["2.1.0", "sha256:" + "a".repeat(63), "sha256:" + "A".repeat(64)]) {
+      expect(messages(parseChanged(rt, (e) => (e.adapterVersion = bad))), bad).toMatch(/adapterVersion must be sha256: \+ 64 lowercase hex/);
+    }
+  });
+
+  it("refuses a free-form unbounded parameter, an empty, duplicated or non-scalar allowed list, and extra keys", () => {
+    const slot = (unbounded: unknown) => (e: any) => e.commands[0].params.push({ name: "slot", unbounded });
+    expect(parseChanged(rt, slot("device-specific")).success).toBe(false);
+    expect(parseChanged(rt, slot({ reason: "a slot", allowed: [] })).success).toBe(false);
+    expect(messages(parseChanged(rt, slot({ reason: "a slot", allowed: [1, 1] })))).toMatch(/an allowed value is listed twice/);
+    expect(parseChanged(rt, slot({ reason: "a slot", allowed: [{ any: true }] })).success).toBe(false);
+    expect(parseChanged(rt, slot({ reason: "a slot", allowed: [" "] })).success).toBe(false);
+    expect(parseChanged(rt, slot({ reason: "a slot", allowed: [1], pattern: ".*" })).success).toBe(false);
+    expect(parseChanged(rt, slot({ reason: " ", allowed: [1] })).success).toBe(false);
+    expect(parseChanged(rt, slot({ reason: "a slot", allowed: [1, "1"] })).success).toBe(true);
+  });
+
+  it("the compiled runtime envelope carries each unbounded parameter's allowed values", () => {
+    const labwareSlot = rt.commands.find((c) => c.name === "runProtocol")!.params.find((p) => p.name === "labwareSlot")!;
+    expect(labwareSlot.unbounded).toEqual({ reason: "a deck position, not a safety quantity", allowed: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] });
   });
 });
