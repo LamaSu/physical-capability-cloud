@@ -18,6 +18,7 @@ import { verifyBundleHash } from "@pcc/spec";
 import type { CameraAdapter, MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus, SensorAdapter } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
+import type { JobResult } from "../job-runner.js";
 
 // Plain functions, not vi.fn(), so vi.restoreAllMocks() cannot strip them.
 vi.mock("@sentry/node", () => ({
@@ -663,5 +664,58 @@ describe("the settle timer", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("defaults to 30 s, and a run that times out waits for it once, not twice", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // setImmediate is real: hashing finishes, and every microtask runs, between checks.
+    const turn = () => new Promise((resolve) => setImmediate(resolve));
+    try {
+      const camera = testCamera("camera-default");
+      camera.afterInspection = () => camera.emit(evidence("camera_snapshot", camera.id, "camera"));
+      let outcome: JobResult | undefined;
+      void new JobRunner(testMachine("machine-default"), [], camera, new StuckEmitter("camera_snapshot"))
+        .run({ jobId: "job-default", stepId: STEP, gcodeHash: gcode(18), assuranceTier: 2 })
+        .then((result) => {
+          outcome = result;
+        });
+      // The settle's timer is the run's first and only timer.
+      while (vi.getTimerCount() === 0) await turn();
+
+      await vi.advanceTimersByTimeAsync(29_999);
+      await turn();
+      expect(outcome, "resolved before 30 s").toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await turn();
+      expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 30000 ms", durationMs: expect.any(Number) });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("an addEvent that fails", () => {
+  it.each(["rejects", "throws"] as const)("is logged and skipped when it %s, and the events after it are still recorded", async (how) => {
+    class FailingEmitter extends EvidenceEmitter {
+      override addEvent(jobId: string, stepId: string, rawEvent: Emitted): Promise<EvidenceEvent> {
+        if (rawEvent.type === "gcode_received") {
+          if (how === "throws") throw new Error("storage full");
+          return Promise.reject(new Error("storage full"));
+        }
+        return super.addEvent(jobId, stepId, rawEvent);
+      }
+    }
+    const emitter = new FailingEmitter(KERNEL_ID);
+    const bundles: EvidenceBundle[] = [];
+    emitter.onBundle((bundle) => bundles.push(bundle));
+    const machine = testMachine("machine-failing-add", {
+      onLoad: (id, hash) => [evidence("gcode_received", id, "controller", { gcodeHash: hash }), ...tier1(id, hash)],
+    });
+
+    const result = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-failing-add", stepId: STEP, gcodeHash: gcode(19), assuranceTier: 1 });
+
+    expect(result).toMatchObject({ success: true });
+    expect(bundles.map((bundle) => bundle.events.map((e) => e.type))).toEqual([["gcode_hash_verified", "execution_completed", "power_profile_summary"]]);
+    expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ message: "storage full" }));
   });
 });
