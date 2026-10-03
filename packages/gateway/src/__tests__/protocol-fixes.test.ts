@@ -56,6 +56,10 @@ async function buildApp(): Promise<FastifyInstance> {
 // Fix 1: Capability auto-registration from operator heartbeats
 // ---------------------------------------------------------------------------
 
+// A heartbeat registers only DECLARED terms (board N23, steward #3538): nothing is defaulted,
+// so every announcement below declares its tiers and pricing, as a kernel must.
+const TERMS = { assuranceTiers: [0, 1], pricing: { currency: "USDC", baseCost: "5", minimum: "5" } };
+
 describe("Fix 1: Capability auto-registration from heartbeats", () => {
   let app: FastifyInstance;
 
@@ -82,6 +86,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
         capabilities: [
           {
             type: "document-printing",
+            ...TERMS,
             name: "HP LaserJet document printing",
             description: "Auto-registered laser printer",
           },
@@ -115,7 +120,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
       payload: {
         kernelId,
         status: "online",
-        capabilities: [{ type: "visual-inspection", name: "Camera-based inspection" }],
+        capabilities: [{ type: "visual-inspection", name: "Camera-based inspection", ...TERMS }],
       },
     });
 
@@ -126,7 +131,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
       payload: {
         kernelId,
         status: "online",
-        capabilities: [{ type: "visual-inspection", name: "Camera-based inspection" }],
+        capabilities: [{ type: "visual-inspection", name: "Camera-based inspection", ...TERMS }],
       },
     });
 
@@ -155,9 +160,9 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
         kernelId,
         status: "online",
         capabilities: [
-          { type: "capability-type-a", name: "Type A" },
-          { type: "capability-type-b", name: "Type B" },
-          { type: "capability-type-c", name: "Type C" },
+          { type: "capability-type-a", name: "Type A", ...TERMS },
+          { type: "capability-type-b", name: "Type B", ...TERMS },
+          { type: "capability-type-c", name: "Type C", ...TERMS },
         ],
       },
     });
@@ -188,7 +193,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
         status: "online",
         capabilities: [
           { name: "No type field here" }, // should be skipped
-          { type: "valid-type", name: "Valid" },
+          { type: "valid-type", name: "Valid", ...TERMS },
         ],
       },
     });
@@ -208,7 +213,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
       payload: {
         status: "online",
         capabilities: [
-          { type: "kernel-heartbeat-cap", name: "Capability via kernel heartbeat endpoint" },
+          { type: "kernel-heartbeat-cap", name: "Capability via kernel heartbeat endpoint", ...TERMS },
         ],
       },
     });
@@ -256,7 +261,7 @@ describe("Fix 2: Semantic job routing", () => {
         kernelId,
         status: "online",
         capabilities: [
-          { type: "document-printing", name: "Office Laser Printer" },
+          { type: "document-printing", name: "Office Laser Printer", ...TERMS },
         ],
       },
     });
