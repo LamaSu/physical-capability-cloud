@@ -145,7 +145,21 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   private evidenceListeners: EvidenceCallback[] = [];
   private currentCollector: EvidenceCollector | null = null;
   private currentJobId: string | null = null;
+  /**
+   * The job whose start is in flight, from the moment it is accepted until it returns. The
+   * adapter records one job at a time: its collector and currentJobId are single, and the
+   * sidecar keeps one window per device. So a start while this is set is refused, before
+   * anything reaches the sidecar (astra pack 473). It is set before the first await, so two
+   * starts in the same tick cannot both pass.
+   */
+  private running: string | null = null;
   private mockStatus: MachineStatus = "idle";
+  /**
+   * The mock run in flight, from its start until it completes or is stopped. Mock mode keeps
+   * one run per device too: a start while it is set is refused, and a stop ends it, with no
+   * completion (astra pack 204).
+   */
+  private mockRun: { jobId: string; timer: ReturnType<typeof setTimeout> | null; end: () => void } | null = null;
   private completedJobs = 0;
   /** Lazy-init guard so we only initialise the sidecar+backend once */
   private initialized = false;
@@ -247,8 +261,18 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     }
     // A start needs its job's id before anything reaches the sidecar: not even backend.init,
     // which can run a backend's setup() on the device (astra pack 197).
-    if (command.type === "start" && this.startJobId(command.payload) === null) {
+    const startJob = command.type === "start" ? this.startJobId(command.payload) : null;
+    if (command.type === "start" && startJob === null) {
       return { success: false, message: START_NEEDS_JOB_ID };
+    }
+    // One run per device (astra pack 473): a second start would take over the collector and
+    // the job the sidecar's notifications are bound to, so the first job's evidence would be
+    // dropped while it still completed. Reserved here, before the first await.
+    if (startJob !== null) {
+      if (this.running !== null) {
+        return { success: false, message: `busy with job ${this.running}: a run is in flight on this device, so job ${startJob} does not start` };
+      }
+      this.running = startJob;
     }
     try {
       await this.ensureInitialized();
@@ -279,6 +303,10 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         success: false,
         message: err instanceof Error ? err.message : "PyLabRobot adapter error",
       };
+    } finally {
+      // The start has returned: its run has ended, or never began. A held job's evidence still
+      // refuses new starts on its own (unproven).
+      if (startJob !== null && this.running === startJob) this.running = null;
     }
   }
 
@@ -518,6 +546,9 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         return { success: true, message: "load_gcode (mock)" };
       case "start": {
         const jobId = String(((command.payload ?? {}) as Record<string, unknown>).jobId ?? `mock-job-${Date.now()}`);
+        if (this.mockRun !== null) {
+          return { success: false, message: `busy with job ${this.mockRun.jobId}: a run is in flight on this device, so job ${jobId} does not start` };
+        }
         this.mockStatus = "busy";
         this.forwardEvent({
           type: "execution_started",
@@ -539,8 +570,11 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
             },
           });
         }
-        const endRun = this.work.begin();
-        setTimeout(() => {
+        const run: { jobId: string; timer: ReturnType<typeof setTimeout> | null; end: () => void } = { jobId, timer: null, end: this.work.begin() };
+        this.mockRun = run;
+        // A stop clears this timer, so it fires only for the run still in flight.
+        run.timer = setTimeout(() => {
+          this.mockRun = null;
           this.mockStatus = "idle";
           this.forwardEvent({
             type: "execution_completed",
@@ -550,13 +584,28 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
           });
           this.emit("mock_run_complete", { jobId });
           // Ended only after the completion is emitted.
-          endRun();
+          run.end();
         }, 0);
         return { success: true, message: `mock run ${jobId} started` };
       }
-      case "stop":
+      case "stop": {
+        // A stop ends the mock run in flight with no completion, as the real stop fails the real
+        // run: execution_failed, "stopped" (astra pack 204).
+        const run = this.mockRun;
+        this.mockRun = null;
         this.mockStatus = "idle";
+        if (run !== null) {
+          if (run.timer) clearTimeout(run.timer);
+          this.forwardEvent({
+            type: "execution_failed",
+            timestamp: new Date().toISOString(),
+            source: this.source,
+            payload: { mock: true, jobId: run.jobId, reason: "stopped" },
+          });
+          run.end();
+        }
         return { success: true, message: "mock stop" };
+      }
       case "status":
         return {
           success: true,
