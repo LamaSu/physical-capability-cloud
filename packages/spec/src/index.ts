@@ -22,6 +22,10 @@ export * from "./payouts.js";
 export * from "./onboarding/intake/index.js";
 // Research prompt library (R5) — ready-to-fire research prompts + coaching
 export * from "./onboarding/research/index.js";
+
+// Economic agreements v1 (docs/ECONOMIC_AGREEMENTS.md). Namespaced because its schema names
+// (Unit, AmountSchema, ...) are generic; also importable directly as `@pcc/spec/economics`.
+export * as economics from "./economics/index.js";
 // Canonical money-status display map (browser-safe) — the ONE exact escrow /
 // settlement state -> tone + honest label table every surface renders from.
 export * from "./money/money-status.js";
