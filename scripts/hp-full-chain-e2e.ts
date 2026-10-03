@@ -25,7 +25,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
-import { safeLogJson } from "../packages/gateway/src/util/redact-log.js";
+import { safeLogJson, safeLogErrorName } from "../packages/gateway/src/util/redact-log.js";
 
 const PK = process.env.PCC_GATEWAY_PRIVATE_KEY as Hex;
 if (!PK || !PK.startsWith("0x") || PK.length !== 66) {
@@ -348,4 +348,7 @@ async function main() {
   fs.writeFileSync("/home/ryangeorge/hp-full-chain-report.txt", report.join("\n"));
 }
 
-main().catch(e => { console.error("FAIL:", e); process.exit(1); });
+// FC-8 round 2: printing the whole error object serializes its message and
+// stack (and any attached properties), which can carry a caught secret; only
+// the bounded error-class name is safe to log here.
+main().catch(e => { console.error("FAIL:", safeLogErrorName(e)); process.exit(1); });

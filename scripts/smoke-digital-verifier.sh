@@ -11,6 +11,14 @@
 
 set -euo pipefail
 
+# FC-8 round 2 (astra pack 61b, CRITICAL): disable xtrace BEFORE any secret is
+# read or expanded, so an inherited `bash -x` or exported SHELLOPTS=xtrace
+# never prints PCC_ORACLE_KEY or the provisioned API key. `set +x` toggles a
+# shell OPTION, not an env var, so it takes effect immediately even when this
+# script was itself invoked as `bash -x smoke-digital-verifier.sh` — kept off
+# for the rest of the script since credentials are handled throughout.
+set +x
+
 # ── Configuration ───────────────────────────────────────────────────────────
 REPO="global-mysterysnailrevolution/physical-capability-cloud"
 BRANCH="digital-verifier/foundation"
@@ -291,8 +299,10 @@ else
       }' 2>/dev/null || echo "")
     if [ -n "$VERIFY_RESP" ]; then
       VERIFIED=$(echo "$VERIFY_RESP" | jq -r .result.verified 2>/dev/null || echo "")
-      REASON=$(echo "$VERIFY_RESP" | jq -r .result.reason 2>/dev/null || echo "")
-      info "Verify response: verified=$VERIFIED reason=$REASON"
+      # FC-8 round 2: .result.reason is the oracle's free text and may
+      # reflect a secret (e.g. a header value echoed into an error message);
+      # only the validated boolean `verified` field is safe to log here.
+      info "Verify response: verified=$VERIFIED"
     else
       info "Verify request returned empty (oracle may be processing)"
     fi
@@ -373,7 +383,10 @@ if $E2E_OK; then
   if [ "$IS_VALID" = "true" ]; then
     info "API key validated successfully"
   else
-    info "API key validation returned: $VALIDATE_RESP"
+    # FC-8 round 2: $VALIDATE_RESP is the full raw response body, which can
+    # include the reflected Authorization header; only the validated
+    # boolean is safe to log here.
+    info "API key validation returned: valid=$IS_VALID"
   fi
 fi
 

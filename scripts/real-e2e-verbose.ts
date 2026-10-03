@@ -13,7 +13,7 @@ import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { writeFileSync } from "node:fs";
-import { safeLogJson } from "../packages/gateway/src/util/redact-log.js";
+import { safeLogJson, safeLogResponseText, safeLogErrorName } from "../packages/gateway/src/util/redact-log.js";
 
 const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
 if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY"); process.exit(1); }
@@ -380,7 +380,9 @@ async function main() {
     body: JSON.stringify({ escrowAddress: ESCROW, milestoneIndex: 0, evidenceHash, jobId: jobResult.jobId }),
   });
   const oracleText = await oracleReq.text();
-  L(`     Oracle HTTP ${oracleReq.status}: ${oracleText.slice(0, 500)}`);
+  // FC-8 round 2: the oracle response may reflect the x-oracle-key or carry a
+  // secret in a non-JSON error body; parse-then-redact, or withhold entirely.
+  L(`     Oracle HTTP ${oracleReq.status}: ${safeLogResponseText(oracleText, 500)}`);
   L("");
 
   // 7c. Attestation
@@ -469,7 +471,9 @@ async function main() {
     kernelId: KERNEL,
     operatorDid: `did:pcc:${KERNEL}`,
   });
-  L(`     Provisioned: ${litProvision.usageKey ? "yes" : litProvision.error ?? "no"}`);
+  // FC-8 round 2: the provisioning response's error field is a raw server
+  // string — never print it; "no" is all a failure needs to say here.
+  L(`     Provisioned: ${litProvision.usageKey ? "yes" : "no"}`);
   L("");
 
   // ── 7b-4. Starknet — ZK Proof Anchoring ───────────────────────────
@@ -616,4 +620,7 @@ async function main() {
   BIGSEP();
 }
 
-main().catch(e => { L(`FATAL: ${e.shortMessage || e.message}`); process.exit(1); });
+// FC-8 round 2: e.shortMessage/e.message is free text that can carry a
+// caught secret (e.g. a header value embedded in a fetch/dependency error);
+// only the bounded error-class name is safe to log here.
+main().catch(e => { L(`FATAL: ${safeLogErrorName(e)}`); process.exit(1); });

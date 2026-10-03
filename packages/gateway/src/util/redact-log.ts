@@ -78,3 +78,62 @@ export function safeLogJson(value: unknown, max = 800): string {
   if (s === undefined) return "undefined";
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
+
+// ── FC-8 round 2 (astra pack 61b, CRITICAL) ─────────────────────────────────
+//
+// Pack 61's fix above routed each script's HTTP Body/Response logging through
+// safeLogJson, but several OTHER print sites in the same e2e/smoke scripts
+// still interpolated a raw oracle/gateway value or a raw caught exception
+// directly, bypassing safeLogJson entirely: a non-JSON response body, an
+// `.error` field used as a fallback next to an id, or `.message`/the whole
+// error object in a top-level catch. Regexes cannot make safeLogJson a sound
+// boundary for free text (see redact-log.test.ts's documented gaps), so these
+// three helpers instead replace each such site with a VALIDATED, ALLOW-LISTED
+// projection — an id-shaped string, a class-name-shaped error label, or a
+// parsed-and-redacted JSON body — and a static fallback otherwise. Never an
+// arbitrary body, error message, or stack.
+
+/** A short, class-name-shaped label (e.g. "TypeError", "HttpRequestError"). */
+const ERROR_NAME_RE = /^[A-Z][A-Za-z0-9]{0,63}$/;
+
+/** A short, bounded identifier: letters, digits, `_`, `.`, `-`. */
+const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+
+/**
+ * Parse `text` (an HTTP response body) as JSON and redact it with
+ * `safeLogJson`; a non-JSON body (an HTML error page, a plain-text
+ * diagnostic, or a reflected header) is withheld entirely rather than
+ * printed raw, since it has no key-name structure for the shape layer to
+ * anchor on. Never throws.
+ */
+export function safeLogResponseText(text: string, max = 800): string {
+  try {
+    return safeLogJson(JSON.parse(text), max);
+  } catch {
+    return "[non-JSON response withheld]";
+  }
+}
+
+/**
+ * A bounded, validated label safe to log for a thrown value: only `.name`
+ * (a short, class-name-shaped identifier), and only when it actually looks
+ * like one. `.message` and `.stack` are free text — exactly where a caught
+ * secret (e.g. a header value embedded in a fetch/dependency error) ends up
+ * — so this never reads them, and a hostile `.name` that isn't
+ * identifier-shaped (whatever characters it uses) falls back to "Error".
+ * Never throws.
+ */
+export function safeLogErrorName(e: unknown): string {
+  const name = e && typeof e === "object" && "name" in e ? (e as { name?: unknown }).name : undefined;
+  return typeof name === "string" && ERROR_NAME_RE.test(name) ? name : "Error";
+}
+
+/**
+ * A value safe to log as an id: only when it already looks like one (short,
+ * identifier-shaped). Anything else — including a free-text error message a
+ * caller might otherwise have printed via `id ?? error` — becomes
+ * `fallback`. Never throws.
+ */
+export function safeLogId(value: unknown, fallback = "(none)"): string {
+  return typeof value === "string" && ID_RE.test(value) ? value : fallback;
+}

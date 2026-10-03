@@ -26,7 +26,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { safeLogJson } from "../packages/gateway/src/util/redact-log.js";
+import { safeLogJson, safeLogId, safeLogErrorName } from "../packages/gateway/src/util/redact-log.js";
 
 const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
 if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY"); process.exit(1); }
@@ -398,9 +398,13 @@ async function main() {
       filename: "pcc-real-e2e-report.txt",
     },
   });
-  log(`    Print Job: ${printResult.jobId ?? printResult.error}`);
+  // FC-8 round 2: printResult.error is a raw server error string — never
+  // fall back to printing it; an id-shaped jobId or a static "(none)" only.
+  log(`    Print Job: ${safeLogId(printResult.jobId)}`);
   log("");
   log("DONE. Full protocol executed. No mocks.");
 }
 
-main().catch((e) => { console.error("FATAL:", e.message ?? e); process.exit(1); });
+// FC-8 round 2: e.message is free text that can carry a caught secret; only
+// the bounded error-class name is safe to log here.
+main().catch((e) => { console.error("FATAL:", safeLogErrorName(e)); process.exit(1); });
