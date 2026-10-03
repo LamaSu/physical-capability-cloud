@@ -243,14 +243,15 @@ function isSafeTwoDecimalHeadline(headline: string): boolean {
   const m = /^([0-9]{1,30})(?:\.([0-9]{1,30}))?$/.exec(headline);
   if (!m) return false;
   const [, integerPart, decimalPart = ""] = m;
-  // MAX_SAFE_INTEGER has 16 digits; anything longer is unambiguously over it
-  // without needing a (lossy) numeric conversion to find out.
-  if (integerPart.length > 16 || Number(integerPart) > Number.MAX_SAFE_INTEGER) {
-    return false;
-  }
   // Any non-zero digit from the 3rd decimal place onward is lost by toFixed(2).
   if (/[1-9]/.test(decimalPart.slice(2))) return false;
-  return true;
+  // The v1 digest writes Number(headline).toFixed(2). Accept a headline only when that is EXACTLY
+  // the two-decimal value it spells: leading zeros carry no value ("00000000000000001" is 1), while
+  // a value a double cannot hold ("9007199254740991.01", "99999999999999.99") or one that toFixed
+  // writes in exponential notation (1e21 and up) can never become a different declared price
+  // (astra 130, 439-B).
+  const exact = `${integerPart.replace(/^0+(?=[0-9])/, "")}.${(decimalPart + "00").slice(0, 2)}`;
+  return Number(headline).toFixed(2) === exact;
 }
 
 /**
