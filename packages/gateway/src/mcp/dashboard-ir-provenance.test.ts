@@ -651,3 +651,40 @@ describe("astra r3 (#348 @c2edf196): reproduced findings (verify before fix)", (
     s.close();
   });
 });
+
+describe("astra r4 (#348 @3e615620): reproduced findings (verify before fix)", () => {
+  // H1 (refresh): validation must run BEFORE the ordering gate. An off-contract, partial or
+  // mistyped refresh is a failed read whatever its timestamp: it clears what was shown and says
+  // why. It is never dropped silently while an older fresh value (or a fresh "none") stays up.
+  const cases: Array<[string, unknown, Reply[], string]> = [
+    ["list: a timed empty list, then {} (no collection, no time)", listManifest,
+      [{ status: 200, json: { items: [], asOf: iso(T0 - 1_000) } }, { status: 200, json: {} }], "unexpected response shape"],
+    ["list: a timed empty list, then an OLDER response with no collection", listManifest,
+      [{ status: 200, json: { items: [], asOf: iso(T0 - 1_000) } }, { status: 200, json: { asOf: iso(T0 - 2_000) } }], "unexpected response shape"],
+    ["list: timed rows, then an OLDER partial collection", listManifest,
+      [{ status: 200, json: { items: [{ name: "A", type: "t", available: true }], asOf: iso(T0 - 1_000) } },
+       { status: 200, json: { items: [{ nope: 1 }], asOf: iso(T0 - 2_000) } }], "partial collection"],
+    ["stat: a timed value, then an OLDER response missing the field", statManifest,
+      [{ status: 200, json: { progress: 80, asOf: iso(T0 - 1_000) } }, { status: 200, json: { asOf: iso(T0 - 2_000) } }], "missing field"],
+    ["stat: a timed value, then an untimed MISTYPED value", statManifest,
+      [{ status: 200, json: { progress: 80, asOf: iso(T0 - 1_000) } }, { status: 200, json: { progress: "42%" } }], "mistyped field"],
+    ["card: a timed card, then an untimed response missing a required field", cardManifest,
+      [{ status: 200, json: { name: "Alpha", type: "t", asOf: iso(T0 - 1_000) } }, { status: 200, json: { type: "t" } }], "missing required fields"],
+  ];
+  for (const [label, manifest, replies, why] of cases) {
+    it(`H1 (refresh) ${label}: the view clears and says "unavailable · ${why}"`, async () => {
+      const s = scene(replies, T0);
+      s.deliver(manifest); await s.settle();
+      const sel = manifest === listManifest ? ".pcc-list" : manifest === statManifest ? ".pcc-stat" : ".pcc-schema-card";
+      expect(s.q(sel).className).not.toContain("pcc-unavail"); // the first, valid datum is shown
+      await s.nextPoll();
+      const host = s.q(sel);
+      expect(s.lineOf(host).textContent).toBe("unavailable · " + why);
+      expect(host.className).toContain("pcc-unavail");
+      expect(s.q(".pcc-list .pcc-empty")).toBeNull();
+      expect(host.querySelectorAll(".pcc-row").length).toBe(0);
+      for (const v of Array.from(host.querySelectorAll(".pcc-value")) as any[]) expect(v.textContent).toBe("");
+      s.close();
+    });
+  }
+});
