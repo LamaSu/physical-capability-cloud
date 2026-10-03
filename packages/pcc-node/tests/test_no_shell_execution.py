@@ -36,7 +36,12 @@ computed argv and ``/usr/bin/env sh``). The rules:
 6. A module is never reached through another module's attribute
    (``subprocess.os``), and an attribute chain goes past a tracked module's
    first attribute only through the few the package uses (``SAFE_CHAINS``:
-   ``os.path``, ``os.environ``, ``sys.stdin``) (verdict 68f).
+   ``os.path``, ``os.environ``, ``sys.stdin``) (verdict 68f). That holds
+   however the path is named: ``from subprocess import os``, ``import os.path
+   as p`` and ``from os.path import os`` resolve to the same paths, and no
+   path passes a dunder. A chain's head, or anything past it, is never bound
+   to a name or passed as a value, where its attributes would escape these
+   rules (``path = os.path``) (verdict 105e).
 """
 
 import ast
@@ -111,31 +116,65 @@ def _root(name):
     return name.split(".")[0]
 
 
+def _tracked(tree):
+    """The names a module binds to tracked modules or to paths into them, and the imports that break a rule.
+
+    Returns (modules, names, prefixed, refusals):
+    - modules: local name -> module, for `import subprocess as sp` and `import os.path` (which binds os);
+    - names: local name -> (module, attr), for `from os import system as s`;
+    - prefixed: local name -> (module, [attr, ...]), for `import os.path as p` and `from os.path import join`;
+    - refusals: (node, reason) for each import that breaks a rule.
+    """
+    modules, names, prefixed, refusals = {}, {}, {}, []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if parts[0] in REFUSED_IMPORTS:
+                    refusals.append((node, f"import {alias.name}"))
+                if parts[0] not in MODULES:
+                    continue
+                if any(part in MODULE_NAMES for part in parts[1:]):
+                    refusals.append((node, f"import {alias.name} reaches another module"))
+                if alias.asname is None:
+                    modules[parts[0]] = parts[0]  # `import os.path` binds os itself
+                elif len(parts) == 1:
+                    modules[alias.asname] = parts[0]
+                else:
+                    prefixed[alias.asname] = (parts[0], parts[1:])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            parts = node.module.split(".")
+            if parts[0] in REFUSED_IMPORTS:
+                refusals.append((node, f"from {node.module} import ..."))
+            if parts[0] not in MODULES:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    refusals.append((node, f"from {node.module} import *"))
+                    continue
+                local = alias.asname or alias.name
+                if len(parts) == 1:
+                    names[local] = (node.module, alias.name)
+                    if alias.name in REFUSED.get(node.module, ()):
+                        refusals.append((node, f"from {node.module} import {alias.name}"))
+                else:
+                    prefixed[local] = (parts[0], [*parts[1:], alias.name])
+                if any(part in MODULE_NAMES for part in [*parts[1:], alias.name]):
+                    refusals.append((node, f"from {node.module} import {alias.name} reaches another module"))
+    return modules, names, prefixed, refusals
+
+
 def violations(source, filename="<src>"):
     """Every rule the source breaks, as "line: reason" strings."""
     tree = ast.parse(source, filename)
-    modules = {}  # local name -> module, for `import subprocess as sp`
-    names = {}    # local name -> (module, attr), for `from os import system as s`
+    modules, names, prefixed, refusals = _tracked(tree)
     found = []
 
     def bad(node, why):
         found.append(f"{getattr(node, 'lineno', 0)}: {why}")
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if _root(alias.name) in REFUSED_IMPORTS:
-                    bad(node, f"import {alias.name}")
-                if alias.name in MODULES:
-                    modules[alias.asname or alias.name] = alias.name
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            if _root(node.module) in REFUSED_IMPORTS:
-                bad(node, f"from {node.module} import ...")
-            if node.module in MODULES:
-                for alias in node.names:
-                    names[alias.asname or alias.name] = (node.module, alias.name)
-                    if alias.name == "*" or alias.name in REFUSED.get(node.module, ()):
-                        bad(node, f"from {node.module} import {alias.name}")
+    for node, why in refusals:
+        bad(node, why)
 
     # Names used as the object of an attribute access (os in os.path.join), and called expressions.
     attribute_bases = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
@@ -171,6 +210,12 @@ def violations(source, filename="<src>"):
                     bad(node, f"{module}.{attr} through getattr")
             elif node.id == "__builtins__":
                 bad(node, "__builtins__")
+            elif (node.id in names or node.id in prefixed) and id(node) not in attribute_bases \
+                    and id(node) not in call_funcs:
+                # An imported chain head (from os import path) passed on as a value (verdict 105e).
+                module, attrs = (names[node.id][0], [names[node.id][1]]) if node.id in names else prefixed[node.id]
+                if len(attrs) >= 2 or (module, attrs[0]) in SAFE_CHAINS:
+                    bad(node, f"{'.'.join([module, *attrs])} used as a value")
         # Rebinding getattr/hasattr on another object (a module, from outside it).
         if isinstance(node, ast.Attribute) and node.attr in LOOKUPS and isinstance(node.ctx, (ast.Store, ast.Del)):
             bad(node, f"rebinds {node.attr} on another object")
@@ -181,18 +226,26 @@ def violations(source, filename="<src>"):
                 bad(node, f"{module}.{node.attr}")
             elif node.attr.startswith("__"):
                 bad(node, f"{module}.{node.attr}")
-        # Any attribute path from a tracked module: never to another module, and past the
-        # first attribute only through SAFE_CHAINS, one step deep.
-        path = _attribute_path(node, modules)
+        # Any attribute path from a tracked module, however its root was imported: never to
+        # another module or through a dunder, and past the first attribute only through
+        # SAFE_CHAINS, one step deep.
+        path = _attribute_path(node, modules, names, prefixed)
         if path is not None:
             module, attrs = path
             dotted = ".".join([module, *attrs])
             if attrs[-1] in MODULE_NAMES:
                 bad(node, f"{dotted} reaches another module")
+            elif any(a.startswith("__") for a in attrs):
+                bad(node, f"{dotted} reaches a dunder")
             elif len(attrs) == 2 and (module, attrs[0]) not in SAFE_CHAINS:
                 bad(node, f"{dotted} reaches past the module")
             elif len(attrs) > 2:
                 bad(node, f"{dotted} reaches too deep")
+            # A chain's head (os.path), or anything past it, bound to a name or passed as a value
+            # takes its attributes out of sight of these rules (verdict 105e: path = os.path).
+            if (id(node) not in attribute_bases and id(node) not in call_funcs
+                    and (len(attrs) >= 2 or (module, attrs[0]) in SAFE_CHAINS)):
+                bad(node, f"{dotted} used as a value")
         # An allowed starter bound to another name, or passed as a value, escapes the call checks.
         if id(node) not in call_funcs:
             ref = None
@@ -241,29 +294,33 @@ def violations(source, filename="<src>"):
     return found
 
 
-def _attribute_path(node, modules):
-    """(module, [attr, ...]) when *node* is an attribute path from a tracked module name."""
+def _attribute_path(node, modules, names=None, prefixed=None):
+    """(module, [attr, ...]) when *node* is an attribute path from a tracked name, however it was imported."""
     attrs = []
     while isinstance(node, ast.Attribute):
         attrs.append(node.attr)
         node = node.value
-    if attrs and isinstance(node, ast.Name) and node.id in modules:
-        return modules[node.id], attrs[::-1]
+    if not attrs or not isinstance(node, ast.Name):
+        return None
+    attrs.reverse()
+    if node.id in modules:
+        return modules[node.id], attrs
+    if names and node.id in names:
+        module, attr = names[node.id]
+        return module, [attr, *attrs]
+    if prefixed and node.id in prefixed:
+        module, prefix = prefixed[node.id]
+        return module, [*prefix, *attrs]
     return None
 
 
 def chains_used(source):
     """The (module, attr) pairs a source reaches past: os.path in os.path.join."""
     tree = ast.parse(source)
-    modules = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name in MODULES:
-                    modules[alias.asname or alias.name] = alias.name
+    modules, names, prefixed, _ = _tracked(tree)
     used = set()
     for node in ast.walk(tree):
-        path = _attribute_path(node, modules)
+        path = _attribute_path(node, modules, names, prefixed)
         if path is not None and len(path[1]) >= 2:
             used.add((path[0], path[1][0]))
     return used
@@ -409,6 +466,21 @@ EVASIONS = {
     "node -e": "import subprocess\nsubprocess.run(['node', '-e', payload])",
     "awk": "import subprocess\nsubprocess.run(['awk', payload])",
     "a path to an allowed name": "import subprocess\nsubprocess.run(['/tmp/x/arp', '-a'])",
+    # Verdict 105e (on #454): a module reached through an import, or through a name bound to a safe chain.
+    "a module imported from another": "from subprocess import os as platform\nplatform.system('id')",
+    "a safe chain bound to a name": "import os\npath = os.path\npath.os.system('id')",
+    "a submodule import binds its root": "import os.path\nos.system('id')",
+    "a submodule imported under a name": "import os.path as p\np.os.system('id')",
+    "a module from a submodule's names": "from os.path import os as o\no.system('id')",
+    "a safe chain imported by name": "from os import path\npath.os.system('id')",
+    "a safe chain imported by name, passed on": "from os import environ\nrun_with(environ)",
+    "a safe chain's head passed as a value": "import os\nrun_with(os.environ)",
+    "a value past a safe chain": "import os\ng = os.path.genericpath\ng.os.system('id')",
+    "a dunder past a safe chain": "import os\nk = os.environ.__class__\nk.__init__.__globals__['system']('id')",
+    "a starred import from a submodule": "from os.path import *\njoin('a', 'b')",
+    "a module imported from another, passed on": "from subprocess import os as platform\nrun_with(platform)",
+    "a module path from a submodule's names": "from os.path import genericpath as g\ng.os.system('id')",
+    "a dunder method past a safe chain": "import os\nos.path.__getattribute__('os').system('id')",
 }
 SAFE = {
     "fixed argv": "import subprocess\nsubprocess.run(['v4l2-ctl', '--device', dev, '--all'], capture_output=True)",
@@ -423,6 +495,10 @@ SAFE = {
     "os.environ chain": "import os\nvalue = os.environ.get('X')",
     "sys.stdin chain": "import sys\ninteractive = sys.stdin.isatty()",
     "an unrelated name that contains getattr": "import os\nmy_getattr = 1\nflags = getattr(os, 'O_NOFOLLOW', 0)",
+    # Verdict 105e: what the stricter rule 6 still allows.
+    "a constant bound to a name": "import os\nseparator = os.sep",
+    "os.path from a submodule import": "import os.path\nfull = os.path.join('a', 'b')",
+    "a safe chain imported by name, used in place": "from os import environ\nhome = environ.get('HOME')",
 }
 
 
