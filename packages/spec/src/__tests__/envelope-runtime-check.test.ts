@@ -146,15 +146,15 @@ function heatedInput(): SafetyEnvelopeInput {
     commandMap: { commands: [{ name: "run", params: [] }, { name: "stop", params: [] }] },
     telemetryMap: {
       channels: [
-        { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", maxAgeMs: 5000 },
-        { id: "run.elapsed_s", quantity: "read_duration", unit: "s", maxAgeMs: 1000 },
+        { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", semantics: "state", maxAgeMs: 5000 },
+        { id: "config.read_seconds", quantity: "read_duration", unit: "s", semantics: "state", maxAgeMs: 1000 },
       ],
     },
     intake: {
       ...plateInput().intake,
       limits: [
         { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 20, max: 45 },
-        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 0, max: 600 },
+        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 600 },
         { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 120 },
       ],
       eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
@@ -164,7 +164,7 @@ function heatedInput(): SafetyEnvelopeInput {
 const HEATED_DECISION = {
   deviceControlled: [
     { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "chamber.temperature_c" },
-    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "run.elapsed_s" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "config.read_seconds" },
   ],
 };
 
@@ -378,8 +378,8 @@ describe("rule 1, envelope-invalid: one plain copy, valid as OperationalEnvelope
       { mechanism: "none" }, { reason: "r", allowed: [1] }, { reason: "r", allowedItems: ["A1"] }, { name: "p", quantity: "aspirate_volume", unit: "uL" },
       { quantity: "aspirate_volume", unit: "uL", min: 0, max: 1 },
       // #508 round 3: the telemetry channels and the channel-bound device control.
-      "chamber.temperature_c", "run.elapsed_s", "Chamber", "1run", "telemetry", "cutoff", "incubation_temperature", "read_duration",
-      "degF", 5000, 60000, 60001, { id: "run.elapsed_s", quantity: "read_duration", unit: "s", maxAgeMs: 1000 },
+      "chamber.temperature_c", "config.read_seconds", "Chamber", "1run", "telemetry", "cutoff", "incubation_temperature", "read_duration",
+      "degF", 5000, 60000, 60001, "state", "elapsed", { id: "config.read_seconds", quantity: "read_duration", unit: "s", semantics: "state", maxAgeMs: 1000 },
       { quantity: "incubation_temperature", enforcement: "telemetry", channel: "chamber.temperature_c" },
       { quantity: "incubation_temperature", enforcement: "cutoff", detail: "x" }, [450, 405, 600], ["A2", "A1"],
     ];
@@ -883,41 +883,46 @@ describe("rule 9, the readings: every committed channel has a current reading in
   const RUN = { name: "run", params: {} };
   const STOP = { name: "stop", params: {} };
   const chamber = (value: unknown, atMs = NOW) => ({ channel: "chamber.temperature_c", value, atMs });
-  const elapsed = (value: unknown, atMs = NOW) => ({ channel: "run.elapsed_s", value, atMs });
+  const readSeconds = (value: unknown, atMs = NOW) => ({ channel: "config.read_seconds", value, atMs });
   const decide = (telemetry: unknown, command: unknown = RUN, over: Partial<RuntimeState> = {}) =>
     codeOf(checkRuntimeCommand(HEATED, command, { ...stateFor(HEATED, over), telemetry } as RuntimeState));
 
   it("allows a command when every committed channel has a current reading inside its limit, in any order", () => {
-    expect(decide([chamber(37), elapsed(0)])).toBe("allowed");
-    expect(decide([elapsed(12), chamber(20)])).toBe("allowed");
-    expect(decide([chamber(45), elapsed(600)])).toBe("allowed");
+    expect(decide([chamber(37), readSeconds(30)])).toBe("allowed");
+    expect(decide([readSeconds(12), chamber(20)])).toBe("allowed");
+    expect(decide([chamber(45), readSeconds(600)])).toBe("allowed");
+    expect(decide([chamber(20), readSeconds(1)])).toBe("allowed");
   });
 
   it("is current at exactly maxAgeMs and stale 1 ms later, per channel", () => {
-    expect(decide([chamber(37, NOW - 5000), elapsed(0, NOW - 1000)])).toBe("allowed");
-    expect(decide([chamber(37, NOW - 5001), elapsed(0)])).toBe("telemetry-stale");
-    expect(decide([chamber(37), elapsed(0, NOW - 1001)])).toBe("telemetry-stale");
+    expect(decide([chamber(37, NOW - 5000), readSeconds(30, NOW - 1000)])).toBe("allowed");
+    expect(decide([chamber(37, NOW - 5001), readSeconds(30)])).toBe("telemetry-stale");
+    expect(decide([chamber(37), readSeconds(30, NOW - 1001)])).toBe("telemetry-stale");
   });
 
   it("refuses a missing reading, a value that is not a finite number, and one outside the limit", () => {
-    expect(decide([elapsed(0)])).toBe("telemetry-missing");
+    expect(decide([readSeconds(30)])).toBe("telemetry-missing");
     expect(decide([])).toBe("telemetry-missing");
     for (const value of ["37", null, true, [37], { c: 37 }, 45.0001, 19.999, -1]) {
-      expect(decide([chamber(value), elapsed(0)]), JSON.stringify(value)).toBe("telemetry-out-of-limit");
+      expect(decide([chamber(value), readSeconds(30)]), JSON.stringify(value)).toBe("telemetry-out-of-limit");
     }
-    expect(decide([chamber(37), elapsed(600.5)])).toBe("telemetry-out-of-limit");
+    expect(decide([chamber(37), readSeconds(600.5)])).toBe("telemetry-out-of-limit");
+    // A state has both bounds at every check: a configured duration below its real minimum is refused (astra pack 178).
+    expect(decide([chamber(37), readSeconds(0.999)])).toBe("telemetry-out-of-limit");
+    expect(decide([chamber(37), readSeconds(0)])).toBe("telemetry-out-of-limit");
   });
 
   it("checks the channels in envelope order, and for each: missing, then stale, then the value", () => {
-    // chamber.temperature_c comes first in the envelope, so its fault decides over run.elapsed_s's.
-    expect(checkRuntimeCommand(HEATED, RUN, { ...stateFor(HEATED), telemetry: [chamber(99), elapsed(0, NOW - 5000)] })).toMatchObject({ code: "telemetry-out-of-limit" });
-    expect(checkRuntimeCommand(HEATED, RUN, { ...stateFor(HEATED), telemetry: [chamber(99, NOW - 6000), elapsed(0)] })).toMatchObject({ code: "telemetry-stale" });
-    expect(decide([elapsed(9999)])).toBe("telemetry-missing");
+    // chamber.temperature_c comes first in the envelope, so its fault decides over config.read_seconds's.
+    expect(checkRuntimeCommand(HEATED, RUN, { ...stateFor(HEATED), telemetry: [chamber(99), readSeconds(30, NOW - 5000)] })).toMatchObject({ code: "telemetry-out-of-limit" });
+    expect(checkRuntimeCommand(HEATED, RUN, { ...stateFor(HEATED), telemetry: [chamber(99, NOW - 6000), readSeconds(30)] })).toMatchObject({ code: "telemetry-stale" });
+    // The missing chamber reading decides before config.read_seconds's out-of-limit value.
+    expect(decide([readSeconds(9999)])).toBe("telemetry-missing");
   });
 
   it("ignores a reading of a channel the envelope does not commit, which never stands in for a committed one", () => {
-    expect(decide([chamber(37), elapsed(0), { channel: "door.open", value: 1, atMs: NOW }])).toBe("allowed");
-    expect(decide([{ channel: "door.open", value: 37, atMs: NOW }, elapsed(0)])).toBe("telemetry-missing");
+    expect(decide([chamber(37), readSeconds(30), { channel: "door.open", value: 1, atMs: NOW }])).toBe("allowed");
+    expect(decide([{ channel: "door.open", value: 37, atMs: NOW }, readSeconds(30)])).toBe("telemetry-missing");
   });
 
   it("comes after the deadline and the rate, and before the params", () => {
@@ -934,13 +939,13 @@ describe("rule 9, the readings: every committed channel has a current reading in
   it("refuses a malformed reading list as state-invalid, for the stop too", () => {
     const cases: Array<[string, unknown]> = [
       ["not a list", { "chamber.temperature_c": 37 }],
-      ["a reading from the future", [chamber(37, NOW + 1), elapsed(0)]],
-      ["two readings of one channel", [chamber(37), chamber(38, NOW - 1), elapsed(0)]],
-      ["an extra key", [{ ...chamber(37), unit: "degC" }, elapsed(0)]],
-      ["no value", [{ channel: "chamber.temperature_c", atMs: NOW }, elapsed(0)]],
-      ["a fractional time", [chamber(37, NOW - 0.5), elapsed(0)]],
-      ["an unsafe time", [chamber(37, -(2 ** 60)), elapsed(0)]],
-      ["a channel that is not an id", [{ channel: "Chamber", value: 37, atMs: NOW }, elapsed(0)]],
+      ["a reading from the future", [chamber(37, NOW + 1), readSeconds(30)]],
+      ["two readings of one channel", [chamber(37), chamber(38, NOW - 1), readSeconds(30)]],
+      ["an extra key", [{ ...chamber(37), unit: "degC" }, readSeconds(30)]],
+      ["no value", [{ channel: "chamber.temperature_c", atMs: NOW }, readSeconds(30)]],
+      ["a fractional time", [chamber(37, NOW - 0.5), readSeconds(30)]],
+      ["an unsafe time", [chamber(37, -(2 ** 60)), readSeconds(30)]],
+      ["a channel that is not an id", [{ channel: "Chamber", value: 37, atMs: NOW }, readSeconds(30)]],
     ];
     for (const [label, telemetry] of cases) {
       expect(decide(telemetry), label).toBe("state-invalid");
@@ -959,15 +964,35 @@ describe("rule 9, the readings: every committed channel has a current reading in
         return 37;
       },
     });
-    expect(decide([getter, elapsed(0)])).toBe("state-invalid");
+    expect(decide([getter, readSeconds(30)])).toBe("state-invalid");
     const trap = new Proxy(chamber(37), { get: () => ((ran = true), 37) });
-    expect(decide([trap, elapsed(0)])).toBe("state-invalid");
+    expect(decide([trap, readSeconds(30)])).toBe("state-invalid");
     expect(ran).toBe(false);
   });
 
   it("an envelope with no channels needs no readings, and its stop is unchanged", () => {
     expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2)))).toBe("allowed");
-    expect(HEATED.telemetryChannels.map((c) => c.id)).toEqual(["chamber.temperature_c", "run.elapsed_s"]);
+    expect(HEATED.telemetryChannels.map((c) => c.id)).toEqual(["chamber.temperature_c", "config.read_seconds"]);
+    expect(HEATED.telemetryChannels.map((c) => c.semantics)).toEqual(["state", "state"]);
+  });
+
+  it("astra pack 179: a bound of 0 is a bound on both sides, and -0 equals it", () => {
+    const moduleChannel = { channels: [{ id: "module.temperature_c", quantity: "module_temperature", unit: "degC" as const, semantics: "state" as const, maxAgeMs: 5000 }] };
+    const monitored = (moduleTemperature: { min: number; max: number }) => {
+      const confirmed = confirmSafetyEnvelope({ ...ot2Input(moduleTemperature), telemetryMap: moduleChannel }, { confirmedBy: "op-1", confirmedAt: AT });
+      return compileOperationalEnvelope(confirmed, register(confirmed), verifyRegistry);
+    };
+    const reading = (env: OperationalEnvelopeV1, value: unknown) =>
+      codeOf(checkRuntimeCommand(env, ASPIRATE, { ...stateFor(env), telemetry: [{ channel: "module.temperature_c", value, atMs: NOW }] }));
+    const fromZero = monitored({ min: 0, max: 95 });
+    expect(reading(fromZero, 0)).toBe("allowed");
+    expect(reading(fromZero, -0)).toBe("allowed");
+    expect(reading(fromZero, -5e-324)).toBe("telemetry-out-of-limit");
+    const cold = monitored({ min: -20, max: 0 });
+    expect(reading(cold, 0)).toBe("allowed");
+    expect(reading(cold, -0)).toBe("allowed");
+    expect(reading(cold, 5e-324)).toBe("telemetry-out-of-limit");
+    expect(reading(cold, -20)).toBe("allowed");
   });
 });
 

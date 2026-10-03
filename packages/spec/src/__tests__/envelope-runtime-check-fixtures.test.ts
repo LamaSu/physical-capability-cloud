@@ -150,11 +150,12 @@ const OT2 = compile(ot2Input({ min: 4, max: 95 }));
 const OT2_COLD = compile(ot2Input({ min: -20, max: 0 }));
 const PLATE = compile(plateInput());
 /**
- * R8 template fit round 3 (Addendum 7, astra pack 176): a heated reader whose
- * firmware runs the incubator and times its reads. No command sets either, so
- * both are device-controlled, each enforced through a channel its adapter
- * declares, and both keep their limits. The read limit starts at 0 because
- * run.elapsed_s reports the current read's elapsed time.
+ * R8 template fit rounds 3 and 4 (Addenda 7 and 8, astra packs 176 and 178): a
+ * heated reader whose firmware runs the incubator and times its reads. No
+ * command sets either, so both are device-controlled, each enforced through a
+ * channel its adapter declares. Each channel reports a state: the chamber
+ * temperature, and the read duration the reader is configured for. Both keep
+ * their real limits, including the read's 1 s minimum.
  */
 const HEATED = compile(
   {
@@ -162,15 +163,15 @@ const HEATED = compile(
     commandMap: { commands: [{ name: "run", params: [] }, { name: "stop", params: [] }] },
     telemetryMap: {
       channels: [
-        { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", maxAgeMs: 5000 },
-        { id: "run.elapsed_s", quantity: "read_duration", unit: "s", maxAgeMs: 1000 },
+        { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", semantics: "state", maxAgeMs: 5000 },
+        { id: "config.read_seconds", quantity: "read_duration", unit: "s", semantics: "state", maxAgeMs: 1000 },
       ],
     },
     intake: {
       ...plateInput().intake,
       limits: [
         { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 20, max: 45 },
-        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 0, max: 600 },
+        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 600 },
         { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 120 },
       ],
       eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
@@ -179,7 +180,7 @@ const HEATED = compile(
   {
     deviceControlled: [
       { quantity: "incubation_temperature", enforcement: "telemetry", channel: "chamber.temperature_c" },
-      { quantity: "read_duration", enforcement: "telemetry", channel: "run.elapsed_s" },
+      { quantity: "read_duration", enforcement: "telemetry", channel: "config.read_seconds" },
     ],
   },
 );
@@ -194,6 +195,17 @@ const OT2_PRESET = compile(
 const presetIndex = OT2_MAP.commands.findIndex((c) => c.name === "setModuleTemp");
 /** No command parameter sets run_duration: the deadline is elapsed time only. */
 const OT2_ELAPSED_ONLY = compile(ot2Input({ min: 4, max: 95 }, OT2_ELAPSED_ONLY_MAP));
+/**
+ * astra pack 179 MEDIUM: a bound of 0 is a bound. Two OT-2s also monitor their
+ * module temperature through a state channel (a channel on a settable quantity
+ * is enforced too), one with a 0 minimum and one, a cold block, with a 0
+ * maximum. Their vectors read exactly 0 and the nearest double past it, so a
+ * port that tests a bound for truthiness ("if minimum and value < minimum")
+ * fails them.
+ */
+const MODULE_CHANNEL = { channels: [{ id: "module.temperature_c", quantity: "module_temperature", unit: "degC" as const, semantics: "state" as const, maxAgeMs: 5000 }] };
+const OT2_MONITORED_FROM_ZERO = compile({ ...ot2Input({ min: 0, max: 95 }), telemetryMap: MODULE_CHANNEL });
+const OT2_MONITORED_COLD = compile({ ...ot2Input({ min: -20, max: 0 }), telemetryMap: MODULE_CHANNEL });
 
 const T0 = 1_790_985_600_000;
 const MIN = 60_000;
@@ -205,11 +217,12 @@ const OTHER_MANIFEST = `sha256:${"ab".repeat(32)}`;
 function stateOf(env: OperationalEnvelopeV1, over: Record<string, unknown> = {}): Record<string, unknown> {
   return { adapterManifestDigest: env.adapterVersion, jobStartedAtMs: T0, nowMs: NOW, recentCommandsAtMs: [], telemetry: [], ...over };
 }
-/** The latest reading of the heated reader's chamber temperature, or of its current read's elapsed time. */
+/** The latest reading of the heated reader's chamber temperature, or of the read duration it is configured for. */
 const chamber = (value: unknown, atMs: number) => ({ channel: "chamber.temperature_c", value, atMs });
-const elapsed = (value: unknown, atMs: number) => ({ channel: "run.elapsed_s", value, atMs });
-/** Both readings current and inside their limits (20..45 degC, 0..600 s). */
-const READINGS = [chamber(37, NOW - 100), elapsed(0, NOW - 100)];
+const readSeconds = (value: unknown, atMs: number) => ({ channel: "config.read_seconds", value, atMs });
+const moduleTemp = (value: unknown, atMs: number) => ({ channel: "module.temperature_c", value, atMs });
+/** Both readings current and inside their limits (20..45 degC, 1..600 s). */
+const READINGS = [chamber(37, NOW - 100), readSeconds(30, NOW - 100)];
 const heatedState = (over: Record<string, unknown> = {}) => stateOf(HEATED, { telemetry: READINGS, ...over });
 const late = (env: OperationalEnvelopeV1, over: Record<string, unknown> = {}) => stateOf(env, { nowMs: T0 + DEADLINE_MS + 1, ...over });
 const sends = (n: number, at: number) => Array.from({ length: n }, () => at);
@@ -266,52 +279,66 @@ const VECTORS: Vector[] = [
   ["envelope-invalid/device-controlled-cutoff", changed(HEATED, (e) => (e.deviceControlled[0].enforcement = "cutoff")), RUN, heatedState(), "envelope-invalid"],
   ["envelope-invalid/device-controlled-prose-detail", changed(HEATED, (e) => (e.deviceControlled[0] = { quantity: "incubation_temperature", enforcement: "cutoff", detail: "x" })), RUN, heatedState(), "envelope-invalid"],
   ["envelope-invalid/device-controlled-channel-unresolved", changed(HEATED, (e) => (e.deviceControlled[0].channel = "chamber.other")), RUN, heatedState(), "envelope-invalid"],
-  ["envelope-invalid/device-controlled-channel-of-another-quantity", changed(HEATED, (e) => (e.deviceControlled[0].channel = "run.elapsed_s")), RUN, heatedState(), "envelope-invalid"],
+  ["envelope-invalid/device-controlled-channel-of-another-quantity", changed(HEATED, (e) => (e.deviceControlled[0].channel = "config.read_seconds")), RUN, heatedState(), "envelope-invalid"],
   ["envelope-invalid/telemetry-channels-missing", changed(OT2, (e) => delete e.telemetryChannels), ASPIRATE, stateOf(OT2), "envelope-invalid"],
   ["envelope-invalid/telemetry-channels-emptied-while-named", changed(HEATED, (e) => (e.telemetryChannels = [])), RUN, heatedState(), "envelope-invalid"],
   ["envelope-invalid/telemetry-channels-out-of-order", changed(HEATED, (e) => e.telemetryChannels.reverse()), RUN, heatedState(), "envelope-invalid"],
-  ["envelope-invalid/telemetry-channel-the-deadline", changed(HEATED, (e) => e.telemetryChannels.splice(1, 0, { id: "job.elapsed_min", quantity: "job_duration", unit: "min", maxAgeMs: 1000 })), RUN, heatedState(), "envelope-invalid"],
+  ["envelope-invalid/telemetry-channel-the-deadline", changed(HEATED, (e) => e.telemetryChannels.splice(1, 0, { id: "job.elapsed_min", quantity: "job_duration", unit: "min", semantics: "state", maxAgeMs: 1000 })), RUN, heatedState(), "envelope-invalid"],
   ["envelope-invalid/telemetry-channel-other-unit", changed(HEATED, (e) => (e.telemetryChannels[0].unit = "degF")), RUN, heatedState(), "envelope-invalid"],
   ["envelope-invalid/telemetry-channel-max-age-over-a-minute", changed(HEATED, (e) => (e.telemetryChannels[0].maxAgeMs = 60001)), RUN, heatedState(), "envelope-invalid"],
   ["envelope-invalid/telemetry-channel-max-age-fraction", changed(HEATED, (e) => (e.telemetryChannels[0].maxAgeMs = 1.5)), RUN, heatedState(), "envelope-invalid"],
   ["envelope-invalid/telemetry-channel-id-uppercase", changed(HEATED, (e) => (e.telemetryChannels[0].id = "Chamber.temperature_c")), RUN, heatedState(), "envelope-invalid"],
   ["envelope-invalid/telemetry-channel-extra-key", changed(HEATED, (e) => (e.telemetryChannels[0].detail = "thermistor")), RUN, heatedState(), "envelope-invalid"],
+  // astra pack 178: every channel reports a state.
+  ["envelope-invalid/telemetry-channel-semantics-elapsed", changed(HEATED, (e) => (e.telemetryChannels[1].semantics = "elapsed")), RUN, heatedState(), "envelope-invalid"],
+  ["envelope-invalid/telemetry-channel-semantics-missing", changed(HEATED, (e) => delete e.telemetryChannels[1].semantics), RUN, heatedState(), "envelope-invalid"],
   // One set, one committed form (astra pack 176 MEDIUM).
   ["envelope-invalid/unbounded-allowed-out-of-order", changed(PLATE, (e) => (e.commands[1].params[1].unbounded.allowed = [450, 405, 600])), read({}), stateOf(PLATE), "envelope-invalid"],
   ["envelope-invalid/allowed-items-out-of-order", changed(PLATE, (e) => (e.commands[1].params[2].unbounded.allowedItems = ["A2", "A1", "A3", "H12"])), read({}), stateOf(PLATE), "envelope-invalid"],
   ["envelope-invalid/preset-out-of-order", changed(OT2_PRESET, (e) => (e.commands[presetIndex].params[0].allowed = [37, 4, 95])), ASPIRATE, stateOf(OT2_PRESET), "envelope-invalid"],
   // Rule 9: every committed channel has a current reading inside its quantity's limit.
-  ["allowed/telemetry-readings-at-exactly-max-age", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW - 5000), elapsed(0, NOW - 1000)] }), "allowed"],
-  ["allowed/telemetry-readings-at-exactly-the-limits", HEATED, RUN, heatedState({ telemetry: [chamber(45, NOW), elapsed(600, NOW)] }), "allowed"],
-  ["allowed/telemetry-reading-at-exactly-the-min", HEATED, RUN, heatedState({ telemetry: [chamber(20, NOW), elapsed(0, NOW)] }), "allowed"],
+  ["allowed/telemetry-readings-at-exactly-max-age", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW - 5000), readSeconds(30, NOW - 1000)] }), "allowed"],
+  ["allowed/telemetry-readings-at-exactly-the-limits", HEATED, RUN, heatedState({ telemetry: [chamber(45, NOW), readSeconds(600, NOW)] }), "allowed"],
+  ["allowed/telemetry-reading-at-exactly-the-min", HEATED, RUN, heatedState({ telemetry: [chamber(20, NOW), readSeconds(1, NOW)] }), "allowed"],
   ["allowed/telemetry-reading-of-an-uncommitted-channel-is-ignored", HEATED, RUN, heatedState({ telemetry: [...READINGS, { channel: "door.open", value: 1, atMs: NOW }] }), "allowed"],
-  ["allowed/telemetry-readings-in-any-order", HEATED, RUN, heatedState({ telemetry: [elapsed(0, NOW), chamber(37, NOW)] }), "allowed"],
-  ["telemetry-stale/temperature-1-ms-past-max-age", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW - 5001), elapsed(0, NOW)] }), "telemetry-stale"],
-  ["telemetry-stale/elapsed-1-ms-past-max-age", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW), elapsed(0, NOW - 1001)] }), "telemetry-stale"],
-  ["telemetry-missing/no-reading-of-one-channel", HEATED, RUN, heatedState({ telemetry: [elapsed(0, NOW)] }), "telemetry-missing"],
+  ["allowed/telemetry-readings-in-any-order", HEATED, RUN, heatedState({ telemetry: [readSeconds(30, NOW), chamber(37, NOW)] }), "allowed"],
+  ["telemetry-stale/temperature-1-ms-past-max-age", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW - 5001), readSeconds(30, NOW)] }), "telemetry-stale"],
+  ["telemetry-stale/read-seconds-1-ms-past-max-age", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW), readSeconds(30, NOW - 1001)] }), "telemetry-stale"],
+  ["telemetry-missing/no-reading-of-one-channel", HEATED, RUN, heatedState({ telemetry: [readSeconds(30, NOW)] }), "telemetry-missing"],
   ["telemetry-missing/no-readings", HEATED, RUN, heatedState({ telemetry: [] }), "telemetry-missing"],
   ["telemetry-missing/only-an-uncommitted-channel", HEATED, RUN, heatedState({ telemetry: [{ channel: "door.open", value: 0, atMs: NOW }] }), "telemetry-missing"],
   ["telemetry-missing/before-the-params", HEATED, { name: "run", params: { extra: 1 } }, heatedState({ telemetry: [] }), "telemetry-missing"],
-  ["telemetry-out-of-limit/temperature-above-the-max", HEATED, RUN, heatedState({ telemetry: [chamber(45.5, NOW), elapsed(0, NOW)] }), "telemetry-out-of-limit"],
-  ["telemetry-out-of-limit/temperature-below-the-min", HEATED, RUN, heatedState({ telemetry: [chamber(19.9, NOW), elapsed(0, NOW)] }), "telemetry-out-of-limit"],
-  ["telemetry-out-of-limit/elapsed-past-the-read-limit", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW), elapsed(600.001, NOW)] }), "telemetry-out-of-limit"],
-  ["telemetry-out-of-limit/reading-a-numeric-string", HEATED, RUN, heatedState({ telemetry: [chamber("37", NOW), elapsed(0, NOW)] }), "telemetry-out-of-limit"],
-  ["telemetry-out-of-limit/reading-null", HEATED, RUN, heatedState({ telemetry: [chamber(null, NOW), elapsed(0, NOW)] }), "telemetry-out-of-limit"],
-  ["telemetry-out-of-limit/reading-true", HEATED, RUN, heatedState({ telemetry: [chamber(true, NOW), elapsed(0, NOW)] }), "telemetry-out-of-limit"],
-  ["telemetry-out-of-limit/reading-a-list", HEATED, RUN, heatedState({ telemetry: [chamber([37], NOW), elapsed(0, NOW)] }), "telemetry-out-of-limit"],
-  ["allowed/stop-with-stale-readings", HEATED, STOP, heatedState({ telemetry: [chamber(37, NOW - 60_000), elapsed(0, NOW - 60_000)] }), "allowed"],
+  ["telemetry-out-of-limit/temperature-above-the-max", HEATED, RUN, heatedState({ telemetry: [chamber(45.5, NOW), readSeconds(30, NOW)] }), "telemetry-out-of-limit"],
+  ["telemetry-out-of-limit/temperature-below-the-min", HEATED, RUN, heatedState({ telemetry: [chamber(19.9, NOW), readSeconds(30, NOW)] }), "telemetry-out-of-limit"],
+  ["telemetry-out-of-limit/read-seconds-above-the-max", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW), readSeconds(600.001, NOW)] }), "telemetry-out-of-limit"],
+  // A configured duration below its real minimum (astra pack 178: the minimum is no longer erased).
+  ["telemetry-out-of-limit/read-seconds-below-the-min", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW), readSeconds(0.999, NOW)] }), "telemetry-out-of-limit"],
+  ["telemetry-out-of-limit/read-seconds-zero", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW), readSeconds(0, NOW)] }), "telemetry-out-of-limit"],
+  // astra pack 179 MEDIUM: a bound of 0 is a bound (a truthiness test would skip it).
+  ["allowed/zero-min-reading-exactly-zero", OT2_MONITORED_FROM_ZERO, ASPIRATE, stateOf(OT2_MONITORED_FROM_ZERO, { telemetry: [moduleTemp(0, NOW)] }), "allowed"],
+  ["telemetry-out-of-limit/zero-min-reading-just-below", OT2_MONITORED_FROM_ZERO, ASPIRATE, stateOf(OT2_MONITORED_FROM_ZERO, { telemetry: [moduleTemp(-5e-324, NOW)] }), "telemetry-out-of-limit"],
+  ["telemetry-out-of-limit/zero-min-reading-minus-one", OT2_MONITORED_FROM_ZERO, ASPIRATE, stateOf(OT2_MONITORED_FROM_ZERO, { telemetry: [moduleTemp(-1, NOW)] }), "telemetry-out-of-limit"],
+  ["allowed/zero-max-reading-exactly-zero", OT2_MONITORED_COLD, ASPIRATE, stateOf(OT2_MONITORED_COLD, { telemetry: [moduleTemp(0, NOW)] }), "allowed"],
+  ["telemetry-out-of-limit/zero-max-reading-just-above", OT2_MONITORED_COLD, ASPIRATE, stateOf(OT2_MONITORED_COLD, { telemetry: [moduleTemp(5e-324, NOW)] }), "telemetry-out-of-limit"],
+  ["allowed/zero-max-reading-at-the-min", OT2_MONITORED_COLD, ASPIRATE, stateOf(OT2_MONITORED_COLD, { telemetry: [moduleTemp(-20, NOW)] }), "allowed"],
+  ["telemetry-missing/monitored-settable-quantity-unread", OT2_MONITORED_COLD, ASPIRATE, stateOf(OT2_MONITORED_COLD), "telemetry-missing"],
+  ["telemetry-out-of-limit/reading-a-numeric-string", HEATED, RUN, heatedState({ telemetry: [chamber("37", NOW), readSeconds(30, NOW)] }), "telemetry-out-of-limit"],
+  ["telemetry-out-of-limit/reading-null", HEATED, RUN, heatedState({ telemetry: [chamber(null, NOW), readSeconds(30, NOW)] }), "telemetry-out-of-limit"],
+  ["telemetry-out-of-limit/reading-true", HEATED, RUN, heatedState({ telemetry: [chamber(true, NOW), readSeconds(30, NOW)] }), "telemetry-out-of-limit"],
+  ["telemetry-out-of-limit/reading-a-list", HEATED, RUN, heatedState({ telemetry: [chamber([37], NOW), readSeconds(30, NOW)] }), "telemetry-out-of-limit"],
+  ["allowed/stop-with-stale-readings", HEATED, STOP, heatedState({ telemetry: [chamber(37, NOW - 60_000), readSeconds(30, NOW - 60_000)] }), "allowed"],
   ["allowed/stop-with-no-readings", HEATED, STOP, heatedState({ telemetry: [] }), "allowed"],
-  ["allowed/stop-with-an-out-of-limit-reading", HEATED, STOP, heatedState({ telemetry: [chamber(200, NOW), elapsed(0, NOW)] }), "allowed"],
+  ["allowed/stop-with-an-out-of-limit-reading", HEATED, STOP, heatedState({ telemetry: [chamber(200, NOW), readSeconds(30, NOW)] }), "allowed"],
   ["past-deadline/before-the-readings", HEATED, RUN, heatedState({ nowMs: T0 + DEADLINE_MS + 1, telemetry: [] }), "past-deadline"],
   ["rate-limited/before-the-readings", HEATED, RUN, heatedState({ recentCommandsAtMs: sends(30, NOW), telemetry: [] }), "rate-limited"],
-  ["state-invalid/reading-taken-after-now", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW + 1), elapsed(0, NOW)] }), "state-invalid"],
-  ["state-invalid/two-readings-of-one-channel", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW), chamber(38, NOW - 1), elapsed(0, NOW)] }), "state-invalid"],
+  ["state-invalid/reading-taken-after-now", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW + 1), readSeconds(30, NOW)] }), "state-invalid"],
+  ["state-invalid/two-readings-of-one-channel", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW), chamber(38, NOW - 1), readSeconds(30, NOW)] }), "state-invalid"],
   ["state-invalid/telemetry-absent", HEATED, RUN, { adapterManifestDigest: HEATED.adapterVersion, jobStartedAtMs: T0, nowMs: NOW, recentCommandsAtMs: [] }, "state-invalid"],
   ["state-invalid/telemetry-not-a-list", HEATED, RUN, heatedState({ telemetry: { "chamber.temperature_c": 37 } }), "state-invalid"],
-  ["state-invalid/reading-extra-key", HEATED, RUN, heatedState({ telemetry: [{ ...chamber(37, NOW), unit: "degC" }, elapsed(0, NOW)] }), "state-invalid"],
-  ["state-invalid/reading-without-a-value", HEATED, RUN, heatedState({ telemetry: [{ channel: "chamber.temperature_c", atMs: NOW }, elapsed(0, NOW)] }), "state-invalid"],
-  ["state-invalid/reading-fractional-time", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW - 0.5), elapsed(0, NOW)] }), "state-invalid"],
-  ["state-invalid/reading-channel-not-an-id", HEATED, RUN, heatedState({ telemetry: [{ channel: "Chamber", value: 37, atMs: NOW }, elapsed(0, NOW)] }), "state-invalid"],
+  ["state-invalid/reading-extra-key", HEATED, RUN, heatedState({ telemetry: [{ ...chamber(37, NOW), unit: "degC" }, readSeconds(30, NOW)] }), "state-invalid"],
+  ["state-invalid/reading-without-a-value", HEATED, RUN, heatedState({ telemetry: [{ channel: "chamber.temperature_c", atMs: NOW }, readSeconds(30, NOW)] }), "state-invalid"],
+  ["state-invalid/reading-fractional-time", HEATED, RUN, heatedState({ telemetry: [chamber(37, NOW - 0.5), readSeconds(30, NOW)] }), "state-invalid"],
+  ["state-invalid/reading-channel-not-an-id", HEATED, RUN, heatedState({ telemetry: [{ channel: "Chamber", value: 37, atMs: NOW }, readSeconds(30, NOW)] }), "state-invalid"],
   ["state-invalid/stop-with-a-reading-from-the-future", HEATED, STOP, heatedState({ telemetry: [chamber(37, NOW + 1)] }), "state-invalid"],
   ["allowed/preset-listed-value", OT2_PRESET, { name: "setModuleTemp", params: { celsius: 37 } }, stateOf(OT2_PRESET), "allowed"],
   ["value-not-allowed/preset-unlisted-value-in-range", OT2_PRESET, { name: "setModuleTemp", params: { celsius: 50 } }, stateOf(OT2_PRESET), "value-not-allowed"],
@@ -514,6 +541,7 @@ function buildFixtures() {
       "astra pack 174: a stop sent through this ordinary check is still held to rules 1-5 and 10-13. A genuine EMERGENCY stop never comes through it: the governor calls the adapter's pre-wired stop directly (emergencyStopOf returns it from the envelope alone), and escalates to the hardware stop when the adapter's identity cannot be trusted.",
       "R8 template fit round 2 (astra pack 173): every template quantity keeps a limit. deviceControlled lists the ones no command sets, in template order, never the deadline; the envelope's limits still hold all of them. A parameter that sets a quantity may list its only values (allowed): a value must be one of them (value-not-allowed), and every listed value lies inside the limit (else envelope-invalid).",
       "R8 template fit round 3 (astra pack 176): telemetryChannels lists the readings the adapter takes, each {id, quantity, unit, maxAgeMs}, ids strictly ascending, a non-deadline template quantity in its unit, maxAgeMs a whole number 1..60000; each deviceControlled entry is {quantity, enforcement: 'telemetry', channel} and its channel must be one of them reporting that quantity. Every value set (allowed, unbounded.allowed, unbounded.allowedItems) lists each value once: numbers ascending, then strings ascending by UTF-16 code unit (else envelope-invalid).",
+      "Rule 9 (round 4, astra packs 178 and 179): every channel reports a state, so both bounds apply at every check. A bound of 0 is a bound: never test a bound for truthiness (Python's 'if minimum and value < minimum' accepts -5e-324 under a 0 minimum); the zero-min and zero-max vectors read exactly 0 and the nearest double past it.",
       "Rule 9 (readings): state.telemetry is a list of the latest readings, {channel, value, atMs} each, one per channel (a second reading of a channel is state-invalid), atMs an epoch millisecond never after nowMs (else state-invalid); a reading of a channel the envelope does not commit is ignored. For each committed channel in envelope order: no reading is telemetry-missing; nowMs - atMs > maxAgeMs is telemetry-stale (exactly maxAgeMs is current); a value that is not a finite number (a boolean, a numeric string, null) or lies outside the channel quantity's [min, max] is telemetry-out-of-limit. The adapter stop skips rule 9, as it skips 7 and 8.",
     ],
     codes: CODES,

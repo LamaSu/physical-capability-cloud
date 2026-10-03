@@ -27,7 +27,12 @@
  *      state, taken at most its `maxAgeMs` before `nowMs`, and that reading is
  *      a finite number inside its quantity's limit's [min, max] (#508 round 3,
  *      astra pack 176: a device-controlled limit is enforced through its
- *      channel, and so is every other committed channel).
+ *      channel, and so is every other committed channel). Every channel
+ *      reports a state (#508 round 4, astra pack 178), so both bounds apply at
+ *      every check, and a bound of 0 is a bound like any other (astra pack 179).
+ *      This is one dispatch decision. A governor applies the same check
+ *      whenever a reading changes or expires, and stops a running job on any
+ *      refusal.
  *  10. undeclared-param, 11. missing-param: the params are exactly the declared ones.
  *  12. not-a-number, out-of-range, value-not-allowed: a parameter that sets a
  *      quantity carries a finite number inside its limit's [min, max], 0 a real
