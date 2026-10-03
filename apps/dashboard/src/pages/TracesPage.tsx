@@ -81,10 +81,39 @@ const TRACE_LIMIT = 50;
 const REFRESH_MS = 5_000;
 const TRACES_QUERY_KEY = ["traces", "recent"] as const;
 
+/**
+ * The complete status vocabulary the renderer switches on (StatusDot,
+ * TraceListRow). A status outside this set is not "probably fine" — astra
+ * 408b F4 found an unknown span status falling through to a green dot.
+ */
+const TRACE_STATUSES = new Set<TraceSpan["status"]>(["ok", "error", "in_progress"]);
+
+function isValidStatus(v: unknown): v is TraceSpan["status"] {
+  return typeof v === "string" && TRACE_STATUSES.has(v as TraceSpan["status"]);
+}
+
+/** A span: the fields the waterfall reads, including a recognized status, recursively through children. */
+function isSpan(value: unknown): value is TraceSpan {
+  const s = value as Partial<TraceSpan> | null;
+  if (!s || typeof s.traceId !== "string" || typeof s.spanId !== "string") return false;
+  if (typeof s.operation !== "string" || typeof s.service !== "string") return false;
+  if (!isValidStatus(s.status)) return false;
+  if (typeof s.startTime !== "number") return false;
+  if (s.children !== undefined && (!Array.isArray(s.children) || !s.children.every(isSpan))) return false;
+  return true;
+}
+
 /** The fields the list and waterfall read; anything less is not a trace. */
 function isTrace(value: unknown): value is Trace {
   const t = value as Partial<Trace> | null;
-  return !!t && typeof t.traceId === "string" && !!t.rootSpan && typeof t.rootSpan.operation === "string" && Array.isArray(t.spans);
+  return (
+    !!t &&
+    typeof t.traceId === "string" &&
+    isSpan(t.rootSpan) &&
+    Array.isArray(t.spans) &&
+    t.spans.every(isSpan) &&
+    isValidStatus(t.status)
+  );
 }
 
 async function fetchRecentTraces(): Promise<Trace[]> {
@@ -146,7 +175,13 @@ function StatusDot({ status }: { status: TraceSpan["status"] }) {
   if (status === "error") {
     return <span className="inline-flex h-2 w-2 rounded-full bg-red-500" />;
   }
-  return <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />;
+  if (status === "ok") {
+    return <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />;
+  }
+  // Unknown status: isTrace()/isSpan() already reject these before a trace
+  // is ever rendered, but stay neutral here too rather than default to a
+  // false "healthy" green (astra 408b F4).
+  return <span className="inline-flex h-2 w-2 rounded-full bg-white/20" />;
 }
 
 // ---------------------------------------------------------------------------
