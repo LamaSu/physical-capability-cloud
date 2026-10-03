@@ -40,6 +40,12 @@ import {
 } from "@pcc/verifier/dist/capture/lingbot-adapter.js";
 import { requireAuth } from "../auth/require-auth.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** LingBotAdapterError's known codes (packages/verifier/src/capture/lingbot-adapter.ts). */
+const LINGBOT_ADAPTER_CODES: readonly string[] = [
+  "missing_video_path", "spawn_failed", "runner_exit_nonzero", "trace_not_written", "trace_json_invalid", "trace_schema_invalid",
+];
 
 const MAX_VIDEO_BYTES = 32 * 1024 * 1024; // 32 MB
 
@@ -197,7 +203,7 @@ export async function capture3dRoutes(app: FastifyInstance): Promise<void> {
         return response;
       } catch (err) {
         if (err instanceof LingBotAdapterError) {
-          req.log.error({ err, code: err.code }, "capture_3d_stream adapter failed");
+          req.log.error({ err, code: declare.code(err.code, LINGBOT_ADAPTER_CODES) }, lit("capture_3d_stream adapter failed"));
           pipelineTelemetry.emit(jobId ?? "capture-3d", "evidence_capture", "failed", {
             metadata: {
               subphase: "capture_3d_stream",
@@ -215,7 +221,7 @@ export async function capture3dRoutes(app: FastifyInstance): Promise<void> {
             detail: err.detail,
           });
         }
-        req.log.error({ err }, "capture_3d_stream threw");
+        req.log.error({ err }, lit("capture_3d_stream threw"));
         return reply.status(500).send({
           error: "internal_error",
           message: (err as Error).message,
