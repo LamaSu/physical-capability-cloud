@@ -45,6 +45,14 @@ function stubFetch(routes: Routes, fallback: Reply = "network-error") {
   return fetchMock;
 }
 
+/** Every path `fetchMock` was called with, origin and query string stripped. */
+function calledPaths(fetchMock: ReturnType<typeof stubFetch>): string[] {
+  return fetchMock.mock.calls.map(([input]) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    return url.replace(/^https?:\/\/[^/]+/, "").split("?")[0]!;
+  });
+}
+
 // ── what the page used to show, and what the gateway sends ──────────────────
 
 /** Values the old page showed from its built-in defaults (now src/demo/SystemDashboardPage.fixtures.ts), as displayed. */
@@ -254,7 +262,7 @@ describe("gateway unreachable", () => {
 // ── (b) demo mode ────────────────────────────────────────────────────────────
 
 describe("demo mode (?demo=1)", () => {
-  it("shows the prototype's sample values under the demo banner and calls no gateway route", async () => {
+  it("shows the prototype's sample values under the demo banner and reads only the gateway's health", async () => {
     window.history.replaceState(null, "", "/system?demo=1");
     const fetchMock = stubFetch({});
     const t = (await renderPage()).text();
@@ -266,7 +274,10 @@ describe("demo mode (?demo=1)", () => {
     expect(t).toContain("0x9e81...6454");
     expect(t).toContain("1Click (chaindefuser)");
     expect(t).not.toContain("Couldn't load");
-    expect(fetchMock).not.toHaveBeenCalled();
+    // The sample business data makes no request. The Gateway card's "Online" badge is the
+    // one exception: it is this session's own read, not a sample value (product review
+    // #3985), so it calls the real, read-only /api/health — see SystemDashboardPage.badges.test.tsx.
+    expect(calledPaths(fetchMock)).toEqual(["/api/health"]);
   });
 });
 

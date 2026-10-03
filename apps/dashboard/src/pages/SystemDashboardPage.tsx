@@ -31,6 +31,7 @@ import React from "react";
 import { GlassPanel } from "@pcc/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useUIStore } from "../stores/ui-store.js";
+import { useGatewayHealth } from "../api/hooks/use-pcc-data.js";
 import { apiGet } from "../lib/api.js";
 import { isDemoMode } from "../lib/demo-mode.js";
 import { formatCount, isActiveJob, isKernelOnline, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-status.js";
@@ -846,7 +847,8 @@ function EscrowActivityCard({ data }: { data: PrototypeSystemPayload }) {
             <h3 className="text-sm font-bold text-white/85 tracking-wide">Escrow Activity</h3>
             <p className="text-[11px] text-white/35 mt-0.5">Milestone settlement contracts</p>
           </div>
-          <Badge color="green">Base Sepolia</Badge>
+          {/* A configuration label, not a live status: the page never reads chain health. */}
+          <Badge color="white">Base Sepolia</Badge>
         </div>
         <div className="flex gap-4">
           <BigNumber value={data.escrow.totalEscrows.toLocaleString()} label="Escrows" />
@@ -990,6 +992,18 @@ function OperatorNetworkCard({ data }: { data: PrototypeSystemPayload }) {
 
 function GatewayCard({ data }: { data: PrototypeSystemPayload }) {
   const { gateway } = data;
+  // Online is this session's own read, not a sample value: a demo of the
+  // gateway's reachability is still a claim about something real.
+  const health = useGatewayHealth();
+  const gatewayOnline = health.isSuccess && health.data?.status === "ok";
+  const gatewayDown = health.isError || (health.isSuccess && health.data?.status !== "ok");
+  const onlineBadge = gatewayOnline ? (
+    <Badge color="green">Online</Badge>
+  ) : gatewayDown ? (
+    <Badge color="yellow">Unreachable</Badge>
+  ) : (
+    <Badge color="yellow">Checking</Badge>
+  );
   return (
     <GlassPanel padding="lg">
       <div className="space-y-4">
@@ -998,7 +1012,7 @@ function GatewayCard({ data }: { data: PrototypeSystemPayload }) {
             <h3 className="text-sm font-bold text-white/85 tracking-wide">Gateway</h3>
             <p className="text-[11px] text-white/35 mt-0.5">HTTP API + SSE streams</p>
           </div>
-          <Badge color="green">Online</Badge>
+          {onlineBadge}
         </div>
         <div className="flex gap-4">
           <BigNumber value={gateway.routeCount} label="Routes" />
@@ -1116,7 +1130,14 @@ function NearIntentsCard({ data }: { data: PrototypeSystemPayload }) {
 // Row 4: Agent Layer (prototype)
 // ---------------------------------------------------------------------------
 
-function AgentPackageCard({ data }: { data: PrototypeSystemPayload }) {
+/**
+ * `fetched` is true only when agentPackage came from an actual read of the
+ * package (never true today: no route on this page serves it — see
+ * NotLiveSections — so the one real caller below always passes false and
+ * shows no badge). Kept as a prop, not inferred from `data`, so the
+ * demo's always-populated sample object can't be mistaken for a fetch.
+ */
+function AgentPackageCard({ data, fetched }: { data: PrototypeSystemPayload; fetched: boolean }) {
   const { agentPackage } = data;
   return (
     <GlassPanel padding="lg">
@@ -1126,7 +1147,7 @@ function AgentPackageCard({ data }: { data: PrototypeSystemPayload }) {
             <h3 className="text-sm font-bold text-white/85 tracking-wide">Agent Package</h3>
             <p className="text-[11px] text-white/35 mt-0.5">LLM-ready tool catalog</p>
           </div>
-          <Badge color="green">Published</Badge>
+          {fetched && <Badge color="green">Published</Badge>}
         </div>
         <BigNumber value={agentPackage.toolCount} label="Tools" />
         <div className="space-y-2 pt-1 border-t border-white/[0.06]">
@@ -1368,7 +1389,8 @@ function SystemDashboardDemo() {
       <div>
         <SectionLabel>Agent Layer</SectionLabel>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <AgentPackageCard data={data} />
+          {/* Demo data is synthesized, not fetched (see AgentPackageCard above). */}
+          <AgentPackageCard data={data} fetched={false} />
           <A2AActivityCard data={data} />
           <PrototypeJobsCard data={data} />
         </div>
