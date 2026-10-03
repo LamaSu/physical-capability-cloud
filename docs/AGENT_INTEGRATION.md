@@ -804,6 +804,8 @@ Subscribe to Server-Sent Events for real-time updates. Connect with `EventSource
 | Notifications | `GET /sse/notifications` | Global notification stream |
 | Camera stream | `GET /api/ot2/camera/stream` | Live camera frames from equipment |
 
+The job stream follows the job read rule above. The kernel, device and batch streams carry job-bound sensor readings, so only an admin or the kernel's operator (a SIWE-proven wallet) may subscribe; anyone else gets the 404 an unknown kernel, device or batch gets, and a caller with no credential gets 401.
+
 Example:
 ```bash
 curl -N -H "Authorization: Bearer $PCC_KEY" \

@@ -288,7 +288,7 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | PATCH | `/api/jobs/:jobId/status` | Update job status. Body: `{status, progress?}`. |
 | POST | `/api/jobs/submit` | Submit a job. Body: `{kernelId, capabilityId, params, assuranceTier}`. |
 
-**Read access:** a job's record, status, evidence, drift alerts, execution and settlement (`GET /api/jobs/:jobId` and its `/status`, `/execution`, `/settlement`, `/evidence` and `/drift-alerts`, plus `GET /api/settlement/:jobId` and `GET /api/evidence/:jobId`) are readable only by an admin (`X-Admin-Key`), the operator of the job's kernel, or the job's recorded buyer. Anyone else gets the same 404 as for a job that does not exist; an unauthenticated caller gets 401.
+**Read access:** a job's record, status, evidence, drift alerts, execution and settlement (`GET /api/jobs/:jobId` and its `/status`, `/execution`, `/settlement`, `/evidence` and `/drift-alerts`, plus `GET /api/settlement/:jobId` and `GET /api/evidence/:jobId`) are readable only by an admin (`X-Admin-Key`), the operator of the job's kernel, or the job's recorded buyer. Anyone else gets the same 404 as for a job that does not exist; an unauthenticated caller gets 401. A kernel's batches (`GET /api/batches`, `GET /api/batches/:batchId`) and its kernel, device and batch streams are readable only by an admin or the kernel's operator (a SIWE-proven wallet); a job's buyer reads its batches through `GET /api/batches/by-job/:jobId`, which shows only that job's slots. Log lines and sensor readings are filtered per record: a record is kept only when the caller may read every job (or, naming no job, every kernel) it names, and a record naming neither is an admin's.
 
 ### Escrow & Settlement
 
@@ -984,6 +984,8 @@ Subscribe to Server-Sent Events for real-time updates. Connect with `EventSource
 | Batch updates | `GET /sse/stream/batch/:batchId` | Batch job progress |
 | Notifications | `GET /sse/notifications` | Global notification stream |
 | Camera stream | `GET /api/ot2/camera/stream` | Live camera frames from equipment |
+
+The job stream follows the job read rule above. The kernel, device and batch streams carry job-bound sensor readings, so only an admin or the kernel's operator (a SIWE-proven wallet) may subscribe; anyone else gets the 404 an unknown kernel, device or batch gets, and a caller with no credential gets 401.
 
 Example:
 ```bash
