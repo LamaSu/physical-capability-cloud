@@ -12,6 +12,7 @@ import {
   UNREACHABLE,
   UNREACHABLE_REASON,
   averageOpsPerBatch,
+  operationsInBatches,
   createFlushController,
   epochDetailNote,
   epochsFromResponse,
@@ -91,6 +92,11 @@ export function SettlementPage() {
       reload,
       onResult: (result) => setFlushResult(result),
       onError: () => setFlushResult({ ok: false, message: UNREACHABLE_REASON }),
+      // The flush answered, but the queue and epochs could not be re-read: both reads say so.
+      onReloadError: () => {
+        setStatus(UNREACHABLE);
+        setEpochs(UNREACHABLE);
+      },
       onFlushingChange: (f) => {
         setFlushing(f);
         if (f) setFlushResult(null);
@@ -107,7 +113,8 @@ export function SettlementPage() {
   const statusNote = status.state === "unavailable" ? status.reason : status.state === "loading" ? "Loading…" : null;
   const epochsNote = epochs.state === "unavailable" ? epochs.reason : epochs.state === "loading" ? "Loading…" : null;
 
-  const totalFlushed = list ? list.reduce((s, e) => s + e.totalIntents, 0) : null;
+  // Operations the epochs' UserOperations carried; an epoch with no batch carried none (M3).
+  const opsInBatches = list ? operationsInBatches(list) : null;
   const totalBatches = list ? list.reduce((s, e) => s + e.batches.length, 0) : null;
   const avgOpsPerBatch = list ? averageOpsPerBatch(list) : null;
   const queueValue = q ? formatUsdcBaseUnits(q.totalValue) : null;
@@ -137,7 +144,7 @@ export function SettlementPage() {
           <DataCell
             label="Epochs Flushed"
             value={list ? list.length.toString() : DASH}
-            sub={list ? `${totalFlushed} ops; since the gateway's last restart` : epochsNote ?? ""}
+            sub={list ? `${opsInBatches} ops carried by UserOperations; since the gateway's last restart` : epochsNote ?? ""}
           />
         </GlassPanel>
         <GlassPanel>
@@ -268,14 +275,15 @@ export function SettlementPage() {
                       #{epoch.epochId}
                     </span>
                     <span className="text-sm text-white/80">
-                      {epoch.totalIntents} ops in{" "}
-                      {epoch.batches.length} batch{epoch.batches.length !== 1 ? "es" : ""}
+                      {epoch.batches.length === 0
+                        ? `${epoch.totalIntents} intents; no UserOperation carried them`
+                        : `${operationsInBatches([epoch])} ops in ${epoch.batches.length} batch${epoch.batches.length !== 1 ? "es" : ""}`}
                     </span>
                     <GlowBadge color={badge.color}>{badge.label}</GlowBadge>
                   </div>
                   <div className="flex items-center gap-4 text-xs text-white/40">
                     <span>
-                      {(epoch.completedAt - epoch.startedAt).toFixed(0)}ms
+                      {epoch.durationMs === null ? "duration unknown: the gateway's clock moved back" : `${epoch.durationMs}ms`}
                     </span>
                     <span>
                       {new Date(epoch.startedAt).toLocaleTimeString()}

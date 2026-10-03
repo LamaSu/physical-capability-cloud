@@ -289,6 +289,16 @@ export async function settlementRoutes(app: FastifyInstance) {
         message: "Batch settlement is not configured. Set PCC_BUNDLER_URL to enable.",
       });
     }
+    // One flush at a time (review r2 of #425, MEDIUM 2). BatchSettler.settle() snapshots and clears
+    // the pending intents, then awaits the queue: two flushes at once would split one epoch into
+    // inconsistent summaries. A page's own guard covers only that page, so the gateway refuses.
+    if (flushInFlight) {
+      return reply.status(409).send({
+        error: "flush_in_progress",
+        message: "A flush is already running. Reload to see its epoch.",
+      });
+    }
+    flushInFlight = true;
 
     try {
       const summary = await flushSettlements();
@@ -311,9 +321,14 @@ export async function settlementRoutes(app: FastifyInstance) {
         error: "flush_failed",
         message: err instanceof Error ? err.message : "Failed to flush settlements",
       });
+    } finally {
+      flushInFlight = false;
     }
   });
 }
+
+/** True while a POST /api/settlement/flush is running (one per gateway process). */
+let flushInFlight = false;
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -15,7 +15,13 @@ export interface QueueStatus {
   pending: number;
   /** USDC base units (6 decimals), as an integer string. */
   totalValue: string;
-  oldestAge: number;
+  /**
+   * How long the oldest pending operation has waited, in ms. Null when the gateway's clock moved
+   * back since it was queued (its age came out negative): the age is then not known (M4).
+   */
+  oldestAge: number | null;
+  /** True when the gateway's answer shows its clock moved back (a negative age). */
+  clockAdjusted: boolean;
   autoFlush: boolean;
   smartAccountAddress: string | null;
 }
@@ -28,7 +34,8 @@ export interface BatchDetail {
   trigger: FlushTrigger;
 }
 
-export interface EpochSummary {
+/** An epoch as the gateway reports it (GET /api/settlement/epochs). */
+export interface EpochRecord {
   epochId: number;
   batches: BatchDetail[];
   totalIntents: number;
@@ -36,6 +43,17 @@ export interface EpochSummary {
   byOperation: Record<string, number>;
   startedAt: number;
   completedAt: number;
+}
+
+/**
+ * An epoch as the page shows it: the record, and its duration when the clock gives one. The
+ * bundler stamps both times with Date.now(), so a clock that moved back can make an epoch end
+ * "before" it started: then durationMs is null and clockAdjusted is true (M4), and the epoch is
+ * still shown.
+ */
+export interface EpochSummary extends EpochRecord {
+  durationMs: number | null;
+  clockAdjusted: boolean;
 }
 
 export type Read<T> = { state: "loading" } | { state: "read"; value: T } | { state: "unavailable"; reason: string };
@@ -56,6 +74,9 @@ const MAX_DATE_MS = 8.64e15;
 /** A time the bundler stamps with Date.now(), or an age measured from one: whole milliseconds,
  * non-negative, and no later than a Date can hold. */
 const isTime = (v: unknown): v is number => isCount(v) && v <= MAX_DATE_MS;
+/** An age the gateway computed as Date.now() minus a stamp: negative only when its clock moved back. */
+const isSignedAge = (v: unknown): v is number =>
+  typeof v === "number" && Number.isSafeInteger(v) && v >= -MAX_DATE_MS && v <= MAX_DATE_MS;
 /** A record of per-key counts (byAgent / byOperation): every value is itself a safe count. */
 const isCountRecord = (v: unknown): v is Record<string, number> => isObj(v) && Object.values(v).every(isCount);
 const FLUSH_TRIGGERS: ReadonlySet<string> = new Set(["manual", "size", "age", "value"]);
@@ -82,7 +103,7 @@ export function statusFromResponse(httpStatus: number, body: unknown): Read<Queu
     !isCount(body.pending) ||
     typeof body.totalValue !== "string" ||
     !/^\d+$/.test(body.totalValue) ||
-    !isTime(body.oldestAge) ||
+    !isSignedAge(body.oldestAge) ||
     typeof body.autoFlush !== "boolean" ||
     !(body.smartAccountAddress === null || isSmartAccountAddress(body.smartAccountAddress))
   ) {
@@ -94,14 +115,15 @@ export function statusFromResponse(httpStatus: number, body: unknown): Read<Queu
       batchEnabled: body.batchEnabled,
       pending: body.pending as number,
       totalValue: body.totalValue,
-      oldestAge: body.oldestAge as number,
+      oldestAge: (body.oldestAge as number) >= 0 ? (body.oldestAge as number) : null,
+      clockAdjusted: (body.oldestAge as number) < 0,
       autoFlush: body.autoFlush,
       smartAccountAddress: body.smartAccountAddress as string | null,
     },
   };
 }
 
-function isEpoch(e: unknown): e is EpochSummary {
+function isEpoch(e: unknown): e is EpochRecord {
   return (
     isObj(e) &&
     isCount(e.epochId) &&
@@ -111,9 +133,24 @@ function isEpoch(e: unknown): e is EpochSummary {
     isCountRecord(e.byAgent) &&
     isCountRecord(e.byOperation) &&
     isTime(e.startedAt) &&
-    isTime(e.completedAt) &&
-    e.completedAt >= e.startedAt
+    isTime(e.completedAt)
   );
+}
+
+/** The epoch as the page shows it: an end before the start is a clock that moved back (M4). */
+function epochView(e: EpochRecord): EpochSummary {
+  const clockAdjusted = e.completedAt < e.startedAt;
+  return {
+    epochId: e.epochId,
+    batches: e.batches,
+    totalIntents: e.totalIntents,
+    byAgent: e.byAgent,
+    byOperation: e.byOperation,
+    startedAt: e.startedAt,
+    completedAt: e.completedAt,
+    durationMs: clockAdjusted ? null : e.completedAt - e.startedAt,
+    clockAdjusted,
+  };
 }
 
 /**
@@ -121,7 +158,7 @@ function isEpoch(e: unknown): e is EpochSummary {
  * of batches. An epoch with no batch adds nothing (summing epochs' totalIntents counted operations
  * that no batch carried). Null when there is no batch at all: no average, never zero.
  */
-export function averageOpsPerBatch(epochs: readonly EpochSummary[]): number | null {
+export function averageOpsPerBatch<E extends Pick<EpochRecord, "batches">>(epochs: readonly E[]): number | null {
   let ops = 0;
   let batches = 0;
   for (const e of epochs) {
@@ -133,11 +170,22 @@ export function averageOpsPerBatch(epochs: readonly EpochSummary[]): number | nu
   return batches === 0 ? null : Math.round(ops / batches);
 }
 
+/**
+ * The operations the epochs' UserOperations carried: the sum of their batches' operationCount
+ * (M3). An epoch's totalIntents counts the intents it settled, and an epoch with no batch carried
+ * none of them in a UserOperation, so it adds nothing here.
+ */
+export function operationsInBatches<E extends Pick<EpochRecord, "batches">>(epochs: readonly E[]): number {
+  let ops = 0;
+  for (const e of epochs) for (const b of e.batches) ops += b.operationCount;
+  return ops;
+}
+
 /** An empty history is a real answer (no epoch settled since the gateway started). */
 export function epochsFromResponse(httpStatus: number, body: unknown): Read<EpochSummary[]> {
   if (httpStatus < 200 || httpStatus >= 300) return { state: "unavailable", reason: refusalReason(httpStatus, body) };
   if (!isObj(body) || !Array.isArray(body.epochs) || !body.epochs.every(isEpoch)) return { state: "unavailable", reason: SHAPE };
-  return { state: "read", value: body.epochs };
+  return { state: "read", value: (body.epochs as EpochRecord[]).map(epochView) };
 }
 
 /**
@@ -146,17 +194,27 @@ export function epochsFromResponse(httpStatus: number, body: unknown): Read<Epoc
  * UserOperations; its answer carries their hashes, not an on-chain receipt, so the page never
  * calls it settled (#313: accepted is not settled). A 2xx body that does not match the flush
  * contract is never assumed accepted — the page cannot say whether anything was flushed, so it
- * fails closed with the same shape message a malformed status/epochs read uses (H1).
+ * fails closed with the same shape message a malformed status/epochs read uses (H1; r2: every
+ * member the route sends is required, not only the counts).
  */
 export function flushOutcome(httpStatus: number, body: unknown): { ok: boolean; message: string } {
   if (httpStatus < 200 || httpStatus >= 300) return { ok: false, message: refusalReason(httpStatus, body) };
+  // Every member the route always sends must be there and well formed (review r2 of #425, H1):
+  // batchDetails (one per batch), byAgent, byOperation and duration. A duration is a signed ms
+  // count: the bundler stamps both ends with Date.now(), so a clock that moved back makes it
+  // negative (M4).
   if (
     isObj(body) &&
     isCount(body.epoch) &&
     isCount(body.totalIntents) &&
     isCount(body.batches) &&
-    (body.batchDetails === undefined ||
-      (Array.isArray(body.batchDetails) && body.batchDetails.length === body.batches && body.batchDetails.every(isBatchDetail)))
+    Array.isArray(body.batchDetails) &&
+    body.batchDetails.length === body.batches &&
+    body.batchDetails.every(isBatchDetail) &&
+    isCountRecord(body.byAgent) &&
+    isCountRecord(body.byOperation) &&
+    typeof body.duration === "number" &&
+    Number.isSafeInteger(body.duration)
   ) {
     return {
       ok: true,
@@ -167,7 +225,7 @@ export function flushOutcome(httpStatus: number, body: unknown): { ok: boolean; 
 }
 
 /** The confirmation a manual flush asks for: how many operations, what a flush does, and that it is final. */
-export function flushConfirmation(q: QueueStatus): string {
+export function flushConfirmation(q: Pick<QueueStatus, "pending">): string {
   const ops = `${q.pending} pending operation${q.pending === 1 ? "" : "s"}`;
   return (
     `Flush ${ops} now? The gateway submits them to the bundler as batched ERC-4337 UserOperations ` +
@@ -196,7 +254,7 @@ export function triggerBadge(epoch: Pick<EpochSummary, "batches">): { label: str
  * real, empty answer, else a prompt to pick one. A failed or loading read must never look like
  * an empty history.
  */
-export function epochDetailNote(epochs: Read<EpochSummary[]>): string {
+export function epochDetailNote(epochs: Read<readonly unknown[]>): string {
   if (epochs.state === "loading") return "Loading…";
   if (epochs.state === "unavailable") return epochs.reason;
   return epochs.value.length > 0 ? "Click an epoch to see breakdown" : "No epoch to show";
@@ -210,6 +268,8 @@ export interface FlushControllerDeps<T> {
   reload: () => Promise<void>;
   onResult: (result: T) => void;
   onError: (error: unknown) => void;
+  /** The authoritative reload failed after a flush (review r2 of #425, M5): say so, never throw. */
+  onReloadError: (error: unknown) => void;
   onFlushingChange: (flushing: boolean) => void;
 }
 
@@ -243,8 +303,12 @@ export function createFlushController<T>(deps: FlushControllerDeps<T>): FlushCon
       } catch (err) {
         deps.onError(err);
       }
+      // A failed reload is reported, and the guard still clears: confirmFlush never rejects, so a
+      // caller that does not await it leaves no unhandled rejection (review r2 of #425, M5).
       try {
         await deps.reload();
+      } catch (err) {
+        deps.onReloadError(err);
       } finally {
         flushing = false;
         deps.onFlushingChange(false);

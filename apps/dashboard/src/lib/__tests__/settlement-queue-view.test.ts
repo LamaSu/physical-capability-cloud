@@ -15,11 +15,11 @@ import {
   formatUsdcBaseUnits,
   statusFromResponse,
   triggerBadge,
-  type EpochSummary,
+  type EpochRecord,
 } from "../settlement-queue-view.js";
 
 const STATUS = { batchEnabled: true, pending: 2, totalValue: "1500000", oldestAge: 1200, autoFlush: false, smartAccountAddress: null };
-const EPOCH: EpochSummary = {
+const EPOCH: EpochRecord = {
   epochId: 1,
   batches: [{ userOpHash: "0x" + "ab".repeat(32), operationCount: 2, trigger: "manual" }],
   totalIntents: 2,
@@ -31,12 +31,12 @@ const EPOCH: EpochSummary = {
 
 describe("statusFromResponse", () => {
   it("reads the gateway's queue status", () => {
-    expect(statusFromResponse(200, STATUS)).toEqual({ state: "read", value: STATUS });
+    expect(statusFromResponse(200, STATUS)).toEqual({ state: "read", value: { ...STATUS, clockAdjusted: false } });
   });
 
   it("reads a gateway with batch settlement off as a real answer", () => {
     const off = { ...STATUS, batchEnabled: false, pending: 0, totalValue: "0" };
-    expect(statusFromResponse(200, off)).toEqual({ state: "read", value: off });
+    expect(statusFromResponse(200, off)).toEqual({ state: "read", value: { ...off, clockAdjusted: false } });
   });
 
   it("NEGATIVE: a refusal is unavailable with the gateway's message, or the HTTP status", () => {
@@ -62,14 +62,14 @@ describe("statusFromResponse", () => {
     const addr = "0x" + "1".repeat(40);
     expect(statusFromResponse(200, { ...STATUS, smartAccountAddress: addr })).toEqual({
       state: "read",
-      value: { ...STATUS, smartAccountAddress: addr },
+      value: { ...STATUS, smartAccountAddress: addr, clockAdjusted: false },
     });
   });
 });
 
 describe("epochsFromResponse", () => {
   it("reads epochs, and an EMPTY history as empty (not as a failure, not as examples)", () => {
-    expect(epochsFromResponse(200, { epochs: [EPOCH] })).toEqual({ state: "read", value: [EPOCH] });
+    expect(epochsFromResponse(200, { epochs: [EPOCH] })).toEqual({ state: "read", value: [{ ...EPOCH, durationMs: 500, clockAdjusted: false }] });
     expect(epochsFromResponse(200, { epochs: [] })).toEqual({ state: "read", value: [] });
   });
 
@@ -123,11 +123,13 @@ describe("epochsFromResponse", () => {
       { completedAt: 2 ** 53 },
       { completedAt: Number.POSITIVE_INFINITY },
       { startedAt: "1000" },
-      { startedAt: 1500, completedAt: 1000 },
     ]) {
       expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, ...times }] }).state, JSON.stringify(times)).toBe("unavailable");
     }
     expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, startedAt: 1500, completedAt: 1500 }] }).state).toBe("read");
+    // An end before the start is a clock that moved back: still read, flagged (review r2 of #425, M4).
+    const back = epochsFromResponse(200, { epochs: [{ ...EPOCH, startedAt: 1500, completedAt: 1000 }] });
+    expect(back.state === "read" && [back.value[0]!.clockAdjusted, back.value[0]!.durationMs]).toEqual([true, null]);
   });
 
   it("NEGATIVE (M4): a time beyond what a Date can hold (8.64e15 ms) is refused too", () => {
@@ -135,11 +137,14 @@ describe("epochsFromResponse", () => {
     expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, startedAt: 8.64e15, completedAt: 8.64e15 }] }).state).toBe("read");
   });
 
-  it("NEGATIVE (M4): the queue's oldestAge is an age in ms: a non-negative safe integer", () => {
-    for (const oldestAge of [-5, 1.5, 2 ** 53, Number.NaN]) {
+  it("NEGATIVE (M4): the queue's oldestAge is an age in ms: a safe integer (negative only when the clock moved back)", () => {
+    for (const oldestAge of [1.5, 2 ** 53, Number.NaN]) {
       expect(statusFromResponse(200, { ...STATUS, oldestAge }).state, String(oldestAge)).toBe("unavailable");
     }
     expect(statusFromResponse(200, { ...STATUS, oldestAge: 0 }).state).toBe("read");
+    // A negative age reads with the age unknown and the clock flagged (review r2 of #425, M4).
+    const back = statusFromResponse(200, { ...STATUS, oldestAge: -5 });
+    expect(back.state === "read" && [back.value.oldestAge, back.value.clockAdjusted]).toEqual([null, true]);
   });
 
   it("an unreachable gateway has its own reason", () => {
@@ -176,10 +181,20 @@ describe("triggerBadge: the epoch-list badge (M3)", () => {
 
 describe("flushOutcome", () => {
   it("reports what the gateway says it flushed, or its refusal", () => {
-    expect(flushOutcome(200, { epoch: 3, totalIntents: 5, batches: 1 })).toEqual({
+    expect(flushOutcome(200, {
+      epoch: 3,
+      totalIntents: 5,
+      batches: 1,
+      batchDetails: [{ userOpHash: "0x" + "ab".repeat(32), operationCount: 5, trigger: "manual" }],
+      byAgent: { a: 5 },
+      byOperation: { release: 5 },
+      duration: 12,
+    })).toEqual({
       ok: true,
       message: "The gateway reports epoch 3 flushed: 5 operations in 1 batch(es).",
     });
+    // The counts alone are not the route's answer (review r2 of #425, H1).
+    expect(flushOutcome(200, { epoch: 3, totalIntents: 5, batches: 1 }).ok).toBe(false);
     expect(flushOutcome(503, { error: "batch_disabled", message: "Batch settlement is not configured. Set PCC_BUNDLER_URL to enable." })).toEqual({
       ok: false,
       message: "Batch settlement is not configured. Set PCC_BUNDLER_URL to enable.",
@@ -194,7 +209,11 @@ describe("NEGATIVE (#313: accepted is not settled): a flush never reads as settl
       totalIntents: 5,
       batches: 1,
       batchDetails: [{ userOpHash: "0x" + "ab".repeat(32), operationCount: 5, trigger: "manual" }],
+      byAgent: { a: 5 },
+      byOperation: { release: 5 },
+      duration: 12,
     };
+    expect(flushOutcome(200, body).ok).toBe(true);
     for (const b of [body, {}, null]) expect(flushOutcome(200, b).message, JSON.stringify(b)).not.toMatch(/settle/i);
   });
 });
@@ -208,7 +227,7 @@ describe("flushOutcome: a malformed 2xx is never assumed accepted (H1)", () => {
     expect(flushOutcome(200, { epoch: 3, totalIntents: 5 })).toEqual({ ok: false, message: SHAPE_MESSAGE });
   });
 
-  it("NEGATIVE: batchDetails, when present, must match the flush contract or the whole read fails closed", () => {
+  it("NEGATIVE: batchDetails must be present and match the flush contract, or the whole read fails closed", () => {
     const hash = "0x" + "ab".repeat(32);
     // Not a real UserOp hash.
     expect(
@@ -222,11 +241,16 @@ describe("flushOutcome: a malformed 2xx is never assumed accepted (H1)", () => {
     ).toBe(false);
   });
 
-  it("a well-formed batchDetails is still a success", () => {
-    const hash = "0x" + "ab".repeat(32);
-    expect(
-      flushOutcome(200, { epoch: 3, totalIntents: 5, batches: 1, batchDetails: [{ userOpHash: hash, operationCount: 5, trigger: "manual" }] }),
-    ).toEqual({ ok: true, message: "The gateway reports epoch 3 flushed: 5 operations in 1 batch(es)." });
+  it("the route's whole answer, with a well-formed batchDetails, is a success", () => {
+    expect(flushOutcome(200, {
+      epoch: 3,
+      totalIntents: 5,
+      batches: 1,
+      batchDetails: [{ userOpHash: "0x" + "ab".repeat(32), operationCount: 5, trigger: "manual" }],
+      byAgent: { a: 5 },
+      byOperation: { release: 5 },
+      duration: 12,
+    })).toEqual({ ok: true, message: "The gateway reports epoch 3 flushed: 5 operations in 1 batch(es)." });
   });
 });
 
@@ -259,7 +283,7 @@ describe("formatUsdcBaseUnits", () => {
 describe("the gateway's real answers", () => {
   it("a gateway with batch settlement off: status reads, and the empty history is empty", () => {
     const status = { batchEnabled: false, pending: 0, totalValue: "0", oldestAge: 0, autoFlush: false, smartAccountAddress: null };
-    expect(statusFromResponse(200, status)).toEqual({ state: "read", value: status });
+    expect(statusFromResponse(200, status)).toEqual({ state: "read", value: { ...status, clockAdjusted: false } });
     expect(epochsFromResponse(200, { epochs: [] })).toEqual({ state: "read", value: [] });
   });
 
@@ -297,6 +321,7 @@ describe("createFlushController: no double-flush, disabled through the reload (M
       reload: () => reloadPromise,
       onResult: (r) => results.push(r),
       onError: () => {},
+      onReloadError: () => {},
       onFlushingChange: (f) => flushingStates.push(f),
     });
 
@@ -334,6 +359,7 @@ describe("createFlushController: no double-flush, disabled through the reload (M
       reload: async () => {},
       onResult: () => {},
       onError: () => {},
+      onReloadError: () => {},
       onFlushingChange: (f) => states.push(f),
     });
     expect(await controller.confirmFlush()).toBe(true);
@@ -355,6 +381,7 @@ describe("createFlushController: no double-flush, disabled through the reload (M
       onError: (e) => {
         caught = e;
       },
+      onReloadError: () => {},
       onFlushingChange: () => {},
     });
     await controller.confirmFlush();
