@@ -24,6 +24,7 @@ import type {
 } from "@pcc/spec";
 import type { IRepositories } from "@pcc/store";
 import { getRepos } from "../db.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 /**
  * Z3 — returns repos when the store is initialised, null otherwise (tests /
@@ -466,8 +467,7 @@ async function orchestrateCompletion(
     }
   } catch (err) {
     // Log the raw error server-side but don't leak internal details to client
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("[wizard] orchestrateCompletion error:", message);
+    console.error(lit("[wizard] orchestrateCompletion error:"), err);
     return {
       success: false,
       executedSteps,
@@ -610,8 +610,7 @@ async function orchestrateMachineOnboarding(
       submittedAt: nowIso,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("[wizard] registration insert failed:", message);
+    console.error(lit("[wizard] registration insert failed:"), err);
     executedSteps.push({
       name: "build-registration",
       status: "failed",
@@ -749,7 +748,10 @@ async function orchestrateDeviceBuilder(
   }
 
   if (failures.length > 0) {
-    console.error("[wizard] device registration failures:", failures);
+    console.error(
+      lit("[wizard] device registration failures"),
+      failures.map((f) => ({ deviceId: declare.id(f.deviceId), error: declare.id(f.error) })),
+    );
     executedSteps.push({
       name: "register-devices",
       status: "failed",
