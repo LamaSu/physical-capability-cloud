@@ -314,6 +314,25 @@ describe("refvertical #5668: the close attests what the sidecar sent, and the ru
     expect.soft(result.message, "why").toBe("evidence incomplete: the sidecar did not attest how many notifications it sent for job j-cnt-none");
   });
 
+  it("a notification the adapter drops by its own rule (a lifecycle type) still arrived: the run succeeds, without it", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fake = fakeSidecar({
+      "backend.init": init("dev-cnt-life"),
+      "evidence.startRecording": opened(),
+      "backend.run": (p, transport) => {
+        transport.notify("evidence", { type: "aspirate", deviceId: "dev-cnt-life", jobId: p.jobId, timestamp: new Date().toISOString(), payload: { well: "A1" } });
+        transport.notify("evidence", { type: "execution_completed", deviceId: "dev-cnt-life", jobId: p.jobId, timestamp: new Date().toISOString(), payload: {} });
+        return ran(p);
+      },
+      "evidence.stopRecording": closed(),
+    });
+    const { adapter, events } = await adapterOn(fake.transport, "dev-cnt-life");
+    const result = await adapter.execute({ type: "start", payload: { jobId: "j-cnt-life" } });
+    expect.soft(result.success, `the run (${result.message})`).toBe(true);
+    expect.soft(events.filter((e) => e.type === "execution_completed").length, "completions: the adapter's own, once").toBe(1);
+    expect.soft(events.filter((e) => e.payload.sidecarType === "execution_completed").length, "the sidecar's completion, recorded").toBe(0);
+  });
+
   it("every notification attested and received: the run succeeds, with each one in its evidence", async () => {
     const fake = countingSidecar("dev-cnt-ok", 3, closed());
     const { adapter, events } = await adapterOn(fake.transport, "dev-cnt-ok");
