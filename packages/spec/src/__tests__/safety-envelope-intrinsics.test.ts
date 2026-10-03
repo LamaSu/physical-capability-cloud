@@ -321,6 +321,9 @@ const PATCHES: Patch[] = [
   ["String.prototype.trim", String.prototype, "trim", () => () => "x"],
   ["String.prototype.toLowerCase", String.prototype, "toLowerCase", () => () => "x"],
   ["String.prototype.charCodeAt", String.prototype, "charCodeAt", () => () => 0x30],
+  // astra pack 183: templateSlotName cuts a slot's name with the slice captured at load. A replaced slice
+  // that names every slot "lampPower" must not change the map-against-profile decision.
+  ["String.prototype.slice", String.prototype, "slice", () => () => "lampPower"],
   ["RegExp.prototype.exec", RegExp.prototype, "exec", () => () => null],
   ["RegExp.prototype.test", RegExp.prototype, "test", () => () => true],
   ["Number.isFinite", Number, "isFinite", () => () => true],
