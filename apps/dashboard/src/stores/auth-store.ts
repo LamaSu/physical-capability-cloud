@@ -1,38 +1,19 @@
 import { create } from "zustand";
 import { fetchWithKey } from "../lib/gateway-base.js";
-
-const STORAGE_KEY = "pcc-api-key";
+import { hasStoredApiKey, setStoredApiKey } from "../lib/authorized-fetch.js";
 
 /**
- * The signed-in API key lives only in this module (and in localStorage, where
- * login puts it). It is deliberately NOT part of the store's state, so no
- * component or module can read it from the store (N50 round 2, astra). Its
- * only reader is lib/authorized-fetch.ts, through readApiKeyForAuthorizedFetch()
- * (enforced by __tests__/no-direct-auth-headers.test.ts).
+ * Sign-in state. The API key itself is not here, not in the state and not in
+ * this module: lib/authorized-fetch.ts holds it, and no export anywhere
+ * returns it (N50; astra rounds 2 and 3). This store only knows whether a
+ * key is held.
  */
-let storedApiKey: string | null = readStorage();
-
-function readStorage(): string | null {
-  try {
-    return localStorage.getItem(STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function writeStorage(key: string | null): void {
-  try {
-    if (key) localStorage.setItem(STORAGE_KEY, key);
-    else localStorage.removeItem(STORAGE_KEY);
-  } catch {
-    // Storage unavailable (private mode, blocked): the key lives for this page only.
-  }
-}
-
 interface AuthState {
   // -- API Key auth (primary gate) --
   /** Whether an API key is held. The key itself is never in the store. */
   isAuthenticated: boolean;
+  /** Bumped on every sign-in, sign-out or key replacement (adoptApiKey, logout). Never the key. */
+  keyEpoch: number;
   login: (key: string) => Promise<boolean>;
   logout: () => void;
 
@@ -54,7 +35,8 @@ interface AuthState {
 
 export const useAuthStore = create<AuthState>((set) => ({
   // -- API Key auth --
-  isAuthenticated: !!storedApiKey,
+  isAuthenticated: hasStoredApiKey(),
+  keyEpoch: 0,
 
   login: async (key: string): Promise<boolean> => {
     try {
@@ -69,8 +51,9 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
-    adoptApiKey(null);
-    set({ address: null, sessionToken: null, error: null });
+    // One set(), so an identity change is reported once (onIdentityChange).
+    setStoredApiKey(null);
+    set((s) => ({ isAuthenticated: false, keyEpoch: s.keyEpoch + 1, address: null, sessionToken: null, error: null }));
   },
 
   // -- Wallet/SIWE auth --
@@ -86,21 +69,28 @@ export const useAuthStore = create<AuthState>((set) => ({
 }));
 
 /**
- * Hold `key` as the signed-in key (or sign out with null). login() calls it
- * after the gateway accepts the key; tests call it directly. Writing a key
- * cannot leak one.
+/**
+ * Hold `key` as the signed-in key, or sign out with null. login() calls it
+ * after the gateway accepts the key; tests call it directly. It is
+ * write-only: writing a key cannot leak one. Every call is an identity change
+ * (keyEpoch), even with the same key: telling "same key" from "another key"
+ * would make this an equality test on the stored key.
  */
 export function adoptApiKey(key: string | null): void {
-  storedApiKey = key;
-  writeStorage(key);
-  useAuthStore.setState({ isAuthenticated: !!key });
+  setStoredApiKey(key);
+  useAuthStore.setState((s) => ({ isAuthenticated: hasStoredApiKey(), keyEpoch: s.keyEpoch + 1 }));
 }
 
 /**
- * The signed-in key. ONLY lib/authorized-fetch.ts may call this: it hands the
- * key to fetchWithKey(), which sends it to the gateway and nowhere else.
- * Any other reference fails __tests__/no-direct-auth-headers.test.ts.
+ * Calls `onChange` whenever the signed-in identity changes: a key signed in or
+ * out, a different key, wallet or SIWE session. A cached read must not outlive
+ * the identity that made it, so App clears the query cache here (review r3 of
+ * #353). The key itself is never in this store (N50), so a key change shows as
+ * keyEpoch.
  */
-export function readApiKeyForAuthorizedFetch(): string | null {
-  return storedApiKey;
+export function onIdentityChange(onChange: () => void): () => void {
+  return useAuthStore.subscribe((s, prev) => {
+    if (s.keyEpoch !== prev.keyEpoch || s.address !== prev.address || s.sessionToken !== prev.sessionToken) onChange();
+  });
 }
+

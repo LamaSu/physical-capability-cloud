@@ -18,20 +18,32 @@
  * 2. fetchWithKey() is the only code that puts a key on a request. It
  *    resolves the final URL, refuses any other origin, refuses redirects, and
  *    only then sets Authorization.
- * 3. No other code can read the signed-in key. It is not in the auth store's
- *    state: stores/auth-store.ts keeps it private, and its one accessor is
- *    read only by lib/authorized-fetch.ts. __tests__/no-direct-auth-headers
- *    enforces this, and also allows an Authorization header or a "Bearer "
- *    string to be built nowhere but here.
+ * 3. No other code can read the signed-in key.
+ *    - lib/authorized-fetch.ts holds it in a module-private variable, and no
+ *      export anywhere returns it (astra round 3: an exported reader could be
+ *      reached by computed access).
+ *    - It leaves that module only through fetchWithKey and this guard.
+ *    - __tests__/no-direct-auth-headers enforces the rest over every
+ *      production module: nothing else touches its storage slot or reaches
+ *      storage by a computed name, and nothing but this module builds an
+ *      Authorization header or a "Bearer " string, or calls sendBeacon,
+ *      XMLHttpRequest or WebSocket.
  * 4. The egress guard (installKeyEgressGuard) is defence in depth, not the
- *    boundary. It inspects every request to another origin: the URL, the
- *    headers, and a string, URLSearchParams, FormData, Blob, binary or Request
- *    body, each raw, percent-decoded and base64-encoded. It rejects one that
- *    carries a key, and one whose body it can't read (a stream, or a type it
- *    doesn't recognise, such as a Blob from another realm). It can't see
- *    a key transformed further (compressed or encrypted), which is why 1-3
- *    are the boundary. sendBeacon and XMLHttpRequest don't pass through it;
- *    the dashboard uses neither.
+ *    boundary.
+ *    - It covers fetch and navigator.sendBeacon to any origin but the
+ *      gateway, and inspects the URL, the headers, and a string,
+ *      URLSearchParams, FormData, Blob, binary or Request body, each raw,
+ *      percent-decoded and base64-encoded.
+ *    - It rejects a request that carries a key, and one whose body it can't
+ *      read (a stream, or a type it doesn't recognise, such as a Blob from
+ *      another realm). A beacon must be answered synchronously, so a Blob or
+ *      file in a beacon counts as unreadable; the one exception is an origin
+ *      the app registers for such beacons (its telemetry host, whose SDK
+ *      sends Blob beacons on unload).
+ *    - It can't see a key transformed further (compressed or encrypted),
+ *      which is why 1-3 are the boundary.
+ *    - XMLHttpRequest doesn't pass through it. The dashboard's own code
+ *      doesn't use it; the ratchet enforces that.
  *
  * This module does not import the auth store, so the store can use it.
  */
@@ -296,14 +308,50 @@ export async function inspectRequest(
   return texts.some((t) => textCarriesKey(t, keyForms)) ? "carries-key" : "clean";
 }
 
+/** The texts a beacon body turns into right now, or null when that needs an async read (a Blob or a file) or the type is unknown. */
+function beaconTexts(data: unknown): string[] | null {
+  if (data === undefined || data === null) return [];
+  if (typeof data === "string") return [data];
+  if (data instanceof URLSearchParams) return [data.toString()];
+  if (typeof FormData !== "undefined" && data instanceof FormData) {
+    const out: string[] = [];
+    for (const [name, value] of data.entries()) {
+      if (typeof value !== "string") return null;
+      out.push(name, value);
+    }
+    return out;
+  }
+  if (ArrayBuffer.isView(data) || isArrayBuffer(data)) return [new TextDecoder().decode(data)];
+  return null;
+}
+
+/** Whether a sendBeacon of (url, data) would carry a PCC key, or `storedKey`. Synchronous, as sendBeacon is. */
+export function inspectBeacon(url: string, data: unknown, storedKey: string | null): RequestInspection {
+  const keyForms = storedKeyForms(storedKey);
+  if (textCarriesKey(url, keyForms)) return "carries-key";
+  const texts = beaconTexts(data);
+  if (texts === null) return "uninspectable";
+  return texts.some((t) => textCarriesKey(t, keyForms)) ? "carries-key" : "clean";
+}
+
+export interface EgressGuardOptions {
+  /**
+   * Origins that may receive a beacon whose body can't be read synchronously
+   * (a Blob or a file). A body that can be read is still inspected, whatever
+   * the origin. Meant for the app's telemetry host only.
+   */
+  unreadableBeaconOrigins?: readonly string[];
+}
+
 /**
- * Wrap window.fetch so a request to any origin but the gateway is inspected
- * first, and rejected before it leaves the browser if it carries a key or has
- * a body that can't be read. Requests to the gateway pass untouched.
- * `getStoredKey` supplies the signed-in key, which may predate the pcc_ key
- * format. Idempotent; returns an uninstall function.
+ * Wrap window.fetch and navigator.sendBeacon so a request to any origin but
+ * the gateway is inspected first. It is rejected before it leaves the browser
+ * if it carries a key, or if it has a body that can't be read. Requests to
+ * the gateway pass untouched. `getStoredKey` supplies the signed-in key,
+ * which may predate the pcc_ key format. Idempotent; returns an uninstall
+ * function.
  */
-export function installKeyEgressGuard(getStoredKey: () => string | null): () => void {
+export function installKeyEgressGuard(getStoredKey: () => string | null, options: EgressGuardOptions = {}): () => void {
   if (typeof window === "undefined" || typeof window.fetch !== "function") return () => {};
   const w = window as unknown as { __pccKeyEgressGuard?: boolean };
   if (w.__pccKeyEgressGuard) return () => {};
@@ -337,9 +385,42 @@ export function installKeyEgressGuard(getStoredKey: () => string | null): () => 
     throw refusal;
   };
   window.fetch = guarded;
+
+  const nav = typeof navigator !== "undefined" ? navigator : undefined;
+  const originalBeacon = nav && typeof nav.sendBeacon === "function" ? nav.sendBeacon : undefined;
+  const unreadableOk = new Set(options.unreadableBeaconOrigins ?? []);
+  let guardedBeacon: Navigator["sendBeacon"] | undefined;
+  if (nav && originalBeacon) {
+    guardedBeacon = (url, data) => {
+      let target: URL;
+      try {
+        target = new URL(String(url), window.location.href);
+      } catch {
+        // sendBeacon itself throws on a URL it can't parse.
+        return originalBeacon.call(nav, url, data);
+      }
+      const origin = gatewayOrigin();
+      if (origin !== null && target.origin === origin) return originalBeacon.call(nav, url, data);
+      const verdict = inspectBeacon(target.href, data, getStoredKey());
+      if (verdict === "clean" || (verdict === "uninspectable" && unreadableOk.has(target.origin))) {
+        return originalBeacon.call(nav, url, data);
+      }
+      const reason =
+        verdict === "uninspectable"
+          ? "its body can't be checked for a key"
+          : origin === null
+            ? "there is no valid gateway origin"
+            : `it is not the gateway (${origin})`;
+      console.error(`[pcc] ${new KeyEgressRefused(target.href, reason).message}`);
+      return false;
+    };
+    nav.sendBeacon = guardedBeacon;
+  }
+
   w.__pccKeyEgressGuard = true;
   return () => {
     if (window.fetch === guarded) window.fetch = original;
+    if (nav && guardedBeacon && nav.sendBeacon === guardedBeacon) nav.sendBeacon = originalBeacon!;
     w.__pccKeyEgressGuard = false;
   };
 }

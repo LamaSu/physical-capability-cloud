@@ -13,6 +13,20 @@ const GA_MEASUREMENT_ID = import.meta.env.VITE_GA_MEASUREMENT_ID || "";
 const SENTRY_DSN = import.meta.env.VITE_SENTRY_DSN || "";
 const IS_PROD = import.meta.env.PROD;
 
+/**
+ * Origins that may receive beacons the egress guard can't read synchronously:
+ * the PostHog host, when PostHog is on. Its SDK wraps every beacon body in a
+ * Blob (lib/gateway-base.ts, installKeyEgressGuard).
+ */
+export function telemetryBeaconOrigins(): string[] {
+  if (!POSTHOG_KEY) return [];
+  try {
+    return [new URL(POSTHOG_HOST).origin];
+  } catch {
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // initTelemetry — call once before ReactDOM.createRoot()
 // ---------------------------------------------------------------------------

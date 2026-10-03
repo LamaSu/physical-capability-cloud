@@ -530,6 +530,71 @@ describe("Setup API", () => {
       expect(res.json().error).toBe("missing_required_fields");
     });
 
+    it("returns missing: [\"deviceId\"] when only deviceId is absent", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: {
+          kernelId: "kernel-nyc",
+          type: "machine",
+          adapterType: "mock",
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error).toBe("missing_required_fields");
+      expect(body.missing).toEqual(["deviceId"]);
+      expect(body.message).toContain("deviceId");
+      expect(body.message).toContain("sim-pr1-0001");
+    });
+
+    it("lists every missing field, in kernelId/deviceId/type/adapterType order", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: { kernelId: "kernel-nyc" },
+      });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.missing).toEqual(["deviceId", "type", "adapterType"]);
+      expect(body.message).toContain("deviceId");
+      expect(body.message).toContain("type");
+      expect(body.message).toContain("adapterType");
+    });
+
+    it("stores and returns a provided firmware string", async () => {
+      const deviceId = `dev-setup-firmware-${Date.now()}`;
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: {
+          kernelId: "kernel-nyc",
+          deviceId,
+          type: "machine",
+          adapterType: "mock",
+          firmware: "1.4.2",
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().device.firmware).toBe("1.4.2");
+    });
+
+    it('defaults firmware to "unknown" when absent', async () => {
+      const deviceId = `dev-setup-no-firmware-${Date.now()}`;
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: {
+          kernelId: "kernel-nyc",
+          deviceId,
+          type: "machine",
+          adapterType: "mock",
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().device.firmware).toBe("unknown");
+    });
+
     it("returns 400 for unknown kernel", async () => {
       const res = await app.inject({
         method: "POST",
@@ -784,5 +849,18 @@ describe("Setup API", () => {
       const body = res.json();
       expect(body.overall).not.toBe("ready");
     });
+  });
+});
+
+describe("pack 111 MEDIUM 5: register-device with no body gets the missing-fields 400", () => {
+  it("an absent body lists all four required fields", async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "POST", url: "/api/setup/register-device" });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().missing).toEqual(["kernelId", "deviceId", "type", "adapterType"]);
+    } finally {
+      await app.close();
+    }
   });
 });

@@ -1,18 +1,66 @@
-import { readApiKeyForAuthorizedFetch } from "../stores/auth-store.js";
-import { fetchWithKey, installKeyEgressGuard } from "./gateway-base.js";
+import { fetchWithKey, installKeyEgressGuard, type EgressGuardOptions } from "./gateway-base.js";
+
+const STORAGE_KEY = "pcc-api-key";
 
 /**
- * fetch() as the signed-in user: the stored API key is attached only when
- * `target` resolves to the configured gateway, and anything else is refused
- * before a request is made (lib/gateway-base.ts). This module is the only
- * reader of the stored key; every other module sends it through here
- * (__tests__/no-direct-auth-headers.test.ts).
+ * The signed-in API key is held here and in no other module (N50; astra
+ * rounds 2 and 3). No export returns it. It leaves this module in only two
+ * ways:
+ * - fetchWithKey, which sends it to the configured gateway and nowhere else
+ *   (authorizedFetch);
+ * - the egress guard, which compares outgoing requests against it.
+ * Other modules can replace it (setStoredApiKey, used by the auth store) and
+ * ask whether one is held (hasStoredApiKey). Neither reads it back out.
+ * __tests__/no-direct-auth-headers.test.ts and lib/__tests__/key-boundary-r4
+ * hold this module to that.
+ *
+ * It is persisted in localStorage so a reload keeps the user signed in. Any
+ * script on this origin can still read that slot. Only an HttpOnly gateway
+ * session would take the key out of JavaScript's reach, and that is a gateway
+ * change awaiting the operator. Until then the ratchet keeps every other
+ * module off this slot, and off storage it can't name.
  */
-export function authorizedFetch(target: string, init: RequestInit = {}): Promise<Response> {
-  return fetchWithKey(target, readApiKeyForAuthorizedFetch(), init);
+let storedApiKey: string | null = readStorage();
+
+function readStorage(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
 }
 
-/** Install the defence-in-depth egress guard with the stored key (main.tsx, at startup). */
-export function installGatewayKeyGuard(): () => void {
-  return installKeyEgressGuard(readApiKeyForAuthorizedFetch);
+function writeStorage(key: string | null): void {
+  try {
+    if (key) localStorage.setItem(STORAGE_KEY, key);
+    else localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Storage unavailable (private mode, blocked): the key lives for this page only.
+  }
+}
+
+/** Hold `key` as the signed-in key, or clear it with null. Write-only: nothing reads it back. */
+export function setStoredApiKey(key: string | null): void {
+  storedApiKey = key || null;
+  writeStorage(storedApiKey);
+}
+
+/** Whether a signed-in key is held. Never the key itself. */
+export function hasStoredApiKey(): boolean {
+  return storedApiKey !== null;
+}
+
+/**
+ * fetch() as the signed-in user: the stored key is attached only when
+ * `target` resolves to the configured gateway, and anything else is refused
+ * before a request is made (lib/gateway-base.ts). Every module that sends the
+ * key does it through here.
+ */
+export function authorizedFetch(target: string, init: RequestInit = {}): Promise<Response> {
+  return fetchWithKey(target, storedApiKey, init);
+}
+
+/** Install the defence-in-depth egress guard over the stored key (main.tsx, at startup). */
+export function installGatewayKeyGuard(options: EgressGuardOptions = {}): () => void {
+  return installKeyEgressGuard(() => storedApiKey, options);
 }
