@@ -21,6 +21,12 @@ import {MockEAS} from "../../mocks/MockEAS.sol";
  *         stub unit tests; this fixture's job is the split/truncation/release money-path,
  *         identically exercisable with or without a root. Logs the addresses + the fixed
  *         actor/schema constants the TS test mirrors exactly.
+ *
+ *         A THIRD V2 clone (ESCROW_V2_DISPUTE) is deployed dedicated to the real
+ *         fileDispute/resolveDispute(false) path (N102 round 2, R2-M1b): `fund()` is a
+ *         single-shot, ESCROW-WIDE latch (`require(!funded)`, and `_addMilestone` itself
+ *         checks the same flag) — ESCROW_V2 is already funded by the ordinary-release test
+ *         by the time a dispute test would run, so a second milestone cannot be added to it.
  */
 contract MilestoneRecipientsAnvilFixture is Script {
     address internal constant PAYER = address(0x1111);
@@ -46,11 +52,17 @@ contract MilestoneRecipientsAnvilFixture is Script {
         MilestoneEscrowV3 escrowV3 = MilestoneEscrowV3(Clones.clone(implV3));
         escrowV3.initialize(PAYER, ARBITER, address(usdc), keccak256("milestone-recipients-anvil-v3"), address(0));
 
+        // Dedicated clone for the dispute test (see the class doc) — never funded by anything
+        // else, so it can take its own addMilestone/fund() independent of ESCROW_V2 above.
+        MilestoneEscrowV2 escrowV2Dispute = MilestoneEscrowV2(Clones.clone(implV2));
+        escrowV2Dispute.initialize(PAYER, ARBITER, address(usdc), keccak256("milestone-recipients-anvil-v2-dispute"), address(0));
+
         vm.stopBroadcast();
 
         console2.log("TOKEN", address(usdc));
         console2.log("EAS", address(eas));
         console2.log("ESCROW_V2", address(escrowV2));
         console2.log("ESCROW_V3", address(escrowV3));
+        console2.log("ESCROW_V2_DISPUTE", address(escrowV2Dispute));
     }
 }

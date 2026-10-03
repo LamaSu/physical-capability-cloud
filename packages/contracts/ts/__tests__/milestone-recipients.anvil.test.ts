@@ -135,7 +135,7 @@ const MOCK_EAS_ABI = [
 describe.skipIf(!RUN)("readMilestoneRecipients against the real contracts on anvil (N102)", () => {
   let anvil: ChildProcess | undefined;
   let rpc = "";
-  let deployed: { TOKEN: Address; EAS: Address; ESCROW_V2: Address; ESCROW_V3: Address };
+  let deployed: { TOKEN: Address; EAS: Address; ESCROW_V2: Address; ESCROW_V3: Address; ESCROW_V2_DISPUTE: Address };
 
   beforeAll(async () => {
     const port = await freePort();
@@ -164,7 +164,13 @@ describe.skipIf(!RUN)("readMilestoneRecipients against the real contracts on anv
       if (!m?.[1]) throw new Error(`the fixture did not log ${label}:\n${out}`);
       return getAddress(m[1]);
     };
-    deployed = { TOKEN: grab("TOKEN"), EAS: grab("EAS"), ESCROW_V2: grab("ESCROW_V2"), ESCROW_V3: grab("ESCROW_V3") };
+    deployed = {
+      TOKEN: grab("TOKEN"),
+      EAS: grab("EAS"),
+      ESCROW_V2: grab("ESCROW_V2"),
+      ESCROW_V3: grab("ESCROW_V3"),
+      ESCROW_V2_DISPUTE: grab("ESCROW_V2_DISPUTE"),
+    };
   }, 600_000);
 
   afterAll(() => {
@@ -353,5 +359,140 @@ describe.skipIf(!RUN)("readMilestoneRecipients against the real contracts on anv
 
   it("V3: fund → attest (with a fee) → release matches readMilestoneRecipients at both pinned blocks", async () => {
     await driveAndVerify("v3");
+  }, 120_000);
+
+  /**
+   * N102 round 2 (R2-M1b): a REAL `fileDispute` + `resolveDispute(false)` path, on a
+   * DEDICATED V2 clone (`ESCROW_V2_DISPUTE` — `fund()` is single-shot and escrow-wide, so
+   * it cannot share ESCROW_V2 with the ordinary-release test above; see the fixture's doc).
+   * Proves the money claim, not just the stub: a configured 2-leg payout map is set, funded,
+   * attested — then DISPUTED and resolved in the operator's favor, and the operator's real
+   * balance delta is checked against readMilestoneRecipients' "operator-dispute-award" row,
+   * while LEG1/LEG2 (which an ordinary release would have paid) are asserted to have
+   * received NOTHING.
+   */
+  it("V2: a real fileDispute + resolveDispute(false) bypasses the map, and matches readMilestoneRecipients' 'released-by-dispute' outcome", async () => {
+    const chain = {
+      id: 31337, name: "anvil",
+      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+      rpcUrls: { default: { http: [rpc] } },
+    } as const;
+    const pub: PublicClient = createPublicClient({ chain, transport: http(rpc) });
+    const test = createTestClient({ mode: "anvil", chain, transport: http(rpc) });
+    // A DEDICATED clone (not ESCROW_V2): `fund()` is a single-shot, escrow-wide latch
+    // (`require(!funded)`, and `_addMilestone` checks the same flag), so a second milestone
+    // cannot be added to ESCROW_V2 once the ordinary-release test above has funded it.
+    const escrow = deployed.ESCROW_V2_DISPUTE;
+    const milestoneIndex = 0n;
+    const ARBITER: Address = "0x0000000000000000000000000000000000003333"; // matches the fixture.
+    const CHALLENGER: Address = "0x0000000000000000000000000000000000008888";
+    const CHALLENGE_WINDOW = 3_600n; // long enough to file within; never warped past in this test.
+    const DISPUTE_AMOUNT = 222_000n;
+    const DISPUTE_BOND = 3_000n;
+    const CHALLENGER_BOND = 1_500n;
+
+    const sendAs = async (account: Address, request: unknown) => {
+      await test.impersonateAccount({ address: account });
+      try {
+        const wallet = createWalletClient({ account, chain, transport: http(rpc) });
+        const hash = await wallet.writeContract(request as never);
+        const receipt = await pub.waitForTransactionReceipt({ hash });
+        expect(receipt.status).toBe("success");
+        return receipt;
+      } finally {
+        await test.stopImpersonatingAccount({ address: account });
+      }
+    };
+    const sendDefault = async (request: unknown) => {
+      const wallet = createWalletClient({ account: ANVIL_DEFAULT_SENDER, chain, transport: http(rpc) });
+      const hash = await wallet.writeContract(request as never);
+      const receipt = await pub.waitForTransactionReceipt({ hash });
+      expect(receipt.status).toBe("success");
+      return receipt;
+    };
+    const balanceOf = async (addr: Address) =>
+      pub.readContract({ address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "balanceOf", args: [addr] }) as Promise<bigint>;
+
+    await test.setBalance({ address: CHALLENGER, value: 10n ** 18n });
+    await test.setBalance({ address: ARBITER, value: 10n ** 18n }); // pays gas for resolveDispute
+
+    const stepId = keccak256(stringToHex("n102-dispute-step"));
+    const jobId = "n102-dispute-job";
+    const evidenceHash = keccak256(stringToHex("n102-dispute-evidence"));
+
+    // 1. payer: fund a milestone on the DEDICATED escrow with a 2-leg payout map — the
+    //    dispute path must bypass this entirely, which only means something if a map
+    //    actually exists.
+    await sendDefault({ address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "mint", args: [PAYER, DISPUTE_AMOUNT] } as never);
+    await sendAs(PAYER, {
+      address: escrow, abi: MilestoneEscrowV2ABI, functionName: "addMilestone",
+      args: [stepId, OPERATOR, DISPUTE_AMOUNT, DISPUTE_BOND, CHALLENGE_WINDOW, 0, jobId],
+    });
+    await sendAs(PAYER, {
+      address: escrow, abi: MilestoneEscrowV2ABI, functionName: "setPayoutMap",
+      args: [milestoneIndex, [
+        { recipient: LEG1, bps: 3333n, roleTag: ROLE_LEG1, ipId: zeroHash },
+        { recipient: LEG2, bps: 3333n, roleTag: ROLE_LEG2, ipId: zeroHash },
+      ]],
+    });
+    await sendAs(PAYER, { address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "approve", args: [escrow, DISPUTE_AMOUNT] } as never);
+    await sendAs(PAYER, { address: escrow, abi: MilestoneEscrowV2ABI, functionName: "fund", args: [] });
+
+    // 2. operator: deposit bond, submit evidence, get attested (so status reaches Attested,
+    //    the only status fileDispute accepts).
+    await sendDefault({ address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "mint", args: [OPERATOR, DISPUTE_BOND] } as never);
+    await sendAs(OPERATOR, { address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "approve", args: [escrow, DISPUTE_BOND] } as never);
+    await sendAs(OPERATOR, { address: escrow, abi: MilestoneEscrowV2ABI, functionName: "depositBond", args: [milestoneIndex] });
+    await sendAs(OPERATOR, { address: escrow, abi: MilestoneEscrowV2ABI, functionName: "submitEvidence", args: [milestoneIndex, evidenceHash] });
+
+    const uid = keccak256(stringToHex("n102-dispute-uid"));
+    const data = encodeAbiParameters(
+      [{ type: "string" }, { type: "bytes32" }, { type: "bytes32" }, { type: "string" }, { type: "uint8" }, { type: "bool" }, { type: "bytes32" }],
+      [jobId, keccak256(stringToHex("kernel")), evidenceHash, "", 0, true, stepId],
+    );
+    await sendDefault({
+      address: deployed.EAS, abi: MOCK_EAS_ABI, functionName: "setAttestation",
+      args: [uid, { uid, schema: SCHEMA_V2_UID, time: 0n, expirationTime: 0n, revocationTime: 0n, refUID: zeroHash, recipient: escrow, attester: ORACLE, revocable: true, data }],
+    } as never);
+    await sendDefault({ address: escrow, abi: MilestoneEscrowV2ABI, functionName: "submitAttestation", args: [milestoneIndex, uid] });
+
+    // 3. CHALLENGER (permissionless — fileDispute has no access-control modifier) files a
+    //    dispute WITHIN the challenge window (never warped here, so it is still open).
+    await sendDefault({ address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "mint", args: [CHALLENGER, CHALLENGER_BOND] } as never);
+    await sendAs(CHALLENGER, { address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "approve", args: [escrow, CHALLENGER_BOND] } as never);
+    await sendAs(CHALLENGER, {
+      address: escrow, abi: MilestoneEscrowV2ABI, functionName: "fileDispute",
+      args: [milestoneIndex, CHALLENGER_BOND, keccak256(stringToHex("bad output")), "bad output"],
+    });
+
+    const disputedBlock = await pub.getBlockNumber();
+    const disputed = await readMilestoneRecipients({ client: pub, escrow, version: "v2", milestoneIndex, blockNumber: disputedBlock });
+    expect(disputed.ok).toBe(true);
+    expect(disputed.status).toBe(6); // Disputed
+    expect(disputed.outcome).toBe("disputed");
+    expect(disputed.projected).toBeUndefined();
+
+    // 4. ARBITER (impersonated) resolves in the OPERATOR's favor — challengerWon:false.
+    const trackedRecipients = [OPERATOR, LEG1, LEG2];
+    const before = new Map(await Promise.all(trackedRecipients.map(async (a) => [a, await balanceOf(a)] as const)));
+    await sendAs(ARBITER, { address: escrow, abi: MilestoneEscrowV2ABI, functionName: "resolveDispute", args: [milestoneIndex, false] });
+    const resolvedBlock = await pub.getBlockNumber();
+    const after = new Map(await Promise.all(trackedRecipients.map(async (a) => [a, await balanceOf(a)] as const)));
+
+    // 5. The strongest proof: readMilestoneRecipients' "released-by-dispute" projection
+    //    against the REAL balance deltas — including that the configured map paid NOTHING.
+    const resolved = await readMilestoneRecipients({ client: pub, escrow, version: "v2", milestoneIndex, blockNumber: resolvedBlock });
+    expect(resolved.ok).toBe(true);
+    expect(resolved.status).toBe(5); // Released
+    expect(resolved.outcome).toBe("released-by-dispute");
+    expect(resolved.projectionBasis).toBe("actual");
+    const expectedOperatorAward = DISPUTE_AMOUNT + DISPUTE_BOND + CHALLENGER_BOND;
+    expect(resolved.projected).toEqual([
+      { recipient: getAddress(OPERATOR), role: "operator-dispute-award", amount: expectedOperatorAward },
+    ]);
+
+    expect(after.get(OPERATOR)! - before.get(OPERATOR)!).toBe(expectedOperatorAward);
+    expect(after.get(LEG1)! - before.get(LEG1)!).toBe(0n); // the map was bypassed entirely
+    expect(after.get(LEG2)! - before.get(LEG2)!).toBe(0n);
   }, 120_000);
 });

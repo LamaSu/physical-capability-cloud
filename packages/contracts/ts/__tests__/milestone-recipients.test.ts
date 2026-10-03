@@ -29,6 +29,14 @@ const V2_LOCAL_ABI = parseAbi([
   "function tokenForMilestone(uint256 milestoneIndex) view returns (address)",
 ]);
 
+/** `disputes(uint256)` — the auto-generated public-mapping getter for `Dispute`. Also
+ *  missing from the generated ABIs (same gap as V2's `protocolRoot`/`tokenForMilestone`).
+ *  Multiple named outputs decode as a PLAIN ARRAY in viem (verified empirically — names
+ *  on top-level outputs are display-only, unlike a single named-tuple/struct return). */
+const DISPUTE_LOCAL_ABI = parseAbi([
+  "function disputes(uint256) view returns (address challenger, uint256 challengerBond, bytes32 challengerEvidenceHash, string reason, bool resolved, bool challengerWon)",
+]);
+
 const ESCROW: Address = getAddress("0x1000000000000000000000000000000000000001");
 const ROOT: Address = getAddress("0x2000000000000000000000000000000000000002");
 const OPERATOR: Address = getAddress("0x3000000000000000000000000000000000000003");
@@ -36,6 +44,11 @@ const TOKEN: Address = getAddress("0x4000000000000000000000000000000000000004");
 const FEE_RECIPIENT: Address = getAddress("0x5000000000000000000000000000000000000005");
 const LEG1: Address = getAddress("0x6000000000000000000000000000000000000006");
 const LEG2: Address = getAddress("0x7000000000000000000000000000000000000007");
+const PAYER: Address = getAddress("0x8000000000000000000000000000000000000008");
+const CHALLENGER: Address = getAddress("0x9000000000000000000000000000000000000009");
+/** A non-zero EAS UID, as `submitAttestation` writes on a REAL attestation (R2-M1a fix:
+ *  attestation presence is read from this field, never inferred from status). */
+const ATTESTATION_UID: Hex = `0x${"ab".repeat(32)}`;
 const ROLE_A: Hex = `0x${"aa".repeat(32)}`;
 const ROLE_B: Hex = `0x${"bb".repeat(32)}`;
 
@@ -86,6 +99,14 @@ const BASE_MILESTONE_V3: MilestoneFieldsV3 = {
 };
 const mkV3 = (overrides: Partial<MilestoneFieldsV3> = {}): MilestoneFieldsV3 => ({ ...BASE_MILESTONE_V3, ...overrides });
 
+interface DisputeState {
+  challenger: Address;
+  challengerBond: bigint;
+  resolved: boolean;
+  challengerWon: boolean;
+}
+const NO_DISPUTE: DisputeState = { challenger: zeroAddress, challengerBond: 0n, resolved: false, challengerWon: false };
+
 interface StubState {
   chainIds: number[];
   milestoneCount: bigint;
@@ -96,6 +117,8 @@ interface StubState {
   protocolRoot: Address;
   rootFeeBps: bigint;
   rootFeeRecipient: Address;
+  payer: Address;
+  dispute: DisputeState;
   eip1898Unsupported?: boolean;
   blockReadFails?: boolean;
   throwOn?: string;
@@ -111,6 +134,8 @@ const DEFAULT_STATE: StubState = {
   protocolRoot: zeroAddress,
   rootFeeBps: 0n,
   rootFeeRecipient: zeroAddress,
+  payer: PAYER,
+  dispute: NO_DISPUTE,
 };
 
 type Pin = { blockHash: Hex; requireCanonical: boolean };
@@ -121,8 +146,12 @@ type Call = { to: Address; functionName: string; pin: Pin };
  *  the same "cast a partial object through PublicClient" convention this package's other
  *  pinned-call tests use (`ts/__tests__/vnext-preflight.test.ts`). */
 function makeClient(version: "v2" | "v3", overrides: Partial<StubState> = {}): { client: PublicClient; calls: Call[] } {
-  const s: StubState = { ...DEFAULT_STATE, ...overrides };
-  const escrowAbi = (version === "v2" ? [...MilestoneEscrowV2ABI, ...V2_LOCAL_ABI] : MilestoneEscrowV3ABI) as Abi;
+  const s: StubState = { ...DEFAULT_STATE, ...overrides, dispute: { ...NO_DISPUTE, ...overrides.dispute } };
+  const escrowAbi = (
+    version === "v2"
+      ? [...MilestoneEscrowV2ABI, ...V2_LOCAL_ABI, ...DISPUTE_LOCAL_ABI]
+      : [...MilestoneEscrowV3ABI, ...DISPUTE_LOCAL_ABI]
+  ) as Abi;
   const calls: Call[] = [];
   let chainCallIndex = 0;
 
@@ -172,6 +201,17 @@ function makeClient(version: "v2" | "v3", overrides: Partial<StubState> = {}): {
           return reply(s.token);
         case "protocolRoot":
           return reply(s.protocolRoot);
+        case "payer":
+          return reply(s.payer);
+        case "disputes":
+          return reply([
+            s.dispute.challenger,
+            s.dispute.challengerBond,
+            zeroHash, // challengerEvidenceHash — unused by the module
+            "", // reason — unused by the module
+            s.dispute.resolved,
+            s.dispute.challengerWon,
+          ]);
         default:
           throw new Error(`stub: unscripted escrow read ${functionName}`);
       }
@@ -347,10 +387,13 @@ describe("readMilestoneRecipients — V3 fee-from-attestation", () => {
     const amount = 200_000n;
     const operatorBond = 500n;
     const { client } = makeClient("v3", {
+      // R2-M1a fix: a genuinely-Attested V3 milestone always has a real EAS UID — submitAttestation
+      // writes BOTH verifierAttestationUid and the fee fields in the same call, together.
       milestone: mkV3({
         status: MilestoneStatusV3.Attested,
         amount,
         operatorBond,
+        verifierAttestationUid: ATTESTATION_UID,
         attestedFeeBps: 500,
         attestedFeeRecipient: FEE_RECIPIENT,
       }),
@@ -374,10 +417,13 @@ describe("readMilestoneRecipients — V3 fee-from-attestation", () => {
     const amount = 300_000n;
     const operatorBond = 1_000n;
     const { client } = makeClient("v3", {
+      // R2-M1a fix: same reasoning — Attested implies a real EAS UID, even in this
+      // defensive (bps>0, zero-recipient) scenario submitAttestation itself refuses.
       milestone: mkV3({
         status: MilestoneStatusV3.Attested,
         amount,
         operatorBond,
+        verifierAttestationUid: ATTESTATION_UID,
         attestedFeeBps: 500,
         attestedFeeRecipient: zeroAddress,
       }),
@@ -449,7 +495,11 @@ describe("readMilestoneRecipients — never throws; fails closed by name", () =>
     const { client, calls } = makeClient("v2", { eip1898Unsupported: true });
     const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
     expect(r.ok).toBe(false);
+    // R2-L2 added 'escrow-address' as a check BEFORE the pin is even attempted (a valid
+    // ESCROW here, so it passes) — 'pinned-block' remains the only FAILED check, and
+    // nothing past it runs.
     expect(r.checks).toEqual([
+      { name: "escrow-address", ok: true, detail: expect.any(String) },
       { name: "pinned-block", ok: false, detail: expect.stringContaining("EIP-1898") },
     ]);
     expect(calls).toEqual([]); // the first (and only) attempted eth_call threw before any decoded
@@ -574,5 +624,190 @@ describe("readMilestoneRecipients — pins every read to one block, by hash", ()
     const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n, blockNumber: HEAD - 5n });
     expect(r.blockNumber).toBe(HEAD - 5n);
     expect(r.blockHash).toBe(hashOf(HEAD - 5n));
+  });
+});
+
+/**
+ * N102 round 2 — pack 411 (astra, SHIP-WITH-FIXES on #556 @8731dd9b). PHASE 1: each of these
+ * asserts the CORRECT behaviour and must FAIL at 8731dd9b (the bug is real); PHASE 2 (the
+ * source fixes in milestone-recipients.ts) makes them pass. See BRIEF-r2.md and the verdict
+ * at review-packs-for-chatgpt-20260924/411-n102-556-recipients-astra-8731dd9b.astra.verdict.md.
+ */
+describe("N102 round 2 — Phase 1 repro (findings R2-M1a, R2-M1b, R2-M2, R2-L1, R2-L2)", () => {
+  it("R2-M1a: V3 Refunded without any attestation must NOT report the fee as attested, and must NOT project a release", async () => {
+    // Today (8731dd9b, :340): `status >= Attested` is true for Refunded (7 >= 4) by pure
+    // numeric luck, even though reclaimAfterDeadline never touches attestation state —
+    // every attestation field is still the zeroed default from addMilestone.
+    const { client } = makeClient("v3", {
+      milestone: mkV3({ status: MilestoneStatusV3.Refunded, amount: 1000n, operatorBond: 0n }),
+    });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v3", milestoneIndex: 0n });
+    expect(r.fee?.source).not.toBe("attested");
+    expect(r.fee?.final).not.toBe(true);
+    expect(r.projected).toBeUndefined(); // the money went back to the payer, not the operator
+    expect(r.outcome).toBe("refunded");
+    expect(r.projectionBasis).toBeUndefined();
+    expect(r.ok).toBe(true); // fee-known/fee-recipient-set are informational; nothing else failed
+  });
+
+  it("R2-M1b: Released via resolveDispute(false) must project amount+operatorBond+challengerBond to the operator — no fee, no splits", async () => {
+    // Today (8731dd9b, :474): the reader does not read the dispute record at all, so a
+    // Released milestone with a payout map AND a root fee still gets ordinary splits —
+    // even though resolveDispute(false) (MilestoneEscrowV2.sol:1113-1153) bypasses both
+    // entirely and sends the operator amount + operatorBond + challengerBond in full.
+    const amount = 100_000n;
+    const operatorBond = 5_000n;
+    const challengerBond = 2_000n;
+    const { client } = makeClient("v2", {
+      milestone: mkV2({ amount, operatorBond, status: MilestoneStatusV2.Released }),
+      payoutMapSet: true,
+      payoutMap: [{ recipient: LEG1, bps: 3000n, roleTag: ROLE_A, ipId: zeroHash }], // would ordinarily split
+      protocolRoot: ROOT, rootFeeBps: 500n, rootFeeRecipient: FEE_RECIPIENT, // would ordinarily take a fee
+      dispute: { challenger: CHALLENGER, challengerBond, resolved: true, challengerWon: false },
+    });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+    expect(r.outcome).toBe("released-by-dispute");
+    expect(r.projectionBasis).toBe("actual");
+    expect(r.projected).toEqual([
+      { recipient: OPERATOR, role: "operator-dispute-award", amount: amount + operatorBond + challengerBond },
+    ]);
+    expect(r.projected!.reduce((s, p) => s + p.amount, 0n)).toBe(amount + operatorBond + challengerBond);
+  });
+
+  it("R2-M2: a single leg at 6000 bps exceeds MAX_SINGLE_BPS (5000) and must fail 'map-bps-within-bounds'", async () => {
+    // Today (8731dd9b, :385): the bounds re-check has no per-leg ceiling at all.
+    const { client } = makeClient("v2", {
+      payoutMapSet: true,
+      payoutMap: [{ recipient: LEG1, bps: 6000n, roleTag: ROLE_A, ipId: zeroHash }],
+    });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+    expect(r.ok).toBe(false);
+    expect(failed(r)).toEqual(["map-bps-within-bounds"]);
+  });
+
+  it("R2-L1: Unfunded with payoutMapSet:true (even an empty map) is ALREADY final — setPayoutMap is single-shot", async () => {
+    // Today (8731dd9b, :367): recipientsFinal looks only at status, so an Unfunded milestone
+    // always reports false — even though setPayoutMap (V2 :688, V3 :590) can never run again.
+    const { client } = makeClient("v2", {
+      milestone: mkV2({ status: MilestoneStatusV2.Unfunded }),
+      payoutMapSet: true,
+      payoutMap: [],
+    });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+    expect(r.recipientsFinal).toBe(true);
+  });
+
+  it("R2-L2: an invalid escrow address must never throw — ok:false, named 'escrow-address'", async () => {
+    // Today (8731dd9b, :186): `getAddress(params.escrow)` runs before any try/catch, so an
+    // invalid address string throws OUT of readMilestoneRecipients entirely.
+    const { client } = makeClient("v2", {});
+    const r = await readMilestoneRecipients({
+      client,
+      escrow: "not-an-address" as Address,
+      version: "v2",
+      milestoneIndex: 0n,
+    });
+    expect(r.ok).toBe(false);
+    expect(failed(r)).toEqual(["escrow-address"]);
+  });
+});
+
+/**
+ * N102 round 2 — Phase 2 supplementary coverage: the rest of M1's outcome table (BRIEF-r2.md
+ * lines 29-42) not already exercised by the Phase 1 repro tests above. Needed for genuine
+ * mutant-killing coverage of mutants (j)-(m), not just the two findings astra reproduced.
+ */
+describe("N102 round 2 — Phase 2: the full M1 outcome table", () => {
+  it("'pending' for every pre-Released status, with projectionBasis 'conditional'", async () => {
+    for (const status of [
+      MilestoneStatusV2.Funded,
+      MilestoneStatusV2.Locked,
+      MilestoneStatusV2.Evidenced,
+      MilestoneStatusV2.Attested,
+    ]) {
+      const { client } = makeClient("v2", { milestone: mkV2({ status, amount: 1000n, operatorBond: 10n }) });
+      const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+      expect(r.outcome).toBe("pending");
+      expect(r.projectionBasis).toBe("conditional");
+      expect(r.projected).toEqual([{ recipient: OPERATOR, role: "operator-residual", amount: 1010n }]);
+    }
+  });
+
+  it("'released' (ordinary release, no resolved dispute) has projectionBasis 'actual' — distinct from 'released-by-dispute'", async () => {
+    const { client } = makeClient("v2", {
+      milestone: mkV2({ status: MilestoneStatusV2.Released, amount: 1000n, operatorBond: 10n }),
+      // default dispute (NO_DISPUTE): resolved:false — no dispute ever touched this milestone.
+    });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+    expect(r.outcome).toBe("released");
+    expect(r.projectionBasis).toBe("actual");
+    expect(r.projected).toEqual([{ recipient: OPERATOR, role: "operator-residual", amount: 1010n }]);
+  });
+
+  it("'released' through a V2 ROOT is 'estimated', not 'actual': the root's rate is mutable and read at this block", async () => {
+    // The release used the rate at its own block. A later read can only reproduce it if the rate never changed,
+    // so the reader must not claim the amounts are actual.
+    const { client } = makeClient("v2", {
+      milestone: mkV2({ status: MilestoneStatusV2.Released, amount: 1000n, operatorBond: 10n }),
+      protocolRoot: ROOT,
+      rootFeeBps: 235n,
+      rootFeeRecipient: FEE_RECIPIENT,
+    });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+    expect(r.outcome).toBe("released");
+    expect(r.fee?.final).toBe(false);
+    expect(r.projectionBasis).toBe("estimated");
+  });
+
+  it("'slashed': resolveDispute(true) projects a payer-refund AND a challenger-award, summing to amount+operatorBond+challengerBond", async () => {
+    const amount = 50_000n;
+    const operatorBond = 3_000n;
+    const challengerBond = 1_500n;
+    const { client } = makeClient("v2", {
+      milestone: mkV2({ amount, operatorBond, status: MilestoneStatusV2.Slashed }),
+      payer: PAYER,
+      dispute: { challenger: CHALLENGER, challengerBond, resolved: true, challengerWon: true },
+    });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+    expect(r.outcome).toBe("slashed");
+    expect(r.projectionBasis).toBe("actual");
+    expect(r.projected).toEqual([
+      { recipient: PAYER, role: "payer-refund", amount },
+      { recipient: CHALLENGER, role: "challenger-award", amount: challengerBond + operatorBond },
+    ]);
+    expect(r.projected!.reduce((s, p) => s + p.amount, 0n)).toBe(amount + operatorBond + challengerBond);
+  });
+
+  it("'disputed': no projection at all — the arbiter has not yet decided", async () => {
+    const { client } = makeClient("v2", {
+      milestone: mkV2({ status: MilestoneStatusV2.Disputed, amount: 1000n, operatorBond: 10n }),
+      dispute: { challenger: CHALLENGER, challengerBond: 100n, resolved: false, challengerWon: false },
+    });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+    expect(r.outcome).toBe("disputed");
+    expect(r.projectionBasis).toBeUndefined();
+    expect(r.projected).toBeUndefined();
+    expect(r.ok).toBe(true);
+  });
+
+  it("V2 can never reach Refunded on the real contract, but is still handled defensively, the same as V3", async () => {
+    const { client } = makeClient("v2", { milestone: mkV2({ status: MilestoneStatusV2.Refunded, amount: 1000n }) });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+    expect(r.outcome).toBe("refunded");
+    expect(r.projected).toBeUndefined();
+  });
+
+  it("a dispute-read failure gives ok:false, named 'dispute-read', no throw — but status/fee/legs already read are still returned", async () => {
+    const { client } = makeClient("v2", {
+      milestone: mkV2({ amount: 1000n, operatorBond: 10n, status: MilestoneStatusV2.Attested }),
+      throwOn: "disputes",
+    });
+    const r = await readMilestoneRecipients({ client, escrow: ESCROW, version: "v2", milestoneIndex: 0n });
+    expect(r.ok).toBe(false);
+    expect(failed(r)).toEqual(["dispute-read"]);
+    expect(r.status).toBe(MilestoneStatusV2.Attested);
+    expect(r.fee).toEqual({ recipient: null, bps: 0, final: true, source: "none" });
+    expect(r.outcome).toBeUndefined();
+    expect(r.projected).toBeUndefined();
   });
 });
