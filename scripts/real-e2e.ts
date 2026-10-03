@@ -8,6 +8,12 @@
  * 5. Submit evidence hash on-chain
  * 6. Release milestone (settle USDC to operator)
  * 7. Collect everything → print on HP printer
+ *
+ * FC-8 round 3 refactor (astra pack 61b census closure, step 1 of 2 — NO
+ * behavior change in this commit): exported as `run(deps)` with injected
+ * fetch/chain-clients/env. CLI behavior preserved behind the entry guard.
+ * Print statements are byte-for-byte unchanged from before this refactor;
+ * the validated-field fix lands in the next commit.
  */
 
 import {
@@ -21,51 +27,34 @@ import {
   toBytes,
   type Address,
   type Hex,
+  type WalletClient,
+  type PublicClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { safeLogJson, safeLogId, safeLogErrorName } from "../packages/gateway/src/util/redact-log.js";
 
-const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
-if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY"); process.exit(1); }
+/** Thrown for a missing required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
+export class MissingEnvError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingEnvError";
+  }
+}
 
 const GATEWAY = "https://capability.network";
 const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
-const ORACLE_ADDRESS = "0x3850F24ACd88F6729692e2d05F75d499F0a661f5" as Address;
-/**
- * Read a required secret from the environment and exit with a clear message
- * when it is unset. Keys are NEVER committed to this repository (WP-A fold F8:
- * the literal that used to sit here was exposed and is listed for revocation
- * in docs/security/WILDCARD_KEY_ROTATION.md).
- */
-function requireEnv(name: string, what: string): string {
-  const value = process.env[name]?.trim();
+const KERNEL = "kernel-nanoclaw";
+
+function requireEnv(env: Record<string, string | undefined>, name: string, what: string): string {
+  const value = env[name]?.trim();
   if (!value) {
-    console.error(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
-    process.exit(1);
+    throw new MissingEnvError(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
   }
   return value;
-}
-
-const ORACLE_KEY = requireEnv("PCC_ORACLE_KEY", "the oracle's x-oracle-key");
-const KERNEL = "kernel-nanoclaw";
-let USDC: Address; // Will be deployed fresh
-
-const account = privateKeyToAccount(PK);
-const rpc = http("https://sepolia.base.org");
-const wallet = createWalletClient({ account, chain: baseSepolia, transport: rpc });
-const pub = createPublicClient({ chain: baseSepolia, transport: rpc });
-
-// Force fresh nonce on every call to avoid nonce collisions
-async function writeContract(params: any) {
-  const n = await pub.getTransactionCount({ address: account.address });
-  return wallet.writeContract({ ...params, nonce: n });
-}
-async function deployContract(params: any) {
-  const n = await pub.getTransactionCount({ address: account.address });
-  return wallet.deployContract({ ...params, nonce: n });
 }
 
 const ERC20 = [
@@ -101,23 +90,60 @@ const ESCROW_ABI = [
   { name: "getMilestoneCount", type: "function" as const, inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" as const },
 ] as const;
 
-const report: string[] = [];
-function log(msg: string) { console.log(msg); report.push(msg); }
-
-async function waitTx(hash: Hex) {
-  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
-  await new Promise(r => setTimeout(r, 2000)); // let nonce propagate
-  return receipt;
+export interface RunDeps {
+  fetchImpl?: typeof fetch;
+  wallet?: WalletClient;
+  pub?: PublicClient;
+  env?: Record<string, string | undefined>;
+  pollSleepMs?: number;
+  pollAttempts?: number;
 }
 
-async function gw(method: string, path: string, body?: any) {
-  const opts: RequestInit = { method, headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e/1.0" } };
-  if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(`${GATEWAY}${path}`, opts);
-  return r.json();
+export interface RunResult {
+  report: string;
 }
 
-async function main() {
+export async function run(deps: RunDeps = {}): Promise<RunResult> {
+  const env = deps.env ?? process.env;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const pollSleepMs = deps.pollSleepMs ?? 5000;
+  const pollAttempts = deps.pollAttempts ?? 40;
+
+  const PK = (env.PCC_GATEWAY_PRIVATE_KEY || env.DEPLOYER_PRIVATE_KEY) as Hex | undefined;
+  if (!PK) throw new MissingEnvError("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY");
+  const ORACLE_KEY = requireEnv(env, "PCC_ORACLE_KEY", "the oracle's x-oracle-key");
+  let USDC: Address; // Will be deployed fresh
+
+  const account = privateKeyToAccount(PK);
+  const rpc = http("https://sepolia.base.org");
+  const wallet = deps.wallet ?? createWalletClient({ account, chain: baseSepolia, transport: rpc });
+  const pub = deps.pub ?? createPublicClient({ chain: baseSepolia, transport: rpc });
+
+  async function writeContract(params: any) {
+    const n = await pub.getTransactionCount({ address: account.address });
+    return wallet.writeContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
+  }
+  async function deployContract(params: any) {
+    const n = await pub.getTransactionCount({ address: account.address });
+    return wallet.deployContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
+  }
+
+  const report: string[] = [];
+  function log(msg: string) { console.log(msg); report.push(msg); }
+
+  async function waitTx(hash: Hex) {
+    const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+    await new Promise(r => setTimeout(r, pollSleepMs > 0 ? 2000 : 0));
+    return receipt;
+  }
+
+  async function gw(method: string, path: string, body?: any) {
+    const opts: RequestInit = { method, headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e/1.0" } };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetchImpl(`${GATEWAY}${path}`, opts);
+    return r.json();
+  }
+
   log("================================================================");
   log("  PCC REAL END-TO-END PROTOCOL EXECUTION");
   log("  " + new Date().toISOString());
@@ -146,17 +172,14 @@ async function main() {
     bytecode: usdcArtifact.bytecode.object as `0x${string}`,
     args: [parseUnits("1000000", 6)],
   });
-  const usdcReceipt = await waitTx(usdcDeployTx);
+  const usdcReceipt: any = await waitTx(usdcDeployTx);
   USDC = usdcReceipt.contractAddress!;
   log(`    MockUSDC:   ${USDC}`);
   log(`    TX:         ${usdcDeployTx}`);
 
   // 1b. Deploy PCCProtocol (fee factory)
   log("    Deploying PCCProtocol (2.35% fee, oracle-gated)...");
-  // Oracle verifier is immutable on PCCProtocol. Use ORACLE_VERIFIER_ADDRESS
-  // from env (real PCC Verification Oracle) or fall back to the deployer
-  // address so the full E2E can be exercised end-to-end (dev only).
-  const oracleVerifier = (process.env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
+  const oracleVerifier = (env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
   log(`    Oracle verifier: ${oracleVerifier}`);
   const protocolDeployTx = await deployContract({
     abi: protocolArtifact.abi,
@@ -168,7 +191,7 @@ async function main() {
       oracleVerifier,    // oracleVerifier (immutable)
     ],
   });
-  const protocolReceipt = await waitTx(protocolDeployTx);
+  const protocolReceipt: any = await waitTx(protocolDeployTx);
   const PROTOCOL = protocolReceipt.contractAddress!;
   log(`    PCCProtocol: ${PROTOCOL}`);
   log(`    TX:          ${protocolDeployTx}`);
@@ -184,9 +207,8 @@ async function main() {
     args: [account.address, account.address, USDC, cwmId],
   });
   log(`    TX:          ${createEscrowTx}`);
-  const createReceipt = await waitTx(createEscrowTx);
-  // Parse the EscrowCreated event to get the escrow address
-  const escrowLog = createReceipt.logs.find(l => l.topics.length >= 2);
+  const createReceipt: any = await waitTx(createEscrowTx);
+  const escrowLog = createReceipt.logs.find((l: any) => l.topics.length >= 2);
   const ESCROW = ("0x" + (escrowLog?.topics[1]?.slice(26) ?? "")) as Address;
   log(`    Escrow:      ${ESCROW}`);
   log(`    Block:       ${createReceipt.blockNumber}`);
@@ -228,7 +250,7 @@ async function main() {
     args: [],
   });
   log(`    Fund TX:         ${fundTx}`);
-  const fundReceipt = await waitTx(fundTx);
+  const fundReceipt: any = await waitTx(fundTx);
   log(`    Block:           ${fundReceipt.blockNumber}`);
 
   const funded = await pub.readContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "funded" });
@@ -273,11 +295,11 @@ async function main() {
   // ── 5. Wait for execution ─────────────────────────────────────────
   log("[5] WAITING FOR DAEMON EXECUTION...");
   let status = "queued";
-  for (let i = 0; i < 40; i++) {
-    await new Promise(r => setTimeout(r, 5000));
+  for (let i = 0; i < pollAttempts; i++) {
+    await new Promise(r => setTimeout(r, pollSleepMs));
     const s = await gw("GET", `/api/jobs/${jobResult.jobId}/status`);
     status = s.status;
-    process.stdout.write(`    ${i + 1}/40: ${status}   \r`);
+    process.stdout.write(`    ${i + 1}/${pollAttempts}: ${status}   \r`);
     if (status === "completed" || status === "failed") break;
   }
   console.log();
@@ -286,7 +308,7 @@ async function main() {
 
   // ── 6. Capture camera evidence ────────────────────────────────────
   log("[6] CAMERA EVIDENCE");
-  const camResp = await fetch(`${GATEWAY}/api/ot2/camera/latest`);
+  const camResp = await fetchImpl(`${GATEWAY}/api/ot2/camera/latest`);
   const camBytes = parseInt(camResp.headers.get("content-length") ?? "0");
   log(`    Frame:   ${camBytes} bytes (${camResp.headers.get("content-type")})`);
   log("");
@@ -310,7 +332,7 @@ async function main() {
     args: [0n, evidenceHash as Hex],
   });
   log(`    TX:      ${evTx}`);
-  const evReceipt = await waitTx(evTx);
+  const evReceipt: any = await waitTx(evTx);
   log(`    Block:   ${evReceipt.blockNumber}`);
   log(`    Gas:     ${evReceipt.gasUsed}`);
   log("");
@@ -318,7 +340,7 @@ async function main() {
   // ── 8. Oracle verification + attestation ────────────────────────────
   log("[8] REQUESTING ORACLE VERIFICATION");
   log(`    Oracle:  ${ORACLE_URL}`);
-  const oracleReq = await fetch(`${ORACLE_URL}/verify`, {
+  const oracleReq = await fetchImpl(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-oracle-key": ORACLE_KEY },
     body: JSON.stringify({
@@ -332,9 +354,6 @@ async function main() {
   log(`    Status:  ${oracleReq.status}`);
   log(`    Result:  ${safeLogJson(oracleResult)}`);
 
-  // Build the on-chain Attestation struct. The escrow stores
-  // keccak256(abi.encode(attestation)) so the SAME struct must be passed
-  // back to release() for settlement. See IPCCOracle.Attestation.
   const attestationStruct = {
     escrowAddress: ESCROW,
     jobId: jobResult.jobId ?? "job-real-e2e",
@@ -346,8 +365,6 @@ async function main() {
     signature: "0x" as Hex,
   };
 
-  // If oracle pre-submitted its attestation on-chain, acknowledge and move on.
-  // Otherwise we submit the struct ourselves as the authorized verifier.
   if (oracleResult.transactionHash) {
     log(`    Oracle-submitted attest TX: ${oracleResult.transactionHash}`);
     await waitTx(oracleResult.transactionHash);
@@ -370,7 +387,7 @@ async function main() {
     args: [0n, attestationStruct],
   });
   log(`    TX:      ${relTx}`);
-  const relReceipt = await waitTx(relTx);
+  const relReceipt: any = await waitTx(relTx);
   log(`    Block:   ${relReceipt.blockNumber}`);
   log(`    Gas:     ${relReceipt.gasUsed}`);
   log("    SETTLED. USDC released to operator.");
@@ -398,13 +415,17 @@ async function main() {
       filename: "pcc-real-e2e-report.txt",
     },
   });
-  // FC-8 round 2: printResult.error is a raw server error string — never
-  // fall back to printing it; an id-shaped jobId or a static "(none)" only.
   log(`    Print Job: ${safeLogId(printResult.jobId)}`);
   log("");
   log("DONE. Full protocol executed. No mocks.");
+
+  return { report: report.join("\n") };
 }
 
-// FC-8 round 2: e.message is free text that can carry a caught secret; only
-// the bounded error-class name is safe to log here.
-main().catch((e) => { console.error("FATAL:", safeLogErrorName(e)); process.exit(1); });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch((e) => {
+    if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; }
+    console.error("FATAL:", safeLogErrorName(e));
+    process.exitCode = 1;
+  });
+}

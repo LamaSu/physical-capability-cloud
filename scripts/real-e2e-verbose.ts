@@ -2,115 +2,148 @@
  * PCC REAL E2E — FULL TELEMETRY CAPTURE
  * Every HTTP call, every on-chain tx, every response — logged verbatim.
  * Output is the print job content.
+ *
+ * FC-8 round 3 refactor (astra pack 61b census closure, step 1 of 2 — NO
+ * behavior change in this commit): the flow is exported as `run(deps)` with
+ * injected fetch/chain-clients/env so it can be driven by mocks in a test,
+ * instead of only ever running against live services. CLI behavior is
+ * preserved behind the entry guard at the bottom. Every print statement is
+ * byte-for-byte the same as before this refactor — the validated-field fix
+ * lands in the next commit, once the dynamic tests have proven (against
+ * THIS commit) that the census sites still leak a planted canary.
  */
 
 import {
   createWalletClient, createPublicClient, http, parseUnits, formatUnits,
   formatEther, keccak256, toBytes, type Address, type Hex,
+  type WalletClient, type PublicClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { safeLogJson, safeLogResponseText, safeLogErrorName } from "../packages/gateway/src/util/redact-log.js";
 
-const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
-if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY"); process.exit(1); }
+/** Thrown for a missing required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
+export class MissingEnvError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingEnvError";
+  }
+}
 
 const GW = "https://capability.network";
 const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
-/**
- * Read a required secret from the environment and exit with a clear message
- * when it is unset. Keys are NEVER committed to this repository (WP-A fold F8:
- * the literal that used to sit here was exposed and is listed for revocation
- * in docs/security/WILDCARD_KEY_ROTATION.md).
- */
-function requireEnv(name: string, what: string): string {
-  const value = process.env[name]?.trim();
+const KERNEL = "kernel-nanoclaw";
+
+function requireEnv(env: Record<string, string | undefined>, name: string, what: string): string {
+  const value = env[name]?.trim();
   if (!value) {
-    console.error(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
-    process.exit(1);
+    throw new MissingEnvError(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
   }
   return value;
 }
 
-const ORACLE_KEY = requireEnv("PCC_ORACLE_KEY", "the oracle's x-oracle-key");
-const KERNEL = "kernel-nanoclaw";
-
-const account = privateKeyToAccount(PK);
-const rpc = http("https://sepolia.base.org");
-const wallet = createWalletClient({ account, chain: baseSepolia, transport: rpc });
-const pub = createPublicClient({ chain: baseSepolia, transport: rpc });
-
-const log: string[] = [];
-function L(s: string) { console.log(s); log.push(s); }
-function SEP() { L("─".repeat(72)); }
-function BIGSEP() { L("═".repeat(72)); }
-
-// ── Traced HTTP ──────────────────────────────────────────────────────
-let reqNum = 0;
-async function gw(method: string, path: string, body?: any): Promise<any> {
-  const n = ++reqNum;
-  const url = `${GW}${path}`;
-  L(`  [HTTP ${n}] ${method} ${url}`);
-  if (body) L(`  [HTTP ${n}] Body: ${safeLogJson(body, 500)}`);
-  const t0 = Date.now();
-  const opts: RequestInit = {
-    method,
-    headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e-verbose/1.0" },
-  };
-  if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(url, opts);
-  const text = await r.text();
-  const ms = Date.now() - t0;
-  let data: any;
-  try { data = JSON.parse(text); } catch { data = text; }
-  L(`  [HTTP ${n}] ${r.status} ${r.statusText} (${ms}ms)`);
-  L(`  [HTTP ${n}] Response: ${safeLogJson(data, 800)}`);
-  return data;
+export interface RunDeps {
+  fetchImpl?: typeof fetch;
+  wallet?: WalletClient;
+  pub?: PublicClient;
+  env?: Record<string, string | undefined>;
+  pollSleepMs?: number;
+  pollAttempts?: number;
+  reportPath?: string;
 }
 
-// ── Traced on-chain write ────────────────────────────────────────────
-let txNum = 0;
-async function txWrite(label: string, fn: () => Promise<Hex>): Promise<{ hash: Hex; receipt: any }> {
-  const n = ++txNum;
-  L(`  [TX ${n}] ${label}`);
-  const nonce = await pub.getTransactionCount({ address: account.address });
-  L(`  [TX ${n}] Nonce: ${nonce}`);
-  const hash = await fn();
-  L(`  [TX ${n}] Hash: ${hash}`);
-  L(`  [TX ${n}] Explorer: https://sepolia.basescan.org/tx/${hash}`);
-  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
-  await new Promise(r => setTimeout(r, 2000));
-  L(`  [TX ${n}] Block: ${receipt.blockNumber} | Gas: ${receipt.gasUsed} | Status: ${receipt.status}`);
-  if (receipt.logs.length > 0) {
-    L(`  [TX ${n}] Events: ${receipt.logs.length} log(s)`);
-    for (const lg of receipt.logs.slice(0, 3)) {
-      L(`  [TX ${n}]   topic0: ${lg.topics[0]?.slice(0, 20)}... addr: ${lg.address}`);
-    }
+export interface RunResult {
+  report: string;
+  log: string[];
+}
+
+export async function run(deps: RunDeps = {}): Promise<RunResult> {
+  const env = deps.env ?? process.env;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const pollSleepMs = deps.pollSleepMs ?? 5000;
+  const pollAttempts = deps.pollAttempts ?? 40;
+  const reportPath = deps.reportPath ?? "/tmp/pcc-e2e-report.txt";
+
+  const PK = (env.PCC_GATEWAY_PRIVATE_KEY || env.DEPLOYER_PRIVATE_KEY) as Hex | undefined;
+  if (!PK) throw new MissingEnvError("Set PCC_GATEWAY_PRIVATE_KEY");
+  const ORACLE_KEY = requireEnv(env, "PCC_ORACLE_KEY", "the oracle's x-oracle-key");
+
+  const account = privateKeyToAccount(PK);
+  const rpc = http("https://sepolia.base.org");
+  const wallet = deps.wallet ?? createWalletClient({ account, chain: baseSepolia, transport: rpc });
+  const pub = deps.pub ?? createPublicClient({ chain: baseSepolia, transport: rpc });
+
+  const log: string[] = [];
+  function L(s: string) { console.log(s); log.push(s); }
+  function SEP() { L("─".repeat(72)); }
+  function BIGSEP() { L("═".repeat(72)); }
+
+  // ── Traced HTTP ──────────────────────────────────────────────────────
+  let reqNum = 0;
+  async function gw(method: string, path: string, body?: any): Promise<any> {
+    const n = ++reqNum;
+    const url = `${GW}${path}`;
+    L(`  [HTTP ${n}] ${method} ${url}`);
+    if (body) L(`  [HTTP ${n}] Body: ${safeLogJson(body, 500)}`);
+    const t0 = Date.now();
+    const opts: RequestInit = {
+      method,
+      headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e-verbose/1.0" },
+    };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetchImpl(url, opts);
+    const text = await r.text();
+    const ms = Date.now() - t0;
+    let data: any;
+    try { data = JSON.parse(text); } catch { data = text; }
+    L(`  [HTTP ${n}] ${r.status} ${r.statusText} (${ms}ms)`);
+    L(`  [HTTP ${n}] Response: ${safeLogJson(data, 800)}`);
+    return data;
   }
-  return { hash, receipt };
-}
 
-async function deploy(label: string, params: any): Promise<{ hash: Hex; receipt: any; address: Address }> {
-  const r = await txWrite(label, async () => {
-    const n = await pub.getTransactionCount({ address: account.address });
-    return wallet.deployContract({ ...params, nonce: n });
-  });
-  const addr = r.receipt.contractAddress!;
-  L(`  [TX ${txNum}] Contract: ${addr}`);
-  return { ...r, address: addr };
-}
+  // ── Traced on-chain write ────────────────────────────────────────────
+  let txNum = 0;
+  async function txWrite(label: string, fn: () => Promise<Hex>): Promise<{ hash: Hex; receipt: any }> {
+    const n = ++txNum;
+    L(`  [TX ${n}] ${label}`);
+    const nonce = await pub.getTransactionCount({ address: account.address });
+    L(`  [TX ${n}] Nonce: ${nonce}`);
+    const hash = await fn();
+    L(`  [TX ${n}] Hash: ${hash}`);
+    L(`  [TX ${n}] Explorer: https://sepolia.basescan.org/tx/${hash}`);
+    const receipt: any = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+    await new Promise(r => setTimeout(r, pollSleepMs > 0 ? 2000 : 0));
+    L(`  [TX ${n}] Block: ${receipt.blockNumber} | Gas: ${receipt.gasUsed} | Status: ${receipt.status}`);
+    if (receipt.logs.length > 0) {
+      L(`  [TX ${n}] Events: ${receipt.logs.length} log(s)`);
+      for (const lg of receipt.logs.slice(0, 3)) {
+        L(`  [TX ${n}]   topic0: ${lg.topics[0]?.slice(0, 20)}... addr: ${lg.address}`);
+      }
+    }
+    return { hash, receipt };
+  }
 
-async function write(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
-  return txWrite(label, async () => {
-    const n = await pub.getTransactionCount({ address: account.address });
-    return wallet.writeContract({ ...params, nonce: n });
-  });
-}
+  async function deploy(label: string, params: any): Promise<{ hash: Hex; receipt: any; address: Address }> {
+    const r = await txWrite(label, async () => {
+      const n = await pub.getTransactionCount({ address: account.address });
+      return wallet.deployContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
+    });
+    const addr = r.receipt.contractAddress!;
+    L(`  [TX ${txNum}] Contract: ${addr}`);
+    return { ...r, address: addr };
+  }
 
-async function main() {
+  async function write(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
+    return txWrite(label, async () => {
+      const n = await pub.getTransactionCount({ address: account.address });
+      return wallet.writeContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
+    });
+  }
+
   BIGSEP();
   L("  PCC PHYSICAL CAPABILITY CLOUD — FULL TELEMETRY CAPTURE");
   L(`  ${new Date().toISOString()}`);
@@ -149,16 +182,8 @@ async function main() {
   // 1b. PCCProtocol
   SEP();
   L("[1b] Deploy PCCProtocol (fee factory, 2.35%)");
-  // oracle verifier must be deployed first (or pass a known address).
-  // For the telemetry run we deploy a throwaway mock oracle that approves
-  // anything with verified=true so the E2E can exercise the full oracle-gated
-  // path end-to-end. Production deploys pass the PCC Oracle Verifier address.
   L("     Deploying test MockPCCOracle (verified=true bypass)...");
-  // Inline minimal oracle contract bytecode would be shipped via a compiled
-  // artifact; for now we expect the user to have deployed one and passed
-  // via env, OR we reuse the deployer as a no-op oracle address. The
-  // safe default for Base Sepolia is to point at a known-good oracle.
-  const ORACLE_VERIFIER = (process.env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
+  const ORACLE_VERIFIER = (env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
   L(`     Oracle verifier: ${ORACLE_VERIFIER}`);
   const prot = await deploy("PCCProtocol.deploy(feeRecipient, 235bps, governor, oracleVerifier)", {
     abi: protArt.abi, bytecode: protArt.bytecode.object as `0x${string}`,
@@ -301,8 +326,8 @@ async function main() {
   SEP();
   L("[5a] Polling job status every 5s — waiting for daemon to pick up and execute");
   let status = "queued";
-  for (let i = 0; i < 40; i++) {
-    await new Promise(r => setTimeout(r, 5000));
+  for (let i = 0; i < pollAttempts; i++) {
+    await new Promise(r => setTimeout(r, pollSleepMs));
     const s = await gw("GET", `/api/jobs/${jobResult.jobId}/status`);
     status = s.status;
     L(`     Poll ${i + 1}: ${status} (progress=${s.progress})`);
@@ -322,7 +347,7 @@ async function main() {
 
   SEP();
   L("[6a] Camera frame from OT-2 (latest JPEG pushed by daemon)");
-  const camResp = await fetch(`${GW}/api/ot2/camera/latest`, {
+  const camResp = await fetchImpl(`${GW}/api/ot2/camera/latest`, {
     headers: { "User-Agent": "pcc-e2e-verbose/1.0" },
   });
   const camBytes = parseInt(camResp.headers.get("content-length") ?? "0");
@@ -374,23 +399,18 @@ async function main() {
   SEP();
   L("[7b] Request oracle verification");
   L(`     Oracle URL: ${ORACLE_URL}`);
-  const oracleReq = await fetch(`${ORACLE_URL}/verify`, {
+  const oracleReq = await fetchImpl(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-oracle-key": ORACLE_KEY },
     body: JSON.stringify({ escrowAddress: ESCROW, milestoneIndex: 0, evidenceHash, jobId: jobResult.jobId }),
   });
   const oracleText = await oracleReq.text();
-  // FC-8 round 2: the oracle response may reflect the x-oracle-key or carry a
-  // secret in a non-JSON error body; parse-then-redact, or withhold entirely.
   L(`     Oracle HTTP ${oracleReq.status}: ${safeLogResponseText(oracleText, 500)}`);
   L("");
 
   // 7c. Attestation
   SEP();
   L("[7c] Submit oracle-signed attestation (arbiter sign-off)");
-  // Build the on-chain Attestation struct. MilestoneEscrow computes
-  // keccak256(abi.encode(attestation)) and binds the milestone to it, so
-  // release(...) later must pass the same struct back in verbatim.
   const attestationStruct = {
     escrowAddress: ESCROW,
     jobId: jobResult.jobId ?? "job-telemetry",
@@ -471,8 +491,6 @@ async function main() {
     kernelId: KERNEL,
     operatorDid: `did:pcc:${KERNEL}`,
   });
-  // FC-8 round 2: the provisioning response's error field is a raw server
-  // string — never print it; "no" is all a failure needs to say here.
   L(`     Provisioned: ${litProvision.usageKey ? "yes" : "no"}`);
   L("");
 
@@ -598,8 +616,8 @@ async function main() {
   BIGSEP();
 
   const report = log.join("\n");
-  writeFileSync("/tmp/pcc-e2e-report.txt", report);
-  L(`Report written to /tmp/pcc-e2e-report.txt (${report.length} bytes)`);
+  writeFileSync(reportPath, report);
+  L(`Report written to ${reportPath} (${report.length} bytes)`);
   L("");
 
   SEP();
@@ -618,9 +636,14 @@ async function main() {
   BIGSEP();
   L("  DONE. Every interaction logged. No mocks.");
   BIGSEP();
+
+  return { report, log };
 }
 
-// FC-8 round 2: e.shortMessage/e.message is free text that can carry a
-// caught secret (e.g. a header value embedded in a fetch/dependency error);
-// only the bounded error-class name is safe to log here.
-main().catch(e => { L(`FATAL: ${safeLogErrorName(e)}`); process.exit(1); });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch(e => {
+    if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; }
+    console.error(`FATAL: ${safeLogErrorName(e)}`);
+    process.exitCode = 1;
+  });
+}

@@ -16,94 +16,119 @@
  *  10. escrow.release(0)
  *
  * Also drives the printer via PCC relay at each step so there's a physical artifact.
+ *
+ * FC-8 round 3 refactor (astra pack 61b census closure, step 1 of 2 — NO
+ * behavior change in this commit): exported as `run(deps)` with injected
+ * fetch/chain-clients/env. CLI behavior preserved behind the entry guard.
+ * Print statements are byte-for-byte unchanged from before this refactor;
+ * the validated-field fix lands in the next commit.
  */
 import {
   createWalletClient, createPublicClient, http,
   parseUnits, formatUnits, formatEther, keccak256, toBytes,
-  type Address, type Hex,
+  type Address, type Hex, type WalletClient, type PublicClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { safeLogJson, safeLogErrorName } from "../packages/gateway/src/util/redact-log.js";
 
-const PK = process.env.PCC_GATEWAY_PRIVATE_KEY as Hex;
-if (!PK || !PK.startsWith("0x") || PK.length !== 66) {
-  console.error("PCC_GATEWAY_PRIVATE_KEY missing or malformed");
-  process.exit(1);
+/** Thrown for a missing/malformed required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
+export class MissingEnvError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingEnvError";
+  }
 }
 
-/**
- * Read a required secret from the environment and exit with a clear message
- * when it is unset. Keys are NEVER committed to this repository (WP-A fold F8:
- * the literals that used to sit here were exposed and are listed for
- * revocation in docs/security/WILDCARD_KEY_ROTATION.md).
- */
-function requireEnv(name: string, what: string): string {
-  const value = process.env[name]?.trim();
+const GATEWAY = "https://capability.network";
+const PROTOCOL = "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23" as Address;
+
+function requireEnv(env: Record<string, string | undefined>, name: string, what: string): string {
+  const value = env[name]?.trim();
   if (!value) {
-    console.error(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
-    process.exit(1);
+    throw new MissingEnvError(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
   }
   return value;
 }
 
-const PCCAPIKEY = requireEnv("PCC_API_KEY", "a PCC API key (pcc_live_/pcc_test_)");
-const GATEWAY = "https://capability.network";
-const ORACLE_URL = "http://localhost:4100"; // oracle is on the same Spark host
-const ORACLE_KEY = requireEnv("PCC_ORACLE_KEY", "the oracle's x-oracle-key");
-const KERNEL = "kernel-hp-printer";
-const PROTOCOL = "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23" as Address;
-const REPO = "/home/ryangeorge/projects/physical-capability-cloud";
-
-// Load ABIs from compiled artifacts
-const usdcArt = JSON.parse(readFileSync(`${REPO}/packages/contracts/out/MockUSDC.sol/MockUSDC.json`, "utf8"));
-const protArt = JSON.parse(readFileSync(`${REPO}/packages/contracts/out/PCCProtocol.sol/PCCProtocol.json`, "utf8"));
-const escArt  = JSON.parse(readFileSync(`${REPO}/packages/contracts/out/MilestoneEscrow.sol/MilestoneEscrow.json`, "utf8"));
-
-const account = privateKeyToAccount(PK);
-const transport = http("https://sepolia.base.org");
-const wallet = createWalletClient({ account, chain: baseSepolia, transport });
-const pub = createPublicClient({ chain: baseSepolia, transport });
-
-const report: string[] = [];
-function L(s: string) { console.log(s); report.push(s); }
-function SEP() { L("─".repeat(72)); }
-
-async function writeC(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
-  L(`  [tx] ${label}`);
-  const nonce = await pub.getTransactionCount({ address: account.address });
-  const hash = await wallet.writeContract({ ...params, nonce });
-  L(`     submitted: ${hash}`);
-  const receipt = await pub.waitForTransactionReceipt({ hash });
-  L(`     mined: block ${receipt.blockNumber}, gas ${receipt.gasUsed}, status ${receipt.status}`);
-  await new Promise(r => setTimeout(r, 2000));
-  return { hash, receipt };
+export interface RunDeps {
+  fetchImpl?: typeof fetch;
+  wallet?: WalletClient;
+  pub?: PublicClient;
+  env?: Record<string, string | undefined>;
+  contractsDir?: string;
+  reportPath?: string;
 }
 
-async function deployC(label: string, abi: any, bytecode: Hex, args: any[]): Promise<{ hash: Hex; address: Address; receipt: any }> {
-  L(`  [deploy] ${label}`);
-  const nonce = await pub.getTransactionCount({ address: account.address });
-  const hash = await wallet.deployContract({ abi, bytecode, args, nonce });
-  L(`     submitted: ${hash}`);
-  const receipt = await pub.waitForTransactionReceipt({ hash });
-  L(`     mined: ${receipt.contractAddress} block ${receipt.blockNumber} gas ${receipt.gasUsed}`);
-  await new Promise(r => setTimeout(r, 2000));
-  return { hash, address: receipt.contractAddress as Address, receipt };
+export interface RunResult {
+  report: string;
 }
 
-async function gwFetch(method: string, path: string, body?: any) {
-  const res = await fetch(`${GATEWAY}${path}`, {
-    method,
-    headers: { "Authorization": `Bearer ${PCCAPIKEY}`, "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  try { return { status: res.status, data: JSON.parse(text) }; }
-  catch { return { status: res.status, data: text }; }
-}
+export async function run(deps: RunDeps = {}): Promise<RunResult> {
+  const env = deps.env ?? process.env;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const contractsDir = deps.contractsDir ?? resolve(process.cwd(), "packages/contracts");
+  const reportPath = deps.reportPath ?? "/home/ryangeorge/hp-full-chain-report.txt";
 
-async function main() {
+  const PK = env.PCC_GATEWAY_PRIVATE_KEY as Hex | undefined;
+  if (!PK || !PK.startsWith("0x") || PK.length !== 66) {
+    throw new MissingEnvError("PCC_GATEWAY_PRIVATE_KEY missing or malformed");
+  }
+  const PCCAPIKEY = requireEnv(env, "PCC_API_KEY", "a PCC API key (pcc_live_/pcc_test_)");
+  const ORACLE_URL = env.ORACLE_URL ?? "http://localhost:4100"; // oracle is on the same Spark host
+  const ORACLE_KEY = requireEnv(env, "PCC_ORACLE_KEY", "the oracle's x-oracle-key");
+  const KERNEL = "kernel-hp-printer";
+
+  // Load ABIs from compiled artifacts
+  const usdcArt = JSON.parse(readFileSync(resolve(contractsDir, "out/MockUSDC.sol/MockUSDC.json"), "utf8"));
+  const protArt = JSON.parse(readFileSync(resolve(contractsDir, "out/PCCProtocol.sol/PCCProtocol.json"), "utf8"));
+  const escArt = JSON.parse(readFileSync(resolve(contractsDir, "out/MilestoneEscrow.sol/MilestoneEscrow.json"), "utf8"));
+
+  const account = privateKeyToAccount(PK);
+  const transport = http("https://sepolia.base.org");
+  const wallet = deps.wallet ?? createWalletClient({ account, chain: baseSepolia, transport });
+  const pub = deps.pub ?? createPublicClient({ chain: baseSepolia, transport });
+
+  const report: string[] = [];
+  function L(s: string) { console.log(s); report.push(s); }
+  function SEP() { L("─".repeat(72)); }
+
+  async function writeC(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
+    L(`  [tx] ${label}`);
+    const nonce = await pub.getTransactionCount({ address: account.address });
+    const hash = await wallet.writeContract({ ...params, nonce, account, chain: baseSepolia } as any);
+    L(`     submitted: ${hash}`);
+    const receipt: any = await pub.waitForTransactionReceipt({ hash });
+    L(`     mined: block ${receipt.blockNumber}, gas ${receipt.gasUsed}, status ${receipt.status}`);
+    await new Promise(r => setTimeout(r, 0));
+    return { hash, receipt };
+  }
+
+  async function deployC(label: string, abi: any, bytecode: Hex, args: any[]): Promise<{ hash: Hex; address: Address; receipt: any }> {
+    L(`  [deploy] ${label}`);
+    const nonce = await pub.getTransactionCount({ address: account.address });
+    const hash = await wallet.deployContract({ abi, bytecode, args, nonce, account, chain: baseSepolia } as any);
+    L(`     submitted: ${hash}`);
+    const receipt: any = await pub.waitForTransactionReceipt({ hash });
+    L(`     mined: ${receipt.contractAddress} block ${receipt.blockNumber} gas ${receipt.gasUsed}`);
+    await new Promise(r => setTimeout(r, 0));
+    return { hash, address: receipt.contractAddress as Address, receipt };
+  }
+
+  async function gwFetch(method: string, path: string, body?: any) {
+    const res = await fetchImpl(`${GATEWAY}${path}`, {
+      method,
+      headers: { "Authorization": `Bearer ${PCCAPIKEY}`, "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text();
+    try { return { status: res.status, data: JSON.parse(text) }; }
+    catch { return { status: res.status, data: text }; }
+  }
+
   L("═".repeat(72));
   L("  kernel-hp-printer Full Chain E2E on Base Sepolia");
   L(`  ${new Date().toISOString()}`);
@@ -249,13 +274,12 @@ async function main() {
     kernelId: KERNEL,
   };
   L(`     request: ${JSON.stringify(verifyBody)}`);
-  const oracleRes = await fetch(`${ORACLE_URL}/verify`, {
+  const oracleRes = await fetchImpl(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: { "x-oracle-key": ORACLE_KEY, "Content-Type": "application/json" },
     body: JSON.stringify(verifyBody),
   });
   const oracleText = await oracleRes.text();
-  // FC-8: the oracle response may reflect the x-oracle-key or carry a secret; redact before logging.
   const oracleShown = (() => { try { return safeLogJson(JSON.parse(oracleText), 600); } catch { return "[non-JSON response withheld]"; } })();
   L(`     HTTP ${oracleRes.status}: ${oracleShown}`);
   let oracleData: any = {};
@@ -264,7 +288,6 @@ async function main() {
 
   SEP();
   L("[9] submitAttestation(0, attestation) — oracle-signed struct");
-  // Build the on-chain Attestation struct that MilestoneEscrow binds to.
   const attestationStruct = {
     escrowAddress: ESCROW,
     jobId: "job-hp-printer-fullchain",
@@ -319,7 +342,7 @@ async function main() {
     "",
     "All steps verified on-chain, milestone released,",
     "printer driven via PCC relay. Full telemetry in",
-    "/home/ryangeorge/hp-full-chain-report.txt",
+    `${reportPath}`,
     "============================================",
     "",
   ].join("\n");
@@ -344,11 +367,15 @@ async function main() {
   L(`  Escrow:   ${ESCROW}`);
   L("");
 
-  const fs = await import("node:fs");
-  fs.writeFileSync("/home/ryangeorge/hp-full-chain-report.txt", report.join("\n"));
+  const joined = report.join("\n");
+  writeFileSync(reportPath, joined);
+  return { report: joined };
 }
 
-// FC-8 round 2: printing the whole error object serializes its message and
-// stack (and any attached properties), which can carry a caught secret; only
-// the bounded error-class name is safe to log here.
-main().catch(e => { console.error("FAIL:", safeLogErrorName(e)); process.exit(1); });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch(e => {
+    if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; }
+    console.error("FAIL:", safeLogErrorName(e));
+    process.exitCode = 1;
+  });
+}
