@@ -305,6 +305,12 @@ export function beginSettlement(
   if (settlementLeases.has(escrow.id)) return { disposition: "busy", ...row };
   if (SETTLEMENT_CLOSED_ESCROW_STATUSES.has(escrow.status)) return { disposition: "blocked", ...row };
 
+  // N79 round 4 (R4-M2, astra 126b Q3 MEDIUM): resolve every fallible piece of the claim BEFORE the compare-and-set
+  // and BEFORE the lease is inserted. `jobOfEscrow` runs a DB query that can throw; if it threw after the lease was
+  // in the map, the caller never receives a claim and can never reach `endSettlement()`, leaking the lease (and, for
+  // the CAS branch, leaving the row `completing` with nothing holding it) until restart.
+  const resolvedJobId = ref.jobId ?? jobOfEscrow(escrow.cwmId);
+
   let disposition: "acquired" | "adopted" | "leased";
   let prior: string | undefined;
   let leasedStatus = escrow.status;
@@ -332,7 +338,14 @@ export function beginSettlement(
 
   const token = Symbol(`settlement:${escrow.id}`);
   settlementLeases.set(escrow.id, token);
-  return { disposition, claim: { escrowId: escrow.id, token, prior, leasedStatus, jobId: ref.jobId ?? jobOfEscrow(escrow.cwmId) } };
+  try {
+    // Nothing here is expected to throw — `resolvedJobId` was already computed above, before the lease existed —
+    // but defence in depth (R4-M2): if it somehow does, the lease must not outlive this call.
+    return { disposition, claim: { escrowId: escrow.id, token, prior, leasedStatus, jobId: resolvedJobId } };
+  } catch (err) {
+    if (settlementLeases.get(escrow.id) === token) settlementLeases.delete(escrow.id);
+    throw err;
+  }
 }
 
 /** Drop the lease, only if it is this claim's. Idempotent; every claimant calls it in a `finally`. */

@@ -13,12 +13,14 @@
 
 import type { EvidenceBundle } from "@pcc/spec";
 import { isFabricated } from "@pcc/spec";
+import { isAddress, getAddress } from "viem";
 import type { Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos } from "../db.js";
 import {
   beginSettlement,
   endSettlement,
+  escrowForJob,
   givenBackEscrow,
   recordMilestoneReleased,
   releaseEscrowFromSettlement,
@@ -45,6 +47,13 @@ export interface SettlementResult {
   releaseTxHash?: string;
   settled: boolean;
   error?: string;
+  /**
+   * N79 round 4 (R4-M3, astra 126b Q5 MEDIUM): set (to `false`), with `reconcile`, only when auto-release's
+   * underlying {@link ReleaseResult} came back CONFIRMED on-chain but its bookkeeping failed. `settled` stays
+   * chain truth either way; this says the DB still needs reconciling. Absent on a normal settlement.
+   */
+  recorded?: false;
+  reconcile?: "required";
 }
 
 export interface ReleaseResult {
@@ -277,7 +286,11 @@ export class SettlementService {
 
                   try {
                     const repos = getRepos();
-                    repos.jobs.updateStatus(jobId, "evidence_submitted");
+                    // N79 round 4 (R4-H2, astra 126b Q4 HIGH): record the EXACT bundle this call just submitted, in
+                    // the SAME write that marks the job evidence_submitted. Resume requires this id (below) and no
+                    // longer falls back to "whatever evidence row is latest" — a relay row appended after this call
+                    // must never become the hash a resume settles on.
+                    repos.jobs.update(jobId, { evidenceBundleId: bundle.id, status: "evidence_submitted" });
                   } catch {
                     // DB update non-fatal
                   }
@@ -388,8 +401,21 @@ export class SettlementService {
                   if (releaseResult.status === "released") {
                     result.releaseTxHash = releaseResult.txHash;
                     result.settled = true;
+                    // N79 round 4 (R4-M3, astra 126b Q5 MEDIUM): a confirmed-on-chain release whose DB bookkeeping
+                    // failed (F5) sets `recorded: false` / `reconcile: "required"` on the release result. Auto-release
+                    // used to check only `status === "released"` and report an unqualified settled success, hiding
+                    // that the escrow still needs reconciling. `settled` stays chain truth either way.
+                    if (releaseResult.recorded === false) {
+                      result.recorded = false;
+                      result.reconcile = releaseResult.reconcile;
+                    }
                     pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
-                      metadata: { released: true, txHash: result.releaseTxHash, contractAddress },
+                      metadata: {
+                        released: true,
+                        txHash: result.releaseTxHash,
+                        contractAddress,
+                        ...(result.recorded === false ? { recorded: false, reconcile: result.reconcile } : {}),
+                      },
                     });
                     auditService.log({
                       eventType: "settlement.completed",
@@ -402,6 +428,7 @@ export class SettlementService {
                         txHash: result.releaseTxHash,
                         contractAddress,
                         autoRelease: true,
+                        ...(result.recorded === false ? { recorded: false, reconcile: result.reconcile } : {}),
                       },
                     });
                   }
@@ -465,25 +492,46 @@ export class SettlementService {
       };
     }
 
+    // N79 round 4 (R4-H1, astra 126b Q1 HIGH): resolve ONE escrow before any claim or chain call. The target is the
+    // caller's contractAddress, else the JOB's own escrow's address, else the env default. When the job has its own
+    // escrow, the target must name THAT exact row: a caller supplying a different escrow's address (or a stale env
+    // default, for a job whose escrow is a per-job V2 clone) is refused here, before the chain and before any
+    // lease. Without this, the service could lease the job's own escrow while releasing, and recording the release
+    // against, a completely different one.
+    const jobRow = escrowForJob(jobId);
     if (!contractAddress) {
-      const defaultAddr = process.env.ESCROW_CONTRACT_ADDRESS;
-      if (!defaultAddr) {
-        return {
-          jobId,
-          txHash: "",
-          status: "failed",
-          error: "no_contract_address",
-        };
+      contractAddress = jobRow?.contractAddress ?? process.env.ESCROW_CONTRACT_ADDRESS;
+    }
+    if (!contractAddress) {
+      return {
+        jobId,
+        txHash: "",
+        status: "failed",
+        error: "no_contract_address",
+      };
+    }
+    if (jobRow) {
+      let targetIsJobsOwnEscrow = false;
+      try {
+        targetIsJobsOwnEscrow =
+          contractAddress === jobRow.contractAddress ||
+          (isAddress(contractAddress) &&
+            isAddress(jobRow.contractAddress) &&
+            getAddress(contractAddress) === getAddress(jobRow.contractAddress));
+      } catch {
+        targetIsJobsOwnEscrow = false;
       }
-      contractAddress = defaultAddr;
+      if (!targetIsJobsOwnEscrow) {
+        return { jobId, txHash: "", status: "failed", error: "escrow_mismatch" };
+      }
     }
 
-    // N79: this release owns the job's escrow from here, synchronously after the checks above and before any await (a
+    // N79: this release owns the resolved escrow from here, synchronously after the checks above and before any await (a
     // lease: no refund lands while the chain call is out, and no second settlement acts on the escrow meanwhile; astra
-    // rounds 2 and 3). The job's own escrow, else the one named by contractAddress; neither is a release with nothing to
-    // protect. An escrow another settlement holds, or one that is not releasable, is refused before the chain is touched.
-    let begun = beginSettlement({ jobId });
-    if (begun.disposition === "no_escrow") begun = beginSettlement({ contractAddress });
+    // rounds 2 and 3). Claimed by ITS OWN id when the job has an escrow — never by address alone, which is what let a
+    // release lease one row and act on another — otherwise by the resolved address. An escrow another settlement
+    // holds, or one that is not releasable, is refused before the chain is touched.
+    const begun = jobRow ? beginSettlement({ escrowId: jobRow.id }) : beginSettlement({ contractAddress });
     if (begun.disposition === "busy") {
       return { jobId, txHash: "", status: "failed", error: "settlement_in_progress" };
     }

@@ -251,9 +251,11 @@ export const releaseMilestoneByJobActivity = defineActivity<
     maximumAttempts: 5,
     backoffCoefficient: 2,
     // escrow_refunded (N79): the escrow was given back; retrying cannot change that. escrow_not_releasable (N79 round 3):
-    // the escrow is in a state no release can start from, and a retry will not change it either. settlement_in_progress
-    // is NOT listed: another settlement holds the escrow, and a retry after it finishes can succeed.
-    nonRetryableErrorPatterns: ["write_disabled", "BadRequestError", "escrow_refunded", "escrow_not_releasable"],
+    // the escrow is in a state no release can start from, and a retry will not change it either. escrow_mismatch (N79
+    // round 4, R4-H1): the job's escrow and the supplied/default contract address name different rows; a retry sends
+    // the exact same mismatched pair. settlement_in_progress is NOT listed: another settlement holds the escrow, and a
+    // retry after it finishes can succeed.
+    nonRetryableErrorPatterns: ["write_disabled", "BadRequestError", "escrow_refunded", "escrow_not_releasable", "escrow_mismatch"],
   },
   deriveKey: (ctx) => {
     const [jobId, milestoneIdx] = ctx.args;

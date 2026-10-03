@@ -1709,13 +1709,14 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
       // Reuse the existing evidence bundle — never rebuild. Its absence means an
       // inconsistent row; release the claim and refuse rather than settle blind.
-      // N79 round 3: the bundle THIS job's /complete recorded (`jobs.evidenceBundleId`), not merely the latest row for
-      // the job. Other paths append rows for any job (the operator relay has no owner check, N85), and a resume must
-      // never settle on one of those. Only a job with no recorded bundle id (a row from before /complete wrote it) falls
-      // back to the latest row.
+      // N79 round 4 (R4-H2, astra 126b Q4 HIGH): EVERY resume requires the job's OWN recorded bundle id
+      // (`jobs.evidenceBundleId`), matching an actual evidence row — not only a terminal-failure resume (round 3's
+      // `recoverableFailure` gate above), and never a fallback to "the latest row for the job". Other paths append
+      // rows for any job (the operator relay has no owner check, N85), and a resume must never settle on one of
+      // those merely because this job happens to have no recorded id yet (e.g. a legacy row from before every
+      // producer stored one — see the operator reconciliation note in the round-4 report, not run here).
       const bundles = repos.evidence.findByJob(jobId);
-      const latestBundle =
-        (recordedBundleId !== null ? bundles.find((b) => b.id === recordedBundleId) : bundles[bundles.length - 1]) ?? null;
+      const latestBundle = recordedBundleId !== null ? bundles.find((b) => b.id === recordedBundleId) ?? null : null;
       if (!latestBundle) {
         repos.jobs.updateStatus(jobId, priorStatus);
         resumedFrom = undefined;
@@ -1729,7 +1730,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           }
         }
         return reply.status(409).send({
-          error: "No evidence bundle found to resume; cannot settle without evidence",
+          error: "no_recorded_evidence_bundle",
+          message: "This job has no recorded evidence bundle id matching an evidence row; cannot settle without one.",
           status: priorStatus,
         });
       }

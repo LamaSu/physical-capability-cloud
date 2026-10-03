@@ -307,8 +307,14 @@ function moneyView(status: string, vocabulary: MoneyStateView["vocabulary"]): Mo
 const MILESTONE_RELEASED = new Set(["RELEASED", "SETTLED_RELEASED"]);
 /** A milestone word that may or may not mean released: never read either way. */
 const MILESTONE_AMBIGUOUS = new Set(["COMPLETED"]);
-/** Milestone words that say the payer was refunded. */
+/** Milestone words that say the payer's refund is COMPLETE. */
 const MILESTONE_REFUNDED = new Set(["REFUNDED", "SETTLED_REFUNDED"]);
+/**
+ * N79 round 4 (R4-H4, astra 126d): the milestone word for a refund the gateway decided but has not executed
+ * on-chain yet — distinct from {@link MILESTONE_REFUNDED}, which is a refund already done. Read explicitly so a
+ * pending refund and a completed refund can be told apart on either side of the reconciliation.
+ */
+const MILESTONE_REFUND_PENDING = new Set(["REFUND_PENDING"]);
 /** Escrow words (escrows.status) that claim everything in the escrow was released. */
 const ESCROW_ALL_RELEASED = new Set(["COMPLETED", "RELEASED", "SETTLED_RELEASED"]);
 /**
@@ -316,6 +322,10 @@ const ESCROW_ALL_RELEASED = new Set(["COMPLETED", "RELEASED", "SETTLED_RELEASED"
  * but has not executed on-chain: a milestone claiming release against it is a conflict, never a release.
  */
 const ESCROW_AGAINST_RELEASE = new Set(["REFUNDED", "SETTLED_REFUNDED", "REFUND_PENDING", "DISPUTED", "SLASHED", "EXPIRED"]);
+/** Escrow words saying ITS refund already completed (round 4, R4-H4) — mirrors {@link MILESTONE_REFUNDED}. */
+const ESCROW_REFUND_DONE = new Set(["REFUNDED", "SETTLED_REFUNDED"]);
+/** Escrow words saying ITS refund is decided but not yet executed (round 4, R4-H4) — mirrors {@link MILESTONE_REFUND_PENDING}. */
+const ESCROW_REFUND_PENDING = new Set(["REFUND_PENDING"]);
 
 /** Every word the reconciliation reads, for the test that each one is in the canonical map. */
 export const RECONCILED_WORDS: readonly string[] = Object.freeze([
@@ -323,8 +333,11 @@ export const RECONCILED_WORDS: readonly string[] = Object.freeze([
     ...MILESTONE_RELEASED,
     ...MILESTONE_AMBIGUOUS,
     ...MILESTONE_REFUNDED,
+    ...MILESTONE_REFUND_PENDING,
     ...ESCROW_ALL_RELEASED,
     ...ESCROW_AGAINST_RELEASE,
+    ...ESCROW_REFUND_DONE,
+    ...ESCROW_REFUND_PENDING,
   ]),
 ]);
 
@@ -343,8 +356,13 @@ export type PayoutUnknownReason = NonNullable<SettlementAxis["payoutUnknownReaso
  *   milestone released + escrow refunded, settled_refunded, disputed, slashed or expired
  *                                                     -> unknown  (records_conflict)
  *   milestone released + any other escrow word        -> reported_released (never paid)
- *   milestone refunded + escrow says all released     -> unknown  (records_conflict)
- *   milestone refunded + any other escrow word        -> refunded
+ *   milestone refund COMPLETE (refunded/settled_refunded) + escrow says all released OR escrow's refund is
+ *     still PENDING (round 4, R4-H4: a completed refund and a pending one on the same money disagree)
+ *                                                     -> unknown  (records_conflict)
+ *   milestone refund complete + any other escrow word  -> refunded
+ *   milestone refund PENDING (round 4, R4-H4) + escrow says all released OR escrow's refund is already
+ *     COMPLETE (the mirror of the row above)           -> unknown  (records_conflict)
+ *   milestone refund pending + any other escrow word    -> not_paid (decided, not yet executed — nobody paid)
  *   any other milestone + escrow says all released    -> unknown  (records_conflict)
  *   any other milestone + any other escrow word       -> not_paid
  *
@@ -366,7 +384,19 @@ export function reconcilePayout(
     return ESCROW_AGAINST_RELEASE.has(e) ? conflict : { payout: "reported_released", unknownReason: null };
   }
   if (MILESTONE_REFUNDED.has(m)) {
-    return ESCROW_ALL_RELEASED.has(e) ? conflict : { payout: "refunded", unknownReason: null };
+    // N79 round 4 (R4-H4): a completed refund also conflicts with an escrow whose OWN refund is still pending —
+    // the two records disagree about whether the payer was refunded, not merely about release.
+    return ESCROW_ALL_RELEASED.has(e) || ESCROW_REFUND_PENDING.has(e)
+      ? conflict
+      : { payout: "refunded", unknownReason: null };
+  }
+  if (MILESTONE_REFUND_PENDING.has(m)) {
+    // N79 round 4 (R4-H4): a refund decided but not executed conflicts with "all released" exactly as any other
+    // unreleased milestone would, AND with an escrow whose OWN refund already completed — the mirror of the branch
+    // above. Otherwise: decided, not yet executed, so nobody is paid yet.
+    return ESCROW_ALL_RELEASED.has(e) || ESCROW_REFUND_DONE.has(e)
+      ? conflict
+      : { payout: "not_paid", unknownReason: null };
   }
   // Not released (waiting / running / failed): this job's money has not been released.
   return ESCROW_ALL_RELEASED.has(e) ? conflict : { payout: "not_paid", unknownReason: null };

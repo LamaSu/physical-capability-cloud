@@ -247,6 +247,20 @@ describe("settlement axis", () => {
     expect(reconcilePayout(funded, refundPendingE)).toEqual(ok("not_paid"));
     expect(reconcilePayout(released, refundPendingE)).toEqual(conflict);
     expect(reconcilePayout(refundPendingM, completed)).toEqual(conflict);
+    // N79 round 4 (R4-H4, astra 126d): a refund decided but not executed and a refund completed contradict each other,
+    // in BOTH directions and whichever completed-refund word the record uses. Neither may read as a final `refunded`,
+    // and neither may fall through to `not_paid`: the records disagree about whether the payer was refunded.
+    const settledRefundedM = v("SETTLED_REFUNDED", "escrow_milestone");
+    const settledRefundedE = v("SETTLED_REFUNDED", "escrow_record");
+    expect(reconcilePayout(refundedM, refundPendingE)).toEqual(conflict);
+    expect(reconcilePayout(settledRefundedM, refundPendingE)).toEqual(conflict);
+    expect(reconcilePayout(refundPendingM, refundedE)).toEqual(conflict);
+    expect(reconcilePayout(refundPendingM, settledRefundedE)).toEqual(conflict);
+    // ...while a refund-pending milestone alone is still nobody paid yet, and the agreeing pairs are unchanged.
+    expect(reconcilePayout(refundPendingM, active)).toEqual(ok("not_paid"));
+    expect(reconcilePayout(refundedM, refundedE)).toEqual(ok("refunded"));
+    expect(reconcilePayout(settledRefundedM, settledRefundedE)).toEqual(ok("refunded"));
+    expect(reconcilePayout(refundPendingM, refundPendingE)).toEqual(ok("not_paid"));
     expect(reconcilePayout(released, unknownE)).toEqual({ payout: "unknown", unknownReason: "status_unrecognized" });
   });
 

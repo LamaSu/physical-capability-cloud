@@ -551,23 +551,38 @@ describe("the keeper owns what it drives (real store)", () => {
   });
 
   it("does not drive an escrow that was given back after the sweep's snapshot, and never overwrites the refund", async () => {
-    const { jobId, escrowId, address } = seed();
+    // N79 round 4 (R4-M1): the keeper takes each escrow's claim right BEFORE its chain read, so no refund lands on the
+    // escrow it is reading (n79-r4-review.test.ts pins that). A refund can still land on an escrow the sweep has not
+    // reached yet: B is given back while the keeper is busy with A, after the snapshot. B's claim must see the refund.
+    const a = seed();
+    const b = seed();
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
-    const read = deferred();
-    vi.mocked(chain.getEscrowStateV2).mockImplementation(async () => {
-      await read.promise;
-      return attested(address);
+    const readA = deferred();
+    vi.mocked(chain.getEscrowStateV2).mockImplementation(async (address) => {
+      if (address === a.address) {
+        await readA.promise;
+        return attested(a.address) as never;
+      }
+      return attested(b.address) as never;
     });
+    vi.mocked(driveSettlement).mockResolvedValue(driveResult({}));
     const sweep = runKeeperSweep(getRepos(), { nowSeconds: NOW });
     inflight.push(sweep);
-    await vi.waitFor(() => expect(chain.getEscrowStateV2).toHaveBeenCalled());
-    expect(setJobStatusWithRefund(jobId, "failed").escrowRefund?.outcome).toBe("refund_pending"); // nobody owns the escrow yet
-    read.resolve();
+    await vi.waitFor(() => expect(chain.getEscrowStateV2).toHaveBeenCalledWith(a.address));
+    expect(setJobStatusWithRefund(a.jobId, "failed").escrowRefund).toEqual(
+      expect.objectContaining({ outcome: "skipped", reason: "settlement_in_progress" }), // A is the keeper's
+    );
+    expect(setJobStatusWithRefund(b.jobId, "failed").escrowRefund?.outcome).toBe("refund_pending"); // B is not yet
+    readA.resolve();
     const result = await sweep;
     expect(result.skippedTerminal).toBe(1);
-    expect(driveSettlement).not.toHaveBeenCalled();
-    expect(result.milestones).toEqual([expect.objectContaining({ disposition: "terminal_other", reason: "escrow refund_pending since the sweep began" })]);
-    expect(escrowRow(escrowId)).toEqual({ escrow: "refund_pending", milestones: ["refund_pending"] });
+    expect(chain.getEscrowStateV2).not.toHaveBeenCalledWith(b.address); // refused at the claim, before any read
+    expect(vi.mocked(driveSettlement).mock.calls.map((c) => c[0])).toEqual([a.address]);
+    expect(result.milestones).toEqual(
+      expect.arrayContaining([expect.objectContaining({ escrowId: b.escrowId, disposition: "terminal_other" })]),
+    );
+    expect(escrowRow(b.escrowId)).toEqual({ escrow: "refund_pending", milestones: ["refund_pending"] });
+    expect(escrowRow(a.escrowId)).toEqual({ escrow: "completed", milestones: ["released"] });
   });
 
   it("an escrow the chain already reads fully Released completes under a claim: the escrow and every milestone row", async () => {
@@ -579,7 +594,11 @@ describe("the keeper owns what it drives (real store)", () => {
     expect(escrowRow(escrowId)).toEqual({ escrow: "completed", milestones: ["released"] });
   });
 
-  it("a fully-Released escrow whose refund landed since the snapshot is left alone, not overwritten with completed", async () => {
+  // N79 round 4 (R4-M1; the lead's one authorized edit of this test). Round 3 asserted the UNSAFE outcome of the pre-read
+  // race: it let a refund land while the keeper's chain read was in flight and accepted `refund_pending` even when the read
+  // then returned a fully Released escrow (a false refund decision on money that had moved). The keeper now owns the escrow
+  // BEFORE the read, so the refund is skipped and the Released escrow completes.
+  it("a fully-Released escrow cannot be refunded while the keeper's read is in flight: the refund is skipped, and the escrow completes once the read returns", async () => {
     const { jobId, escrowId, address } = seed();
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     const read = deferred();
@@ -590,14 +609,14 @@ describe("the keeper owns what it drives (real store)", () => {
     const sweep = runKeeperSweep(getRepos(), { nowSeconds: NOW });
     inflight.push(sweep);
     await vi.waitFor(() => expect(chain.getEscrowStateV2).toHaveBeenCalled());
-    setJobStatusWithRefund(jobId, "failed");
+    expect(setJobStatusWithRefund(jobId, "failed").escrowRefund).toEqual(
+      expect.objectContaining({ outcome: "skipped", reason: "settlement_in_progress" }),
+    );
     read.resolve();
     const result = await sweep;
-    expect(result.reconciledCompleted).toBe(0);
-    expect(result.skippedTerminal).toBe(1);
-    // The escrow row is never overwritten with completed. The milestone row records what the chain says (it was paid), so
-    // the given-back escrow no longer claims otherwise: the discrepancy is visible, not hidden.
-    expect(escrowRow(escrowId)).toEqual({ escrow: "refund_pending", milestones: ["released"] });
+    expect(result.reconciledCompleted).toBe(1);
+    expect(result.skippedTerminal).toBe(0);
+    expect(escrowRow(escrowId)).toEqual({ escrow: "completed", milestones: ["released"] });
   });
 
   it("marks the row of a milestone the chain already reads Released at once, even when nothing is driven; a later refund stops", async () => {
@@ -622,23 +641,32 @@ describe("the keeper owns what it drives (real store)", () => {
     expect(escrowRow(escrowId)).toEqual({ escrow: "funded", milestones: ["released", "funded"] });
   });
 
-  it("a failed row record is logged and does not stop the sweep: the escrow is still handed back and the lease ends", async () => {
-    const { escrowId, address } = seed({ milestones: ["funded", "funded"] });
+  // N79 round 4 (R4-H3; the lead's one authorized edit of this test). Round 3 asserted the UNSAFE hand-back: after a drive
+  // settled milestone 0 on-chain but its row write failed, the escrow went back to `funded` with both rows `funded`, so a
+  // later failure refunded a partly paid escrow. A paid milestone whose row is missing keeps the escrow durably `completing`.
+  it("a failed row record is logged and does not stop the sweep: the escrow is NOT handed back (a paid milestone has no row), so no refund can land, and the lease ends", async () => {
+    const { jobId, escrowId, address } = seed({ milestones: ["funded", "funded"] });
     keeperSees(address, chainState(address, [chain.MilestoneStatusV2.Attested, chain.MilestoneStatusV2.Evidenced]));
     vi.mocked(driveSettlement).mockResolvedValue(driveResult({}));
     const writes = vi.spyOn(getRepos().escrows, "updateMilestoneStatus").mockImplementation(() => {
       throw new Error("disk full");
     });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const warn = vi.fn();
     try {
       const result = await runKeeperSweep(getRepos(), { nowSeconds: NOW, logger: { info: vi.fn(), warn } });
       expect(result.released).toBe(1); // the money moved; the failed bookkeeping does not undo or hide that
       expect(warn).toHaveBeenCalledWith(expect.stringContaining(`could not record ${escrowId}#0 as released: disk full`));
+      expect(errors).toHaveBeenCalledWith("[escrow] settlement_record_failed", expect.objectContaining({ escrowId, milestoneIndex: 0 }));
     } finally {
       writes.mockRestore();
+      errors.mockRestore();
     }
-    expect(escrowRow(escrowId)).toEqual({ escrow: "funded", milestones: ["funded", "funded"] });
-    expect(beginSettlement({ escrowId }).disposition).toBe("acquired"); // handed back, and no lease left
+    expect(escrowRow(escrowId)).toEqual({ escrow: "completing", milestones: ["funded", "funded"] });
+    expect(setJobStatusWithRefund(jobId, "failed").escrowRefund).toEqual(
+      expect.objectContaining({ outcome: "skipped", reason: "settlement_in_progress" }),
+    );
+    expect(beginSettlement({ escrowId }).disposition).toBe("adopted"); // the lease ended; the durable mark is adopted by the next claim
   });
 
   it("hands an escrow back when the drive does not settle it, restoring the status it took it from", async () => {

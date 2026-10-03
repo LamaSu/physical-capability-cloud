@@ -15,10 +15,19 @@ import type { MachineAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
-import { setJobStatusWithRefund } from "./escrow-refund.js";
+import { escrowForJob, setJobStatusWithRefund } from "./escrow-refund.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
+
+/**
+ * The escrow a local-kernel auto-release targets: THIS job's own escrow when it has one, else the configured default
+ * (N79 round 4, H1). SettlementService.releaseMilestone refuses a release whose target is not the job's own escrow,
+ * so naming the global default for a job that has its own per-job escrow would only ever be refused.
+ */
+export function autoReleaseContractAddress(jobId: string): string | undefined {
+  return escrowForJob(jobId)?.contractAddress ?? process.env.ESCROW_CONTRACT_ADDRESS;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -353,7 +362,7 @@ export class KernelService {
                   // onPhase callback wired into runner.run() above.
                   try {
                     const settlementService = getSettlementService();
-                    const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
+                    const contractAddress = autoReleaseContractAddress(jobId);
                     await settlementService.processEvidence(bundle, jobId, {
                       // For tier 0 jobs, auto-release immediately (no challenge window)
                       autoRelease: assuranceTier === 0,
@@ -437,7 +446,7 @@ export class KernelService {
               // onPhase callback wired into runner.run() above.
               try {
                 const settlementService = getSettlementService();
-                const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
+                const contractAddress = autoReleaseContractAddress(jobId);
                 await settlementService.processEvidence(bundle, jobId, {
                   autoRelease: assuranceTier === 0,
                   contractAddress,
