@@ -324,25 +324,30 @@ function StepIdentity() {
     setSubmitting(true);
 
     try {
-      // Validate the setup config
+      // PX-10 Wave 0 (#2561): an invalid or unreachable validation used to mark
+      // setup complete anyway. It no longer does; Skip stays an explicit choice.
       const validation = await apiPost<ValidateResponse>("/setup/validate", {});
+      setApiWarnings(validation.warnings ?? []);
       if (!validation.valid) {
-        // Non-fatal: just surface warnings and continue
-        setApiWarnings(validation.warnings);
+        const errors = validation.errors ?? [];
+        setApiError(
+          errors.length > 0
+            ? `The gateway reported this setup as not valid: ${errors.join("; ")}`
+            : "The gateway reported this setup as not valid.",
+        );
+        return;
       }
-      // Mark setup complete in store and advance
       completeSetup();
       nextStep();
     } catch (err) {
-      // Gateway may not be running in demo mode — fall back gracefully
       const msg = err instanceof Error ? err.message : "Unknown error";
-      // If it's a network/fetch error, continue offline with a warning
-      if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("fetch")) {
-        completeSetup();
-        nextStep();
-      } else {
-        setApiError(msg);
-      }
+      const unreachable =
+        err instanceof TypeError || /failed to fetch|networkerror|network request failed|load failed/i.test(msg);
+      setApiError(
+        unreachable
+          ? "The gateway could not be reached, so nothing was validated. Try again, or skip this step."
+          : msg,
+      );
     } finally {
       setSubmitting(false);
     }
@@ -356,10 +361,10 @@ function StepIdentity() {
   return (
     <WizardStepContent
       title="Platform Identity"
-      subtitle="Register your identity on the PCCP network."
+      subtitle="Name your identity and validate your setup with the gateway."
       onNext={handleNext}
       onBack={prevStep}
-      nextLabel={submitting ? "Registering..." : "Complete Setup"}
+      nextLabel={submitting ? "Validating..." : "Complete Setup"}
       nextDisabled={!isStepValid(3) || submitting}
     >
       <div className="space-y-6 max-w-lg">
@@ -418,7 +423,7 @@ function StepIdentity() {
           <div className="flex items-start gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
             <div className="w-2 h-2 rounded-full bg-red-500 mt-1 shrink-0" />
             <div className="flex-1 min-w-0">
-              <div className="text-xs text-red-400 font-medium mb-1">Registration error</div>
+              <div className="text-xs text-red-400 font-medium mb-1">Setup not validated</div>
               <div className="text-xs text-white/40">{apiError}</div>
             </div>
             <button
@@ -449,7 +454,7 @@ function StepIdentity() {
         )}
 
         <p className="text-[10px] text-white/15 italic">
-          This validates your setup and registers your identity on the PCCP network via ERC-8004.
+          This checks your setup with the gateway. It does not register an identity.
         </p>
       </div>
     </WizardStepContent>
