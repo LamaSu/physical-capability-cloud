@@ -41,6 +41,8 @@
  * tell. Load @pcc/spec before untrusted code.
  */
 
+import { types as nodeUtilTypes } from "node:util";
+
 const ArrayCtor = Array;
 const ArrayIsArray = Array.isArray;
 const ArrayPrototype = Array.prototype;
@@ -78,14 +80,6 @@ function ownDataValue(o: unknown, key: string): unknown {
   return descriptor !== undefined && hasOwn(descriptor, "value") ? descriptor.value : undefined;
 }
 
-/** An OWN property's value, read through its own getter when it is an accessor (Node's global `process` is one). */
-function ownValue(o: object, key: string): unknown {
-  const descriptor = ObjectGetOwnPropertyDescriptor(o, key);
-  if (descriptor === undefined) return undefined;
-  if (hasOwn(descriptor, "value")) return descriptor.value;
-  const get = hasOwn(descriptor, "get") ? descriptor.get : undefined;
-  return typeof get === "function" ? ReflectApply(get, o, []) : undefined;
-}
 
 /** Every trap a proxy handler can define. */
 const PROXY_TRAPS = [
@@ -109,8 +103,13 @@ const PROXY_TRAPS = [
  * It is asked about two probe proxies, whose every trap is recorded, and two
  * plain values. It must answer exactly true, true, false, false, and no trap
  * may run. Otherwise this returns null.
+ *
+ * A sanity check, NOT the trust anchor: a stateful function can answer these
+ * four calls and misbehave afterwards (astra pack 170). What makes `isProxy`
+ * trustworthy is where it comes from: the module loader's own `node:util`.
+ * Exported for its tests.
  */
-function trapFreeCheck(candidate: unknown): ((value: object) => boolean) | null {
+export function trapFreeProxyCheck(candidate: unknown): ((value: object) => boolean) | null {
   if (typeof candidate !== "function") return null;
   let trapped = false;
   const handler = ObjectCreate(null) as Record<string, () => never>;
@@ -137,38 +136,22 @@ function trapFreeCheck(candidate: unknown): ((value: object) => boolean) | null 
 }
 
 /**
- * A proxy check that runs no trap: Node's `util.types.isProxy`, loaded when
- * the module loads without a static `node:util` import, so browser bundles of
- * @pcc/spec still build (the dashboard bundles this module and never calls
- * it; vite has no `node:util`).
+ * A proxy check that runs no trap: Node's `util.types.isProxy`, bound by the
+ * module loader through the static `node:util` import above and captured
+ * when this module loads. Nothing the runtime offers at call time can supply
+ * or replace it, `globalThis.process` included (astra pack 170: a stateful
+ * check offered through `process.getBuiltinModule` passed any finite probe).
  *
- * It is found through own properties only: the global's `process`, its
- * `getBuiltinModule`, the module's `types` and their `isProxy`. Nothing
- * written on a prototype is consulted, so a `getBuiltinModule` inherited from
- * Object.prototype (Node before 20.16, or a browser's process shim) is never
- * used. It is accepted only after it passes the probe in `trapFreeCheck`.
+ * In the dashboard's browser build, vite aliases `node:util` to a shim whose
+ * `types` has no `isProxy` (apps/dashboard/src/lib/node-util-shim.ts, beside
+ * the node:crypto shim). There, `isProxy` is null, and plainDataCopy refuses
+ * every object: a proxy cannot be told apart from plain data without running
+ * its traps.
  *
- * Otherwise, and wherever no such check exists (a browser, or Node before
- * 20.16), `isProxy` is null, and plainDataCopy refuses every object: a proxy
- * cannot be told apart from plain data there without running its traps.
- * A check replaced before this module loaded, by one that passes the probe,
- * is a realm compromised before load (astra pack 162).
+ * The boundary: a realm whose `util.types.isProxy` was replaced before this
+ * module loaded was compromised before load.
  */
-export const isProxy: ((value: object) => boolean) | null = trapFreeProxyCheckOf(globalThis);
-
-/** The loader behind `isProxy`, given the global object: exported so each of its refusals can be tested. */
-export function trapFreeProxyCheckOf(global: object): ((value: object) => boolean) | null {
-  const runtime = ownValue(global, "process");
-  const load = ownDataValue(runtime, "getBuiltinModule");
-  if (typeof load !== "function") return null;
-  let util: unknown;
-  try {
-    util = ReflectApply(load, runtime, ["node:util"]);
-  } catch {
-    return null;
-  }
-  return trapFreeCheck(ownDataValue(ownDataValue(util, "types"), "isProxy"));
-}
+export const isProxy: ((value: object) => boolean) | null = trapFreeProxyCheck(ownDataValue(nodeUtilTypes, "isProxy"));
 
 class NotPlainData extends Error {}
 const NOT_PLAIN_DATA = NotPlainData.prototype;
