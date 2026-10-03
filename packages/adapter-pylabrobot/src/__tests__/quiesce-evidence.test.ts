@@ -189,6 +189,34 @@ describe("astra pack 186 HIGH: the sidecar's stopRecording answer is the barrier
     expect(events.at(-1)?.payload, "execution_completed").toMatchObject({ jobId: "j-o", opCount: 1 });
   });
 
+  it("(sidecar) a failed run's notification that arrives before the barrier's answer is recorded, before execution_failed", async () => {
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-fail", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+
+    const startP = adapter.execute({ type: "start", payload: { jobId: "j-f" } });
+    for (const method of ["backend.init", "evidence.startRecording"]) {
+      await tick();
+      expect(answerLast(transport, "dev-q-fail", "j-f")).toBe(method);
+    }
+    await tick();
+    const run = transport.lastSent() as { id: string; method: string };
+    expect(run.method).toBe("backend.run");
+    transport.respondError(run.id, -32001, "protocol failed: tip collision");
+    await tick();
+    // Written by the sidecar before it answers the barrier.
+    transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-fail", jobId: "j-f", timestamp: new Date().toISOString(), payload: { well: "A1" } });
+    await tick();
+    expect(answerLast(transport, "dev-q-fail", "j-f")).toBe("evidence.stopRecording");
+    const result = await startP;
+
+    expect(result.success).toBe(false);
+    expect(events.map((e) => e.type)).toEqual(["device_birth", "execution_started", "instrument_result", "execution_failed"]);
+  });
+
   it("(sidecar) when the sidecar is recycled after a job, the old sidecar answers the barrier first", async () => {
     const transport = new InMemoryTransport();
     const sidecar = new SidecarClient({ inMemoryTransport: transport });
