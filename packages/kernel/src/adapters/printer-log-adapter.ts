@@ -350,7 +350,10 @@ export class PrinterLogAdapter implements SensorAdapter {
    * poll included, then stops the recording, or refuses if the start failed (astra pack 196).
    * Single-flight: a stop while one is in flight is that stop. Each stop is the adapter's
    * outstanding work, so quiesceEvidence() waits for one in flight, including a retry after a
-   * failed stop, which still emits the job's last entry and its summary.
+   * failed stop. A retry emits the job's last entry and its summary only when the failed stop
+   * latched no poll failure and emitted no summary (getChain() threw, say): once a poll of the
+   * recording has failed, a retry refuses, emitting nothing, and once the summary is emitted the
+   * recording is over, so a stop refuses (astra pack 211).
    */
   stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
     if (this.stopping !== null) return this.stopping;
