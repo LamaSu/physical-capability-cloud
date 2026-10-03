@@ -1100,3 +1100,99 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
     expect(feedLines()).toEqual(["running"]); // a safe word stays plain
   });
 });
+
+// -- astra round 7 on #313 @9f3f75af (verify before fix): F13 provenance laundering, F10 over time --------
+describe("astra r7 (#313 @9f3f75af): F13 provenance and F10 over time (verify before fix)", () => {
+  const UNIT = "0x" + "ab".repeat(32);
+  const RC_LIVE = `/api/settlement/units/${UNIT}/receipt`;
+  const LC_LIVE = `/api/settlement/units/${UNIT}/lifecycle`;
+  const SETTLED = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" };
+  const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" };
+  const LC1 = { unitState: 1, finalState: null, isTerminal: false, isAllocated: false, phase: "active" };
+  const man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
+  type Reply = { status: number; body?: unknown } | "reject";
+  // Replies by call index; after the script every request stays pending, so no window keeps polling.
+  function bootScript(manifest: string, script: Reply[]) {
+    document.documentElement.removeAttribute("data-theme");
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__ = false;
+    const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+    const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest"; mNode.textContent = manifest;
+    document.body.appendChild(mNode); // LIVE mode
+    let n = 0;
+    (window as unknown as { fetch: unknown }).fetch = () => {
+      const r = script[n++];
+      if (r === undefined) return new Promise(() => {});
+      if (r === "reject") return Promise.reject(new Error("network down"));
+      return Promise.resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: () => null }, json: () => Promise.resolve(r.body ?? {}), text: () => Promise.resolve(JSON.stringify(r.body ?? {})) });
+    };
+    // eslint-disable-next-line no-eval
+    (0, eval)(kitSrc);
+  }
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const pillClass = (sel: string) => (document.querySelector(sel) as HTMLElement).className;
+  const latestText = () => (document.querySelector(".pcc-run-latest") as HTMLElement).textContent;
+  const feedLines = () => Array.from(document.querySelectorAll(".pcc-feed-line")).map((e) => (e.textContent || "").trim());
+
+  it("F13 (HIGH): a receipt's binding.select cannot launder a nested object into a verified settlement", async () => {
+    bootScript(man([{ kind: "receipt", binding: { path: RC_LIVE, select: "claim" } }]),
+      [{ status: 200, body: { finalState: null, isAllocated: false, phase: "active", claim: SETTLED } }]);
+    await flush();
+    expect(pillClass(".pcc-receipt-rail .pcc-pill")).not.toContain("st-settled");
+  });
+
+  it("F13 (HIGH): a list's rows never inherit the exact route's authority (with or without select)", async () => {
+    bootScript(man([{ kind: "list", binding: { path: RC_LIVE, select: "rows" }, item: { title: "phase", statusFrom: "finalState" } }]),
+      [{ status: 200, body: { finalState: null, isAllocated: false, phase: "active", rows: [SETTLED] } }]);
+    await flush();
+    expect(pillClass(".pcc-list-row .pcc-pill")).not.toContain("st-settled");
+    bootScript(man([{ kind: "list", binding: { path: RC_LIVE }, item: { title: "phase", statusFrom: "finalState" } }]),
+      [{ status: 200, body: { finalState: null, isAllocated: false, phase: "active", events: [SETTLED] } }]);
+    await flush();
+    expect(pillClass(".pcc-list-row .pcc-pill")).not.toContain("st-settled");
+  });
+
+  it("F13 positive control: the unprojected top-level read of the exact route is still verified", async () => {
+    bootScript(man([{ kind: "receipt", binding: { path: RC_LIVE } }]), [{ status: 200, body: SETTLED }]);
+    await flush();
+    expect(pillClass(".pcc-receipt-rail .pcc-pill")).toContain("st-settled");
+  });
+
+  it("F10 over time (HIGH): a later UNVERIFIED read requalifies the latest line a verified read left plain", async () => {
+    bootScript(man([{ kind: "run", binding: { path: LC_LIVE, pollMs: 5 }, statusFrom: "finalState", latestFrom: "message" }]),
+      [{ status: 200, body: { ...LC8, message: "PAID" } }, { status: 200, body: LC1 }]);
+    await flush();
+    expect(latestText()).toBe("PAID"); // verified payee payment: plain
+    await wait(60);
+    expect(pillClass(".pcc-win-head .pcc-pill")).not.toContain("st-settled");
+    expect(latestText()).not.toBe("PAID");
+  });
+
+  it("F10 over time (HIGH): a FAILED read requalifies the latest line too", async () => {
+    bootScript(man([{ kind: "run", binding: { path: LC_LIVE, pollMs: 5 }, statusFrom: "finalState", latestFrom: "message" }]),
+      [{ status: 200, body: { ...LC8, message: "PAID" } }, "reject"]);
+    await flush();
+    expect(latestText()).toBe("PAID");
+    await wait(60);
+    expect(latestText()).not.toBe("PAID");
+  });
+
+  it("F10 over time (HIGH): a FAILED read requalifies a verified poll timeline too", async () => {
+    bootScript(man([{ kind: "run", binding: { path: LC_LIVE, pollMs: 5 }, statusFrom: "finalState", latestFrom: "message" }]),
+      [{ status: 200, body: { ...LC8, timeline: [{ type: "PAID" }] } }, "reject"]);
+    await flush();
+    expect(feedLines()).toEqual(["PAID"]);
+    await wait(60);
+    expect(feedLines()).not.toContain("PAID");
+  });
+
+  it("F10 over time (HIGH): a later unverified read requalifies a verified poll timeline", async () => {
+    bootScript(man([{ kind: "run", binding: { path: LC_LIVE, pollMs: 5 }, statusFrom: "finalState", latestFrom: "message" }]),
+      [{ status: 200, body: { ...LC8, timeline: [{ type: "PAID" }] } }, { status: 200, body: LC1 }]);
+    await flush();
+    expect(feedLines()).toEqual(["PAID"]);
+    await wait(60);
+    expect(feedLines()).not.toContain("PAID");
+  });
+});

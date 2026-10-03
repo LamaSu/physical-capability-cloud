@@ -1193,7 +1193,9 @@
         li.appendChild(main);
         if (w.item.statusFrom) {
           var st = dot(row, w.item.statusFrom);
-          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st, !r.stale), dataStatusText(w.binding && w.binding.path, row, st, !r.stale)));
+          // A row is an element of a collection, never the top-level record a settlement route returns, so
+          // it is never a verified read, however live the fetch (astra r7 F13).
+          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st, false), dataStatusText(w.binding && w.binding.path, row, st, false)));
         }
         listNode.appendChild(li);
       }
@@ -1325,6 +1327,21 @@
       elapsed.textContent = Math.floor((Date.now() - started) / 1000) + 's elapsed';
     }, 1000);
 
+    // Secondary text is HELD raw and repainted under each read's verification (astra r7 F10): a later
+    // read that is not a verified payee payment, or a failed read, requalifies what an earlier verified
+    // read left plain. held.latest = { raw, isStatus, money }; held.feed = { lines: [{ ts, label }], money }.
+    var held = { latest: null, feed: null };
+    function paintLatest(verified) {
+      var h = held.latest;
+      if (h) latest.textContent = h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, verified, h.money);
+    }
+    function paintFeed(verified) {
+      var f = held.feed;
+      if (!f) return;
+      clear(feed);
+      for (var i = 0; i < f.lines.length; i++) feedLine(f.lines[i].ts + statusPillText(f.lines[i].label, verified, f.money));
+    }
+
     // `live` is true only for a successful poll of the binding (never a snapshot or a stream event).
     function apply(statusVal, latestVal, data, full, live) {
       var bpath = w.binding && w.binding.path;
@@ -1347,10 +1364,10 @@
         // The latest line, on every surface (astra r5 F8, r6 F12). Status-sourced text (the status path
         // itself, or a status/state/phase field) is a label, so it takes the closed vocabulary; anything
         // else is a free-text message, attributed to its source.
-        var money = isMoneyData(bpath, data);
         var latestIsStatus = typeof w.latestFrom === 'string' && (w.latestFrom === w.statusFrom || isStatusPath(w.latestFrom));
-        latest.textContent = latestIsStatus ? statusPillText(latestVal, payeeVerified, money) : reportedText(latestVal, payeeVerified, money);
+        held.latest = { raw: latestVal, isStatus: latestIsStatus, money: isMoneyData(bpath, data) };
       }
+      paintLatest(payeeVerified); // this read decides, even when it carries no new latest value
       return payeeVerified;
     }
     function feedLine(txt) {
@@ -1386,19 +1403,22 @@
       ctx.tx.getJSON(w.binding.path, w.binding.query).then(function (d) {
         var payeeVerified = apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, true);
         // Timeline feed, if the response carries one. Each entry (its type, or the raw entry) is a label:
-        // the closed vocabulary, plain only on a verified payee payment (astra r6 F10, F11).
+        // the closed vocabulary, plain only on a verified payee payment (astra r6 F10, F11). It is held,
+        // so a later unverified read requalifies it (astra r7 F10).
         var tl = dot(d, 'timeline') || dot(d, 'job.timeline');
         if (Array.isArray(tl)) {
-          clear(feed);
-          var pollMoney = isMoneyData(w.binding.path, d);
-          for (var i = 0; i < tl.length; i++) feedLine((tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' \u00b7 ' : '') + statusPillText(tl[i].type || JSON.stringify(tl[i]), payeeVerified, pollMoney));
+          var lines = [];
+          for (var i = 0; i < tl.length; i++) lines.push({ ts: tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' \u00b7 ' : '', label: tl[i].type || JSON.stringify(tl[i]) });
+          held.feed = { lines: lines, money: isMoneyData(w.binding.path, d) };
         }
+        paintFeed(payeeVerified);
         wrap._setFoot(ctx.tx.lastTrace, false);
         setTimeout(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }, w.binding.pollMs || POLL_DEFAULT_MS);
       }, function () {
         var next = Math.min((delay || POLL_DEFAULT_MS) * 2, 120000); // backoff
         // A failed read never keeps an earlier state, least of all a final one (astra r2 on #313, F3).
         pill.textContent = 'unknown · read failed'; pill.className = 'pcc-pill st-unknown';
+        paintLatest(false); paintFeed(false); // nothing earlier stays vouched for (astra r7 F10)
         wrap._setFoot(ctx.tx.lastTrace, true);
         setTimeout(function () { poll(next); }, next);
       });
@@ -1588,7 +1608,10 @@
       // Settlement state by SOURCE SCHEMA (V-next /lifecycle or /receipt, a legacy escrow record,
       // or "not a settlement record"), never by a bare status word. Never inferred from a count or
       // from the receipt's existence (contract rule 12).
-      var rec = settlementReadClass(e, w.binding && w.binding.path, !r.stale && ctx.mode !== 'snapshot');
+      // Authority needs the UNPROJECTED top-level response of the exact route: a binding.select projection
+      // (or any nested object) never inherits the route's provenance (astra r7 F13).
+      var recTopLevel = r.raw !== undefined && e === r.raw;
+      var rec = settlementReadClass(e, w.binding && w.binding.path, !r.stale && ctx.mode !== 'snapshot' && recTopLevel);
       var railRow = el('div', 'pcc-receipt-rail');
       // The pill text may not claim more than the class (F6): only a verified final keeps its plain name;
       // "no settlement state" is PCC's own text.
