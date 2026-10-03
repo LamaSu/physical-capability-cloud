@@ -20,6 +20,23 @@
  *       unitContextDigest, kernelSignedEventsRoot, sessionKeyAuthDigest, attestationSetRoot, workProductRoot, programHash))
  *
  * Run: NODE_PATH=/c/Users/globa/pcc-oracle/node_modules node evidence-block-v2-mirror.cjs
+ *
+ * RE-PIN to PRODUCTION (oracle #5772, bus #1069): the oracle pins the PRODUCTION coherent sample, not the
+ * MIRROR-FORM sample this file originally pinned (golden 0x4605a6e9…, now SUPERSEDED below but still asserted
+ * so a drift in the old construction is still caught). The PRODUCTION section below recomputes
+ * kernelSignedEventsRoot, sessionKeyAuthDigest and attestationSetRoot from INPUTS, ported verbatim from three
+ * read-only golden files in this folder (not required as modules — they have side effects / their own
+ * process.exit()):
+ *   - sessionKeyAuthDigest: RATIFIED D3 (oracle #1030), sessionkey-grant-golden-vector.cjs — the two-value
+ *     model (canonicalSessionKeyBytes -> sessionKeyGrantHash -> sessionKeyAuthDigest, full-proof + keyVersion bound).
+ *   - attestationSetRoot: RATIFIED D4 (oracle #1030), attestation-set-root-golden-vector.cjs — registry-snapshot
+ *     role policy, per-role digest tree bound to roleId + quorum + fundedProgramHash.
+ *   - kernelSignedEventsRoot: the PRODUCTION event set + sha256:-prefixed bundle construction (oracle #1049),
+ *     kernel-signed-events-root-golden-vector.cjs — fixes the 0x-prefix-in-preimage bug this mirror's original
+ *     (now-superseded) construction has.
+ * unitContextDigest, workProductRoot and programHash are UNCHANGED: this mirror's existing computations already
+ * match the production values (confirmed by assertion below). The public producer, PR #361 @2550254a, now
+ * reproduces the production aggregate with its own functions; this re-pin lets the oracle replay it byte for byte.
  */
 const crypto = require('crypto');
 const E = require('ethers');
@@ -149,13 +166,169 @@ chk(derive(events).physicalOutcomeVerified === true, 'evaluator-shape: derive ov
 chk(derive(events.filter(e => e.type !== 'execution_completed')).physicalOutcomeVerified === false, 'evaluator-shape negative: tampered events -> derived FALSE -> no release (fail-closed; #1 stays oracle-side until (A))');
 chk(bundleHashOf(events.map(e => ({ ...e, source: { ...e.source, simulated: true } }))).toLowerCase() !== kernelSignedEventsRoot.toLowerCase(), 'authenticity: source.simulated flips the bundleHash (fabrication visible to the evaluator)');
 
-// (7) PINNED GOLDEN
-const EXPECT = {
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// PRODUCTION section (oracle #5772, bus #1069) — re-derives kernelSignedEventsRoot, sessionKeyAuthDigest
+// and attestationSetRoot from INPUTS using the ratified D3/D4 formulas + the production event-bundle
+// construction, ported VERBATIM from three read-only golden files in this folder. Those files are not
+// `require`d here — they have side effects (their own chk()/process.exit()) that would abort this script —
+// so the formulas and inputs are copied in instead. unitContextDigest, workProductRoot and programHash are
+// NOT re-derived: the mirror's existing computations above already equal the production values (confirmed
+// in section (7) below), so they are reused as-is.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── PRODUCTION kernelSignedEventsRoot — ported verbatim from kernel-signed-events-root-golden-vector.cjs
+//    (oracle #1049). Production canonicalize/sha256pfx + the PRODUCTION event set (ISO-8601 timestamps,
+//    schema-valid; sol #34) — NOT the mirror's own `events` above, which is the 0x-prefixed BUG form on a
+//    different event set. `source` is reused as-is: it is byte-identical to the golden file's. ──
+function prodCanonicalize(v) {
+  if (v === null || v === undefined) return 'null';
+  if (typeof v === 'string') return JSON.stringify(v);
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return '[' + v.map(prodCanonicalize).join(',') + ']';
+  if (typeof v === 'object') { const ks = Object.keys(v).sort(); return '{' + ks.filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ':' + prodCanonicalize(v[k])).join(',') + '}'; }
+  return String(v);
+}
+const SHA = (s) => crypto.createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
+const sha256pfx = (x) => 'sha256:' + SHA(prodCanonicalize(x));        // PRODUCTION spec sha256() — sha256: PREFIX
+
+const prodEvents = [
+  { type: 'execution_completed', timestamp: '2026-08-20T00:00:00Z', source, payload: { ok: true } },
+  { type: 'cv_inspection_result', timestamp: '2026-08-20T00:00:05Z', source, payload: { pass: 1, defects: 0 } },
+];
+const prodEventHashes = prodEvents.map((e) => sha256pfx({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload }));
+const prodBundleHash = sha256pfx([...prodEventHashes].sort());
+const prodKernelSignedEventsRoot = '0x' + prodBundleHash.slice(7);   // the frozen sha256:->bytes32 bridge
+
+// ── PRODUCTION sessionKeyAuthDigest — RATIFIED D3 (oracle #1030), ported verbatim from
+//    sessionkey-grant-golden-vector.cjs. Two-value model: canonicalSessionKeyBytes (EXPLICIT key order,
+//    EXCLUDES parentSignature) -> sessionKeyGrantHash -> sessionKeyAuthDigest (binds the FULL proof incl
+//    parentSignature + parentPubKey + scheme + keyVersion). ──
+const raw32 = (h) => Buffer.from(h.slice(2), 'hex');
+function canonicalSessionKeyBytes(sk) {
+  const body = {
+    sessionId: sk.sessionId,
+    parentAgentId: sk.parentAgentId,
+    publicKey: sk.publicKey,
+    issuedAt: sk.issuedAt,
+    expiresAt: sk.expiresAt,
+    scope: {
+      allowedActions: [...sk.scope.allowedActions].sort(),
+      contractIds: [...sk.scope.contractIds].sort(),
+      maxSignatures: sk.scope.maxSignatures,
+    },
+  };
+  if (sk.derivationPath !== undefined) body.derivationPath = sk.derivationPath;
+  return Buffer.from(JSON.stringify(body), 'utf8');
+}
+const GRANT_DOMAIN = K('PCC:vnext:session-key-grant:v1');
+const AUTH_DOMAIN = K('PCC:vnext:session-key-auth:v1');
+const SCHEME_ED25519 = 1;
+
+const pSeed = Buffer.from('44'.repeat(32), 'hex');
+const parentPriv = crypto.createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), pSeed]), format: 'der', type: 'pkcs8' });
+const parentPubRaw = crypto.createPublicKey(parentPriv).export({ type: 'spki', format: 'der' }).subarray(-32).toString('hex');
+const kernelPubRaw = 'aa'.repeat(32);
+
+const prodSessionKeyAuth = {
+  sessionId: 'sess-golden', parentAgentId: 'kernel-golden-01', publicKey: kernelPubRaw,
+  issuedAt: 1755648000, expiresAt: 1755734400,
+  scope: { allowedActions: ['sign-evidence'], contractIds: ['unit-golden'], maxSignatures: 8 },
+};
+const keyVersion = 1;
+
+const grantBytes = canonicalSessionKeyBytes(prodSessionKeyAuth);
+const parentSignature = '0x' + crypto.sign(null, grantBytes, parentPriv).toString('hex');
+
+const sessionKeyGrantHash = keccak256(Buffer.concat([raw32(GRANT_DOMAIN), grantBytes]));
+const prodSessionKeyAuthDigest = keccak256(enc(
+  ['bytes32', 'bytes32', 'bytes', 'bytes32', 'uint8', 'uint32'],
+  [AUTH_DOMAIN, sessionKeyGrantHash, parentSignature, '0x' + parentPubRaw, SCHEME_ED25519, keyVersion]));
+
+// ── PRODUCTION attestationSetRoot — RATIFIED D4 (oracle #1030), ported verbatim from
+//    attestation-set-root-golden-vector.cjs. REGISTRY-SNAPSHOT role policy (not inline signers), per-attestation
+//    preimage incl timestamp+comment, producer `satisfied` EXCLUDED (recomputed), duplicate roleIds/attestors
+//    REJECTED. Functions suffixed D4 / `rolesD4` / `byRoleD4` only to avoid shadowing the mirror's own
+//    flat-form `roleDigest`/`attestationSetRoot`/`roles` above (#3 section); the formulas are unchanged. ──
+const ROLE_DOMAIN = K('PCC:vnext:attestation-role:v1');
+const ATTSET_DOMAIN = K('PCC:vnext:attestation-set:v1');
+const fundedProgramHash = K('golden-program');
+const jobId = 'job-golden';
+
+const prodSha256bytes32 = (x) => '0x' + crypto.createHash('sha256').update(Buffer.from(prodCanonicalize(x), 'utf8')).digest('hex');
+const attHash = (a) => prodSha256bytes32({ jobId: a.jobId, attestor: a.attestor, score: a.score, comment: a.comment, timestamp: a.timestamp });
+const A1 = { jobId, attestor: '0x' + '11'.repeat(20), score: 92, comment: 'pass, within tol', timestamp: 1700000100 };
+const A2 = { jobId, attestor: '0x' + '22'.repeat(20), score: 88, comment: 'ok', timestamp: 1700000200 };
+
+const roleSignersDigest = (s) => keccak256(enc(['bytes32', 'bytes32'], [K(s.registryId), s.snapshotHash]));
+const inspectorRole = {
+  roleId: 'inspector',
+  signers: { kind: 'registry', registryId: 'pcc-verifier-registry', snapshotHash: K('golden-registry-snapshot') },
+  minPositive: 2, total: 3, minScore: 80,
+};
+
+function roleDigestD4(role, atts) {
+  const attestors = atts.map(a => a.attestor.toLowerCase());
+  if (new Set(attestors).size !== attestors.length) throw new Error('DUPLICATE_ATTESTOR in role ' + role.roleId);
+  const hashes = atts.map(attHash).sort();
+  return keccak256(enc(
+    ['bytes32', 'bytes32', 'bytes32', 'uint32', 'uint32', 'uint32', 'bytes32', 'bytes32[]'],
+    [ROLE_DOMAIN, K(role.roleId), roleSignersDigest(role.signers), role.minPositive, role.total, role.minScore ?? 0, fundedProgramHash, hashes]));
+}
+
+function attestationSetRootD4(roles, byRole) {
+  const ids = roles.map(r => r.roleId);
+  if (new Set(ids).size !== ids.length) throw new Error('DUPLICATE_ROLE');
+  const rds = roles.map(r => roleDigestD4(r, byRole[r.roleId] || [])).sort();
+  return keccak256(enc(['bytes32', 'bytes32', 'bytes32[]'], [ATTSET_DOMAIN, fundedProgramHash, rds]));
+}
+
+const rolesD4 = [inspectorRole];
+const byRoleD4 = { inspector: [A1, A2] };
+const prodAttestationSetRoot = attestationSetRootD4(rolesD4, byRoleD4);
+
+// ── PRODUCTION aggregate — the mirror's existing six-root block formula (BLK_TYPES / EVIDENCE_BLOCK_DOMAIN_V2 /
+//    EVIDENCE_BLOCK_VERSION, all defined above, UNCHANGED), applied to the PRODUCTION roots instead of the
+//    mirror-form ones ──
+const prodBlockFields = [unitContextDigest, prodKernelSignedEventsRoot, prodSessionKeyAuthDigest, prodAttestationSetRoot, workProductRoot, programHash];
+const prodEvidenceBlockHash = keccak256(enc(BLK_TYPES, [EVIDENCE_BLOCK_DOMAIN_V2, EVIDENCE_BLOCK_VERSION, ...prodBlockFields]));
+
+console.log(`== PRODUCTION coherent sample (oracle #5772, bus #1069) — the oracle pins THIS sample, not the mirror-form one above ==`);
+console.log(`  unitContextDigest      (unchanged)      ${unitContextDigest}`);
+console.log(`  kernelSignedEventsRoot (PRODUCTION)      ${prodKernelSignedEventsRoot}`);
+console.log(`  sessionKeyAuthDigest   (D3, PRODUCTION)  ${prodSessionKeyAuthDigest}`);
+console.log(`  attestationSetRoot     (D4, PRODUCTION)  ${prodAttestationSetRoot}`);
+console.log(`  workProductRoot        (unchanged)      ${workProductRoot}`);
+console.log(`  programHash            (unchanged)      ${programHash}`);
+console.log(`  evidenceBlockHash      (PRODUCTION)      ${prodEvidenceBlockHash}\n`);
+
+// (7) PRODUCTION PINNED GOLDEN (oracle #5772, bus #1069) — the oracle pins the PRODUCTION coherent sample.
+const EXPECT_PROD = {
+  unitContextDigest:      '0x4de8723033b81fe8465870c2105d5a13ca37337bea5881eafdf72666591fb519',
+  kernelSignedEventsRoot: '0x4e0af964e4e066717998ed7a49bf7c874023bd402b825da22b4dabd70fb6f9fe',
+  sessionKeyAuthDigest:   '0xaccbbe5a396764ac3eff908cca1c03d9d57e617407e0d8f3cb9bf9f9904a8323',
+  attestationSetRoot:     '0xcb38575b678a08c0915704d648c851ee7b26f6737c2ddb097c7ff531a16ad0e9',
+  workProductRoot:        '0xa7f8570e430e1dee4deed6c2d118ed7cbc9b9d60d81d6dbd6cb980a3ef4bb1a7',
+  programHash:            '0x95e8193a8602b26f5930d45d810404ea6cf0a91c13849f918af40f406be565bc',
+  evidenceBlockHash:      '0xcb30733c2904e714a4ef89a387b75bdcfa07aff5a4ea7482b55404a1e24e396c',
+};
+chk(unitContextDigest.toLowerCase() === EXPECT_PROD.unitContextDigest, `PRODUCTION: unitContextDigest == ${EXPECT_PROD.unitContextDigest} (mirror's existing #4 computation, unchanged, confirmed == production)`);
+chk(workProductRoot.toLowerCase() === EXPECT_PROD.workProductRoot, `PRODUCTION: workProductRoot == ${EXPECT_PROD.workProductRoot} (mirror's existing computation, unchanged, confirmed == production)`);
+chk(programHash.toLowerCase() === EXPECT_PROD.programHash, `PRODUCTION: programHash == ${EXPECT_PROD.programHash} (mirror's existing computation, unchanged, confirmed == production)`);
+chk(prodKernelSignedEventsRoot.toLowerCase() === EXPECT_PROD.kernelSignedEventsRoot, `PRODUCTION: kernelSignedEventsRoot == ${EXPECT_PROD.kernelSignedEventsRoot} (production event set + sha256:-prefixed bundle construction, ported verbatim from kernel-signed-events-root-golden-vector.cjs, oracle #1049)`);
+chk(prodSessionKeyAuthDigest.toLowerCase() === EXPECT_PROD.sessionKeyAuthDigest, `PRODUCTION: sessionKeyAuthDigest == ${EXPECT_PROD.sessionKeyAuthDigest} (D3 two-value formula, ported verbatim from sessionkey-grant-golden-vector.cjs, RATIFIED oracle #1030)`);
+chk(prodAttestationSetRoot.toLowerCase() === EXPECT_PROD.attestationSetRoot, `PRODUCTION: attestationSetRoot == ${EXPECT_PROD.attestationSetRoot} (D4 registry-snapshot formula, ported verbatim from attestation-set-root-golden-vector.cjs, RATIFIED oracle #1030)`);
+chk(prodEvidenceBlockHash.toLowerCase() === EXPECT_PROD.evidenceBlockHash, `PRODUCTION PINNED GOLDEN (oracle #5772, bus #1069): evidenceBlockHash == ${EXPECT_PROD.evidenceBlockHash} — re-pinned from the mirror-form sample below; PR #361 @2550254a reproduces this aggregate independently`);
+
+// (8) SUPERSEDED — the mirror-form sample this file originally pinned (sessionKeyAuthDigest = flat
+// sha256(cjson(auth)), attestationSetRoot = flat sorted-hash list, kernelSignedEventsRoot = 0x-prefixed-preimage
+// form on the mirror's own event set). The oracle no longer pins this; kept so a drift in the OLD construction
+// is still caught.
+const EXPECT_SUPERSEDED = {
   EVIDENCE_BLOCK_DOMAIN_V2: '0xf15817db95786e8bbc3156b3e66c9fa7776b2d1233841e8718b9c91fa1c751a0',
   evidenceBlockHash:        '0x4605a6e9affa66fd2acd44f5b88d0468f293056573f04e884048f58ba8803a40',
 };
-chk(EVIDENCE_BLOCK_DOMAIN_V2.toLowerCase() === EXPECT.EVIDENCE_BLOCK_DOMAIN_V2, `pinned golden: EVIDENCE_BLOCK_DOMAIN_V2 == ${EXPECT.EVIDENCE_BLOCK_DOMAIN_V2}`);
-chk(evidenceBlockHash.toLowerCase() === EXPECT.evidenceBlockHash, `pinned golden: evidenceBlockHash == ${EXPECT.evidenceBlockHash}`);
+chk(EVIDENCE_BLOCK_DOMAIN_V2.toLowerCase() === EXPECT_SUPERSEDED.EVIDENCE_BLOCK_DOMAIN_V2, `SUPERSEDED pinned golden: EVIDENCE_BLOCK_DOMAIN_V2 == ${EXPECT_SUPERSEDED.EVIDENCE_BLOCK_DOMAIN_V2}`);
+chk(evidenceBlockHash.toLowerCase() === EXPECT_SUPERSEDED.evidenceBlockHash, `SUPERSEDED mirror-form evidenceBlockHash == ${EXPECT_SUPERSEDED.evidenceBlockHash} (pre-#5772 mirror-form sample; oracle now pins PRODUCTION above, #5772)`);
 
-console.log(`\n${ok ? 'EvidenceBlockV1 v2 mirror: claimsAsserted OUT + unitContextDigest IN + role/quorum-bound attestations + programHash-pin gate + cross-unit/challenge/role-relabel rejected. Folds sol NO-GO #2/#3/#4. Oracle owns (A) evaluator + #1/#5 boundary checks. GOLDEN printed above.' : 'DIVERGENCE -- blocker'}`);
+console.log(`\n${ok ? 'EvidenceBlockV1 v2 mirror: claimsAsserted OUT + unitContextDigest IN + role/quorum-bound attestations + programHash-pin gate + cross-unit/challenge/role-relabel rejected. Folds sol NO-GO #2/#3/#4. Oracle owns (A) evaluator + #1/#5 boundary checks. Re-pinned to the PRODUCTION coherent sample (oracle #5772, bus #1069); mirror-form sample SUPERSEDED but still checked for drift.' : 'DIVERGENCE -- blocker'}`);
 process.exit(ok ? 0 : 1);
