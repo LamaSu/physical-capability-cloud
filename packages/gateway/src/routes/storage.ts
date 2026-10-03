@@ -157,7 +157,7 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({
           error: "invalid_body",
           message:
-            "Request body must be binary. Set Content-Type to a known binary media type (e.g. application/octet-stream) and PUT raw bytes.",
+            "Request body must be binary. POST the raw bytes as the request body with a binary Content-Type (e.g. application/octet-stream).",
         });
       }
 

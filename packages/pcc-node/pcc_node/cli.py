@@ -32,7 +32,6 @@ from .register import (
     provision_api_key,
     register_kernel,
     register_devices,
-    announce_capabilities,
     register_signing_key,
 )
 from .log_capture import LogSigningRefused
@@ -158,6 +157,108 @@ def _load_node_keys():
         click.echo(f"Cannot use this node's key file: {exc}", err=True)
         sys.exit(1)
 
+
+#: The public PCC gateway, the default target of `pcc-node start`.
+PUBLIC_GATEWAY = "https://capability.network"
+
+
+def _config_file_base(config_file):
+    """The gateway a config file names (written by `pcc-node setup` or a
+    previous start), or None."""
+    try:
+        with open(os.path.abspath(config_file)) as f:
+            base = json.load(f).get("pcc_base")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return base.rstrip("/") if isinstance(base, str) and base.strip() else None
+
+
+def _resolve_target(pcc_base, config_file):
+    """The gateway `start` will use, and where that choice came from.
+
+    --pcc-base, then PCC_BASE, then the config file's pcc_base, then the public
+    gateway. Returns (base, source); source is "flag", "env", "default", or
+    "config:<path>".
+    """
+    source = None
+    try:
+        source = click.get_current_context().get_parameter_source("pcc_base")
+    except RuntimeError:
+        pass
+    if source == click.core.ParameterSource.COMMANDLINE:
+        return pcc_base.rstrip("/"), "flag"
+    if source == click.core.ParameterSource.ENVIRONMENT:
+        return pcc_base.rstrip("/"), "env"
+    from_file = _config_file_base(config_file)
+    if from_file:
+        return from_file, f"config:{os.path.abspath(config_file)}"
+    return PUBLIC_GATEWAY, "default"
+
+
+def _target_banner(base, source):
+    """The first lines `pcc-node start` prints (N57): the gateway this node will
+    register with (it takes no jobs), and what starting creates there."""
+    if base == PUBLIC_GATEWAY:
+        where = "public PCC network, test-net payments"
+    elif source == "flag":
+        where = "set by --pcc-base"
+    elif source == "env":
+        where = "set by PCC_BASE"
+    elif source.startswith("config:"):
+        where = f"from {source[len('config:'):]}"
+    else:
+        where = source
+    return [
+        f"Target gateway: {base} ({where})",
+        "  Starting registers this machine there: a kernel record under your API key "
+        "(updated if it already exists).",
+    ]
+
+
+def _confirmed_targets_path():
+    return os.path.join(os.path.expanduser("~"), ".pcc-node", "confirmed-gateways")
+
+
+def _target_confirmed_before(base):
+    try:
+        with open(_confirmed_targets_path()) as f:
+            return base in {line.strip() for line in f}
+    except OSError:
+        return False
+
+
+def _remember_target(base):
+    path = _confirmed_targets_path()
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(base + "\n")
+    except OSError:
+        pass
+
+
+def _interactive():
+    return sys.stdin.isatty()
+
+
+def _confirm_public_target(base, source, yes):
+    """N57: registering on the public network by default needs a yes, once.
+
+    Asked only when the public gateway came from the default (not --pcc-base,
+    PCC_BASE or a config file), --yes is absent, and this machine has not
+    confirmed that gateway before. Without a terminal, refuse and say how.
+    """
+    if source != "default" or base != PUBLIC_GATEWAY or yes or _target_confirmed_before(base):
+        return True
+    if not _interactive():
+        click.echo("Pass --yes or set PCC_BASE to register with the public network.", err=True)
+        return False
+    if click.confirm(f"Register this machine on the public PCC network ({base})?", default=False):
+        _remember_target(base)
+        return True
+    click.echo("Not registering. Set PCC_BASE to use another gateway.")
+    return False
+
 @click.group()
 @click.version_option(version=__version__, prog_name="pcc-node")
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug logging")
@@ -204,14 +305,29 @@ def main(ctx, verbose):
     default="",
     help="Subnet to scan with --discover (default: auto-detect)",
 )
-def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Register with the public PCC network without asking",
+)
+def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     """Detect hardware, register on PCC, and start the node daemon."""
     log = logging.getLogger("pcc-node")
+
+    # N57: say which gateway this node will talk to before doing anything.
+    target, target_source = _resolve_target(pcc_base, config_file)
+    for line in _target_banner(target, target_source):
+        click.echo(line)
 
     # Check if already running
     running, pid = is_running()
     if running:
         click.echo(f"Node is already running (PID {pid}). Use 'pcc-node status'.")
+        sys.exit(1)
+
+    # N57: a default public registration needs a yes, before any network step.
+    if not _confirm_public_target(target, target_source, yes):
         sys.exit(1)
 
     # Try loading existing config
@@ -269,8 +385,9 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
         # Merge newly detected devices into existing config
         config.devices = devices
 
-    # Apply CLI overrides
-    config.pcc_base = pcc_base
+    # Apply CLI overrides. The gateway is the resolved target: --pcc-base, then
+    # PCC_BASE, then the config file's, then the public default.
+    config.pcc_base = target
     if kernel_id:
         config.kernel_id = kernel_id
     if api_key:
@@ -322,15 +439,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
     except LogSigningRefused as exc:
         click.echo(f"  Skipping signing-key registration (dev key): {exc}")
 
-    # Announce capabilities
-    if devices:
-        announce_capabilities(
-            config.pcc_base,
-            config.pcc_api_key,
-            config.kernel_id,
-            devices,
-            secret_key=secret_key,
-        )
+    # No capability announcement: this node takes no jobs (verdict 68d, finding 3).
 
     # First-run diagnostics banner (no-op if already acknowledged)
     _maybe_prompt_diagnostics(config)
@@ -341,7 +450,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
 
     # Start daemon
     click.echo("")
-    click.echo("Node running. Accepting jobs.")
+    click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
     click.echo(f"  Dashboard: {config.pcc_base}/operator")
     click.echo("  Press Ctrl+C to stop.")
     click.echo("")
@@ -608,21 +717,9 @@ def ui():
 @ui.command("serve")
 @click.option("--port", default=3200, help="Server port (default: 3200)")
 @click.option("--ui-dir", default=None, help="UI directory (default: ~/.pcc-node/ui/)")
-@click.option(
-    "--pcc-base",
-    envvar="PCC_BASE",
-    default="https://capability.network",
-    help="PCC gateway URL for API proxy",
-)
-@click.option(
-    "--api-key",
-    envvar="PCC_API_KEY",
-    default="",
-    help="PCC API key for proxy auth",
-)
-def ui_serve(port, ui_dir, pcc_base, api_key):
-    """Start the dynamic UI server."""
-    from .ui_server import start_ui_server, _active_ui_dir
+def ui_serve(port, ui_dir):
+    """Start the dynamic UI server. It takes no PCC credentials: its pages are agent-generated."""
+    from .ui_server import start_ui_server, ui_token_path
 
     click.echo(f"UI server: http://localhost:{port}")
     if ui_dir:
@@ -630,21 +727,16 @@ def ui_serve(port, ui_dir, pcc_base, api_key):
     else:
         from .ui_server import _DEFAULT_UI_DIR
         click.echo(f"UI directory: {_DEFAULT_UI_DIR}")
+    click.echo(f"Agent token: {ui_token_path()} (read it to use the agent API)")
     click.echo("Press Ctrl+C to stop.")
-    start_ui_server(
-        port=port,
-        ui_dir=ui_dir,
-        background=False,
-        pcc_base=pcc_base,
-        pcc_api_key=api_key,
-    )
+    start_ui_server(port=port, ui_dir=ui_dir, background=False)
 
 
 @ui.command("open")
 @click.argument("template")
 @click.option("--port", default=3200, help="Server port (default: 3200)")
 def ui_open(template, port):
-    """Install and open a built-in template in the browser."""
+    """Install a built-in template and print the URL to open it at."""
     from .ui_gen import install_template, list_templates
 
     available = list_templates()
@@ -657,9 +749,7 @@ def ui_open(template, port):
         filename = install_template(template)
         url = f"http://localhost:{port}/{filename}"
         click.echo(f"Installed: {filename}")
-        click.echo(f"URL: {url}")
-        import webbrowser
-        webbrowser.open(url)
+        click.echo(f"Open it in your browser: {url}")
     except FileNotFoundError as e:
         click.echo(f"Error: {e}")
 

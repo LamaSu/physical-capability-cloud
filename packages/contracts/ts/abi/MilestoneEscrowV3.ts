@@ -120,6 +120,40 @@ export const MilestoneEscrowV3ABI = [
     outputs: [{ name: "", type: "bool" }],
   },
   {
+    // When fund() ran (block timestamp). The deadline reclaim is due at fundedAt + the reclaim window.
+    name: "fundedAt",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    // The payer-set reclaim window in seconds; 0 means DEFAULT_RECLAIM_DEADLINE.
+    name: "reclaimDeadlineSeconds",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    // 30 days.
+    name: "DEFAULT_RECLAIM_DEADLINE",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    // The deadline reclaim (N79). PAYER-ONLY (forwarder-aware). Allowed only from Funded, Locked or Evidenced, and
+    // only once block.timestamp >= fundedAt + the reclaim window. Sets the milestone Refunded, then returns its
+    // amount to the payer (and a held operator bond to the operator). A second call reverts "Not reclaimable".
+    name: "reclaimAfterDeadline",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "milestoneIndex", type: "uint256" }],
+    outputs: [],
+  },
+  {
     name: "totalAmount",
     type: "function",
     stateMutability: "view",
