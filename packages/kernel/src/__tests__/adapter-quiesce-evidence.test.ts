@@ -246,6 +246,37 @@ describe("IppAdapter", () => {
     await expectSilenceAfter(events);
   });
 
+  // astra pack 185: a page count that is not a positive integer began the job's work and then
+  // never ended it (0 or less: the first page returned at once) or never finished (NaN,
+  // Infinity: pages forever), so the hook never answered and the device was held for good.
+  it.each([
+    ["zero", 0],
+    ["negative", -2],
+    ["NaN", Number.NaN],
+    ["infinite", Number.POSITIVE_INFINITY],
+  ])("(mock mode) a %s page count is refused before the job is accepted: the hook answers, and nothing runs on", async (_label, totalPages) => {
+    const ipp = new IppAdapter("ipp-q-pages", { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: true });
+    const events = record(ipp);
+    const result = await ipp.execute({ type: "start", payload: { totalPages } });
+    expect.soft(result, "start").toMatchObject({ success: false, message: `totalPages must be a positive integer (got ${String(totalPages)})` });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const hook = ask(ipp, events);
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook.resolved, "the hook, 10 s after the start").toBe(true);
+    expect.soft(events.map((e) => e.type), "events").toEqual([]);
+    expect.soft(vi.getTimerCount(), "timers left").toBe(0);
+  });
+
+  // The rest of the fix's domain: these terminate today, but a page count is a positive integer.
+  it.each([
+    ["fractional", 1.5],
+    ["string", "3"],
+  ])("(mock mode) a %s page count is refused too; an absent one still defaults to 3 pages", async (_label, totalPages) => {
+    const ipp = new IppAdapter("ipp-q-pages-domain", { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: true });
+    expect(await ipp.execute({ type: "start", payload: { totalPages } })).toMatchObject({ success: false });
+    expect(await ipp.execute({ type: "start" })).toMatchObject({ success: true });
+  });
+
   it("(mock mode) a paused job keeps it pending, since it can be resumed; cancelling it resolves it", async () => {
     const ipp = new IppAdapter("ipp-q-pause", { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: true });
     const events = record(ipp);

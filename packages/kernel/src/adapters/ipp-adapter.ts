@@ -254,6 +254,12 @@ export class IppAdapter implements MachineAdapter {
 
         const jobName = (command.payload?.jobName as string | undefined) ?? "document.pdf";
         const totalPages = (command.payload?.totalPages as number | undefined) ?? 3;
+        // Refused before the job is accepted: with no page to print (0 or fewer) its work would
+        // begin and never end, and with no last page (NaN, Infinity, or past 2^53, where
+        // currentPage++ stops counting) it would print forever. Either holds quiesceEvidence().
+        if (!Number.isSafeInteger(totalPages) || totalPages < 1) {
+          return { success: false, message: `totalPages must be a positive integer (got ${String(totalPages)})` };
+        }
         const jobId = this.currentJobId++;
 
         this.mockStatus = "busy";
