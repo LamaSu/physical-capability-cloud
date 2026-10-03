@@ -71,6 +71,22 @@ function makeSimulatedLogProvider(): LogProvider {
   };
 }
 
+/**
+ * A failure's reason as text, for the failed-poll latch and the stop's refusal. It never
+ * throws: a reason with no text form (an object with no prototype, a toString or message
+ * getter that throws, a message that is not a string) gets a fixed text instead, so the latch
+ * holds whatever a poll rejected with (astra pack 200).
+ */
+function failureText(err: unknown): string {
+  try {
+    const text: unknown = err instanceof Error ? err.message : String(err);
+    if (typeof text === "string") return text;
+  } catch {
+    // No text form: the fixed text below.
+  }
+  return "a reason with no text form";
+}
+
 // ---------------------------------------------------------------------------
 // PrinterLogAdapter
 // ---------------------------------------------------------------------------
@@ -305,8 +321,9 @@ export class PrinterLogAdapter implements SensorAdapter {
       void this.poll(jobId)
         .catch((err: unknown) => {
           // The chain may now lack the lines this poll would have read: latched, so the
-          // stop refuses to vouch for it (astra pack 190).
-          this.pollFailure ??= err instanceof Error ? err.message : String(err);
+          // stop refuses to vouch for it (astra pack 190). failureText never throws, so the
+          // latch is set before the placeholder settles, whatever the reason (astra pack 200).
+          this.pollFailure ??= failureText(err);
         })
         .finally(done);
     }, this.pollIntervalMs);

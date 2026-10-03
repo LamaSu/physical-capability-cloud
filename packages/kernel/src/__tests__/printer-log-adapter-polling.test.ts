@@ -772,6 +772,34 @@ describe("PrinterLogAdapter: a stop asked from inside a timer poll (astra pack 1
     expect.soft(vi.getTimerCount(), "timers left").toBe(0);
   });
 
+  it.each([
+    ["an object with no prototype (astra pack 200's recipe)", () => Object.create(null) as unknown],
+    ["an object whose toString throws", () => ({ toString: () => { throw new Error("no text"); } }) as unknown],
+    ["an Error whose message getter throws", () => Object.defineProperty(new Error("x"), "message", { get: () => { throw new Error("no message"); } }) as unknown],
+    ["an Error whose message is not text", () => Object.defineProperty(new Error("x"), "message", { value: Object.create(null) }) as unknown],
+  ])("the timer's poll then fails with %s: the failure is still latched, so the stop refuses and no summary vouches for the chain", async (_what, reason) => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (err: unknown) => void unhandled.push(err);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const t = timerPollThatStops("log-reenter-timer-fails-oddly");
+      await t.log.startRecording("job-o");
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      t.held.reject(reason() as Error);
+      const outcome = await t.asked.stop!;
+      await vi.advanceTimersByTimeAsync(0);
+      await new Promise((r) => setImmediate(r)); // let Node report any unhandled rejection
+      expect.soft(outcome.error ?? "resolved", "the stop").toMatch(/a log poll failed during the recording/);
+      expect.soft(summaries(t.events), "summaries").toEqual([]);
+      expect.soft(entries(t.events), "entries").toEqual(["first"]);
+      expect.soft(t.calls(), "log polls: no final poll").toBe(2);
+      expect.soft(unhandled.length, "unhandled rejections").toBe(0);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("a dispose from inside the timer's poll: quiesceEvidence() still waits for that poll, which then emits nothing", async () => {
     const held = deferredLine();
     let log!: PrinterLogAdapter;
