@@ -234,6 +234,42 @@ describe("demo mode (?demo=1)", () => {
 
 // ── Funded Key tab (live) ────────────────────────────────────────────────────
 
+/** The checkout URL POST /api/fiat-ramp/coinbase/onramp builds for `wallet` (packages/gateway/src/routes/fiat-ramp.ts). */
+function coinbaseCheckout(wallet: string, destinations: Record<string, string[]> = { [wallet]: ["base"] }): string {
+  const params = new URLSearchParams({
+    appId: "app-123",
+    defaultAsset: "USDC",
+    defaultNetwork: "base",
+    fiatCurrency: "USD",
+    addresses: JSON.stringify(destinations),
+    assets: JSON.stringify(["USDC"]),
+  });
+  return `https://pay.coinbase.com/buy/select-asset?${params.toString()}`;
+}
+
+/** The route's whole answer for a live Coinbase app. */
+function onrampAnswer(wallet: string, onrampUrl: string) {
+  return { provider: "coinbase", onrampUrl, walletAddress: wallet, asset: "USDC", network: "base", fiatCurrency: "USD", amount: null, mock: false, note: "Live Coinbase Onramp" };
+}
+
+/** A spend permission as the CDP service issues it (packages/payments/src/cdp/spend-permission-service.ts), for the tab's default request. */
+function permissionAnswer(overrides: Record<string, unknown> = {}) {
+  const now = Date.now();
+  return {
+    permissionId: "cdp_spendperm_1",
+    account: "0x2222222222222222222222222222222222222222",
+    spender: "0x4444444444444444444444444444444444444444",
+    token: "USDC",
+    allowance: "50000000",
+    allowanceUSDC: 50,
+    periodSec: 86400,
+    start: new Date(now).toISOString(),
+    expiresAt: new Date(now + 30 * 24 * 3600 * 1000).toISOString(),
+    revoked: false,
+    ...overrides,
+  };
+}
+
 describe("Funded Key tab: shows what the gateway returns", () => {
   it("a simulated wallet is labelled, never called usable, and can't be funded by card", async () => {
     const stub = stubFetch({
@@ -260,16 +296,13 @@ describe("Funded Key tab: shows what the gateway returns", () => {
   });
 
   it("a real wallet links to the checkout URL the gateway returned", async () => {
-    const checkout = "https://pay.coinbase.com/buy/select-asset?appId=app-123&defaultNetwork=base";
+    const checkout = coinbaseCheckout("0x2222222222222222222222222222222222222222");
     const stub = stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
         body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
       },
-      "/api/fiat-ramp/coinbase/onramp": {
-        status: 200,
-        body: { provider: "coinbase", onrampUrl: checkout, walletAddress: "0x2222222222222222222222222222222222222222", mock: false },
-      },
+      "/api/fiat-ramp/coinbase/onramp": { status: 200, body: onrampAnswer("0x2222222222222222222222222222222222222222", checkout) },
     });
     await renderPage();
     await click(button("Funded Key"));
@@ -323,7 +356,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
   });
 
   it("a key reads REVOKED only when the gateway confirms it", async () => {
-    const perm = { permissionId: "0xperm", spender: "0x4444444444444444444444444444444444444444", allowanceUSDC: 50, periodSec: 86400, expiresAt: "2026-10-01T00:00:00Z", revoked: false };
+    const perm = permissionAnswer({ permissionId: "0xperm" });
     const routes: Record<string, { status: number; body: unknown }> = {
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
@@ -391,6 +424,80 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     typeInto(container.querySelector('input[placeholder="Agent address (0x…)"]'), "0x4444444444444444444444444444444444444444");
     await click(button("Issue scoped key"));
     expect(text()).not.toContain("ACTIVE");
+  });
+
+  const WALLET_2 = "0x2222222222222222222222222222222222222222";
+  it.each([
+    ["another address", { "0x9999999999999999999999999999999999999999": ["base"] }],
+    ["another network", { [WALLET_2]: ["ethereum"] }],
+    ["a second address too", { [WALLET_2]: ["base"], "0x9999999999999999999999999999999999999999": ["base"] }],
+  ])("a checkout that pays %s is not offered (astra 408a HIGH)", async (_what, destinations) => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false } },
+      "/api/fiat-ramp/coinbase/onramp": { status: 200, body: onrampAnswer(WALLET_2, coinbaseCheckout(WALLET_2, destinations)) },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    await click(button(/Add funds with a card/));
+    expect([...container.querySelectorAll("a")].some((a) => a.textContent?.includes("Open card checkout"))).toBe(false);
+    expect(text()).toContain("isn't offered");
+  });
+
+  it.each([
+    ["another spender", { spender: "0x5555555555555555555555555555555555555555" }],
+    ["another allowance", { allowanceUSDC: 500, allowance: "500000000" }],
+    ["an on-chain allowance that disagrees", { allowance: "50" }],
+    ["already revoked", { revoked: true }],
+    ["another wallet's account", { account: "0x9999999999999999999999999999999999999999" }],
+  ])("a permission with %s is not shown as issued (astra 408a HIGH)", async (_what, echo) => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false } },
+      "/api/fiat-ramp/cdp/spend-permission": { status: 200, body: permissionAnswer(echo) },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    typeInto(container.querySelector('input[placeholder="Agent address (0x…)"]'), "0x4444444444444444444444444444444444444444");
+    await click(button("Issue scoped key"));
+    expect(text()).not.toContain("ACTIVE");
+    expect(text()).toContain("didn't confirm this permission in full");
+  });
+
+  it("a permission past its expiry reads EXPIRED, never ACTIVE", async () => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": {
+        status: 200,
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+      },
+      "/api/fiat-ramp/cdp/spend-permission": {
+        status: 200,
+        body: permissionAnswer({ start: "2026-01-01T00:00:00Z", expiresAt: "2026-01-02T00:00:00Z" }),
+      },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    typeInto(container.querySelector('input[placeholder="Agent address (0x…)"]'), "0x4444444444444444444444444444444444444444");
+    await click(button("Issue scoped key"));
+    expect(text()).toContain("EXPIRED");
+    expect(text()).not.toContain("ACTIVE");
+  });
+
+  it("an agent address that isn't 0x and 40 hex digits is refused before anything is sent", async () => {
+    const stub = stubFetch({
+      "/api/fiat-ramp/cdp/wallet": {
+        status: 200,
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+      },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    typeInto(container.querySelector('input[placeholder="Agent address (0x…)"]'), "agent-7");
+    await click(button("Issue scoped key"));
+    expect(text()).toContain("Enter the agent's address");
+    expect(requests(stub)).toEqual(["POST /api/fiat-ramp/cdp/wallet"]);
   });
 
   it("a gateway error is shown with its reason, and no wallet appears", async () => {

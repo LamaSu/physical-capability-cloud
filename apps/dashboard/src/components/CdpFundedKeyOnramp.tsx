@@ -21,13 +21,27 @@ import { authorizedFetch } from "../lib/authorized-fetch.js";
  * Such a wallet is labelled, is never called usable, and is never offered
  * card funding: the Coinbase checkout is real, so money sent to that address
  * could not be recovered. Its spend permissions are simulated too.
+ *
+ * Every answer is checked in full before it is shown as money state (astra
+ * 408a). An answer missing a field, or one that doesn't match what was asked,
+ * is a failed request: a wallet must say whether it is simulated, a checkout
+ * must be Coinbase's own and pay exactly this wallet on Base, and a spend
+ * permission must echo the request it confirms.
  */
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+/** The networks the CDP wallet client creates wallets on (packages/payments/src/cdp). */
+const NETWORKS = new Set(["base", "base-sepolia"]);
+/** USDC's smallest unit: the permission's on-chain allowance is the USDC amount times this. */
+const USDC_UNITS = 1_000_000;
+const CHECKOUT_ORIGIN = "https://pay.coinbase.com";
 
 interface Wallet {
   walletAddress: string;
   network: string;
-  smartAccount: boolean;
-  mock?: boolean;
+  smartAccount: true;
+  /** Explicit in every answer: true when no key controls the address. */
+  mock: boolean;
 }
 interface Permission {
   permissionId: string;
@@ -36,6 +50,83 @@ interface Permission {
   periodSec: number;
   expiresAt: string;
   revoked: boolean;
+}
+interface PermissionRequest {
+  walletAddress: string;
+  spender: string;
+  allowanceUSDC: number;
+  periodSec: number;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+const sameAddress = (a: unknown, b: string) => typeof a === "string" && a.toLowerCase() === b.toLowerCase();
+
+/** POST /api/fiat-ramp/cdp/wallet's answer, or null when it isn't one in full. */
+function parseWallet(v: unknown): Wallet | null {
+  if (!isRecord(v)) return null;
+  const { walletAddress, network, smartAccount, mock } = v;
+  if (typeof walletAddress !== "string" || !ADDRESS.test(walletAddress)) return null;
+  if (typeof network !== "string" || !NETWORKS.has(network)) return null;
+  if (smartAccount !== true || typeof mock !== "boolean") return null;
+  return { walletAddress, network, smartAccount, mock };
+}
+
+/**
+ * POST /api/fiat-ramp/coinbase/onramp's answer for `wallet`: Coinbase's live
+ * checkout paying exactly this wallet on Base, the gateway's note when it says
+ * the checkout is a mock, or null when the answer is neither.
+ */
+function parseCheckout(v: unknown, wallet: Wallet): { url: string } | { note: string } | null {
+  if (!isRecord(v) || v.provider !== "coinbase" || typeof v.mock !== "boolean") return null;
+  if (v.mock) return { note: typeof v.note === "string" && v.note ? v.note : "This gateway has no Coinbase app configured." };
+  if (v.network !== "base" || v.asset !== "USDC" || !sameAddress(v.walletAddress, wallet.walletAddress)) return null;
+  if (typeof v.onrampUrl !== "string") return null;
+  let url: URL;
+  try {
+    url = new URL(v.onrampUrl);
+  } catch {
+    return null;
+  }
+  if (url.origin !== CHECKOUT_ORIGIN || !url.pathname.startsWith("/buy")) return null;
+  // Where the money goes: {"<address>": ["base"]}, this wallet and nothing else.
+  let addresses: unknown;
+  try {
+    addresses = JSON.parse(url.searchParams.get("addresses") ?? "");
+  } catch {
+    return null;
+  }
+  if (!isRecord(addresses)) return null;
+  const destinations = Object.entries(addresses);
+  if (destinations.length !== 1) return null;
+  const [address, networks] = destinations[0]!;
+  if (!sameAddress(address, wallet.walletAddress)) return null;
+  if (!Array.isArray(networks) || networks.length !== 1 || networks[0] !== "base") return null;
+  return { url: url.href };
+}
+
+/** POST /api/fiat-ramp/cdp/spend-permission's answer, or null unless it is a complete, unrevoked permission confirming `request`. */
+function parsePermission(v: unknown, request: PermissionRequest): Permission | null {
+  if (!isRecord(v)) return null;
+  const { permissionId, account, spender, token, allowance, allowanceUSDC, periodSec, start, expiresAt, revoked } = v;
+  if (typeof permissionId !== "string" || permissionId.length === 0) return null;
+  if (!sameAddress(account, request.walletAddress) || !sameAddress(spender, request.spender)) return null;
+  if (token !== "USDC" || allowanceUSDC !== request.allowanceUSDC || periodSec !== request.periodSec) return null;
+  if (allowance !== String(Math.round(request.allowanceUSDC * USDC_UNITS))) return null;
+  if (typeof start !== "string" || typeof expiresAt !== "string") return null;
+  const from = Date.parse(start);
+  const until = Date.parse(expiresAt);
+  if (!Number.isFinite(from) || !Number.isFinite(until) || until <= from) return null;
+  if (revoked !== false) return null;
+  return { permissionId, spender: spender as string, allowanceUSDC, periodSec, expiresAt, revoked };
+}
+
+/** What a permission is now: revoked only on the gateway's confirmation, expired past its expiry. */
+function permissionStatus(perm: Permission, now = Date.now()): "REVOKED" | "EXPIRED" | "ACTIVE" {
+  if (perm.revoked) return "REVOKED";
+  return Date.parse(perm.expiresAt) <= now ? "EXPIRED" : "ACTIVE";
 }
 
 async function api(path: string, method: string, body?: unknown): Promise<any> {
@@ -83,13 +174,15 @@ export function CdpFundedKeyOnramp() {
   // Coinbase's card checkout pays out USDC on Base mainnet. Only a real wallet
   // on "base" can receive it. A base-sepolia (testnet) wallet would be paid
   // real money on a network PCC doesn't read for it.
-  const cardFundable = !!wallet && !simulated && wallet.network === "base";
+  const cardFundable = !!wallet && wallet.mock === false && wallet.network === "base";
 
   async function createWallet() {
     setCreating(true);
     setErr(null);
     try {
-      setWallet(await api("/api/fiat-ramp/cdp/wallet", "POST"));
+      const w = parseWallet(await api("/api/fiat-ramp/cdp/wallet", "POST"));
+      if (w) setWallet(w);
+      else setErr("The gateway's wallet answer was incomplete (it must give the address and network, and say whether the wallet is simulated), so no wallet is shown.");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -102,18 +195,17 @@ export function CdpFundedKeyOnramp() {
     setFunding(true);
     setErr(null);
     try {
-      const r = (await api("/api/fiat-ramp/coinbase/onramp", "POST", {
-        walletAddress: wallet.walletAddress,
-        network: wallet.network,
-      })) as { onrampUrl?: unknown; mock?: unknown; note?: unknown };
-      if (r.mock === true) {
-        // No Coinbase app is configured on this gateway, so its URL is not a checkout to offer.
-        setOnrampNote(typeof r.note === "string" && r.note ? r.note : "This gateway has no Coinbase app configured.");
-      } else if (typeof r.onrampUrl === "string" && r.onrampUrl.startsWith("https://")) {
-        setOnrampUrl(r.onrampUrl);
-      } else {
-        setErr("The gateway returned no checkout link.");
-      }
+      const checkout = parseCheckout(
+        await api("/api/fiat-ramp/coinbase/onramp", "POST", {
+          walletAddress: wallet.walletAddress,
+          network: wallet.network,
+        }),
+        wallet,
+      );
+      if (!checkout) setErr("The gateway's checkout wasn't Coinbase's card checkout for this wallet on Base, so it isn't offered.");
+      // A mock: no Coinbase app is configured on this gateway, so its URL is not a checkout to offer.
+      else if ("note" in checkout) setOnrampNote(checkout.note);
+      else setOnrampUrl(checkout.url);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -123,17 +215,26 @@ export function CdpFundedKeyOnramp() {
 
   async function issue() {
     if (!wallet) return;
+    const request: PermissionRequest = {
+      walletAddress: wallet.walletAddress,
+      spender: spender.trim(),
+      allowanceUSDC: Number(allowance),
+      periodSec: Math.round(Number(periodHrs) * 3600),
+    };
+    if (!ADDRESS.test(request.spender)) {
+      setErr("Enter the agent's address: 0x and 40 hex digits.");
+      return;
+    }
+    if (!(request.allowanceUSDC > 0) || !Number.isFinite(request.allowanceUSDC) || !(request.periodSec > 0)) {
+      setErr("Enter a positive USDC allowance and period.");
+      return;
+    }
     setIssuing(true);
     setErr(null);
     try {
-      setPerm(
-        await api("/api/fiat-ramp/cdp/spend-permission", "POST", {
-          walletAddress: wallet.walletAddress,
-          spender: spender.trim(),
-          allowanceUSDC: Number(allowance),
-          periodSec: Math.round(Number(periodHrs) * 3600),
-        }),
-      );
+      const p = parsePermission(await api("/api/fiat-ramp/cdp/spend-permission", "POST", request), request);
+      if (p) setPerm(p);
+      else setErr("The gateway's answer didn't confirm this permission in full, so it isn't shown as issued. Check the gateway before relying on it.");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -146,9 +247,9 @@ export function CdpFundedKeyOnramp() {
     setRevoking(true);
     setErr(null);
     try {
-      const r = (await api(`/api/fiat-ramp/cdp/spend-permission/${perm.permissionId}`, "DELETE")) as { revoked?: unknown } | null;
-      // Only the gateway's explicit confirmation marks the key revoked.
-      if (r?.revoked === true) setPerm({ ...perm, revoked: true });
+      const r = (await api(`/api/fiat-ramp/cdp/spend-permission/${perm.permissionId}`, "DELETE")) as { revoked?: unknown; permissionId?: unknown } | null;
+      // Only the gateway's explicit confirmation, for this permission, marks the key revoked.
+      if (r?.revoked === true && r.permissionId === perm.permissionId) setPerm({ ...perm, revoked: true });
       else setErr("The gateway didn't confirm the revocation, so the key may still be active.");
     } catch (e) {
       setErr((e as Error).message);
@@ -298,12 +399,12 @@ export function CdpFundedKeyOnramp() {
                     )}
                     <span
                       className={`text-[10px] rounded px-1.5 py-0.5 border ${
-                        perm.revoked
-                          ? "text-white/40 border-white/20"
-                          : "text-emerald-400/80 border-emerald-400/30"
+                        permissionStatus(perm) === "ACTIVE"
+                          ? "text-emerald-400/80 border-emerald-400/30"
+                          : "text-white/40 border-white/20"
                       }`}
                     >
-                      {perm.revoked ? "REVOKED" : "ACTIVE"}
+                      {permissionStatus(perm)}
                     </span>
                   </span>
                 </div>
