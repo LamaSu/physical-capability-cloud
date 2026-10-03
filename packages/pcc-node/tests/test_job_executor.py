@@ -41,6 +41,7 @@ from pcc_node.job_executor import (  # noqa: E402
     COMPLETION_FLAG_KEYS,
     ACCEPTANCE_FLAG_KEYS,
     _extract_device_error,
+    _is_transport_failure,
 )
 
 
@@ -895,6 +896,48 @@ class TestR31MalformedFieldsAndDeepBodies:
 # ---------------------------------------------------------------------------
 # JobExecutor._find_device
 # ---------------------------------------------------------------------------
+
+class TestTransportFailureSentinel:
+    """The classifier-backstop half of #333's class (098af22c), verbatim. Its live-adapter half
+    (`test_generic_http_adapter_does_not_claim_executed`, `test_unreachable_device_disputes_end_to_end`)
+    drove the adapters and `JobExecutor.execute`, which #454 deletes, so it is not carried."""
+
+    # --- the classifier backstop -------------------------------------------
+
+    def test_status_code_zero_is_a_failure(self):
+        """The pre-fix shape: claims executed, but never reached the device."""
+        assert classify_execution_result(GH_TRANSPORT_PRE_FIX) == RESULT_FAILURE
+
+    def test_transport_sentinel_outranks_a_claimed_success(self):
+        result = {"status": "completed", "status_code": 0, "executed": True}
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_negative_status_code_is_also_a_failure(self):
+        assert classify_execution_result({"executed": True, "status_code": -1}) == RESULT_FAILURE
+
+    def test_real_http_status_codes_are_untouched(self):
+        assert classify_execution_result(GH_SUCCESS) == RESULT_SUCCESS
+        # A real 200 is not the sentinel.  OctoPrint's 2xx is acceptance, not
+        # completion (item 5), so its verdict is accepted -- but not failure.
+        assert classify_execution_result(OP_ACCEPTED) == RESULT_ACCEPTED
+
+    def test_boolean_status_code_is_not_read_as_the_sentinel(self):
+        """`False == 0` in Python -- a bool there is a malformed result, not a
+        transport report, so it is not the sentinel (not a failure by rule 4).
+
+        CHANGED (r31 astra verdict item 3): this used to assert RESULT_SUCCESS.
+        A present-but-malformed status_code is unreadable, and an unreadable
+        outcome field is not evidence that nothing failed, so it now
+        classifies as unclassifiable (rule 4c) -- never a success."""
+        result = {"printed": True, "status_code": False}
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+        assert not _is_transport_failure(result)
+
+    def test_failure_reason_names_the_transport_failure(self):
+        reason = describe_execution_failure(GH_TRANSPORT_PRE_FIX)
+        assert "unreachable" in reason
+        assert "status_code=0" in reason
+
 
 class TestJobExecutorFindDevice:
     def _make_executor(self, devices):
