@@ -22,15 +22,21 @@ const BASE_UNITS = /^([+-]?)(\d+)$/;
 /**
  * Read an amount exactly, or return null when it can't be read. Accepts a decimal
  * string ("1234.5", "-3"), one with correct thousands grouping ("1,234.56"), a
- * finite number or a bigint. With `decimals`, `amount` is an integer count of base
- * units (USDC: 6), so "1500000" reads as 1.5. Missing, empty or anything else is
- * null: the caller shows the amount as unavailable, never as 0.
+ * bigint, or a number that still holds its digits: at most Number.MAX_SAFE_INTEGER
+ * in size and printed without an exponent (so not 1e-7 or 1e21). Anything larger
+ * or smaller must arrive as a string or a bigint. With `decimals`, `amount` is an
+ * integer count of base units (USDC: 6), so "1500000" reads as 1.5; a number count
+ * must be a safe integer. Missing, empty or anything else is null: the caller
+ * shows the amount as unavailable, never as 0.
  */
 export function parseAmountExact(amount: unknown, decimals?: number): ExactAmount | null {
   let s: string;
   if (typeof amount === "string") s = amount.trim();
   else if (typeof amount === "number") {
-    if (!Number.isFinite(amount)) return null;
+    // Past 2^53 a number has already lost digits (JSON 9007199254740993 arrives as
+    // ...992), so it can't be shown exactly.
+    if (!Number.isFinite(amount) || Math.abs(amount) > Number.MAX_SAFE_INTEGER) return null;
+    if (decimals !== undefined && !Number.isSafeInteger(amount)) return null;
     s = String(amount);
   } else if (typeof amount === "bigint") s = amount.toString();
   else return null;
