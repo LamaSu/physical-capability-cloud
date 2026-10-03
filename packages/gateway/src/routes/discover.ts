@@ -16,6 +16,7 @@ import type { FastifyInstance } from "fastify";
 import type { CSD } from "@pcc/spec";
 import { buildAdapterEvidence } from "@pcc/spec";
 import { getCsdRegistry } from "./csd.js";
+import { lit } from "../observability/closed-schema.js";
 
 // ── Discovery types ──────────────────────────────────────────────────────────
 
@@ -305,8 +306,7 @@ export async function discoverRoutes(app: FastifyInstance) {
       registry.register(csd);
     } catch (err) {
       // Already registered — update is fine since register overwrites
-      const message = err instanceof Error ? err.message : String(err);
-      app.log.warn(`CSD registration warning: ${message}`);
+      app.log.warn({ err }, lit("CSD registration warning"));
     }
 
     return {
