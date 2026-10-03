@@ -459,6 +459,67 @@ describe("full /mcp prod domain gate on MCP App views (D14)", () => {
     }
   });
 
+  // astra r1 on #495 (HIGH): the plain HTTP mirror, registered with /mcp, served the view HTML with no
+  // domain gate. In production it may serve only on the configured app domain's own host.
+  const MIRROR = "/mcp-apps/ui/dashboard";
+
+  it("prod + placeholder domain: the plain HTTP mirror serves no view HTML", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.PCC_MCP_APP_DOMAIN;
+    const app = await fullSurfaceApp();
+    try {
+      const res = await app.inject({ method: "GET", url: MIRROR, headers: { host: "capability.network" } });
+      expect(res.statusCode).toBe(503);
+      expect(res.body).toContain("MCP App surface unavailable");
+      expect(res.body).not.toMatch(/<html|<script/i);
+      expect(res.headers["content-security-policy"]).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("prod + a configured domain: the mirror serves only on that domain's host, never on a shared origin", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.PCC_MCP_APP_DOMAIN = "https://pcc-apps.example";
+    const app = await fullSurfaceApp();
+    try {
+      for (const host of ["capability.network", "pcc-apps.example.evil", "PCC-APPS.EXAMPLE:444"]) {
+        const shared = await app.inject({ method: "GET", url: MIRROR, headers: { host } });
+        expect(shared.statusCode, host).toBe(404);
+        expect(shared.body, host).not.toMatch(/<html|<script/i);
+      }
+      const own = await app.inject({ method: "GET", url: MIRROR, headers: { host: "pcc-apps.example" } });
+      expect(own.statusCode).toBe(200);
+      expect(String(own.headers["content-type"])).toContain("text/html");
+      expect(String(own.headers["content-security-policy"])).toContain("frame-ancestors");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("prod + placeholder domain: every view resources/list names is unreadable (listing alone serves nothing)", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.PCC_MCP_APP_DOMAIN;
+    const app = await fullSurfaceApp();
+    try {
+      const session = await initSession(app, "/mcp");
+      const listed = await rpc(app, "/mcp", session, { id: 40, method: "resources/list", params: {} });
+      const templates = await rpc(app, "/mcp", session, { id: 41, method: "resources/templates/list", params: {} });
+      const uris: string[] = listed.body.result.resources.map((r: { uri: string }) => r.uri);
+      for (const t of templates.body.result.resourceTemplates as { uriTemplate: string }[]) {
+        uris.push(t.uriTemplate.replace("{slug}", "a-dash-1111"));
+      }
+      expect(uris.length).toBeGreaterThanOrEqual(4);
+      for (const [i, uri] of uris.entries()) {
+        const read = await rpc(app, "/mcp", session, { id: 50 + i, method: "resources/read", params: { uri } });
+        expect(read.body.result, uri).toBeUndefined();
+        expect(read.body.error.message, uri).toContain("MCP App surface unavailable");
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
   it("withoutMcpAppViewLink drops ONLY the view link: app-only visibility survives", () => {
     // job.cancel is state-changing, so its descriptor is app-only (hidden from the model).
     // Stripping must never make such an op model-visible.
