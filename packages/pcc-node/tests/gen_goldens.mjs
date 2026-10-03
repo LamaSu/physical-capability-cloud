@@ -369,6 +369,13 @@ const goldens = {
 // vector states its intended outcome, and generation fails if the mirror
 // disagrees. Session keys travel as publicKeyHex.
 const REVOCATION_TEXT = (revokedAt) => '{"sessionId":"sess-001","revokedAt":' + revokedAt + ',"reason":"rotated"}';
+// R20 round 3: the JSON boundary itself. A field the preimage ignores still
+// has to be RFC 8259 JSON, and a container nest at most 64 deep, so json.loads'
+// NaN/Infinity tokens, CPython's 4300-digit and recursion limits and V8's
+// unlimited depth cannot make the two languages disagree.
+const REVOCATION_WITH = (unused) => '{"sessionId":"sess-001","revokedAt":1727201000,"reason":"rotated","unused":' + unused + '}';
+const NEST = (levels) => "[".repeat(levels) + "]".repeat(levels);
+const SIGNING_JSON_MAX_DEPTH = 64;
 const SESSION_TEXT = JSON.stringify(SESSION_BASE);
 const sessionWith = (patch) => JSON.stringify({ ...SESSION_BASE, ...patch });
 const swap = (from, to) => {
@@ -403,9 +410,48 @@ const PARITY_VECTORS = [
   { name: "delegation_missing_scope", kind: "delegation", accept: false, json: sessionWith({ scope: undefined }) },
   { name: "delegation_short_public_key", kind: "delegation", accept: false, json: sessionWith({ publicKeyHex: SESSION_BASE.publicKeyHex.slice(2) }) },
   { name: "delegation_public_key_0x_uppercase", kind: "delegation", accept: true, json: sessionWith({ publicKeyHex: "0X" + SESSION_BASE.publicKeyHex.toUpperCase() }) },
+  { name: "revocation_ignored_nan", kind: "revocation", accept: false, json: REVOCATION_WITH("NaN") },
+  { name: "revocation_ignored_infinity", kind: "revocation", accept: false, json: REVOCATION_WITH("Infinity") },
+  { name: "revocation_ignored_negative_infinity_nested", kind: "revocation", accept: false, json: REVOCATION_WITH('{"a":[-Infinity]}') },
+  { name: "delegation_ignored_nan", kind: "delegation", accept: false, json: SESSION_TEXT.slice(0, -1) + ',"extra":NaN}' },
+  { name: "revocation_leading_bom", kind: "revocation", accept: false, json: "\ufeff" + REVOCATION_TEXT("1727201000") },
+  { name: "revocation_ignored_depth_64", kind: "revocation", accept: true, json: REVOCATION_WITH(NEST(63)) },
+  { name: "revocation_ignored_depth_65", kind: "revocation", accept: false, json: REVOCATION_WITH(NEST(64)) },
+  { name: "revocation_ignored_depth_1200", kind: "revocation", accept: false, json: REVOCATION_WITH(NEST(1199)) },
+  { name: "revocation_ignored_long_integer", kind: "revocation", accept: true, json: REVOCATION_WITH("1" + "0".repeat(5000)) },
+  { name: "revocation_long_integer", kind: "revocation", accept: false, json: REVOCATION_TEXT("1" + "0".repeat(5000)) },
+  // Depth is measured on the TEXT (cross-family review A01b-q1): a later duplicate key must not hide a deeper value.
+  { name: "revocation_ignored_shadowed_depth_64", kind: "revocation", accept: true, json: REVOCATION_WITH(NEST(63) + ',"unused":0') },
+  { name: "revocation_ignored_shadowed_depth_65", kind: "revocation", accept: false, json: REVOCATION_WITH(NEST(64) + ',"unused":0') },
+  { name: "revocation_ignored_shadowed_depth_20000", kind: "revocation", accept: false, json: REVOCATION_WITH(NEST(19999) + ',"unused":0') },
+  { name: "revocation_ignored_brackets_in_string", kind: "revocation", accept: true, json: REVOCATION_WITH('"' + "[".repeat(100) + '"') },
+  { name: "revocation_ignored_escaped_backslash_then_depth", kind: "revocation", accept: false, json: REVOCATION_WITH('["\\\\",' + NEST(70) + "]") },
 ];
 
+/** parseSigningInputJson's depth rule (signing-preimage.ts textNestingExceeds): measured on the TEXT, before decoding. */
+function textNestingExceeds(text, limit) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === 0x5c) escaped = true;
+      else if (c === 0x22) inString = false;
+    } else if (c === 0x22) {
+      inString = true;
+    } else if (c === 0x5b || c === 0x7b) {
+      if (++depth > limit) return true;
+    } else if (c === 0x5d || c === 0x7d) {
+      depth--;
+    }
+  }
+  return false;
+}
+
 function evaluateParityVector(v) {
+  if (textNestingExceeds(v.json, SIGNING_JSON_MAX_DEPTH)) return { reject: true };
   let parsed;
   try {
     parsed = JSON.parse(v.json);

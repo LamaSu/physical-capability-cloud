@@ -102,12 +102,17 @@ function registerKey(kernelId: string, keyPair: nacl.SignKeyPair) {
   });
 }
 
-/** A node-signed bundle whose events commit `jobId` and `kernelId`. */
-async function signedBundle(jobId: string, kernelId: string, keyPair: nacl.SignKeyPair) {
+/** A node-signed bundle whose events commit `jobId` and `kernelId` (and, when given, a settlement unit and its challenge). */
+async function signedBundle(
+  jobId: string,
+  kernelId: string,
+  keyPair: nacl.SignKeyPair,
+  unit?: { settlementUnitId: string; challengeNonce: string },
+) {
   const source = { deviceId: `${kernelId}-ot2`, deviceType: "controller" as const, kernelId };
   const raw: Array<Omit<EvidenceEvent, "id" | "hash">> = [
-    { type: "execution_started", timestamp: "2026-09-24T10:00:00.000Z", source, payload: { jobId, kernelId } },
-    { type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source, payload: { jobId, kernelId } },
+    { type: "execution_started", timestamp: "2026-09-24T10:00:00.000Z", source, payload: { jobId, kernelId, ...unit } },
+    { type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source, payload: { jobId, kernelId, ...unit } },
   ];
   const events: EvidenceEvent[] = await Promise.all(
     raw.map(async (e, i) => ({ ...e, id: `node-ev-${i}`, hash: await hashEvent(e) })),
@@ -206,6 +211,27 @@ describe("LO-EV-9 — /complete binds device evidence to the accepted job and ke
 
     const settled = await complete(app, jobSf);
     expect(settled.evidenceHash).not.toBe(fromNyc.bundleHash);
+  });
+
+  it("E11 F1: a bundle signed for settlement unit U3 / challenge N3 cannot anchor /complete, which settles milestone 0 and names no unit", async () => {
+    const node = nacl.sign.keyPair();
+    registerKey("kernel-nyc", node);
+    const jobId = await createJob(app, "kernel-nyc", "user-agent-unit-u3");
+    const unit = { settlementUnitId: `0x${"03".repeat(32)}`, challengeNonce: `0x${"a3".repeat(32)}` };
+    const scoped = await signedBundle(jobId, "kernel-nyc", node, unit);
+    const scopedRowId = storeRelayedBundle(jobId, "kernel-nyc", scoped);
+
+    // Before E11 the device bundle anchored here: evidenceHash === scoped.bundleHash.
+    const settled = await complete(app, jobId);
+    expect(settled.status).toBe("settled");
+    expect(settled.evidenceHash).not.toBe(scoped.bundleHash);
+    expect(getRepos().jobs.findById(jobId)!.evidenceBundleId).not.toBe(scopedRowId);
+
+    // Control: the same node's unit-less bundle for another job still anchors /complete.
+    const other = await createJob(app, "kernel-nyc", "user-agent-unit-none");
+    const plain = await signedBundle(other, "kernel-nyc", node);
+    storeRelayedBundle(other, "kernel-nyc", plain);
+    expect((await complete(app, other)).evidenceHash).toBe(plain.bundleHash);
   });
 
   it("a replayed row stored first does not hide the job's genuine bundle", async () => {
@@ -307,6 +333,21 @@ describe("LO-EV-9 review R1 — /resume-settlement settles the pinned, re-verifi
     const res = await resume(app, jobId);
     expect(res.statusCode).toBe(409);
     expect(res.json().reason).toBe("event-hash-mismatch");
+    expect(getRepos().jobs.findById(jobId)!.status).toBe("evidence_submitted");
+  });
+
+  it("E11 F1: recovery refuses a pinned device anchor scoped to a settlement unit (a pin made before this fix)", async () => {
+    const node = nacl.sign.keyPair();
+    registerKey("kernel-nyc", node);
+    const jobId = await createJob(app, "kernel-nyc", "user-agent-unit-pinned");
+    const unit = { settlementUnitId: `0x${"03".repeat(32)}`, challengeNonce: `0x${"a3".repeat(32)}` };
+    const pinnedId = storeRelayedBundle(jobId, "kernel-nyc", await signedBundle(jobId, "kernel-nyc", node, unit));
+    // /complete no longer pins such a row, so pin it as the code before this fix did.
+    getRepos().jobs.update(jobId, { evidenceBundleId: pinnedId, status: "evidence_submitted" } as any);
+
+    const res = await resume(app, jobId);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().reason).toBe("unit-not-in-subject");
     expect(getRepos().jobs.findById(jobId)!.status).toBe("evidence_submitted");
   });
 

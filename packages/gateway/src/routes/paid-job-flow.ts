@@ -1119,6 +1119,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
               payload: ev.payload,
               hash: ev.hash,
             })),
+            // No settlement unit or challenge: this route drives milestone 0 of the job's
+            // per-job escrow, which has no unit id. LO-EV-9 then refuses evidence that commits
+            // either (E11 F1), so evidence signed for a V-next milestone cannot anchor it.
             subject: { jobId, kernelId: job.kernelId },
             // When the gateway received the bundle: the relay row's createdAt.
             ...(receivedAtSeconds(r.createdAt) !== undefined ? { receivedAt: receivedAtSeconds(r.createdAt) } : {}),

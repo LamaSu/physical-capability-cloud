@@ -81,24 +81,32 @@ const SUBJECT_KERNEL = "kernel-seam2-subject";
  *  the signing key's signature over signingPreimage(bundleHash). `slot()`
  *  presents it to settlement for a subject, by default its own. */
 async function boundDeviceEvidence(
-  opts: { jobId?: string; kernelId?: string; keyPair?: nacl.SignKeyPair; at?: number } = {},
+  opts: {
+    jobId?: string;
+    kernelId?: string;
+    keyPair?: nacl.SignKeyPair;
+    at?: number;
+    /** A settlement unit and its challenge, committed by every event (a V-next milestone's evidence). */
+    unit?: { settlementUnitId: string; challengeNonce: string };
+  } = {},
 ) {
   const jobId = opts.jobId ?? SUBJECT_JOB;
   const kernelId = opts.kernelId ?? SUBJECT_KERNEL;
   const keyPair = opts.keyPair ?? nacl.sign.keyPair();
+  const unit = opts.unit ?? {};
   const source = { deviceId: `${kernelId}-printer`, deviceType: "controller" as const, kernelId };
   const raw: Array<Omit<EvidenceEvent, "id" | "hash">> = [
     {
       type: "execution_started",
       timestamp: opts.at !== undefined ? new Date(opts.at * 1000).toISOString() : "2026-09-24T10:00:00.000Z",
       source,
-      payload: { jobId, kernelId },
+      payload: { jobId, kernelId, ...unit },
     },
     {
       type: "execution_completed",
       timestamp: opts.at !== undefined ? new Date((opts.at + 5) * 1000).toISOString() : "2026-09-24T10:00:05.000Z",
       source,
-      payload: { jobId, kernelId, outputHash: `sha256:${"5e".repeat(32)}` },
+      payload: { jobId, kernelId, outputHash: `sha256:${"5e".repeat(32)}`, ...unit },
     },
   ];
   const events: EvidenceEvent[] = await Promise.all(
@@ -297,6 +305,40 @@ describe("verifyDeviceSignedEvidence — registered-signer → Ed25519 verify (r
       receivedAt: Math.floor(Date.now() / 1000),
     });
     expect(result).toMatchObject({ ok: true });
+  });
+
+  it("NEGATIVE (adk #4322, rule 5): the session delegation is checked against the job being SETTLED", async () => {
+    // Under LO-EV-9 (#341) a bundle signed for job A and presented for job B already fails the subject
+    // binding (see "a real kernel-sdk bundle opens to its own events and anchors; for another job it does
+    // not" below). This test isolates rule 5 itself: the events ARE bound to job B, the job being settled,
+    // but the session key's delegation names only job A, so the scope check refuses it.
+    const principal = nacl.sign.keyPair();
+    const session = nacl.sign.keyPair();
+    const now = Math.floor(Date.now() / 1000);
+    const body = {
+      sessionId: "session-4322-rule5",
+      parentAgentId: "eip155:1:0x0000000000000000000000000000000000000001",
+      publicKey: session.publicKey,
+      issuedAt: now,
+      expiresAt: now + 300,
+      scope: { allowedActions: ["evidence_submit"], contractIds: ["job-A-4322"], maxSignatures: 10 },
+    };
+    const auth: SessionKeyAuthorization = {
+      ...body,
+      publicKey: toHex(session.publicKey),
+      parentSignature: toHex(nacl.sign.detached(sessionKeyDelegationPreimage(body), principal.secretKey)),
+    };
+    // Events inside the delegation's window, and the trusted context #438 requires for session
+    // evidence (the funded operator and the receipt time), so that only the scope can refuse it.
+    const b = await boundDeviceEvidence({ jobId: "job-B-4322", kernelId: "kernel-delegated-4322", keyPair: session, at: now });
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: { ...b.slot(), sessionKeyAuthorization: auth, receivedAt: now },
+      registeredSigner: ed25519Signer(principal.publicKey),
+      operatorPrincipalId: "eip155:1:0x0000000000000000000000000000000000000001",
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(decision).toMatchObject({ source: "gateway-fallback", reason: "contract_not_allowed" });
   });
 
   it("naclEd25519Verify round-trips a genuine tweetnacl signature", () => {
@@ -532,6 +574,47 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
       gateOpen: true,
     });
     expect(own).toMatchObject({ source: "device", bundleHash: a.bundleHash });
+  });
+
+  it("E11 F1: evidence signed for unit U3 / challenge N3 cannot anchor the subject /complete builds (job + kernel only)", async () => {
+    const U3 = `0x${"03".repeat(32)}`;
+    const U4 = `0x${"04".repeat(32)}`;
+    const N3 = `0x${"a3".repeat(32)}`;
+    const N4 = `0x${"a4".repeat(32)}`;
+    const m3 = await boundDeviceEvidence({ jobId: "job-units", unit: { settlementUnitId: U3, challengeNonce: N3 } });
+    const signer = ed25519Signer(m3.keyPair.publicKey);
+
+    // Exactly what /complete (paid-job-flow.ts) and /resume-settlement build: { jobId, kernelId: job.kernelId }.
+    // Before E11 this anchored on the device: the legacy escrow's milestone 0 settled on U3's evidence.
+    const legacy = await resolveSettlementEvidence({
+      deviceBundles: [m3.slot({ jobId: m3.jobId, kernelId: m3.kernelId })],
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(legacy).toMatchObject({
+      source: "gateway-fallback",
+      reason: "unit-not-in-subject",
+      bundleHash: GATEWAY_FALLBACK.bundleHash,
+    });
+
+    // A consumer settling U4/N4 refuses it too.
+    const u4 = await resolveSettlementEvidence({
+      deviceBundle: m3.slot({ jobId: m3.jobId, kernelId: m3.kernelId, settlementUnitId: U4, challengeNonce: N4 }),
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(u4).toMatchObject({ source: "gateway-fallback", reason: "unit-mismatch" });
+
+    // Positive control: the same genuine bundle anchors where its own unit and challenge are named.
+    const own = await resolveSettlementEvidence({
+      deviceBundle: m3.slot({ jobId: m3.jobId, kernelId: m3.kernelId, settlementUnitId: U3, challengeNonce: N3 }),
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(own).toMatchObject({ source: "device", bundleHash: m3.bundleHash });
   });
 
   it("the anchor carries the binding's canonical snapshots, never the caller's objects", async () => {
@@ -956,8 +1039,12 @@ import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js
 import { createHash } from "node:crypto";
 
 describe("verifyPinnedSettlementEvidence — what recovery may settle on", () => {
-  async function deviceRow(jobId = SUBJECT_JOB, kernelId = SUBJECT_KERNEL) {
-    const dev = await boundDeviceEvidence({ jobId, kernelId });
+  async function deviceRow(
+    jobId = SUBJECT_JOB,
+    kernelId = SUBJECT_KERNEL,
+    unit?: { settlementUnitId: string; challengeNonce: string },
+  ) {
+    const dev = await boundDeviceEvidence({ jobId, kernelId, ...(unit ? { unit } : {}) });
     const row = {
       id: "ev-relayed-1",
       jobId,
@@ -996,6 +1083,22 @@ describe("verifyPinnedSettlementEvidence — what recovery may settle on", () =>
         registeredSigner: signer,
       }),
     ).toEqual({ ok: true });
+  });
+
+  it("E11 F1: a pinned device anchor scoped to a settlement unit may not be settled by recovery", async () => {
+    // Recovery re-verifies with { jobId, kernelId } and drives milestone 0, so a row pinned
+    // before this fix whose events commit U3/N3 must be refused, not settled.
+    const unit = { settlementUnitId: `0x${"03".repeat(32)}`, challengeNonce: `0x${"a3".repeat(32)}` };
+    const { dev, row, signer } = await deviceRow(SUBJECT_JOB, SUBJECT_KERNEL, unit);
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: dev.events,
+        registeredSigner: signer,
+      }),
+    ).toEqual({ ok: false, reason: "unit-not-in-subject" });
   });
 
   it("a device anchor whose stored events were altered may not", async () => {
