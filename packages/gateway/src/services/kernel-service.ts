@@ -10,6 +10,7 @@ import { JobRunner } from "@pcc/kernel";
 import { EvidenceEmitter } from "@pcc/kernel";
 import { createAdaptersFromConfig, loadKernelConfig } from "@pcc/kernel";
 import { initSafetyGateway, getSafetyGateway } from "@pcc/kernel";
+import type { JobResult, SafetyGateway } from "@pcc/kernel";
 import type { KernelConfig } from "@pcc/kernel";
 import type { MachineAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
@@ -18,6 +19,24 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
+
+/**
+ * Charge a failed run to the device its JobResult names (#5417; astra packs 190 and 227): a
+ * machine fault to the machine's circuit, a sensor's or a camera's to that adapter's own circuit,
+ * and an evidence or configuration failure to no device, since no device was at fault. A result
+ * that names no origin is charged to the machine, as before.
+ */
+function chargeFailedRun(gateway: SafetyGateway, machineId: string, failure: JobResult["failure"]): void {
+  if (failure === undefined) {
+    gateway.recordDeviceFailure(machineId);
+    return;
+  }
+  if (failure.origin === "machine") {
+    gateway.recordDeviceFailure(failure.adapterId ?? machineId);
+  } else if ((failure.origin === "sensor" || failure.origin === "camera") && failure.adapterId !== undefined) {
+    gateway.recordDeviceFailure(failure.adapterId);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -328,7 +347,7 @@ export class KernelService {
               if (result.success) {
                 gateway.recordDeviceSuccess(deviceId);
               } else if (result.busy === undefined) {
-                gateway.recordDeviceFailure(deviceId);
+                chargeFailedRun(gateway, deviceId, result.failure);
               }
               try {
                 const repos = getRepos();
@@ -415,7 +434,7 @@ export class KernelService {
           if (result.success) {
             gateway.recordDeviceSuccess(deviceId);
           } else if (result.busy === undefined) {
-            gateway.recordDeviceFailure(deviceId);
+            chargeFailedRun(gateway, deviceId, result.failure);
           }
           try {
             const repos = getRepos();
