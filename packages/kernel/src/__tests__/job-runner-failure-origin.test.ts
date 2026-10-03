@@ -458,3 +458,31 @@ describe("a runner's timeouts are timer delays, refused before anything is held 
     expect.soft(machine.commands, "commands sent").toEqual([]);
   });
 });
+
+describe("a run's assurance tier is one of AssuranceTier's, refused before anything is held otherwise", () => {
+  it("at the base, a tier-5 run commanded the machine and then failed as evidence; now it is refused as configuration", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("m-tier-5");
+    const result = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-tier-5", stepId: STEP, gcodeHash: gcode(92), assuranceTier: 5 as unknown as 0 });
+    expect.soft(result.error, "why").toBe("the run's assurance tier must be 0, 1, 2 or 3");
+    expect.soft(result.failure, "where").toEqual({ origin: "configuration" });
+    expect.soft(machine.commands, "commands sent").toEqual([]);
+  });
+
+  it.each([[-1], [1.5], [4], ["2"], [null], [undefined], [Number.NaN]] as const)("tier %s is refused before anything is held", async (tier) => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine(`m-tier-${String(tier)}`);
+    const result = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-tier-each", stepId: STEP, gcodeHash: gcode(93), assuranceTier: tier as unknown as 0 });
+    expect.soft(result.failure, "where").toEqual({ origin: "configuration" });
+    expect.soft(machine.commands, "commands sent").toEqual([]);
+  });
+
+  it("a tier whose conversion would throw is refused without converting it", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("m-tier-hostile");
+    const tier = { valueOf: () => { throw new Error("converted"); }, toString: () => { throw new Error("converted"); } };
+    const result = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-tier-hostile", stepId: STEP, gcodeHash: gcode(94), assuranceTier: tier as unknown as 0 });
+    expect.soft(result.error, "why").toBe("the run's assurance tier must be 0, 1, 2 or 3");
+    expect.soft(machine.commands, "commands sent").toEqual([]);
+  });
+});
