@@ -16,7 +16,11 @@ case "$ARGS" in
   *"/health"*)
     echo "{\"status\":\"ok\",\"note\":\"diag-$CANARY\"}" ;;
   *"/api/auth/provision"*)
-    echo "{\"api_key\":\"pcc_test_deadbeefdeadbeefdeadbeefdeadbeef\"}" ;;
+    # astra's own note: this site (smoke-digital-verifier.sh:328) already
+    # prints only ${#API_KEY} (a length), never the value — embed the
+    # canary IN the key itself so the dynamic test actually proves that,
+    # rather than taking the note on faith.
+    echo "{\"api_key\":\"pcc_test_$CANARY\"}" ;;
   *"/api/capabilities/types"*)
     echo "{\"types\":[1,2,3]}" ;;
   *"/api/status/integrations"*)
