@@ -19,6 +19,7 @@ import { auditService } from "../services/audit-service.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 import { z } from "zod";
 import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Valid adapter types and device roles
@@ -693,14 +694,15 @@ export async function setupRoutes(app: FastifyInstance) {
           }
         }
 
-        trackServerEvent("device_registered", {
-          deviceId,
-          kernelId,
-          type,
-          adapterType,
-          model,
-          action,
-          capabilitiesRegistered: capabilities?.length ?? 0,
+        trackServerEvent(lit("device_registered"), {
+          deviceId: declare.id(deviceId),
+          kernelId: declare.id(kernelId),
+          type: declare.code(type, VALID_DEVICE_ROLES),
+          adapterType: declare.code(adapterType, VALID_ADAPTER_TYPES),
+          model: declare.id(model),
+          action: declare.code(action, ["updated", "created"]),
+          // capabilities is the caller-supplied array from the request body — declare.id, not metric.
+          capabilitiesRegistered: declare.id(capabilities?.length ?? 0),
         }, (req as any).operatorId ?? (req as any).apiKeyId);
         auditService.log({
           eventType: action === "created" ? "device.registered" : "device.updated",
