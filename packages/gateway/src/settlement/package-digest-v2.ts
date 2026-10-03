@@ -38,9 +38,10 @@
  * (secp256k1-eip712 for D1, ed25519-raw32 for D2) and the signer width per scheme.
  * `g2-settlement-vector-golden.json` is the mirror's SAMPLE vector, whose entries
  * are labelled "secp256k1" and "ed25519" (the latter with a 40-digit signer), and
- * its digest must stay byte-identical, so `packageDigestV2` has to accept it.
- * `assertMintablePackage` enforces both, and a package that is not mintable never
- * becomes a digest bound to money.
+ * its digest must stay byte-identical, so `packageDigestV2Unchecked` has to
+ * accept it. `assertMintablePackage` enforces both, and a package that is not
+ * mintable never becomes a digest bound to money (`mintablePackageDigest` is
+ * the only digest function that takes its word for that, below).
  *
  * WHY THE CANONICALIZER IS IMPORTED, NOT HAND-ROLLED: `packages/spec`'s
  * `canonicalize` is already the repo's serializer for evidence events and
@@ -60,13 +61,19 @@
 
 import { createHash } from "node:crypto";
 import { canonicalize } from "@pcc/spec";
-import { canonicalSignatures, validatePackageBody } from "./final-milestone-package-v2.js";
+import {
+  canonicalSignatures,
+  validatePackageBody,
+  MintablePackage,
+  PackageNotMintableError,
+} from "./final-milestone-package-v2.js";
 
 // The signature entry type, its error and its canonicalization live in
 // final-milestone-package-v2.ts, so that this module can call validatePackageBody
 // without an import cycle. Importers keep importing them from here.
 export { canonicalSignatures, InvalidSignatureEntryError } from "./final-milestone-package-v2.js";
 export type { PackageSignature } from "./final-milestone-package-v2.js";
+export { MintablePackage, PackageNotMintableError } from "./final-milestone-package-v2.js";
 
 /** 0x-prefixed lowercase hex. */
 export type Hex = `0x${string}`;
@@ -151,7 +158,21 @@ export function packageDigestV2PreImage(body: unknown, sigs: unknown): string {
 }
 
 /**
- * packageDigestV2 — SHA-256 over the canonical package, as 0x-prefixed hex.
+ * packageDigestV2Unchecked — SHA-256 over the canonical package, as
+ * 0x-prefixed hex. The wire VALUE this computes is still "packageDigestV2" per
+ * the oracle's contract (#1368/#1359); "Unchecked" names this IMPLEMENTATION,
+ * which is the lenient, sample-compatible path — it accepts any conforming
+ * body and any two-entry signature set `canonicalSignatures` accepts (foreign
+ * scheme labels, a 40-digit "ed25519" signer, free-text principals), which is
+ * exactly what lets it reproduce the published golden
+ * (`g2-settlement-vector-golden.json`) byte for byte.
+ *
+ * NEVER FOR MONEY; VECTORS ONLY. The money-bound digest is
+ * `mintablePackageDigest`, below, which only accepts a `MintablePackage` —
+ * obtainable solely from `assertMintablePackage`. (F3, cross-family E9: before
+ * this split, the lenient digest and the mint guard had no enforced seam —
+ * nothing stopped this function from being called directly on a body/
+ * signature set `assertMintablePackage` would have refused.)
  *
  * NOTE ON FRAMING: `@pcc/spec`'s `sha256()` returns a `sha256:<hex>`-PREFIXED
  * string, which is the evidence-bundle framing, NOT the on-chain bytes32
@@ -159,8 +180,32 @@ export function packageDigestV2PreImage(body: unknown, sigs: unknown): string {
  * `0x<hex>`. Mixing those two framings would produce a value that looks right
  * in logs and fails every on-chain bind.
  */
-export function packageDigestV2(body: unknown, sigs: unknown): Hex {
+export function packageDigestV2Unchecked(body: unknown, sigs: unknown): Hex {
   const preImage = packageDigestV2PreImage(body, sigs);
   const hex = createHash("sha256").update(preImage, "utf8").digest("hex");
   return `0x${hex}` as Hex;
+}
+
+/**
+ * The ONLY money-bound digest (F3, cross-family E9). Takes a `MintablePackage`
+ * — the branded, frozen result `assertMintablePackage` returns after verifying
+ * D2's signature, the F2 registry binding and the F4 challenge freshness (and,
+ * for now, D1's shape only — see the STOP note in `final-milestone-package-v2.ts`
+ * above `MINT_SIGNER_PROFILE`) — and hashes it exactly as
+ * `packageDigestV2Unchecked` would.
+ *
+ * A structural fake (`{body, signatures}` built by hand, not through the
+ * guard) is never a `MintablePackage`: TypeScript refuses the assignment at
+ * compile time (the class has a private field, so it is compared nominally),
+ * and the `instanceof` check below refuses it at runtime too, so a caller
+ * cannot route around the guard even with a type assertion.
+ */
+export function mintablePackageDigest(mintable: MintablePackage): Hex {
+  if (!(mintable instanceof MintablePackage)) {
+    throw new PackageNotMintableError(
+      "$",
+      "argument is not a MintablePackage produced by assertMintablePackage",
+    );
+  }
+  return packageDigestV2Unchecked(mintable.body, mintable.signatures);
 }

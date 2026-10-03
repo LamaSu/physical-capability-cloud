@@ -26,12 +26,13 @@ import {
   PACKAGE_FORMAT,
   PackageNotMintableError,
   assertMintablePackage,
+  MintablePackage,
   type FinalMilestonePackageV2Body,
   type KernelRegistryReader,
   type KernelRegistrySigner,
   type ChallengeReader,
 } from "../settlement/final-milestone-package-v2.js";
-import { packageDigestV2, canonicalSignatures, type PackageSignature } from "../settlement/package-digest-v2.js";
+import { packageDigestV2Unchecked, canonicalSignatures, type PackageSignature } from "../settlement/package-digest-v2.js";
 import { COMPROMISED_DEVICE_PUBLIC_KEYS } from "@pcc/spec";
 import { signWithPrivateKeyHex } from "../auth/ed25519.js";
 
@@ -245,7 +246,7 @@ describe("hex spelling is pinned by rejection on every hashing path (F3)", () =>
   const hashers: Array<[string, (b: unknown) => unknown]> = [
     ["computePackageBodyHash", (b) => computePackageBodyHash(b)],
     ["packageBodyJcs", (b) => packageBodyJcs(b)],
-    ["packageDigestV2", (b) => packageDigestV2(b, SIGS)],
+    ["packageDigestV2Unchecked", (b) => packageDigestV2Unchecked(b, SIGS)],
   ];
 
   it("every hashing function refuses every hex field in every spelling but 0x + lowercase, naming the field", () => {
@@ -275,7 +276,7 @@ describe("hex spelling is pinned by rejection on every hashing path (F3)", () =>
     const eip55 = clone(BODY);
     eip55.unitBinding.escrow = "0x00000000000000000000000000000000000E5c0F" as `0x${string}`;
     expect(() => computePackageBodyHash(eip55)).toThrow(PackageBodyValidationError);
-    expect(() => packageDigestV2(eip55, SIGS)).toThrow(PackageBodyValidationError);
+    expect(() => packageDigestV2Unchecked(eip55, SIGS)).toThrow(PackageBodyValidationError);
     // The lowercase spelling of the same address is the one accepted spelling, and it hashes.
     expect(computePackageBodyHash(BODY)).toMatch(/^0x[0-9a-f]{64}$/);
   });
@@ -302,26 +303,26 @@ describe("hex spelling is pinned by rejection on every hashing path (F3)", () =>
   });
 });
 
-describe("packageBodyHash vs packageDigestV2 — two DIFFERENT hashes", () => {
+describe("packageBodyHash vs packageDigestV2Unchecked — two DIFFERENT hashes", () => {
   it("are not the same value, and must never be confused", () => {
     // The operator and kernel sign packageBodyHash. `raw.packageHash` must equal
-    // packageDigestV2. Signing the wrong one yields signatures that verify
+    // packageDigestV2Unchecked. Signing the wrong one yields signatures that verify
     // against nothing — at mint, with funds in escrow.
     const sigs: PackageSignature[] = [
       { signer: SIGNER_OP, scheme: "secp256k1-eip712", sig: "0xop" },
       { signer: SIGNER_KERNEL, scheme: "ed25519-raw32", sig: "0xkernel" },
     ];
-    expect(computePackageBodyHash(BODY)).not.toBe(packageDigestV2(BODY, sigs));
+    expect(computePackageBodyHash(BODY)).not.toBe(packageDigestV2Unchecked(BODY, sigs));
   });
 
-  it("packageBodyHash does NOT depend on the signatures; packageDigestV2 does", () => {
+  it("packageBodyHash does NOT depend on the signatures; packageDigestV2Unchecked does", () => {
     const kernel: PackageSignature = { signer: SIGNER_KERNEL, scheme: "ed25519-raw32", sig: "0xkernel" };
     const s1: PackageSignature[] = [{ signer: SIGNER_OP, scheme: "secp256k1-eip712", sig: "0x1" }, kernel];
     const s2: PackageSignature[] = [{ signer: SIGNER_OP, scheme: "secp256k1-eip712", sig: "0x2" }, kernel];
     // Body hash is what gets signed, so it cannot depend on the signatures —
     // that would be circular.
     expect(computePackageBodyHash(BODY)).toBe(computePackageBodyHash(BODY));
-    expect(packageDigestV2(BODY, s1)).not.toBe(packageDigestV2(BODY, s2));
+    expect(packageDigestV2Unchecked(BODY, s1)).not.toBe(packageDigestV2Unchecked(BODY, s2));
   });
 });
 
@@ -363,8 +364,8 @@ describe("evidence's published settlement-vector golden (#1202, 974b3ff1)", () =
     expect(computePackageBodyHash(body)).toBe(GOLDEN.packageBodyHash);
   });
 
-  it("packageDigestV2 over the same body matches the golden", () => {
-    expect(packageDigestV2(body, GOLDEN.rawSigs)).toBe(GOLDEN.packageDigestV2);
+  it("packageDigestV2Unchecked over the same body matches the golden", () => {
+    expect(packageDigestV2Unchecked(body, GOLDEN.rawSigs)).toBe(GOLDEN.packageDigestV2);
   });
 });
 
@@ -451,7 +452,7 @@ describe("validatePackageBody — pinned forms", () => {
       b.producer[key] = "";
       expect(() => computePackageBodyHash(b), key).toThrow(/must not be empty/);
       expect(() => packageBodyJcs(b), key).toThrow(/must not be empty/);
-      expect(() => packageDigestV2(b, sigs), key).toThrow(/must not be empty/);
+      expect(() => packageDigestV2Unchecked(b, sigs), key).toThrow(/must not be empty/);
     }
   });
 
@@ -535,8 +536,9 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
 
   it("accepts a real D1 + D2 set and hashes exactly what the digest function would", async () => {
     const minted = await assertMintablePackage(MINTABLE, [D2, D1], REGISTRY, CHALLENGES);
+    expect(minted).toBeInstanceOf(MintablePackage);
     expect(minted.signatures.map((s) => s.scheme)).toEqual(["secp256k1-eip712", "ed25519-raw32"]);
-    expect(packageDigestV2(minted.body, minted.signatures)).toBe(packageDigestV2(MINTABLE, [D1, D2]));
+    expect(packageDigestV2Unchecked(minted.body, minted.signatures)).toBe(packageDigestV2Unchecked(MINTABLE, [D1, D2]));
   });
 
   // ── F1 (cross-family E9): D2's ed25519 signature is now cryptographically
@@ -753,7 +755,7 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
 });
 
 // ── read-once ────────────────────────────────────────────────────────────────
-// validatePackageBody, packageDigestV2 and assertMintablePackage must read every
+// validatePackageBody, packageDigestV2Unchecked and assertMintablePackage must read every
 // input field exactly ONCE into a local copy and validate and hash only the
 // copies, so no getter's second answer, and no change the caller makes after a
 // check, can make what was checked differ from what was hashed.
@@ -865,23 +867,23 @@ describe("read-once: every input field is read exactly once and only the copies 
     }
   });
 
-  it("packageDigestV2 reads each body field and each signature field once, and hashes the first answers", () => {
+  it("packageDigestV2Unchecked reads each body field and each signature field once, and hashes the first answers", () => {
     const sigs = [D1r, D2r];
     const bodyCounts: Counts = {};
     const sigCounts: Counts = {};
     const arrayReads: Counts = {};
-    const digest = packageDigestV2(
+    const digest = packageDigestV2Unchecked(
       counting(BODY, bodyCounts, "$"),
       countingArray([counting(D1r, sigCounts, "$d1"), counting(D2r, sigCounts, "$d2")], arrayReads),
     );
     expect(bodyCounts).toEqual(eachOnce(BODY, "$"));
     expect(sigCounts).toEqual({ ...eachOnce(D1r, "$d1"), ...eachOnce(D2r, "$d2") });
     expect(arrayReads).toEqual({ length: 1, "0": 1, "1": 1 });
-    expect(digest).toBe(packageDigestV2(BODY, sigs));
+    expect(digest).toBe(packageDigestV2Unchecked(BODY, sigs));
 
     // a getter that answers differently the second time cannot move the digest off the first answers
     const flipSig = flipLaterReads([".signer"]);
-    const flipped = packageDigestV2(
+    const flipped = packageDigestV2Unchecked(
       counting(BODY, {}, "$", flipLaterReads(BODY_FLIPS)),
       [counting(D1r, {}, "$d1", flipSig), counting(D2r, {}, "$d2", flipSig)],
     );
@@ -994,7 +996,7 @@ describe("read-once: every input field is read exactly once and only the copies 
 describe("rules the published golden blocks (STOPPED, not applied)", () => {
   // The golden's body is evidence's SAMPLE vector and carries the free-text
   // principal ids "op-golden" / "dev-golden"; its packageBodyHash 0x94a48c16... and
-  // packageDigestV2 0xf78103a1... must stay byte-identical, so validatePackageBody
+  // packageDigestV2Unchecked 0xf78103a1... must stay byte-identical, so validatePackageBody
   // can only require them to be non-empty. The mint guard above pins them.
   it.todo("validatePackageBody pins operatorPrincipalId and devicePrincipalId to the #399 forms (parseOperatorPrincipalId, parseDevicePrincipalId)");
 });

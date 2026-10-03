@@ -6,6 +6,12 @@
  * this module produces. These tests pin the properties that make the digest
  * SAFE to bind money to.
  *
+ * NAMING (F3, cross-family E9): the wire VALUE is still called packageDigestV2;
+ * `packageDigestV2Unchecked` is the lenient IMPLEMENTATION tested below (sample
+ * vectors, goldens). The money-bound implementation is `mintablePackageDigest`,
+ * which only accepts a `MintablePackage` from `assertMintablePackage` — see its
+ * own describe block near the end of this file.
+ *
  * The malleability block is the point. If a relayer can reorder, duplicate, or
  * RE-CASE signatures and move the digest without changing a single semantic
  * fact, then one piece of evidence has two package identities and the
@@ -29,22 +35,31 @@
 
 import { describe, it, expect } from "vitest";
 import { canonicalize } from "@pcc/spec";
+import { createPrivateKey, createPublicKey } from "node:crypto";
+import { toBytes } from "viem";
 import GOLDEN from "./fixtures/g2-settlement-vector-golden.json";
 import {
-  packageDigestV2,
+  packageDigestV2Unchecked,
   packageDigestV2PreImage,
   canonicalSignatures,
   assertCanonicalizable,
   NonCanonicalizableBodyError,
   InvalidSignatureEntryError,
   SIGNATURES_KEY,
+  mintablePackageDigest,
+  MintablePackage,
+  PackageNotMintableError,
   type PackageSignature,
 } from "../settlement/package-digest-v2.js";
 import {
   PACKAGE_FORMAT,
   PACKAGE_SCHEMA_VERSION,
   PackageBodyValidationError,
+  assertMintablePackage,
+  computePackageBodyHash,
+  type FinalMilestonePackageV2Body,
 } from "../settlement/final-milestone-package-v2.js";
+import { signWithPrivateKeyHex } from "../auth/ed25519.js";
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 const H = (n: string) => `0x${n.repeat(64).slice(0, 64)}`;
@@ -254,11 +269,11 @@ describe("producer vs evidence's mirror — signer case (F6)", () => {
   });
 });
 
-describe("packageDigestV2 — signature malleability closes by REFUSAL, reordering is a NO-OP", () => {
-  const base = packageDigestV2(BODY, [SIG_A, SIG_B]);
+describe("packageDigestV2Unchecked — signature malleability closes by REFUSAL, reordering is a NO-OP", () => {
+  const base = packageDigestV2Unchecked(BODY, [SIG_A, SIG_B]);
 
   it("is stable under signature REORDERING", () => {
-    expect(packageDigestV2(BODY, [SIG_B, SIG_A])).toBe(base);
+    expect(packageDigestV2Unchecked(BODY, [SIG_B, SIG_A])).toBe(base);
   });
 
   it("REFUSES a duplicated signer instead of deduplicating it, wherever the duplicate sits (F4)", () => {
@@ -271,13 +286,13 @@ describe("packageDigestV2 — signature malleability closes by REFUSAL, reorderi
       [forged, SIG_A],
       [SIG_A, forged],
     ]) {
-      expect(() => packageDigestV2(BODY, sigs)).toThrow(InvalidSignatureEntryError);
+      expect(() => packageDigestV2Unchecked(BODY, sigs)).toThrow(InvalidSignatureEntryError);
     }
   });
 
   it("REFUSES an extra key on a signature entry: it would move the digest without changing a fact (F4)", () => {
     const withNote = { ...SIG_A, note: "x" } as PackageSignature;
-    expect(() => packageDigestV2(BODY, [withNote, SIG_B])).toThrow(/exactly the keys/);
+    expect(() => packageDigestV2Unchecked(BODY, [withNote, SIG_B])).toThrow(/exactly the keys/);
   });
 
   /**
@@ -298,7 +313,7 @@ describe("packageDigestV2 — signature malleability closes by REFUSAL, reorderi
     for (const signer of [SIGNER_A, SIGNER_B]) {
       const recased = signer.toUpperCase().replace("0X", "0x");
       const sigs = [SIG_A, SIG_B].map((s) => (s.signer === signer ? { ...s, signer: recased } : s));
-      expect(() => packageDigestV2(BODY, sigs), recased).toThrow(/lowercase hex/);
+      expect(() => packageDigestV2Unchecked(BODY, sigs), recased).toThrow(/lowercase hex/);
     }
   });
 
@@ -311,12 +326,12 @@ describe("packageDigestV2 — signature malleability closes by REFUSAL, reorderi
           : v;
     const reordered = reverseKeys(BODY);
     expect(Object.keys(reordered as object)).not.toEqual(Object.keys(BODY));
-    expect(packageDigestV2(reordered, [SIG_A, SIG_B])).toBe(base);
+    expect(packageDigestV2Unchecked(reordered, [SIG_A, SIG_B])).toBe(base);
   });
 });
 
-describe("packageDigestV2 — negative parity, every fact must be bound", () => {
-  const base = packageDigestV2(BODY, [SIG_A, SIG_B]);
+describe("packageDigestV2Unchecked — negative parity, every fact must be bound", () => {
+  const base = packageDigestV2Unchecked(BODY, [SIG_A, SIG_B]);
 
   it("moves when ANY body field changes", () => {
     const mutate = (f: (b: typeof BODY) => void) => {
@@ -334,31 +349,31 @@ describe("packageDigestV2 — negative parity, every fact must be bound", () => 
       mutate((b) => { b.evidence.evidenceBlockHash = H("93"); }),
       mutate((b) => { b.evidenceTimeBounds.end = "1700000200"; }),
     ]) {
-      expect(packageDigestV2(mutated, [SIG_A, SIG_B])).not.toBe(base);
+      expect(packageDigestV2Unchecked(mutated, [SIG_A, SIG_B])).not.toBe(base);
     }
   });
 
   it("moves when a signature VALUE changes", () => {
-    expect(packageDigestV2(BODY, [{ ...SIG_A, sig: "0xforged" }, SIG_B])).not.toBe(base);
+    expect(packageDigestV2Unchecked(BODY, [{ ...SIG_A, sig: "0xforged" }, SIG_B])).not.toBe(base);
   });
 
   it("moves when the SCHEME changes", () => {
     // scheme selects the verification algorithm; swapping it must not be free.
-    expect(packageDigestV2(BODY, [{ ...SIG_A, scheme: "secp256k1" }, SIG_B])).not.toBe(base);
+    expect(packageDigestV2Unchecked(BODY, [{ ...SIG_A, scheme: "secp256k1" }, SIG_B])).not.toBe(base);
   });
 
   it("moves when a SIGNER changes", () => {
-    expect(packageDigestV2(BODY, [SIG_A, { ...SIG_B, signer: `0x${"d4".repeat(32)}` }])).not.toBe(base);
-    expect(packageDigestV2(BODY, [SIG_C, SIG_B])).not.toBe(base);
+    expect(packageDigestV2Unchecked(BODY, [SIG_A, { ...SIG_B, signer: `0x${"d4".repeat(32)}` }])).not.toBe(base);
+    expect(packageDigestV2Unchecked(BODY, [SIG_C, SIG_B])).not.toBe(base);
   });
 });
 
-describe("packageDigestV2 — framing", () => {
+describe("packageDigestV2Unchecked — framing", () => {
   it("returns 0x-prefixed 32-byte hex, NOT the sha256: evidence framing", () => {
     // @pcc/spec's sha256() returns "sha256:<hex>" — the evidence-bundle framing.
     // This digest is bound on-chain as bytes32; mixing the two looks right in a
     // log and fails every bind.
-    const d = packageDigestV2(BODY, [SIG_A, SIG_B]);
+    const d = packageDigestV2Unchecked(BODY, [SIG_A, SIG_B]);
     expect(d).toMatch(/^0x[0-9a-f]{64}$/);
     expect(d.startsWith("sha256:")).toBe(false);
   });
@@ -377,7 +392,7 @@ describe("packageDigestV2 — framing", () => {
 
 describe("assertCanonicalizable — the tripwire on the object about to be hashed", () => {
   // The shared canonicalizer serializes numbers with String(), which is not
-  // RFC 8785. A validated body is all strings, so packageDigestV2 never reaches
+  // RFC 8785. A validated body is all strings, so packageDigestV2Unchecked never reaches
   // these; they pin the tripwire itself for the day the schema gains a number.
   it("refuses a non-integer number rather than letting an unreproducible digest through", () => {
     expect(() => assertCanonicalizable({ amount: 1.5 })).toThrow(NonCanonicalizableBodyError);
@@ -392,14 +407,14 @@ describe("assertCanonicalizable — the tripwire on the object about to be hashe
   });
 });
 
-describe("packageDigestV2 — the body is validated first, and a body that is not conforming is never hashed", () => {
+describe("packageDigestV2Unchecked — the body is validated first, and a body that is not conforming is never hashed", () => {
   const SIGS = [SIG_A, SIG_B];
 
   it("refuses a JS number where the schema says decimal string (F7)", () => {
     const num: any = clone(BODY);
     num.unitBinding.chainId = 8453;
-    expect(() => packageDigestV2(num, SIGS)).toThrow(PackageBodyValidationError);
-    expect(() => packageDigestV2(num, SIGS)).toThrow(/\$\.unitBinding\.chainId/);
+    expect(() => packageDigestV2Unchecked(num, SIGS)).toThrow(PackageBodyValidationError);
+    expect(() => packageDigestV2Unchecked(num, SIGS)).toThrow(/\$\.unitBinding\.chainId/);
   });
 
   it("refuses an unknown key at any level, and a missing field (F7)", () => {
@@ -412,7 +427,7 @@ describe("packageDigestV2 — the body is validated first, and a body that is no
     ]) {
       const b = clone(BODY);
       mutate(b);
-      expect(() => packageDigestV2(b, SIGS)).toThrow(PackageBodyValidationError);
+      expect(() => packageDigestV2Unchecked(b, SIGS)).toThrow(PackageBodyValidationError);
       expect(() => packageDigestV2PreImage(b, SIGS)).toThrow(PackageBodyValidationError);
     }
   });
@@ -420,10 +435,10 @@ describe("packageDigestV2 — the body is validated first, and a body that is no
   it("refuses an EIP-55 checksummed escrow address instead of letting it move the digest (F3)", () => {
     const eip55: any = clone(BODY);
     eip55.unitBinding.escrow = "0x00000000000000000000000000000000000E5c0F";
-    expect(() => packageDigestV2(eip55, SIGS)).toThrow(PackageBodyValidationError);
-    expect(() => packageDigestV2(eip55, SIGS)).toThrow(/\$\.unitBinding\.escrow/);
+    expect(() => packageDigestV2Unchecked(eip55, SIGS)).toThrow(PackageBodyValidationError);
+    expect(() => packageDigestV2Unchecked(eip55, SIGS)).toThrow(/\$\.unitBinding\.escrow/);
     // The lowercase spelling of the same address is the one accepted spelling.
-    expect(() => packageDigestV2(BODY, SIGS)).not.toThrow();
+    expect(() => packageDigestV2Unchecked(BODY, SIGS)).not.toThrow();
   });
 
   it("refuses an uppercase hash and a 0X prefix (F3)", () => {
@@ -431,38 +446,38 @@ describe("packageDigestV2 — the body is validated first, and a body that is no
     upper.evidence.evidenceBlockHash = `0x${"1A".repeat(32)}`;
     const prefix: any = clone(BODY);
     prefix.challengeBinding.nonce = `0X${"f6".repeat(32)}`;
-    expect(() => packageDigestV2(upper, SIGS)).toThrow(/\$\.evidence\.evidenceBlockHash/);
-    expect(() => packageDigestV2(prefix, SIGS)).toThrow(/\$\.challengeBinding\.nonce/);
+    expect(() => packageDigestV2Unchecked(upper, SIGS)).toThrow(/\$\.evidence\.evidenceBlockHash/);
+    expect(() => packageDigestV2Unchecked(prefix, SIGS)).toThrow(/\$\.challengeBinding\.nonce/);
   });
 
   it("refuses empty principal ids (F7)", () => {
     for (const key of ["operatorPrincipalId", "kernelId", "devicePrincipalId"]) {
       const b: any = clone(BODY);
       b.producer[key] = "";
-      expect(() => packageDigestV2(b, SIGS), key).toThrow(/must not be empty/);
+      expect(() => packageDigestV2Unchecked(b, SIGS), key).toThrow(/must not be empty/);
     }
   });
 
   it("refuses a body that is not an object", () => {
     for (const bad of [null, undefined, "body", 7, [BODY]]) {
-      expect(() => packageDigestV2(bad, SIGS), String(bad)).toThrow(PackageBodyValidationError);
+      expect(() => packageDigestV2Unchecked(bad, SIGS), String(bad)).toThrow(PackageBodyValidationError);
     }
   });
 });
 
-describe("packageDigestV2 — evidence's published golden (#1202, 974b3ff1)", () => {
+describe("packageDigestV2Unchecked — evidence's published golden (#1202, 974b3ff1)", () => {
   // The input vector (body + rawSigs) and the digest come from evidence's
   // integrated settlement-vector mirror, computed with a different JCS and hash
   // toolchain — so agreement here is a cross-check, not self-agreement.
   it("matches the golden digest over the published body and sample signature set", () => {
     const body: unknown = JSON.parse(GOLDEN.jcsBody);
-    expect(packageDigestV2(body, GOLDEN.rawSigs)).toBe(GOLDEN.packageDigestV2);
+    expect(packageDigestV2Unchecked(body, GOLDEN.rawSigs)).toBe(GOLDEN.packageDigestV2);
   });
 
   it("stays on the golden when the published signatures are reordered", () => {
     const [a, b] = GOLDEN.rawSigs as PackageSignature[];
     const body: unknown = JSON.parse(GOLDEN.jcsBody);
-    expect(packageDigestV2(body, [b!, a!])).toBe(GOLDEN.packageDigestV2);
+    expect(packageDigestV2Unchecked(body, [b!, a!])).toBe(GOLDEN.packageDigestV2);
   });
 
   it("REFUSES the published signatures with one duplicated: the mirror deduplicates, the producer refuses (F4)", () => {
@@ -471,11 +486,94 @@ describe("packageDigestV2 — evidence's published golden (#1202, 974b3ff1)", ()
     // they agree: it refuses the duplicate instead of repairing it.
     const [a, b] = GOLDEN.rawSigs as PackageSignature[];
     const body: unknown = JSON.parse(GOLDEN.jcsBody);
-    expect(() => packageDigestV2(body, [b!, a!, b!])).toThrow(InvalidSignatureEntryError);
+    expect(() => packageDigestV2Unchecked(body, [b!, a!, b!])).toThrow(InvalidSignatureEntryError);
   });
 });
 
-describe("packageDigestV2 — rules the published golden blocks (STOPPED, not applied)", () => {
+/**
+ * F3 (cross-family E9): before this, nothing stopped `packageDigestV2Unchecked`
+ * (then named `packageDigestV2`) from being called directly on a body/
+ * signature set `assertMintablePackage` would have refused — there was no
+ * enforced seam between the lenient digest and the mint guard.
+ * `mintablePackageDigest` is that seam: it only accepts a `MintablePackage`,
+ * which is obtainable solely from `assertMintablePackage`.
+ */
+describe("mintablePackageDigest — the only money-bound digest (F3)", () => {
+  function ed25519PublicKeyHexFromSeed(seedHex: string): string {
+    const pkcs8Prefix = Buffer.from("302e020100300506032b657004220420", "hex");
+    const pkcs8Der = Buffer.concat([pkcs8Prefix, Buffer.from(seedHex, "hex")]);
+    const privateKey = createPrivateKey({ key: pkcs8Der, format: "der", type: "pkcs8" });
+    const publicKey = createPublicKey(privateKey);
+    const spkiDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
+    return `0x${spkiDer.subarray(12).toString("hex")}`;
+  }
+  const H = (n: string) => `0x${n.repeat(64).slice(0, 64)}`;
+  const D1 = { signer: `0x${"ab".repeat(20)}`, scheme: "secp256k1-eip712", sig: `0x${"11".repeat(65)}` };
+  const DEVICE_SEED = "44".repeat(32);
+  const DEVICE_PUB = ed25519PublicKeyHexFromSeed(DEVICE_SEED);
+  const MINTABLE_BODY: FinalMilestonePackageV2Body = {
+    packageSchemaVersion: PACKAGE_SCHEMA_VERSION,
+    packageFormat: PACKAGE_FORMAT,
+    compositionSchemaVersion: "1",
+    unitBinding: {
+      chainId: "8453",
+      escrow: "0x00000000000000000000000000000000000e5c0f",
+      settlementUnitId: H("a1"),
+      jobIdHash: H("b2"),
+      milestoneIndex: "3",
+      stepId: H("c3"),
+      compositionRoot: H("d4"),
+      acceptedEnvelopeHash: H("e5"),
+    },
+    producer: {
+      operatorPrincipalId: `eip155:8453:${D1.signer}`,
+      kernelId: "kernel-1",
+      devicePrincipalId: `ed25519:${DEVICE_PUB}`,
+    },
+    challengeBinding: { nonce: H("f6"), tChallengeRef: "chal-1" },
+    evidence: { evidenceBlockHash: H("1a") },
+    evidenceTimeBounds: { start: "1700000000", end: "1700000100" },
+  };
+  const D2 = {
+    signer: DEVICE_PUB,
+    scheme: "ed25519-raw32",
+    sig: `0x${signWithPrivateKeyHex(DEVICE_SEED, Buffer.from(toBytes(computePackageBodyHash(MINTABLE_BODY))))!}`,
+  };
+  const REGISTRY = { signerForKernel: async () => ({ algorithm: "ed25519" as const, publicKey: DEVICE_PUB }) };
+  const CHALLENGES = {
+    recordFor: async () => ({
+      nonce: MINTABLE_BODY.challengeBinding.nonce,
+      tChallengeRef: MINTABLE_BODY.challengeBinding.tChallengeRef,
+      state: "issued" as const,
+    }),
+  };
+
+  it("hashes a real MintablePackage exactly as packageDigestV2Unchecked would over the same body/signatures", async () => {
+    const mintable = await assertMintablePackage(MINTABLE_BODY, [D1, D2], REGISTRY, CHALLENGES);
+    expect(mintable).toBeInstanceOf(MintablePackage);
+    expect(mintablePackageDigest(mintable)).toBe(packageDigestV2Unchecked(mintable.body, mintable.signatures));
+  });
+
+  it("refuses a structural fake: a hand-built {body, signatures} object is not a MintablePackage", () => {
+    // A real caller would have to `as unknown as MintablePackage` to even get
+    // this past TypeScript — the private `#brand` field makes the class
+    // nominal, so this assignment is rejected at compile time; this test
+    // pins the RUNTIME half of that protection (the `instanceof` check).
+    const fake = { body: MINTABLE_BODY, signatures: [D1, D2] } as unknown as MintablePackage;
+    expect(() => mintablePackageDigest(fake)).toThrow(PackageNotMintableError);
+    expect(() => mintablePackageDigest(fake)).toThrow(/not a MintablePackage/);
+  });
+
+  it("refuses null/undefined/a plain object masquerading as MintablePackage", () => {
+    for (const bad of [null, undefined, {}, MINTABLE_BODY]) {
+      expect(() => mintablePackageDigest(bad as unknown as MintablePackage), String(bad)).toThrow(
+        PackageNotMintableError,
+      );
+    }
+  });
+});
+
+describe("packageDigestV2Unchecked — rules the published golden blocks (STOPPED, not applied)", () => {
   // The golden's sample signature set labels its entries "secp256k1" / "ed25519"
   // and gives the "ed25519" entry a 40-digit signer, and its digest 0xf78103a1...
   // must stay byte-identical. Until evidence re-issues the sample set in the

@@ -708,150 +708,196 @@ function copyChallengeRecord(
 }
 
 /**
- * Refuse anything a real mint must never produce, before any digest exists. The
- * digest path (`canonicalSignatures`) already refuses what the oracle's ingestion
- * would repair (duplicates, case, extra keys); this is the stricter gate for a
- * real mint:
- *  - the body passes `validatePackageBody` (exact keys, lowercase hex, kernel id);
- *  - the challenge nonce is not the interim placeholder AND matches an ISSUED,
- *    unit-bound challenge record (F4: via `ChallengeReader`) — nonzero alone is
- *    not proof of issuance, and no durable issuer yet means nothing is mintable
- *    until it exists (fails closed);
- *  - exactly one D1 and one D2 signature, each with exactly the keys
- *    {signer, scheme, sig}, the profile's exact scheme name and its signer and
- *    signature forms, so no duplicate, extra, relabelled or foreign-scheme entry
- *    can reach the digest;
- *  - the principal ids are the pinned forms (`pcc.evidence.principal-id.v1`)
- *    and bound to those signatures: operatorPrincipalId is
- *    eip155:<unit chainId>:<the D1 signer>, and devicePrincipalId is
- *    ed25519:<the D2 signer>, which must be the key the kernel registry holds
- *    for the VALIDATED producer.kernelId (F2: looked up through
- *    `KernelRegistryReader`, never a bare caller-asserted signer) and never a
- *    key whose secret is public.
+ * F3: the nominal brand that makes `assertMintablePackage` the ONLY mint-bound
+ * seam. The private field `#brand` makes TypeScript compare this class
+ * NOMINALLY rather than structurally: a hand-built `{body, signatures}` object
+ * is never assignable to `MintablePackage`, even though its public shape
+ * matches, because it has no `#brand`. (A private CONSTRUCTOR alone would not
+ * be enough for this — TypeScript's structural check for classes only treats
+ * them as nominal when they carry a private or protected MEMBER.) The private
+ * constructor additionally means nothing outside this class can construct one
+ * at runtime, so the `instanceof` check in `mintablePackageDigest`
+ * (`package-digest-v2.ts`) is meaningful even against a
+ * `as unknown as MintablePackage` type assertion.
  *
- * READ ONCE. Every input is read exactly once into a local copy (the body through
- * `validatePackageBody`'s returned copy, each signature entry's fields and the
- * list's length and indices through `copySignatureEntries`, the registry signer's
- * and the challenge record's fields through `copyRegisteredSigner` /
- * `copyChallengeRecord`), and only the copies are checked and hashed. No
- * getter's second answer, and no change the caller makes after a check, can
- * make what was validated differ from what is returned.
- *
- * The registry and challenge lookups are async (real reads are I/O), so this
- * function is too.
- *
- * Returns the validated body and the canonical signatures to hash.
+ * `body` and `signatures` are deep-frozen copies the caller cannot reach (both
+ * already came back from `validatePackageBody` / `canonicalSignatures`, which
+ * never alias the caller's objects).
+ */
+export class MintablePackage {
+  readonly body: FinalMilestonePackageV2Body;
+  readonly signatures: readonly PackageSignature[];
+  /** Exists only to make this class nominal (see class doc). Never read. */
+  readonly #brand = true;
+
+  private constructor(body: FinalMilestonePackageV2Body, signatures: PackageSignature[]) {
+    this.body = Object.freeze(body);
+    this.signatures = Object.freeze(signatures);
+    Object.freeze(this);
+  }
+
+  /**
+   * Refuse anything a real mint must never produce, before any digest exists,
+   * and return a branded `MintablePackage` — the only way to construct one.
+   * The digest path (`canonicalSignatures`) already refuses what the oracle's
+   * ingestion would repair (duplicates, case, extra keys); this is the
+   * stricter gate for a real mint:
+   *  - the body passes `validatePackageBody` (exact keys, lowercase hex, kernel id);
+   *  - the challenge nonce is not the interim placeholder AND matches an ISSUED,
+   *    unit-bound challenge record (F4: via `ChallengeReader`) — nonzero alone is
+   *    not proof of issuance, and no durable issuer yet means nothing is mintable
+   *    until it exists (fails closed);
+   *  - exactly one D1 and one D2 signature, each with exactly the keys
+   *    {signer, scheme, sig}, the profile's exact scheme name and its signer and
+   *    signature forms, so no duplicate, extra, relabelled or foreign-scheme entry
+   *    can reach the digest;
+   *  - the principal ids are the pinned forms (`pcc.evidence.principal-id.v1`)
+   *    and bound to those signatures: operatorPrincipalId is
+   *    eip155:<unit chainId>:<the D1 signer>, and devicePrincipalId is
+   *    ed25519:<the D2 signer>, which must be the key the kernel registry holds
+   *    for the VALIDATED producer.kernelId (F2: looked up through
+   *    `KernelRegistryReader`, never a bare caller-asserted signer) and never a
+   *    key whose secret is public;
+   *  - D2's ed25519 signature verifies over raw32(packageBodyHash) (F1; D1 is
+   *    NOT cryptographically verified — see the STOP note above
+   *    MINT_SIGNER_PROFILE).
+   *
+   * READ ONCE. Every input is read exactly once into a local copy (the body through
+   * `validatePackageBody`'s returned copy, each signature entry's fields and the
+   * list's length and indices through `copySignatureEntries`, the registry signer's
+   * and the challenge record's fields through `copyRegisteredSigner` /
+   * `copyChallengeRecord`), and only the copies are checked and hashed. No
+   * getter's second answer, and no change the caller makes after a check, can
+   * make what was validated differ from what is returned.
+   *
+   * The registry and challenge lookups are async (real reads are I/O), so this
+   * method is too.
+   */
+  static async assert(
+    body: unknown,
+    sigs: unknown,
+    registry: KernelRegistryReader,
+    challenges: ChallengeReader,
+  ): Promise<MintablePackage> {
+    const valid = validatePackageBody(body);
+    if (isInterimNonce(valid)) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding.nonce",
+        "is the interim placeholder; the durable challenge is not built",
+      );
+    }
+    const refuse: Refuse = (path, detail) => new PackageNotMintableError(path, detail);
+    const schemes = new Set<string>();
+    const entries: PackageSignature[] = copySignatureEntries(sigs, SIGNATURE_COUNT, refuse).map((c, i) => {
+      const path = `$signatures[${i}]`;
+      // Own keys only: a scheme named "constructor" or "__proto__" must be a typed refusal, not a crash.
+      const profile =
+        typeof c.scheme === "string" && Object.hasOwn(MINT_SIGNER_PROFILE, c.scheme)
+          ? MINT_SIGNER_PROFILE[c.scheme]
+          : undefined;
+      if (!profile || typeof c.scheme !== "string") {
+        throw refuse(`${path}.scheme`, `must be "${D1_SCHEME}" (D1) or "${D2_SCHEME}" (D2)`);
+      }
+      if (schemes.has(c.scheme)) {
+        throw refuse(`${path}.scheme`, `a second ${profile.role} signature`);
+      }
+      schemes.add(c.scheme);
+      if (typeof c.signer !== "string" || !profile.signer.test(c.signer)) {
+        throw refuse(`${path}.signer`, `not a ${profile.role} signer in its lowercase form`);
+      }
+      if (typeof c.sig !== "string" || !profile.sig.test(c.sig)) {
+        throw refuse(`${path}.sig`, `not a ${profile.role} signature`);
+      }
+      return { signer: c.signer, scheme: c.scheme, sig: c.sig };
+    });
+    const d1 = entries.find((e) => e.scheme === D1_SCHEME)!;
+    const d2 = entries.find((e) => e.scheme === D2_SCHEME)!;
+    const chainId = Number(valid.unitBinding.chainId);
+    if (!operatorPrincipalMatchesSigner(valid.producer.operatorPrincipalId, d1.signer, chainId)) {
+      throw new PackageNotMintableError(
+        "$.producer.operatorPrincipalId",
+        "must be eip155:<unitBinding.chainId>:<the D1 signer's address> (pcc.evidence.principal-id.v1)",
+      );
+    }
+    if (!devicePrincipalMatchesSigner(valid.producer.devicePrincipalId, d2.signer)) {
+      throw new PackageNotMintableError(
+        "$.producer.devicePrincipalId",
+        "must be ed25519:<the D2 signer's key>, never a key whose secret is public (pcc.evidence.principal-id.v1)",
+      );
+    }
+
+    // F1 (D2 half): the kernel's ed25519 signature must verify over the raw 32
+    // bytes of packageBodyHash — not the hex string, and not packageDigestV2
+    // (which would be circular: it embeds this very signature). D1 is NOT
+    // cryptographically verified here; see the STOP note above
+    // MINT_SIGNER_PROFILE.
+    const bodyHashRaw32 = Buffer.from(toBytes(computePackageBodyHash(valid)));
+    if (!verifyEd25519Signature(d2.signer, bodyHashRaw32, d2.sig)) {
+      throw new PackageNotMintableError(
+        `$signatures[${entries.indexOf(d2)}].sig`,
+        "D2 ed25519 signature does not verify over raw32(packageBodyHash)",
+      );
+    }
+
+    // F2: the registry binding is authenticated, keyed by the VALIDATED kernel
+    // id — never a caller-asserted signer with no registry lookup at all.
+    const registeredSigner = await registry.signerForKernel(valid.producer.kernelId);
+    if (registeredSigner === null || registeredSigner === undefined) {
+      throw new PackageNotMintableError(
+        "$.producer.kernelId",
+        "the kernel registry holds no signer for this kernel id",
+      );
+    }
+    if (
+      principalFromRegistry(copyRegisteredSigner(registeredSigner), chainId) !==
+      valid.producer.devicePrincipalId
+    ) {
+      throw new PackageNotMintableError(
+        "$.producer.devicePrincipalId",
+        "is not the key the kernel registry holds for producer.kernelId",
+      );
+    }
+
+    // F4: freshness is authenticated against an issued, unit-bound challenge
+    // record — nonzero is not proof of issuance. No durable issuer yet means
+    // no record, ever, which fails closed by design (see ChallengeReader doc).
+    const record = copyChallengeRecord(await challenges.recordFor(valid.unitBinding));
+    if (record === null) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        "no issued challenge record exists for this unit; nothing is mintable until the durable challenge issuer exists",
+      );
+    }
+    if (record.state !== "issued") {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        `challenge record is not issued (state: ${JSON.stringify(record.state)})`,
+      );
+    }
+    if (
+      record.nonce !== valid.challengeBinding.nonce ||
+      record.tChallengeRef !== valid.challengeBinding.tChallengeRef
+    ) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        "does not match the issued challenge record's nonce/tChallengeRef",
+      );
+    }
+
+    return new MintablePackage(valid, canonicalSignatures(entries));
+  }
+}
+
+/**
+ * Thin, stable entry point: `MintablePackage.assert` under its established
+ * name. Kept as a function (not just the class) because it is the public API
+ * every caller and test already imports.
  */
 export async function assertMintablePackage(
   body: unknown,
   sigs: unknown,
   registry: KernelRegistryReader,
   challenges: ChallengeReader,
-): Promise<{ body: FinalMilestonePackageV2Body; signatures: PackageSignature[] }> {
-  const valid = validatePackageBody(body);
-  if (isInterimNonce(valid)) {
-    throw new PackageNotMintableError(
-      "$.challengeBinding.nonce",
-      "is the interim placeholder; the durable challenge is not built",
-    );
-  }
-  const refuse: Refuse = (path, detail) => new PackageNotMintableError(path, detail);
-  const schemes = new Set<string>();
-  const entries: PackageSignature[] = copySignatureEntries(sigs, SIGNATURE_COUNT, refuse).map((c, i) => {
-    const path = `$signatures[${i}]`;
-    // Own keys only: a scheme named "constructor" or "__proto__" must be a typed refusal, not a crash.
-    const profile =
-      typeof c.scheme === "string" && Object.hasOwn(MINT_SIGNER_PROFILE, c.scheme)
-        ? MINT_SIGNER_PROFILE[c.scheme]
-        : undefined;
-    if (!profile || typeof c.scheme !== "string") {
-      throw refuse(`${path}.scheme`, `must be "${D1_SCHEME}" (D1) or "${D2_SCHEME}" (D2)`);
-    }
-    if (schemes.has(c.scheme)) {
-      throw refuse(`${path}.scheme`, `a second ${profile.role} signature`);
-    }
-    schemes.add(c.scheme);
-    if (typeof c.signer !== "string" || !profile.signer.test(c.signer)) {
-      throw refuse(`${path}.signer`, `not a ${profile.role} signer in its lowercase form`);
-    }
-    if (typeof c.sig !== "string" || !profile.sig.test(c.sig)) {
-      throw refuse(`${path}.sig`, `not a ${profile.role} signature`);
-    }
-    return { signer: c.signer, scheme: c.scheme, sig: c.sig };
-  });
-  const d1 = entries.find((e) => e.scheme === D1_SCHEME)!;
-  const d2 = entries.find((e) => e.scheme === D2_SCHEME)!;
-  const chainId = Number(valid.unitBinding.chainId);
-  if (!operatorPrincipalMatchesSigner(valid.producer.operatorPrincipalId, d1.signer, chainId)) {
-    throw new PackageNotMintableError(
-      "$.producer.operatorPrincipalId",
-      "must be eip155:<unitBinding.chainId>:<the D1 signer's address> (pcc.evidence.principal-id.v1)",
-    );
-  }
-  if (!devicePrincipalMatchesSigner(valid.producer.devicePrincipalId, d2.signer)) {
-    throw new PackageNotMintableError(
-      "$.producer.devicePrincipalId",
-      "must be ed25519:<the D2 signer's key>, never a key whose secret is public (pcc.evidence.principal-id.v1)",
-    );
-  }
-
-  // F1 (D2 half): the kernel's ed25519 signature must verify over the raw 32
-  // bytes of packageBodyHash — not the hex string, and not packageDigestV2
-  // (which would be circular: it embeds this very signature). D1 is NOT
-  // cryptographically verified here; see the STOP note above
-  // MINT_SIGNER_PROFILE.
-  const bodyHashRaw32 = Buffer.from(toBytes(computePackageBodyHash(valid)));
-  if (!verifyEd25519Signature(d2.signer, bodyHashRaw32, d2.sig)) {
-    throw new PackageNotMintableError(
-      `$signatures[${entries.indexOf(d2)}].sig`,
-      "D2 ed25519 signature does not verify over raw32(packageBodyHash)",
-    );
-  }
-
-  // F2: the registry binding is authenticated, keyed by the VALIDATED kernel
-  // id — never a caller-asserted signer with no registry lookup at all.
-  const registeredSigner = await registry.signerForKernel(valid.producer.kernelId);
-  if (registeredSigner === null || registeredSigner === undefined) {
-    throw new PackageNotMintableError(
-      "$.producer.kernelId",
-      "the kernel registry holds no signer for this kernel id",
-    );
-  }
-  if (
-    principalFromRegistry(copyRegisteredSigner(registeredSigner), chainId) !==
-    valid.producer.devicePrincipalId
-  ) {
-    throw new PackageNotMintableError(
-      "$.producer.devicePrincipalId",
-      "is not the key the kernel registry holds for producer.kernelId",
-    );
-  }
-
-  // F4: freshness is authenticated against an issued, unit-bound challenge
-  // record — nonzero is not proof of issuance. No durable issuer yet means
-  // no record, ever, which fails closed by design (see ChallengeReader doc).
-  const record = copyChallengeRecord(await challenges.recordFor(valid.unitBinding));
-  if (record === null) {
-    throw new PackageNotMintableError(
-      "$.challengeBinding",
-      "no issued challenge record exists for this unit; nothing is mintable until the durable challenge issuer exists",
-    );
-  }
-  if (record.state !== "issued") {
-    throw new PackageNotMintableError(
-      "$.challengeBinding",
-      `challenge record is not issued (state: ${JSON.stringify(record.state)})`,
-    );
-  }
-  if (
-    record.nonce !== valid.challengeBinding.nonce ||
-    record.tChallengeRef !== valid.challengeBinding.tChallengeRef
-  ) {
-    throw new PackageNotMintableError(
-      "$.challengeBinding",
-      "does not match the issued challenge record's nonce/tChallengeRef",
-    );
-  }
-
-  return { body: valid, signatures: canonicalSignatures(entries) };
+): Promise<MintablePackage> {
+  return MintablePackage.assert(body, sigs, registry, challenges);
 }
