@@ -24,7 +24,7 @@
  *       "plrBackend": "ot2",
  *       "backendConfig": {
  *         "ot2Url": "http://192.168.1.50:31950",
- *         "ot2ApiKey": "..."
+ *         "robotSerial": "OT2CEP20200217B03"
  *       },
  *       "pythonPath": "auto"
  *     },
@@ -34,6 +34,7 @@
 
 import { registerMachineAdapter } from "@pcc/kernel";
 import { PyLabRobotAdapter } from "./adapter.js";
+import { defaultPythonPath } from "./sidecar-client.js";
 
 // Auto-register at module load. Mirrors the SiLA / Hamilton / Opentrons
 // pattern of having one entry-point per adapter that the host application
@@ -56,7 +57,7 @@ registerMachineAdapter("pylabrobot", (device, cfg, kernelId) => {
       pythonPath:
         (cfg.pythonPath as string | undefined) ??
         process.env.PCC_PLR_PYTHON_PATH ??
-        "python",
+        defaultPythonPath(),
     },
   });
 });

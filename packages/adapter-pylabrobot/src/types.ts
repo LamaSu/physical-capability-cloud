@@ -5,9 +5,9 @@
  * from the kernel package). TypeScript is structural — the adapter class
  * here is assignment-compatible with the kernel's MachineAdapter interface.
  *
- * The kernel re-exports this adapter via
- * `packages/kernel/src/adapters/pylabrobot.ts`, which performs the local
- * import side of the interface satisfaction.
+ * The adapter reaches the kernel through `registerMachineAdapter` (src/index.ts),
+ * so a host process must import `@pcc/adapter-pylabrobot` for the "pylabrobot"
+ * adapterType to resolve. (There is no kernel-side re-export file.)
  */
 
 import type { EvidenceEvent, EvidenceEventType, EvidenceSource } from "@pcc/spec";
