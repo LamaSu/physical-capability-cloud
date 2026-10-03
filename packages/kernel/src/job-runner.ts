@@ -68,9 +68,29 @@ export class JobRunner {
     // Register step with evidence emitter
     this.evidenceEmitter.registerStep(jobId, stepId, assuranceTier);
 
-    // Wire up evidence listeners
+    // Wire up evidence listeners. addEvent hashes asynchronously before it stores
+    // an event, so each one is recorded on one chain, in the order it was emitted,
+    // and the tier check and the bundle wait for the chain (allRecorded). An
+    // unawaited addEvent could land after both: an inspection emitted at step 7
+    // was missing from the step-8 check (found in LO-SE-1 round 2).
+    let recorded: Promise<void> = Promise.resolve();
     const handleEvidence = (event: Parameters<MachineAdapter["onEvidence"]>[0] extends (e: infer E) => void ? E : never) => {
-      this.evidenceEmitter.addEvent(jobId, stepId, event).catch(console.error);
+      recorded = recorded.then(() =>
+        this.evidenceEmitter.addEvent(jobId, stepId, event).then(
+          () => undefined,
+          (err: unknown) => {
+            console.error(err);
+          },
+        ),
+      );
+    };
+    // An event emitted while waiting extends the chain, so wait until it stops growing.
+    const allRecorded = async (): Promise<void> => {
+      let current: Promise<void>;
+      do {
+        current = recorded;
+        await current;
+      } while (current !== recorded);
     };
 
     this.machine.onEvidence(handleEvidence);
@@ -161,7 +181,8 @@ export class JobRunner {
             );
           }
 
-          // 8. Check tier requirements are met
+          // 8. Check tier requirements are met, over every event emitted so far
+          await allRecorded();
           const events = this.evidenceEmitter.getEvents(jobId, stepId);
           const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier);
           if (!check.met) {
@@ -179,6 +200,7 @@ export class JobRunner {
           }
 
           // 9. Finalize evidence bundle
+          await allRecorded();
           const bundle = await Sentry.startSpan(
             { name: "job.finalize_bundle", op: "job.phase", attributes: { "job.id": jobId } },
             async () => this.evidenceEmitter.finalizeBundle(jobId, stepId),
