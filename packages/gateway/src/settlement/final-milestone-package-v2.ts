@@ -667,13 +667,56 @@ export interface KernelRegistryReader {
 }
 
 /**
+ * F4: one durable challenge-issuance record, as the gateway's (not-yet-built)
+ * challenge issuer would return it. Only `state === "issued"` authorizes a
+ * mint: `"consumed"`, any other string, or no record at all are all refused.
+ * This is intentionally not a closed enum — a future issuer may add states
+ * (e.g. `"expired"`), and every one of them must fail closed by DEFAULT, not
+ * by an exhaustive switch this file would need to keep in sync.
+ */
+export interface ChallengeRecord {
+  nonce: Hex;
+  tChallengeRef: string;
+  state: "issued" | "consumed" | (string & {});
+}
+
+/**
+ * F4: the durable challenge issuer, injected. `assertMintablePackage` calls
+ * `recordFor` with the VALIDATED `unitBinding` and requires an ISSUED record
+ * whose `nonce` and `tChallengeRef` equal the package's. The durable issuer is
+ * NOT BUILT yet (evidence schema §4; `challengeBinding.nonce` is still
+ * interim), so today every real caller's `recordFor` returns `null` and every
+ * non-interim-nonce package is refused here — FAILS CLOSED: nothing is
+ * mintable until the issuer exists, which is the correct state for an unbuilt
+ * freshness gate, not a bug in this guard.
+ */
+export interface ChallengeReader {
+  recordFor(unitBinding: UnitBinding): ChallengeRecord | null | Promise<ChallengeRecord | null>;
+}
+
+/**
+ * One read of a challenge record into a plain copy — same discipline as
+ * `copyRegisteredSigner`: a getter that answers differently on a second read
+ * cannot move what was checked away from what was compared.
+ */
+function copyChallengeRecord(
+  v: ChallengeRecord | null | undefined,
+): { nonce: unknown; tChallengeRef: unknown; state: unknown } | null {
+  if (v === null || v === undefined) return null;
+  const { nonce, tChallengeRef, state } = v as unknown as Record<string, unknown>;
+  return { nonce, tChallengeRef, state };
+}
+
+/**
  * Refuse anything a real mint must never produce, before any digest exists. The
  * digest path (`canonicalSignatures`) already refuses what the oracle's ingestion
  * would repair (duplicates, case, extra keys); this is the stricter gate for a
  * real mint:
  *  - the body passes `validatePackageBody` (exact keys, lowercase hex, kernel id);
- *  - the challenge nonce is not the interim placeholder, so nothing is minted
- *    until the durable challenge exists (fails closed);
+ *  - the challenge nonce is not the interim placeholder AND matches an ISSUED,
+ *    unit-bound challenge record (F4: via `ChallengeReader`) — nonzero alone is
+ *    not proof of issuance, and no durable issuer yet means nothing is mintable
+ *    until it exists (fails closed);
  *  - exactly one D1 and one D2 signature, each with exactly the keys
  *    {signer, scheme, sig}, the profile's exact scheme name and its signer and
  *    signature forms, so no duplicate, extra, relabelled or foreign-scheme entry
@@ -689,11 +732,12 @@ export interface KernelRegistryReader {
  * READ ONCE. Every input is read exactly once into a local copy (the body through
  * `validatePackageBody`'s returned copy, each signature entry's fields and the
  * list's length and indices through `copySignatureEntries`, the registry signer's
- * fields through `copyRegisteredSigner`), and only the copies are checked and
- * hashed. No getter's second answer, and no change the caller makes after a
- * check, can make what was validated differ from what is returned.
+ * and the challenge record's fields through `copyRegisteredSigner` /
+ * `copyChallengeRecord`), and only the copies are checked and hashed. No
+ * getter's second answer, and no change the caller makes after a check, can
+ * make what was validated differ from what is returned.
  *
- * The registry lookup is async (a real registry is an I/O read), so this
+ * The registry and challenge lookups are async (real reads are I/O), so this
  * function is too.
  *
  * Returns the validated body and the canonical signatures to hash.
@@ -702,6 +746,7 @@ export async function assertMintablePackage(
   body: unknown,
   sigs: unknown,
   registry: KernelRegistryReader,
+  challenges: ChallengeReader,
 ): Promise<{ body: FinalMilestonePackageV2Body; signatures: PackageSignature[] }> {
   const valid = validatePackageBody(body);
   if (isInterimNonce(valid)) {
@@ -781,5 +826,32 @@ export async function assertMintablePackage(
       "is not the key the kernel registry holds for producer.kernelId",
     );
   }
+
+  // F4: freshness is authenticated against an issued, unit-bound challenge
+  // record — nonzero is not proof of issuance. No durable issuer yet means
+  // no record, ever, which fails closed by design (see ChallengeReader doc).
+  const record = copyChallengeRecord(await challenges.recordFor(valid.unitBinding));
+  if (record === null) {
+    throw new PackageNotMintableError(
+      "$.challengeBinding",
+      "no issued challenge record exists for this unit; nothing is mintable until the durable challenge issuer exists",
+    );
+  }
+  if (record.state !== "issued") {
+    throw new PackageNotMintableError(
+      "$.challengeBinding",
+      `challenge record is not issued (state: ${JSON.stringify(record.state)})`,
+    );
+  }
+  if (
+    record.nonce !== valid.challengeBinding.nonce ||
+    record.tChallengeRef !== valid.challengeBinding.tChallengeRef
+  ) {
+    throw new PackageNotMintableError(
+      "$.challengeBinding",
+      "does not match the issued challenge record's nonce/tChallengeRef",
+    );
+  }
+
   return { body: valid, signatures: canonicalSignatures(entries) };
 }
