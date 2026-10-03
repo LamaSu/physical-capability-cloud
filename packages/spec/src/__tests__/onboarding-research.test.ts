@@ -434,6 +434,21 @@ describe("entryInstructsExecution — a closed policy over all instruction-beari
     }
   });
 
+  it("verb-local negation scope: a negation excuses only its own verb and directly-coordinated verbs (astra pack 120c, MEDIUM 8)", () => {
+    // Once a negated verb has taken an object, a verb coordinated with it by
+    // "and" (not "or"/"," alone) starts a new, un-negated predicate.
+    expect(entryInstructsExecution(withPrompt("Do not install A and execute B."))).toBe(true);
+    // Plain "or"/", "-coordination with no object in between stays excused.
+    expect(entryInstructsExecution(withPrompt("Do not install or run any code."))).toBe(false);
+    // A second, later negation re-opens the scope for its own verb.
+    expect(entryInstructsExecution(withPrompt("Do not install A, and do not run B."))).toBe(false);
+    // Pure coordination under one negation, no object between the verbs.
+    expect(entryInstructsExecution(withPrompt("Never install, run, or flash firmware."))).toBe(false);
+    // A clean, un-negated instruction in an earlier sentence is still caught,
+    // whatever a later sentence says.
+    expect(entryInstructsExecution(withPrompt("Install X. Do not run Y."))).toBe(true);
+  });
+
   it("looks at every instruction-bearing member, not just the prompt", () => {
     const run = "Run the downloaded driver.";
     const cases: [string, ResearchLibraryEntry][] = [
