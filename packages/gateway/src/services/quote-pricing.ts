@@ -417,6 +417,29 @@ export function computeRegisteredQuote({
   };
 }
 
+/**
+ * An operator-policy override whose contract (operator-policy.ts: challengeWindowOverride,
+ * bondPercentOverride) is a NUMBER in which 0 means "use the assurance tier's default". An absent field
+ * is the default too. Any other present value is returned UNCHANGED, so the caller's own validator
+ * refuses it. `override || tierDefault` used to turn a malformed false, "" or null into the tier default
+ * (astra 234 F1).
+ */
+export function overrideOrTierDefault(override: unknown, tierDefault: number): unknown {
+  return override === undefined || override === 0 ? tierDefault : override;
+}
+
+export type ChallengeWindowResult =
+  | { ok: true; seconds: number }
+  | { ok: false; status: 422; error: "operator_pricing_policy_invalid"; reason: "invalid-challenge-window" };
+
+/** A challenge window: operator policy data, so it must be a non-negative safe integer number of seconds. */
+export function validChallengeWindowSeconds(v: unknown): ChallengeWindowResult {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {
+    return { ok: false, status: 422, error: "operator_pricing_policy_invalid", reason: "invalid-challenge-window" };
+  }
+  return { ok: true, seconds: v };
+}
+
 /** A bond percent: a finite number in [0, 100] whose String() is a canonical amount (at most 6 decimals). */
 const BOND_PERCENT_PATTERN = /^(0|[1-9][0-9]{0,2})(\.[0-9]{1,6})?$/;
 

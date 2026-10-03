@@ -41,6 +41,8 @@ import {
   selectRegisteredCapability,
   computeRegisteredQuote,
   exactBondCents,
+  overrideOrTierDefault,
+  validChallengeWindowSeconds,
 } from "../services/quote-pricing.js";
 import {
   DEFAULT_OPERATOR_POLICY,
@@ -310,9 +312,14 @@ export async function createPccQuote(
   const evidenceTier = selections.evidenceTier;
   const assuranceTier =
     evidenceTier === "full" ? 2 : evidenceTier === "basic" ? 1 : 0;
-  const challengeWindowSeconds =
-    policy.challengeWindowOverride || [0, 3600, 7200, 14400][assuranceTier] || 3600;
-  const bond = exactBondCents(cq.totalCents, policy.bondPercentOverride || [0, 5, 15, 25][assuranceTier]);
+  // Both overrides are validated BEFORE defaulting: 0 or absent means the tier default; any other value
+  // must be valid, or the quote is refused before any session row exists (astra 234 F1).
+  const cw = validChallengeWindowSeconds(
+    overrideOrTierDefault(policy.challengeWindowOverride, [0, 3600, 7200, 14400][assuranceTier] || 3600),
+  );
+  if (!cw.ok) throw new Error(cw.error);
+  const challengeWindowSeconds = cw.seconds;
+  const bond = exactBondCents(cq.totalCents, overrideOrTierDefault(policy.bondPercentOverride, [0, 5, 15, 25][assuranceTier]));
   if (!bond.ok) throw new Error(bond.error);
 
   const quote = {

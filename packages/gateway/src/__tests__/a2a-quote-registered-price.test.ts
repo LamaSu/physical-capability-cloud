@@ -155,6 +155,45 @@ describe("N100 A2A pcc-quote: the registered price, through the shared evaluator
     expect(sessionCount()).toBe(before);
   });
 
+  // astra 234 F1 (HIGH): see the negotiation suite. A2A refuses with the machine-readable code and inserts no session.
+  it.each([["false", false], ["an empty string", ""], ["null", null], ["a negative number", -1]])(
+    "astra 234 F1: a malformed bondPercentOverride (%s) is refused, no session row",
+    async (_label, bad) => {
+      registerCap("cap-n100-a2a-falsybond", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
+      setPolicy({ bondPercentOverride: bad, pricingRules: [] });
+      const before = sessionCount();
+      const res = await sendQuote(app, "qf1", { selections: { evidenceTier: "basic" } });
+      expect(res.json().error?.message).toBe("operator_pricing_policy_invalid");
+      expect(sessionCount()).toBe(before);
+    },
+  );
+
+  it.each([["0", 0], ["absent", undefined]])("astra 234 F1: bondPercentOverride %s keeps its documented meaning, the tier default", async (_label, v) => {
+    registerCap("cap-n100-a2a-zerobond", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
+    setPolicy({ bondPercentOverride: v, pricingRules: [] });
+    const res = await sendQuote(app, "qf2", { selections: { evidenceTier: "basic" } });
+    expect(res.json().result.artifacts[0].data.quote.bondAmount).toBe("5.00");
+  });
+
+  it.each([["false", false], ["an empty string", ""], ["null", null], ["a negative number", -1], ["a fraction", 1.5]])(
+    "the same property: a malformed challengeWindowOverride (%s) is refused, no session row",
+    async (_label, bad) => {
+      registerCap("cap-n100-a2a-falsycw", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
+      setPolicy({ challengeWindowOverride: bad, pricingRules: [] });
+      const before = sessionCount();
+      const res = await sendQuote(app, "qf3", { selections: { evidenceTier: "basic" } });
+      expect(res.json().error?.message).toBe("operator_pricing_policy_invalid");
+      expect(sessionCount()).toBe(before);
+    },
+  );
+
+  it.each([["0", 0], ["absent", undefined]])("challengeWindowOverride %s keeps its documented meaning, the tier default", async (_label, v) => {
+    registerCap("cap-n100-a2a-zerocw", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
+    setPolicy({ challengeWindowOverride: v, pricingRules: [] });
+    const res = await sendQuote(app, "qf4", { selections: { evidenceTier: "basic" } });
+    expect(res.json().result.artifacts[0].data.quote.challengeWindowSeconds).toBe(3600);
+  });
+
   it("the DEFAULT policy's rush (+25%) and loyalty (-5%) rules no longer apply (no time/history fact)", async () => {
     registerCap("cap-n100-a2a-rl", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
     const res = await sendQuote(app, "q6", { selections: { quantity: 1 } });

@@ -156,6 +156,48 @@ describe("N100 negotiation /quote: the registered price, through the shared eval
     expect(row!.quote).toBeNull();
   });
 
+  // astra 234 F1 (HIGH): `override || tierDefault` turned a MALFORMED falsy override into the tier default.
+  // The contract (operator-policy.ts:157-160) makes both overrides numbers where 0 means "use the tier default".
+  it.each([["false", false], ["an empty string", ""], ["null", null], ["a negative number", -1]])(
+    "astra 234 F1: a malformed bondPercentOverride (%s) is refused, never silently replaced by the tier default",
+    async (_label, bad) => {
+      registerCap("cap-n100-neg-falsybond", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
+      setPolicy({ bondPercentOverride: bad, pricingRules: [] });
+      const { id, res } = await quotedBody(app, { evidenceTier: "basic" });
+      expect(res.statusCode).toBe(422);
+      expect([res.json().error, res.json().reason]).toEqual(["operator_pricing_policy_invalid", "invalid-bond-percent"]);
+      expect(sessionRow(id)!.quote).toBeNull();
+    },
+  );
+
+  it.each([["0", 0], ["absent", undefined]])("astra 234 F1: bondPercentOverride %s keeps its documented meaning, the tier default", async (_label, v) => {
+    registerCap("cap-n100-neg-zerobond", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
+    setPolicy({ bondPercentOverride: v, pricingRules: [] });
+    const { res } = await quotedBody(app, { evidenceTier: "basic" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().quote.bondAmount).toBe("5.00"); // basic tier: 5% of 100.00
+  });
+
+  it.each([["false", false], ["an empty string", ""], ["null", null], ["a negative number", -1], ["a fraction", 1.5]])(
+    "the same property: a malformed challengeWindowOverride (%s) is refused, never silently replaced by the tier default",
+    async (_label, bad) => {
+      registerCap("cap-n100-neg-falsycw", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
+      setPolicy({ challengeWindowOverride: bad, pricingRules: [] });
+      const { id, res } = await quotedBody(app, { evidenceTier: "basic" });
+      expect(res.statusCode).toBe(422);
+      expect([res.json().error, res.json().reason]).toEqual(["operator_pricing_policy_invalid", "invalid-challenge-window"]);
+      expect(sessionRow(id)!.quote).toBeNull();
+    },
+  );
+
+  it.each([["0", 0], ["absent", undefined]])("challengeWindowOverride %s keeps its documented meaning, the tier default", async (_label, v) => {
+    registerCap("cap-n100-neg-zerocw", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
+    setPolicy({ challengeWindowOverride: v, pricingRules: [] });
+    const { res } = await quotedBody(app, { evidenceTier: "basic" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().quote.challengeWindowSeconds).toBe(3600); // basic tier's default
+  });
+
   it("the DEFAULT policy's rush (+25%) and loyalty (-5%) rules no longer apply (no time/history fact)", async () => {
     registerCap("cap-n100-neg-rl", KERNEL, TYPE, { currency: "USDC", baseCost: "100.00", minimum: "0.01" });
     // DEFAULT_OPERATOR_POLICY (no override row): rush + loyalty-5 enabled, quantity 1 so volume-10 (minQuantity 10) is also unmet.

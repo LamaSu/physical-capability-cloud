@@ -43,6 +43,8 @@ import {
   selectRegisteredCapability,
   computeRegisteredQuote,
   exactBondCents,
+  overrideOrTierDefault,
+  validChallengeWindowSeconds,
 } from "../services/quote-pricing.js";
 // Liveness gate lives in one shared module so the A2A commit path (a2a-tasks.ts)
 // enforces the identical rule — see session-liveness.ts (N1).
@@ -513,8 +515,16 @@ export async function negotiationRoutes(app: FastifyInstance) {
 
         // Determine assurance tier and smart contract params (unchanged).
         const assuranceTier = (selections.evidenceTier === "full" ? 2 : selections.evidenceTier === "basic" ? 1 : 0);
-        const challengeWindowSeconds = policy.challengeWindowOverride || [0, 3600, 7200, 14400][assuranceTier] || 3600;
-        const bond = exactBondCents(cq.totalCents, policy.bondPercentOverride || [0, 5, 15, 25][assuranceTier]);
+        // Both overrides are validated BEFORE defaulting: 0 or absent means the tier default; any other
+        // value must be valid, or the quote is refused with the session untouched (astra 234 F1).
+        const cw = validChallengeWindowSeconds(
+          overrideOrTierDefault(policy.challengeWindowOverride, [0, 3600, 7200, 14400][assuranceTier] || 3600),
+        );
+        if (!cw.ok) {
+          return reply.status(cw.status).send({ error: cw.error, reason: cw.reason });
+        }
+        const challengeWindowSeconds = cw.seconds;
+        const bond = exactBondCents(cq.totalCents, overrideOrTierDefault(policy.bondPercentOverride, [0, 5, 15, 25][assuranceTier]));
         if (!bond.ok) {
           return reply.status(bond.status).send({ error: bond.error, reason: bond.reason });
         }
