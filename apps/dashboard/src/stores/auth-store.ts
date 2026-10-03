@@ -12,6 +12,8 @@ interface AuthState {
   // -- API Key auth (primary gate) --
   /** Whether an API key is held. The key itself is never in the store. */
   isAuthenticated: boolean;
+  /** Bumped on every sign-in, sign-out or key replacement (adoptApiKey, logout). Never the key. */
+  keyEpoch: number;
   login: (key: string) => Promise<boolean>;
   logout: () => void;
 
@@ -34,6 +36,7 @@ interface AuthState {
 export const useAuthStore = create<AuthState>((set) => ({
   // -- API Key auth --
   isAuthenticated: hasStoredApiKey(),
+  keyEpoch: 0,
 
   login: async (key: string): Promise<boolean> => {
     try {
@@ -48,8 +51,9 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
-    adoptApiKey(null);
-    set({ address: null, sessionToken: null, error: null });
+    // One set(), so an identity change is reported once (onIdentityChange).
+    setStoredApiKey(null);
+    set((s) => ({ isAuthenticated: false, keyEpoch: s.keyEpoch + 1, address: null, sessionToken: null, error: null }));
   },
 
   // -- Wallet/SIWE auth --
@@ -65,11 +69,28 @@ export const useAuthStore = create<AuthState>((set) => ({
 }));
 
 /**
+/**
  * Hold `key` as the signed-in key, or sign out with null. login() calls it
  * after the gateway accepts the key; tests call it directly. It is
- * write-only: writing a key cannot leak one.
+ * write-only: writing a key cannot leak one. Every call is an identity change
+ * (keyEpoch), even with the same key: telling "same key" from "another key"
+ * would make this an equality test on the stored key.
  */
 export function adoptApiKey(key: string | null): void {
   setStoredApiKey(key);
-  useAuthStore.setState({ isAuthenticated: hasStoredApiKey() });
+  useAuthStore.setState((s) => ({ isAuthenticated: hasStoredApiKey(), keyEpoch: s.keyEpoch + 1 }));
 }
+
+/**
+ * Calls `onChange` whenever the signed-in identity changes: a key signed in or
+ * out, a different key, wallet or SIWE session. A cached read must not outlive
+ * the identity that made it, so App clears the query cache here (review r3 of
+ * #353). The key itself is never in this store (N50), so a key change shows as
+ * keyEpoch.
+ */
+export function onIdentityChange(onChange: () => void): () => void {
+  return useAuthStore.subscribe((s, prev) => {
+    if (s.keyEpoch !== prev.keyEpoch || s.address !== prev.address || s.sessionToken !== prev.sessionToken) onChange();
+  });
+}
+
