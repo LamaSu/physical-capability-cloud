@@ -17,7 +17,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
-import { isExecutingAdapter } from "../facades/job.facade.js";
+import { isExecutingAdapter, sameDeviceRevision, type DeviceRevisionSnapshot } from "../facades/job.facade.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 import { z } from "zod";
 import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
@@ -854,6 +854,24 @@ export async function setupRoutes(app: FastifyInstance) {
       };
     }
 
+    // ── #469 round 2 (R1): snapshot the device's kernel/adapter/config
+    // identity BEFORE submission, not after polling completes. Reading the
+    // row only after the job finishes let a mid-poll re-registration (e.g.
+    // moving the device onto the very kernelId the caller claimed) credit a
+    // kernel the device never belonged to at the moment the job actually
+    // ran. Only meaningful when the caller supplied a deviceId — the
+    // deviceless self-attest branch above already returned. Best-effort: a
+    // lookup failure here must not block job submission, it just means
+    // test_job_passed won't be credited below.
+    let preSubmitDevice: DeviceRevisionSnapshot | undefined;
+    if (deviceId) {
+      try {
+        preSubmitDevice = getRepos().kernels.findDeviceById(deviceId);
+      } catch {
+        preSubmitDevice = undefined;
+      }
+    }
+
     // Submit the job
     let submitResult: { jobId: string; deviceId: string; status: string };
     try {
@@ -916,12 +934,31 @@ export async function setupRoutes(app: FastifyInstance) {
     // kernel, the kernel must exist, and the caller must be authenticated:
     // otherwise a completed job on a mock device, or on another kernel's device,
     // would count (#469 round 1). Ownership of the kernel is WP-C's guard (#445).
+    //
+    // #469 round 2 (R1): "belongs to that very kernel" is now resolved from
+    // the PRE-SUBMIT snapshot, not a post-poll read — a device re-parented
+    // (or re-adapted) onto the claimed kernelId WHILE the job polls must not
+    // retroactively validate a claim that wasn't true when the job actually
+    // ran. submitResult.deviceId must also match the requested deviceId (the
+    // device that ran is the one snapshotted), and the row read after
+    // completion must still be the SAME REVISION as the pre-submit snapshot
+    // — otherwise something about the device changed mid-flight and neither
+    // kernel is credited.
     try {
       const operatorId = (req as unknown as { operatorId?: string | null }).operatorId ?? null;
-      if (kernelId && operatorId && finalStatus === "completed" && submitResult.deviceId) {
+      if (
+        kernelId &&
+        operatorId &&
+        finalStatus === "completed" &&
+        submitResult.deviceId &&
+        submitResult.deviceId === deviceId &&
+        preSubmitDevice &&
+        preSubmitDevice.kernelId === kernelId &&
+        isExecutingAdapter(preSubmitDevice.adapterType)
+      ) {
         const repos = getRepos();
-        const device = repos.kernels.findDeviceById(submitResult.deviceId);
-        if (repos.kernels.findById(kernelId) && device?.kernelId === kernelId && isExecutingAdapter(device.adapterType)) {
+        const postPollDevice = repos.kernels.findDeviceById(submitResult.deviceId);
+        if (repos.kernels.findById(kernelId) && sameDeviceRevision(preSubmitDevice, postPollDevice)) {
           recordOperatorStage(kernelId, "test_job_passed", { deviceId: submitResult.deviceId, jobId, operatorId });
         }
       }

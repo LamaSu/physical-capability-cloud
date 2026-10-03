@@ -48,6 +48,38 @@ export function isExecutingAdapter(adapterType: string | null | undefined): bool
   return !!adapterType && adapterType !== "mock" && adapterType !== "generic-http";
 }
 
+/** A device-row snapshot shape sufficient to detect a revision change. */
+export interface DeviceRevisionSnapshot {
+  kernelId?: string | null;
+  adapterType?: string | null;
+  adapterConfig?: string | null;
+  lastUpdated?: string | null;
+}
+
+/**
+ * Whether two device-row snapshots are the exact same revision: both rows
+ * must exist, and kernelId, adapterType, adapterConfig and lastUpdated must
+ * all be strictly equal. `lastUpdated` is bumped on every register/
+ * re-register (routes/setup.ts), so this catches a device moved to another
+ * kernel, re-adapted, or simply re-registered with byte-identical fields
+ * between a "before" snapshot and an "after" read — none of those describe
+ * one continuous, uninterrupted registration (#469 round 2 R1/R3). A
+ * health-status-only write (repos.kernels.updateHealth) does NOT touch
+ * lastUpdated, so it never trips this check on its own.
+ */
+export function sameDeviceRevision(
+  before: DeviceRevisionSnapshot | undefined,
+  after: DeviceRevisionSnapshot | undefined,
+): boolean {
+  if (!before || !after) return false;
+  return (
+    before.kernelId === after.kernelId &&
+    before.adapterType === after.adapterType &&
+    before.adapterConfig === after.adapterConfig &&
+    before.lastUpdated === after.lastUpdated
+  );
+}
+
 // ── Input interfaces ────────────────────────────────────────────────────────
 
 export interface JobFilters {
@@ -445,7 +477,7 @@ export class JobFacade extends BaseFacade {
       const svc = getKernelService();
       // Snapshot the device row BEFORE the check, so the funnel attributes the
       // result to the device that was actually checked (#469 round 1).
-      let before: { kernelId?: string | null; adapterType?: string | null } | undefined;
+      let before: DeviceRevisionSnapshot | undefined;
       try {
         before = this.repos.kernels.findDeviceById(deviceId);
       } catch {
@@ -471,15 +503,17 @@ export class JobFacade extends BaseFacade {
       // can't be found, there's nothing to attribute the stage to, so we
       // don't record. Telemetry must never break a health-check response.
       // Recorded only for an authenticated caller, and only if the device row is
-      // unchanged across the check: a device moved to another kernel (or given
-      // another adapter) mid-check is not attributed to either (#469 round 1).
+      // the SAME REVISION across the check (kernelId, adapterType, adapterConfig
+      // and lastUpdated all unchanged): a device moved to another kernel, given
+      // another adapter, or simply re-registered mid-check — even with
+      // byte-identical config, since lastUpdated still bumps — is not
+      // attributed to either (#469 round 1 + round 2 R3).
       try {
         const after = this.repos.kernels.findDeviceById(deviceId);
         if (
           opts.operatorId &&
           before?.kernelId &&
-          after?.kernelId === before.kernelId &&
-          after?.adapterType === before.adapterType &&
+          sameDeviceRevision(before, after) &&
           isRealAdapterHealthy(result.healthy, before.adapterType)
         ) {
           recordOperatorStage(before.kernelId, "adapter_ready", { deviceId, operatorId: opts.operatorId });

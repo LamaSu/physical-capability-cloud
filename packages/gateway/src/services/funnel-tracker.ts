@@ -373,23 +373,6 @@ function markOperatorSeen(kernelId: string, stage: OperatorStage): void {
   stages.add(stage);
 }
 
-/**
- * Whether the audit log already holds this (kernelId, stage) row. The in-memory
- * map is only a cache: eviction, a restart or a second gateway instance would
- * otherwise write the stage again (#469 round 1). Two instances racing past this
- * check can still both write; read-side counts are distinct per kernel, so a rare
- * duplicate never changes the funnel.
- */
-function operatorStageDurable(kernelId: string, stage: OperatorStage): boolean {
-  try {
-    return auditService
-      .query({ eventType: OPERATOR_FUNNEL_AUDIT_EVENT, resourceType: "kernel", resourceId: kernelId, limit: 50 })
-      .some((r) => r.action === stage);
-  } catch {
-    return false;
-  }
-}
-
 /** Reset operator-funnel dedup state. Test-only. */
 export function __resetOperatorFunnelState(): void {
   operatorSeen.clear();
@@ -414,7 +397,12 @@ export interface OperatorStageMeta {
  *
  * Returns true iff this call actually recorded a new (kernelId, stage) row;
  * false for: flag off, invalid/missing kernelId, the "kernel_dev_001" dev
- * placeholder, or a (kernelId, stage) pair already recorded.
+ * placeholder, a (kernelId, stage) pair already recorded, or a durable
+ * write/check that failed outright (left unmarked so a later retry can
+ * still record it — #469 round 2 R4a). The durable write itself
+ * (auditService.logOnce) is an atomic check-then-insert, so two gateway
+ * instances racing past the in-memory dedup above can never both write a
+ * duplicate row.
  *
  * `verified_run` is a real member of OperatorStage/OPERATOR_STAGES, but
  * NOTHING on master calls `recordOperatorStage(_, "verified_run", _)` today.
@@ -436,22 +424,23 @@ export function recordOperatorStage(
   if (typeof kernelId !== "string" || !OPERATOR_KERNEL_ID_RE.test(kernelId)) return false;
   if (kernelId === DEV_PLACEHOLDER_KERNEL_ID) return false;
   if (operatorSeenHas(kernelId, stage)) return false;
-  if (operatorStageDurable(kernelId, stage)) {
-    markOperatorSeen(kernelId, stage);
-    return false;
-  }
 
   const operatorId = meta?.operatorId ?? null;
   const deviceId = meta?.deviceId ?? null;
   const capabilityId = meta?.capabilityId ?? null;
   const jobId = meta?.jobId ?? null;
 
-  // 1. Durable audit row (system of record) — mirrors recordStage's shape. The
-  // stage counts as recorded only once this row is written, so a failed write
-  // leaves it free to record on the next success (#469 round 1).
-  let written = false;
+  // 1. Durable audit row (system of record) — mirrors recordStage's shape, but
+  // via an atomic check-then-insert (auditService.logOnce) instead of a
+  // separate query-then-log: a thrown durable-check error must never read as
+  // "no row exists yet" (#469 round 2 R4a — that's how a restarted instance
+  // used to write a duplicate stage row after a transient DB error). "exists"
+  // means another writer already recorded this (kernelId, stage); "failed"
+  // means the check/insert itself errored, so the row's true state is
+  // unknown — leave it unmarked so a later retry can still record it.
+  let outcome: "written" | "exists" | "failed";
   try {
-    written = auditService.log({
+    outcome = auditService.logOnce({
       eventType: OPERATOR_FUNNEL_AUDIT_EVENT,
       actor: operatorId ?? "unknown",
       resourceType: "kernel",
@@ -464,12 +453,13 @@ export function recordOperatorStage(
         capability_id: capabilityId,
         job_id: jobId,
       },
-    }) === true;
+    });
   } catch {
-    /* funnel tracking must never affect request handling */
+    outcome = "failed";
   }
-  if (!written) return false;
+  if (outcome === "failed") return false;
   markOperatorSeen(kernelId, stage);
+  if (outcome === "exists") return false;
 
   // 2. PostHog — capture per stage, distinctId = kernelId so PostHog funnels
   // reconstruct the operator-onboarding chart natively.

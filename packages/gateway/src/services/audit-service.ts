@@ -49,6 +49,49 @@ class AuditService {
   }
 
   /**
+   * Like log(), but an atomic check-then-insert on (eventType, resourceType,
+   * resourceId, action): if a matching row already exists, this is a no-op
+   * returning "exists" rather than writing a duplicate. Backed by
+   * IAuditLogRepository.insertIfAbsent, a single IMMEDIATE transaction, so
+   * two callers (or two gateway instances) racing this can never both
+   * insert (#469 round 2 R4a).
+   *
+   * "failed" means the durable check/insert itself errored (e.g. the DB was
+   * locked) — callers must NOT treat that the same as "exists": a thrown
+   * error reading as "no row exists" is exactly the bug this method exists
+   * to prevent. "failed" should leave the caller's own dedup state
+   * unmarked, so a later retry can still record the row.
+   */
+  logOnce(entry: AuditEntry & { resourceType: string; resourceId: string }): "written" | "exists" | "failed" {
+    try {
+      const repos = getRepos();
+      const inserted = repos.auditLog.insertIfAbsent(
+        {
+          timestamp: new Date().toISOString(),
+          eventType: entry.eventType,
+          actor: entry.actor ?? null,
+          resourceType: entry.resourceType,
+          resourceId: entry.resourceId,
+          action: entry.action,
+          metadata: entry.metadata ?? null,
+          ip: entry.ip ?? null,
+          userAgent: entry.userAgent ?? null,
+        },
+        {
+          eventType: entry.eventType,
+          resourceType: entry.resourceType,
+          resourceId: entry.resourceId,
+          action: entry.action,
+        },
+      );
+      return inserted ? "written" : "exists";
+    } catch {
+      // Durable failures must never crash request handling — swallow silently.
+      return "failed";
+    }
+  }
+
+  /**
    * Query audit entries with optional filters.
    */
   query(opts: {
