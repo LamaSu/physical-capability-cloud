@@ -18,6 +18,7 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -360,7 +361,7 @@ export class KernelService {
                     });
                   } catch (err) {
                     // Settlement pipeline is non-fatal — the job itself succeeded
-                    console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                    console.warn(lit("[kernel-service] Settlement pipeline failed:"), err);
                   } finally {
                     // Clean up in-memory evidence data
                     this.emitter.cleanup(jobId, stepId);
@@ -443,7 +444,7 @@ export class KernelService {
                   contractAddress,
                 });
               } catch (err) {
-                console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                console.warn(lit("[kernel-service] Settlement pipeline failed:"), err);
               } finally {
                 // Clean up in-memory evidence data
                 this.emitter.cleanup(jobId, stepId);
