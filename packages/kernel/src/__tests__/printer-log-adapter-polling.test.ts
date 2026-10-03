@@ -24,14 +24,15 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => voi
   return { promise, resolve };
 }
 
-/** A log capture that chains entries in memory. */
-function memoryLogCapture(): LogCaptureService {
+/** A log capture that chains entries in memory. With `hold`, each capture (its hashing and signing) waits for it. */
+function memoryLogCapture(hold?: Promise<void>): LogCaptureService {
   let n = 0;
   const chain: Array<{ entryHash: string; previousHash: string }> = [];
   return {
     reset: () => void (chain.length = 0),
     getChain: () => chain,
     captureEntry: async (rawContent: string) => {
+      if (hold) await hold;
       const entry = { entryId: `e${++n}`, entryHash: `h${n}`, previousHash: `h${n - 1}`, rawContent, capturedAt: new Date().toISOString(), kernelSignature: "sig" };
       chain.push(entry);
       return entry;
@@ -278,6 +279,9 @@ describe("PrinterLogAdapter lifecycle (astra pack 196)", () => {
     expect.soft(hook.resolved, "the hook, once the stop has emitted").toBe(true);
     expect.soft(hook.seen, "events emitted when the hook answered: every one, none after").toBe(events.length);
     expect.soft(vi.getTimerCount(), "timers left").toBe(0);
+    // The start handed the recording to that stop, which ended it: nothing is left to stop.
+    expect.soft((await log.getCurrentReading()).recording, "recording, after the stop").toBe(false);
+    expect.soft((await settle(log.stopRecording())).error ?? "resolved", "a stop after it").toMatch(/no recording to stop/);
   });
 
   it("a stop during a pending start whose first poll fails refuses: no summary for a recording that never started, and startRecording rejects", async () => {
@@ -308,6 +312,10 @@ describe("PrinterLogAdapter lifecycle (astra pack 196)", () => {
     expect.soft(hook.resolved, "the hook, once the start has failed").toBe(true);
     expect.soft(calls, "log polls: the first only").toBe(1);
     expect.soft(vi.getTimerCount(), "timers left").toBe(0);
+    // The refused stop left the adapter idle, not stopping: the next start records.
+    const next = await settle(log.startRecording("job-next")); // its first poll reads "line 2"
+    expect.soft(next.error, "a start once the stop has refused").toBeUndefined();
+    expect.soft((await settle(log.stopRecording())).value?.payload, "its summary").toMatchObject({ jobId: "job-next", chainLength: 1 });
   });
 
   it("a start of the next job while a stop is in flight does not begin: the stop's summary is its own job's, and nothing of it lands in the next job", async () => {
@@ -393,5 +401,243 @@ describe("PrinterLogAdapter lifecycle (astra pack 196)", () => {
     expect.soft(captured, "entries captured after dispose").not.toHaveBeenCalled();
     expect.soft(calls, "log polls: the first only").toBe(1);
     expect.soft(hook.resolved, "the hook, once the first poll has settled").toBe(true);
+  });
+
+  it("a start while one is starting or recording: the same job's is that start, another job's is refused, and a start in flight is outstanding work", async () => {
+    const firstPoll = deferredLine();
+    let calls = 0;
+    const logProvider = async (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 1) return firstPoll.promise;
+      return calls === 2 ? "line 2" : null;
+    };
+    const log = new PrinterLogAdapter("log-busy", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider });
+    const events = record(log);
+
+    const first = log.startRecording("job-a");
+    const again = log.startRecording("job-a");
+    const other = settle(log.startRecording("job-b"));
+    const hook = ask(log, events);
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(again, "a start of the same job while it is starting").toBe(first);
+    expect.soft((await other).error ?? "resolved", "a start of another job while one is starting").toMatch(/busy with job job-a, so job job-b cannot start/);
+    expect.soft((await log.getCurrentReading()).recording, "recording, while starting").toBe(true);
+    expect.soft(hook.resolved, "the hook, while the start is in flight").toBe(false);
+
+    firstPoll.resolve("line 1");
+    await first;
+    expect.soft((await settle(log.startRecording("job-a"))).error, "a start of the same job while it records").toBeUndefined();
+    expect.soft((await settle(log.startRecording("job-b"))).error ?? "resolved", "a start of another job while one records").toMatch(/busy with job job-a/);
+    const summary = await log.stopRecording();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect.soft(summary.payload, "the summary").toMatchObject({ jobId: "job-a", chainLength: 2 });
+    expect.soft(events.map((e) => e.payload.jobId), "each event's jobId").toEqual(["job-a", "job-a", "job-a"]);
+    expect.soft(calls, "log polls: job-a's first and final").toBe(2);
+    expect.soft(hook.resolved, "the hook, once the stop has emitted").toBe(true);
+  });
+
+  it("a first poll that fails returns the adapter to idle: the next start records", async () => {
+    let calls = 0;
+    const logProvider = async (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 1) throw new Error("log source unreachable");
+      return calls === 2 ? "line 1" : null;
+    };
+    const log = new PrinterLogAdapter("log-restart", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider });
+    const events = record(log);
+
+    await expect(log.startRecording("job-1")).rejects.toThrow("log source unreachable");
+    expect.soft((await log.getCurrentReading()).recording, "recording, after the failed start").toBe(false);
+    const again = await settle(log.startRecording("job-1"));
+    const stop = await settle(log.stopRecording());
+
+    expect.soft(again.error, "the next start").toBeUndefined();
+    expect.soft(stop.value?.payload, "its summary").toMatchObject({ jobId: "job-1", chainLength: 1 });
+    expect.soft(summaries(events).length, "summaries").toBe(1);
+  });
+
+  it("dispose while an entry is being captured: the entry is not emitted, and the start installs nothing", async () => {
+    const signing = deferred();
+    let calls = 0;
+    const logProvider = async (): Promise<string | null> => `line ${++calls}`;
+    const log = new PrinterLogAdapter("log-dispose-capturing", KERNEL_ID, memoryLogCapture(signing.promise), { pollIntervalMs: 1_000, logProvider });
+
+    const started = settle(log.startRecording("job-c"));
+    await vi.advanceTimersByTimeAsync(0); // the first line is being hashed and signed
+    await log.dispose();
+    const heard = record(log);
+    const hook = ask(log, heard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook.resolved, "the hook, while the entry is being captured").toBe(false);
+    signing.resolve();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect.soft((await started).error ?? "resolved", "startRecording").toMatch(/disposed while job job-c was starting/);
+    expect.soft(heard, "events emitted after dispose").toEqual([]);
+    expect.soft(calls, "log polls: the first only").toBe(1);
+    expect.soft(vi.getTimerCount(), "timers").toBe(0);
+    expect.soft(hook.resolved, "the hook, once the capture has settled").toBe(true);
+  });
+
+  it("dispose while recording: the timer's poll in flight captures and emits nothing, and the hook answers once it settles", async () => {
+    const timerPoll = deferredLine();
+    let calls = 0;
+    const logProvider = async (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 1) return "line 1";
+      return calls === 2 ? timerPoll.promise : `line ${calls}`; // the 1000 ms tick's poll waits on the log source
+    };
+    const capture = memoryLogCapture();
+    const log = new PrinterLogAdapter("log-dispose-recording", KERNEL_ID, capture, { pollIntervalMs: 1_000, logProvider });
+
+    await log.startRecording("job-r");
+    await vi.advanceTimersByTimeAsync(1_000);
+    const captured = vi.spyOn(capture, "captureEntry");
+    await log.dispose();
+    const heard = record(log);
+    const hook = ask(log, heard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook.resolved, "the hook, while the timer's poll is in flight").toBe(false);
+    timerPoll.resolve("line 2");
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect.soft(captured, "entries captured after dispose").not.toHaveBeenCalled();
+    expect.soft(heard, "events emitted after dispose").toEqual([]);
+    expect.soft(calls, "log polls: the first and the timer's").toBe(2);
+    expect.soft(hook.resolved, "the hook, once that poll has settled").toBe(true);
+  });
+
+  it("dispose while a stop waits for the timer's poll: no final poll and no summary, and the stop rejects", async () => {
+    const timerPoll = deferredLine();
+    let calls = 0;
+    const logProvider = async (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 1) return "line 1";
+      return calls === 2 ? timerPoll.promise : `line ${calls}`; // the 1000 ms tick's poll waits on the log source
+    };
+    const log = new PrinterLogAdapter("log-dispose-stop-waits", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 1_000, logProvider });
+
+    await log.startRecording("job-w");
+    await vi.advanceTimersByTimeAsync(1_000);
+    const stopped = settle(log.stopRecording()); // it waits for that poll
+    await vi.advanceTimersByTimeAsync(0);
+    await log.dispose();
+    const heard = record(log);
+    const hook = ask(log, heard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook.resolved, "the hook, while the timer's poll is in flight").toBe(false);
+    timerPoll.resolve("line 2");
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect.soft((await stopped).error ?? "resolved", "the stop").toMatch(/disposed while job job-w was stopping, so it has no summary/);
+    expect.soft(heard, "events emitted after dispose").toEqual([]);
+    expect.soft(calls, "log polls: the first and the timer's, and no final poll").toBe(2);
+    expect.soft(hook.resolved, "the hook, once the stop has settled").toBe(true);
+  });
+
+  it("dispose during a stop's final poll: no summary, the stop rejects, and a retried stop refuses and polls nothing", async () => {
+    const finalPoll = deferredLine();
+    let calls = 0;
+    const logProvider = async (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 1) return "line 1";
+      return calls === 2 ? finalPoll.promise : `line ${calls}`; // the stop's final poll waits on the log source
+    };
+    const log = new PrinterLogAdapter("log-dispose-final-poll", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider });
+
+    await log.startRecording("job-f");
+    const stopped = settle(log.stopRecording());
+    await vi.advanceTimersByTimeAsync(0);
+    await log.dispose();
+    const heard = record(log);
+    const hook = ask(log, heard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook.resolved, "the hook, while the final poll is in flight").toBe(false);
+    finalPoll.resolve("line 2");
+    await vi.advanceTimersByTimeAsync(0);
+    const stop = await stopped;
+    const retry = await settle(log.stopRecording());
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect.soft(stop.error ?? "resolved", "the stop").toMatch(/disposed while job job-f was stopping, so it has no summary/);
+    expect.soft(retry.error ?? "resolved", "a retried stop").toMatch(/disposed, so there is no recording to stop/);
+    expect.soft(heard, "events emitted after dispose").toEqual([]);
+    expect.soft(calls, "log polls: the first and the final").toBe(2);
+    expect.soft(hook.resolved, "the hook, once the stop has settled").toBe(true);
+  });
+
+  it.each(["succeeds", "fails"] as const)(
+    "dispose during a start that a stop waits on, whose first poll then %s: both refuse, nothing is emitted, and the adapter stays disposed",
+    async (outcome) => {
+      const firstPoll = deferredLine();
+      let calls = 0;
+      const logProvider = async (): Promise<string | null> => {
+        calls += 1;
+        return calls === 1 ? firstPoll.promise : `line ${calls}`;
+      };
+      const log = new PrinterLogAdapter(`log-dispose-start-stop-${outcome}`, KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 1_000, logProvider });
+
+      const started = settle(log.startRecording("job-x"));
+      const stopped = settle(log.stopRecording()); // it waits for the start
+      await vi.advanceTimersByTimeAsync(0);
+      await log.dispose();
+      const heard = record(log);
+      const hook = ask(log, heard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect.soft(hook.resolved, "the hook, while the first poll is pending").toBe(false);
+      if (outcome === "succeeds") firstPoll.resolve("line 1");
+      else firstPoll.reject(new Error("log source unreachable"));
+      await vi.advanceTimersByTimeAsync(0);
+      const [start, stop] = await Promise.all([started, stopped]);
+      const next = await settle(log.startRecording("job-next"));
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect.soft(start.error ?? "resolved", "startRecording").toMatch(outcome === "succeeds" ? /disposed while job job-x was starting/ : /log source unreachable/);
+      expect.soft(stop.error ?? "resolved", "the stop").toMatch(/disposed, so there is no recording to stop/);
+      expect.soft(next.error ?? "resolved", "a start afterwards").toMatch(/disposed, so job job-next cannot start/);
+      expect.soft(heard, "events emitted after dispose").toEqual([]);
+      expect.soft(calls, "log polls: the first only").toBe(1);
+      expect.soft(vi.getTimerCount(), "timers").toBe(0);
+      expect.soft(hook.resolved, "the hook, once the start has settled").toBe(true);
+    },
+  );
+
+  it("dispose is final: a dispose made while the stop emits its summary is not undone", async () => {
+    let calls = 0;
+    const log = new PrinterLogAdapter("log-dispose-on-summary", KERNEL_ID, memoryLogCapture(), {
+      pollIntervalMs: 60_000,
+      logProvider: async () => (++calls === 1 ? "line 1" : null),
+    });
+    log.onEvidence((e) => {
+      if (e.type === "printer_job_verified") void log.dispose();
+    });
+
+    await log.startRecording("job-s");
+    const summary = await log.stopRecording();
+    const next = await settle(log.startRecording("job-next"));
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect.soft(summary.payload, "the summary, emitted before dispose").toMatchObject({ jobId: "job-s", chainLength: 1 });
+    expect.soft(next.error ?? "resolved", "a start after dispose").toMatch(/disposed, so job job-next cannot start/);
+    expect.soft(calls, "log polls: job-s's first and final").toBe(2);
+    expect.soft(vi.getTimerCount(), "timers").toBe(0);
+  });
+
+  it("after dispose, a start refuses and polls nothing, and a stop refuses", async () => {
+    let calls = 0;
+    const log = new PrinterLogAdapter("log-disposed", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 1_000, logProvider: async () => `line ${++calls}` });
+    await log.dispose();
+    const heard = record(log);
+
+    const start = await settle(log.startRecording("job-late"));
+    const stop = await settle(log.stopRecording());
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect.soft(start.error ?? "resolved", "a start after dispose").toMatch(/disposed, so job job-late cannot start/);
+    expect.soft(stop.error ?? "resolved", "a stop after dispose").toMatch(/disposed, so there is no recording to stop/);
+    expect.soft(calls, "log polls").toBe(0);
+    expect.soft(heard, "events").toEqual([]);
+    expect.soft(vi.getTimerCount(), "timers").toBe(0);
   });
 });
