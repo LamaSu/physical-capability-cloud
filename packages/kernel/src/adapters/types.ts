@@ -22,7 +22,7 @@
  * outstanding for an adapter that tracks its own work.
  */
 
-import type { EvidenceEvent, EvidenceEventType, EvidenceSource } from "@pcc/spec";
+import type { EvidenceEvent, EvidenceEventType, EvidenceSource, WorkflowChallenge } from "@pcc/spec";
 
 /** Status a machine adapter can report */
 export type MachineStatus = "idle" | "busy" | "error" | "offline" | "maintenance";
@@ -94,15 +94,26 @@ export interface SensorAdapter {
 }
 
 /** Interface for camera/vision adapters */
+/**
+ * What a capture is for. A camera that acquires its own frames (the pull
+ * adapter) binds these into the signed payload and refuses a capture without
+ * `jobId`; adapters that ignore it are unchanged.
+ */
+export interface CaptureContext {
+  jobId: string;
+  /** The job's challenge, rendered in the camera's field as a visual nonce, when one was issued. */
+  challenge?: WorkflowChallenge;
+}
+
 export interface CameraAdapter {
   readonly id: string;
   readonly source: EvidenceSource;
 
   /** Capture a snapshot */
-  captureSnapshot(): Promise<{ imageHash: string; storageRef: string }>;
+  captureSnapshot(context?: CaptureContext): Promise<{ imageHash: string; storageRef: string }>;
 
   /** Run CV inspection on current view */
-  runInspection(referenceHash?: string): Promise<{
+  runInspection(referenceHash?: string, context?: CaptureContext): Promise<{
     passed: boolean;
     confidence: number;
     findings: string[];

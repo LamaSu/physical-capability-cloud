@@ -135,9 +135,10 @@ describe("IppAdapter — execute()", () => {
     const result = await adapter.execute(makeCommand("start", { jobName: "invoice.pdf", totalPages: 2 }));
     expect(result.success).toBe(true);
     expect(result.message).toContain("mock");
-    // The device job it names, as real mode does: the job its events carry (N106 binds a print to it).
-    expect(result.data).toEqual({ jobId: started[0]?.jobId });
-    expect(typeof started[0]?.jobId).toBe("number");
+    // The device job it names, as real mode does: the job its events carry as ippJobId (N106 binds a
+    // print to it; payload.jobId is the PCC job's, LO-EV-9).
+    expect(result.data).toEqual({ jobId: started[0]?.ippJobId });
+    expect(typeof started[0]?.ippJobId).toBe("number");
     await adapter.dispose();
   });
 

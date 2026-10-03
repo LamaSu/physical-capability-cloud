@@ -43,14 +43,15 @@
  *   - Step lease: a print of a (jobId, stepId) already running on the emitter is refused
  *     as busy, "step" (step-lease.ts, shared with JobRunner).
  *   - Device job: start names the printer's own job (`data.jobId`). An event is bound to the
- *     print when its `payload.jobId` strictly equals that id. It is bound before it is
+ *     print when its `payload.ippJobId` strictly equals that id: an event's payload.jobId is
+ *     the PCC job's, which the emitter commits (LO-EV-9). It is bound before it is
  *     recorded, and only bound events are recorded (astra pack 192). An event that arrives
  *     before start returns (the IPP mock emits execution_started inside start) waits,
  *     unrecorded, until the id is known, and is then admitted in the order it arrived:
  *       - bound: recorded. The job's execution_completed or execution_failed ends the print;
  *       - it names another device job: something else is driving the printer. The event is
  *         never recorded; the print fails closed and finalizes nothing;
- *       - it names no device job (payload.jobId absent or null): it says nothing about this
+ *       - it names no device job (payload.ippJobId absent or null): it says nothing about this
  *         print, so it is excluded, with a warning. It is never recorded and never decides.
  *   - Recording: a bound event the print could not record (its hash or its addEvent failed)
  *     fails the print once its chain has settled, and nothing is finalized: the bundle would
@@ -142,7 +143,8 @@ export interface PrintJobOptions {
   /**
    * The device to drive: an IppAdapter, or any MachineAdapter whose start names its device
    * job as `data.jobId`, and whose events of that job carry the same value, compared
-   * strictly, as `payload.jobId`. Only those events are recorded into the print's evidence.
+   * strictly, as `payload.ippJobId` (payload.jobId is the PCC job's, LO-EV-9). Only those
+   * events are recorded into the print's evidence.
    * An event that names another job is never recorded, and fails the print closed. One that
    * names no job is excluded, with a warning, and never ends the print. A start that names
    * no job fails the print.
@@ -344,11 +346,11 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
 
   /**
    * Admit an event of the window once the print's device job id is known. It is bound before
-   * it is recorded: only an event whose payload.jobId strictly equals the id is recorded, and
+   * it is recorded: only an event whose payload.ippJobId strictly equals the id is recorded, and
    * only such an event can end the print (astra pack 192).
    */
   const admit = (event: EmittedEvidence): void => {
-    const named = (event.payload as Record<string, unknown> | undefined)?.jobId;
+    const named = (event.payload as Record<string, unknown> | undefined)?.ippJobId;
     if (named === undefined || named === null) {
       // It names no device job, so it says nothing about this print: excluded, never recorded
       // and never deciding. Failing the print on it would fail every print on a printer that
@@ -383,7 +385,7 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
   const foreignJob = (): string | null => {
     const event = deviceJob.foreign;
     if (event === null) return null;
-    const named = (event.payload as Record<string, unknown> | undefined)?.jobId;
+    const named = (event.payload as Record<string, unknown> | undefined)?.ippJobId;
     return (
       `the printer reported device job ${String(named)} (${event.type}) while print ${jobId} was its ` +
       `device job ${String(deviceJob.id)}: something else is driving the printer, so this print's evidence cannot be bound to it`
@@ -529,9 +531,11 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
 
     const completion: PrintCompletion = {
       jobId,
+      // The printer's own job number: the IPP adapter reports it as ippJobId,
+      // since payload.jobId is reserved for the PCC job (LO-EV-9).
       printerJobId:
-        typeof cp.jobId === "string" || typeof cp.jobId === "number"
-          ? (cp.jobId as string | number)
+        typeof cp.ippJobId === "string" || typeof cp.ippJobId === "number"
+          ? (cp.ippJobId as string | number)
           : undefined,
       pageCount,
       printerId,
