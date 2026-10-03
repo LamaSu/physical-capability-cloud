@@ -24,6 +24,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalize } from "../util/canonical.js";
+import { compareCodeUnits } from "../util/code-unit-order.js";
 
 /** AssuranceTier zod schema. Inlined here because common.ts only exports
  *  the TS union type, not a runtime schema. Must match `AssuranceTier`
@@ -132,12 +133,9 @@ export type WorkSchema = z.infer<typeof WorkSchemaSchema>;
 export function computeWorkSchemaHash(
   schema: Omit<WorkSchema, "schemaHash"> | WorkSchema,
 ): `0x${string}` {
-  const sortedEventTypes = [...schema.eventTypes].sort((a, b) =>
-    a.id.localeCompare(b.id),
-  );
-  const sortedWorkProducts = [...schema.workProducts].sort((a, b) =>
-    a.kind.localeCompare(b.kind),
-  );
+  // Code-unit order, never locale collation (util/code-unit-order.ts).
+  const sortedEventTypes = [...schema.eventTypes].sort((a, b) => compareCodeUnits(a.id, b.id));
+  const sortedWorkProducts = [...schema.workProducts].sort((a, b) => compareCodeUnits(a.kind, b.kind));
   const payload = {
     version: schema.version,
     eventTypes: sortedEventTypes,

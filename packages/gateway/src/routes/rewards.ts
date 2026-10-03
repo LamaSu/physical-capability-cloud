@@ -10,7 +10,9 @@ import type { FastifyInstance } from "fastify";
  * treasury holding "50000.00 USDC" and "10.5 ETH" worth "85000.00" USD. The agent package advertises
  * them (`pcc_depin_stats`), so an agent read invented money as fact.
  *
- * They now answer 501 `not_available`, naming the reads that ARE real, instead of inventing data
+ * Certificates follow board N80: none exist, so the list is empty, one certificate is 404 and a mint
+ * answers 501 without claiming anything. The reward and treasury routes answer 501 `not_available`,
+ * naming the reads that ARE real, instead of inventing data
  * (the product invariant: empty, unavailable or error are valid states; fabricated plausibility is
  * not). The paths stay registered so a client gets an honest answer rather than a 404. Readmodels'
  * server-side fabrication census (2026-09-24) assigned this family to pcc-economics.
@@ -25,11 +27,12 @@ const REWARDS_UNAVAILABLE = notAvailable(
   ["/api/escrow", "/api/jobs/:jobId"],
 );
 
-const CERTIFICATES_UNAVAILABLE = notAvailable(
-  "Capability certificates are not minted or recorded.",
-  "A capability's real standing is its registration, its compliance report and its reputation.",
-  ["/api/capabilities/:capabilityId", "/api/capabilities/:capabilityId/compliance", "/api/kernels/:kernelId"],
-);
+// ── Certificates ────────────────────────────────────────────────
+// None exist. Minting has no registration or job checks, no Merkle tree and no store, so
+// the gateway serves no certificate and mints none (board N80; rehearsal R0 finding G4:
+// a certificate "minted" for any kernelDid, with a caller-chosen tier, a placeholder tree
+// and a mintedAt from when this module loaded, before the kernel existed). The three
+// certificates that used to be listed here named kernels that do not exist.
 
 const TREASURY_UNAVAILABLE = notAvailable(
   "No treasury balance is read.",
@@ -48,11 +51,26 @@ export async function rewardRoutes(app: FastifyInstance) {
   app.post("/api/rewards/claims", async (_req, reply) => reply.code(501).send(REWARDS_UNAVAILABLE));
   app.get("/api/rewards/claims/:claimId", async (_req, reply) => reply.code(501).send(REWARDS_UNAVAILABLE));
 
-  // ── Certificates ──────────────────────────────────────────────
-  // Minting used to report `minted: true` with a fabricated asset id and merkle tree.
-  app.get("/api/certificates", async (_req, reply) => reply.code(501).send(CERTIFICATES_UNAVAILABLE));
-  app.get("/api/certificates/:certId", async (_req, reply) => reply.code(501).send(CERTIFICATES_UNAVAILABLE));
-  app.post("/api/certificates/mint", async (_req, reply) => reply.code(501).send(CERTIFICATES_UNAVAILABLE));
+  // ── Certificates (none exist; minting is not implemented, N80) ─────
+
+  app.get<{ Querystring: { kernelDid?: string; status?: string } }>(
+    "/api/certificates",
+    async () => ({ certificates: [], total: 0 }),
+  );
+
+  app.get<{ Params: { certId: string } }>(
+    "/api/certificates/:certId",
+    async (_req, reply) => reply.code(404).send({ error: "not_found", message: "Certificate not found" }),
+  );
+
+  app.post("/api/certificates/mint", async (_req, reply) =>
+    reply.code(501).send({
+      minted: false,
+      error: "not_implemented",
+      message:
+        "No certificate was minted. Minting needs checks against the kernel's registration and jobs, a real Merkle tree and a store; none exist yet.",
+    }),
+  );
 
   // ── Treasury ──────────────────────────────────────────────────
   app.get("/api/treasury/summary", async (_req, reply) => reply.code(501).send(TREASURY_UNAVAILABLE));
