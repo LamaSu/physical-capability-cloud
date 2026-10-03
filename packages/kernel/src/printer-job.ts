@@ -243,11 +243,12 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
 }
 
 /**
- * A timer's delay in milliseconds: a finite number from 0 to 2^31 - 1. Node fires a longer one
- * after 1 ms, and converting a value that is not a number can throw (astra pack 216).
+ * A timer's delay in milliseconds: a number from 0 to 2^31 - 1 (so not NaN, nor infinite). Node
+ * fires a longer one after 1 ms, and converting a value that is not a number can throw (astra
+ * pack 216).
  */
 function isTimerDelay(ms: unknown): ms is number {
-  return typeof ms === "number" && Number.isFinite(ms) && ms >= 0 && ms <= 2_147_483_647;
+  return typeof ms === "number" && ms >= 0 && ms <= 2_147_483_647;
 }
 
 /** One release of a print's cleanup: attempted, and logged if it throws, so the next is attempted too (astra pack 213). */
