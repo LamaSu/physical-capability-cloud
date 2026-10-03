@@ -16,7 +16,17 @@ import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
-import { redactUrlCredentials } from "../redaction.js";
+import {
+  redactUrlCredentials,
+  isKnownNodeEnv,
+  isKnownPccNetwork,
+  isKnownStorageType,
+  isPlainPort,
+  isPlainIdentifier,
+  valueCarriesCredential,
+  REDACTED,
+  INVALID_ID,
+} from "../redaction.js";
 import { populateDeviceRegistrationDTO } from "../facades/populators/device.populator.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 import { z } from "zod";
@@ -37,6 +47,37 @@ const VALID_ADAPTER_TYPES: AdapterType[] = [
 ];
 
 const VALID_DEVICE_ROLES: DeviceRole[] = ["machine", "sensor", "camera"];
+
+/**
+ * N71 round 3 (astra pack 83b): names whose raw value is shown ONLY when it provably
+ * matches a fixed set / type ("fail closed"), never free-form — astra's point that a
+ * credential pasted into the wrong env var (PORT, PCC_NETWORK, EVIDENCE_STORAGE,
+ * NODE_ENV) is just as real a leak as one in a URL. ADDRESS_PRESENCE_ONLY names are
+ * never shown: an address isn't drawn from a small enum, so there is no safe set to
+ * check against — the same choice astra's remediation offers for a URL ("presence
+ * only, or parse + project safe components"); an address has no safe component to
+ * project, so presence-only is the one that applies.
+ */
+function displayEnvValue(name: string, value: string): string | undefined {
+  switch (name) {
+    case "NODE_ENV":
+      return isKnownNodeEnv(value) ? value : undefined;
+    case "PCC_NETWORK":
+      return isKnownPccNetwork(value) ? value : undefined;
+    case "EVIDENCE_STORAGE":
+      return isKnownStorageType(value) ? value : undefined;
+    case "PORT":
+      return isPlainPort(value) ? value : undefined;
+    case "STARKNET_ACCOUNT_ADDRESS":
+    case "ESCROW_CONTRACT_ADDRESS":
+    case "X402_FACILITATOR_URL":
+      return undefined; // presence-only (N71 round 3)
+    default:
+      // Everything else keeps the round-2 behavior: a URL-aware scrub, now fixed to
+      // not stop at a quote inside the credential (see redaction.ts, astra pack 83b).
+      return redactUrlCredentials(value);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Environment variables that the detect endpoint checks
@@ -180,58 +221,62 @@ function validateAdapterConfig(
 ): Array<{ name: string; status: "pass" | "warn" | "fail"; message: string }> {
   const checks: Array<{ name: string; status: "pass" | "warn" | "fail"; message: string }> = [];
   const cfg = device.config;
+  // N71 round 3 (astra pack 83b): the id in a check's name/message is echoed only
+  // when it is a plain identifier — e.g. the server's own KERNEL_CONFIG can hold a
+  // credential-bearing URL where an id belongs, and it must not come back out here.
+  const id = isPlainIdentifier(device.id) ? device.id : INVALID_ID;
 
   switch (device.adapterType) {
     case "octoprint": {
       if (!cfg.url) {
         checks.push({
-          name: `device:${device.id}:url`,
+          name: `device:${id}:url`,
           status: "fail",
-          message: `OctoPrint adapter "${device.id}" requires a url`,
+          message: `OctoPrint adapter "${id}" requires a url`,
         });
       } else {
         checks.push({
-          name: `device:${device.id}:url`,
+          name: `device:${id}:url`,
           status: "pass",
-          message: `OctoPrint adapter "${device.id}": url is set`,
+          message: `OctoPrint adapter "${id}": url is set`,
         });
       }
       if (!cfg.apiKey) {
         checks.push({
-          name: `device:${device.id}:apiKey`,
+          name: `device:${id}:apiKey`,
           status: "warn",
-          message: `OctoPrint adapter "${device.id}" has no apiKey set`,
+          message: `OctoPrint adapter "${id}" has no apiKey set`,
         });
       }
       break;
     }
     case "modbus": {
       checks.push({
-        name: `device:${device.id}:host`,
+        name: `device:${id}:host`,
         status: cfg.host ? "pass" : "warn",
         message: cfg.host
-          ? `Modbus adapter "${device.id}": host is set`
-          : `Modbus adapter "${device.id}" has no host set (will default to localhost)`,
+          ? `Modbus adapter "${id}": host is set`
+          : `Modbus adapter "${id}" has no host set (will default to localhost)`,
       });
       break;
     }
     case "opcua": {
       checks.push({
-        name: `device:${device.id}:endpoint`,
+        name: `device:${id}:endpoint`,
         status: cfg.endpoint ? "pass" : "warn",
         message: cfg.endpoint
-          ? `OPC-UA adapter "${device.id}": endpoint is set`
-          : `OPC-UA adapter "${device.id}" has no endpoint set`,
+          ? `OPC-UA adapter "${id}": endpoint is set`
+          : `OPC-UA adapter "${id}" has no endpoint set`,
       });
       break;
     }
     case "sila": {
       checks.push({
-        name: `device:${device.id}:url`,
+        name: `device:${id}:url`,
         status: cfg.url ? "pass" : "warn",
         message: cfg.url
-          ? `SiLA adapter "${device.id}": url is set`
-          : `SiLA adapter "${device.id}" has no url set (mock mode)`,
+          ? `SiLA adapter "${id}": url is set`
+          : `SiLA adapter "${id}" has no url set (mock mode)`,
       });
       break;
     }
@@ -239,30 +284,30 @@ function validateAdapterConfig(
       const uri = cfg.uri as string | undefined;
       if (!uri) {
         checks.push({
-          name: `device:${device.id}:uri`,
+          name: `device:${id}:uri`,
           status: "fail",
-          message: `IPP adapter "${device.id}" requires a uri (e.g. ipp://host:631/ipp/print)`,
+          message: `IPP adapter "${id}" requires a uri (e.g. ipp://host:631/ipp/print)`,
         });
       } else if (!/^ipps?:\/\//.test(uri)) {
         checks.push({
-          name: `device:${device.id}:uri`,
+          name: `device:${id}:uri`,
           status: "fail",
-          message: `IPP adapter "${device.id}" uri must start with ipp:// or ipps://`,
+          message: `IPP adapter "${id}" uri must start with ipp:// or ipps://`,
         });
       } else {
         checks.push({
-          name: `device:${device.id}:uri`,
+          name: `device:${id}:uri`,
           status: "pass",
-          message: `IPP adapter "${device.id}": uri is set`,
+          message: `IPP adapter "${id}": uri is set`,
         });
       }
       break;
     }
     default:
       checks.push({
-        name: `device:${device.id}:adapter`,
+        name: `device:${id}:adapter`,
         status: "pass",
-        message: `Device "${device.id}" uses ${device.adapterType} adapter`,
+        message: `Device "${id}" uses ${device.adapterType} adapter`,
       });
   }
 
@@ -286,9 +331,10 @@ export async function setupRoutes(app: FastifyInstance) {
         name: v.name,
         category: v.category,
         set: Boolean(value),
-        // Don't expose sensitive values. The rest are shown as they are, except that a URL
-        // never carries its userinfo or query out (X402_FACILITATOR_URL could).
-        value: value && !v.sensitive ? redactUrlCredentials(value) : undefined,
+        // Don't expose sensitive values. Everything else is shown only when it
+        // provably matches what that name is supposed to hold (displayEnvValue,
+        // N71 round 3 / astra pack 83b) — never free-form.
+        value: value && !v.sensitive ? displayEnvValue(v.name, value) : undefined,
       };
     });
 
@@ -352,15 +398,23 @@ export async function setupRoutes(app: FastifyInstance) {
       },
       chain: {
         connected: chainConfigured,
-        network: process.env.PCC_NETWORK ?? null,
+        // N71 round 3 (astra pack 83b): shown only when it is one of the networks
+        // this gateway actually runs against — never whatever the env var holds.
+        network: process.env.PCC_NETWORK
+          ? isKnownPccNetwork(process.env.PCC_NETWORK)
+            ? process.env.PCC_NETWORK
+            : REDACTED
+          : null,
       },
       storage: {
-        type: storageType,
+        type: isKnownStorageType(storageType) ? storageType : REDACTED,
         configured: storageConfigured,
       },
       identity: {
         configured: identityConfigured,
-        accountAddress: process.env.STARKNET_ACCOUNT_ADDRESS ?? null,
+        // Presence-only (N71 round 3): an address isn't drawn from a small enum,
+        // so there is no safe set to check it against before showing it.
+        accountAddress: process.env.STARKNET_ACCOUNT_ADDRESS ? REDACTED : null,
       },
       litProtocol: {
         real: process.env.LIT_PROTOCOL_REAL === "true",
@@ -468,15 +522,17 @@ export async function setupRoutes(app: FastifyInstance) {
       }
     }
 
-    // Check kernelId
+    // Check kernelId. N71 round 3 (astra pack 83b): echoed only when it is a plain
+    // identifier — the server's own KERNEL_CONFIG can hold anything in this field.
     if (!config.kernelId) {
       checks.push({ name: "kernel_id", status: "fail", message: "kernelId is required" });
       errors.push("Missing kernelId");
     } else {
+      const kernelIdDisplay = isPlainIdentifier(config.kernelId) ? config.kernelId : INVALID_ID;
       checks.push({
         name: "kernel_id",
         status: "pass",
-        message: `kernelId: ${config.kernelId}`,
+        message: `kernelId: ${kernelIdDisplay}`,
       });
     }
 
@@ -507,22 +563,24 @@ export async function setupRoutes(app: FastifyInstance) {
           errors.push("Device missing id");
           continue;
         }
+        // N71 round 3 (astra pack 83b): echoed only when it is a plain identifier.
+        const deviceIdDisplay = isPlainIdentifier(device.id) ? device.id : INVALID_ID;
         if (!VALID_DEVICE_ROLES.includes(device.type)) {
           checks.push({
-            name: `device:${device.id}:type`,
+            name: `device:${deviceIdDisplay}:type`,
             status: "fail",
-            message: `Device "${device.id}" has an invalid type (valid: ${VALID_DEVICE_ROLES.join(", ")})`,
+            message: `Device "${deviceIdDisplay}" has an invalid type (valid: ${VALID_DEVICE_ROLES.join(", ")})`,
           });
-          errors.push(`Device ${device.id}: invalid type`);
+          errors.push(`Device ${deviceIdDisplay}: invalid type`);
           continue;
         }
         if (!VALID_ADAPTER_TYPES.includes(device.adapterType)) {
           checks.push({
-            name: `device:${device.id}:adapterType`,
+            name: `device:${deviceIdDisplay}:adapterType`,
             status: "fail",
-            message: `Device "${device.id}" has an invalid adapterType (valid: ${VALID_ADAPTER_TYPES.join(", ")})`,
+            message: `Device "${deviceIdDisplay}" has an invalid adapterType (valid: ${VALID_ADAPTER_TYPES.join(", ")})`,
           });
-          errors.push(`Device ${device.id}: invalid adapterType`);
+          errors.push(`Device ${deviceIdDisplay}: invalid adapterType`);
           continue;
         }
 
@@ -598,6 +656,16 @@ export async function setupRoutes(app: FastifyInstance) {
         // Idempotent upsert — never 409 a re-registration. If the device
         // exists, update its mutable fields; otherwise insert.
         const existing = repos.kernels.findDeviceById(deviceId);
+        // N71 round 3 (astra pack 83b, Q3): emits[] is a PUBLIC matching artifact —
+        // every registration view and GET /api/kernels/:id/devices returns it
+        // verbatim — so it may never carry a credential, whether the caller just
+        // sent one or an update would silently preserve one a prior row already
+        // held (from before this check existed). Resolve once, check once, use
+        // the resolved value below instead of re-deriving it per branch.
+        const resolvedEmits = validatedEmits ?? existing?.emits ?? undefined;
+        if (resolvedEmits && valueCarriesCredential(resolvedEmits)) {
+          return reply.code(400).send({ error: "invalid_emitter_manifest" });
+        }
         const now = new Date().toISOString();
         let device: any;
         let action: "created" | "updated";
@@ -616,7 +684,7 @@ export async function setupRoutes(app: FastifyInstance) {
             capabilities: capabilities ?? existing.capabilities ?? [],
             healthStatus: existing.healthStatus ?? "healthy",
             // Supply-side emitter manifest — update when provided, else preserve.
-            emits: validatedEmits ?? existing.emits ?? undefined,
+            emits: resolvedEmits,
           });
           action = "updated";
         } else {
@@ -634,7 +702,7 @@ export async function setupRoutes(app: FastifyInstance) {
             capabilities: capabilities ?? [],
             healthStatus: "healthy",
             // Supply-side emitter manifest (bounded vocabulary), if declared.
-            emits: validatedEmits,
+            emits: resolvedEmits,
           });
           action = "created";
         }
@@ -704,8 +772,15 @@ export async function setupRoutes(app: FastifyInstance) {
           action,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Unknown error";
-        return reply.code(500).send({ error: "upsert_failed", message });
+        // N71 round 3 (astra pack 83b): a fixed message, never the exception's own —
+        // a repository error can quote whatever was being written, stored credentials
+        // included. (req as any).log carries the real error for operators; this
+        // response does not.
+        (req as any).log?.error?.(
+          { err: err instanceof Error ? err.message : String(err) },
+          "setup/register-device upsert failed",
+        );
+        return reply.code(500).send({ error: "upsert_failed", message: "Device registration failed" });
       }
     },
   );
@@ -834,9 +909,15 @@ export async function setupRoutes(app: FastifyInstance) {
         assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
       });
     } catch (err) {
+      // N71 round 3 (astra pack 83b): a fixed message — the service's errors can
+      // quote the server-held configuration being submitted against.
+      (req as any).log?.error?.(
+        { err: err instanceof Error ? err.message : String(err) },
+        "setup/test-job submission failed",
+      );
       return reply.code(500).send({
         error: "job_submission_failed",
-        message: err instanceof Error ? err.message : "Unknown error",
+        message: "Test job submission failed",
         jobId,
         duration: Date.now() - startTime,
       });
@@ -894,11 +975,14 @@ export async function setupRoutes(app: FastifyInstance) {
       details: string;
     }> = [];
 
-    // Gateway category
+    // Gateway category. N71 round 3 (astra pack 83b): the raw PORT value is shown
+    // only when it parses as a plain port number — never free-form.
+    const portEnv = process.env.PORT;
+    const portDisplay = !portEnv ? "3200" : isPlainPort(portEnv) ? portEnv : REDACTED;
     categories.push({
       name: "gateway",
       status: "ready",
-      details: `Gateway running on port ${process.env.PORT ?? "3200"}`,
+      details: `Gateway running on port ${portDisplay}`,
     });
 
     // Database category
@@ -950,7 +1034,12 @@ export async function setupRoutes(app: FastifyInstance) {
     let chainDetails: string;
     if (hasNetwork && hasKey && hasEscrow) {
       chainStatus = "ready";
-      chainDetails = `Chain: ${process.env.PCC_NETWORK}, escrow configured`;
+      // N71 round 3 (astra pack 83b): shown only when it is a known network.
+      const networkDisplay =
+        process.env.PCC_NETWORK && isKnownPccNetwork(process.env.PCC_NETWORK)
+          ? process.env.PCC_NETWORK
+          : REDACTED;
+      chainDetails = `Chain: ${networkDisplay}, escrow configured`;
     } else if (hasNetwork || hasKey || hasEscrow) {
       chainStatus = "partial";
       const missing: string[] = [];
@@ -986,7 +1075,9 @@ export async function setupRoutes(app: FastifyInstance) {
       }
     } else {
       storageStatus = "partial";
-      storageDetails = `Unknown storage type: ${storageType}`;
+      // N71 round 3 (astra pack 83b): storageType is, by construction, outside the
+      // known set here (local/helia/storacha were all handled above) — never shown raw.
+      storageDetails = `Unknown storage type: ${REDACTED}`;
     }
     categories.push({ name: "storage", status: storageStatus, details: storageDetails });
 
@@ -996,7 +1087,8 @@ export async function setupRoutes(app: FastifyInstance) {
     let identityDetails: string;
     if (hasStarknet) {
       identityStatus = "ready";
-      identityDetails = `Starknet identity: ${process.env.STARKNET_ACCOUNT_ADDRESS}`;
+      // Presence-only (N71 round 3): no fixed set to check an address against.
+      identityDetails = `Starknet identity: ${REDACTED}`;
     } else {
       identityStatus = "unconfigured";
       identityDetails = "No on-chain identity configured";
