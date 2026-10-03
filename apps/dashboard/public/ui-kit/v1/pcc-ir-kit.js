@@ -1150,7 +1150,7 @@
       case "bool":
         return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No" } : { ok: false };
       case "percent":
-        return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 100 ? { ok: true, text: String(raw) } : { ok: false };
+        return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? { ok: true, text: String(raw) } : { ok: false };
       default:
         return { ok: false };
     }
@@ -1282,7 +1282,7 @@
     const d = new Date(Date.UTC(year, month - 1, day, hour, minute, second, ms));
     return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day && d.getUTCHours() === hour && d.getUTCMinutes() === minute && d.getUTCSeconds() === second && d.getUTCMilliseconds() === ms;
   }
-  var LIST_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]{1,32})?(?:\+[0-9A-Za-z.-]{1,32})?$/;
+  var LIST_VERSION_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
   function readListField(row, field) {
     const raw = readOwnPath(row, field);
     if (raw === void 0 || raw === null) return { ok: true, text: "", raw };
@@ -1375,7 +1375,7 @@
       case "bool":
         return typeof raw === "boolean" ? raw ? "Yes" : "No" : UNAVAILABLE;
       case "percent":
-        return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 100 ? String(raw) : UNAVAILABLE;
+        return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? String(raw) : UNAVAILABLE;
       case "count":
         return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? String(raw) : UNAVAILABLE;
       case "id":

@@ -927,3 +927,28 @@ describe("genui review of #344 r6 (@d9add4d3): an identifier cannot spell a clai
     }
   });
 });
+
+describe("astra r6 (#344 @a3521bad): versions and percents are closed grammars (verify before fix at 7f6d8d43)", () => {
+  // Reproduced at 7f6d8d43: "1.0.0-alpha..1", "1.0.0-01" and a 2,000-digit version rendered, and a
+  // stat with {progress: 2.5} rendered "2.5". (Compact identifiers such as PAYMENTRECEIVED were already
+  // attributed at 7f6d8d43, so that finding did not reproduce at the current head.)
+  const versionRow = (version: string) => {
+    const l = fdoc.createElement("div");
+    bindListRows(fdoc, l, { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["version"], statusFrom: "status" }, bind: { path: "/api/kernels" } } as unknown as IrNode, [{ name: "K", version, status: "online" }]);
+    return (l.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent))[0];
+  };
+  it("a version carrying words, an empty or leading-zero part, or unbounded digits fails the whole row", () => {
+    for (const v of ["1.0.0-paymentreceived", "1.0.0-payment-received", "1.0.0-alpha..1", "1.0.0-01", "01.0.0", "1.0.0+build", "1" + "0".repeat(2000) + ".0.0", "1.0"]) {
+      expect(versionRow(v), v).toEqual(["Name:", UNAVAILABLE, "Version:", UNAVAILABLE, "Status:", UNAVAILABLE]);
+    }
+  });
+  it("a real numeric version renders as is", () => {
+    expect(versionRow("1.4.0")).toEqual(["Name:", REPORTED_PREFIX + "K", "Version:", "1.4.0", "Status:", "online"]);
+  });
+  it("a percent is an integer 0..100 (a fraction is off-kind)", () => {
+    const stat = (p: unknown) => bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "progress" } } as unknown as IrNode, { progress: p });
+    expect(stat(2.5)).toBe(UNAVAILABLE);
+    expect(stat(80)).toBe("80");
+    expect(stat(101)).toBe(UNAVAILABLE);
+  });
+});

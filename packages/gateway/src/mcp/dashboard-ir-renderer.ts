@@ -178,7 +178,8 @@ function readField(data: unknown, f: SchemaField): FieldRead {
     case "bool":
       return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No" } : { ok: false };
     case "percent":
-      return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 100
+      // An integer 0..100 (astra r6 on #344): progress is the DB's integer column, uptime is 0/50/100.
+      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100
         ? { ok: true, text: String(raw) } : { ok: false };
     default:
       return { ok: false };
@@ -318,10 +319,11 @@ function timeRoundTrips(s: string): boolean {
     d.getUTCHours() === hour && d.getUTCMinutes() === minute && d.getUTCSeconds() === second &&
     d.getUTCMilliseconds() === ms;
 }
-// astra r5 F4: strict semver (semver.org's own grammar), not an open-ended alnum token shape —
-// "banana" no longer passes as a version. Real kernels report "1.4.0" / "1.3.2" / "0.1.0"/"1.5.0"
-// (packages/db/src/seed/kernels.ts), each a bare major.minor.patch with no prerelease/build tag.
-const LIST_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]{1,32})?(?:\+[0-9A-Za-z.-]{1,32})?$/;
+// A version is a CLOSED, bounded numeric MAJOR.MINOR.PATCH (astra r6 on #344): no prerelease or build
+// tag, because those admit words ("1.0.0-paymentreceived"), so a hostile version could carry a claim.
+// No leading zeros, at most 9 digits per part, so the value is contract-bounded. Real kernels report
+// "1.4.0", "1.3.2", "0.1.0" and "1.5.0" (packages/db/src/seed/kernels.ts), each a bare numeric triple.
+const LIST_VERSION_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 type ListFieldRead = { ok: true; text: string; raw: unknown } | { ok: false };
 
 /** Read + type-validate ONE list field from a fetched row, by its CLOSED kind (LIST_FIELD_KINDS,
@@ -478,7 +480,8 @@ export function bindScalar(node: IrNode, data: unknown): string {
     case "bool":
       return typeof raw === "boolean" ? (raw ? "Yes" : "No") : UNAVAILABLE;
     case "percent":
-      return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 100 ? String(raw) : UNAVAILABLE;
+      // An integer 0..100 (astra r6 on #344): progress is the DB's integer column, uptime is 0/50/100.
+      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? String(raw) : UNAVAILABLE;
     case "count":
       return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? String(raw) : UNAVAILABLE;
     case "id":
