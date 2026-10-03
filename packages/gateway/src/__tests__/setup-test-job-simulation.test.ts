@@ -38,6 +38,7 @@ import { adapterIsSimulated, initKernelService, resetKernelService } from "../se
 import {
   JobRunner,
   EvidenceEmitter,
+  IppAdapter,
   OctoPrintAdapter,
   resetSafetyGateway,
   registerMachineAdapter,
@@ -253,6 +254,8 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     seedDevice("dev-bench-neutral", KERNEL_ID, "bench-neutral-test-double");
     // Round 4: an IPP default-mock device whose adapter is replaced mid-run.
     seedDevice("dev-ipp-swap", KERNEL_ID, "ipp");
+    // Round 5: an IPP configured for real transport whose optional import has not settled.
+    seedDevice("dev-ipp-loading", KERNEL_ID, "ipp", { mockMode: false });
     // Round 4: a registered extension whose source omits the marker.
     registerMachineAdapter(UNMARKED_EXTENSION_TYPE, (device, _cfg, kernelId) => new UnmarkedBenchAdapter(device.id, kernelId));
     seedDevice("dev-unmarked-ext", KERNEL_ID, UNMARKED_EXTENSION_TYPE);
@@ -335,7 +338,7 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
   afterAll(async () => {
     // Belt-and-suspenders: stop any adapter-internal timers (IPP's mock job
     // timer / poll timer) regardless of per-test cleanup below.
-    for (const id of ["dev-ipp-default", "dev-octoprint-mock", "dev-ipp-downgrade", "dev-bench-neutral", "dev-ipp-swap", "dev-unmarked-ext"]) {
+    for (const id of ["dev-ipp-default", "dev-octoprint-mock", "dev-ipp-downgrade", "dev-bench-neutral", "dev-ipp-swap", "dev-unmarked-ext", "dev-ipp-loading"]) {
       try {
         await svcInternals.machines.get(id)?.dispose();
       } catch {
@@ -443,6 +446,27 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     }, 20_000);
   });
 
+  // ── 3b'. Round 5: IPP still loading its transport serves mock answers ────
+
+  describe("an IPP configured for real transport whose 'ipp' import has not settled (round 5, NEW HIGH)", () => {
+    it("[F] the mock run it serves while loading is reported simulated:true, passed:false", async () => {
+      // Hold the adapter in its loading state for the whole job: an import slower than the run.
+      const proto = IppAdapter.prototype as unknown as { tryLoadIpp: () => void };
+      const realLoad = proto.tryLoadIpp;
+      proto.tryLoadIpp = () => {};
+      try {
+        expect(svc.refreshDeviceFromDb("dev-ipp-loading")).toEqual({ installed: true });
+      } finally {
+        proto.tryLoadIpp = realLoad;
+      }
+      const machine = svcInternals.machines.get("dev-ipp-loading");
+      expect(Object.getPrototypeOf(machine)).toBe(IppAdapter.prototype);
+      expect("simulated" in (machine?.source ?? {})).toBe(false); // loading: no marker yet
+      const body = (await post({ kernelId: KERNEL_ID, deviceId: "dev-ipp-loading", assuranceTier: 0 })).json();
+      expect(body).toMatchObject({ ran: true, status: "completed", simulated: true, passed: false });
+    }, 20_000);
+  });
+
   // ── 3c. Round 4: an extension must say it is real ────────────────────────
 
   describe("a registered extension whose source omits the simulated marker (round 4, NEW HIGH)", () => {
@@ -490,6 +514,16 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
       const adapter = realModeOctoPrint();
       expect("simulated" in adapter.source).toBe(false);
       expect(adapterIsSimulated(adapter)).toBe(false);
+    });
+
+    it("[F] an exact IppAdapter with no marker is simulated: it can serve mock answers while its import is pending (round 5)", () => {
+      const adapter = new IppAdapter("dev-unit-ipp", { uri: "ipp://127.0.0.1:9/ipp/print", kernelId: KERNEL_ID, mockMode: false });
+      try {
+        expect("simulated" in adapter.source).toBe(false); // nothing has settled yet
+        expect(adapterIsSimulated(adapter)).toBe(true);
+      } finally {
+        void adapter.dispose();
+      }
     });
 
     it("a SUBCLASS of that built-in with no marker is simulated: the list matches exact classes only", () => {

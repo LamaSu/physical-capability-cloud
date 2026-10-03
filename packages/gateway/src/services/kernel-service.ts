@@ -12,7 +12,7 @@ import { createAdaptersFromConfig, loadKernelConfig } from "@pcc/kernel";
 import { initSafetyGateway, getSafetyGateway } from "@pcc/kernel";
 import type { KernelConfig } from "@pcc/kernel";
 import type { MachineAdapter } from "@pcc/kernel";
-import { IppAdapter, OctoPrintAdapter, OPCUAAdapter, OpentronsMachineAdapter, SiLAAdapter } from "@pcc/kernel";
+import { OctoPrintAdapter, OPCUAAdapter, OpentronsMachineAdapter, SiLAAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
@@ -66,16 +66,17 @@ interface RunningJob {
 
 /**
  * The built-in machine adapters whose every simulating path sets
- * `source.simulated: true`, checked per class (N59 round 4): mockMode (and
- * SiLA's mock), IPP's default mock, and IPP's runtime downgrade. An instance
- * of EXACTLY one of these classes with no marker is driving its real
- * transport. Any other adapter (an extension registered at runtime, a
- * subclass, a built-in not listed here such as Hamilton, which @pcc/kernel
- * does not export) counts as real only when its source says
- * `simulated: false`.
+ * `source.simulated: true`, checked per class (N59 rounds 4 and 5): each
+ * simulates only in its declared mock mode (SiLA's `mock`), which sets the
+ * marker at construction, and OPC UA and SiLA refuse real operations they do
+ * not implement. An instance of EXACTLY one of these classes with no marker is
+ * driving its real transport. Any other adapter counts as real only when its
+ * source says `simulated: false`: an extension registered at runtime, a
+ * subclass, Hamilton (@pcc/kernel does not export it), and IPP. A real-mode
+ * IppAdapter serves mock answers while its optional `ipp` import is still
+ * pending, before any marker is set, so an unmarked IPP counts as simulated.
  */
 const MARKS_ITS_OWN_SIMULATION: ReadonlySet<object> = new Set<object>([
-  IppAdapter.prototype,
   OctoPrintAdapter.prototype,
   OPCUAAdapter.prototype,
   OpentronsMachineAdapter.prototype,
