@@ -387,6 +387,25 @@ describe("steward #5413: nothing with no job binding is recorded under a job", (
     vi.restoreAllMocks();
   });
 
+  it("(sidecar) a sidecar crash while no job is recording is no evidence", async () => {
+    const transport = new InMemoryTransport();
+    const sidecar = new SidecarClient({ inMemoryTransport: transport });
+    const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-crash", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar });
+    await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
+    const startP = adapter.execute({ type: "start", payload: { jobId: "j-c" } });
+    for (const method of ["backend.init", "evidence.startRecording", "backend.run", "evidence.stopRecording"]) {
+      await tick();
+      expect(answerLast(transport, "dev-q-crash", "j-c")).toBe(method);
+    }
+    await startP;
+    const settled = events.map((e) => e.type);
+    (sidecar as unknown as { emit: (event: string) => void }).emit("crash");
+    await tick();
+    expect(events.map((e) => e.type), "events after a crash with no job recording").toEqual(settled);
+  });
+
   it("(sidecar) a notification bound to no job, during a job's window, is dropped; the job's own is recorded", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const transport = new InMemoryTransport();
