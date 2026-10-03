@@ -715,7 +715,7 @@ Physical operations fail routinely. A tip pickup misses. A well plate is offset.
 1. **Auto-retry**: Tool call fails; retry within the scope's retry budget using Class 1/2 diagnostics (check calibration, home, inspect via camera)
 2. **Brain recovery**: Claude examines error context, camera frames, and calibration data to decide on a recovery strategy within the scope's command budget
 3. **Operator escalation**: Brain cannot resolve; pauses the job, notifies the operator via the dashboard with diagnostic context. Operator can extend the scope, grant temporary elevated access, manually fix hardware, or abort.
-4. **Emergency stop**: Safety concern detected; all scopes for the kernel are revoked, all active runs receive "stop" actions, kernel status set to `emergency_stopped`. Requires manual resume and new scope creation.
+4. **Emergency stop**: Safety concern detected; the operator calls `POST /api/operator/emergency-stop`, which marks the kernel's operator policy `emergencyStop: true` and rejects any PENDING approval already queued for that kernel. From that point, every job-creating path (direct submission, negotiated commit/retry, fast-track, A2A, setup test jobs) and both queues a node polls for work refuse the kernel, so no new work starts. The stop does not revoke the kernel's already-active execution scopes and does not set any kernel status field — it only withholds new work for as long as it lasts. `POST /api/operator/emergency-resume` (same owner) clears the flag so new work can be accepted again.
 
 ### 11.5 Audit Trail
 
