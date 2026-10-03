@@ -417,11 +417,14 @@ describe("Fix A: the JobRunner checks the tier against its own jobId", () => {
     expect(r.success).toBe(true);
   });
 
-  it("a camera emitting complete captures for ANOTHER job fails Tier 2, naming why", async () => {
+  it("a camera emitting complete captures for ANOTHER job fails the run, naming why", async () => {
     const r = await new JobRunner(machineEmitting(TIER1), [], captureCamera(() => "job-other"), new EvidenceEmitter(KERNEL_ID)).run(JOB_CONFIG);
     expect(r.success).toBe(false);
-    expect(r.error).toContain("Tier 2 requirements not met");
-    expect(r.error).toContain('payload.jobId "job-other" is not this job\'s "job-provenance-001"');
+    // The emitter refuses an event that names another job (LO-EV-9, #341), so the run fails
+    // before its tier check. That check's own refusal of such a capture is the "a capture for
+    // another job" case above.
+    expect(r.error).toContain("a camera_snapshot event of this job could not be recorded");
+    expect(r.error).toContain("event payload.jobId job-other does not match the step's job-provenance-001");
   });
 });
 

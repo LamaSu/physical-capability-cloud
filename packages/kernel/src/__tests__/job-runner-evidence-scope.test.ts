@@ -241,6 +241,9 @@ async function addEventsSettled(spy: { mock: { results: Array<{ value: unknown }
   }
 }
 
+// A recorded payload also carries its job's id, which the emitter commits into every event
+// (LO-EV-9, #341). An absence is therefore checked with expect.objectContaining: an exact
+// object could never match a recorded payload, so it would pass whatever was recorded.
 const payloadsOf = (emitter: EvidenceEmitter, jobId: string) =>
   emitter.getEvents(jobId, STEP).map((e) => e.payload as Record<string, unknown>);
 
@@ -281,10 +284,11 @@ describe("R1: a finished job records nothing from later jobs on the same adapter
 
     expect.soft(namingA(), "addEvent calls naming job A, after A returned").toBe(callsForA);
     expect.soft(emitter.getEvents("job-r1-A", STEP).length, "events recorded under job A, after job B ran").toBe(eventsOfA);
+    // The emitter commits each recorded event's job into its payload (LO-EV-9, #341).
     expect.soft(payloadsOf(emitter, "job-r1-B"), "job B records its own events only").toEqual([
-      { gcodeHash: gcode(2) },
-      { gcodeHash: gcode(2) },
-      { gcodeHash: gcode(2) },
+      { gcodeHash: gcode(2), jobId: "job-r1-B" },
+      { gcodeHash: gcode(2), jobId: "job-r1-B" },
+      { gcodeHash: gcode(2), jobId: "job-r1-B" },
     ]);
   });
 });
@@ -315,7 +319,7 @@ describe("R2: overlapping Tier 2 jobs on one machine and one camera", () => {
     expect.soft(typesOf("job-r2-B"), "event types recorded under job B").not.toContain("cv_inspection_result");
     expect.soft(b, "job B's result").toMatchObject({ success: false });
     expect.soft(a, "job A's result").toMatchObject({ success: true });
-    expect.soft(payloadsOf(emitter, "job-r2-A"), "payloads recorded under job A").not.toContainEqual({ gcodeHash: gcode(2) });
+    expect.soft(payloadsOf(emitter, "job-r2-A"), "payloads recorded under job A").not.toContainEqual(expect.objectContaining({ gcodeHash: gcode(2) }));
   });
 });
 
@@ -503,8 +507,8 @@ describe("R6: an event emitted while the bundle is finalized", () => {
     expect(result.success).toBe(true);
     await Promise.allSettled(emitter.calls);
 
-    expect.soft(bundle!.events.map((e) => e.payload), "bundled payloads").not.toContainEqual({ late: "finalize" });
-    expect.soft(payloadsOf(emitter, "job-r6a"), "payloads recorded under the job").not.toContainEqual({ late: "finalize" });
+    expect.soft(bundle!.events.map((e) => e.payload), "bundled payloads").not.toContainEqual(expect.objectContaining({ late: "finalize" }));
+    expect.soft(payloadsOf(emitter, "job-r6a"), "payloads recorded under the job").not.toContainEqual(expect.objectContaining({ late: "finalize" }));
   });
 
   it("while the bundle is signed: the bundle still matches its hash, and the step its bundle", async () => {
@@ -534,8 +538,8 @@ describe("R6: an event emitted while the bundle is finalized", () => {
     await Promise.allSettled(calls);
 
     expect.soft(await verifyBundleHash(bundle!), "the bundle's events match its bundleHash").toBe(true);
-    expect.soft(bundle!.events.map((e) => e.payload), "bundled payloads").not.toContainEqual({ late: "signing" });
-    expect.soft(payloadsOf(emitter, "job-r6b"), "payloads recorded under the job").not.toContainEqual({ late: "signing" });
+    expect.soft(bundle!.events.map((e) => e.payload), "bundled payloads").not.toContainEqual(expect.objectContaining({ late: "signing" }));
+    expect.soft(payloadsOf(emitter, "job-r6b"), "payloads recorded under the job").not.toContainEqual(expect.objectContaining({ late: "signing" }));
   });
 });
 
@@ -594,7 +598,7 @@ describe("Busy: an adapter serves one job at a time", () => {
     release.resolve();
     expect(await runA).toMatchObject({ success: true });
     // The sensor's summary, emitted at step 6, is job A's own.
-    expect(bundles[0]!.events.map((e) => e.payload)).toContainEqual({ recordedFor: "job-share-A" });
+    expect(bundles[0]!.events.map((e) => e.payload)).toContainEqual({ recordedFor: "job-share-A", jobId: "job-share-A" });
   });
 
   it("a duplicate of a running job, under the same ids, is refused before it can wipe that job's evidence", async () => {

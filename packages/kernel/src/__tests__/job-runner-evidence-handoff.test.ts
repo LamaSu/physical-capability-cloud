@@ -358,7 +358,9 @@ describe("R9: two adapter objects for one physical device", () => {
       emitter.getEvents(jobId, STEP).flatMap((e) => (e.type === "execution_completed" ? [jobId] : [])),
     );
     expect.soft(recordedCompletions, "jobs that recorded the device's one completion").toEqual(["job-r9-A"]);
-    expect.soft(emitter.getEvents("job-r9-A", STEP).map((e) => e.payload), "payloads recorded under job A").not.toContainEqual({ gcodeHash: gcode(92) });
+    // Absences match by expect.objectContaining: the emitter commits the job's id into every
+    // recorded payload (LO-EV-9, #341), so an exact object could never match one.
+    expect.soft(emitter.getEvents("job-r9-A", STEP).map((e) => e.payload), "payloads recorded under job A").not.toContainEqual(expect.objectContaining({ gcodeHash: gcode(92) }));
     expect.soft(a, "job A's result").toMatchObject({ success: true });
   });
 });
@@ -534,7 +536,7 @@ describe("Quiescence: a job's window stays open until its adapters are done", ()
     const a = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-noisy", stepId: STEP, gcodeHash: gcode(205), assuranceTier: 1 }));
     expect(a, "round 3 failed this run at the quiesce bound: the device was never quiet").toMatchObject({ success: true, durationMs: 0 });
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(emitter.getEvents("job-noisy", STEP).map((e) => e.payload), "payloads recorded under the job").not.toContainEqual({ tick: true });
+    expect(emitter.getEvents("job-noisy", STEP).map((e) => e.payload), "payloads recorded under the job").not.toContainEqual(expect.objectContaining({ tick: true }));
 
     const next = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-noisy-next", stepId: STEP, gcodeHash: gcode(206), assuranceTier: 1 }));
     clearInterval(noise);
@@ -572,7 +574,7 @@ describe("Quiescence: a job's window stays open until its adapters are done", ()
     const b = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-late-B", stepId: STEP, gcodeHash: gcode(213), assuranceTier: 1 }));
     expect(b, "round 3 refused B for a quiet period after that event").toMatchObject({ success: true });
     const payloads = ["job-late-A", "job-late-B"].flatMap((jobId) => emitter.getEvents(jobId, STEP).map((e) => e.payload));
-    expect(payloads, "payloads recorded under either job").not.toContainEqual({ late: "after close" });
+    expect(payloads, "payloads recorded under either job").not.toContainEqual(expect.objectContaining({ late: "after close" }));
   });
 });
 
@@ -744,7 +746,7 @@ describe("Closed before it settles: an event after quiescence is the next job's 
     await vi.advanceTimersByTimeAsync(0);
 
     expect(run.outcome).toMatchObject({ success: true });
-    expect(bundles.flatMap((bundle) => bundle.events.map((e) => e.payload)), "bundled payloads").not.toContainEqual({ late: "while settling" });
-    expect(emitter.getEvents("job-settling", STEP).map((e) => e.payload), "payloads recorded under the job").not.toContainEqual({ late: "while settling" });
+    expect(bundles.flatMap((bundle) => bundle.events.map((e) => e.payload)), "bundled payloads").not.toContainEqual(expect.objectContaining({ late: "while settling" }));
+    expect(emitter.getEvents("job-settling", STEP).map((e) => e.payload), "payloads recorded under the job").not.toContainEqual(expect.objectContaining({ late: "while settling" }));
   });
 });
