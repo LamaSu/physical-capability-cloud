@@ -649,6 +649,9 @@ describe("the rules catch each known way around them (self-test)", () => {
       "const p = Headers.prototype;\nconst q = p;\nq.set = observe;",
       "const p = (Headers as any).prototype;\npatch(p, observe);",
       'const nav = typeof navigator !== "undefined" ? navigator : undefined;\nObject.assign(nav, { sendBeacon: observe });',
+      'const { prototype: hp } = Headers;\nObject.defineProperty(hp, "set", { value: observe });',
+      // An alias chain out of source order: q is bound to p in a function declared before p.
+      'function later() { Object.defineProperty(q, "set", { value: observe }); }\nlet q;\nfunction setup() { q = p; }\nconst p = Headers.prototype;',
     ]) {
       expect(caught(code), code).toContain("global-write");
     }
