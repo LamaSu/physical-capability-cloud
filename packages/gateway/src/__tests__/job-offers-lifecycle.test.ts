@@ -12,10 +12,11 @@
  * lifecycle, not from authentication. Without #395's checks the fixtures change
  * nothing.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { jobOffersRoutes } from "../routes/job-offers.js";
 import { courierJobsRoutes } from "../routes/courier-jobs.js";
+import { initStore, closeStore, getStore } from "../db.js";
 import {
   getJobOffersStore,
   initJobOffersStore,
@@ -27,6 +28,7 @@ import {
   type JobOfferStatus,
   type VerifyFn,
   type VerifyResult,
+  type SqliteDatabaseLike,
 } from "../services/job-offers-store.js";
 
 // ── Participants (the authenticated fixtures) ───────────────────────────────
@@ -751,8 +753,11 @@ const FREE_FORM = ["note", "progress_update", "error", "acknowledged", "toString
  * expectations; the pin test below fails until they are changed on purpose.
  *   - delivered is the claimant's assertion: never terminal, never success;
  *   - confirmed (poster) ends a delivery in 'completed', the success;
- *   - disputed (poster) ends it in 'disputed', inside the window only (the
- *     delivered -> disputed cell is the inside-the-window one);
+ *   - disputed (poster) ends it in 'disputed';
+ *   - confirmed and disputed are the two JUDGMENTS of a delivery: from
+ *     'delivered' each is allowed only inside the review window (see JUDGMENTS
+ *     below), so the delivered -> completed and delivered -> disputed cells are
+ *     the inside-the-window ones;
  *   - release (claimant, before delivery) puts the offer back to 'open';
  *   - settled is the server's alone: a posted one is refused from every status;
  *   - a repeat of an event that already holds is allowed and changes nothing.
@@ -791,22 +796,48 @@ const STAMP_OF: ReadonlyMap<string, string> = new Map([
   ["disputed", "disputedAt"],
 ]);
 
+/**
+ * The events that judge a delivery (kits #3989): from 'delivered', each is
+ * allowed only while the offer is no more than 72 h past its delivery. Anywhere
+ * else the window plays no part: a judgment already made may be repeated at any
+ * age. Written out here, like the table above: a change to the production rule
+ * cannot change it, and the matrix below reads every cell at the window's edges.
+ */
+const JUDGMENTS: ReadonlySet<string> = new Set(["confirmed", "disputed"]);
+
+/** How long after an offer reached its status an event is posted: well inside the window, its last instant, one millisecond past it. */
+const AGES: ReadonlyArray<readonly [string, number]> = [
+  ["60 s", 60_000],
+  ["exactly 72 h", WINDOW_MS],
+  ["72 h + 1 ms", WINDOW_MS + 1],
+];
+
 // The matrix is generated from the production table: every status against every event in it, and the free-form ones.
 const EVENTS: string[] = [...EVENT_ALLOWED_FROM.keys(), ...FREE_FORM];
 const CELLS: Array<[JobOfferStatus, string]> = JOB_OFFER_STATUSES.flatMap((s) =>
   EVENTS.map((e): [JobOfferStatus, string] => [s, e]),
 );
+/** Each cell read at each age: the table is the same at every moment except where a window closes. */
+const TIMED_CELLS: Array<[JobOfferStatus, string, string, number]> = AGES.flatMap(([label, ageMs]) =>
+  CELLS.map(([s, e]): [JobOfferStatus, string, string, number] => [s, e, label, ageMs]),
+);
 
-type Expectation = { allowed: true; to: JobOfferStatus } | { allowed: false };
+type Expectation =
+  | { allowed: true; to: JobOfferStatus }
+  | { allowed: false; reason: "invalid_transition" | "review_window_closed" };
 
-function expectedFor(status: JobOfferStatus, event: string): Expectation {
+function expectedFor(status: JobOfferStatus, event: string, ageMs: number = AGES[0]![1]): Expectation {
   if (EVENT_ALLOWED_FROM.has(event) && !ALLOWED_TO.has(event)) {
     throw new Error(`the production table has the event ${event}, with no independent expectation here`);
   }
   const row = ALLOWED_TO.get(event);
   if (!row) return { allowed: true, to: status }; // not in the table: recorded, no status change
   const to = row[status];
-  return to === undefined ? { allowed: false } : { allowed: true, to };
+  if (to === undefined) return { allowed: false, reason: "invalid_transition" };
+  if (JUDGMENTS.has(event) && status === "delivered" && ageMs > WINDOW_MS) {
+    return { allowed: false, reason: "review_window_closed" };
+  }
+  return { allowed: true, to };
 }
 
 type Snap = { offer: Record<string, unknown>; events: Array<Record<string, unknown>> };
@@ -893,6 +924,108 @@ describe("F5: the same matrix through POST /api/job-offers/:id/events, by an act
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe(exp.to);
     expectAllowed(before, snapshot(id), status, event, exp.to, iso(nowMs));
+  });
+});
+
+// ═══ Q2 MEDIUM (#455 r2): 'confirmed' is bounded by the review window too ═══
+
+describe("Q2 MEDIUM (#455 r2): the store x event matrix holds at every age, including the window's edges", () => {
+  // Every (status, event) cell, read at 60s (well inside any window), at exactly
+  // 72h, and at 72h + 1ms — the only ages where a JUDGMENT (confirmed/disputed)
+  // from 'delivered' can change answer. expectedFor is the one place the rule
+  // lives for this test file; a change to the production rule that this matrix
+  // doesn't also reflect fails here, at the store, before it fails anywhere else.
+  it.each(TIMED_CELLS)("%s + %s at %s", async (status, event, _label, ageMs) => {
+    const id = await offerIn(status);
+    const before = snapshot(id);
+    nowMs += ageMs;
+    const exp = expectedFor(status, event, ageMs);
+    const r = store().recordEvent(id, event, "tester", null, null);
+    if (!exp.allowed) {
+      expect(r).toEqual({ ok: false, reason: exp.reason, currentStatus: status });
+      expect(snapshot(id)).toEqual(before);
+      return;
+    }
+    expect(r).toMatchObject({ ok: true, status: exp.to });
+    expectAllowed(before, snapshot(id), status, event, exp.to, iso(nowMs));
+  });
+});
+
+describe("Q2 MEDIUM (#455 r2): 'confirmed' is bounded by the 72 h review window, like disputed", () => {
+  const confirm = (id: string) => event_(id, "confirmed");
+
+  it.each([
+    ["1 ms after delivery", 1],
+    ["1 h after delivery", 60 * 60 * 1000],
+    ["71 h 59 m after delivery", WINDOW_MS - 60_000],
+    ["exactly 72 h after delivery", WINDOW_MS],
+  ] as Array<[string, number]>)("inside the window, %s: allowed, and records when", async (_label, age) => {
+    const id = await offerIn("delivered");
+    nowMs += age;
+    const res = await confirm(id);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("completed");
+    expect(store().get(id)!.completedAt).toBe(iso(nowMs));
+  });
+
+  it.each([
+    ["1 ms past 72 h", WINDOW_MS + 1],
+    ["73 h", WINDOW_MS + 60 * 60 * 1000],
+    ["30 days", 30 * 24 * 60 * 60 * 1000],
+  ] as Array<[string, number]>)("outside the window, %s: refused (409 review_window_closed), and nothing changes", async (_label, age) => {
+    const id = await offerIn("delivered");
+    nowMs += age;
+    const before = snapshot(id);
+    const res = await confirm(id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: "review_window_closed", event: "confirmed", currentStatus: "delivered" });
+    expect(snapshot(id)).toEqual(before);
+    expect(store().get(id)!.completedAt).toBeNull();
+  });
+
+  it("the store itself: allowed at exactly 72 h, refused one millisecond later", async () => {
+    const atEdge = await offerIn("delivered");
+    nowMs += WINDOW_MS;
+    expect(store().recordEvent(atEdge, "confirmed", null, null, null)).toMatchObject({ ok: true, status: "completed" });
+
+    const pastEdge = await offerIn("delivered");
+    nowMs += WINDOW_MS + 1;
+    expect(store().recordEvent(pastEdge, "confirmed", null, null, null)).toEqual({
+      ok: false,
+      reason: "review_window_closed",
+      currentStatus: "delivered",
+    });
+  });
+
+  it("the window runs from the delivery, not from posting or from the claim", async () => {
+    const id = `offer-${++seq}`;
+    await createOffer(id);
+    nowMs += 100 * 60 * 60 * 1000; // posted and unclaimed for 100 h (nothing swept it)
+    expect((await claimAs(id)).statusCode).toBe(200);
+    nowMs += 80 * 60 * 60 * 1000; // claimed for 80 h
+    expect((await event_(id, "delivered")).statusCode).toBe(200);
+    nowMs += 60 * 60 * 1000; // delivered an hour ago
+    expect((await confirm(id)).json().status).toBe("completed");
+  });
+
+  it("a delivered offer with no recorded delivery time cannot be confirmed: the window fails closed", async () => {
+    const id = await offerIn("delivered");
+    (store().get(id) as unknown as { deliveredAt: string | null }).deliveredAt = null;
+    const res = await confirm(id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("review_window_closed");
+    expect(store().get(id)!.status).toBe("delivered");
+  });
+
+  it("past the window a confirm is refused for its window; once the sweep lapses the offer, as an invalid transition", async () => {
+    const id = await offerIn("delivered");
+    nowMs += WINDOW_MS + 1;
+    expect((await confirm(id)).json().error).toBe("review_window_closed");
+    await store().sweep();
+    expect(store().get(id)!.status).toBe("lapsed");
+    const after = await confirm(id);
+    expect(after.statusCode).toBe(409);
+    expect(after.json()).toEqual({ error: "invalid_transition", event: "confirmed", currentStatus: "lapsed" });
   });
 });
 
@@ -1101,5 +1234,98 @@ describe("F5: a repeat keeps the first time, and a release clears the whole clai
       driverEtaMin: null,
       driverContact: null,
     });
+  });
+});
+
+// ═══ Q3 MEDIUM (#455 r2): the re-claim guard survives a restart ════════════
+
+describe("Q3 MEDIUM (#455 r2): the 1 h re-claim guard is rebuilt from the persisted event log", () => {
+  let raw: SqliteDatabaseLike;
+
+  beforeAll(() => {
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: false });
+    const client = (getStore().db as unknown as { $client?: SqliteDatabaseLike }).$client;
+    if (!client) throw new Error("test rig: no raw SQLite handle on the store");
+    raw = client;
+  });
+  afterAll(() => closeStore());
+
+  /** A fresh JobOffersStore over the SAME sqlite handle: the application-level
+   * effect of a restart (new process, same database) without tearing down the
+   * in-memory :memory: connection the test itself depends on. */
+  async function restart(): Promise<void> {
+    _resetJobOffersStoreForTests();
+    initJobOffersStore({ sqlite: raw, verify: async () => ({ ok: true, body: { ok: true } }), now: () => new Date(nowMs) });
+    app = await buildApp();
+  }
+
+  it("inside the hour, after a restart: the releasing kernel is still blocked, another kernel is not", async () => {
+    await restart();
+    const id = await offerIn("claimed"); // claimed by k-1 (CLAIMANT)
+    await event_(id, "release");
+    nowMs += 30 * 60 * 1000; // 30 min later — inside RECLAIM_BLOCK_MS
+    await restart(); // a NEW store, the SAME database, "before 1h"
+    const again = await claimAs(id, "k-1", CLAIMANT);
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toBe("recently_released");
+    expect(again.json().retryAfterMs).toBeGreaterThan(0);
+    expect((await claimAs(id, "k-2", OTHER_CLAIMANT)).statusCode).toBe(200);
+  });
+
+  it("after the hour, a restart does not resurrect an expired guard: the releasing kernel may claim again", async () => {
+    await restart();
+    const id = await offerIn("claimed");
+    await event_(id, "release");
+    nowMs += RECLAIM_BLOCK_MS; // exactly the hour — the existing (non-restart) test uses this same boundary
+    await restart(); // a NEW store, the SAME database, "after 1h"
+    expect((await claimAs(id)).statusCode).toBe(200);
+  });
+
+  it("an offer re-claimed and released again carries only the LATEST release forward", async () => {
+    await restart();
+    const id = await offerIn("claimed"); // k-1
+    await event_(id, "release"); // guard (in-memory, pre-restart): k-1
+    expect((await claimAs(id, "k-2", OTHER_CLAIMANT)).statusCode).toBe(200);
+    await event_(id, "release"); // guard overwritten: k-2 is now the latest releaser
+    nowMs += 30 * 60 * 1000; // inside the hour for k-2's release
+    await restart(); // rebuilds the guard from the event log alone
+    // Checked k-2 FIRST, while the offer is still open: a rebuild that wrongly
+    // kept k-1's stale, superseded release (instead of k-2's, the latest one)
+    // would let this claim through. It must not.
+    const k2Claim = await claimAs(id, "k-2", OTHER_CLAIMANT);
+    expect(k2Claim.statusCode).toBe(409);
+    expect(k2Claim.json().error).toBe("recently_released");
+    // k-1's much earlier release must NOT carry forward forever: its claim succeeds.
+    expect((await claimAs(id, "k-1", CLAIMANT)).statusCode).toBe(200);
+  });
+});
+
+// ═══ Q3 MEDIUM (#455 r2): an unknown courier status fails closed ═══════════
+
+describe("Q3 MEDIUM (#455 r2): an unknown courier status projects as expired, never open", () => {
+  it("a hydrated offer with an unrecognized status (e.g. 'archived'): detail, claim refusal and the open feed all agree it is unavailable", async () => {
+    const created = await app.inject({
+      method: "POST", url: "/api/courier-jobs", headers: as(POSTER),
+      payload: { deliveryId: "cj-archived", pickup: { name: "A" }, dropoff: { name: "B" } },
+    });
+    expect(created.statusCode).toBe(201);
+    (store() as unknown as { offers: Map<string, { status: string }> }).offers.get("cj-archived")!.status = "archived";
+
+    const detail = await app.inject({ method: "GET", url: "/api/courier-jobs/cj-archived" });
+    expect(detail.json().job.status).toBe("expired");
+
+    const claim = await app.inject({
+      method: "POST", url: "/api/courier-jobs/cj-archived/claim", headers: as(CLAIMANT), payload: { driverAgent: "d1" },
+    });
+    expect(claim.statusCode).toBe(409);
+    expect(claim.json()).toMatchObject({ error: "not_open", currentStatus: "expired" });
+
+    const feed = await app.inject({ method: "GET", url: "/api/courier-jobs/open" });
+    expect((feed.json().jobs as Array<{ id: string }>).map((j) => j.id)).not.toContain("cj-archived");
+
+    // The generic surface's own feed already excludes it on the real (unmapped) status alone.
+    const genericFeed = await app.inject({ method: "GET", url: "/api/job-offers/open?capabilityType=courier.dispatch" });
+    expect((genericFeed.json().offers as Array<{ id: string }>).map((o) => o.id)).not.toContain("cj-archived");
   });
 });

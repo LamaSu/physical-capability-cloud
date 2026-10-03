@@ -208,7 +208,11 @@ function genericStatusToCourier(status: string): CourierJobStatus {
     case "completed": return "delivered";
     case "disputed": return "delivered";
     case "lapsed": return "expired";
-    default: return "open";
+    // An unrecognized status (future enum value, corrupt/hydrated row) must
+    // never fail open as "open": that would make an unavailable, unclaimable
+    // offer look claimable (#455 r2 Q3 MEDIUM). "expired" is the fail-closed
+    // projection — unavailable, matching claim()'s own real refusal.
+    default: return "expired";
   }
 }
 

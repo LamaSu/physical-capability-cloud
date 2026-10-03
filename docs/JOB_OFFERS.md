@@ -160,18 +160,40 @@ POST /api/job-offers/:id/events
 { "event": "in_progress", "by": "kernel-driver-7", "payload": {…}, "note": "…" }
 ```
 
+**Statuses:** `open`, `claimed`, `in_progress`, `delivered`, `completed`,
+`settled`, `cancelled`, `expired`, `lapsed`, `disputed`. An open offer enters
+`claimed` only through `POST /:id/claim` — no event moves it there.
+
 Event vocabulary (extensible — unknown events are recorded but don't
 change status):
 
-| Event | Status transition |
-|---|---|
-| `acknowledged` | (no change — operator accepts after claim) |
-| `in_progress` (alias: `pickup`) | claimed/open → in_progress |
-| `progress_update` | (no change — carries `payload` for streaming progress) |
-| `delivered` | → delivered |
-| `error` | (no change — payload describes the error) |
-| `cancelled` | → cancelled |
-| `note` | (no change — free-form annotation) |
+| Event | Posted by | Status transition |
+|---|---|---|
+| `acknowledged` | operator | (no change — operator accepts after claim) |
+| `in_progress` (alias: `pickup`) | claimant | claimed → in_progress |
+| `progress_update` | either | (no change — carries `payload` for streaming progress) |
+| `delivered` | claimant | claimed/in_progress → delivered |
+| `release` | claimant | claimed/in_progress → open — see "Re-claim block" below |
+| `error` | either | (no change — payload describes the error) |
+| `cancelled` | poster | open/claimed/in_progress → cancelled (also `DELETE /:id`) |
+| `confirmed` | poster | delivered → completed — only inside the 72h review window |
+| `disputed` | poster | delivered → disputed — only inside the 72h review window |
+| `settled` | **server only** | reserved for a future settlement writer; refused (409) from any caller, from every status |
+| `note` | either | (no change — free-form annotation) |
+
+`in_progress`/`delivered`/`release` are the claimant's to post;
+`cancelled`/`confirmed`/`disputed` are the poster's.
+
+**The 72h review window.** Once `delivered`, the poster has 72h to post
+`confirmed` or `disputed`; either is refused with `409 review_window_closed`
+past that point — allowed at exactly `deliveredAt + 72h`, refused one
+millisecond later. With neither posted inside the window, the background
+sweeper lapses the offer to `lapsed`, never as a success.
+
+**The 1h re-claim block.** After a claimant's `release`, that SAME kernel
+cannot re-claim the offer for 1h (`409 recently_released`, with
+`retryAfterMs`); a different kernel can claim it immediately. The block is
+rebuilt from the persisted event log on restart, so it survives one.
 
 The shim translates v0.2's `pickup` event to `in_progress` so courier
 callers continue to work.

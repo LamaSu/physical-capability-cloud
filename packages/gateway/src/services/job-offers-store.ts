@@ -447,6 +447,40 @@ export class JobOffersStore {
     } catch {
       // Tables may not exist yet on first boot — migrate.ts will create them.
     }
+    // The release guard is in-memory only; rebuild it from what just hydrated.
+    // Harmless no-op when the try block above threw (this.events is whatever
+    // it was left as, possibly empty).
+    this.rebuildReleaseGuards();
+  }
+
+  /**
+   * Rebuild the 1 h re-claim guard from the persisted event log (#455 r2 Q3
+   * MEDIUM: the guard used to live in memory only, so a restart lost it,
+   * silently re-opening the hour-long re-claim block it exists to enforce).
+   * No schema change: the releasing kernel id already travels inside each
+   * 'release' event's own JSON blob (see recordEvent's releasedKernelId).
+   *
+   * Only the LAST 'release' event per offer matters: a second release is
+   * reachable only via an intervening claim (the lifecycle table requires
+   * 'claimed' or 'in_progress' to release from), so each later release
+   * event is strictly more recent than, and supersedes, any earlier one —
+   * exactly as the live in-memory map already behaves (recordEvent
+   * overwrites, never merges, releaseGuard.set on each release).
+   */
+  private rebuildReleaseGuards(): void {
+    const now = this.nowMs();
+    for (const [offerId, evts] of this.events) {
+      for (let i = evts.length - 1; i >= 0; i--) {
+        const evt = evts[i]!;
+        if (evt.event !== "release") continue;
+        const kernelId = typeof evt.kernelId === "string" ? evt.kernelId : null;
+        const atMs = isoToMs(evt.at);
+        if (kernelId && atMs != null && now - atMs < RECLAIM_BLOCK_MS) {
+          this.releaseGuard.set(offerId, { kernelId, untilMs: atMs + RECLAIM_BLOCK_MS });
+        }
+        break; // only the most recent release event for this offer decides
+      }
+    }
   }
 
   private persistOffer(offer: JobOffer): void {
@@ -732,18 +766,30 @@ export class JobOffersStore {
     if (allowedFrom && !allowedFrom.has(o.status)) {
       return { ok: false, reason: "invalid_transition", currentStatus: o.status };
     }
-    if (event === "disputed" && o.status === "delivered") {
+    // confirmed and disputed are the two JUDGMENTS of a delivery (#455 r2 Q2
+    // MEDIUM): from 'delivered', each is allowed only inside the review
+    // window. A judgment already made (status no longer 'delivered') may be
+    // repeated at any age — the condition below only ever fires on the FIRST
+    // judgment of a given delivery.
+    if ((event === "confirmed" || event === "disputed") && o.status === "delivered") {
       const deliveredMs = isoToMs(o.deliveredAt);
       if (deliveredMs == null || this.nowMs() - deliveredMs > REVIEW_WINDOW_MS) {
         return { ok: false, reason: "review_window_closed", currentStatus: o.status };
       }
     }
+    // 'release' hands the claim back to the pool. Capture which kernel held
+    // it BEFORE the event object is built, so the kernel id travels inside
+    // the event's own JSON blob (no schema change — same `data` column) and
+    // survives a restart: rebuildReleaseGuards() below reads it back out
+    // (#455 r2 Q3 MEDIUM).
+    const releasedKernelId = event === "release" ? o.claimedByKernelId : null;
     const evt: JobOfferEvent = {
       at: this.nowIso(),
       event,
       by,
       payload: payload ?? null,
       note: note ?? null,
+      ...(releasedKernelId ? { kernelId: releasedKernelId } : {}),
     };
     this.appendEvent(o.id, evt);
     // Status transitions — opt-in by event kind. Unknown event kinds leave
@@ -760,7 +806,7 @@ export class JobOffersStore {
       o.cancelledAt = evt.at;
     }
     if (event === "release") {
-      const kernelId = o.claimedByKernelId;
+      const kernelId = releasedKernelId;
       o.status = "open";
       o.claimedByKernelId = null;
       o.claimedAt = null;
