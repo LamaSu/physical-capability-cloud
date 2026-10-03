@@ -407,6 +407,12 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     expect(forge((w) => { (w.props as Record<string, unknown>).text = "Paid"; })).toBe(false); // the notice carrying words
     expect(forge((w) => { (w.props as Record<string, unknown>).withheld = "yes"; })).toBe(false);
     expect(forge((_w, fine) => { delete fine.untrusted; })).toBe(false); // agent words passed off as PCC text
+    // the node check alone refuses it: a dashboard whose only agent prose is its title has no join
+    const lone = ok({ csd: CSD, title: "Ops", sections: [{ windows: [{ kind: "receipt" }] }] });
+    const forgedTitle = JSON.parse(JSON.stringify(lone)) as IrDoc;
+    (forgedTitle.title.props as { text: string }).text = WITHHELD_PROSE;
+    expect(validateIr(lone)).toEqual({ ok: true });
+    expect(validateIr(forgedTitle).ok).toBe(false);
   });
 
   it("F4: the renderer paints the notice from its own constant, and marks only agent words as agent-authored", () => {
@@ -444,8 +450,8 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     bindSchemaCard("capability-summary-v1", { name: "Refunded in full", type: "arm", pricing: { baseCost: "12.50", currency: "USDC" }, assuranceTiers: [1, 2], available: true }, slots);
     expect(slots.map((x) => x.textContent)).toEqual([WITHHELD_FIELD, "arm", "12.50", "USDC", "1, 2", "Yes"]);
     // the card's own price fields show money as stated, even an amount; no other field may
-    bindSchemaCard("capability-summary-v1", { name: "Arm", type: "1,000 USDC", pricing: { baseCost: "1,000 USDC", currency: "USDC" }, assuranceTiers: [1], available: false }, slots);
-    expect(slots.map((x) => x.textContent)).toEqual(["Arm", WITHHELD_FIELD, "1,000 USDC", "USDC", "1", "No"]);
+    bindSchemaCard("capability-summary-v1", { name: "Arm", type: "1,000 USDC", pricing: { baseCost: "1,000 USDC", currency: "USDC" }, assuranceTiers: ["Paid", 2], available: false }, slots);
+    expect(slots.map((x) => x.textContent)).toEqual(["Arm", WITHHELD_FIELD, "1,000 USDC", "USDC", WITHHELD_FIELD, "No"]);
     expect(textOf(listEl)).not.toContain("verified site");
   });
 
