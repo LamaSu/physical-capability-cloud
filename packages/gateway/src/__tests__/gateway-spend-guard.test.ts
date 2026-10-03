@@ -550,4 +550,19 @@ describe("hourly throttles survive an intra-day clock rollback after a prune (as
     t = D1_0010;
     expect(admitFaucetDrip({ wallet: "0xwp6", amount: 1, spender: { apiKeyId: "kp" } })).toMatchObject({ status: 429, error: "faucet_rate_limited" });
   });
+
+  it("rule 3 (relay, astra pack 103c Q3): a UTC midnight crossed inside a relay admission cannot split its check from its record", () => {
+    process.env.PCC_RELAY_MAX_GLOBAL_DAY = "1";
+    const lateD = Date.UTC(2026, 8, 29, 23, 59, 59, 999);
+    const earlyNext = Date.UTC(2026, 8, 30, 0, 0, 0, 0);
+    t = lateD;
+    expect(admitRelay({ principal: "pa", apiKeyId: "ka" }).ok).toBe(true); // D's only global slot
+    // The next call's FIRST clock read is D's last millisecond; any later read would be D+1.
+    t = earlyNext;
+    queuedReads = [lateD];
+    expect(admitRelay({ principal: "pb", apiKeyId: "kb" })).toMatchObject({ status: 503, error: "relay_daily_breaker" });
+    // Checked AND refused on D: nothing was recorded under D+1, whose one slot is still free.
+    expect(admitRelay({ principal: "pc", apiKeyId: "kc" }).ok).toBe(true);
+    expect(admitRelay({ principal: "pd", apiKeyId: "kd" })).toMatchObject({ status: 503, error: "relay_daily_breaker" });
+  });
 });
