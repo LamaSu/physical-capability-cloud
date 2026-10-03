@@ -196,17 +196,22 @@ function admitPlainArray(value: unknown, field: string): readonly unknown[] {
   return value as readonly unknown[];
 }
 
-/** What `ownDataValue` returns for a missing property and for an accessor or non-enumerable one. Module-private, so neither can equal a value read from input. */
+/** What `ownDataValue` returns for a missing property and for an accessor. Module-private, so neither can equal a value read from input. */
 const ABSENT = Symbol("accepted-policy: no such own property");
-const ACCESSOR = Symbol("accepted-policy: accessor or non-enumerable property");
+const ACCESSOR = Symbol("accepted-policy: accessor property");
 
 /**
- * The value of `owner`'s own ENUMERABLE DATA property `key`, or ABSENT / ACCESSOR. Read
- * entirely through descriptors obtained via the captured `Reflect.getOwnPropertyDescriptor`
- * — never a [[Get]], so no getter and no Proxy trap ever runs, and the descriptor objects
- * themselves (freshly minted by the engine for every call, per `FromPropertyDescriptor`)
- * cannot be a Proxy or carry an accessor, so reading their `value`/`get`/`set`/`enumerable`
- * is safe. `owner` must already be proven not a Proxy (`admitPlainObject`/`admitPlainArray`).
+ * The value of `owner`'s own DATA property `key` (enumerable or not), or ABSENT / ACCESSOR.
+ * Read entirely through descriptors obtained via the captured
+ * `Reflect.getOwnPropertyDescriptor` — never a [[Get]], so no getter and no Proxy trap ever
+ * runs, and the descriptor objects themselves (freshly minted by the engine for every call,
+ * per `FromPropertyDescriptor`) cannot be a Proxy or carry an accessor, so reading their
+ * `value`/`get`/`set` is safe. Enumerability is a SEPARATE concern, checked only where it
+ * matters (`isOwnEnumerable`, used by `checkExactKeys` on caller-declared fields): a real
+ * array's own `length` is permanently non-enumerable by spec (and permanently a data
+ * property — `[[DefineOwnProperty]]` refuses to make an Array exotic object's `length` an
+ * accessor), so a general-purpose reader must not treat non-enumerable as suspect on its
+ * own. `owner` must already be proven not a Proxy (`admitPlainObject`/`admitPlainArray`).
  */
 function ownDataValue(owner: object, key: PropertyKey): unknown {
   const descriptor = getOwnPropertyDescriptor(owner, key);
@@ -219,17 +224,23 @@ function ownDataValue(owner: object, key: PropertyKey): unknown {
   ) {
     return ACCESSOR;
   }
-  const enumerable = getOwnPropertyDescriptor(descriptor, "enumerable");
-  if (enumerable === undefined || enumerable.value !== true) {
-    return ACCESSOR;
-  }
   return value.value;
+}
+
+/** Whether `owner` has an own property `key` whose descriptor owns `enumerable: true`. `owner` must not be a Proxy. */
+function isOwnEnumerable(owner: object, key: PropertyKey): boolean {
+  const descriptor = getOwnPropertyDescriptor(owner, key);
+  if (descriptor === undefined) return false;
+  const enumerable = getOwnPropertyDescriptor(descriptor, "enumerable");
+  return enumerable !== undefined && enumerable.value === true;
 }
 
 /**
  * Checks that `owner`'s own keys are EXACTLY `allowed` (sol-style pinning: "nothing
- * unknown"), each an enumerable own DATA property (never an accessor: a getter runs code,
- * so it is refused before it is read). `owner` must already be `admitPlainObject`-checked.
+ * unknown"), each an ENUMERABLE own DATA property (never an accessor: a getter runs code,
+ * so it is refused before it is read; never non-enumerable: a hidden field pretending not
+ * to be there is refused, not silently skipped). `owner` must already be
+ * `admitPlainObject`-checked.
  */
 function checkExactKeys(owner: object, field: string, allowed: readonly string[]): void {
   const keys = ownKeys(owner);
@@ -240,7 +251,7 @@ function checkExactKeys(owner: object, field: string, allowed: readonly string[]
     if (typeof key === "symbol" || !allowed.includes(key)) {
       throw new AcceptedPolicyDigestInputError(field, `unknown key ${String(key).slice(0, 64)}`);
     }
-    if (ownDataValue(owner, key) === ACCESSOR) {
+    if (ownDataValue(owner, key) === ACCESSOR || !isOwnEnumerable(owner, key)) {
       throw new AcceptedPolicyDigestInputError(`${field}.${key}`, "accessor or non-enumerable properties are not accepted; pass plain data");
     }
   }
