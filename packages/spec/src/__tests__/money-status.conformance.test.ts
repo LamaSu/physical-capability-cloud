@@ -22,7 +22,7 @@ import path from "node:path";
 import vm from "node:vm";
 import {
   MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
-  classifySettlementRead, SETTLEMENT_READ_ROUTE,
+  classifySettlementRead, SETTLEMENT_READ_ROUTE, FINAL_MONEY_TOKENS, claimsFinalMoney, statusPillText,
 } from "../money/money-status.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -43,6 +43,9 @@ type KitRegion = {
   settlementRecordClass: (r: unknown) => [string, string | null, string];
   settlementReadClass: (r: unknown, path: unknown, live: unknown) => [string, string | null, string];
   SETTLEMENT_READ_ROUTE: RegExp;
+  FINAL_MONEY_TOKENS: Record<string, boolean>;
+  claimsFinalMoney: (s: unknown) => boolean;
+  statusPillText: (raw: unknown, verified: boolean) => string;
 };
 
 function extractRegion(): KitRegion {
@@ -55,7 +58,8 @@ function extractRegion(): KitRegion {
       " this.statusClass = statusClass; this.moneyStatusClass = moneyStatusClass;" +
       " this.settlementLabel = settlementLabel; this.isMoneyData = isMoneyData; this.dataStatusClass = dataStatusClass;" +
       " this.VNEXT_UNIT_STATES = VNEXT_UNIT_STATES; this.VNEXT_STATE_PRESENTATION = VNEXT_STATE_PRESENTATION; this.VNEXT_PHASE = VNEXT_PHASE;" +
-      " this.settlementRecordClass = settlementRecordClass; this.settlementReadClass = settlementReadClass; this.SETTLEMENT_READ_ROUTE = SETTLEMENT_READ_ROUTE;",
+      " this.settlementRecordClass = settlementRecordClass; this.settlementReadClass = settlementReadClass; this.SETTLEMENT_READ_ROUTE = SETTLEMENT_READ_ROUTE;" +
+      " this.FINAL_MONEY_TOKENS = FINAL_MONEY_TOKENS; this.claimsFinalMoney = claimsFinalMoney; this.statusPillText = statusPillText;",
     ctx,
   );
   return ctx as unknown as KitRegion;
@@ -403,7 +407,7 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
     const LC = "/api/settlement/units/u1/lifecycle";
     const ok = await receiptOf(LC, lifecycle(8));
     expect(ok.cls).toContain("st-unknown"); // named by its ordinal, but a snapshot is never shown as final
-    expect(ok.text).toBe("SETTLED_RELEASED");
+    expect(ok.text).toBe("reported status: SETTLED_RELEASED - settlement unconfirmed"); // nor named as one (astra r4 F6)
     const six = await receiptOf(LC, lifecycle(6));
     expect(six.cls).toContain("st-waiting");
     expect(six.body).toContain("payout outstanding");
@@ -599,5 +603,145 @@ describe("astra r3 (#313 @9250c578): F5, generic request success is never green 
   it("F5: no code path assigns the green class directly; only the settlement-read classifier yields it", () => {
     expect(kitSrc).not.toMatch(/className\s*=\s*'[^']*st-settled/);
     expect(kitSrc).not.toMatch(/['"]pcc-(?:pill|action-status) st-settled['"]/);
+  });
+});
+
+describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as a bare status (verify before fix)", () => {
+  const UNIT = "0x" + "ab".repeat(32);
+  const RC_LIVE = `/api/settlement/units/${UNIT}/receipt`;
+  const SETTLED_RECEIPT = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" };
+  const man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
+  // Answers only the requests a test expects (null = not this test's), and only its FIRST read of each:
+  // a later poll never settles, so no window keeps polling after the test.
+  function bootRead(manifest: string, reply: (url: string) => unknown) {
+    document.documentElement.removeAttribute("data-theme");
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__ = false;
+    const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+    const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest"; mNode.textContent = manifest;
+    document.body.appendChild(mNode); // LIVE mode
+    const seen = new Set<string>();
+    (window as unknown as { fetch: unknown }).fetch = (url: unknown) => {
+      const u = String(url);
+      const body = seen.has(u) ? null : reply(u);
+      seen.add(u);
+      if (body === null) return new Promise(() => {});
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) });
+    };
+    // eslint-disable-next-line no-eval
+    (0, eval)(kitSrc);
+  }
+  const pills = () => Array.from(document.querySelectorAll(".pcc-pill")).map((p) => (p.textContent || "").trim());
+  const WORDS = ["paid", "released", "settled", "PAID", "Released", "SETTLED_RELEASED"];
+  const bare = (texts: string[], w: string) => texts.filter((t) => t.toLowerCase() === w.toLowerCase());
+
+  it("F6 (HIGH): a list row on a money read never shows a bare final money word", async () => {
+    for (const w of WORDS) {
+      bootRead(man([{ kind: "list", binding: { path: "/api/escrow" }, item: { title: "id", statusFrom: "status" } }]),
+        (u) => (new URL(u).pathname === "/api/escrow" ? [{ id: "e1", status: w }] : null));
+      await flush();
+      expect(document.querySelector(".pcc-list-row"), w).not.toBeNull();
+      expect(bare(pills(), w), w).toEqual([]);
+    }
+  });
+
+  it("F6 (HIGH): a run window never shows a bare final money word", async () => {
+    for (const w of WORDS) {
+      bootRead(man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "message" }]),
+        (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: w, message: "m" } : null));
+      await flush();
+      expect(bare(pills(), w), w).toEqual([]);
+    }
+  });
+
+  it("F6 (HIGH): a run window rendered from a snapshot never shows a bare final money word either", async () => {
+    for (const w of WORDS) {
+      boot({}, man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "message" }]),
+        { _ts: "2026-09-24T00:00:00Z", "/api/escrow/e1": { status: w, message: "m" } });
+      await flush();
+      expect(bare(pills(), w), w).toEqual([]);
+    }
+  });
+
+  it("F6 (HIGH): a receipt never shows a bare final money word for a legacy record", async () => {
+    for (const w of WORDS) {
+      bootRead(man([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]),
+        (u) => (new URL(u).pathname === "/api/escrow/e1" ? { id: "e1", status: w, contractAddress: "0x" + "11".repeat(20), totalAmount: "5" } : null));
+      await flush();
+      expect(document.querySelector(".pcc-receipt-rail"), w).not.toBeNull();
+      expect(bare(pills(), w), w).toEqual([]);
+    }
+  });
+
+  it("F6 (HIGH): a gated-out final state (a baked snapshot) is never shown as a bare state name", async () => {
+    boot({}, man([{ kind: "receipt", binding: { path: RC_LIVE } }]), { _ts: "2026-09-24T00:00:00Z", [RC_LIVE]: SETTLED_RECEIPT });
+    await flush();
+    const pill = document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement;
+    expect(pill.className).not.toContain("st-settled");
+    expect(pill.textContent).not.toBe("SETTLED_RELEASED");
+  });
+
+  it("F6: a NON-money read's status that claims money moved is not shown bare either", async () => {
+    bootRead(man([{ kind: "list", binding: { path: "/api/jobs" }, item: { title: "id", statusFrom: "status" } }]),
+      (u) => (new URL(u).pathname === "/api/jobs" ? [{ id: "j1", status: "settled" }, { id: "j2", status: "running" }] : null));
+    await flush();
+    expect(bare(pills(), "settled")).toEqual([]);
+    expect(pills()).toContain("running"); // an ordinary status word is unchanged
+  });
+
+  it("F6: a run window names a gated-out final by the classifier's label, a verified one by its plain name", async () => {
+    const LC_LIVE = `/api/settlement/units/${UNIT}/lifecycle`;
+    const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" };
+    const run = (p: string) => man([{ kind: "run", binding: { path: p }, statusFrom: "status", latestFrom: "message" }]);
+    boot({}, run(LC_LIVE), { _ts: "2026-09-24T00:00:00Z", [LC_LIVE]: LC8 }); // a baked snapshot: gated out
+    await flush();
+    const gated = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
+    expect(gated.className).toContain("st-unknown");
+    expect(gated.textContent).toBe("final state not shown - not a live read of a settlement route");
+    bootRead(run(LC_LIVE), (u) => (new URL(u).pathname === LC_LIVE ? LC8 : null)); // a LIVE read of the exact route
+    await flush();
+    const verified = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
+    expect(verified.className).toContain("st-settled");
+    expect(verified.textContent).toBe("SETTLED_RELEASED");
+  });
+
+  it("F6: money data shows the classifier's honest label, not the bare word", async () => {
+    bootRead(man([{ kind: "list", binding: { path: "/api/escrow" }, item: { title: "id", statusFrom: "status" } }]),
+      (u) => (new URL(u).pathname === "/api/escrow" ? [{ id: "e1", status: "funded" }, { id: "e2", status: "released" }] : null));
+    await flush();
+    expect(pills()).toEqual(["funds held - not released", "released - not confirmed by a settlement read"]);
+  });
+
+  it("F6 positive control: a VERIFIED final state (live read of the exact route) keeps its plain name", async () => {
+    bootRead(man([{ kind: "receipt", binding: { path: RC_LIVE } }]), (u) => (new URL(u).pathname === RC_LIVE ? SETTLED_RECEIPT : null));
+    await flush();
+    const pill = document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement;
+    expect(pill.className).toContain("st-settled");
+    expect(pill.textContent).toBe("SETTLED_RELEASED");
+  });
+});
+
+describe("astra r4 (#313): the pill-text rule, kit == spec", () => {
+  const kit = extractRegion();
+  it("the same final-money tokens", () => {
+    expect(Object.keys(kit.FINAL_MONEY_TOKENS).sort()).toEqual([...FINAL_MONEY_TOKENS].sort());
+  });
+  it("the same claim test and the same pill text over adversarial inputs, verified or not", () => {
+    const inputs: unknown[] = [...ADVERSARIAL, "paid", "Paid in full", "paidOut", "payout_pending", "settlement_complete", "PAID!", "p\u0430id",
+      "SETTLED_RELEASED", "SETTLED_REFUNDED", "RELEASE_ALLOCATED", "refund_allocated", "running", "pending", "3", "no settlement state", "funded"];
+    for (const x of inputs) {
+      expect(kit.claimsFinalMoney(x), JSON.stringify(x)).toBe(claimsFinalMoney(x));
+      for (const v of [true, false]) expect(kit.statusPillText(x, v), JSON.stringify(x)).toBe(statusPillText(x, v));
+    }
+  });
+  it("what the rule says", () => {
+    expect(statusPillText("paid", false)).toBe("reported status: paid - settlement unconfirmed");
+    expect(statusPillText("paid", true)).toBe("paid");
+    expect(statusPillText(["released"], false)).toBe("reported status: released - settlement unconfirmed"); // String() of an array
+    expect(statusPillText("running", false)).toBe("running");
+    expect(statusPillText("RELEASE_ALLOCATED", false)).toBe("RELEASE_ALLOCATED"); // decided, not moved: no claim
+    expect(claimsFinalMoney("p\u0430id")).toBe(true); // a look-alike is never a bare status
+    expect(claimsFinalMoney("42")).toBe(false);
   });
 });
