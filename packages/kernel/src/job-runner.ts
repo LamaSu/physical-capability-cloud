@@ -214,6 +214,11 @@ export class JobRunner {
     if (typeof jobId !== "string" || typeof stepId !== "string") {
       return { success: false, error: "the run's job id and step id must be text", failure: { origin: "configuration" }, durationMs: Date.now() - startTime };
     }
+    // A tier outside AssuranceTier has no requirements, so its run would command the device and
+    // then fail as evidence: refused before anything is held. Compared, never converted.
+    if (assuranceTier !== 0 && assuranceTier !== 1 && assuranceTier !== 2 && assuranceTier !== 3) {
+      return { success: false, error: "the run's assurance tier must be 0, 1, 2 or 3", failure: { origin: "configuration" }, durationMs: Date.now() - startTime };
+    }
     // Each timeout arms a timer, and a delay that cannot be one could make settle() reject in the
     // final release, after the step was registered: refused before anything is held (astra pack 216).
     for (const [name, ms] of [["evidenceQuiesceTimeoutMs", this.evidenceQuiesceTimeoutMs], ["evidenceSettleTimeoutMs", this.evidenceSettleTimeoutMs]] as const) {

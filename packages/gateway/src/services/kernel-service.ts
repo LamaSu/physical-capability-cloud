@@ -10,6 +10,7 @@ import { JobRunner } from "@pcc/kernel";
 import { EvidenceEmitter } from "@pcc/kernel";
 import { createAdaptersFromConfig, loadKernelConfig } from "@pcc/kernel";
 import { initSafetyGateway, getSafetyGateway } from "@pcc/kernel";
+import type { JobResult, SafetyGateway } from "@pcc/kernel";
 import type { KernelConfig } from "@pcc/kernel";
 import type { MachineAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
@@ -18,6 +19,66 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
+
+/**
+ * Charge a failed run to the device its JobResult names (#5417; astra packs 190 and 227): a
+ * machine fault to the machine's circuit, a sensor's or a camera's to that adapter's own circuit,
+ * and an evidence or configuration failure to no device, since no device was at fault. A result
+ * that names no origin is charged to the machine, as before.
+ */
+function chargeFailedRun(gateway: SafetyGateway, machineId: string, failure: JobResult["failure"]): void {
+  if (failure === undefined) {
+    gateway.recordDeviceFailure(machineId);
+    return;
+  }
+  if (failure.origin === "machine") {
+    gateway.recordDeviceFailure(failure.adapterId ?? machineId);
+  } else if ((failure.origin === "sensor" || failure.origin === "camera") && failure.adapterId !== undefined) {
+    gateway.recordDeviceFailure(failure.adapterId);
+  }
+}
+
+/** A reason as text, without throwing: a value with no text form gets a fixed label. */
+function errorText(err: unknown): string {
+  try {
+    const text: unknown = err instanceof Error ? err.message : String(err);
+    if (typeof text === "string") return text;
+  } catch {
+    // No text form
+  }
+  return "an error with no text form";
+}
+
+/** The part of a Sentry span a job's lifecycle ends. */
+interface LifecycleSpan {
+  setStatus(status: { code: 0 | 1 | 2; message?: string }): unknown;
+  end(): void;
+}
+
+/**
+ * End a job's telemetry: its Sentry lifecycle span, if any, and its local trace. Telemetry never
+ * changes a job's breaker charge or its status (N115): a call that throws is logged, never the job's.
+ */
+function endJobTelemetry(jobId: string, span: LifecycleSpan | null, traceId: string, spanId: string, ok: boolean, message: string): void {
+  const logged = (what: string) => (err: unknown) => console.warn(`[kernel-service] job ${jobId}: ${what} failed: ${errorText(err)}`);
+  if (span !== null) {
+    try {
+      span.setStatus({ code: ok ? 1 : 2, message });
+    } catch (err) {
+      logged("its lifecycle span's status")(err);
+    }
+    try {
+      span.end();
+    } catch (err) {
+      logged("ending its lifecycle span")(err);
+    }
+  }
+  try {
+    endTrace(traceId, spanId, ok ? "ok" : "error");
+  } catch (err) {
+    logged("ending its trace")(err);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -328,7 +389,7 @@ export class KernelService {
               if (result.success) {
                 gateway.recordDeviceSuccess(deviceId);
               } else if (result.busy === undefined) {
-                gateway.recordDeviceFailure(deviceId);
+                chargeFailedRun(gateway, deviceId, result.failure);
               }
               try {
                 const repos = getRepos();
@@ -371,14 +432,11 @@ export class KernelService {
                 }
               }
 
-              lifecycleSpan.setStatus({ code: result.success ? 1 : 2, message: result.error ?? "ok" });
-              lifecycleSpan.end();
-              // End local trace span
-              endTrace(traceId, lifecycleLocalSpanId, result.success ? "ok" : "error");
-            })
-            .catch((err: unknown) => {
+              endJobTelemetry(jobId, lifecycleSpan, traceId, lifecycleLocalSpanId, result.success, result.error ?? "ok");
+            }, (err: unknown) => {
+              // Only a rejected runner.run() lands here, never this handler's own failure (N115).
+              // run() never rejects (#531); were it to, the failure is the device's, as before.
               this.runningJobs.delete(jobId);
-              // A rejected runner.run() is a real device failure — record it.
               gateway.recordDeviceFailure(deviceId);
               try {
                 const repos = getRepos();
@@ -386,10 +444,11 @@ export class KernelService {
               } catch {
                 // DB update failure is non-fatal
               }
-              lifecycleSpan.setStatus({ code: 2, message: String(err) });
-              lifecycleSpan.end();
-              // End local trace span
-              endTrace(traceId, lifecycleLocalSpanId, "error");
+              endJobTelemetry(jobId, lifecycleSpan, traceId, lifecycleLocalSpanId, false, errorText(err));
+            })
+            .catch((err: unknown) => {
+              // The completion handling's own failure: logged, and it changes no charge and no status (N115).
+              console.error(`[kernel-service] job ${jobId}: completion handling failed: ${errorText(err)}`);
             });
         },
       );
@@ -415,7 +474,7 @@ export class KernelService {
           if (result.success) {
             gateway.recordDeviceSuccess(deviceId);
           } else if (result.busy === undefined) {
-            gateway.recordDeviceFailure(deviceId);
+            chargeFailedRun(gateway, deviceId, result.failure);
           }
           try {
             const repos = getRepos();
@@ -455,11 +514,11 @@ export class KernelService {
             }
           }
           // End local trace span (fallback path)
-          endTrace(traceId, lifecycleLocalSpanId, result.success ? "ok" : "error");
-        })
-        .catch(() => {
+          endJobTelemetry(jobId, null, traceId, lifecycleLocalSpanId, result.success, result.error ?? "ok");
+        }, (err: unknown) => {
+          // Only a rejected runner.run() lands here, never this handler's own failure (N115).
+          // run() never rejects (#531); were it to, the failure is the device's, as before (fallback path).
           this.runningJobs.delete(jobId);
-          // A rejected runner.run() is a real device failure — record it (fallback path).
           gateway.recordDeviceFailure(deviceId);
           try {
             const repos = getRepos();
@@ -467,8 +526,11 @@ export class KernelService {
           } catch {
             // DB update failure is non-fatal
           }
-          // End local trace span on error (fallback path)
-          endTrace(traceId, lifecycleLocalSpanId, "error");
+          endJobTelemetry(jobId, null, traceId, lifecycleLocalSpanId, false, errorText(err));
+        })
+        .catch((err: unknown) => {
+          // The completion handling's own failure: logged, and it changes no charge and no status (N115).
+          console.error(`[kernel-service] job ${jobId}: completion handling failed: ${errorText(err)}`);
         });
     }
 

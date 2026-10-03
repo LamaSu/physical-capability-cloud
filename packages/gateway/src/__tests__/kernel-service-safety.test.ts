@@ -34,6 +34,23 @@ vi.mock("../sentry.js", () => ({
   },
 }));
 
+/** While set, the next endTrace() throws once; `ends` counts every endTrace() (N115). */
+const tracing = vi.hoisted(() => ({ failEnd: false, ends: 0 }));
+vi.mock("../tracing.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../tracing.js")>();
+  return {
+    ...real,
+    endTrace: (...args: Parameters<typeof real.endTrace>) => {
+      tracing.ends += 1;
+      if (tracing.failEnd) {
+        tracing.failEnd = false;
+        throw new Error("trace end failed");
+      }
+      return real.endTrace(...args);
+    },
+  };
+});
+
 vi.mock("../sse/stream-hub.js", () => ({
   streamHub: { publish: vi.fn(), subscribe: vi.fn(), unsubscribe: vi.fn() },
 }));
@@ -78,7 +95,7 @@ vi.mock("../contracts/batch-settlement.js", () => ({
 }));
 
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { Sentry } from "../sentry.js";
 import { KernelService } from "../services/kernel-service.js";
 import {
@@ -87,8 +104,13 @@ import {
   resetSafetyGateway,
   registerMachineAdapter,
   unregisterMachineAdapter,
+  registerSensorAdapter,
+  unregisterSensorAdapter,
+  registerCameraAdapter,
+  unregisterCameraAdapter,
+  SafetyGateway,
 } from "@pcc/kernel";
-import type { MachineAdapter, KernelConfig } from "@pcc/kernel";
+import type { MachineAdapter, KernelConfig, SensorAdapter, CameraAdapter } from "@pcc/kernel";
 
 // ── Test adapters ─────────────────────────────────────────────────────────────
 // Minimal MachineAdapter implementations. Parameters/ReturnType tricks keep the
@@ -364,5 +386,268 @@ describe("KernelService.listDevices — real health, not hardcoded", () => {
       "dev-degrade": "degraded",  // adapter idle + breaker open → degraded
       "dev-off": "offline",       // adapter offline
     });
+  });
+});
+
+// ── A failure is charged to the device it names (#5417, astra pack 227) ───────
+
+/** Completes every job at once, reporting the Tier 0 evidence: a machine that never fails. */
+class WorkingAdapter implements MachineAdapter {
+  readonly id: string;
+  readonly type = "fdm" as const;
+  readonly source: MachineAdapter["source"];
+  readonly commands: string[] = [];
+  private readonly listeners: Array<Parameters<MachineAdapter["onEvidence"]>[0]> = [];
+  constructor(id: string, kernelId: string) {
+    this.id = id;
+    this.source = { deviceId: id, deviceType: "controller", kernelId };
+  }
+  async getStatus(): ReturnType<MachineAdapter["getStatus"]> {
+    return "busy";
+  }
+  async execute(command: Parameters<MachineAdapter["execute"]>[0]): ReturnType<MachineAdapter["execute"]> {
+    this.commands.push(command.type);
+    if (command.type === "load_gcode") {
+      for (const type of ["gcode_hash_verified", "execution_completed"] as const) {
+        const event = { type, timestamp: new Date().toISOString(), source: this.source, payload: {} };
+        for (const listener of this.listeners) listener(event);
+      }
+    }
+    return { success: true };
+  }
+  async getProgress(): Promise<number> {
+    return 100;
+  }
+  onEvidence(cb: Parameters<MachineAdapter["onEvidence"]>[0]): void {
+    this.listeners.push(cb);
+  }
+  // It emits inside its commands, so nothing is outstanding once they return.
+  async quiesceEvidence(): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+/** A sensor whose start throws: its fault, never the machine's. */
+class BrokenSensor implements SensorAdapter {
+  readonly id: string;
+  readonly type = "power_monitor" as const;
+  readonly source: SensorAdapter["source"];
+  constructor(id: string, kernelId: string) {
+    this.id = id;
+    this.source = { deviceId: id, deviceType: "power_monitor", kernelId };
+  }
+  async startRecording(): Promise<void> {
+    throw new Error("sensor offline");
+  }
+  async stopRecording(): ReturnType<SensorAdapter["stopRecording"]> {
+    return { type: "power_profile_summary", timestamp: new Date().toISOString(), source: this.source, payload: {} };
+  }
+  async getCurrentReading(): Promise<Record<string, unknown>> {
+    return {};
+  }
+  onEvidence(_cb: Parameters<SensorAdapter["onEvidence"]>[0]): void {}
+  async quiesceEvidence(): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+/** A camera whose snapshot throws: its fault, never the machine's. */
+class BrokenCamera implements CameraAdapter {
+  readonly id: string;
+  readonly source: CameraAdapter["source"];
+  constructor(id: string, kernelId: string) {
+    this.id = id;
+    this.source = { deviceId: id, deviceType: "camera", kernelId };
+  }
+  async captureSnapshot(): ReturnType<CameraAdapter["captureSnapshot"]> {
+    throw new Error("lens cap on");
+  }
+  async runInspection(): ReturnType<CameraAdapter["runInspection"]> {
+    return { passed: true, confidence: 100, findings: [], imageHash: "sha256:none" };
+  }
+  onEvidence(_cb: Parameters<CameraAdapter["onEvidence"]>[0]): void {}
+  async quiesceEvidence(): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+const WORKING_TYPE = "test-working-ks-origin";
+const BROKEN_SENSOR_TYPE = "test-broken-sensor-ks-origin";
+const BROKEN_CAMERA_TYPE = "test-broken-camera-ks-origin";
+
+describe("KernelService charges a failed run to the device its JobResult names (#5417, astra pack 227)", () => {
+  beforeAll(() => {
+    try { unregisterMachineAdapter(WORKING_TYPE); } catch { /* not registered */ }
+    try { unregisterSensorAdapter(BROKEN_SENSOR_TYPE); } catch { /* not registered */ }
+    registerMachineAdapter(WORKING_TYPE, (device, _cfg, kernelId) => new WorkingAdapter(device.id, kernelId));
+    registerSensorAdapter(BROKEN_SENSOR_TYPE, (device, _cfg, kernelId) => new BrokenSensor(device.id, kernelId));
+    try { unregisterCameraAdapter(BROKEN_CAMERA_TYPE); } catch { /* not registered */ }
+    registerCameraAdapter(BROKEN_CAMERA_TYPE, (device, _cfg, kernelId) => new BrokenCamera(device.id, kernelId));
+  });
+  afterAll(() => {
+    try { unregisterMachineAdapter(WORKING_TYPE); } catch { /* already gone */ }
+    try { unregisterSensorAdapter(BROKEN_SENSOR_TYPE); } catch { /* already gone */ }
+    try { unregisterCameraAdapter(BROKEN_CAMERA_TYPE); } catch { /* already gone */ }
+  });
+
+  async function waitDone(svc: KernelService, jobId: string): Promise<void> {
+    const start = Date.now();
+    while ((await svc.getJobStatus(jobId)).status === "executing") {
+      if (Date.now() - start > 2_000) throw new Error(`job ${jobId} is still executing`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  it.each([
+    ["astra's recipe: an assurance tier outside 0..3 (configuration)", 5],
+    ["Tier 2 with no camera, so its requirements are not met (evidence)", 2],
+  ])("%s: the machine's breaker stays closed at threshold 1, and the next job is admitted", async (_what, tier) => {
+    initSafetyGateway({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
+    const gw = getSafetyGateway();
+    const svc = new KernelService({
+      kernelId: `kernel-ks-origin-${tier}`,
+      mockMode: false,
+      devices: [{ id: "dev-origin", type: "machine", adapterType: WORKING_TYPE, config: {} }],
+    });
+    await svc.submitJob({ jobId: `ks-origin-${tier}`, stepId: "s", assuranceTier: tier, deviceId: "dev-origin" });
+    await waitDone(svc, `ks-origin-${tier}`);
+    expect.soft(gw.getStatus().circuits.get("dev-origin")?.failures ?? 0, "failures charged to the machine").toBe(0);
+    expect.soft(gw.getStatus().circuits.get("dev-origin")?.state ?? "closed", "the machine's breaker").toBe("closed");
+    await expect
+      .soft(svc.submitJob({ jobId: `ks-origin-${tier}-next`, stepId: "s", assuranceTier: 0, deviceId: "dev-origin" }), "the next job's admission")
+      .resolves.toMatchObject({ status: "accepted" });
+    await waitDone(svc, `ks-origin-${tier}-next`).catch(() => {});
+  });
+
+  it("a sensor whose start throws is charged to that sensor, never to the machine", async () => {
+    initSafetyGateway({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
+    const gw = getSafetyGateway();
+    const svc = new KernelService({
+      kernelId: "kernel-ks-origin-sensor",
+      mockMode: false,
+      devices: [
+        { id: "dev-origin-m", type: "machine", adapterType: WORKING_TYPE, config: {} },
+        { id: "dev-origin-sensor", type: "sensor", adapterType: BROKEN_SENSOR_TYPE, config: {} },
+      ],
+    });
+    await svc.submitJob({ jobId: "ks-origin-sensor", stepId: "s", assuranceTier: 1, deviceId: "dev-origin-m" });
+    await waitDone(svc, "ks-origin-sensor");
+    expect.soft(gw.getStatus().circuits.get("dev-origin-m")?.failures ?? 0, "failures charged to the machine").toBe(0);
+    expect.soft(gw.getStatus().circuits.get("dev-origin-sensor")?.failures ?? 0, "failures charged to the sensor").toBe(1);
+  });
+
+  it("a camera whose snapshot throws is charged to that camera, never to the machine", async () => {
+    initSafetyGateway({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
+    const gw = getSafetyGateway();
+    const svc = new KernelService({
+      kernelId: "kernel-ks-origin-camera",
+      mockMode: false,
+      devices: [
+        { id: "dev-origin-cm", type: "machine", adapterType: WORKING_TYPE, config: {} },
+        { id: "dev-origin-camera", type: "camera", adapterType: BROKEN_CAMERA_TYPE, config: {} },
+      ],
+    });
+    await svc.submitJob({ jobId: "ks-origin-camera", stepId: "s", assuranceTier: 2, deviceId: "dev-origin-cm" });
+    await waitDone(svc, "ks-origin-camera");
+    expect.soft(gw.getStatus().circuits.get("dev-origin-cm")?.failures ?? 0, "failures charged to the machine").toBe(0);
+    expect.soft(gw.getStatus().circuits.get("dev-origin-camera")?.failures ?? 0, "failures charged to the camera").toBe(1);
+  });
+});
+
+describe("telemetry never changes a job's breaker charge or its status (N115)", () => {
+  const LC_TYPE = "test-working-ks-n115";
+  /** SafetyGateway's prototype, so a test can make one method throw once. */
+  const SafetyGatewayProto = SafetyGateway.prototype as unknown as { recordDeviceSuccess: (...args: unknown[]) => unknown };
+  beforeAll(() => {
+    try { unregisterMachineAdapter(LC_TYPE); } catch { /* not registered */ }
+    registerMachineAdapter(LC_TYPE, (device, _cfg, kernelId) => new WorkingAdapter(device.id, kernelId));
+  });
+  afterAll(() => {
+    try { unregisterMachineAdapter(LC_TYPE); } catch { /* already gone */ }
+  });
+
+  /** Runs one successful tier-0 job on its own machine; returns the machine's circuit, the 'failed' marks and unhandled rejections. */
+  async function successfulJob(kernelId: string, deviceId: string) {
+    initSafetyGateway({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
+    const gw = getSafetyGateway();
+    const markedFailed = vi.spyOn(getRepos().jobs, "updateStatus");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const endsBefore = tracing.ends;
+    let unhandled = 0;
+    const on = () => void (unhandled += 1);
+    process.on("unhandledRejection", on);
+    try {
+      const svc = new KernelService({ kernelId, mockMode: false, devices: [{ id: deviceId, type: "machine", adapterType: LC_TYPE, config: {} }] });
+      await svc.submitJob({ jobId: `${kernelId}-job`, stepId: "s", assuranceTier: 0, deviceId });
+      const start = Date.now();
+      while ((await svc.getJobStatus(`${kernelId}-job`)).status === "executing" && Date.now() - start < 2_000) await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 30));
+    } finally {
+      process.off("unhandledRejection", on);
+    }
+    const failedMarks = markedFailed.mock.calls.filter(([, status]) => status === "failed").length;
+    const handlingFailed = errors.mock.calls.filter(([line]) => typeof line === "string" && line.includes("completion handling failed")).length;
+    return { circuit: gw.getStatus().circuits.get(deviceId), failedMarks, unhandled, traceEnds: tracing.ends - endsBefore, handlingFailed };
+  }
+
+  it.each([
+    ["its lifecycle span's end() throws", { end: () => { throw new Error("span end failed"); }, setStatus: () => {} }],
+    ["its lifecycle span's setStatus() throws", { end: () => {}, setStatus: () => { throw new Error("span status failed"); } }],
+  ])("a successful job whose %s: no failure is charged, it is not marked failed, nothing is unhandled", async (_what, span) => {
+    vi.mocked(Sentry.startSpanManual).mockImplementationOnce((_o: unknown, cb: (s: object) => void) => {
+      cb(span);
+    });
+    const out = await successfulJob(`kernel-ks-n115-${_what.length}`, `dev-n115-${_what.length}`);
+    expect.soft(out.circuit?.failures ?? 0, "failures charged to the machine").toBe(0);
+    expect.soft(out.circuit?.state ?? "closed", "the machine's breaker").toBe("closed");
+    expect.soft(out.failedMarks, "the job marked failed").toBe(0);
+    expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+    // The rest of its telemetry still ends, and the throw stays telemetry's: guarded, not the handler's.
+    expect.soft(out.traceEnds, "its trace, ended").toBe(1);
+    expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(0);
+  });
+
+  it("on the fallback path, a successful job whose trace's end throws: no failure is charged, it is not marked failed, nothing is unhandled", async () => {
+    vi.mocked(Sentry.startSpanManual).mockImplementationOnce(() => {
+      throw new Error("Sentry not initialised");
+    });
+    tracing.failEnd = true;
+    const out = await successfulJob("kernel-ks-n115-fallback", "dev-n115-fallback");
+    expect.soft(tracing.failEnd, "the trace's end threw").toBe(false);
+    expect.soft(out.circuit?.failures ?? 0, "failures charged to the machine").toBe(0);
+    expect.soft(out.circuit?.state ?? "closed", "the machine's breaker").toBe("closed");
+    expect.soft(out.failedMarks, "the job marked failed").toBe(0);
+    expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+    expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(0);
+  });
+
+  it.each([
+    ["with the Sentry lifecycle span", false],
+    ["on the fallback path", true],
+  ])("a successful job whose completion handling itself throws (%s) is logged: no failure is charged, it is not marked failed, nothing is unhandled", async (_path, fallback) => {
+    if (fallback) {
+      vi.mocked(Sentry.startSpanManual).mockImplementationOnce(() => {
+        throw new Error("Sentry not initialised");
+      });
+    }
+    // Not telemetry: the success record itself throws, once, after the run resolved.
+    const real = SafetyGatewayProto.recordDeviceSuccess;
+    let thrown = false;
+    SafetyGatewayProto.recordDeviceSuccess = function (this: unknown, ...args: unknown[]) {
+      if (!thrown) {
+        thrown = true;
+        throw new Error("breaker store unavailable");
+      }
+      return real.apply(this, args as never);
+    };
+    try {
+      const out = await successfulJob(`kernel-ks-n115-handler-${fallback}`, `dev-n115-handler-${fallback}`);
+      expect.soft(thrown, "the success record threw").toBe(true);
+      expect.soft(out.circuit?.failures ?? 0, "failures charged to the machine").toBe(0);
+      expect.soft(out.failedMarks, "the job marked failed").toBe(0);
+      expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+      expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(1);
+    } finally {
+      SafetyGatewayProto.recordDeviceSuccess = real;
+    }
   });
 });
