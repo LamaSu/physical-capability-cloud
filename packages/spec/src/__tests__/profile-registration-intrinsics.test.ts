@@ -59,6 +59,59 @@ beforeAll(async () => {
   );
 }, 900_000);
 
+/**
+ * The scenarios, as a fixed inventory (astra pack 188): a recipe cannot be dropped or renamed
+ * without this failing. It covers every intrinsic registration reaches, transitively:
+ * validation's Number.isInteger (measurement-profile.ts), and plainDataCopy's Object.create,
+ * Object.defineProperty, Object.is, Object.prototype.hasOwnProperty and Reflect.apply.
+ */
+const INVENTORY = [
+  "patch: Array.prototype.map",
+  "patch: Array.prototype.filter",
+  "patch: Array.prototype.some",
+  "patch: Array.prototype.every",
+  "patch: Array.prototype.includes",
+  "patch: Array.prototype.indexOf",
+  "patch: Array.prototype.join",
+  "patch: Array.prototype.push",
+  "patch: Array.prototype.sort",
+  "patch: Array.prototype.slice",
+  "patch: Array.prototype.concat",
+  "patch: Array.prototype[Symbol.iterator]",
+  "patch: %ArrayIteratorPrototype%.next",
+  "patch: Array.isArray",
+  "patch: Object.keys",
+  "patch: Object.entries",
+  "patch: Object.values",
+  "patch: Object.assign",
+  "patch: Object.freeze",
+  "patch: Object.isFrozen",
+  "patch: Object.getOwnPropertyDescriptor",
+  "patch: Object.getPrototypeOf",
+  "patch: Object.create",
+  "patch: Object.defineProperty",
+  "patch: Object.is",
+  "patch: Reflect.ownKeys",
+  "patch: Reflect.apply",
+  "patch: JSON.stringify",
+  "patch: String",
+  "patch: Number.isFinite",
+  "patch: Number.isInteger",
+  "patch: Set.prototype.has",
+  "patch: Map.prototype.get",
+  "patch: RegExp.prototype.test",
+  "patch: String.prototype.trim",
+  "patch: String.prototype.charCodeAt",
+  "patch: String.prototype.includes",
+  "patch: Function.prototype.call",
+  "patch: Object.prototype.hasOwnProperty",
+  "patch: Hash.prototype.update",
+  "patch: Hash.prototype.digest",
+  "patch: Object.prototype.claimedDigest",
+  "patch: Object.prototype.tolerance",
+  "patch: Object.prototype.value = true",
+];
+
 /** Each request whose result changed and is not a refusal. */
 function violations(clean: Row[], patched: Row[]): string[] {
   const out: string[] = [];
@@ -76,6 +129,10 @@ function violations(clean: Row[], patched: Row[]): string[] {
 }
 
 describe("registration: nothing changed after load makes a request registrable, or changes what is stored", () => {
+  it("the scenarios are the fixed inventory, which covers every intrinsic registration reaches (astra pack 188)", () => {
+    expect(SCENARIOS).toEqual(INVENTORY);
+  });
+
   it("the clean run is what the builders say, in every realm (the harness is not vacuous)", () => {
     const reference = OUTCOMES.get(SCENARIOS[0]!)!;
     expect(reference.error).toBeUndefined();

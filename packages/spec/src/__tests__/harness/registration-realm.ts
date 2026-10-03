@@ -107,6 +107,8 @@ function buildCases(): void {
   Object.defineProperty(getter.device, "deviceId", nullDescriptor({ enumerable: true, configurable: true, get: () => CAMERA }));
   add("refused: a getter in the profile", request(getter));
   add("refused: a NaN in the profile", request(edit((x) => ((x.measurement.sampling as { minSamples: number }).minSamples = Number.NaN))));
+  // Refused only by the integer check (2.5 >= 1), so "patch: Number.isInteger" can tell a live call from the captured one.
+  add("refused: a fractional minimum sample count", request(edit((x) => (x.measurement.sampling.minSamples = 2.5))));
   add("refused: a proxy request", new Proxy(request(p), {}));
   CASES = cases;
 }
@@ -178,10 +180,16 @@ const SCENARIOS: Array<[string, Apply]> = [
   ["patch: Object.isFrozen", replace(Object, "isFrozen", () => () => true)],
   ["patch: Object.getOwnPropertyDescriptor", replace(Object, "getOwnPropertyDescriptor", () => () => undefined)],
   ["patch: Object.getPrototypeOf", replace(Object, "getPrototypeOf", () => () => null)],
+  // astra pack 188: plainDataCopy's intrinsics (it captures its own at load), each in its dangerous direction.
+  ["patch: Object.create", replace(Object, "create", () => () => ({}))],
+  ["patch: Object.defineProperty", replace(Object, "defineProperty", () => (o: unknown) => o)],
+  ["patch: Object.is", replace(Object, "is", () => () => true)],
   ["patch: Reflect.ownKeys", replace(Reflect, "ownKeys", () => () => [])],
+  ["patch: Reflect.apply", replace(Reflect, "apply", () => () => true)],
   ["patch: JSON.stringify", replace(JSON, "stringify", () => () => '"x"')],
   ["patch: String", replace(globalThis, "String", () => () => "x")],
   ["patch: Number.isFinite", replace(Number, "isFinite", () => () => true)],
+  ["patch: Number.isInteger", replace(Number, "isInteger", () => () => true)],
   ["patch: Set.prototype.has", replace(Set.prototype, "has", () => () => true)],
   ["patch: Map.prototype.get", replace(Map.prototype, "get", () => () => ({ status: "active" }))],
   ["patch: RegExp.prototype.test", replace(RegExp.prototype, "test", () => () => true)],
@@ -189,6 +197,7 @@ const SCENARIOS: Array<[string, Apply]> = [
   ["patch: String.prototype.charCodeAt", replace(String.prototype, "charCodeAt", () => () => 0x30)],
   ["patch: String.prototype.includes", replace(String.prototype, "includes", () => () => false)],
   ["patch: Function.prototype.call", replace(Function.prototype, "call", () => () => undefined)],
+  ["patch: Object.prototype.hasOwnProperty", replace(Object.prototype, "hasOwnProperty", () => () => true)],
   ["patch: Hash.prototype.update", replace(HashPrototype, "update", (o) => function (this: unknown) { return ReflectApply(o, this, ["tampered"]); })],
   ["patch: Hash.prototype.digest", replace(HashPrototype, "digest", () => () => "0".repeat(64))],
   ["patch: Object.prototype.claimedDigest", pollute(() => ({ claimedDigest: "0x" + "1".repeat(64) }))],
