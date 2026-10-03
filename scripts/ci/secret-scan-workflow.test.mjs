@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,12 +18,35 @@ const TRUSTED = readFileSync(resolve(ROOT, ".github/workflows/secret-scan.yml"),
 const CI = readFileSync(resolve(ROOT, ".github/workflows/ci.yml"), "utf8");
 const GUARD_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "trust-root-guard.mjs");
 
-/** The text of the step whose name contains `name`, up to the next step. */
+/** The text of the step whose name contains `name`, up to the next step or job (or EOF). */
 function step(workflow, name) {
   const start = workflow.indexOf(`- name: ${name}`);
   assert.ok(start >= 0, `no step named "${name}"`);
-  const next = workflow.indexOf("\n      - ", start + 1);
-  return workflow.slice(start, next < 0 ? undefined : next);
+  const next = /\n {6}- |\n {2}\S/.exec(workflow.slice(start + 1));
+  return workflow.slice(start, next ? start + 1 + next.index : undefined);
+}
+
+/** Every `run: |` script: the lines after it that are blank or indented deeper than its key. */
+function runScripts(workflow) {
+  const lines = workflow.split("\n");
+  const scripts = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^( *)run: \|$/.exec(lines[i]);
+    if (!m) continue;
+    const body = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (line.trim() !== "" && line.length - line.trimStart().length <= m[1].length) break;
+      body.push(line);
+    }
+    scripts.push(body.join("\n"));
+  }
+  return scripts;
+}
+
+/** The workflow without its comment lines. */
+function uncommented(workflow) {
+  return workflow.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
 }
 
 /** The text of the job keyed `name` directly under `jobs:`, up to the next job (or EOF). */
@@ -35,8 +58,9 @@ function job(workflow, name) {
   return next ? body.slice(0, next.index) : body;
 }
 
-test("the trusted scan runs on a merge queue's promotion commit", () => {
-  assert.match(TRUSTED, /^ {2}merge_group:\n {4}types: \[checks_requested\]$/m);
+test("the trusted scan does not run on merge_group (a queue runs workflow files a pull request can add)", () => {
+  assert.ok(!/^ {2}merge_group:/m.test(TRUSTED), "merge_group trigger");
+  assert.ok(!TRUSTED.includes("github.event.merge_group"), "a merge_group expression");
 });
 
 test("editing a pull request's title or description runs the trusted scan again", () => {
@@ -44,21 +68,19 @@ test("editing a pull request's title or description runs the trusted scan again"
   assert.ok(types.split(",").map((t) => t.trim()).includes("edited"), types);
 });
 
-test("the checkout is the base commit for a pull request and for a merge queue, never the code under test", () => {
-  const ref = /ref: (\$\{\{.*\}\})/.exec(TRUSTED)?.[1] ?? "";
-  assert.match(ref, /github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.sha/);
-  assert.match(ref, /github\.event_name == 'merge_group' && github\.event\.merge_group\.base_sha/);
-  assert.match(TRUSTED, /persist-credentials: false/);
+test("every checkout is the base commit for a pull request, never the code under test", () => {
+  const refs = [...TRUSTED.matchAll(/ref: (\$\{\{.*\}\})/g)].map((m) => m[1]);
+  assert.equal(refs.length, 3, refs.join("\n"));
+  for (const ref of refs) {
+    assert.match(ref, /github\.event\.pull_request\.base\.sha/);
+    assert.ok(!ref.includes(".head."), ref);
+  }
+  assert.equal((TRUSTED.match(/persist-credentials: false/g) || []).length, 3);
   assert.match(TRUSTED, /^permissions:\n {2}contents: read$/m);
 });
 
-test("the merge queue's head commit and every object it adds are scanned with the base's scanner", () => {
-  const s = step(TRUSTED, "Scan the merge queue's commit");
-  assert.match(s, /if: github\.event_name == 'merge_group'/);
-  assert.match(s, /HEAD_SHA: \$\{\{ github\.event\.merge_group\.head_sha \}\}/);
-  assert.match(s, /BASE_SHA: \$\{\{ github\.event\.merge_group\.base_sha \}\}/);
-  assert.match(s, /git fetch --no-tags --quiet origin "\$HEAD_SHA"/);
-  assert.match(s, /node scripts\/ci\/secret-scan\.mjs --tree "\$HEAD_SHA" --range "\$\{BASE_SHA\}\.\.\$\{HEAD_SHA\}"/);
+test("one run per pull request: a newer push or edit cancels the old run; pushes to master are never cancelled", () => {
+  assert.match(TRUSTED, /^concurrency:\n {2}group: secret-scan-\$\{\{ github\.event\.pull_request\.number \|\| github\.sha \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request_target' \}\}$/m);
 });
 
 test("the pull request's title and description are scanned, and reach the shell only through the environment", () => {
@@ -66,10 +88,14 @@ test("the pull request's title and description are scanned, and reach the shell 
   assert.match(s, /PR_TITLE: \$\{\{ github\.event\.pull_request\.title \}\}/);
   assert.match(s, /PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}/);
   assert.match(s, /node scripts\/ci\/secret-scan\.mjs --text /);
-  // No expression is expanded inside a run script (script injection).
-  for (const run of TRUSTED.split(/\n\s+run: \|\n/).slice(1)) {
-    const script = run.split(/\n {6}- /)[0];
+  // No expression is expanded inside a run script (script injection), block or one-line.
+  const scripts = runScripts(TRUSTED);
+  assert.equal(scripts.length, 4, "every block script was found");
+  for (const script of scripts) {
     assert.ok(!script.includes("${{"), `an expression inside a run script:\n${script}`);
+  }
+  for (const [, line] of TRUSTED.matchAll(/\n\s+run: (?!\|)(.*)/g)) {
+    assert.ok(!line.includes("${{"), `an expression inside a run line: ${line}`);
   }
 });
 
@@ -89,16 +115,14 @@ test("a trust-root-guard job exists", () => {
   assert.ok(job(TRUSTED, "trust-root-guard").startsWith("  trust-root-guard:"));
 });
 
-test("the trust-root-guard job does not run on push (the scan above is detection there, not prevention)", () => {
-  assert.match(job(TRUSTED, "trust-root-guard"), /if: github\.event_name != 'push'/);
+test("the trust-root-guard job runs only for a pull request (on push the scan above is detection, not prevention)", () => {
+  assert.match(job(TRUSTED, "trust-root-guard"), /\n {4}if: github\.event_name == 'pull_request_target'\n/);
 });
 
 test("the trust-root-guard job checks out only the base commit, never the head, and persists no credentials", () => {
   const guard = job(TRUSTED, "trust-root-guard");
   const ref = /ref: (\$\{\{.*\}\})/.exec(guard)?.[1] ?? "";
-  assert.match(ref, /github\.event\.pull_request\.base\.sha/);
-  assert.match(ref, /github\.event\.merge_group\.base_sha/);
-  assert.ok(!ref.includes(".head."), ref);
+  assert.equal(ref, "${{ github.event.pull_request.base.sha }}");
   assert.match(guard, /persist-credentials: false/);
 });
 
@@ -108,8 +132,8 @@ test("the trust-root-guard run step passes both SHAs through env and never inter
   assert.match(s, /BASE_SHA: \$\{\{.*\}\}/);
   assert.match(s, /git fetch --no-tags --quiet origin "\$HEAD_SHA"/);
   assert.match(s, /node scripts\/ci\/trust-root-guard\.mjs "\$BASE_SHA" "\$HEAD_SHA"/);
-  const run = s.split(/\n\s+run: \|\n/)[1] ?? "";
-  assert.ok(!run.includes("${{"), `an expression inside the run script:\n${run}`);
+  const [run] = runScripts(s);
+  assert.ok(run && !run.includes("${{"), `an expression inside the run script:\n${run}`);
 });
 
 test("the workflow grants permissions exactly once, so trust-root-guard inherits read-only too", () => {
@@ -117,11 +141,63 @@ test("the workflow grants permissions exactly once, so trust-root-guard inherits
   assert.match(TRUSTED, /^permissions:\n {2}contents: read$/m);
 });
 
-test("the header names both required checks", () => {
+test("the header names both required checks, the App as their source, and the master-only environment", () => {
   const header = TRUSTED.slice(0, TRUSTED.indexOf("\non:"));
-  assert.match(header, /required status checks? on master/);
-  assert.ok(header.includes("trusted-secret-scan"), "trusted-secret-scan");
-  assert.ok(header.includes("trust-root-guard"), "trust-root-guard");
+  assert.ok(header.includes("pcc-trusted/secret-scan"), "pcc-trusted/secret-scan");
+  assert.ok(header.includes("pcc-trusted/trust-root-guard"), "pcc-trusted/trust-root-guard");
+  assert.match(header, /with that App as their source \(its app_id\), never "any source"/);
+  assert.match(header, /environment named trusted-checks whose deployment branches are\n# +"Selected branches": master only/);
+  assert.match(header, /No merge queue/);
+});
+
+// ── The verdicts (finding 1, round 6) ───────────────────────────────────────
+// The required checks are check runs a dedicated App posts on the pull
+// request's head commit. Only the post-verdicts job can reach the App's key.
+
+const VERDICT_JOB = job(TRUSTED, "post-verdicts");
+
+test("post-verdicts waits for both jobs, runs whatever their result, and never for a cancelled run or a push", () => {
+  assert.match(VERDICT_JOB, /\n {4}needs: \[trusted-secret-scan, trust-root-guard\]\n/);
+  assert.match(VERDICT_JOB, /\n {4}if: \$\{\{ github\.event_name == 'pull_request_target' && !cancelled\(\) \}\}\n/);
+});
+
+test("post-verdicts runs in the trusted-checks environment, checks out only the base, and runs only the verdict script", () => {
+  assert.match(VERDICT_JOB, /\n {4}environment: trusted-checks\n/);
+  assert.match(VERDICT_JOB, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+  assert.match(VERDICT_JOB, /persist-credentials: false/);
+  const uses = [...VERDICT_JOB.matchAll(/uses: (\S+)/g)].map((m) => m[1]);
+  assert.deepEqual(uses, ["actions/checkout@v4"]);
+  const runs = [...VERDICT_JOB.matchAll(/\n\s+run: (.*)/g)].map((m) => m[1]);
+  assert.deepEqual(runs, ["node scripts/ci/post-trusted-verdicts.mjs"]);
+});
+
+test("post-verdicts gets every pull-request value and both job results through env, from the event and needs", () => {
+  const s = step(TRUSTED, "Post the verdicts on the pull request's head commit");
+  for (const [name, expr] of [
+    ["TRUSTED_CHECKS_APP_ID", "secrets.TRUSTED_CHECKS_APP_ID"],
+    ["TRUSTED_CHECKS_PRIVATE_KEY", "secrets.TRUSTED_CHECKS_PRIVATE_KEY"],
+    ["PR_NUMBER", "github.event.pull_request.number"],
+    ["HEAD_SHA", "github.event.pull_request.head.sha"],
+    ["PR_TITLE", "github.event.pull_request.title"],
+    ["PR_BODY", "github.event.pull_request.body"],
+    ["SCAN_RESULT", "needs.trusted-secret-scan.result"],
+    ["GUARD_RESULT", "needs.trust-root-guard.result"],
+  ]) {
+    assert.ok(s.includes(`${name}: \${{ ${expr} }}`), `${name}: ${expr}`);
+  }
+});
+
+test("only post-verdicts names a secret or the trusted-checks environment, in any workflow", () => {
+  const outside = uncommented(TRUSTED.replace(VERDICT_JOB, ""));
+  assert.ok(!outside.includes("secrets."), "a secret outside post-verdicts");
+  assert.ok(!outside.includes("trusted-checks"), "the environment outside post-verdicts");
+  const dir = resolve(ROOT, ".github/workflows");
+  for (const name of readdirSync(dir)) {
+    if (name === "secret-scan.yml") continue;
+    const text = uncommented(readFileSync(join(dir, name), "utf8"));
+    assert.ok(!text.includes("trusted-checks"), `${name} names the trusted-checks environment`);
+    assert.ok(!text.includes("TRUSTED_CHECKS_"), `${name} names a trusted-checks secret`);
+  }
 });
 
 // ── trustRootViolations (unit) ───────────────────────────────────────────────
@@ -130,27 +206,41 @@ test("trustRootViolations flags every trust-root path, deduped and sorted", () =
   assert.deepEqual(trustRootViolations(TRUST_ROOT), [...TRUST_ROOT].sort());
 });
 
-test("trustRootViolations ignores near-misses that are not exact trust-root paths", () => {
+test("trustRootViolations ignores near-misses that are not trust-root files or under a trust-root directory", () => {
   const nearMisses = [
     "scripts/ci/secret-scan.mjs.bak",
     "x/.github/workflows/secret-scan.yml",
-    ".github/workflows/secret-scan.yaml",
+    ".github/workflowsX/ci.yml",
+    ".github/workflow/ci.yml",
+    "github/workflows/ci.yml",
+    ".github/actions",
+    "x/.github/actions/a/action.yml",
     "codeowners",
     "CODEOWNERS.md",
     "scripts/ci/secret-scan.mjs/extra",
+    "scripts/ci/post-trusted-verdicts.test.mjs",
   ];
   assert.deepEqual(trustRootViolations(nearMisses), []);
 });
 
-test("trustRootViolations dedupes its hits and sorts them", () => {
+test("any file under .github/workflows/ or .github/actions/ is a trust-root change, a new one included", () => {
+  assert.deepEqual(trustRootViolations([".github/workflows/new-one.yml"]), [".github/workflows/"]);
+  assert.deepEqual(trustRootViolations([".github/workflows/ci.yml"]), [".github/workflows/"]);
+  assert.deepEqual(trustRootViolations([".github/actions/x/action.yml"]), [".github/actions/"]);
+});
+
+test("trustRootViolations returns fixed entries, deduped and sorted, never a changed path", () => {
   const hits = trustRootViolations([
     "scripts/ci/trust-root-guard.mjs",
     "unrelated/file.ts",
     ".github/CODEOWNERS",
     "scripts/ci/trust-root-guard.mjs",
+    ".github/workflows/a.yml",
+    ".github/workflows/b.yml",
     "CODEOWNERS",
   ]);
-  assert.deepEqual(hits, [".github/CODEOWNERS", "CODEOWNERS", "scripts/ci/trust-root-guard.mjs"]);
+  assert.deepEqual(hits, [".github/CODEOWNERS", ".github/workflows/", "CODEOWNERS", "scripts/ci/trust-root-guard.mjs"]);
+  for (const hit of hits) assert.ok(TRUST_ROOT.includes(hit), hit);
 });
 
 // ── trust-root-guard.mjs, the CLI (end to end against a real git repo) ─────
@@ -159,6 +249,11 @@ test("trustRootViolations dedupes its hits and sorts them", () => {
 // own default), commits trust-root files once as `base`, then commits a
 // change on a fresh branch and runs the real script against both commit ids.
 
+/** A file that stands for a trust-root entry: the file itself, or one inside a directory entry. */
+function fileFor(trustPath) {
+  return trustPath.endsWith("/") ? `${trustPath}existing.yml` : trustPath;
+}
+
 function buildRepo() {
   const dir = mkdtempSync(join(tmpdir(), "trust-root-guard-"));
   const git = (args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
@@ -166,7 +261,7 @@ function buildRepo() {
   git(["config", "user.email", "trust-root-guard-test@example.com"]);
   git(["config", "user.name", "trust-root-guard-test"]);
   for (const trustPath of TRUST_ROOT) {
-    const abs = join(dir, trustPath);
+    const abs = join(dir, fileFor(trustPath));
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, `${trustPath}\n`);
   }
@@ -202,7 +297,7 @@ for (const trustPath of TRUST_ROOT) {
   test(`trust-root-guard exits 1 and lists ${trustPath} when a change touches it`, () => {
     const repo = buildRepo();
     try {
-      const head = commitChange(repo, () => appendFileSync(join(repo.dir, trustPath), "touched\n"));
+      const head = commitChange(repo, () => appendFileSync(join(repo.dir, fileFor(trustPath)), "touched\n"));
       const r = runGuard(repo.dir, [repo.base, head]);
       assert.equal(r.status, 1);
       assert.ok(r.stdout.includes(trustPath), r.stdout);
@@ -211,6 +306,19 @@ for (const trustPath of TRUST_ROOT) {
     }
   });
 }
+
+test("trust-root-guard exits 1 when a change ADDS a workflow file (it could name the trusted-checks environment)", () => {
+  const repo = buildRepo();
+  try {
+    const head = commitChange(repo, () => writeFileSync(join(repo.dir, ".github/workflows/added.yml"), "on: push\n"));
+    const r = runGuard(repo.dir, [repo.base, head]);
+    assert.equal(r.status, 1);
+    assert.ok(r.stdout.includes(".github/workflows/"), r.stdout);
+    assert.ok(!r.stdout.includes("added.yml"), "a changed path was printed");
+  } finally {
+    removeRepo(repo);
+  }
+});
 
 test("trust-root-guard exits 0 when a change is unrelated to the trust root", () => {
   const repo = buildRepo();
@@ -248,6 +356,21 @@ test("trust-root-guard exits 1 when a change deletes .github/CODEOWNERS", () => 
     const r = runGuard(repo.dir, [repo.base, head]);
     assert.equal(r.status, 1);
     assert.ok(r.stdout.includes(".github/CODEOWNERS"), r.stdout);
+  } finally {
+    removeRepo(repo);
+  }
+});
+
+test("a workflow file named with an injected workflow command is caught, and its name is never printed", () => {
+  const repo = buildRepo();
+  try {
+    const head = commitChange(repo, () => writeFileSync(join(repo.dir, ".github/workflows/x\n::error::injected.yml"), "x\n"));
+    const r = runGuard(repo.dir, [repo.base, head]);
+    assert.equal(r.status, 1);
+    for (const line of (r.stdout + r.stderr).split("\n")) {
+      assert.ok(!line.startsWith("::"), `a workflow-command line: ${JSON.stringify(line)}`);
+    }
+    assert.ok(!r.stdout.includes("injected"), r.stdout);
   } finally {
     removeRepo(repo);
   }

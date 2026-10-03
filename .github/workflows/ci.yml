@@ -35,7 +35,7 @@ jobs:
           node-version: 22
 
       - name: Secret-scan self-test
-        run: node --test scripts/ci/secret-scan.test.mjs scripts/ci/secret-scan-workflow.test.mjs scripts/ci/smoke-digital-verifier.test.mjs
+        run: node --test scripts/ci/secret-scan.test.mjs scripts/ci/secret-scan-workflow.test.mjs scripts/ci/smoke-digital-verifier.test.mjs scripts/ci/post-trusted-verdicts.test.mjs
 
       - name: Scan the commit tree and every object this change adds
         env:

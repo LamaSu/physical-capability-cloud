@@ -1,15 +1,17 @@
 #!/usr/bin/env node
-// Board row N44, round 5: the trust-root guard for the enforcing secret scan.
+// Board row N44, rounds 5 and 6: the trust-root guard for the enforcing secret scan.
 //
 // The trusted scan (.github/workflows/secret-scan.yml) is only as good as its
-// definition. On merge_group GitHub runs that workflow file from the queue's
-// commit, which carries the pull request's own changes, so a pull request that
-// edits the file (or the scanner it calls) could swap the scan for a no-op that
-// passes. This guard fails any change that touches the trust root. It runs on
-// pull_request_target, where GitHub takes the job's definition from the base
-// branch, and on every push to the pull request (synchronize), so a no-op
-// swapped in after an approval fails as well. Landing a trust-root change then
-// needs the operator to override this required check knowingly.
+// definition, and its verdicts are posted by an App whose key any workflow file
+// on master can reach (the trusted-checks environment admits master only, not a
+// particular file). So the trust root is the scan, the guard, the verdict
+// script, CODEOWNERS, and every workflow file and local action. This guard
+// fails any change that touches it. It runs on pull_request_target, where
+// GitHub takes the job's definition from the base branch, and on every push to
+// the pull request (synchronize), so a no-op swapped in after an approval fails
+// as well. Its result reaches the pull request's head commit only through the
+// trusted App (pcc-trusted/trust-root-guard). Landing a trust-root change then
+// needs the operator to override that required check knowingly.
 //
 // Usage: node scripts/ci/trust-root-guard.mjs <base-sha> <head-sha>
 //   Lists the paths that <head-sha> changes since its merge base with
@@ -22,20 +24,34 @@ import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-/** The files that decide what the enforcing scan checks. GitHub reads CODEOWNERS from any of three places. */
+/**
+ * What decides the enforcing scan's verdict. An entry ending in "/" is a
+ * directory: every path under it. GitHub reads CODEOWNERS from any of three places.
+ */
 export const TRUST_ROOT = Object.freeze([
-  ".github/workflows/secret-scan.yml",
+  ".github/workflows/",
+  ".github/actions/",
   "scripts/ci/secret-scan.mjs",
   "scripts/ci/trust-root-guard.mjs",
+  "scripts/ci/post-trusted-verdicts.mjs",
   ".github/CODEOWNERS",
   "CODEOWNERS",
   "docs/CODEOWNERS",
 ]);
 
-/** The trust-root paths among `changedPaths`, sorted and without repeats. Exact matches only. */
+/** Whether `path` is the trust-root entry `entry`, or lies under it when it is a directory. */
+function inEntry(path, entry) {
+  return entry.endsWith("/") ? path.startsWith(entry) : path === entry;
+}
+
+/**
+ * The TRUST_ROOT entries that `changedPaths` touch, sorted and without repeats.
+ * It returns entries from the fixed list, never a changed path, so no file name
+ * chosen by a pull request is ever printed.
+ */
 export function trustRootViolations(changedPaths) {
-  const root = new Set(TRUST_ROOT);
-  return [...new Set(changedPaths)].filter((path) => root.has(path)).sort();
+  const paths = [...new Set(changedPaths)];
+  return TRUST_ROOT.filter((entry) => paths.some((path) => inEntry(path, entry))).sort();
 }
 
 const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
