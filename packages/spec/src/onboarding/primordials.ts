@@ -159,6 +159,11 @@ export function toLowerCase(s: string): string {
   return StringPrototypeToLowerCase(s);
 }
 
+/** The UTF-16 code unit of `s` at `index` (NaN past the end), through the charCodeAt captured at load. */
+export function charCodeAt(s: string, index: number): number {
+  return StringPrototypeCharCodeAt(s, index);
+}
+
 export function regexMatches(re: RegExp, s: string): boolean {
   return RegExpPrototypeExec(re, s) !== null;
 }
