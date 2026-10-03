@@ -84,8 +84,9 @@ export class KernelService {
     // This guarantees the singleton exists before submitJob can be called.
     initSafetyGateway();
     this.initAdapters();
-    // Also load any DB-registered devices for this kernel so test-job lands
-    // on the operator's REAL device, not the KERNEL_CONFIG mock fallback.
+    // Also load any DB-registered devices for this kernel so test-job runs the
+    // adapter registered for the operator's device, not the KERNEL_CONFIG mock
+    // fallback. (Whether that adapter is serving real I/O is deviceIsSimulated.)
     this.loadDbDevicesIntoRuntime();
     // Cache finalized bundles so we can pass them to the settlement service
     this.emitter.onBundle((bundle) => {
@@ -221,15 +222,27 @@ export class KernelService {
   }
 
   /**
-   * Whether the loaded runner for `deviceId` is a simulator/mock rather than
-   * real hardware. Used by /api/setup/test-job so a simulated completion is
-   * never reported as passed. Returns true when nothing real is loaded.
-   * (Authoritative physical verification is D4a, #428, against the kernel's
-   * registered key; this only keeps an obvious simulator from passing.)
+   * Whether the loaded runner for `deviceId` is serving simulation right now.
+   * Used by /api/setup/test-job so a simulated completion is never reported
+   * as passed (N59 round 3). The authoritative marker is the adapter's own
+   * evidence source, `source.simulated`. Every mock adapter sets it, and so
+   * does any adapter in mockMode (OctoPrint, IPP and the rest). IPP also sets
+   * it at the moment it downgrades to mock because its real transport is
+   * missing. So the caller reads this AFTER the run, and a downgrade during
+   * the run counts. An unknown device, an adapter with no evidence source, a
+   * non-boolean marker, or a mock-like class name also counts as simulated
+   * (fail closed). This says what the adapter is doing, not what hardware is
+   * attached: physical verification against the kernel's registered key is
+   * D4a, #428.
    */
   deviceIsSimulated(deviceId: string): boolean {
     const machine = this.machines.get(deviceId);
     if (!machine) return true;
+    const source: unknown = machine.source;
+    if (typeof source !== "object" || source === null) return true; // nothing to read a marker from
+    const marker = (source as { simulated?: unknown }).simulated;
+    if (marker === true) return true;
+    if (marker !== undefined && marker !== false) return true; // anything but a clean false is not "real"
     return /mock|chatterbox|stub|simulat|fake/i.test(machine.constructor?.name ?? "");
   }
 

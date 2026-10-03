@@ -707,10 +707,13 @@ export async function setupRoutes(app: FastifyInstance) {
     //   - a device on that kernel must be named and loaded in THIS gateway's
     //     runtime — otherwise the gateway cannot run it and says so;
     //   - a deviceless self-attestation is never reported as a pass.
-    // The reply carries ran/passed: `ran` is true only when a real adapter
-    // executed here, and `passed` only when that run completed. A run that
-    // verifies against the kernel's registered key (D4a, #428) will tighten
-    // `passed` further when it lands; this route never loosens it.
+    // The reply carries ran/passed. `ran` is true only when the device's
+    // adapter executed in this gateway. `passed` is true only when that run
+    // completed AND the adapter was not serving simulation
+    // (deviceIsSimulated, read after the run). Neither proves which physical
+    // machine is attached: the route checks recorded ownership and local
+    // dispatch. A run verified against the kernel's registered key (D4a, #428)
+    // will tighten `passed` when it lands; this route never loosens it.
     if (!kernelId || typeof kernelId !== "string") {
       return reply.code(400).send({
         error: "kernel_id_required",
@@ -921,10 +924,12 @@ export async function setupRoutes(app: FastifyInstance) {
       }
     }
 
-    // A real adapter ran here (ran:true). It passes only when that run reached
-    // "completed" AND the device is not a simulator (N59 F2: a mock/simulated
-    // adapter's completion is not a hardware pass). "failed", "unknown" (ran
-    // without DB tracking) and a poll timeout are not passes either.
+    // The device's adapter ran here (ran:true). It passes only when that run
+    // reached "completed" AND the adapter was not serving simulation. N59 F2:
+    // a mock, mockMode or downgraded adapter's completion is not a hardware
+    // pass. This is judged now, after the run, from the adapter's own
+    // source.simulated marker. "failed", "unknown" (ran without DB tracking)
+    // and a poll timeout are not passes either.
     const simulated = deviceRow.adapterType === "mock" || svc.deviceIsSimulated(deviceId);
     return {
       jobId,
