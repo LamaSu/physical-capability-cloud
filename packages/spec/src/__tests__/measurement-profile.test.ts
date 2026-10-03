@@ -6,8 +6,10 @@
  * parameter or tolerance change must not authorize under the old digest.
  */
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import {
   MEASUREMENT_PROFILE_DOMAIN,
@@ -609,6 +611,38 @@ describe("plain-data boundary: no inherited values, and -0 is 0 (astra packs 124
 });
 
 // ── astra (pack 154, gpt-5.6-sol): no code supplied with the data runs during the copy ──
+describe("plain-data boundary: the proxy check is Node's, and the module stays browser-bundleable", () => {
+  it("in Node the trap-free proxy check is present, so the boundary is active", async () => {
+    const { isProxy } = await import("../util/plain-data.js");
+    expect(typeof isProxy).toBe("function");
+    expect(isProxy!(new Proxy({}, {}))).toBe(true);
+    expect(isProxy!({})).toBe(false);
+  });
+
+  it("plain-data.ts has no static node:util import (the dashboard's browser build has no node:util; CI run 37090398492)", () => {
+    const source = readFileSync(fileURLToPath(new URL("../util/plain-data.ts", import.meta.url)), "utf8");
+    expect(source).not.toMatch(/from\s+["']node:util["']|require\(\s*["']node:util["']\s*\)/);
+  });
+
+  it("without a trap-free proxy check (a browser, or Node before 20.16), every object is refused, never copied unchecked", async () => {
+    const runtime = process as unknown as { getBuiltinModule?: unknown };
+    const original = runtime.getBuiltinModule;
+    runtime.getBuiltinModule = undefined;
+    try {
+      vi.resetModules();
+      const fresh = await import("../util/plain-data.js");
+      expect(fresh.isProxy).toBeNull();
+      const copy = fresh.plainDataCopy({ a: 1 });
+      expect(copy.ok).toBe(false);
+      expect(copy.ok ? "" : copy.reason).toMatch(/no trap-free proxy check/);
+      expect(fresh.plainDataCopy("text")).toEqual({ ok: true, value: "text" });
+    } finally {
+      runtime.getBuiltinModule = original;
+      vi.resetModules();
+    }
+  });
+});
+
 describe("plain-data boundary: writing the copy runs no inherited setter (astra pack 158)", () => {
   it("astra's recipe: a setter on Array.prototype[0] never runs while the copy is built, and cannot substitute a value", () => {
     let ran = false;
