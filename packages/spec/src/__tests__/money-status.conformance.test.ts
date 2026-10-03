@@ -22,7 +22,7 @@ import path from "node:path";
 import vm from "node:vm";
 import {
   MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
-  classifySettlementRead, SETTLEMENT_READ_ROUTE, SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText,
+  classifySettlementRead, SETTLEMENT_READ_ROUTE, SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText,
 } from "../money/money-status.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -46,6 +46,7 @@ type KitRegion = {
   SAFE_STATUS_WORDS: Record<string, boolean>;
   SAFE_MONEY_STATUS_WORDS: Record<string, boolean>;
   statusPillText: (raw: unknown, verified: boolean, money: boolean) => string;
+  reportedText: (raw: unknown, verified: boolean, money: boolean) => string;
 };
 
 function extractRegion(): KitRegion {
@@ -59,7 +60,7 @@ function extractRegion(): KitRegion {
       " this.settlementLabel = settlementLabel; this.isMoneyData = isMoneyData; this.dataStatusClass = dataStatusClass;" +
       " this.VNEXT_UNIT_STATES = VNEXT_UNIT_STATES; this.VNEXT_STATE_PRESENTATION = VNEXT_STATE_PRESENTATION; this.VNEXT_PHASE = VNEXT_PHASE;" +
       " this.settlementRecordClass = settlementRecordClass; this.settlementReadClass = settlementReadClass; this.SETTLEMENT_READ_ROUTE = SETTLEMENT_READ_ROUTE;" +
-      " this.SAFE_STATUS_WORDS = SAFE_STATUS_WORDS; this.SAFE_MONEY_STATUS_WORDS = SAFE_MONEY_STATUS_WORDS; this.statusPillText = statusPillText;",
+      " this.SAFE_STATUS_WORDS = SAFE_STATUS_WORDS; this.SAFE_MONEY_STATUS_WORDS = SAFE_MONEY_STATUS_WORDS; this.statusPillText = statusPillText; this.reportedText = reportedText;",
     ctx,
   );
   return ctx as unknown as KitRegion;
@@ -778,6 +779,21 @@ describe("astra r4 (#313): the pill-text rule, kit == spec", () => {
     expect(statusPillText("running!", false, false)).toBe("reported status: running! - status unverified");
     expect(statusPillText("running!", false, true)).toBe("reported status: running! - settlement unconfirmed");
   });
+  it("astra r6 F12: the same free-text message rule over adversarial inputs, every combination of verified x money", () => {
+    const inputs: unknown[] = [...ADVERSARIAL, "Payout released to payee", "PAID", "Printing layer 3", "", "p\u0430id", 42, ["paid"]];
+    for (const x of inputs) {
+      for (const v of [true, false]) for (const money of [true, false]) {
+        expect(kit.reportedText(x, v, money), JSON.stringify(x) + " v=" + v + " money=" + money).toBe(reportedText(x, v, money));
+      }
+    }
+  });
+  it("what the message rule says", () => {
+    expect(reportedText("Payout released to payee", false, true)).toBe("reported: Payout released to payee - settlement unconfirmed");
+    expect(reportedText("Payout released to payee", false, false)).toBe("reported: Payout released to payee");
+    expect(reportedText("pending", false, true)).toBe("reported: pending - settlement unconfirmed"); // no vocabulary for messages
+    expect(reportedText("Payout released to payee", true, true)).toBe("Payout released to payee"); // a verified payee payment
+    expect(reportedText("", false, true)).toBe("");
+  });
 });
 
 // -- astra round 5 on #313 @d82cde8b (verify before fix): F7, F8, F9 -----------------------------
@@ -913,7 +929,8 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
       (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "funded", message: "Payout released to payee" } : null));
     await flush();
     const latest = document.querySelector(".pcc-run-latest") as HTMLElement;
-    expect(latest.textContent).toBe("reported status: Payout released to payee - settlement unconfirmed");
+    // astra r6 F12: a free-text message is attributed to its source (reportedText), not called a status.
+    expect(latest.textContent).toBe("reported: Payout released to payee - settlement unconfirmed");
   });
 
   it("F8 residual (HIGH): an SSE feed line from ev.type is qualified on a money surface, never bare", async () => {
@@ -977,16 +994,109 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
     expect(timelineRows()).toEqual(["reported status: REFUNDED - settlement unconfirmed"]);
   });
 
-  it("F8 residual non-money control: a job run keeps its free-text latest line and event kinds as sent", async () => {
+  // astra r6 (#313 @3b2e6e38): F10-F12, verify before fix. X1-X3 are the same class, found by a
+  // sink inventory (every kit line that renders bound server text), not by astra.
+  const LC9 = { unitState: 9, finalState: "SETTLED_REFUNDED", isTerminal: true, isAllocated: false, phase: "settled" };
+  const latestText = () => (document.querySelector(".pcc-run-latest") as HTMLElement).textContent;
+
+  it("r6 F10 (HIGH): a VERIFIED refund vouches for no payment claim (run latest line)", async () => {
+    bootRead(man([{ kind: "run", binding: { path: LC_LIVE }, statusFrom: "finalState", latestFrom: "message" }]),
+      (u) => (new URL(u).pathname === LC_LIVE ? { ...LC9, message: "PAID" } : null));
+    await flush();
+    expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className).toContain("st-refunded");
+    expect(latestText()).not.toBe("PAID");
+  });
+
+  it("r6 F10 (HIGH): a VERIFIED refund vouches for no payment claim (receipt timeline)", async () => {
+    bootRead(man([{ kind: "receipt", binding: { path: RC_LIVE } }]),
+      (u) => (new URL(u).pathname === RC_LIVE
+        ? { finalState: "SETTLED_REFUNDED", isAllocated: false, phase: "settled", events: [{ type: "PAID" }] }
+        : null));
+    await flush();
+    expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-refunded");
+    expect(timelineRows()).not.toContain("PAID");
+  });
+
+  it("r6 F11 (HIGH): a snapshot timeline shows no bare claim, in the feed or the latest line", async () => {
+    boot({}, man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "message" }]),
+      { _ts: "2026-09-24T00:00:00Z", "/api/escrow/e1": { status: "FUNDED", timeline: [{ type: "PAID" }] } });
+    await flush();
+    expect(feedLines()).not.toContain("PAID");
+    expect(latestText()).not.toBe("PAID");
+  });
+
+  it("r6 F11 (HIGH): a live poll's timeline shows no bare claim in the feed", async () => {
+    bootRead(man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "message" }]),
+      (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "FUNDED", timeline: [{ type: "PAYOUT_RELEASED" }, { note: "paid" }] } : null));
+    await flush();
+    expect(feedLines()).not.toContain("PAYOUT_RELEASED");
+    expect(feedLines()).not.toContain('{"note":"paid"}');
+  });
+
+  it("r6 F11 positive control: a VERIFIED payee payment's live poll timeline stays plain (no contradiction with the green pill)", async () => {
+    const LC8T = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled", timeline: [{ type: "SETTLED_RELEASED" }] };
+    bootRead(man([{ kind: "run", binding: { path: LC_LIVE }, statusFrom: "finalState", latestFrom: "phase" }]),
+      (u) => (new URL(u).pathname === LC_LIVE ? LC8T : null));
+    await flush();
+    expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className).toContain("st-settled");
+    expect(feedLines()).toEqual(["SETTLED_RELEASED"]);
+  });
+
+  it("r6 F12 (HIGH): a non-money run's free-text message is source-qualified, not bare", async () => {
+    bootRead(man([{ kind: "run", binding: { path: "/api/jobs/j1" }, statusFrom: "status", latestFrom: "message" }]),
+      (u) => (new URL(u).pathname === "/api/jobs/j1" ? { status: "running", message: "Payout released to payee" } : null));
+    await flush();
+    expect(latestText()).not.toBe("Payout released to payee");
+  });
+
+  it("r6 F12 (HIGH): a non-money SSE event kind uses the closed vocabulary, not bare", async () => {
+    const ssePath = "/sse/stream/jobs/j1";
+    bootSSE(man([{ kind: "run", binding: { path: "/api/jobs/j1", sse: ssePath }, statusFrom: "status", latestFrom: "message" }]), ssePath, { type: "PAID" });
+    await flush();
+    await flush();
+    expect(feedLines()).not.toContain("PAID");
+  });
+
+  it("r6 X1 (same class): a money list's status-like META field is not shown bare", async () => {
+    bootRead(man([{ kind: "list", binding: { path: "/api/escrow" }, item: { title: "id", meta: ["status"] } }]),
+      (u) => (new URL(u).pathname === "/api/escrow" ? [{ id: "e1", status: "PAID" }] : null));
+    await flush();
+    const meta = (document.querySelector(".pcc-list-meta") as HTMLElement).textContent;
+    expect(meta).not.toBe("PAID");
+  });
+
+  it("r6 X2 (same class): a money list's status-bound TITLE is not shown bare", async () => {
+    bootRead(man([{ kind: "list", binding: { path: "/api/escrow" }, item: { title: "state" } }]),
+      (u) => (new URL(u).pathname === "/api/escrow" ? [{ id: "e1", state: "RELEASED" }] : null));
+    await flush();
+    const title = (document.querySelector(".pcc-list-title") as HTMLElement).textContent;
+    expect(title).not.toBe("RELEASED");
+  });
+
+  it("r6 X3 (same class): a metric selecting a status field is not shown bare", async () => {
+    bootRead(man([{ kind: "metric", label: "Escrow", binding: { path: "/api/escrow/e1" }, select: "status" }]),
+      (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "PAID" } : null));
+    await flush();
+    const val = (document.querySelector(".pcc-metric-amount") as HTMLElement).textContent;
+    expect(val).not.toBe("PAID");
+  });
+
+  // astra r6 F12 replaced this control's old expectations (a non-money message and event kind were shown
+  // as sent). Now: a message is attributed to its source, and an event kind takes the closed vocabulary.
+  it("F8 residual non-money control (astra r6 F12): a job run's message is attributed and its event kinds take the vocabulary", async () => {
     bootRead(man([{ kind: "run", binding: { path: "/api/jobs/j1" }, statusFrom: "status", latestFrom: "message" }]),
       (u) => (new URL(u).pathname === "/api/jobs/j1" ? { status: "running", message: "Printing layer 3" } : null));
     await flush();
-    expect((document.querySelector(".pcc-run-latest") as HTMLElement).textContent).toBe("Printing layer 3");
+    expect((document.querySelector(".pcc-run-latest") as HTMLElement).textContent).toBe("reported: Printing layer 3");
 
     const ssePath = "/sse/stream/jobs/j1";
     bootSSE(man([{ kind: "run", binding: { path: "/api/jobs/j1", sse: ssePath }, statusFrom: "status", latestFrom: "message" }]), ssePath, { type: "log" });
     await flush();
     await flush();
-    expect(feedLines()).toEqual(["log"]);
+    expect(feedLines()).toEqual(["reported status: log - status unverified"]);
+    bootSSE(man([{ kind: "run", binding: { path: "/api/jobs/j1", sse: ssePath }, statusFrom: "status", latestFrom: "message" }]), ssePath, { type: "running" });
+    await flush();
+    await flush();
+    expect(feedLines()).toEqual(["running"]); // a safe word stays plain
   });
 });

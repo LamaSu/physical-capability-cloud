@@ -542,6 +542,14 @@
     if (k !== '' && ownKey(safe, k)) return t;
     return 'reported status: ' + t + (money ? UNCONFIRMED_SUFFIX : UNVERIFIED_SUFFIX);
   }
+  // A free-text server MESSAGE outside a pill (astra r6 F12): never PCC's own claim, so it is attributed
+  // to its source, and on money data it says the settlement is unconfirmed. Callers pass `verified` only
+  // for a VERIFIED PAYEE PAYMENT, never a verified refund (astra r6 F10). Mirrors the spec's reportedText.
+  function reportedText(raw, verified, money) {
+    var t = raw == null ? '' : String(raw);
+    if (verified || t === '') return t;
+    return 'reported: ' + t + (money ? UNCONFIRMED_SUFFIX : '');
+  }
   // The TEXT of a data status pill (list rows, run windows), paired with dataStatusClass. Money data shows
   // the classifier's honest label, and a VERIFIED final (a live read of an exact settlement route) keeps
   // its plain name. Anything else is the value itself, qualified when it claims money moved.
@@ -822,6 +830,19 @@
   // Window renderers — one per manifest window kind (schema-closed set)
   // ═══════════════════════════════════════════════════════════════════════
 
+  // A binding path whose last segment names a status field (status, state, phase): its value is a status
+  // LABEL, so it takes the closed-vocabulary text rule wherever it is shown (astra r6).
+  function isStatusPath(p) {
+    return typeof p === 'string' && /status|state|phase/i.test(p.split('.').pop() || '');
+  }
+  // A bound value shown as plain text (a list title or meta field, a metric): a status field takes the
+  // closed-vocabulary rule (astra r6, the F8/F11 class); anything else (a name, an id, an amount) is shown
+  // as sent. Never verified: these windows read collections, snapshots or single values, not a live
+  // settlement read model.
+  function boundText(path, v, money) {
+    return isStatusPath(path) ? statusPillText(v, false, money) : String(v);
+  }
+
   // note — prose; split on double newline into <p>, textContent only.
   function renderNote(ctx, w) {
     var wrap = el('article', 'pcc-win pcc-win-note');
@@ -843,7 +864,8 @@
     resolveBinding(ctx, w.binding).then(function (r) {
       var raw = sel != null ? dot(r.data, sel) : r.data;
       if (r.error) { clear(wrap._body); wrap._body.appendChild(errorLine(r.error)); }
-      else val.textContent = fmtVal(raw, w.format);
+      else val.textContent = isStatusPath(sel) && raw != null && typeof raw !== 'object'
+        ? boundText(sel, raw, isMoneyData(w.binding && w.binding.path, r.data)) : fmtVal(raw, w.format);
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
     return wrap;
@@ -895,12 +917,14 @@
         var row = rows[i];
         var li = el('li', 'pcc-list-row');
         var main = el('div', 'pcc-list-main');
-        main.appendChild(el('span', 'pcc-list-title', String(dot(row, w.item.title) != null ? dot(row, w.item.title) : (w.item.title || ''))));
+        var rowMoney = isMoneyData(w.binding && w.binding.path, row);
+        var tv = dot(row, w.item.title);
+        main.appendChild(el('span', 'pcc-list-title', tv != null ? boundText(w.item.title, tv, rowMoney) : String(w.item.title || '')));
         var metaVals = [];
         var metaKeys = (w.item.meta || []);
         for (var j = 0; j < metaKeys.length; j++) {
           var mv = dot(row, metaKeys[j]);
-          if (mv != null && mv !== '') metaVals.push(String(mv));
+          if (mv != null && mv !== '') metaVals.push(boundText(metaKeys[j], mv, rowMoney));
         }
         if (metaVals.length) main.appendChild(el('span', 'pcc-list-meta', metaVals.join(' · ')));
         li.appendChild(main);
@@ -1051,18 +1075,19 @@
         // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
         pill.textContent = 'unknown'; pill.className = 'pcc-pill st-unknown';
       }
+      // Secondary text (the latest line, timeline and feed lines) is plain only on a VERIFIED PAYEE
+      // PAYMENT: a V-next record whose live exact read is st-settled. A verified refund proves the payees
+      // were NOT paid, so it vouches for no other claim (astra r6 F10).
+      var payeeVerified = isVNextRecord(data) && cls === 'st-settled';
       if (latestVal != null && latestVal !== '') {
-        // The latest line (astra r5 F8). On a MONEY surface every latest line, a free-text message
-        // included, passes the fail-closed text rule. It is plain only for a money-safe word, or when
-        // this read is a VERIFIED final, so it never contradicts the green pill. On a non-money surface,
-        // status-sourced text (the status path itself, or a status/state/phase field) gets the neutral
-        // qualifier, and a free-text message is shown as the server sent it.
+        // The latest line, on every surface (astra r5 F8, r6 F12). Status-sourced text (the status path
+        // itself, or a status/state/phase field) is a label, so it takes the closed vocabulary; anything
+        // else is a free-text message, attributed to its source.
         var money = isMoneyData(bpath, data);
-        var latestIsStatus = typeof w.latestFrom === 'string' &&
-          (w.latestFrom === w.statusFrom || /status|state|phase/i.test(w.latestFrom.split('.').pop() || ''));
-        var verifiedFinal = isVNextRecord(data) && (cls === 'st-settled' || cls === 'st-refunded');
-        latest.textContent = money || latestIsStatus ? statusPillText(latestVal, verifiedFinal, money) : String(latestVal);
+        var latestIsStatus = typeof w.latestFrom === 'string' && (w.latestFrom === w.statusFrom || isStatusPath(w.latestFrom));
+        latest.textContent = latestIsStatus ? statusPillText(latestVal, payeeVerified, money) : reportedText(latestVal, payeeVerified, money);
       }
+      return payeeVerified;
     }
     function feedLine(txt) {
       var line = el('div', 'pcc-mono pcc-feed-line', txt);
@@ -1079,8 +1104,11 @@
       if (stat == null && !isVNextRecord(snap)) pill.textContent = 'snapshot';
       var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
       if (Array.isArray(tl) && tl.length) {
-        for (var ti = 0; ti < tl.length; ti++) feedLine((tl[ti].timestamp ? fmtTs(tl[ti].timestamp) + ' · ' : '') + (tl[ti].type || ''));
-        latest.textContent = String(tl[tl.length - 1].type || latest.textContent); // last event = latest truth
+        // Timeline entries are labels (astra r6 F11): the closed vocabulary, never verified in a snapshot.
+        var snapMoney = isMoneyData(w.binding.path, snap);
+        for (var ti = 0; ti < tl.length; ti++) feedLine((tl[ti].timestamp ? fmtTs(tl[ti].timestamp) + ' \u00b7 ' : '') + statusPillText(tl[ti].type || '', false, snapMoney));
+        var lastType = tl[tl.length - 1].type; // last event = latest truth
+        if (lastType != null && lastType !== '') latest.textContent = statusPillText(lastType, false, snapMoney);
       }
       wrap._setFoot(null, true);
       clearInterval(tick); elapsed.textContent = '';
@@ -1092,10 +1120,15 @@
     function poll(delay) {
       if (stopped) return;
       ctx.tx.getJSON(w.binding.path, w.binding.query).then(function (d) {
-        apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, true);
-        // timeline feed if the response carries one
+        var payeeVerified = apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, true);
+        // Timeline feed, if the response carries one. Each entry (its type, or the raw entry) is a label:
+        // the closed vocabulary, plain only on a verified payee payment (astra r6 F10, F11).
         var tl = dot(d, 'timeline') || dot(d, 'job.timeline');
-        if (Array.isArray(tl)) { clear(feed); for (var i = 0; i < tl.length; i++) feedLine((tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' · ' : '') + (tl[i].type || JSON.stringify(tl[i]))); }
+        if (Array.isArray(tl)) {
+          clear(feed);
+          var pollMoney = isMoneyData(w.binding.path, d);
+          for (var i = 0; i < tl.length; i++) feedLine((tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' \u00b7 ' : '') + statusPillText(tl[i].type || JSON.stringify(tl[i]), payeeVerified, pollMoney));
+        }
         wrap._setFoot(ctx.tx.lastTrace, false);
         setTimeout(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }, w.binding.pollMs || POLL_DEFAULT_MS);
       }, function () {
@@ -1111,13 +1144,11 @@
       ctx.tx.streamSSE(w.binding.sse, function (ev) {
         apply(dot(ev, w.statusFrom) != null ? dot(ev, w.statusFrom) : ev.status,
               dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev, false, false);
-        // The feed line (astra r5 F8). On a money surface every label (the event's type, its status or
-        // the raw event) passes the fail-closed text rule. On a non-money surface a status label gets the
-        // neutral qualifier and an event kind is shown as sent. A stream event is never a verified read.
+        // The feed line (astra r5 F8, r6 F12). Every label (the event's type, its status or the raw
+        // event) takes the closed vocabulary on every surface. A stream event is never a verified read.
         var feedMoney = isMoneyData(w.binding && w.binding.path, ev);
         var label = ev.type || ev.status || JSON.stringify(ev);
-        var shown = feedMoney || (!ev.type && ev.status != null) ? statusPillText(label, false, feedMoney) : String(label);
-        feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' \u00b7 ' : '') + shown);
+        feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' \u00b7 ' : '') + statusPillText(label, false, feedMoney));
         wrap._setFoot(ctx.tx.lastTrace, false);
       }).catch(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }); // stream dropped → poll
     } else {
@@ -1241,6 +1272,7 @@
       // The pill text may not claim more than the class (F6): only a verified final keeps its plain name;
       // "no settlement state" is PCC's own text.
       var recVerified = isVNextRecord(e) && (rec[0] === 'st-settled' || rec[0] === 'st-refunded');
+      var payeePaid = isVNextRecord(e) && rec[0] === 'st-settled'; // secondary text: payee payment only
       railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], recVerified || (!isVNextRecord(e) && e.status == null), true)));
       if (rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', ' ' + rec[1]));
       if (e.rail) railRow.appendChild(el('span', 'pcc-muted', ' · ' + String(e.rail)));
@@ -1253,10 +1285,10 @@
           var ev = events[i];
           var li = el('li', 'pcc-timeline-row');
           // Each entry is a server claim about this money record (astra r5 F8). Its label (type, name or
-          // status) passes the fail-closed text rule, and is plain only when this receipt is a VERIFIED
-          // final, like its pill. 'event' is PCC's own placeholder.
+          // status) takes the closed vocabulary, plain only on a VERIFIED PAYEE PAYMENT: a verified refund
+          // keeps its own pill text but vouches for no entry (astra r6 F10). 'event' is PCC's own placeholder.
           var evRaw = ev.type || ev.name || ev.status;
-          var evTxt = evRaw != null && evRaw !== '' ? statusPillText(evRaw, recVerified, true) : 'event';
+          var evTxt = evRaw != null && evRaw !== '' ? statusPillText(evRaw, payeePaid, true) : 'event';
           li.appendChild(el('span', 'pcc-timeline-type', evTxt));
           if (ev.timestamp) li.appendChild(el('span', 'pcc-mono pcc-timeline-ts', fmtTs(ev.timestamp)));
           tl.appendChild(li);

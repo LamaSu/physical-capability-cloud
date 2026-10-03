@@ -347,6 +347,20 @@ export function statusPillText(raw: unknown, verified: boolean, money: boolean):
   return "reported status: " + t + (money ? UNCONFIRMED_SUFFIX : UNVERIFIED_SUFFIX);
 }
 
+/**
+ * The text of a free-text server MESSAGE shown outside a pill, such as a run window's latest line (astra
+ * r6 F12). A message cannot be checked against a vocabulary, so it is never presented as PCC's own claim:
+ * it is attributed to its source ("reported: ..."), and on money data it also says the settlement is
+ * unconfirmed. Only `verified` shows it plainly, and for any secondary text (a message, a timeline entry,
+ * a latest line) callers pass a VERIFIED PAYEE PAYMENT there, never a verified refund: a refund proves the
+ * payees were NOT paid, so it vouches for no other claim (astra r6 F10).
+ */
+export function reportedText(raw: unknown, verified: boolean, money: boolean): string {
+  const t = raw == null ? "" : String(raw);
+  if (verified || t === "") return t;
+  return "reported: " + t + (money ? UNCONFIRMED_SUFFIX : "");
+}
+
 // ── Coverage ───────────────────────────────────────────────────────────────
 // The `satisfies` on FLAT is the compile-time guarantee. These records list the same keys for
 // the runtime coverage test (the dashboard DTO and context-pack vocabularies are listed there).
