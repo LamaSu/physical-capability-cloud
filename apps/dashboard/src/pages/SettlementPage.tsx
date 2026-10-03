@@ -7,135 +7,120 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store";
 import { getAuthHeaders } from "../stores/auth-store.js";
+import {
+  LOADING,
+  UNREACHABLE,
+  UNREACHABLE_REASON,
+  averageOpsPerBatch,
+  operationsInBatches,
+  createFlushController,
+  epochDetailNote,
+  epochsFromResponse,
+  flushConfirmation,
+  flushOutcome,
+  formatUsdcBaseUnits,
+  statusFromResponse,
+  triggerBadge,
+  type EpochSummary,
+  type QueueStatus,
+  type Read,
+} from "../lib/settlement-queue-view.js";
 
-// ── Types ───────────────────────────────────────────────────────
+// Every number on this page is the gateway's (GET /api/settlement/status and /epochs). A read
+// that fails shows "—" and the gateway's reason; an empty epoch history is shown as empty.
 
-interface QueueStatus {
-  batchEnabled: boolean;
-  pending: number;
-  totalValue: string;
-  oldestAge: number;
-  autoFlush: boolean;
-  smartAccountAddress: string | null;
+async function readJson(r: Response): Promise<unknown> {
+  try {
+    return await r.json();
+  } catch {
+    return null;
+  }
 }
 
-interface BatchDetail {
-  userOpHash: string;
-  operationCount: number;
-  trigger: string;
+async function loadStatus(): Promise<Read<QueueStatus>> {
+  try {
+    const r = await fetch("/api/settlement/status", { headers: { ...getAuthHeaders() } });
+    return statusFromResponse(r.status, await readJson(r));
+  } catch {
+    return UNREACHABLE;
+  }
 }
 
-interface EpochSummary {
-  epochId: number;
-  batches: BatchDetail[];
-  totalIntents: number;
-  byAgent: Record<string, number>;
-  byOperation: Record<string, number>;
-  startedAt: number;
-  completedAt: number;
+async function loadEpochs(): Promise<Read<EpochSummary[]>> {
+  try {
+    const r = await fetch("/api/settlement/epochs", { headers: { ...getAuthHeaders() } });
+    return epochsFromResponse(r.status, await readJson(r));
+  } catch {
+    return UNREACHABLE;
+  }
 }
 
-// ── Mock Data ───────────────────────────────────────────────────
-
-const MOCK_STATUS: QueueStatus = {
-  batchEnabled: true,
-  pending: 7,
-  totalValue: "342000000",
-  oldestAge: 45_000,
-  autoFlush: true,
-  smartAccountAddress: "0x91E60e0613810449d098b0b5Ec8b51A0FE8c8985",
-};
-
-const MOCK_EPOCHS: EpochSummary[] = [
-  {
-    epochId: 5,
-    batches: [
-      { userOpHash: "0xabc123...def456", operationCount: 12, trigger: "age" },
-    ],
-    totalIntents: 12,
-    byAgent: { "user-agent": 3, "kernel-agent-1": 5, "kernel-agent-2": 4 },
-    byOperation: { submitEvidence: 5, release: 4, depositBond: 3 },
-    startedAt: Date.now() - 600_000,
-    completedAt: Date.now() - 599_200,
-  },
-  {
-    epochId: 4,
-    batches: [
-      { userOpHash: "0x789abc...123def", operationCount: 8, trigger: "value" },
-    ],
-    totalIntents: 8,
-    byAgent: { "user-agent": 2, "broker-agent": 1, "kernel-agent-1": 5 },
-    byOperation: { submitEvidence: 3, release: 3, fund: 2 },
-    startedAt: Date.now() - 1_200_000,
-    completedAt: Date.now() - 1_199_500,
-  },
-  {
-    epochId: 3,
-    batches: [
-      { userOpHash: "0xdef789...abc123", operationCount: 23, trigger: "size" },
-    ],
-    totalIntents: 23,
-    byAgent: { "kernel-agent-1": 10, "kernel-agent-2": 8, "user-agent": 5 },
-    byOperation: { submitEvidence: 12, release: 8, depositBond: 3 },
-    startedAt: Date.now() - 2_400_000,
-    completedAt: Date.now() - 2_398_100,
-  },
-];
-
-// ── Component ───────────────────────────────────────────────────
+const DASH = "—";
 
 export function SettlementPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const [status, setStatus] = React.useState<QueueStatus>(MOCK_STATUS);
-  const [epochs, setEpochs] = React.useState<EpochSummary[]>(MOCK_EPOCHS);
+  const [status, setStatus] = React.useState<Read<QueueStatus>>(LOADING);
+  const [epochs, setEpochs] = React.useState<Read<EpochSummary[]>>(LOADING);
   const [flushing, setFlushing] = React.useState(false);
+  const [confirmingFlush, setConfirmingFlush] = React.useState(false);
+  const [flushResult, setFlushResult] = React.useState<{ ok: boolean; message: string } | null>(null);
   const [selectedEpoch, setSelectedEpoch] = React.useState<number | null>(null);
 
   React.useEffect(() => {
     setPageMeta("Settlement", "ERC-4337 Batch Settlement");
   }, [setPageMeta]);
 
-  // Try to fetch live data, fall back to mock
-  React.useEffect(() => {
-    fetch("/api/settlement/status", { headers: { ...getAuthHeaders() } })
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.batchEnabled !== undefined) setStatus(data);
-      })
-      .catch(() => {}); // keep mock
-
-    fetch("/api/settlement/epochs", { headers: { ...getAuthHeaders() } })
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.epochs?.length) setEpochs(data.epochs);
-      })
-      .catch(() => {});
+  const reload = React.useCallback(async () => {
+    const [s, e] = await Promise.all([loadStatus(), loadEpochs()]);
+    setStatus(s);
+    setEpochs(e);
   }, []);
 
-  const handleFlush = async () => {
-    setFlushing(true);
-    try {
-      await fetch("/api/settlement/flush", { method: "POST", headers: { ...getAuthHeaders() } });
-      // Refresh status
-      const r = await fetch("/api/settlement/status", { headers: { ...getAuthHeaders() } });
-      const data = await r.json();
-      if (data.batchEnabled !== undefined) setStatus(data);
-    } catch {
-      // Ignore
-    } finally {
-      setFlushing(false);
-    }
+  React.useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  // Framework-free controller (M5): a synchronous in-flight guard, and `flushing` stays true
+  // through the authoritative reload (not just the POST), so a second confirm mid-reload can
+  // never fire another POST off a stale queue status. Built once — `reload` is itself stable.
+  const [flushController] = React.useState(() =>
+    createFlushController<{ ok: boolean; message: string }>({
+      post: async () => {
+        const r = await fetch("/api/settlement/flush", { method: "POST", headers: { ...getAuthHeaders() } });
+        return flushOutcome(r.status, await readJson(r));
+      },
+      reload,
+      onResult: (result) => setFlushResult(result),
+      onError: () => setFlushResult({ ok: false, message: UNREACHABLE_REASON }),
+      // The flush answered, but the queue and epochs could not be re-read: both reads say so.
+      onReloadError: () => {
+        setStatus(UNREACHABLE);
+        setEpochs(UNREACHABLE);
+      },
+      onFlushingChange: (f) => {
+        setFlushing(f);
+        if (f) setFlushResult(null);
+      },
+    }),
+  );
+
+  const handleFlush = () => {
+    void flushController.confirmFlush();
   };
 
-  const totalSettled = epochs.reduce((s, e) => s + e.totalIntents, 0);
-  const totalBatches = epochs.reduce((s, e) => s + e.batches.length, 0);
-  const avgOpsPerBatch = totalBatches > 0
-    ? Math.round(totalSettled / totalBatches)
-    : 0;
+  const q = status.state === "read" ? status.value : null;
+  const list = epochs.state === "read" ? epochs.value : null;
+  const statusNote = status.state === "unavailable" ? status.reason : status.state === "loading" ? "Loading…" : null;
+  const epochsNote = epochs.state === "unavailable" ? epochs.reason : epochs.state === "loading" ? "Loading…" : null;
 
-  const selected = selectedEpoch !== null
-    ? epochs.find((e) => e.epochId === selectedEpoch)
-    : null;
+  // Operations the epochs' UserOperations carried; an epoch with no batch carried none (M3).
+  const opsInBatches = list ? operationsInBatches(list) : null;
+  const totalBatches = list ? list.reduce((s, e) => s + e.batches.length, 0) : null;
+  const avgOpsPerBatch = list ? averageOpsPerBatch(list) : null;
+  const queueValue = q ? formatUsdcBaseUnits(q.totalValue) : null;
+  const canFlush = !flushing && q !== null && q.batchEnabled && q.pending > 0;
+
+  const selected = list && selectedEpoch !== null ? list.find((e) => e.epochId === selectedEpoch) ?? null : null;
 
   return (
     <div className="space-y-6 p-6">
@@ -144,56 +129,58 @@ export function SettlementPage() {
         <GlassPanel>
           <DataCell
             label="Queue Depth"
-            value={status.pending.toString()}
-            sub={status.autoFlush ? "auto-flush on" : "manual only"}
+            value={q ? q.pending.toString() : DASH}
+            sub={q ? (q.autoFlush ? "auto-flush on" : "manual only") : statusNote ?? ""}
           />
         </GlassPanel>
         <GlassPanel>
           <DataCell
             label="Queue Value"
-            value={`$${(parseInt(status.totalValue) / 1_000_000).toFixed(2)}`}
-            sub="USDC pending"
+            value={queueValue !== null ? `${queueValue} USDC` : DASH}
+            sub={q ? "recorded on queued operations" : statusNote ?? ""}
           />
         </GlassPanel>
         <GlassPanel>
           <DataCell
-            label="Epochs Settled"
-            value={epochs.length.toString()}
-            sub={`${totalSettled} total ops`}
+            label="Epochs Flushed"
+            value={list ? list.length.toString() : DASH}
+            sub={list ? `${opsInBatches} ops carried by UserOperations; since the gateway's last restart` : epochsNote ?? ""}
           />
         </GlassPanel>
         <GlassPanel>
           <DataCell
             label="Avg Ops/Batch"
-            value={avgOpsPerBatch.toString()}
-            sub={`${avgOpsPerBatch}x throughput`}
+            value={avgOpsPerBatch !== null ? avgOpsPerBatch.toString() : DASH}
+            sub={avgOpsPerBatch !== null ? "operations per UserOperation" : list ? "no batches yet" : epochsNote ?? ""}
           />
         </GlassPanel>
         <GlassPanel>
           <DataCell
             label="Status"
-            value={status.batchEnabled ? "Active" : "Disabled"}
-            sub={status.batchEnabled ? "ERC-4337" : "Set PCC_BUNDLER_URL"}
+            value={q ? (q.batchEnabled ? "Active" : "Disabled") : DASH}
+            sub={q ? (q.batchEnabled ? "ERC-4337" : "Set PCC_BUNDLER_URL") : statusNote ?? ""}
           />
         </GlassPanel>
       </div>
 
       {/* Smart Account + Flush */}
       <div className="grid grid-cols-3 gap-4">
-        <GlassPanel glow="green" className="col-span-2">
+        <GlassPanel glow={q?.smartAccountAddress ? "green" : "none"} className="col-span-2">
           <div className="space-y-3">
             <p className="text-[10px] uppercase tracking-wider text-white/40">
               Smart Account
             </p>
-            {status.smartAccountAddress ? (
+            {!q ? (
+              <p className="text-sm text-white/50">{statusNote}</p>
+            ) : q.smartAccountAddress ? (
               <div className="space-y-2">
                 <div className="flex items-center gap-3">
-                  <AddressDisplay address={status.smartAccountAddress} chars={10} />
+                  <AddressDisplay address={q.smartAccountAddress} chars={10} />
                   <GlowBadge color="green">ERC-4337</GlowBadge>
                 </div>
                 <p className="text-xs text-white/50">
-                  All agent settlements route through this smart account.
-                  Operations are batched into single UserOperations for {avgOpsPerBatch}x throughput.
+                  Agent settlements route through this smart account, batched into UserOperations
+                  {avgOpsPerBatch !== null ? ` (${avgOpsPerBatch} operations per batch on average in the epochs below)` : ""}.
                 </p>
               </div>
             ) : (
@@ -210,20 +197,48 @@ export function SettlementPage() {
               Manual Flush
             </p>
             <button
-              onClick={handleFlush}
-              disabled={flushing || status.pending === 0}
+              onClick={() => setConfirmingFlush(true)}
+              disabled={!canFlush || confirmingFlush}
               className={`w-full rounded-lg px-4 py-2.5 text-sm font-medium transition-all ${
-                flushing || status.pending === 0
+                !canFlush
                   ? "bg-white/5 text-white/30 cursor-not-allowed"
                   : "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 border border-emerald-500/30"
               }`}
             >
-              {flushing ? "Flushing..." : `Flush ${status.pending} ops`}
+              {flushing ? "Flushing..." : q ? `Flush ${q.pending} ops` : "Flush"}
             </button>
+            {confirmingFlush && q && (
+              <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+                <p className="text-xs text-amber-200/90">{flushConfirmation(q)}</p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setConfirmingFlush(false);
+                      void handleFlush();
+                    }}
+                    disabled={!canFlush}
+                    className="flex-1 rounded-lg border border-amber-500/40 bg-amber-500/20 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30"
+                  >
+                    Confirm flush
+                  </button>
+                  <button
+                    onClick={() => setConfirmingFlush(false)}
+                    className="flex-1 rounded-lg bg-white/5 px-3 py-1.5 text-xs text-white/60 hover:bg-white/10"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {flushResult && (
+              <p className={`text-xs ${flushResult.ok ? "text-emerald-400/80" : "text-red-400/80"}`}>{flushResult.message}</p>
+            )}
             <p className="text-[10px] text-white/40">
-              {status.autoFlush
-                ? "Auto-flush triggers on size, value, or age thresholds"
-                : "Auto-flush disabled — manual only"}
+              {!q
+                ? statusNote
+                : q.autoFlush
+                  ? "Auto-flush triggers on size, value, or age thresholds"
+                  : "Auto-flush disabled — manual only"}
             </p>
           </div>
         </GlassPanel>
@@ -233,56 +248,55 @@ export function SettlementPage() {
       <div className="grid grid-cols-3 gap-4">
         <div className="col-span-2 space-y-3">
           <p className="text-[10px] uppercase tracking-wider text-white/40">
-            Epoch History
+            Epoch History (kept in the gateway's memory: since its last restart, at most the last 100)
           </p>
-          {epochs.map((epoch) => (
-            <GlassPanel
-              key={epoch.epochId}
-              hover
-              glow={selectedEpoch === epoch.epochId ? "green" : "none"}
-              onClick={() =>
-                setSelectedEpoch(
-                  selectedEpoch === epoch.epochId ? null : epoch.epochId,
-                )
-              }
-              className="cursor-pointer"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="text-sm font-mono text-emerald-400">
-                    #{epoch.epochId}
-                  </span>
-                  <span className="text-sm text-white/80">
-                    {epoch.totalIntents} ops in{" "}
-                    {epoch.batches.length} batch{epoch.batches.length !== 1 ? "es" : ""}
-                  </span>
-                  <GlowBadge
-                    color={
-                      epoch.batches[0]?.trigger === "size"
-                        ? "teal"
-                        : epoch.batches[0]?.trigger === "value"
-                          ? "gold"
-                          : "gray"
-                    }
-                  >
-                    {epoch.batches[0]?.trigger ?? "manual"}
-                  </GlowBadge>
-                </div>
-                <div className="flex items-center gap-4 text-xs text-white/40">
-                  <span>
-                    {(epoch.completedAt - epoch.startedAt).toFixed(0)}ms
-                  </span>
-                  <span>
-                    {new Date(epoch.startedAt).toLocaleTimeString()}
-                  </span>
-                </div>
-              </div>
+          {list === null && (
+            <GlassPanel>
+              <p className="text-sm text-white/40 text-center py-4">{epochsNote}</p>
             </GlassPanel>
-          ))}
-          {epochs.length === 0 && (
+          )}
+          {list?.map((epoch) => {
+            const badge = triggerBadge(epoch);
+            return (
+              <GlassPanel
+                key={epoch.epochId}
+                hover
+                glow={selectedEpoch === epoch.epochId ? "green" : "none"}
+                onClick={() =>
+                  setSelectedEpoch(
+                    selectedEpoch === epoch.epochId ? null : epoch.epochId,
+                  )
+                }
+                className="cursor-pointer"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm font-mono text-emerald-400">
+                      #{epoch.epochId}
+                    </span>
+                    <span className="text-sm text-white/80">
+                      {epoch.batches.length === 0
+                        ? `${epoch.totalIntents} intents; no UserOperation carried them`
+                        : `${operationsInBatches([epoch])} ops in ${epoch.batches.length} batch${epoch.batches.length !== 1 ? "es" : ""}`}
+                    </span>
+                    <GlowBadge color={badge.color}>{badge.label}</GlowBadge>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs text-white/40">
+                    <span>
+                      {epoch.durationMs === null ? "duration unknown: the gateway's clock moved back" : `${epoch.durationMs}ms`}
+                    </span>
+                    <span>
+                      {new Date(epoch.startedAt).toLocaleTimeString()}
+                    </span>
+                  </div>
+                </div>
+              </GlassPanel>
+            );
+          })}
+          {list !== null && list.length === 0 && (
             <GlassPanel>
               <p className="text-sm text-white/40 text-center py-4">
-                No epochs yet. Submit settlements and flush to see history.
+                No epoch has been flushed since the gateway last started.
               </p>
             </GlassPanel>
           )}
@@ -297,7 +311,7 @@ export function SettlementPage() {
             <>
               <GlassPanel>
                 <p className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-                  By Agent
+                  Intents by Agent
                 </p>
                 <div className="space-y-1.5">
                   {Object.entries(selected.byAgent).map(([agent, count]) => (
@@ -315,7 +329,7 @@ export function SettlementPage() {
               </GlassPanel>
               <GlassPanel>
                 <p className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-                  By Operation
+                  Intents by Operation
                 </p>
                 <div className="space-y-1.5">
                   {Object.entries(selected.byOperation).map(([op, count]) => (
@@ -348,7 +362,7 @@ export function SettlementPage() {
           ) : (
             <GlassPanel>
               <p className="text-sm text-white/30 text-center py-8">
-                Click an epoch to see breakdown
+                {epochDetailNote(epochs)}
               </p>
             </GlassPanel>
           )}
