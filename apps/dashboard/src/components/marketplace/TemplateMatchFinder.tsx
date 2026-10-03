@@ -2,16 +2,108 @@ import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { GlassPanel, GlowBadge } from "@pcc/ui";
 
-const API_ROOT = (import.meta.env.VITE_PCC_URL ?? "");
+import { gatewayUrl } from "../../lib/gateway-base.js";
 
-interface TemplateMatch {
+/** What POST /api/capabilities/templates/match returns per template: a score, not the template. */
+interface MatchScore {
+  slug: string;
+  score: number;
+  reason: string;
+}
+
+/** A GET /api/orchestrator/templates entry: the template's own name, description and class. */
+interface TemplateEntry {
   slug: string;
   display_name: string;
   description: string;
-  produces_kind: string;
   capability_class: "physical" | "digital";
+}
+
+/**
+ * A match joined with its directory entry. The match route returns only
+ * {slug, score, reason}, so name, description and class come from the
+ * template directory. When the directory can't be read, or doesn't list the
+ * slug, they are null and the card says so. It never renders a blank name or
+ * a guessed class.
+ */
+interface TemplateMatch {
+  slug: string;
+  display_name: string | null;
+  description: string | null;
+  capability_class: "physical" | "digital" | null;
   score: number;
   reason: string;
+}
+
+/**
+ * A directory entry needs real display fields, not just the right types —
+ * an empty display_name/description would otherwise pass straight through
+ * the `?? fallback` below (nullish coalescing doesn't catch ""). An entry
+ * failing this is dropped from the map by the same per-entry `.filter`
+ * readDirectory already used for wrong-shaped rows, so its slug reads as
+ * absent, hitting the existing "details missing" path (slug name, no class,
+ * "Template details couldn't be loaded from the gateway.") that an unlisted
+ * slug already gets — rather than failing the whole directory read over one
+ * bad row among what may be many good ones.
+ */
+function isTemplateEntry(v: unknown): v is TemplateEntry {
+  const t = v as Partial<TemplateEntry> | null;
+  return (
+    !!t &&
+    typeof t.slug === "string" &&
+    t.slug.length > 0 &&
+    typeof t.display_name === "string" &&
+    t.display_name.length > 0 &&
+    typeof t.description === "string" &&
+    t.description.length > 0 &&
+    (t.capability_class === "physical" || t.capability_class === "digital")
+  );
+}
+
+/** A match row is usable only with a real slug, a real reason, and a score that's actually a [0,1] fraction. */
+function isMatchScore(v: unknown): v is MatchScore {
+  const m = v as Partial<MatchScore> | null;
+  return (
+    !!m &&
+    typeof m.slug === "string" &&
+    m.slug.length > 0 &&
+    typeof m.reason === "string" &&
+    m.reason.length > 0 &&
+    typeof m.score === "number" &&
+    Number.isFinite(m.score) &&
+    m.score >= 0 &&
+    m.score <= 1
+  );
+}
+
+/**
+ * All-or-nothing: the match route returns one ranked batch, so one malformed
+ * row (an out-of-range score, an empty reason) means the whole batch can't be
+ * trusted. Filtering just that row out — the old behavior — would render the
+ * remaining rows as a complete, confidently-ranked answer when it isn't one,
+ * or render the empty-array "No matches" state when every row was bad, which
+ * claims a real zero-result search rather than a failed read.
+ */
+function parseMatchScores(matches: unknown[]): MatchScore[] | null {
+  const result: MatchScore[] = [];
+  for (const m of matches) {
+    if (!isMatchScore(m)) return null;
+    result.push(m);
+  }
+  return result;
+}
+
+/** The template directory by slug, or null when it can't be read. */
+async function readDirectory(): Promise<Map<string, TemplateEntry> | null> {
+  try {
+    const res = await fetch(gatewayUrl("/api/orchestrator/templates"));
+    if (!res.ok) return null;
+    const body = (await res.json()) as { templates?: unknown };
+    if (!Array.isArray(body.templates)) return null;
+    return new Map(body.templates.filter(isTemplateEntry).map((t) => [t.slug, t]));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -34,17 +126,41 @@ export function TemplateMatchFinder() {
     setError(null);
     setMatches(null);
     try {
-      const res = await fetch(`${API_ROOT}/api/capabilities/templates/match`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: query }),
-      });
+      const [res, directory] = await Promise.all([
+        fetch(gatewayUrl("/api/capabilities/templates/match"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ input: query }),
+        }),
+        readDirectory(),
+      ]);
       if (!res.ok) {
         setError(`HTTP ${res.status}`);
         return;
       }
-      const data = (await res.json()) as { matches: TemplateMatch[] };
-      setMatches(data.matches ?? []);
+      const data = (await res.json()) as { matches?: unknown };
+      if (!Array.isArray(data.matches)) {
+        setError("Unexpected response from /api/capabilities/templates/match");
+        return;
+      }
+      const scores = parseMatchScores(data.matches);
+      if (!scores) {
+        setError("Unexpected response from /api/capabilities/templates/match");
+        return;
+      }
+      setMatches(
+        scores.map((m) => {
+          const entry = directory?.get(m.slug);
+          return {
+            slug: m.slug,
+            score: m.score,
+            reason: m.reason,
+            display_name: entry?.display_name ?? null,
+            description: entry?.description ?? null,
+            capability_class: entry?.capability_class ?? null,
+          };
+        }),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -95,16 +211,18 @@ export function TemplateMatchFinder() {
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-white/80">{m.display_name}</span>
-                  <GlowBadge color={m.capability_class === "physical" ? "green" : "gold"}>
-                    {m.capability_class}
-                  </GlowBadge>
+                  <span className="text-sm font-medium text-white/80">{m.display_name ?? m.slug}</span>
+                  {m.capability_class && (
+                    <GlowBadge color={m.capability_class === "physical" ? "green" : "gold"}>{m.capability_class}</GlowBadge>
+                  )}
                 </div>
                 <span className="text-xs font-mono text-white/40">
                   match {(m.score * 100).toFixed(0)}%
                 </span>
               </div>
-              <p className="text-xs text-white/40 leading-snug">{m.description}</p>
+              <p className="text-xs text-white/40 leading-snug">
+                {m.description ?? "Template details couldn't be loaded from the gateway."}
+              </p>
               <p className="text-[10px] text-white/30 italic">{m.reason}</p>
             </button>
           ))}

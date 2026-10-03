@@ -1,4 +1,4 @@
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 import type { JobExecutionDTO } from "@pcc/spec";
 import type {
   CapabilityDTO,
@@ -11,6 +11,7 @@ import type {
   DriftAlertDTO,
   EvidenceSummaryDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../types/dto.js";
 
 const BASE_URL = "/api";
@@ -34,11 +35,10 @@ export class ApiError extends Error {
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...getAuthHeaders(),
     ...(sessionId ? { "x-pcc-session": sessionId } : {}),
   };
 
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await authorizedFetch(`${BASE_URL}${path}`, {
     ...options,
     headers: { ...headers, ...options?.headers },
   });
@@ -202,6 +202,11 @@ export const api = {
   getEscrow: (escrowId: string) =>
     fetchAPI<{ escrow: unknown; source: "on-chain" | "db" }>(`/escrow/${escrowId}`),
 
+  // ── Account ───────────────────────────────────────────────────────────────
+
+  /** Where the calling key's operator stands: identity, scopes, keys, work. */
+  getAgentMe: () => fetchAPI<AgentMeDTO>("/agent/me"),
+
   // ── Agents ────────────────────────────────────────────────────────────────
 
   getConversations: () => fetchAPI<{ conversations: unknown[] }>("/agents/conversations"),
@@ -242,11 +247,10 @@ export const api = {
     max_tokens?: number;
     stream?: boolean;
   }): Promise<Response> =>
-    fetch(`${BASE_URL}/agent/chat`, {
+    authorizedFetch(`${BASE_URL}/agent/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...getAuthHeaders(),
         ...(sessionId ? { "x-pcc-session": sessionId } : {}),
       },
       body: JSON.stringify(body),

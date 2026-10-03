@@ -74,6 +74,11 @@ export async function statusRoutes(app: FastifyInstance) {
     let devices: unknown[] = [];
     let registrations: unknown[] = [];
     let capabilities: unknown[] = [];
+    // Per-section read failures (astra 408b F1). Every field above still
+    // defaults to [] so older dashboards see no shape change; this is purely
+    // additive. A name here means that collection's facade returned
+    // success:false, or its repository read threw — NOT that it's empty.
+    const unavailable: string[] = [];
 
     // kernels + jobs via facades (standardized Result<T> — never throws)
     const kernelResult = await kernelFacade.list();
@@ -83,21 +88,40 @@ export async function statusRoutes(app: FastifyInstance) {
       for (const k of kernelResult.data as Array<{ id: string; devices?: unknown[] }>) {
         if (Array.isArray(k.devices)) devices.push(...k.devices);
       }
+    } else {
+      unavailable.push("kernels");
     }
 
     const jobResult = await jobFacade.list();
     if (jobResult.success) {
       jobs = jobResult.data.items;
+    } else {
+      unavailable.push("jobs");
     }
 
-    // evidence, registrations, capabilities have no facade getter — stay inline
+    // evidence, registrations, capabilities have no facade getter — stay inline.
+    // Each gets its own try/catch so one repo's failure doesn't mask the
+    // other two as unavailable when they actually succeeded.
     try {
       const repos = getRepos();
-      evidence = repos.evidence.findAll();
-      registrations = repos.registrations?.findAll?.() ?? [];
-      capabilities = repos.capabilities?.findAll?.() ?? [];
+      try {
+        evidence = repos.evidence.findAll();
+      } catch {
+        unavailable.push("evidence");
+      }
+      try {
+        registrations = repos.registrations?.findAll?.() ?? [];
+      } catch {
+        unavailable.push("registrations");
+      }
+      try {
+        capabilities = repos.capabilities?.findAll?.() ?? [];
+      } catch {
+        unavailable.push("capabilities");
+      }
     } catch {
-      // DB not ready
+      // DB not ready at all: none of the three repository reads above ran.
+      unavailable.push("evidence", "registrations", "capabilities");
     }
 
     const agentBridgeReady = isAgentBridgeReady();
@@ -132,6 +156,9 @@ export async function statusRoutes(app: FastifyInstance) {
         ESCROW_CONTRACT_ADDRESS: process.env.ESCROW_CONTRACT_ADDRESS ?? null,
         NODE_ENV: process.env.NODE_ENV ?? null,
       },
+      // Additive (astra 408b F1): which db.* collections above are empty
+      // because their read failed, not because there's nothing to list.
+      unavailable,
     };
   });
 
