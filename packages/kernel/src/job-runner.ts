@@ -264,8 +264,9 @@ export class JobRunner {
               { name: "job.stop_sensors", op: "job.phase", attributes: { "job.id": jobId } },
               async () => {
                 for (const sensor of this.sensors) {
-                  recording.delete(sensor);
                   await sensor.stopRecording();
+                  // Only once stopped: a stop that fails is made again on the failure path.
+                  recording.delete(sensor);
                 }
               },
             );
@@ -357,7 +358,13 @@ export class JobRunner {
       if (!quiesceAsked) {
         quiesceAsked = true;
         for (const sensor of recording) {
-          sensor.stopRecording().catch((err: unknown) => console.error(`[job-runner] stopping sensor ${sensor.id} after a failed run:`, err));
+          // A stop that throws, or rejects, is logged: it cannot abort this cleanup.
+          const failed = (err: unknown) => console.error(`[job-runner] stopping sensor ${sensor.id} after a failed run:`, err);
+          try {
+            Promise.resolve(sensor.stopRecording()).catch(failed);
+          } catch (err) {
+            failed(err);
+          }
         }
         try {
           await session.quiesce(this.evidenceQuiesceTimeoutMs);
