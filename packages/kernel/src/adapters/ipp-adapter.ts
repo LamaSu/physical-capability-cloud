@@ -281,7 +281,7 @@ export class IppAdapter implements MachineAdapter {
         // Simulate print job: each page takes ~1200ms, job completes in 3-5 seconds
         this.simulatePrintJob(jobId, jobName, totalPages);
 
-        return { success: true, message: `Print job ${jobId} submitted (mock)` };
+        return { success: true, message: `Print job ${jobId} submitted (mock)`, data: { jobId } };
       }
 
       case "stop": {

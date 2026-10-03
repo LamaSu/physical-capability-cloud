@@ -128,9 +128,16 @@ describe("IppAdapter — execute()", () => {
 
   it("start returns success with jobId", async () => {
     const adapter = makeAdapter();
+    const started: Array<Record<string, unknown>> = [];
+    adapter.onEvidence((e) => {
+      if (e.type === "execution_started") started.push(e.payload);
+    });
     const result = await adapter.execute(makeCommand("start", { jobName: "invoice.pdf", totalPages: 2 }));
     expect(result.success).toBe(true);
     expect(result.message).toContain("mock");
+    // The device job it names, as real mode does: the job its events carry (N106 binds a print to it).
+    expect(result.data).toEqual({ jobId: started[0]?.jobId });
+    expect(typeof started[0]?.jobId).toBe("number");
     await adapter.dispose();
   });
 
