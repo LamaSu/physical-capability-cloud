@@ -681,6 +681,20 @@ describe("the rules catch each known way around them (self-test)", () => {
     }
   });
 
+  it("a protected object held anywhere a name can reach it later (self-found, A03f F1's family)", () => {
+    for (const code of [
+      'const holder = { proto: Headers.prototype };\nObject.defineProperty(holder.proto, "set", { value: observe });',
+      'class Patch { proto = Headers.prototype; run() { Object.defineProperty(this.proto, "set", { value: observe }); } }',
+      "function proto() { return Headers.prototype; }",
+      "const targets = [navigator, document];",
+      'const nav = window.navigator;\nObject.defineProperty(nav, "sendBeacon", { value: observe });',
+      'const proto = Object.getPrototypeOf(new Headers());\nObject.defineProperty(proto, "set", { value: observe });',
+      'const proto = new Headers().__proto__;',
+    ]) {
+      expect(caught(code), code).toContain("global-write");
+    }
+  });
+
   it("the syntax rules let through what the app does", () => {
     for (const [code, rel] of [
       ['window.location.href = "/";', "pages/Probe.ts"],
