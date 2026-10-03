@@ -1843,6 +1843,8 @@ describe("astra 153: every shape is closed, so nothing is committed and then ign
     ["limit", (b) => (b.limits[0].fallback = 1), /a limit holds only quantity/],
     ["device", (b) => (b.device.firmware = "2.0"), /device holds only deviceId, adapterType, adapterVersion, vendor and model/],
     ["device vendor", (b) => (b.device.vendor = " "), /device\.vendor, when given, must not be blank/],
+    ["device model", (b) => (b.device.model = " "), /device\.model, when given, must not be blank/],
+    ["device adapterType", (b) => (b.device.adapterType = " "), /device\.adapterType is required/],
     ["confirmation", (b) => (b.confirmation.session = "abc"), /confirmation holds only confirmedBy and confirmedAt/],
     ["e-stop", (b) => (b.eStop.note = "red button"), /eStop holds only its mechanism/],
     ["command map", (b) => (b.commandMap.version = 2), /the command map holds only commands/],

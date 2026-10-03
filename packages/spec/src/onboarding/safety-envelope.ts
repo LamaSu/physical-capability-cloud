@@ -70,6 +70,17 @@
  * verifier. Units come only from the composition unit table (`KNOWN_UNITS`),
  * the one the prism compiler parses.
  *
+ * Intrinsics. Every check, hash and projection calls only the intrinsics
+ * `primordials.ts` captured when it loaded, plain loops and operators, never a
+ * method looked up on a mutable prototype or global at call time. So a
+ * prototype method or global replaced after load cannot change what is
+ * checked or emitted (astra pack 164: a replaced `Array.prototype.map` raised
+ * an emitted limit from the signed 40 to 400). The templates and the other
+ * module constants are frozen when this module loads. A realm whose
+ * intrinsics were replaced BEFORE this module loaded is beyond any in-process
+ * check: load @pcc/spec before any untrusted code, or run under a frozen
+ * realm.
+ *
  * Inputs, by kits' permanent intake field ids (item 6, bus #4140):
  *   - `safety.limits` gives the operator's answers, one per template quantity (`intake.limits`);
  *   - `safety.estop` gives `intake.eStop`, `safety.supervision` gives
@@ -83,13 +94,46 @@
  * All of these are never defaulted.
  */
 
-import { createHash } from "node:crypto";
-
 import { KNOWN_UNITS, type ParameterDefinition, type PortType, type Unit } from "../csd/composition.js";
 import type { CsdEvidenceTier, CsdParameter } from "../csd/schema.js";
-import { parseEd25519SignatureHex, signingPreimage } from "../evidence/signing-preimage.js";
 import type { SHA256 } from "../types/common.js";
-import { canonicalize } from "../util/canonical.js";
+import {
+  append,
+  ArrayIsArray,
+  ArrayPrototype,
+  asciiBytes,
+  canonicalJson,
+  deepFreeze,
+  defineIndex,
+  DateParse,
+  filterList,
+  fixedHexBytes,
+  hasOwn,
+  includesValue,
+  inSet,
+  isProxy,
+  joinStrings,
+  JSONParse,
+  JSONStringify,
+  mapList,
+  newList,
+  NumberIsFinite,
+  NumberIsInteger,
+  ObjectAssign,
+  ObjectCreate,
+  ObjectGetOwnPropertyDescriptor,
+  ObjectGetPrototypeOf,
+  ObjectIs,
+  ObjectKeys,
+  ObjectPrototype,
+  quoted,
+  regexMatches,
+  sha256Hex,
+  stringSet,
+  text,
+  toLowerCase,
+  trim,
+} from "./primordials.js";
 
 /** Domain separator: an envelope digest can never collide with another digest. */
 export const SAFETY_ENVELOPE_DOMAIN = "PCC:safety-envelope:v1";
@@ -104,9 +148,9 @@ const DIGEST_PATTERN = /^0x[0-9a-f]{64}$/;
 /** An adapter's manifest digest: `sha256:` + 64 lowercase hex of its reviewed release manifest. */
 export const ADAPTER_MANIFEST_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
-const UNITS = new Set<string>(KNOWN_UNITS);
+const UNITS = stringSet(KNOWN_UNITS);
 /** Units a job deadline can be stated in. */
-const TIME_UNITS = new Set<string>(["s", "min", "h"]);
+const TIME_UNITS = stringSet(["s", "min", "h"]);
 
 // ── Inputs ──────────────────────────────────────────────────────────
 
@@ -144,11 +188,11 @@ export interface ReferenceFinding {
 }
 
 /** Who watches the device while it runs (`safety.supervision`). */
-export const SUPERVISION_MODES = ["attended", "unattended", "remote-supervised"] as const;
+export const SUPERVISION_MODES = deepFreeze(["attended", "unattended", "remote-supervised"] as const);
 export type Supervision = (typeof SUPERVISION_MODES)[number];
 
 /** Hazard classes (`safety.hazards`). An empty list is the operator's explicit "none". */
-export const HAZARDS = ["biological", "chemical", "heat", "laser", "mechanical"] as const;
+export const HAZARDS = deepFreeze(["biological", "chemical", "heat", "laser", "mechanical"] as const);
 export type Hazard = (typeof HAZARDS)[number];
 
 export interface EStopDeclaration {
@@ -256,7 +300,7 @@ export interface DeviceClassTemplate {
  * generic-HTTP plate reader and an Opentrons OT-2. A template names what must
  * be bounded and how it is typed; it never supplies a value.
  */
-export const DEVICE_CLASS_TEMPLATES: Readonly<Record<string, DeviceClassTemplate>> = {
+export const DEVICE_CLASS_TEMPLATES: Readonly<Record<string, DeviceClassTemplate>> = deepFreeze({
   "lab-plate-reader": {
     id: "lab-plate-reader",
     label: "Microplate reader (absorbance), generic HTTP",
@@ -342,7 +386,7 @@ export const DEVICE_CLASS_TEMPLATES: Readonly<Record<string, DeviceClassTemplate
       plate: { semanticType: "processed-plate", required: true },
     },
   },
-};
+});
 
 // ── The draft ───────────────────────────────────────────────────────
 
@@ -408,48 +452,39 @@ export interface SafetyEnvelopeDraft {
 /** Input the generator refuses outright (malformed, not merely incomplete). */
 export class EnvelopeRefused extends Error {
   constructor(public readonly reasons: string[]) {
-    super(`safety envelope refused (${reasons.length}): ${reasons.join("; ")}`);
+    super(`safety envelope refused (${reasons.length}): ${joinStrings(reasons, "; ")}`);
     this.name = "EnvelopeRefused";
   }
 }
 
 function finite(v: unknown): v is number {
-  return typeof v === "number" && Number.isFinite(v);
+  return typeof v === "number" && NumberIsFinite(v);
 }
 
 function nonEmpty(v: unknown): v is string {
-  return typeof v === "string" && v.trim().length > 0;
+  return typeof v === "string" && trim(v).length > 0;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+  return typeof v === "object" && v !== null && !ArrayIsArray(v);
 }
 
 /** The keys of `v` that are not in `allowed`, for closed shapes. */
-function extraKeys(v: Record<string, unknown>, allowed: readonly string[]): string[] {
-  return Object.keys(v).filter((k) => !allowed.includes(k));
+function extraKeys(v: object, allowed: readonly string[]): string[] {
+  return filterList(ObjectKeys(v), (k) => !includesValue(allowed, k));
+}
+
+/** The template for `deviceClass`, read as an own property only. */
+function templateOf(deviceClass: unknown): DeviceClassTemplate | undefined {
+  return typeof deviceClass === "string" && hasOwn(DEVICE_CLASS_TEMPLATES, deviceClass) ? DEVICE_CLASS_TEMPLATES[deviceClass] : undefined;
 }
 
 // ── One observation: plain data, read once ──────────────────────────
 
 class NotPlainData extends Error {}
+const NOT_PLAIN_DATA = NotPlainData.prototype;
 
 const MAX_DEPTH = 64;
-
-/**
- * A proxy check that runs no trap: Node's `util.types.isProxy`, loaded at
- * module load without a static `node:util` import, so browser bundles of
- * @pcc/spec still build (the dashboard has no `node:util`). Where there is
- * none (a browser, or Node before 20.16) it is null, and every object is
- * refused: a proxy cannot be told apart from plain data there without
- * running its traps.
- */
-const isProxy: ((value: object) => boolean) | null = (() => {
-  const runtime = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process;
-  const util = runtime?.getBuiltinModule?.("node:util") as { types?: { isProxy?: (value: unknown) => boolean } } | undefined;
-  const check = util?.types?.isProxy;
-  return typeof check === "function" ? (value: object) => check(value) : null;
-})();
 
 /**
  * A one-pass copy of JSON data that runs no code supplied with it. Everything
@@ -460,77 +495,71 @@ const isProxy: ((value: object) => boolean) | null = (() => {
  * number; undefined inside an array; a cycle; a key named `__proto__`; and
  * nesting deeper than 64. An undefined member is dropped, and -0 becomes 0,
  * both as `canonicalize` writes them. Copied objects have a null prototype,
- * and copied array elements are installed with `Object.defineProperty`, so
+ * and copied array elements are installed as own data properties, so
  * building the copy runs no inherited setter either.
  */
-function plainCopy(value: unknown, path: string, ancestors: Set<object>, depth: number): unknown {
+function plainCopy(value: unknown, path: string, ancestors: object[], depth: number): unknown {
   if (value === null || typeof value === "boolean" || typeof value === "string") return value;
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new NotPlainData(`${path}: ${String(value)} is not a finite number`);
-    return Object.is(value, -0) ? 0 : value;
+    if (!NumberIsFinite(value)) throw new NotPlainData(`${path}: ${text(value)} is not a finite number`);
+    return ObjectIs(value, -0) ? 0 : value;
   }
   if (typeof value !== "object") throw new NotPlainData(`${path}: a ${typeof value} is not JSON data`);
   if (isProxy === null) throw new NotPlainData(`${path}: this runtime has no trap-free proxy check, so no object is copied as plain data`);
   if (isProxy(value)) throw new NotPlainData(`${path}: a proxy`);
   if (depth > MAX_DEPTH) throw new NotPlainData(`${path}: nested deeper than ${MAX_DEPTH}`);
-  if (ancestors.has(value)) throw new NotPlainData(`${path}: a cycle`);
-  ancestors.add(value);
+  if (includesValue(ancestors, value)) throw new NotPlainData(`${path}: a cycle`);
+  append(ancestors, value);
   try {
-    if (Array.isArray(value)) {
-      if (Object.getPrototypeOf(value) !== Array.prototype) throw new NotPlainData(`${path}: an array with a nonstandard prototype`);
-      const out: unknown[] = new Array(value.length);
+    if (ArrayIsArray(value)) {
+      if (ObjectGetPrototypeOf(value) !== ArrayPrototype) throw new NotPlainData(`${path}: an array with a nonstandard prototype`);
+      const out = newList<unknown>(value.length);
       for (let i = 0; i < value.length; i++) {
-        const element = Object.getOwnPropertyDescriptor(value, i);
+        const element = ObjectGetOwnPropertyDescriptor(value, i);
         if (element === undefined) throw new NotPlainData(`${path}[${i}]: a hole in an array`);
-        if (!("value" in element)) throw new NotPlainData(`${path}[${i}]: an accessor (a getter or setter)`);
+        if (!hasOwn(element, "value")) throw new NotPlainData(`${path}[${i}]: an accessor (a getter or setter)`);
         if (element.value === undefined) throw new NotPlainData(`${path}[${i}]: undefined in an array`);
         // Installed as the copy's own data property: an assignment or push would run a setter
         // Array.prototype serves for this index (astra pack 158).
-        Object.defineProperty(out, i, { value: plainCopy(element.value, `${path}[${i}]`, ancestors, depth + 1), writable: true, enumerable: true, configurable: true });
+        defineIndex(out, i, plainCopy(element.value, `${path}[${i}]`, ancestors, depth + 1));
       }
       return out;
     }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) throw new NotPlainData(`${path}: not a plain object`);
-    const out = Object.create(null) as Record<string, unknown>;
-    for (const key of Object.keys(value)) {
+    const prototype = ObjectGetPrototypeOf(value);
+    if (prototype !== ObjectPrototype && prototype !== null) throw new NotPlainData(`${path}: not a plain object`);
+    const out = ObjectCreate(null) as Record<string, unknown>;
+    const keys = ObjectKeys(value);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i]!;
       if (key === "__proto__") throw new NotPlainData(`${path}: a key named __proto__`);
-      const member = Object.getOwnPropertyDescriptor(value, key);
+      const member = ObjectGetOwnPropertyDescriptor(value, key);
       if (member === undefined) continue;
-      if (!("value" in member)) throw new NotPlainData(`${path}.${key}: an accessor (a getter or setter)`);
+      if (!hasOwn(member, "value")) throw new NotPlainData(`${path}.${key}: an accessor (a getter or setter)`);
       if (member.value === undefined) continue;
       out[key] = plainCopy(member.value, `${path}.${key}`, ancestors, depth + 1);
     }
     return out;
   } finally {
-    ancestors.delete(value);
+    ancestors.length = ancestors.length - 1;
   }
 }
 
 /** `value` as plain JSON data, copied once; `EnvelopeRefused` when it is anything else. */
 function plainSnapshot<T>(value: unknown, what: string): T {
   try {
-    return plainCopy(value, what, new Set(), 0) as T;
+    return plainCopy(value, what, newList<object>(0), 0) as T;
   } catch (err) {
-    if (err instanceof NotPlainData) {
-      throw new EnvelopeRefused([`${err.message}: ${what} must be plain JSON data, and no code supplied with it may run`]);
+    if (typeof err === "object" && err !== null && ObjectGetPrototypeOf(err) === NOT_PLAIN_DATA) {
+      throw new EnvelopeRefused([`${(err as NotPlainData).message}: ${what} must be plain JSON data, and no code supplied with it may run`]);
     }
     throw err;
   }
 }
 
 function nullPrototype(_key: string, value: unknown): unknown {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? Object.assign(Object.create(null) as Record<string, unknown>, value)
+  return value !== null && typeof value === "object" && !ArrayIsArray(value)
+    ? ObjectAssign(ObjectCreate(null) as Record<string, unknown>, value)
     : value;
-}
-
-function deepFreeze<T>(value: T): T {
-  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const v of Object.values(value)) deepFreeze(v);
-  }
-  return value;
 }
 
 /** An envelope as it was hashed: the one copy that is checked and compiled, and its digest. */
@@ -539,18 +568,21 @@ interface EnvelopeSnapshot {
   digest: SafetyEnvelopeDigest;
 }
 
+/** `{"domain":<SAFETY_ENVELOPE_DOMAIN>,"envelope":`, the start of the digest preimage, fixed at load. */
+const ENVELOPE_PREIMAGE_HEAD = `{"domain":${JSONStringify(SAFETY_ENVELOPE_DOMAIN)},"envelope":`;
+
 /**
  * Copy the envelope once as plain data, serialize the copy once, hash those
  * bytes, and parse the same bytes back into the frozen body that is checked
  * and compiled. Nothing afterwards reads the caller's object, so a value
- * cannot change between hashing, checking and use (astra pack 153).
+ * cannot change between hashing, checking and use (astra pack 153). Every
+ * step uses intrinsics captured at load (astra pack 164).
  */
 function snapshotEnvelope(envelope: unknown): EnvelopeSnapshot {
-  const bytes = canonicalize(plainSnapshot(envelope, "envelope"));
+  const bytes = canonicalJson(plainSnapshot(envelope, "envelope"));
   // Exactly canonicalize({ domain, envelope }): "domain" sorts before "envelope".
-  const preimage = `{"domain":${JSON.stringify(SAFETY_ENVELOPE_DOMAIN)},"envelope":${bytes}}`;
-  const digest = `0x${createHash("sha256").update(preimage).digest("hex")}` as SafetyEnvelopeDigest;
-  const body = deepFreeze(JSON.parse(bytes, nullPrototype)) as SafetyEnvelopeBody;
+  const digest = `0x${sha256Hex(`${ENVELOPE_PREIMAGE_HEAD}${bytes}}`)}` as SafetyEnvelopeDigest;
+  const body = deepFreeze(JSONParse(bytes, nullPrototype)) as SafetyEnvelopeBody;
   return { body, digest };
 }
 
@@ -561,11 +593,18 @@ function rangeProblem(min: unknown, max: unknown): string | null {
   return null;
 }
 
-const ESTOP_MECHANISMS: readonly string[] = ["hardware", "adapter-stop", "none"];
+const ESTOP_MECHANISMS: readonly string[] = deepFreeze(["hardware", "adapter-stop", "none"]);
 
-function declaredCommands(commandMap: unknown): Set<string> {
-  if (!isRecord(commandMap) || !Array.isArray(commandMap.commands)) return new Set();
-  return new Set(commandMap.commands.filter(isRecord).map((c) => c.name).filter(nonEmpty));
+/** The names of the map's declared commands. */
+function declaredCommands(commandMap: unknown): string[] {
+  const names = newList<string>(0);
+  if (!isRecord(commandMap) || !ArrayIsArray(commandMap.commands)) return names;
+  const commands = commandMap.commands as unknown[];
+  for (let i = 0; i < commands.length; i++) {
+    const command = commands[i];
+    if (isRecord(command) && nonEmpty(command.name)) append(names, command.name);
+  }
+  return names;
 }
 
 /** Why an e-stop cannot stand in a confirmed envelope for this class, or null. */
@@ -575,27 +614,28 @@ function eStopProblem(
   commandMap: unknown,
 ): string | null {
   if (!eStop) return "no e-stop declared";
-  if (!ESTOP_MECHANISMS.includes(eStop.mechanism)) {
-    return `e-stop mechanism ${JSON.stringify(String(eStop.mechanism))} is not hardware, adapter-stop or none`;
+  if (!includesValue(ESTOP_MECHANISMS, eStop.mechanism)) {
+    return `e-stop mechanism ${quoted(eStop.mechanism)} is not hardware, adapter-stop or none`;
   }
   if (eStop.mechanism === "none" && template.movesOrHeats) return "a device that moves or heats needs an e-stop";
   if (eStop.mechanism === "adapter-stop") {
     if (!nonEmpty(eStop.stopCommand)) return "an adapter stop needs its command";
-    if (!declaredCommands(commandMap).has(eStop.stopCommand)) {
-      return `the stop command ${JSON.stringify(eStop.stopCommand)} is not one of the adapter's declared commands`;
+    if (!includesValue(declaredCommands(commandMap), eStop.stopCommand)) {
+      return `the stop command ${JSONStringify(eStop.stopCommand)} is not one of the adapter's declared commands`;
     }
   }
   return null;
 }
 
 function rateProblem(rate: unknown): string | null {
-  return Number.isInteger(rate) && (rate as number) >= 1 ? null : "maxCommandsPerMinute must be an integer >= 1";
+  return NumberIsInteger(rate) && (rate as number) >= 1 ? null : "maxCommandsPerMinute must be an integer >= 1";
 }
 
 /** Why a finding's value cannot bound a quantity, or null. Either side may be absent, but not both. */
 function boundProblem(value: unknown): string | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return "has no {min, max} value";
-  const { min, max } = value as { min?: unknown; max?: unknown };
+  if (typeof value !== "object" || value === null || ArrayIsArray(value)) return "has no {min, max} value";
+  const min = hasOwn(value, "min") ? (value as { min?: unknown }).min : undefined;
+  const max = hasOwn(value, "max") ? (value as { max?: unknown }).max : undefined;
   if (min === undefined && max === undefined) return "bounds neither side";
   if (min !== undefined && !finite(min)) return "has a min that is not a finite number";
   if (max !== undefined && !finite(max)) return "has a max that is not a finite number";
@@ -613,14 +653,25 @@ function sidesOf(v: { min?: number; max?: number }): { min?: number; max?: numbe
   return { ...(v.min !== undefined ? { min: v.min } : {}), ...(v.max !== undefined ? { max: v.max } : {}) };
 }
 
-/** The tightest bound cited references allow together: the largest given min and the smallest given max. */
+/**
+ * The tightest bound cited references allow together: the largest given min
+ * and the smallest given max. It has a null prototype, so a side no
+ * reference gives reads as undefined, never as an inherited value.
+ */
 function tightestBound(values: readonly { min?: number; max?: number }[]): { min?: number; max?: number } {
-  const mins = values.flatMap((v) => (v.min === undefined ? [] : [v.min]));
-  const maxes = values.flatMap((v) => (v.max === undefined ? [] : [v.max]));
-  return {
-    ...(mins.length > 0 ? { min: Math.max(...mins) } : {}),
-    ...(maxes.length > 0 ? { max: Math.min(...maxes) } : {}),
-  };
+  let min: number | undefined;
+  let max: number | undefined;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i]!;
+    const vMin = hasOwn(v, "min") ? v.min : undefined;
+    const vMax = hasOwn(v, "max") ? v.max : undefined;
+    if (vMin !== undefined && (min === undefined || vMin > min)) min = vMin;
+    if (vMax !== undefined && (max === undefined || vMax < max)) max = vMax;
+  }
+  const bound = ObjectCreate(null) as { min?: number; max?: number };
+  if (min !== undefined) bound.min = min;
+  if (max !== undefined) bound.max = max;
+  return bound;
 }
 
 function describeBound(bound: { min?: number; max?: number }, unit: string): string {
@@ -629,20 +680,20 @@ function describeBound(bound: { min?: number; max?: number }, unit: string): str
 }
 
 function supervisionProblem(supervision: unknown): string | null {
-  return (SUPERVISION_MODES as readonly unknown[]).includes(supervision)
+  return includesValue(SUPERVISION_MODES, supervision)
     ? null
-    : `supervision ${JSON.stringify(String(supervision))} is not attended, unattended or remote-supervised`;
+    : `supervision ${quoted(supervision)} is not attended, unattended or remote-supervised`;
 }
 
 function hazardsProblem(hazards: unknown): string | null {
-  if (!Array.isArray(hazards)) return "hazards must be a list (an empty list means none)";
-  const unknown = hazards.filter((h) => !(HAZARDS as readonly unknown[]).includes(h));
-  return unknown.length > 0 ? `unknown hazard ${unknown.map((h) => JSON.stringify(String(h))).join(", ")}` : null;
+  if (!ArrayIsArray(hazards)) return "hazards must be a list (an empty list means none)";
+  const unknown = filterList(hazards as unknown[], (h) => !includesValue(HAZARDS, h));
+  return unknown.length > 0 ? `unknown hazard ${joinStrings(mapList(unknown, (h) => quoted(h)), ", ")}` : null;
 }
 
 /** Hazards in one canonical order, each once, so the same answer always digests the same. */
 function canonicalHazards(hazards: readonly Hazard[]): Hazard[] {
-  return HAZARDS.filter((h) => hazards.includes(h));
+  return filterList(HAZARDS as readonly Hazard[], (h) => includesValue(hazards, h));
 }
 
 /** Why a committed hazards list is not one confirm produces (each once, in canonical order), or null. */
@@ -650,9 +701,9 @@ function hazardsCanonicalProblem(hazards: unknown): string | null {
   if (hazardsProblem(hazards)) return null; // hazardsProblem reports it
   const list = hazards as Hazard[];
   const canonical = canonicalHazards(list);
-  return canonical.length === list.length && canonical.every((h, i) => h === list[i])
-    ? null
-    : "hazards must each appear once, in canonical order";
+  if (canonical.length !== list.length) return "hazards must each appear once, in canonical order";
+  for (let i = 0; i < list.length; i++) if (canonical[i] !== list[i]) return "hazards must each appear once, in canonical order";
+  return null;
 }
 
 /** v1's supervision policy (fail closed until safeguards are modeled), or null. */
@@ -672,18 +723,21 @@ function supervisionPolicyProblem(
 
 /** Why `values` is not a non-empty list of distinct non-blank strings or finite numbers, or null. */
 function finiteSetProblem(values: unknown, at: string, name: string): string | null {
-  if (!Array.isArray(values) || values.length === 0) {
+  if (!ArrayIsArray(values) || values.length === 0) {
     return `parameter ${at}: ${name} must list the values it may carry; a free-form parameter could carry anything`;
   }
-  const seen = new Set<string>();
-  for (const value of values) {
+  const seen = newList<string>(0);
+  for (let i = 0; i < values.length; i++) {
+    const value: unknown = values[i];
     if (!nonEmpty(value) && !finite(value)) return `parameter ${at}: every ${name} value must be a non-blank string or a finite number`;
-    const key = JSON.stringify(value);
-    if (seen.has(key)) return `parameter ${at}: the ${name} value ${key} is listed twice`;
-    seen.add(key);
+    const key = JSONStringify(value);
+    if (includesValue(seen, key)) return `parameter ${at}: the ${name} value ${key} is listed twice`;
+    append(seen, key);
   }
   return null;
 }
+
+const UNBOUNDED_LISTS: readonly ("allowed" | "allowedItems")[] = deepFreeze(["allowed", "allowedItems"]);
 
 /**
  * Why an unbounded parameter's declaration is not a reason plus finite sets
@@ -699,7 +753,8 @@ function unboundedProblem(unbounded: unknown, at: string): string | null {
   if (unbounded.allowed === undefined && unbounded.allowedItems === undefined) {
     return `parameter ${at} is unbounded, so it must list the values it may carry (allowed, or allowedItems for a list); a free-form parameter could carry anything`;
   }
-  for (const name of ["allowed", "allowedItems"] as const) {
+  for (let i = 0; i < UNBOUNDED_LISTS.length; i++) {
+    const name = UNBOUNDED_LISTS[i]!;
     if (unbounded[name] === undefined) continue;
     const problem = finiteSetProblem(unbounded[name], at, name);
     if (problem) return problem;
@@ -707,36 +762,46 @@ function unboundedProblem(unbounded: unknown, at: string): string | null {
   return null;
 }
 
+/** The unit each template quantity is bounded in, or undefined for a quantity the template does not bound. */
+function unitOf(template: DeviceClassTemplate, quantity: unknown): string | undefined {
+  for (let i = 0; i < template.requires.length; i++) {
+    if (template.requires[i]!.quantity === quantity) return template.requires[i]!.unit;
+  }
+  return undefined;
+}
+
 /** Why a command map is malformed for this class, or null. Coverage gaps are `commandMapGaps`. */
 function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): string | null {
-  if (!isRecord(commandMap) || !Array.isArray(commandMap.commands) || commandMap.commands.length === 0) {
+  if (!isRecord(commandMap) || !ArrayIsArray(commandMap.commands) || (commandMap.commands as unknown[]).length === 0) {
     return "the command map must list at least one command";
   }
   if (extraKeys(commandMap, ["commands"]).length > 0) return "the command map holds only commands";
-  const units = new Map(template.requires.map((r) => [r.quantity, r.unit]));
-  const commandNames = new Set<string>();
-  for (const [i, command] of commandMap.commands.entries()) {
+  const commands = commandMap.commands as unknown[];
+  const commandNames = newList<string>(0);
+  for (let i = 0; i < commands.length; i++) {
+    const command = commands[i];
     if (!isRecord(command) || !nonEmpty(command.name)) return `command ${i} needs a name`;
-    if (extraKeys(command, ["name", "params"]).length > 0) return `command ${JSON.stringify(command.name)} has keys other than name and params`;
-    if (commandNames.has(command.name)) return `command ${JSON.stringify(command.name)} is declared twice`;
-    commandNames.add(command.name);
-    if (!Array.isArray(command.params)) return `command ${JSON.stringify(command.name)} needs a params list`;
-    const paramNames = new Set<string>();
-    for (const param of command.params) {
-      if (!isRecord(param) || !nonEmpty(param.name)) return `command ${JSON.stringify(command.name)} has a parameter without a name`;
+    if (extraKeys(command, ["name", "params"]).length > 0) return `command ${JSONStringify(command.name)} has keys other than name and params`;
+    if (includesValue(commandNames, command.name)) return `command ${JSONStringify(command.name)} is declared twice`;
+    append(commandNames, command.name);
+    if (!ArrayIsArray(command.params)) return `command ${JSONStringify(command.name)} needs a params list`;
+    const params = command.params as unknown[];
+    const paramNames = newList<string>(0);
+    for (let j = 0; j < params.length; j++) {
+      const param = params[j];
+      if (!isRecord(param) || !nonEmpty(param.name)) return `command ${JSONStringify(command.name)} has a parameter without a name`;
       const at = `${command.name}.${param.name}`;
       if (extraKeys(param, ["name", "quantity", "unit", "unbounded"]).length > 0) return `parameter ${at} has keys other than name, quantity, unit and unbounded`;
-      if (paramNames.has(param.name)) return `parameter ${at} is declared twice`;
-      paramNames.add(param.name);
+      if (includesValue(paramNames, param.name)) return `parameter ${at} is declared twice`;
+      append(paramNames, param.name);
       const mapped = param.quantity !== undefined || param.unit !== undefined;
       if (mapped === (param.unbounded !== undefined)) {
         return `parameter ${at} must either set a quantity (quantity and unit) or say why it sets none (unbounded)`;
       }
       if (mapped) {
-        if (!units.has(param.quantity as string)) return `parameter ${at} sets ${JSON.stringify(param.quantity)}, which this class does not bound`;
-        if (param.unit !== units.get(param.quantity as string)) {
-          return `parameter ${at} sets ${String(param.quantity)} in ${JSON.stringify(param.unit)}, not ${units.get(param.quantity as string)}`;
-        }
+        const unit = unitOf(template, param.quantity);
+        if (unit === undefined) return `parameter ${at} sets ${JSONStringify(param.quantity)}, which this class does not bound`;
+        if (param.unit !== unit) return `parameter ${at} sets ${text(param.quantity)} in ${JSONStringify(param.unit)}, not ${unit}`;
       } else {
         const problem = unboundedProblem(param.unbounded, at);
         if (problem) return problem;
@@ -753,26 +818,33 @@ function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): 
  * parameter for it would only invite a dummy one (astra pack 153, HIGH 8).
  */
 function commandMapGaps(commandMap: CommandMapV1, template: DeviceClassTemplate): string[] {
-  const set = new Set(commandMap.commands.flatMap((c) => c.params.map((p) => p.quantity).filter(nonEmpty)));
-  return template.requires.map((r) => r.quantity).filter((q) => q !== template.deadline && !set.has(q));
+  const set = newList<string>(0);
+  for (let i = 0; i < commandMap.commands.length; i++) {
+    const params = commandMap.commands[i]!.params;
+    for (let j = 0; j < params.length; j++) if (nonEmpty(params[j]!.quantity)) append(set, params[j]!.quantity as string);
+  }
+  const gaps = newList<string>(0);
+  for (let i = 0; i < template.requires.length; i++) {
+    const quantity = template.requires[i]!.quantity;
+    if (quantity !== template.deadline && !includesValue(set, quantity)) append(gaps, quantity);
+  }
+  return gaps;
 }
 
 function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate } {
-  const reasons: string[] = [];
-  const template = Object.prototype.hasOwnProperty.call(DEVICE_CLASS_TEMPLATES, input?.deviceClass)
-    ? DEVICE_CLASS_TEMPLATES[input.deviceClass]
-    : undefined;
-  if (!template) reasons.push(`unknown deviceClass ${JSON.stringify(String(input?.deviceClass))}`);
-  if (!nonEmpty(input?.device?.deviceId)) reasons.push("device.deviceId is required");
-  if (!nonEmpty(input?.device?.adapterType)) reasons.push("device.adapterType is required");
-  if (typeof input?.device?.adapterVersion !== "string" || !ADAPTER_MANIFEST_DIGEST_PATTERN.test(input.device.adapterVersion)) {
-    reasons.push("device.adapterVersion must be the adapter's manifest digest, sha256: + 64 lowercase hex");
+  const reasons = newList<string>(0);
+  const template = templateOf(input?.deviceClass);
+  if (!template) append(reasons, `unknown deviceClass ${quoted(input?.deviceClass)}`);
+  if (!nonEmpty(input?.device?.deviceId)) append(reasons, "device.deviceId is required");
+  if (!nonEmpty(input?.device?.adapterType)) append(reasons, "device.adapterType is required");
+  if (typeof input?.device?.adapterVersion !== "string" || !regexMatches(ADAPTER_MANIFEST_DIGEST_PATTERN, input.device.adapterVersion)) {
+    append(reasons, "device.adapterVersion must be the adapter's manifest digest, sha256: + 64 lowercase hex");
   }
-  if (!Array.isArray(input?.intake?.limits)) reasons.push("intake.limits must be an array");
-  if (!Array.isArray(input?.references)) reasons.push("references must be an array");
+  if (!ArrayIsArray(input?.intake?.limits)) append(reasons, "intake.limits must be an array");
+  if (!ArrayIsArray(input?.references)) append(reasons, "references must be an array");
   if (template && input?.commandMap !== undefined) {
     const problem = commandMapProblem(input.commandMap, template);
-    if (problem) reasons.push(`commandMap: ${problem}`);
+    if (problem) append(reasons, `commandMap: ${problem}`);
   }
   if (reasons.length > 0 || !template) throw new EnvelopeRefused(reasons);
   return { template };
@@ -786,60 +858,64 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
   // Every later read is of this one plain copy, so the draft is one observation of the input.
   const input = plainSnapshot<SafetyEnvelopeInput>(given, "input");
   const { template } = checkInput(input);
-  const limits: EnvelopeLimit[] = [];
-  const questions: EnvelopeQuestion[] = [];
-  const dropped: DroppedInput[] = [];
-  const referenceBounds: ReferenceBound[] = [];
+  const limits = newList<EnvelopeLimit>(0);
+  const questions = newList<EnvelopeQuestion>(0);
+  const dropped = newList<DroppedInput>(0);
+  const referenceBounds = newList<ReferenceBound>(0);
 
-  for (const req of template.requires) {
-    const ask = (why: string, text: string) => questions.push({ about: req.quantity, ask: text, why });
-    const range = `the range of ${req.label.toLowerCase()} in ${req.unit}`;
+  for (let q = 0; q < template.requires.length; q++) {
+    const req = template.requires[q]!;
+    const ask = (why: string, asked: string) => append(questions, { about: req.quantity, ask: asked, why });
+    const range = `the range of ${toLowerCase(req.label)} in ${req.unit}`;
 
-    const answers = input.intake.limits.filter((l) => l?.quantity === req.quantity);
-    const usableAnswers: IntakeLimit[] = [];
-    for (const a of answers) {
+    const answers = filterList(input.intake.limits, (l) => l?.quantity === req.quantity);
+    const usableAnswers = newList<IntakeLimit>(0);
+    for (let i = 0; i < answers.length; i++) {
+      const a = answers[i]!;
       if (a.unit !== req.unit) {
-        dropped.push({ quantity: req.quantity, reason: `operator answer in ${JSON.stringify(a.unit)}, not ${req.unit}` });
+        append(dropped, { quantity: req.quantity, reason: `operator answer in ${JSONStringify(a.unit)}, not ${req.unit}` });
         continue;
       }
       const problem = rangeProblem(a.min, a.max);
       if (problem) {
-        dropped.push({ quantity: req.quantity, reason: `operator answer ${problem}` });
+        append(dropped, { quantity: req.quantity, reason: `operator answer ${problem}` });
         continue;
       }
-      usableAnswers.push(a);
+      append(usableAnswers, a);
     }
 
-    const references: ReferenceFinding[] = [];
-    for (const r of input.references.filter((x) => x?.quantity === req.quantity)) {
+    const references = newList<ReferenceFinding>(0);
+    const asked = filterList(input.references, (x) => x?.quantity === req.quantity);
+    for (let i = 0; i < asked.length; i++) {
+      const r = asked[i]!;
       if (!nonEmpty(r.citation?.doc) || !nonEmpty(r.citation?.section)) {
-        dropped.push({ quantity: req.quantity, reason: "a reference without a citation (doc and section) cannot propose a limit" });
+        append(dropped, { quantity: req.quantity, reason: "a reference without a citation (doc and section) cannot propose a limit" });
       } else if (r.citation.url !== undefined && !nonEmpty(r.citation.url)) {
-        dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} has a blank url` });
+        append(dropped, { quantity: req.quantity, reason: `a reference from ${r.citation.doc} has a blank url` });
       } else if (!nonEmpty(r.claim)) {
-        dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} states no claim` });
-      } else if (!nonEmpty(r.retrievedAt) || !Number.isFinite(Date.parse(r.retrievedAt))) {
-        dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} has no valid retrievedAt` });
+        append(dropped, { quantity: req.quantity, reason: `a reference from ${r.citation.doc} states no claim` });
+      } else if (!nonEmpty(r.retrievedAt) || !NumberIsFinite(DateParse(r.retrievedAt))) {
+        append(dropped, { quantity: req.quantity, reason: `a reference from ${r.citation.doc} has no valid retrievedAt` });
       } else if (r.unit !== req.unit) {
-        dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} is in ${JSON.stringify(r.unit)}, not ${req.unit}` });
+        append(dropped, { quantity: req.quantity, reason: `a reference from ${r.citation.doc} is in ${JSONStringify(r.unit)}, not ${req.unit}` });
       } else if (boundProblem(r.value)) {
-        dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} ${boundProblem(r.value)}` });
+        append(dropped, { quantity: req.quantity, reason: `a reference from ${r.citation.doc} ${boundProblem(r.value)}` });
       } else {
-        references.push(r);
+        append(references, r);
       }
     }
     // Each source keeps exactly what it cites, so the bound can be checked wherever the body is compiled.
-    const referenceSources: LimitSource[] = references.map((r) => ({
-      kind: "reference",
+    const referenceSources: LimitSource[] = mapList(references, (r) => ({
+      kind: "reference" as const,
       citation: citationOf(r.citation),
       retrievedAt: r.retrievedAt,
       claim: r.claim,
       value: sidesOf(r.value),
       unit: req.unit,
     }));
-    const { min, max } = tightestBound(references.map((r) => r.value));
+    const { min, max } = tightestBound(mapList(references, (r) => r.value));
     if (references.length > 0) {
-      referenceBounds.push({
+      append(referenceBounds, {
         quantity: req.quantity,
         unit: req.unit,
         ...(min !== undefined ? { min } : {}),
@@ -848,32 +924,41 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
       });
     }
 
-    const distinct = new Set(usableAnswers.map((a) => `${a.min}..${a.max}`));
-    if (distinct.size > 1) {
-      ask(req.why, `You gave ${[...distinct].join(" and ")} ${req.unit} for ${req.label.toLowerCase()}. Which is it?`);
+    const distinct = newList<string>(0);
+    for (let i = 0; i < usableAnswers.length; i++) {
+      const stated = `${usableAnswers[i]!.min}..${usableAnswers[i]!.max}`;
+      if (!includesValue(distinct, stated)) append(distinct, stated);
+    }
+    if (distinct.length > 1) {
+      ask(req.why, `You gave ${joinStrings(distinct, " and ")} ${req.unit} for ${toLowerCase(req.label)}. Which is it?`);
       continue;
     }
     if (usableAnswers.length > 0) {
       const a = usableAnswers[0]!;
       // A reference tighter than the operator's answer, on either side, is asked about, never silently loosened past.
-      const tighter = references.filter(
+      const tighter = filterList(
+        references,
         (r) => (r.value.min !== undefined && r.value.min > (a.min as number)) || (r.value.max !== undefined && r.value.max < (a.max as number)),
       );
-      for (const r of tighter) {
+      for (let i = 0; i < tighter.length; i++) {
+        const r = tighter[i]!;
         ask(
           req.why,
           `${r.citation.doc} (${r.citation.section}) gives ${describeBound(r.value, req.unit)}; you gave ${a.min}..${a.max}. Confirm your range or tighten it.`,
         );
       }
       if (tighter.length > 0) continue;
-      limits.push({
+      const sources = newList<LimitSource>(0);
+      append(sources, { kind: "operator", field: a.field });
+      for (let i = 0; i < referenceSources.length; i++) append(sources, referenceSources[i]!);
+      append(limits, {
         quantity: req.quantity,
         unit: req.unit,
         param: req.param,
         min: a.min as number,
         max: a.max as number,
         proposedBy: "operator",
-        sources: [{ kind: "operator", field: a.field }, ...referenceSources],
+        sources,
       });
       continue;
     }
@@ -885,10 +970,10 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
       }
       if (min === undefined || max === undefined) {
         const missing = min === undefined ? "lowest" : "highest";
-        ask(req.why, `The references give ${describeBound({ min, max }, req.unit)} for ${req.label.toLowerCase()}. What is the ${missing} it may be?`);
+        ask(req.why, `The references give ${describeBound({ min, max }, req.unit)} for ${toLowerCase(req.label)}. What is the ${missing} it may be?`);
         continue;
       }
-      limits.push({ quantity: req.quantity, unit: req.unit, param: req.param, min, max, proposedBy: "reference", sources: referenceSources });
+      append(limits, { quantity: req.quantity, unit: req.unit, param: req.param, min, max, proposedBy: "reference", sources: referenceSources });
       continue;
     }
     ask(req.why, `What is ${range}?`);
@@ -896,7 +981,7 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
 
   const commandMap = input.commandMap ?? null;
   if (commandMap === null) {
-    questions.push({
+    append(questions, {
       about: "command-map",
       ask: "The adapter must declare its commands, and which parameters set which quantities.",
       why: "the runtime refuses anything outside the declared command surface; it cannot be guessed",
@@ -904,9 +989,9 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
   } else {
     const gaps = commandMapGaps(commandMap, template);
     if (gaps.length > 0) {
-      questions.push({
+      append(questions, {
         about: "command-map",
-        ask: `No declared command parameter sets ${gaps.join(", ")}. Which parameters do?`,
+        ask: `No declared command parameter sets ${joinStrings(gaps, ", ")}. Which parameters do?`,
         why: "a limit no parameter maps to is never enforced",
       });
     }
@@ -914,39 +999,39 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
 
   const eStop = input.intake.eStop ?? null;
   if (eStop === null) {
-    questions.push({ about: "e-stop", ask: "How is this device stopped in an emergency?", why: "every device needs a declared stop" });
-  } else if (!ESTOP_MECHANISMS.includes(eStop.mechanism)) {
-    throw new EnvelopeRefused([`intake.eStop.mechanism ${JSON.stringify(String(eStop.mechanism))} is not hardware, adapter-stop or none`]);
+    append(questions, { about: "e-stop", ask: "How is this device stopped in an emergency?", why: "every device needs a declared stop" });
+  } else if (!includesValue(ESTOP_MECHANISMS, eStop.mechanism)) {
+    throw new EnvelopeRefused([`intake.eStop.mechanism ${quoted(eStop.mechanism)} is not hardware, adapter-stop or none`]);
   } else if (eStop.mechanism === "none" && template.movesOrHeats) {
-    questions.push({
+    append(questions, {
       about: "e-stop",
       ask: "This device moves or heats, and no emergency stop was declared. How is it stopped?",
       why: "a device that moves or heats cannot be confirmed without an e-stop",
     });
   } else if (eStop.mechanism === "adapter-stop" && !nonEmpty(eStop.stopCommand)) {
-    questions.push({ about: "e-stop", ask: "Which adapter command stops the device?", why: "an adapter stop needs its command" });
-  } else if (eStop.mechanism === "adapter-stop" && commandMap !== null && !declaredCommands(commandMap).has(eStop.stopCommand as string)) {
-    questions.push({
+    append(questions, { about: "e-stop", ask: "Which adapter command stops the device?", why: "an adapter stop needs its command" });
+  } else if (eStop.mechanism === "adapter-stop" && commandMap !== null && !includesValue(declaredCommands(commandMap), eStop.stopCommand)) {
+    append(questions, {
       about: "e-stop",
-      ask: `The stop command ${JSON.stringify(eStop.stopCommand)} is not one of the adapter's declared commands. Which declared command stops the device?`,
+      ask: `The stop command ${JSONStringify(eStop.stopCommand)} is not one of the adapter's declared commands. Which declared command stops the device?`,
       why: "a stop the runtime cannot send is no stop",
     });
   }
 
   const rate = input.intake.maxCommandsPerMinute;
   if (rate === undefined) {
-    questions.push({
+    append(questions, {
       about: "command-rate",
       ask: "How many commands per minute may be sent to this device at most?",
       why: "the runtime check rate-limits commands; the operator sets the limit",
     });
-  } else if (!Number.isInteger(rate) || rate < 1) {
-    throw new EnvelopeRefused([`intake.maxCommandsPerMinute must be an integer >= 1 (got ${String(rate)})`]);
+  } else if (!NumberIsInteger(rate) || rate < 1) {
+    throw new EnvelopeRefused([`intake.maxCommandsPerMinute must be an integer >= 1 (got ${text(rate)})`]);
   }
 
   const supervision = input.intake.supervision ?? null;
   if (supervision === null) {
-    questions.push({
+    append(questions, {
       about: "supervision",
       ask: "Who watches this device while it runs: attended, unattended, or remote-supervised?",
       why: "how the device is supervised is the operator's to state",
@@ -954,13 +1039,13 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
   } else if (supervisionProblem(supervision)) {
     throw new EnvelopeRefused([`intake.${supervisionProblem(supervision)}`]);
   } else if (supervision === "unattended" && template.movesOrHeats) {
-    questions.push({
+    append(questions, {
       about: "supervision",
       ask: "This device moves or heats, and v1 does not allow it to run unattended. Attended, or remote-supervised?",
       why: supervisionPolicyProblem(supervision, eStop, template) as string,
     });
   } else if (supervision === "remote-supervised" && eStop !== null && eStop.mechanism !== "adapter-stop") {
-    questions.push({
+    append(questions, {
       about: "e-stop",
       ask: "Remote supervision needs a stop the supervisor can trigger remotely. Which adapter command stops the device?",
       why: supervisionPolicyProblem(supervision, eStop, template) as string,
@@ -969,7 +1054,7 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
 
   const givenHazards = input.intake.hazards;
   if (givenHazards === undefined) {
-    questions.push({
+    append(questions, {
       about: "hazards",
       ask: "Which hazards does this device present: biological, chemical, heat, laser, mechanical, or none?",
       why: "none is an answer; silence is not",
@@ -1068,24 +1153,26 @@ function sourceProblem(source: unknown, unit: string): string | null {
       const citation = citationProblem(source.citation);
       if (citation) return `a reference source ${citation}`;
       if (!nonEmpty(source.claim)) return "a reference source needs its claim";
-      if (!nonEmpty(source.retrievedAt) || !Number.isFinite(Date.parse(source.retrievedAt))) return "a reference source needs a valid retrievedAt";
-      if (source.unit !== unit) return `a reference source must cite the limit's unit ${unit} (got ${JSON.stringify(source.unit)})`;
+      if (!nonEmpty(source.retrievedAt) || !NumberIsFinite(DateParse(source.retrievedAt))) return "a reference source needs a valid retrievedAt";
+      if (source.unit !== unit) return `a reference source must cite the limit's unit ${unit} (got ${JSONStringify(source.unit)})`;
       const bound = boundProblem(source.value);
       if (bound) return `a reference source ${bound}`;
       if (extraKeys(source.value as Record<string, unknown>, ["min", "max"]).length > 0) return "a reference source's value holds only min and max";
       return null;
     }
-    case "override":
+    case "override": {
       if (extraKeys(source, ["kind", "reason", "overrides"]).length > 0) return "an override source holds only kind, reason and overrides";
       if (!nonEmpty(source.reason)) return "an override needs the operator's reason";
-      if (!Array.isArray(source.overrides) || source.overrides.length === 0) return "an override must name the citations it overrides";
-      for (const c of source.overrides) {
-        const problem = citationProblem(c);
+      if (!ArrayIsArray(source.overrides) || (source.overrides as unknown[]).length === 0) return "an override must name the citations it overrides";
+      const overrides = source.overrides as unknown[];
+      for (let i = 0; i < overrides.length; i++) {
+        const problem = citationProblem(overrides[i]);
         if (problem) return `an override ${problem}`;
       }
       return null;
+    }
     default:
-      return `a source of kind ${JSON.stringify(String(source.kind))} is not operator, reference or override`;
+      return `a source of kind ${quoted(source.kind)} is not operator, reference or override`;
   }
 }
 
@@ -1102,20 +1189,26 @@ function sourceProblem(source: unknown, unit: string): string | null {
  */
 function provenanceProblems(limit: Record<string, unknown>, quantity: string, unit: string): string[] {
   const sources = limit.sources;
-  if (!Array.isArray(sources) || sources.length === 0) return [`${quantity}: a limit must name its sources`];
-  for (const source of sources) {
-    const problem = sourceProblem(source, unit);
+  if (!ArrayIsArray(sources) || (sources as unknown[]).length === 0) return [`${quantity}: a limit must name its sources`];
+  const typed = sources as LimitSource[];
+  for (let i = 0; i < typed.length; i++) {
+    const problem = sourceProblem(typed[i], unit);
     if (problem) return [`${quantity}: ${problem}`];
   }
-  const typed = sources as LimitSource[];
-  const operators = typed.filter((s) => s.kind === "operator");
-  const references = typed.flatMap((s) => (s.kind === "reference" ? [s] : []));
-  const overrides = typed.flatMap((s) => (s.kind === "override" ? [s] : []));
-  const bound = tightestBound(references.map((r) => r.value));
+  let operators = 0;
+  const references = newList<Extract<LimitSource, { kind: "reference" }>>(0);
+  const overrides = newList<Extract<LimitSource, { kind: "override" }>>(0);
+  for (let i = 0; i < typed.length; i++) {
+    const source = typed[i]!;
+    if (source.kind === "operator") operators++;
+    else if (source.kind === "reference") append(references, source);
+    else append(overrides, source);
+  }
+  const bound = tightestBound(mapList(references, (r) => r.value));
   const min = limit.min as number;
   const max = limit.max as number;
   if (limit.proposedBy === "reference") {
-    if (operators.length > 0 || overrides.length > 0 || references.length === 0) {
+    if (operators > 0 || overrides.length > 0 || references.length === 0) {
       return [`${quantity}: a limit a reference proposed must come from references alone`];
     }
     if (bound.min !== min || bound.max !== max) {
@@ -1123,21 +1216,22 @@ function provenanceProblems(limit: Record<string, unknown>, quantity: string, un
     }
     return [];
   }
-  const problems: string[] = [];
-  if (operators.length !== 1) problems.push(`${quantity}: an operator's limit names exactly one operator source`);
+  const problems = newList<string>(0);
+  if (operators !== 1) append(problems, `${quantity}: an operator's limit names exactly one operator source`);
   const loosens = (bound.min !== undefined && min < bound.min) || (bound.max !== undefined && max > bound.max);
   if (loosens && overrides.length !== 1) {
-    problems.push(`${quantity}: ${min}..${max} ${unit} loosens the cited bound ${describeBound(bound, unit)}, so it must carry exactly one override with the operator's reason`);
-  } else if (loosens && canonicalize(overrides[0]!.overrides) !== canonicalize(references.map((r) => r.citation))) {
-    problems.push(`${quantity}: the override must name exactly the cited references, in order`);
+    append(problems, `${quantity}: ${min}..${max} ${unit} loosens the cited bound ${describeBound(bound, unit)}, so it must carry exactly one override with the operator's reason`);
+  } else if (loosens && canonicalJson(overrides[0]!.overrides) !== canonicalJson(mapList(references, (r) => r.citation))) {
+    append(problems, `${quantity}: the override must name exactly the cited references, in order`);
   } else if (!loosens && overrides.length > 0) {
-    problems.push(`${quantity}: an override is recorded, but ${min}..${max} ${unit} loosens no cited bound`);
+    append(problems, `${quantity}: an override is recorded, but ${min}..${max} ${unit} loosens no cited bound`);
   }
   return problems;
 }
 
-const BODY_KEYS = ["envelopeVersion", "deviceClass", "device", "limits", "eStop", "maxCommandsPerMinute", "supervision", "hazards", "commandMap", "confirmation"];
-const LIMIT_KEYS = ["quantity", "unit", "param", "min", "max", "proposedBy", "sources"];
+const BODY_KEYS: readonly string[] = deepFreeze(["envelopeVersion", "deviceClass", "device", "limits", "eStop", "maxCommandsPerMinute", "supervision", "hazards", "commandMap", "confirmation"]);
+const LIMIT_KEYS: readonly string[] = deepFreeze(["quantity", "unit", "param", "min", "max", "proposedBy", "sources"]);
+const DEVICE_KEYS: readonly string[] = deepFreeze(["deviceId", "adapterType", "adapterVersion", "vendor", "model"]);
 
 /**
  * Every rule a confirmed body must meet, whoever built it. Confirm runs it on
@@ -1147,69 +1241,72 @@ const LIMIT_KEYS = ["quantity", "unit", "param", "min", "max", "proposedBy", "so
  * is refused, never committed and ignored.
  */
 export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
-  const problems: string[] = [];
+  const problems = newList<string>(0);
   if (!isRecord(envelope)) return ["the envelope is not an object"];
-  const template = Object.prototype.hasOwnProperty.call(DEVICE_CLASS_TEMPLATES, envelope.deviceClass)
-    ? DEVICE_CLASS_TEMPLATES[envelope.deviceClass]
-    : undefined;
-  if (!template) return [`unknown deviceClass ${JSON.stringify(String(envelope.deviceClass))}`];
+  const template = templateOf(envelope.deviceClass);
+  if (!template) return [`unknown deviceClass ${quoted(envelope.deviceClass)}`];
   const extra = extraKeys(envelope, BODY_KEYS);
-  if (extra.length > 0) problems.push(`the envelope holds keys it does not define: ${extra.join(", ")}`);
-  if (envelope.envelopeVersion !== 1) problems.push("envelopeVersion must be 1");
-  const device = (isRecord(envelope.device) ? envelope.device : {}) as Record<string, unknown>;
-  for (const key of ["deviceId", "adapterType"] as const) {
-    if (!nonEmpty(device[key])) problems.push(`device.${key} is required`);
+  if (extra.length > 0) append(problems, `the envelope holds keys it does not define: ${joinStrings(extra, ", ")}`);
+  if (envelope.envelopeVersion !== 1) append(problems, "envelopeVersion must be 1");
+  const device = (isRecord(envelope.device) ? envelope.device : ObjectCreate(null)) as Record<string, unknown>;
+  if (!nonEmpty(device.deviceId)) append(problems, "device.deviceId is required");
+  if (!nonEmpty(device.adapterType)) append(problems, "device.adapterType is required");
+  if (typeof device.adapterVersion !== "string" || !regexMatches(ADAPTER_MANIFEST_DIGEST_PATTERN, device.adapterVersion)) {
+    append(problems, "device.adapterVersion must be the adapter's manifest digest, sha256: + 64 lowercase hex");
   }
-  if (typeof device.adapterVersion !== "string" || !ADAPTER_MANIFEST_DIGEST_PATTERN.test(device.adapterVersion)) {
-    problems.push("device.adapterVersion must be the adapter's manifest digest, sha256: + 64 lowercase hex");
+  if (device.vendor !== undefined && !nonEmpty(device.vendor)) append(problems, "device.vendor, when given, must not be blank");
+  if (device.model !== undefined && !nonEmpty(device.model)) append(problems, "device.model, when given, must not be blank");
+  if (extraKeys(device, DEVICE_KEYS).length > 0) {
+    append(problems, "device holds only deviceId, adapterType, adapterVersion, vendor and model");
   }
-  for (const key of ["vendor", "model"] as const) {
-    if (device[key] !== undefined && !nonEmpty(device[key])) problems.push(`device.${key}, when given, must not be blank`);
+  const confirmation = (isRecord(envelope.confirmation) ? envelope.confirmation : ObjectCreate(null)) as Record<string, unknown>;
+  if (!nonEmpty(confirmation.confirmedBy)) append(problems, "confirmedBy is required");
+  if (!nonEmpty(confirmation.confirmedAt) || !NumberIsFinite(DateParse(confirmation.confirmedAt as string))) {
+    append(problems, "confirmedAt must be an ISO-8601 time");
   }
-  if (extraKeys(device, ["deviceId", "adapterType", "adapterVersion", "vendor", "model"]).length > 0) {
-    problems.push("device holds only deviceId, adapterType, adapterVersion, vendor and model");
-  }
-  const confirmation = (isRecord(envelope.confirmation) ? envelope.confirmation : {}) as Record<string, unknown>;
-  if (!nonEmpty(confirmation.confirmedBy)) problems.push("confirmedBy is required");
-  if (!nonEmpty(confirmation.confirmedAt) || !Number.isFinite(Date.parse(confirmation.confirmedAt as string))) {
-    problems.push("confirmedAt must be an ISO-8601 time");
-  }
-  if (extraKeys(confirmation, ["confirmedBy", "confirmedAt"]).length > 0) problems.push("confirmation holds only confirmedBy and confirmedAt");
-  if (!Array.isArray(envelope.limits) || envelope.limits.length !== template.requires.length) {
-    problems.push(`limits must hold exactly one limit per required quantity, in template order (${template.requires.map((r) => r.quantity).join(", ")})`);
+  if (extraKeys(confirmation, ["confirmedBy", "confirmedAt"]).length > 0) append(problems, "confirmation holds only confirmedBy and confirmedAt");
+  if (!ArrayIsArray(envelope.limits) || envelope.limits.length !== template.requires.length) {
+    append(problems, `limits must hold exactly one limit per required quantity, in template order (${joinStrings(mapList(template.requires, (r) => r.quantity), ", ")})`);
   } else {
-    template.requires.forEach((req, i) => {
+    for (let i = 0; i < template.requires.length; i++) {
+      const req = template.requires[i]!;
       const limit: unknown = envelope.limits[i];
       if (!isRecord(limit) || limit.quantity !== req.quantity) {
-        problems.push(`limit ${i} must be ${req.quantity}`);
-        return;
+        append(problems, `limit ${i} must be ${req.quantity}`);
+        continue;
       }
-      if (extraKeys(limit, LIMIT_KEYS).length > 0) problems.push(`${req.quantity}: a limit holds only ${LIMIT_KEYS.join(", ")}`);
-      if (limit.unit !== req.unit || !UNITS.has(limit.unit as string)) problems.push(`${req.quantity} must be in ${req.unit} (got ${JSON.stringify(limit.unit)})`);
-      if (limit.param !== req.param) problems.push(`${req.quantity} must bound the parameter ${req.param}`);
+      if (extraKeys(limit, LIMIT_KEYS).length > 0) append(problems, `${req.quantity}: a limit holds only ${joinStrings(LIMIT_KEYS, ", ")}`);
+      if (limit.unit !== req.unit || !inSet(UNITS, limit.unit)) append(problems, `${req.quantity} must be in ${req.unit} (got ${JSONStringify(limit.unit)})`);
+      if (limit.param !== req.param) append(problems, `${req.quantity} must bound the parameter ${req.param}`);
       const range = rangeProblem(limit.min, limit.max);
-      if (range) problems.push(`${req.quantity}: ${range}`);
-      if (limit.proposedBy !== "operator" && limit.proposedBy !== "reference") problems.push(`${req.quantity}: proposedBy must be operator or reference`);
-      else if (!range) problems.push(...provenanceProblems(limit, req.quantity, req.unit));
-    });
+      if (range) append(problems, `${req.quantity}: ${range}`);
+      if (limit.proposedBy !== "operator" && limit.proposedBy !== "reference") append(problems, `${req.quantity}: proposedBy must be operator or reference`);
+      else if (!range) {
+        const provenance = provenanceProblems(limit, req.quantity, req.unit);
+        for (let j = 0; j < provenance.length; j++) append(problems, provenance[j]!);
+      }
+    }
   }
   if (isRecord(envelope.eStop) && extraKeys(envelope.eStop, envelope.eStop.mechanism === "adapter-stop" ? ["mechanism", "stopCommand"] : ["mechanism"]).length > 0) {
-    problems.push("eStop holds only its mechanism, and an adapter stop's command");
+    append(problems, "eStop holds only its mechanism, and an adapter stop's command");
   }
   const stop = eStopProblem(envelope.eStop, template, envelope.commandMap);
-  if (stop) problems.push(stop);
+  if (stop) append(problems, stop);
   const rate = rateProblem(envelope.maxCommandsPerMinute);
-  if (rate) problems.push(rate);
-  for (const p of [supervisionProblem(envelope.supervision), hazardsProblem(envelope.hazards), hazardsCanonicalProblem(envelope.hazards)]) {
-    if (p) problems.push(p);
-  }
+  if (rate) append(problems, rate);
+  const supervision = supervisionProblem(envelope.supervision);
+  if (supervision) append(problems, supervision);
+  const hazards = hazardsProblem(envelope.hazards);
+  if (hazards) append(problems, hazards);
+  const hazardsOrder = hazardsCanonicalProblem(envelope.hazards);
+  if (hazardsOrder) append(problems, hazardsOrder);
   const policy = supervisionPolicyProblem(envelope.supervision, envelope.eStop, template);
-  if (policy) problems.push(policy);
+  if (policy) append(problems, policy);
   const map = commandMapProblem(envelope.commandMap, template);
-  if (map) problems.push(`commandMap: ${map}`);
+  if (map) append(problems, `commandMap: ${map}`);
   else {
     const gaps = commandMapGaps(envelope.commandMap, template);
-    if (gaps.length > 0) problems.push(`commandMap: no declared parameter sets ${gaps.join(", ")}`);
+    if (gaps.length > 0) append(problems, `commandMap: no declared parameter sets ${joinStrings(gaps, ", ")}`);
   }
   return problems;
 }
@@ -1229,87 +1326,106 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
 export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: EnvelopeDecision): ConfirmedSafetyEnvelope {
   const draft = draftSafetyEnvelope(input);
   const decision = plainSnapshot<EnvelopeDecision>(given, "decision");
-  const reasons: string[] = [];
-  const template = DEVICE_CLASS_TEMPLATES[draft.deviceClass];
-  if (!template) throw new EnvelopeRefused([`unknown deviceClass ${JSON.stringify(draft.deviceClass)}`]);
-  if (!nonEmpty(decision.confirmedBy)) reasons.push("confirmedBy is required");
-  if (!nonEmpty(decision.confirmedAt) || !Number.isFinite(Date.parse(decision.confirmedAt))) {
-    reasons.push("confirmedAt must be an ISO-8601 time");
+  const reasons = newList<string>(0);
+  const template = templateOf(draft.deviceClass);
+  if (!template) throw new EnvelopeRefused([`unknown deviceClass ${quoted(draft.deviceClass)}`]);
+  if (!nonEmpty(decision.confirmedBy)) append(reasons, "confirmedBy is required");
+  if (!nonEmpty(decision.confirmedAt) || !NumberIsFinite(DateParse(decision.confirmedAt))) {
+    append(reasons, "confirmedAt must be an ISO-8601 time");
   }
 
-  const bounds = new Map(draft.referenceBounds.map((b) => [b.quantity, b]));
-  const limits = new Map(draft.limits.map((l) => [l.quantity, l]));
-  const answered = new Set<string>();
-  const edited = new Set<string>();
-  for (const edit of decision.edits ?? []) {
-    const req = template.requires.find((r) => r.quantity === edit.quantity);
+  // Keyed by quantity, with no prototype: a lookup never reads an inherited value.
+  const bounds = ObjectCreate(null) as Record<string, ReferenceBound>;
+  for (let i = 0; i < draft.referenceBounds.length; i++) bounds[draft.referenceBounds[i]!.quantity] = draft.referenceBounds[i]!;
+  const limits = ObjectCreate(null) as Record<string, EnvelopeLimit>;
+  for (let i = 0; i < draft.limits.length; i++) limits[draft.limits[i]!.quantity] = draft.limits[i]!;
+  const answered = newList<string>(0);
+  const edited = newList<string>(0);
+  const edits = decision.edits ?? newList<EnvelopeEdit>(0);
+  for (let e = 0; e < edits.length; e++) {
+    const edit = edits[e]!;
+    let req: QuantityRequirement | undefined;
+    for (let i = 0; i < template.requires.length; i++) if (template.requires[i]!.quantity === edit.quantity) req = template.requires[i];
     if (!req) {
-      reasons.push(`edit for ${JSON.stringify(edit.quantity)}: not a quantity this device class bounds`);
+      append(reasons, `edit for ${JSONStringify(edit.quantity)}: not a quantity this device class bounds`);
       continue;
     }
-    if (edited.has(edit.quantity)) {
-      reasons.push(`edit for ${edit.quantity}: given twice; one confirmation states one range`);
+    if (includesValue(edited, edit.quantity)) {
+      append(reasons, `edit for ${edit.quantity}: given twice; one confirmation states one range`);
       continue;
     }
-    edited.add(edit.quantity);
+    append(edited, edit.quantity);
     const problem = rangeProblem(edit.min, edit.max);
     if (problem) {
-      reasons.push(`edit for ${edit.quantity}: ${problem}`);
+      append(reasons, `edit for ${edit.quantity}: ${problem}`);
       continue;
     }
-    const bound = bounds.get(edit.quantity);
-    const loosens =
-      bound !== undefined &&
-      ((bound.min !== undefined && edit.min < bound.min) || (bound.max !== undefined && edit.max > bound.max));
+    const bound = hasOwn(bounds, edit.quantity) ? bounds[edit.quantity] : undefined;
+    // Own sides only: a side the references do not give is never read through a prototype.
+    const boundMin = bound !== undefined && hasOwn(bound, "min") ? bound.min : undefined;
+    const boundMax = bound !== undefined && hasOwn(bound, "max") ? bound.max : undefined;
+    const loosens = bound !== undefined && ((boundMin !== undefined && edit.min < boundMin) || (boundMax !== undefined && edit.max > boundMax));
     if (loosens && !nonEmpty(edit.override?.reason)) {
-      reasons.push(
+      append(
+        reasons,
         `edit for ${edit.quantity}: ${edit.min}..${edit.max} ${req.unit} loosens the cited bound ${describeBound(bound, req.unit)}; an override needs a reason`,
       );
       continue;
     }
-    const citations = (bound?.sources ?? []).flatMap((s) => (s.kind === "reference" ? [s.citation] : []));
-    limits.set(edit.quantity, {
+    const boundSources = bound?.sources ?? newList<LimitSource>(0);
+    const citations = newList<Citation>(0);
+    for (let i = 0; i < boundSources.length; i++) {
+      const source = boundSources[i]!;
+      if (source.kind === "reference") append(citations, source.citation);
+    }
+    const sources = newList<LimitSource>(0);
+    append(sources, { kind: "operator", field: "confirmation" });
+    for (let i = 0; i < boundSources.length; i++) append(sources, boundSources[i]!);
+    if (loosens) append(sources, { kind: "override", reason: (edit.override as { reason: string }).reason, overrides: citations });
+    limits[edit.quantity] = {
       quantity: req.quantity,
       unit: req.unit,
       param: req.param,
       min: edit.min,
       max: edit.max,
       proposedBy: "operator",
-      sources: [
-        { kind: "operator", field: "confirmation" },
-        ...(bound?.sources ?? []),
-        ...(loosens ? [{ kind: "override" as const, reason: (edit.override as { reason: string }).reason, overrides: citations }] : []),
-      ],
-    });
-    answered.add(edit.quantity);
+      sources,
+    };
+    append(answered, edit.quantity);
   }
 
   const eStop = decision.eStop ?? draft.eStop;
-  if (decision.eStop) answered.add("e-stop");
+  if (decision.eStop) append(answered, "e-stop");
   const rate = decision.maxCommandsPerMinute ?? draft.maxCommandsPerMinute;
-  if (decision.maxCommandsPerMinute !== undefined) answered.add("command-rate");
+  if (decision.maxCommandsPerMinute !== undefined) append(answered, "command-rate");
   const supervision = decision.supervision ?? draft.supervision;
-  if (decision.supervision !== undefined) answered.add("supervision");
+  if (decision.supervision !== undefined) append(answered, "supervision");
   const hazards = decision.hazards ?? draft.hazards;
-  if (decision.hazards !== undefined) answered.add("hazards");
+  if (decision.hazards !== undefined) append(answered, "hazards");
 
-  for (const q of draft.questions) {
-    if (!answered.has(q.about)) reasons.push(`unanswered: ${q.ask}`);
+  for (let i = 0; i < draft.questions.length; i++) {
+    const q = draft.questions[i]!;
+    if (!includesValue(answered, q.about)) append(reasons, `unanswered: ${q.ask}`);
   }
-  for (const req of template.requires) {
-    if (!limits.has(req.quantity)) reasons.push(`no confirmed limit for ${req.quantity}`);
+  for (let i = 0; i < template.requires.length; i++) {
+    if (!hasOwn(limits, template.requires[i]!.quantity)) append(reasons, `no confirmed limit for ${template.requires[i]!.quantity}`);
   }
-  if (draft.commandMap === null) reasons.push("the adapter has not declared its commands; draft again with its command map");
-  for (const p of [eStopProblem(eStop, template, draft.commandMap), rateProblem(rate), supervisionProblem(supervision), hazardsProblem(hazards)]) {
-    if (p) reasons.push(p);
-  }
+  if (draft.commandMap === null) append(reasons, "the adapter has not declared its commands; draft again with its command map");
+  const stopProblem = eStopProblem(eStop, template, draft.commandMap);
+  if (stopProblem) append(reasons, stopProblem);
+  const rateIssue = rateProblem(rate);
+  if (rateIssue) append(reasons, rateIssue);
+  const supervisionIssue = supervisionProblem(supervision);
+  if (supervisionIssue) append(reasons, supervisionIssue);
+  const hazardsIssue = hazardsProblem(hazards);
+  if (hazardsIssue) append(reasons, hazardsIssue);
   if (reasons.length > 0 || !eStop || !hazards || !draft.commandMap) throw new EnvelopeRefused(reasons);
 
   const envelope: SafetyEnvelopeBody = {
     envelopeVersion: 1,
     deviceClass: draft.deviceClass,
     device: { ...draft.device },
-    limits: template.requires.map((r) => limits.get(r.quantity)!),
+    limits: mapList(template.requires, (r) => limits[r.quantity]!),
     // Only the declaration's own fields are committed.
     eStop: {
       mechanism: eStop.mechanism,
@@ -1353,26 +1469,40 @@ export interface SafetyEnvelopeRegistration extends SafetyEnvelopeRegistrationSt
  */
 export type RegistrationVerifier = (preimage: Uint8Array, signature: Uint8Array) => boolean;
 
+/** LO-EV-1's tagged digest form, `sha256:` + 64 lowercase hex. */
+const TAGGED_DIGEST = /^sha256:[0-9a-f]{64}$/;
+
 function registrationStatementProblems(statement: Record<string, unknown>): string[] {
-  const problems: string[] = [];
-  if (!nonEmpty(statement.deviceId)) problems.push("the registration needs the deviceId");
-  if (typeof statement.envelopeDigest !== "string" || !DIGEST_PATTERN.test(statement.envelopeDigest)) {
-    problems.push("the registration's envelopeDigest must be 0x + 64 lowercase hex");
+  const problems = newList<string>(0);
+  if (!nonEmpty(statement.deviceId)) append(problems, "the registration needs the deviceId");
+  if (typeof statement.envelopeDigest !== "string" || !regexMatches(DIGEST_PATTERN, statement.envelopeDigest)) {
+    append(problems, "the registration's envelopeDigest must be 0x + 64 lowercase hex");
   }
-  if (!nonEmpty(statement.registeredAt) || !Number.isFinite(Date.parse(statement.registeredAt))) {
-    problems.push("the registration's registeredAt must be an ISO-8601 time");
+  if (!nonEmpty(statement.registeredAt) || !NumberIsFinite(DateParse(statement.registeredAt))) {
+    append(problems, "the registration's registeredAt must be an ISO-8601 time");
   }
   return problems;
 }
 
 function statementDigestOf(statement: Record<string, unknown>): SHA256 {
-  const canonical = canonicalize({
+  const canonical = canonicalJson({
     domain: SAFETY_ENVELOPE_REGISTRATION_DOMAIN,
     deviceId: statement.deviceId,
     envelopeDigest: statement.envelopeDigest,
     registeredAt: statement.registeredAt,
   });
-  return `sha256:${createHash("sha256").update(canonical).digest("hex")}` as SHA256;
+  return `sha256:${sha256Hex(canonical)}` as SHA256;
+}
+
+/**
+ * LO-EV-1's signing preimage of a tagged digest: its UTF-8, the 71 bytes of
+ * `sha256:` + 64 lowercase hex (`signingPreimage` in evidence/signing-preimage.ts),
+ * built from intrinsics captured at load.
+ */
+function taggedDigestPreimage(tagged: string): Uint8Array {
+  const bytes = regexMatches(TAGGED_DIGEST, tagged) ? asciiBytes(tagged) : null;
+  if (bytes === null) throw new EnvelopeRefused([`not a tagged sha256 digest: ${quoted(tagged)}`]);
+  return bytes;
 }
 
 /**
@@ -1389,7 +1519,7 @@ export function registrationStatementDigest(statement: SafetyEnvelopeRegistratio
 
 /** The bytes the registry signs: LO-EV-1's preimage of `registrationStatementDigest(statement)`. */
 export function registrationSigningPreimage(statement: SafetyEnvelopeRegistrationStatement): Uint8Array {
-  return signingPreimage(registrationStatementDigest(statement));
+  return taggedDigestPreimage(registrationStatementDigest(statement));
 }
 
 /**
@@ -1424,15 +1554,13 @@ function committedSnapshot(
   if (record.deviceId !== snapshot.body.device?.deviceId) {
     throw new EnvelopeRefused(["the registration is for another device"]);
   }
-  let signature: Uint8Array;
-  try {
-    signature = parseEd25519SignatureHex(record.signature);
-  } catch {
+  const signature = fixedHexBytes(record.signature, 64);
+  if (signature === null) {
     throw new EnvelopeRefused(["the registration's signature is not an Ed25519 signature (128 hex characters)"]);
   }
   let verified = false;
   try {
-    verified = verifyRegistration(signingPreimage(statementDigestOf(record)), signature) === true;
+    verified = verifyRegistration(taggedDigestPreimage(statementDigestOf(record)), signature) === true;
   } catch {
     verified = false;
   }
@@ -1474,7 +1602,10 @@ export interface CompiledSafetyEnvelope {
 /**
  * Compile the envelope the registry's signed registration commits (see
  * `checkCommittedEnvelope`) into the CSD's typed I/O and its evidence tier.
- * It reads only the snapshot it checked, never `confirmed` again.
+ * It reads only the snapshot it checked, never `confirmed` again, and builds
+ * every array by index from intrinsics captured at load, so a prototype
+ * method replaced after load cannot change an emitted value (astra pack 164).
+ * The result is frozen.
  */
 export function compileSafetyEnvelope(
   confirmed: ConfirmedSafetyEnvelope,
@@ -1482,12 +1613,9 @@ export function compileSafetyEnvelope(
   verifyRegistration: RegistrationVerifier,
 ): CompiledSafetyEnvelope {
   const { body: envelope, digest: committedDigest } = committedSnapshot(confirmed, registration, verifyRegistration);
-  const template = DEVICE_CLASS_TEMPLATES[envelope.deviceClass]!;
+  const template = templateOf(envelope.deviceClass)!;
 
-  // Built with map, which installs each element directly: a push or an
-  // assignment would run a setter Array.prototype serves for that index, and
-  // could substitute a compiled bound.
-  const parameters: CsdParameter[] = template.requires.map((req, i) => {
+  const parameters = mapList(template.requires, (req, i): CsdParameter => {
     const limit = envelope.limits[i]!;
     return {
       key: req.param,
@@ -1501,7 +1629,7 @@ export function compileSafetyEnvelope(
       unit: limit.unit,
     };
   });
-  const definitions: ParameterDefinition[] = template.requires.map((req, i) => {
+  const definitions = mapList(template.requires, (req, i): ParameterDefinition => {
     const limit = envelope.limits[i]!;
     return {
       name: req.param,
@@ -1513,7 +1641,7 @@ export function compileSafetyEnvelope(
     };
   });
 
-  return {
+  return deepFreeze({
     parameters,
     evidence: {
       "envelope-conformance": {
@@ -1522,19 +1650,19 @@ export function compileSafetyEnvelope(
         primitives: [
           {
             id: "telemetry.envelope_conformance",
-            params: { envelope: envelope.limits.map((l) => ({ metric: l.quantity, unit: l.unit, min: l.min, max: l.max })) },
+            params: { envelope: mapList(envelope.limits, (l) => ({ metric: l.quantity, unit: l.unit, min: l.min, max: l.max })) },
           },
         ],
       },
     },
     composition: { parameters: definitions, outputPorts: { ...template.outputPorts } },
     envelopeDigest: committedDigest as SafetyEnvelopeDigest,
-  };
+  });
 }
 
 /** The time units a deadline quantity may use (for the runtime schema). */
 export function isTimeUnit(unit: unknown): boolean {
-  return typeof unit === "string" && TIME_UNITS.has(unit);
+  return inSet(TIME_UNITS, unit);
 }
 
 /** The v1 supervision policy, exported for the runtime schema. */
@@ -1543,16 +1671,16 @@ export function supervisionPolicy(
   eStop: EStopDeclaration | null | undefined,
   deviceClass: string,
 ): string | null {
-  const template = Object.prototype.hasOwnProperty.call(DEVICE_CLASS_TEMPLATES, deviceClass) ? DEVICE_CLASS_TEMPLATES[deviceClass] : undefined;
+  const template = templateOf(deviceClass);
   return template ? supervisionPolicyProblem(supervision, eStop, template) : null;
 }
 
 /** Why a command map is malformed or leaves a bounded quantity unset, for a known class; null when it is complete. */
 export function commandMapIssue(commandMap: unknown, deviceClass: string): string | null {
-  const template = Object.prototype.hasOwnProperty.call(DEVICE_CLASS_TEMPLATES, deviceClass) ? DEVICE_CLASS_TEMPLATES[deviceClass] : undefined;
-  if (!template) return `unknown deviceClass ${JSON.stringify(String(deviceClass))}`;
+  const template = templateOf(deviceClass);
+  if (!template) return `unknown deviceClass ${quoted(deviceClass)}`;
   const problem = commandMapProblem(commandMap, template);
   if (problem) return problem;
   const gaps = commandMapGaps(commandMap as CommandMapV1, template);
-  return gaps.length > 0 ? `no declared parameter sets ${gaps.join(", ")}` : null;
+  return gaps.length > 0 ? `no declared parameter sets ${joinStrings(gaps, ", ")}` : null;
 }

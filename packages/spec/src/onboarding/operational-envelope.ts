@@ -36,6 +36,13 @@
  * `envelopeDigest` names the confirmed envelope this came from, the one the
  * registry's signed registration commits. A digest is not a signature: it
  * proves nothing by itself, and it matters where it is committed.
+ *
+ * Like safety-envelope.ts, compile and the schema's refinements call only
+ * intrinsics `primordials.ts` captured at load, so a prototype method
+ * replaced after load cannot change what is emitted (astra pack 164). The
+ * candidate is frozen before zod sees it: zod is third-party code that calls
+ * ambient methods, so it only gates success or failure, and what is returned
+ * is the frozen object compile built.
  */
 
 import { z } from "zod";
@@ -55,8 +62,33 @@ import {
   type RegistrationVerifier,
   type SafetyEnvelopeRegistration,
 } from "./safety-envelope.js";
+import {
+  deepFreeze,
+  filterList,
+  hasOwn,
+  includesValue,
+  joinStrings,
+  JSONStringify,
+  mapList,
+  newList,
+  append,
+  quoted,
+  text,
+  trim,
+} from "./primordials.js";
 
-const NonBlank = z.string().refine((s) => s.trim().length > 0, { message: "must not be blank" });
+const NonBlank = z.string().refine((s) => trim(s).length > 0, { message: "must not be blank" });
+
+/** True when no two values are equal by type and value (compared as their JSON). */
+function allDistinct(values: readonly unknown[]): boolean {
+  const seen = newList<string>(0);
+  for (let i = 0; i < values.length; i++) {
+    const key = JSONStringify(values[i]);
+    if (includesValue(seen, key)) return false;
+    append(seen, key);
+  }
+  return true;
+}
 
 export const OperationalLimitSchema = z
   .object({
@@ -78,7 +110,7 @@ export const OperationalEStopSchema = z.discriminatedUnion("mechanism", [
 const FiniteSet = z
   .array(z.union([NonBlank, z.number().finite()]))
   .min(1)
-  .refine((values) => new Set(values.map((v) => JSON.stringify(v))).size === values.length, { message: "an allowed value is listed twice" });
+  .refine((values) => allDistinct(values), { message: "an allowed value is listed twice" });
 
 /**
  * A parameter that sets no physical quantity: why, and the only values it may
@@ -111,9 +143,7 @@ export const OperationalCommandSchema = z
   .strict();
 
 function templateOf(deviceClass: string) {
-  return Object.prototype.hasOwnProperty.call(DEVICE_CLASS_TEMPLATES, deviceClass)
-    ? DEVICE_CLASS_TEMPLATES[deviceClass]
-    : undefined;
+  return hasOwn(DEVICE_CLASS_TEMPLATES, deviceClass) ? DEVICE_CLASS_TEMPLATES[deviceClass] : undefined;
 }
 
 export const OperationalEnvelopeV1Schema = z
@@ -135,7 +165,7 @@ export const OperationalEnvelopeV1Schema = z
     /** How the device is supervised while it runs, as the operator confirmed it. */
     supervision: z.enum(SUPERVISION_MODES),
     /** The hazards the operator confirmed, each once; an empty list is the operator's "none". */
-    hazards: z.array(z.enum(HAZARDS)).refine((h) => new Set(h).size === h.length, { message: "a hazard is listed twice" }),
+    hazards: z.array(z.enum(HAZARDS)).refine((h) => allDistinct(h), { message: "a hazard is listed twice" }),
   })
   .strict()
   .superRefine((env, ctx) => {
@@ -143,36 +173,43 @@ export const OperationalEnvelopeV1Schema = z
     const template = templateOf(env.deviceClass);
     // Only a class with a template: a runtime validating this schema accepts nothing compile would refuse.
     if (!template) {
-      issue(["deviceClass"], `unknown deviceClass ${JSON.stringify(env.deviceClass)}`);
+      issue(["deviceClass"], `unknown deviceClass ${quoted(env.deviceClass)}`);
       return;
     }
     // One canonical order, as confirm commits it (a duplicate is reported by the hazards refinement).
-    const canonical = HAZARDS.filter((h) => env.hazards.includes(h));
-    if (canonical.length === env.hazards.length && canonical.some((h, i) => h !== env.hazards[i])) {
-      issue(["hazards"], "hazards must be in canonical order");
+    const canonical = filterList(HAZARDS as readonly string[], (h) => includesValue(env.hazards, h));
+    if (canonical.length === env.hazards.length) {
+      for (let i = 0; i < canonical.length; i++) {
+        if (canonical[i] !== env.hazards[i]) {
+          issue(["hazards"], "hazards must be in canonical order");
+          break;
+        }
+      }
     }
     // Exactly the template's quantities, in its order and units.
     if (env.limits.length !== template.requires.length) {
-      issue(["limits"], `limits must be exactly ${template.requires.map((r) => r.quantity).join(", ")}`);
+      issue(["limits"], `limits must be exactly ${joinStrings(mapList(template.requires, (r) => r.quantity), ", ")}`);
     }
-    template.requires.forEach((req, i) => {
+    for (let i = 0; i < template.requires.length; i++) {
+      const req = template.requires[i]!;
       const limit = env.limits[i];
-      if (!limit) return;
+      if (!limit) continue;
       if (limit.quantity !== req.quantity) issue(["limits", i, "quantity"], `limit ${i} must be ${req.quantity}`);
       else if (limit.unit !== req.unit) issue(["limits", i, "unit"], `${req.quantity} is in ${req.unit}`);
-    });
+    }
     if (env.eStop.mechanism === "none" && template.movesOrHeats) {
       issue(["eStop", "mechanism"], "a device that moves or heats needs an e-stop");
     }
     const stop = env.eStop;
-    if (stop.mechanism === "adapter-stop" && !env.commands.some((c) => c.name === stop.stopCommand)) {
+    if (stop.mechanism === "adapter-stop" && filterList(env.commands, (c) => c.name === stop.stopCommand).length === 0) {
       issue(["eStop", "stopCommand"], "the stop command must be one of the declared commands");
     }
     const policy = supervisionPolicy(env.supervision, env.eStop, env.deviceClass);
     if (policy) issue(["supervision"], policy);
     const map = commandMapIssue({ commands: env.commands }, env.deviceClass);
     if (map) issue(["commands"], map);
-    const deadline = env.limits.find((l) => l.quantity === env.deadlineQuantity);
+    const deadlines = filterList(env.limits, (l) => l.quantity === env.deadlineQuantity);
+    const deadline = deadlines.length > 0 ? deadlines[0] : undefined;
     if (env.deadlineQuantity !== template.deadline) {
       issue(["deadlineQuantity"], `the deadline of a ${template.id} is ${template.deadline}`);
     } else if (!deadline || !isTimeUnit(deadline.unit)) {
@@ -184,8 +221,9 @@ export type OperationalEnvelopeV1 = z.infer<typeof OperationalEnvelopeV1Schema>;
 /**
  * Compile the envelope the registry's signed registration commits into the
  * runtime envelope. It reads only the snapshot `checkCommittedEnvelope`
- * returns, never `confirmed` again, and refuses anything confirm would
- * refuse, and anything the schema refuses.
+ * returns, never `confirmed` again, builds every array by index from
+ * intrinsics captured at load, and refuses anything confirm would refuse,
+ * and anything the schema refuses. The result is frozen.
  */
 export function compileOperationalEnvelope(
   confirmed: ConfirmedSafetyEnvelope,
@@ -193,14 +231,14 @@ export function compileOperationalEnvelope(
   verifyRegistration: RegistrationVerifier,
 ): OperationalEnvelopeV1 {
   const { envelope, envelopeDigest: committedDigest } = checkCommittedEnvelope(confirmed, registration, verifyRegistration);
-  const template = DEVICE_CLASS_TEMPLATES[envelope.deviceClass]!;
+  const template = templateOf(envelope.deviceClass)!;
   const eStop =
     envelope.eStop.mechanism === "adapter-stop"
       ? { mechanism: "adapter-stop" as const, stopCommand: envelope.eStop.stopCommand as string }
       : { mechanism: envelope.eStop.mechanism };
-  // Built from the checked snapshot with literals and map only, which install
-  // values directly (no assignment a polluted prototype's setter could intercept).
-  const candidate = {
+  // Built from the checked snapshot by index, with own data properties only: no
+  // prototype method or setter takes part (astra packs 158 and 164).
+  const candidate = deepFreeze({
     envelopeVersion: 1 as const,
     envelopeDigest: committedDigest,
     deviceClass: envelope.deviceClass,
@@ -208,17 +246,17 @@ export function compileOperationalEnvelope(
     adapterType: envelope.device.adapterType,
     adapterVersion: envelope.device.adapterVersion,
     strict: true,
-    limits: envelope.limits.map((l) => ({ quantity: l.quantity, unit: l.unit, min: l.min, max: l.max })),
-    commands: envelope.commandMap.commands.map((c) => ({
+    limits: mapList(envelope.limits, (l) => ({ quantity: l.quantity, unit: l.unit, min: l.min, max: l.max })),
+    commands: mapList(envelope.commandMap.commands, (c) => ({
       name: c.name,
-      params: c.params.map((p) =>
+      params: mapList(c.params, (p) =>
         p.unbounded !== undefined
           ? {
               name: p.name,
               unbounded: {
                 reason: p.unbounded.reason,
-                ...(p.unbounded.allowed !== undefined ? { allowed: [...p.unbounded.allowed] } : {}),
-                ...(p.unbounded.allowedItems !== undefined ? { allowedItems: [...p.unbounded.allowedItems] } : {}),
+                ...(p.unbounded.allowed !== undefined ? { allowed: mapList(p.unbounded.allowed, (v) => v) } : {}),
+                ...(p.unbounded.allowedItems !== undefined ? { allowedItems: mapList(p.unbounded.allowedItems, (v) => v) } : {}),
               },
             }
           : { name: p.name, quantity: p.quantity, unit: p.unit },
@@ -228,21 +266,15 @@ export function compileOperationalEnvelope(
     maxCommandsPerMinute: envelope.maxCommandsPerMinute,
     eStop,
     supervision: envelope.supervision,
-    hazards: [...envelope.hazards],
-  };
+    hazards: mapList(envelope.hazards, (h) => h),
+  });
+  // Frozen before zod reads it: zod calls ambient methods, so it may only say yes or no, never change the candidate.
   const parsed = OperationalEnvelopeV1Schema.safeParse(candidate);
   if (!parsed.success) {
-    throw new EnvelopeRefused(parsed.error.issues.map((i) => `${i.path.join(".") || "envelope"}: ${i.message}`));
+    throw new EnvelopeRefused(
+      mapList(parsed.error.issues, (i) => `${joinStrings(mapList(i.path, (k) => text(k)), ".") || "envelope"}: ${i.message}`),
+    );
   }
-  // What was built and validated is what is returned, frozen. Zod's parsed copy
-  // is not used: zod rebuilds objects and arrays by assignment.
-  return deepFreeze(candidate) as OperationalEnvelopeV1;
-}
-
-function deepFreeze<T>(value: T): T {
-  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const v of Object.values(value)) deepFreeze(v);
-  }
-  return value;
+  // What was built and validated is what is returned. Zod's parsed copy is not used: zod rebuilds objects and arrays by assignment.
+  return candidate as OperationalEnvelopeV1;
 }
