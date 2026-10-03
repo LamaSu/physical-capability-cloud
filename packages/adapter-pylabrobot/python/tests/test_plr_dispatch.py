@@ -245,6 +245,100 @@ async def test_empty_ops_and_non_inline_sources_fail_loud_on_plr(fake_plr):
     assert [c[0] for c in s.loader.get("lh1").machine.calls] == ["setup"]
 
 
+
+# ── R39 CRIT2: one per-device execution lease ───────────────────────────────
+
+def _block_pick_up_tips_on(machine) -> tuple["asyncio.Event", "asyncio.Event"]:
+    """Make ONE specific fake LiquidHandler instance's pick_up_tips wait on an
+    Event before doing its work. Scoped to this instance only (an attribute
+    set directly on it shadows the class method) -- a different device's
+    machine is a different instance and is never touched.
+
+    Returns (entered, release): ``entered`` is set the instant a run is inside
+    pick_up_tips (holding the lease, nothing moved yet); set ``release`` to let
+    it proceed.
+    """
+    import asyncio as _asyncio
+
+    entered = _asyncio.Event()
+    release = _asyncio.Event()
+    original = type(machine).pick_up_tips
+
+    async def blocking(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(machine, *args, **kwargs)
+
+    machine.pick_up_tips = blocking
+    return entered, release
+
+
+async def test_concurrent_runs_on_one_device_are_serialized_not_interleaved(fake_plr):
+    import asyncio
+
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
+
+    task_a = asyncio.create_task(_run(s, out, TRANSFER))
+    await entered.wait()  # job A holds the lease, blocked inside pick_up_tips
+    assert _calls(s) == ["setup"]  # not even pick_up_tips has recorded yet
+
+    # B must get DEVICE_BUSY fast -- it must never queue behind A. Bounded by
+    # wait_for so a regression (B blocking on the same backend call) fails the
+    # test cleanly instead of hanging the whole run. (Same `out`/`s` as task_a:
+    # the Server writes only to the `out` it was constructed with -- task_a is
+    # dormant here, so there's nothing to interleave with yet.)
+    resp_b = await asyncio.wait_for(call(s, out, "backend.run", {
+        "deviceId": "lh1", "jobId": "job-b", "protocolSource": "inline-ops", "protocolInline": TRANSFER,
+    }, "20"), timeout=2.0)
+    assert resp_b["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], resp_b
+    assert _calls(s) == ["setup"]  # B touched nothing: no backend call at all
+
+    # a different device is not blocked
+    await call(s, out, "backend.init", {"deviceId": "lh2", "plrBackend": "chatterbox", "backendConfig": {"deckLayout": DECK}}, "30")
+    other = await asyncio.wait_for(call(s, out, "backend.run", {
+        "deviceId": "lh2", "jobId": "job-other", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
+    }, "31"), timeout=2.0)
+    assert other["result"]["ok"] is True
+
+    release.set()
+    result_a = await task_a
+    assert result_a["result"]["opCount"] == 4
+    assert _calls(s) == ["setup", "pick_up_tips", "aspirate", "dispense", "return_tips"]
+
+    # the lease is released: B can run now
+    resp_b2 = await call(s, out, "backend.run", {
+        "deviceId": "lh1", "jobId": "job-b", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
+    }, "21")
+    assert resp_b2["result"]["opCount"] == 1, resp_b2
+
+
+async def test_evidence_start_recording_refuses_a_different_job_while_the_device_is_busy(fake_plr):
+    import asyncio
+
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
+    task_a = asyncio.create_task(_run(s, out, TRANSFER))  # _run always uses jobId "job-x"
+    await entered.wait()
+
+    resp = await asyncio.wait_for(
+        call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-b"}, "40"), timeout=2.0,
+    )
+    assert resp["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], resp
+
+    # the lease holder's own job ("job-x", see _run) may still (re)arm its
+    # window without conflict
+    own = await asyncio.wait_for(
+        call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-x"}, "41"), timeout=2.0,
+    )
+    assert "error" not in own, own
+
+    release.set()
+    await asyncio.wait_for(task_a, timeout=2.0)
+
+
 async def test_tips_can_be_dropped_into_a_named_spot(fake_plr):
     s, out = _server()
     await init(s, out, deckLayout=DECK)

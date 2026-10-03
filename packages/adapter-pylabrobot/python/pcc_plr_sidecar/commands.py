@@ -114,27 +114,36 @@ class Commands:
 
         handle = self._require_handle(device_id)
 
-        if not self.evidence.is_recording(device_id):
-            # Auto-start recording window if the TS adapter didn't pre-arm it.
-            self.evidence.start_recording(device_id, job_id)
-
-        started_at = time.monotonic()
-        if not is_stub_machine(handle.machine):
-            # R39: a PLR LiquidHandler runs every op for real. The evidence is what
-            # the machine did, never an echo of the request.
-            op_count = await self._run_plr_ops(
-                handle, device_id, job_id, protocol_source, protocol_inline,
+        # R39 CRIT2: one per-device execution lease, taken BEFORE anything else
+        # -- a second run on the same device fails fast with DEVICE_BUSY and
+        # touches nothing: no recording start, no backend call. It doesn't queue.
+        if not handle.try_acquire(job_id):
+            raise RpcException(
+                RPC_ERROR_CODES["DEVICE_BUSY"],
+                f"deviceId {device_id} is busy running job {handle.busy_job_id}",
+                {"deviceId": device_id, "jobId": job_id, "busyJobId": handle.busy_job_id},
             )
-            return {
-                "ok": True,
-                "jobId": job_id,
-                "opCount": op_count,
-                "executionMode": handle.execution_mode,
-                "durationMs": int((time.monotonic() - started_at) * 1000),
-                "summary": {},
-            }
-        # The stub moves nothing: its results and every event say executionMode "stub".
         try:
+            if not self.evidence.is_recording(device_id):
+                # Auto-start recording window if the TS adapter didn't pre-arm it.
+                self.evidence.start_recording(device_id, job_id)
+
+            started_at = time.monotonic()
+            if not is_stub_machine(handle.machine):
+                # R39: a PLR LiquidHandler runs every op for real. The evidence is
+                # what the machine did, never an echo of the request.
+                op_count = await self._run_plr_ops(
+                    handle, device_id, job_id, protocol_source, protocol_inline,
+                )
+                return {
+                    "ok": True,
+                    "jobId": job_id,
+                    "opCount": op_count,
+                    "executionMode": handle.execution_mode,
+                    "durationMs": int((time.monotonic() - started_at) * 1000),
+                    "summary": {},
+                }
+            # The stub moves nothing: its results and every event say executionMode "stub".
             ops = _normalise_ops(protocol_source, protocol_payload, protocol_inline, run_params)
             for op in ops:
                 op_type = (op.get("op") if isinstance(op, dict) else None) or "atomic_op"
@@ -172,10 +181,10 @@ class Commands:
                 "durationMs": duration_ms,
                 "summary": summary,
             }
-        finally:
             # Recording window is closed explicitly by the TS adapter via
             # evidence.stopRecording — leave it open here.
-            pass
+        finally:
+            handle.release()
 
     async def backend_status(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
@@ -243,6 +252,17 @@ class Commands:
     async def evidence_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
+        # R39 CRIT2: a recording window is bound to the run holding the device's
+        # lease. A different job may not open (or silently replace) a window
+        # while that lease is held.
+        if self.loader.has(device_id):
+            handle = self.loader.get(device_id)
+            if handle.busy and handle.busy_job_id != job_id:
+                raise RpcException(
+                    RPC_ERROR_CODES["DEVICE_BUSY"],
+                    f"deviceId {device_id} is busy running job {handle.busy_job_id}",
+                    {"deviceId": device_id, "jobId": job_id, "busyJobId": handle.busy_job_id},
+                )
         window = self.evidence.start_recording(device_id, job_id)
         return {"ok": True, "jobId": window.job_id, "startedAt": window.started_at.isoformat()}
 

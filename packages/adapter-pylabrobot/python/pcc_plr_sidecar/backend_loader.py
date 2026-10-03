@@ -41,10 +41,12 @@ is ``"stub"``, never as a fallback, and every result it gives says
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import math
 import os
+import stat
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -77,6 +79,13 @@ MAX_LAYOUT_STRING = 4096
 _GEOMETRY_TOLERANCE_MM = 0.5
 
 
+def _already_set_event() -> asyncio.Event:
+    """An ``asyncio.Event`` that starts set (device idle, no run holds it)."""
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass
 class BackendHandle:
     """A loaded backend instance + associated PLR objects.
@@ -99,6 +108,28 @@ class BackendHandle:
     execution_mode: str = "stub"
     # The largest volume one aspirate or dispense may move, in uL.
     max_volume_ul: float = DEFAULT_MAX_VOLUME_UL
+    # R39 CRIT2: one per-device execution lease. ``busy`` + ``busy_job_id`` are
+    # the fast synchronous gate `backend.run` and `evidence.startRecording`
+    # check before touching anything; ``idle`` is the coordination primitive
+    # `BackendLoader.unload` awaits so shutdown never races a holder's actuation.
+    busy: bool = False
+    busy_job_id: Optional[str] = None
+    idle: asyncio.Event = field(default_factory=lambda: _already_set_event())
+
+    def try_acquire(self, job_id: str) -> bool:
+        """Take the lease for ``job_id``. False (no state changed) if busy."""
+        if self.busy:
+            return False
+        self.busy = True
+        self.busy_job_id = job_id
+        self.idle.clear()
+        return True
+
+    def release(self) -> None:
+        """Release the lease. Safe to call even if never acquired."""
+        self.busy = False
+        self.busy_job_id = None
+        self.idle.set()
 
 
 class BackendLoader:
@@ -158,6 +189,10 @@ class BackendLoader:
         h = self._handles.pop(device_id, None)
         if h is None:
             return
+        # R39 CRIT2: shutdown waits for the lease holder cleanly rather than
+        # racing its actuation -- popped from ``_handles`` first so no NEW run
+        # can start against this device while we wait.
+        await h.idle.wait()
         # PLR backends typically expose .stop() (async). Stub doesn't.
         stop_fn = getattr(h.machine, "stop", None)
         if stop_fn:
