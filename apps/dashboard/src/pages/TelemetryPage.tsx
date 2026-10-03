@@ -50,7 +50,10 @@ export type PipelinePhase =
   | "settlement_complete"
   | "delivery_dispatch"
   | "delivery_pickup"
-  | "delivery_complete";
+  | "delivery_complete"
+  | "operator_register"
+  | "operator_verify"
+  | "dht_query";
 
 export type TelemetryStatus = "started" | "completed" | "failed" | "skipped";
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -152,6 +155,9 @@ const PHASE_LABELS: Record<PipelinePhase, string> = {
   delivery_dispatch: "Dispatch",
   delivery_pickup: "Pickup",
   delivery_complete: "Delivered",
+  operator_register: "Operator Reg",
+  operator_verify: "Operator Verify",
+  dht_query: "DHT Query",
 };
 
 /** The gateway also emits phases the visualizer doesn't draw; show those by name. */
@@ -199,7 +205,12 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 // than being displayed as a garbled entry ("Invalid Date", blank fields).
 // ---------------------------------------------------------------------------
 
-const PIPELINE_PHASE_SET = new Set<string>(PIPELINE_PHASES);
+/**
+ * Every phase the gateway emits (packages/gateway/src/telemetry.ts): the job
+ * pipeline the strip draws, plus operator registration and DHT lookups. A
+ * row in any of them is real data (astra 408e item 5).
+ */
+const GATEWAY_PHASE_SET = new Set<string>([...PIPELINE_PHASES, "operator_register", "operator_verify", "dht_query"]);
 const TELEMETRY_STATUS_SET = new Set<string>(["started", "completed", "failed", "skipped"]);
 const LOG_LEVEL_SET = new Set<string>(["debug", "info", "warn", "error"]);
 
@@ -208,7 +219,7 @@ function isActiveJobSummary(v: unknown): v is ActiveJobSummary {
     isRecord(v) &&
     typeof v.jobId === "string" &&
     typeof v.currentPhase === "string" &&
-    PIPELINE_PHASE_SET.has(v.currentPhase) &&
+    GATEWAY_PHASE_SET.has(v.currentPhase) &&
     typeof v.startedAt === "string" &&
     typeof v.eventCount === "number" &&
     typeof v.lastUpdated === "string"
@@ -222,7 +233,7 @@ function isTelemetryEvent(v: unknown): v is TelemetryEvent {
     typeof v.jobId === "string" &&
     typeof v.timestamp === "string" &&
     typeof v.phase === "string" &&
-    PIPELINE_PHASE_SET.has(v.phase) &&
+    GATEWAY_PHASE_SET.has(v.phase) &&
     typeof v.status === "string" &&
     TELEMETRY_STATUS_SET.has(v.status) &&
     (v.duration_ms === undefined || typeof v.duration_ms === "number") &&
