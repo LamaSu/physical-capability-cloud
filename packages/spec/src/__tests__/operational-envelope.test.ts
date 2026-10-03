@@ -194,8 +194,8 @@ describe("compileOperationalEnvelope: the confirmed envelope, projected for the 
       ],
       [
         "a command map gap",
-        (b) => (b.commandMap = { commands: b.commandMap.commands.filter((cmd: any) => cmd.name !== "runProtocol") }),
-        /commandMap: no declared parameter sets run_duration/,
+        (b) => (b.commandMap = { commands: b.commandMap.commands.filter((cmd: any) => cmd.name !== "setModuleTemp") }),
+        /commandMap: no declared parameter sets module_temperature/,
       ],
       ["a device with a blank id (registered for the original device)", (b) => (b.device.deviceId = " "), /the registration is for another device/, "ot2-sim-1"],
     ];
@@ -253,9 +253,26 @@ describe("OperationalEnvelopeV1Schema: strict, no defaults", () => {
   });
 
   it("(114b-12) refuses a command map with a gap", () => {
-    expect(messages(parseChanged(rt, (e) => (e.commands = e.commands.filter((c: any) => c.name !== "runProtocol"))))).toMatch(
-      /commands no declared parameter sets run_duration/,
+    expect(messages(parseChanged(rt, (e) => (e.commands = e.commands.filter((c: any) => c.name !== "setModuleTemp"))))).toMatch(
+      /commands no declared parameter sets module_temperature/,
     );
+  });
+
+  it("(round 4) the deadline needs no parameter: the runtime enforces it as elapsed time", () => {
+    // Requiring one only invited a dummy parameter (astra pack 153, HIGH 8).
+    const noDeadlineParam = parseChanged(rt, (e) =>
+      (e.commands = e.commands.map((c: any) => (c.name === "runProtocol" ? { ...c, params: c.params.filter((p: any) => p.quantity !== "run_duration") } : c))),
+    );
+    expect(noDeadlineParam.success).toBe(true);
+  });
+
+  it("(round 4) a list-valued parameter declares allowedItems, and an unbounded parameter needs allowed or allowedItems", () => {
+    const wells = (unbounded: unknown) => (e: any) => e.commands[0].params.push({ name: "wells", unbounded });
+    expect(parseChanged(rt, wells({ reason: "plate wells", allowed: ["all"], allowedItems: ["A1", "A2", "H12"] })).success).toBe(true);
+    expect(parseChanged(rt, wells({ reason: "plate wells", allowedItems: ["A1", "H12"] })).success).toBe(true);
+    expect(messages(parseChanged(rt, wells({ reason: "plate wells" })))).toMatch(/must list allowed values or allowed list items/);
+    expect(parseChanged(rt, wells({ reason: "plate wells", allowedItems: [] })).success).toBe(false);
+    expect(messages(parseChanged(rt, wells({ reason: "plate wells", allowedItems: ["A1", "A1"] })))).toMatch(/an allowed value is listed twice/);
   });
 
   it("(114b-12) refuses a deadlineQuantity that isn't the template's own deadline", () => {
@@ -399,6 +416,7 @@ describe("mutation-found gaps: the runtime command surface", () => {
     expect(unbounded.length).toBeGreaterThan(0);
     for (const p of unbounded) {
       expect(p.unbounded!.reason.trim().length).toBeGreaterThan(0);
+      expect(p.unbounded!.allowedItems).toBeUndefined();
       expect(p.unbounded!.allowed).toEqual([340, 405, 450, 600]);
       expect(p.quantity).toBeUndefined();
     }

@@ -175,8 +175,14 @@ export interface DeviceIdentity {
 export interface UnboundedParam {
   /** Why it sets no physical quantity (a well name, a labware id). */
   reason: string;
-  /** Every value the runtime lets through, each a non-blank string or a finite number; nothing else passes. */
-  allowed: (string | number)[];
+  /** The single values the runtime lets through, each a non-blank string or a finite number. */
+  allowed?: (string | number)[];
+  /**
+   * For a list-valued parameter (a plate's wells): the items a list may hold.
+   * The runtime lets through a non-empty list of distinct items, each in
+   * `allowedItems`. At least one of `allowed` and `allowedItems` is given.
+   */
+  allowedItems?: (string | number)[];
 }
 
 /** One parameter of an adapter command: the quantity it sets, or why it sets none and what it may carry. */
@@ -664,26 +670,39 @@ function supervisionPolicyProblem(
   return null;
 }
 
+/** Why `values` is not a non-empty list of distinct non-blank strings or finite numbers, or null. */
+function finiteSetProblem(values: unknown, at: string, name: string): string | null {
+  if (!Array.isArray(values) || values.length === 0) {
+    return `parameter ${at}: ${name} must list the values it may carry; a free-form parameter could carry anything`;
+  }
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!nonEmpty(value) && !finite(value)) return `parameter ${at}: every ${name} value must be a non-blank string or a finite number`;
+    const key = JSON.stringify(value);
+    if (seen.has(key)) return `parameter ${at}: the ${name} value ${key} is listed twice`;
+    seen.add(key);
+  }
+  return null;
+}
+
 /**
- * Why an unbounded parameter's declaration is not a reason plus a finite set
- * of allowed values, or null. A free-form parameter could carry anything (an
+ * Why an unbounded parameter's declaration is not a reason plus finite sets
+ * of what it may carry, or null: single values (`allowed`), list items
+ * (`allowedItems`), or both. A free-form parameter could carry anything (an
  * opaque payload hiding a physical control), so v1 has none (astra pack 153).
  */
 function unboundedProblem(unbounded: unknown, at: string): string | null {
-  if (!isRecord(unbounded) || extraKeys(unbounded, ["reason", "allowed"]).length > 0) {
-    return `parameter ${at} is unbounded, so it must be exactly {reason, allowed}`;
+  if (!isRecord(unbounded) || extraKeys(unbounded, ["reason", "allowed", "allowedItems"]).length > 0) {
+    return `parameter ${at} is unbounded, so it must be exactly {reason, allowed?, allowedItems?}`;
   }
   if (!nonEmpty(unbounded.reason)) return `parameter ${at} is unbounded without a reason`;
-  const allowed = unbounded.allowed;
-  if (!Array.isArray(allowed) || allowed.length === 0) {
-    return `parameter ${at} is unbounded, so it must list the values it may carry (allowed); a free-form parameter could carry anything`;
+  if (unbounded.allowed === undefined && unbounded.allowedItems === undefined) {
+    return `parameter ${at} is unbounded, so it must list the values it may carry (allowed, or allowedItems for a list); a free-form parameter could carry anything`;
   }
-  const seen = new Set<string>();
-  for (const value of allowed) {
-    if (!nonEmpty(value) && !finite(value)) return `parameter ${at}: every allowed value must be a non-blank string or a finite number`;
-    const key = JSON.stringify(value);
-    if (seen.has(key)) return `parameter ${at}: the allowed value ${key} is listed twice`;
-    seen.add(key);
+  for (const name of ["allowed", "allowedItems"] as const) {
+    if (unbounded[name] === undefined) continue;
+    const problem = finiteSetProblem(unbounded[name], at, name);
+    if (problem) return problem;
   }
   return null;
 }
@@ -727,10 +746,15 @@ function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): 
   return null;
 }
 
-/** Bounded quantities no declared parameter sets: their limits could not be enforced. */
+/**
+ * Bounded quantities no declared parameter sets: their limits could not be
+ * enforced. The template's deadline is exempt. The runtime enforces it as the
+ * job's elapsed time whether or not a parameter also sets it, so requiring a
+ * parameter for it would only invite a dummy one (astra pack 153, HIGH 8).
+ */
 function commandMapGaps(commandMap: CommandMapV1, template: DeviceClassTemplate): string[] {
   const set = new Set(commandMap.commands.flatMap((c) => c.params.map((p) => p.quantity).filter(nonEmpty)));
-  return template.requires.map((r) => r.quantity).filter((q) => !set.has(q));
+  return template.requires.map((r) => r.quantity).filter((q) => q !== template.deadline && !set.has(q));
 }
 
 function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate } {

@@ -1334,12 +1334,22 @@ describe("astra 114b findings", () => {
     expect(() => compileRegistered(bad)).toThrow(/v1 does not allow unattended operation/);
   });
 
-  it("the map gap: a command map that sets no job_duration gives a command-map question", () => {
+  it("the map gap: a command map that sets no read_duration gives a command-map question", () => {
+    const input = fullyAnsweredInput("lab-plate-reader");
+    input.commandMap = { commands: COMMAND_MAPS["lab-plate-reader"]!.commands.filter((c) => c.name !== "read") };
+    const draft = draftSafetyEnvelope(input);
+    expect(draft.questions.map((q) => q.about)).toContain("command-map");
+    expect(draft.questions.find((q) => q.about === "command-map")?.ask).toMatch(/read_duration/);
+  });
+
+  it("(round 4) the deadline (job_duration) needs no parameter: the runtime enforces it as elapsed time", () => {
+    // Requiring one only invited a dummy "minutes" parameter (astra pack 153, HIGH 8).
     const input = fullyAnsweredInput("lab-plate-reader");
     input.commandMap = { commands: COMMAND_MAPS["lab-plate-reader"]!.commands.filter((c) => c.name !== "runProtocol") };
     const draft = draftSafetyEnvelope(input);
-    expect(draft.questions.map((q) => q.about)).toContain("command-map");
-    expect(draft.questions.find((q) => q.about === "command-map")?.ask).toMatch(/job_duration/);
+    expect(draft.questions).toEqual([]);
+    const confirmed = confirmSafetyEnvelope(input, confirmDecision());
+    expect(confirmed.envelope.limits.map((l) => l.quantity)).toContain("job_duration");
   });
 
   it("the undeclared stop: adapter-stop naming a command outside the map gives an e-stop question", () => {
@@ -1784,18 +1794,21 @@ describe("astra 153 HIGH 8: no free-form parameter, and the adapter is named by 
         ...COMMAND_MAPS["lab-plate-reader"]!.commands,
       ],
     };
-    expect(() => draftSafetyEnvelope(input)).toThrow(/rawCommand\.payload is unbounded, so it must be exactly \{reason, allowed\}/);
+    expect(() => draftSafetyEnvelope(input)).toThrow(/rawCommand\.payload is unbounded, so it must be exactly \{reason, allowed\?, allowedItems\?\}/);
   });
 
   it("an unbounded parameter must list distinct non-blank strings or finite numbers, and nothing else", () => {
     const cases: Array<[string, unknown, RegExp]> = [
-      ["no allowed", { reason: "a slot" }, /must list the values it may carry/],
-      ["empty allowed", { reason: "a slot", allowed: [] }, /must list the values it may carry/],
+      ["no allowed", { reason: "a slot" }, /must list the values it may carry \(allowed, or allowedItems for a list\)/],
+      ["empty allowed", { reason: "a slot", allowed: [] }, /allowed must list the values it may carry/],
+      ["empty allowedItems", { reason: "a slot", allowedItems: [] }, /allowedItems must list the values it may carry/],
       ["a duplicate", { reason: "a slot", allowed: [1, 2, 1] }, /the allowed value 1 is listed twice/],
+      ["a duplicate item", { reason: "wells", allowedItems: ["A1", "A1"] }, /the allowedItems value "A1" is listed twice/],
+      ["an object item", { reason: "wells", allowedItems: [{ row: "A" }] }, /every allowedItems value must be a non-blank string or a finite number/],
       ["an object", { reason: "a slot", allowed: [{ any: true }] }, /every allowed value must be a non-blank string or a finite number/],
       ["a blank string", { reason: "a slot", allowed: [" "] }, /every allowed value must be a non-blank string or a finite number/],
       ["a boolean", { reason: "a slot", allowed: [true] }, /every allowed value must be a non-blank string or a finite number/],
-      ["an extra key", { reason: "a slot", allowed: [1], pattern: ".*" }, /must be exactly \{reason, allowed\}/],
+      ["an extra key", { reason: "a slot", allowed: [1], pattern: ".*" }, /must be exactly \{reason, allowed\?, allowedItems\?\}/],
     ];
     for (const [label, unbounded, reason] of cases) {
       const input = fullyAnsweredInput("lab-plate-reader");
@@ -1809,6 +1822,11 @@ describe("astra 153 HIGH 8: no free-form parameter, and the adapter is named by 
     map.commands[0]!.params.push({ name: "slot", unbounded: { reason: "a slot", allowed: [1, "1"] } });
     distinctTypes.commandMap = map;
     expect(() => draftSafetyEnvelope(distinctTypes)).not.toThrow();
+    const wells = fullyAnsweredInput("lab-plate-reader");
+    const wellsMap = structuredClone(COMMAND_MAPS["lab-plate-reader"]!) as CommandMapV1;
+    wellsMap.commands[1]!.params.push({ name: "wells", unbounded: { reason: "plate wells", allowed: ["all"], allowedItems: ["A1", "B1", "H12"] } });
+    wells.commandMap = wellsMap;
+    expect(draftSafetyEnvelope(wells).questions).toEqual([]);
   });
 
   it("a registered body whose adapterVersion is not a manifest digest is refused", () => {

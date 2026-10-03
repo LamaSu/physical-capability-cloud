@@ -16,15 +16,18 @@
  *     string is refused, never coerced (G4). A value in another unit is
  *     refused; v1 defines no conversions. 0 is a bound like any other, never
  *     "no limit" (G1). A parameter declared `unbounded` sets no physical
- *     quantity (the committed map says why), and it passes only a value in its
- *     `allowed` list, compared by type and value; there is no free-form
+ *     quantity (the committed map says why). It passes only a single value in its
+ *     `allowed` list, or a non-empty list of distinct items each in its
+ *     `allowedItems`, compared by type and value; there is no free-form
  *     parameter.
  *   - The adapter is the one the envelope commits: a runtime refuses an
  *     adapter whose release manifest digest is not `adapterVersion`.
  *   - At most `maxCommandsPerMinute` commands in any 60-second window, per
  *     device. The stop command is exempt: a stop is always sent.
  *   - A job that runs past the confirmed maximum of `deadlineQuantity` is
- *     stopped.
+ *     stopped. This is elapsed time, measured by the runtime: no command
+ *     parameter needs to set it, though one may (its value is then checked
+ *     against the same limit).
  *   - The stop is wired before the first command: `hardware` is the device's
  *     own stop, and `adapter-stop` sends `eStop.stopCommand`, one of `commands`.
  *   - Engaged e-stop, maintenance and lockout/tagout stay independent,
@@ -72,16 +75,24 @@ export const OperationalEStopSchema = z.discriminatedUnion("mechanism", [
   z.object({ mechanism: z.literal("none") }).strict(),
 ]);
 
-/** A parameter that sets no physical quantity: why, and the only values it may carry. */
+const FiniteSet = z
+  .array(z.union([NonBlank, z.number().finite()]))
+  .min(1)
+  .refine((values) => new Set(values.map((v) => JSON.stringify(v))).size === values.length, { message: "an allowed value is listed twice" });
+
+/**
+ * A parameter that sets no physical quantity: why, and the only values it may
+ * carry. A single value must be in `allowed`; a list must be non-empty, with
+ * distinct items, each in `allowedItems`. At least one of the two is given.
+ */
 export const OperationalUnboundedSchema = z
   .object({
     reason: NonBlank,
-    allowed: z
-      .array(z.union([NonBlank, z.number().finite()]))
-      .min(1)
-      .refine((values) => new Set(values.map((v) => JSON.stringify(v))).size === values.length, { message: "an allowed value is listed twice" }),
+    allowed: FiniteSet.optional(),
+    allowedItems: FiniteSet.optional(),
   })
-  .strict();
+  .strict()
+  .refine((u) => u.allowed !== undefined || u.allowedItems !== undefined, { message: "an unbounded parameter must list allowed values or allowed list items" });
 
 export const OperationalCommandSchema = z
   .object({
@@ -202,7 +213,14 @@ export function compileOperationalEnvelope(
       name: c.name,
       params: c.params.map((p) =>
         p.unbounded !== undefined
-          ? { name: p.name, unbounded: { reason: p.unbounded.reason, allowed: [...p.unbounded.allowed] } }
+          ? {
+              name: p.name,
+              unbounded: {
+                reason: p.unbounded.reason,
+                ...(p.unbounded.allowed !== undefined ? { allowed: [...p.unbounded.allowed] } : {}),
+                ...(p.unbounded.allowedItems !== undefined ? { allowedItems: [...p.unbounded.allowedItems] } : {}),
+              },
+            }
           : { name: p.name, quantity: p.quantity, unit: p.unit },
       ),
     })),

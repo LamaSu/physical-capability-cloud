@@ -63,6 +63,15 @@ const OT2_MAP = {
   ],
 };
 
+/** All 96 wells of a 96-well plate, A1..H12. */
+const WELLS_96 = [..."ABCDEFGH"].flatMap((row) => Array.from({ length: 12 }, (_, i) => `${row}${i + 1}`));
+
+/**
+ * The plate reader's map, shaped like the rehearsal simulator's run request
+ * (refvertical's SIM-PR1): wavelength, plate format and wells are finite sets,
+ * and wells is list-valued. No parameter sets job_duration: the deadline is
+ * the runtime's elapsed-time check (round 4).
+ */
 const PLATE_MAP = {
   commands: [
     { name: "setIncubation", params: [{ name: "celsius", quantity: "incubation_temperature", unit: "degC" }] },
@@ -71,9 +80,10 @@ const PLATE_MAP = {
       params: [
         { name: "seconds", quantity: "read_duration", unit: "s" },
         { name: "wavelengthNm", unbounded: { reason: "an optical setting, not a safety quantity", allowed: [405, 450, 600] } },
+        { name: "plateFormat", unbounded: { reason: "the plate format; this reader takes 96-well plates only", allowed: ["96-well"] } },
+        { name: "wells", unbounded: { reason: "which wells to read; a well name sets no physical quantity", allowed: ["all"], allowedItems: WELLS_96 } },
       ],
     },
-    { name: "runProtocol", params: [{ name: "minutes", quantity: "job_duration", unit: "min" }] },
     { name: "stop", params: [] },
   ],
 };
@@ -187,6 +197,10 @@ const INVALID: Array<[string, Change]> = [
   ["unbounded-allowed-duplicate", (e) => e.commands[0].params.push({ name: "slot", unbounded: { reason: "a deck slot", allowed: [1, 1] } })],
   ["unbounded-allowed-blank-string", (e) => e.commands[0].params.push({ name: "slot", unbounded: { reason: "a deck slot", allowed: [" "] } })],
   ["unbounded-extra-key", (e) => e.commands[0].params.push({ name: "slot", unbounded: { reason: "a deck slot", allowed: [1], any: true } })],
+  // Round 4: a list-valued parameter declares allowedItems; an unbounded parameter needs allowed or allowedItems.
+  ["unbounded-neither-allowed-nor-items", (e) => e.commands[0].params.push({ name: "wells", unbounded: { reason: "plate wells" } })],
+  ["unbounded-allowedItems-empty", (e) => e.commands[0].params.push({ name: "wells", unbounded: { reason: "plate wells", allowedItems: [] } })],
+  ["unbounded-allowedItems-duplicate", (e) => e.commands[0].params.push({ name: "wells", unbounded: { reason: "plate wells", allowedItems: ["A1", "A1"] } })],
   // Moved from `valid` (114b-10): the schema now refuses an unknown deviceClass outright, so this is
   // no longer "generic rules only" — it is refused before any per-class rule (even e-stop) is checked.
   [
@@ -219,6 +233,7 @@ function buildFixtures() {
       "operationalEnvelopeV1: a validator must accept every 'valid' envelope and refuse every 'invalid' one; 'paths' are the issue paths the TS schema reports. NaN and Infinity cannot appear in JSON, so they are not here; a JSON consumer never sees them.",
       "114b: the schema now refuses an unknown deviceClass outright (see 'unknown-class-generic-rules-only', moved here from 'valid'), limits must be in the template's exact order and units, an adapter-stop's command must be one of the declared commands, and deadlineQuantity must be the template's own deadline.",
       "153 (round 3): adapterVersion is the adapter's release manifest digest (sha256: + 64 lowercase hex); an unbounded parameter is {reason, allowed}, and a runtime passes only a value in allowed (same type and value); a reference source carries the bound it cites (value) and its unit.",
+      "round 4: the template's deadline (deadlineQuantity) needs no command parameter: the runtime enforces it as elapsed time, and a parameter that does set it is checked against the same limit. A list-valued parameter declares unbounded.allowedItems: a runtime passes a non-empty list of distinct items, each in allowedItems (compared by type and value); a single value must be in allowed.",
       "registration: the registry signs statementDigest = 'sha256:' + lowercase hex(sha256(UTF-8(canonicalize({domain, deviceId, envelopeDigest, registeredAt})))) with Ed25519; the signed message is the UTF-8 of statementDigest itself (LO-EV-1 signingPreimage, 71 bytes). Signatures are not in this file: verify with the registry's key.",
     ],
     digest: {
