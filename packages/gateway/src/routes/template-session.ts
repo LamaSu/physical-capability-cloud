@@ -45,7 +45,10 @@ import { auditService } from "../services/audit-service.js";
 /**
  * The audit log's name for a session. Audit reads are not tenant-scoped, so every
  * audit record names a session by this 128-bit digest of its id, and none holds
- * the id itself, its name or a URL (verdicts 75 and 75b).
+ * the id itself, its name or a URL (verdicts 75 and 75b). Nor does any record hold
+ * the caller's actor, IP or user-agent (verdict 75c): a request chooses its own
+ * User-Agent, so it could carry the session id or a URL into a record any tenant
+ * reads. They return once the audit readers are tenant-scoped.
  */
 function auditId(sessionId: string): string {
   return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
@@ -324,13 +327,10 @@ export async function templateSessionRoutes(
 
       auditService.log({
         eventType: `${template}.session_started`,
-        actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
         resourceId: auditId(sessionId),
         action: "create",
         metadata: { template },
-        ip: req.ip,
-        userAgent: req.headers["user-agent"],
       });
 
       return { session_id: sessionId, state: session.state };
@@ -389,13 +389,10 @@ export async function templateSessionRoutes(
 
       auditService.log({
         eventType: `${template}.scrape`,
-        actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
         resourceId: auditId(session.id),
         action: "scrape",
         metadata: { template },
-        ip: req.ip,
-        userAgent: req.headers["user-agent"],
       });
 
       return { ok: true, scraped };
@@ -447,13 +444,10 @@ export async function templateSessionRoutes(
 
       auditService.log({
         eventType: `${template}.ingest_docs`,
-        actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
         resourceId: auditId(session.id),
         action: "ingest_docs",
         metadata: { template, doc_count: docUrls.length },
-        ip: req.ip,
-        userAgent: req.headers["user-agent"],
       });
 
       return { ok: true, ingested: session.ingested_count };
@@ -495,13 +489,10 @@ export async function templateSessionRoutes(
 
         auditService.log({
           eventType: `${template}.build_complete`,
-          actor: req.operatorId ?? req.apiKeyId ?? undefined,
           resourceType: "template_session",
           resourceId: auditId(session.id),
           action: "build",
           metadata: { template, capability_count: result.capabilities.length },
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
         });
 
         return {

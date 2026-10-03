@@ -298,4 +298,37 @@ describe("verdict 75: a session stays in its mount and leaves no usable trail in
     expect(ids.size).toBe(1);
     expect([...ids][0]).toMatch(/^[0-9a-f]{32}$/);
   });
+
+  it("C2 (75c): no record carries the caller's user-agent, actor or IP, whatever the request sends", async () => {
+    // Audit reads are not tenant-scoped, and a request chooses its own User-Agent: it could carry the
+    // session's id or URL into a record any tenant reads (/api/telemetry/audit, /api/telemetry/system).
+    const started = await app.inject({ method: "POST", url: "/api/onboard/start",
+      headers: { ...headers(), "user-agent": "https://secret.example/start-agent" }, payload: { name: "Acme" } });
+    expect(started.statusCode).toBe(200);
+    const id = started.json().session_id as string;
+    const steps: Array<[string, Record<string, unknown>]> = [
+      ["scrape", { url: "https://example.test" }],
+      ["ingest-docs", { doc_urls: ["local://a"] }],
+      ["build-agent", {}],
+    ];
+    for (const [suffix, payload] of steps) {
+      const res = await app.inject({ method: "POST", url: `/api/onboard/${id}/${suffix}`,
+        headers: { ...headers(), "user-agent": `https://secret.example/${id}` }, payload });
+      expect(res.statusCode, suffix).toBe(200);
+    }
+    const records = vi.mocked(auditService.log).mock.calls.map((call) => call[0] as Record<string, unknown>);
+    expect(records.map((r) => r.eventType)).toEqual([
+      "physical-operator.session_started", "physical-operator.scrape",
+      "physical-operator.ingest_docs", "physical-operator.build_complete",
+    ]);
+    for (const record of records) {
+      expect(record, String(record.eventType)).not.toHaveProperty("userAgent");
+      expect(record, String(record.eventType)).not.toHaveProperty("actor");
+      expect(record, String(record.eventType)).not.toHaveProperty("ip");
+    }
+    const logged = JSON.stringify(records);
+    expect(logged).not.toContain(id);
+    expect(logged).not.toContain("secret.example");
+    expect(logged).not.toContain("owner@example.com");
+  });
 });
