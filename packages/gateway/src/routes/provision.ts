@@ -12,6 +12,7 @@ import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
+import { declare, lit } from "../observability/closed-schema.js";
 import {
   registerAgentOnChain,
   isIdentityWriteEnabled,
@@ -128,10 +129,10 @@ export async function provisionRoutes(app: FastifyInstance) {
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
-      trackServerEvent("api_key_provisioned", {
-        email: body.email,
-        capability: body.capability,
-        ed25519_keypair_source: ed25519 ? "server-minted" : "byok",
+      trackServerEvent(lit("api_key_provisioned"), {
+        email: declare.id(body.email),
+        capability: declare.id(body.capability),
+        ed25519_keypair_source: ed25519 ? lit("server-minted") : lit("byok"),
       });
       // Surface the trace_id (stamped by `middleware/trace-id.ts`) so the
       // agent can echo it on every subsequent call via `x-pcc-trace-id`.
