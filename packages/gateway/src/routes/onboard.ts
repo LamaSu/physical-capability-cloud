@@ -17,6 +17,7 @@ import {
 // time so once the flag flips, scoped listing yields correct rows without a
 // data backfill.
 import { tenantOpts } from "../config/tenant-enforce.js";
+import { lit } from "../observability/closed-schema.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
@@ -50,7 +51,7 @@ export async function onboardRoutes(app: FastifyInstance) {
       });
       return { status: "ok", analysis, mode, ...(warning ? { warning } : {}) };
     } catch (e) {
-      req.log.error(e, "[onboard] analyze failed");
+      req.log.error({ err: e }, lit("[onboard] analyze failed"));
       return reply.status(500).send({
         error: "analysis_failed",
         message: (e as Error).message,
@@ -676,7 +677,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         },
       });
     } catch (err) {
-      app.log.error(err, "Onboard redeem failed");
+      app.log.error({ err }, lit("Onboard redeem failed"));
       return reply.status(502).send({ error: "Identity service unreachable" });
     }
   });
