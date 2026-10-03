@@ -705,21 +705,9 @@ def ui():
 @ui.command("serve")
 @click.option("--port", default=3200, help="Server port (default: 3200)")
 @click.option("--ui-dir", default=None, help="UI directory (default: ~/.pcc-node/ui/)")
-@click.option(
-    "--pcc-base",
-    envvar="PCC_BASE",
-    default="https://capability.network",
-    help="PCC gateway URL for API proxy",
-)
-@click.option(
-    "--api-key",
-    envvar="PCC_API_KEY",
-    default="",
-    help="PCC API key for proxy auth",
-)
-def ui_serve(port, ui_dir, pcc_base, api_key):
-    """Start the dynamic UI server."""
-    from .ui_server import start_ui_server, _active_ui_dir
+def ui_serve(port, ui_dir):
+    """Start the dynamic UI server. It takes no PCC credentials: its pages are agent-generated."""
+    from .ui_server import start_ui_server, ui_token_path
 
     click.echo(f"UI server: http://localhost:{port}")
     if ui_dir:
@@ -727,14 +715,9 @@ def ui_serve(port, ui_dir, pcc_base, api_key):
     else:
         from .ui_server import _DEFAULT_UI_DIR
         click.echo(f"UI directory: {_DEFAULT_UI_DIR}")
+    click.echo(f"Agent token: {ui_token_path()} (read it to use the agent API)")
     click.echo("Press Ctrl+C to stop.")
-    start_ui_server(
-        port=port,
-        ui_dir=ui_dir,
-        background=False,
-        pcc_base=pcc_base,
-        pcc_api_key=api_key,
-    )
+    start_ui_server(port=port, ui_dir=ui_dir, background=False)
 
 
 @ui.command("open")
