@@ -39,6 +39,7 @@ import { schema, eq, and } from "@pcc/store";
 import type { JobOffer, JobOfferEvent } from "../services/job-offers-store.js";
 import { extractRequirementsCoords } from "../services/job-offers-store.js";
 import {
+  MILESTONE_WORDS,
   buildSettlementAxis,
   resolveSettlement,
   type JobExecutionDb,
@@ -297,6 +298,8 @@ export interface FundingContest {
  * reconciliation, and from every other record that can contest the money: the job's own status
  * and the disputes on its milestone.
  *   the payout is unknown (conflicting, unrecognized or ambiguous records)    -> unknown
+ *   the milestone's word is not a milestone status (MILESTONE_WORDS, shared
+ *   with the payout rule in job-execution.ts; review r3 of #389, MEDIUM)      -> unknown
  *   either word says never funded, refunded or released                       -> not_held
  *   a refund to the payer is decided but not made                             -> refund_pending
  *   the words do not say the escrow holds the funds and the milestone is open -> unknown
@@ -312,6 +315,7 @@ function recordFunding(s: SettlementAxis, contest: FundingContest): OperatorWork
   if (s.payout === "unknown" || !record.escrow.known || !ms.status.known) return "unknown";
   const e = normalizeMoneyStatus(record.escrow.sourceStatus);
   const m = normalizeMoneyStatus(ms.status.sourceStatus);
+  if (!MILESTONE_WORDS.has(m)) return "unknown";
   if (NOT_HELD.has(e) || NOT_HELD.has(m)) return "not_held";
   if (REFUND_PENDING.has(e) || REFUND_PENDING.has(m)) return "refund_pending";
   const held = (ESCROW_HOLDS.has(e) || ESCROW_CONTESTED.has(e)) && (MILESTONE_HOLDS.has(m) || MILESTONE_CONTESTED.has(m));
