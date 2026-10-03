@@ -48,9 +48,11 @@ non-pinned binary -- **including re-executing `python3`**, which is the path App
 
 It is applied FIRST and is **mandatory**: if Landlock is unavailable, `pcc_node._entry` **refuses to
 run** (exit) rather than fall back to AppArmor alone. An operator who accepts the weaker posture (Layer
-1 + Layer 3 only, and the operating runtime left unarmed) may set `PCC_ALLOW_NO_LANDLOCK=1` to run
-anyway. Landlock does not close the loader gadget (that is Layer 1's job); `tests/test_landlock.py`
-pins both the blocks and that residual at runtime.
+1 + Layer 3 only) may set `PCC_ALLOW_NO_LANDLOCK=1` to run anyway, **but the node then runs UNARMED**:
+the spawn guard (Layer 3) is installed with `armed=False`, so it **refuses every device-utility spawn**
+and no device command executes (the node still registers and serves status). That unarmed state is
+enforced in code, not just documented. Landlock does not close the loader gadget (that is Layer 1's
+job); `tests/test_landlock.py` pins both the blocks and that residual at runtime.
 
 ## Layer 3 -- the Python spawn guard (accidental-spawn check)
 `pcc_node.spawn_guard` installs a PEP 578 audit hook at startup that refuses a *careless or mistaken*

@@ -77,8 +77,15 @@ class SpawnRefused(RuntimeError):
     """pcc-node's spawn guard refused a process start (or native code that could make one)."""
 
 
-def install() -> None:
+def install(armed: bool = True) -> None:
     """Install the spawn guard for the rest of this process (once; later calls do nothing).
+
+    ``armed`` is the Landlock result from the entry (:mod:`pcc_node._entry`). When False -- Landlock was
+    unavailable and the operator opted out with ``PCC_ALLOW_NO_LANDLOCK=1`` -- the guard is UNARMED: it
+    refuses EVERY ``subprocess.Popen``, including a pinned device utility, so no device command executes
+    without the kernel execve floor (verdict 105n, steward 10/03). Device detection degrades on the
+    resulting :class:`SpawnRefused` as it does for a missing tool, so the node still registers and serves
+    status. Armed (the normal path) allows a ``subprocess.Popen`` proven to run a pinned utility, as before.
 
     POSIX only: on Windows it is a no-op (see the module docstring's Scope note).
     """
@@ -132,6 +139,10 @@ def install() -> None:
 
         def _hook(event: str, args: Tuple[Any, ...]) -> None:
             if event == "subprocess.Popen":
+                if not armed:
+                    # Unarmed: no Landlock execve floor (PCC_ALLOW_NO_LANDLOCK), so refuse EVERY spawn,
+                    # the pinned utilities included. The node runs but executes no device command.
+                    raise Refused("pcc-node spawn guard: refused subprocess.Popen: device execution is unarmed (no Landlock floor)")
                 executable, argv = args[0], args[1]
                 if not _isinstance(argv, _seqs) or not argv:
                     raise Refused("pcc-node spawn guard: refused subprocess.Popen: the arguments are not a list")

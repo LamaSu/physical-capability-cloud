@@ -271,7 +271,7 @@ def test_entry_refuses_to_run_when_landlock_is_unavailable():
         "import pcc_node._entry as e, pcc_node._landlock as L, pcc_node.spawn_guard as g, pcc_node.cli as cli\n"
         "L.restrict = lambda paths: False\n"
         "reached = []\n"
-        "g.install = lambda: reached.append('install')\n"
+        "g.install = lambda armed=True: reached.append('install')\n"
         "cli.main = lambda *a, **k: reached.append('main')\n"
         "try:\n    e.run()\n    print('NO-REFUSAL|' + ','.join(reached))\n"
         "except SystemExit:\n    print('REFUSED|' + ','.join(reached))\n"
@@ -289,13 +289,31 @@ def test_entry_runs_without_landlock_only_with_the_explicit_override():
         "import pcc_node._entry as e, pcc_node._landlock as L, pcc_node.spawn_guard as g, pcc_node.cli as cli\n"
         "L.restrict = lambda paths: False\n"
         "reached = []\n"
-        "g.install = lambda: reached.append('install')\n"
+        "g.install = lambda armed=True: reached.append('install:armed=' + str(armed))\n"
         "cli.main = lambda *a, **k: reached.append('main')\n"
         "e.run()\n"
         "print('RAN|' + ','.join(reached))\n"
     )
     last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
-    assert last == "RAN|install,main", f"override did not let the node run: {r.stdout!r} {r.stderr!r}"
+    assert last == "RAN|install:armed=False,main", (
+        f"override must run UNARMED (install(armed=False)), not armed: {r.stdout!r} {r.stderr!r}")
+
+
+def test_unarmed_mode_refuses_even_a_pinned_device_spawn():
+    # verdict 105n / steward #5488: PCC_ALLOW_NO_LANDLOCK must leave the runtime UNARMED in code, not
+    # only by docs. install(armed=False) refuses EVERY subprocess.Popen -- a pinned utility included --
+    # so no device command runs without the Landlock floor. Child process (the hook is unremovable).
+    r = _run_raw(
+        "import subprocess\n"
+        "from pcc_node.spawn_guard import install, SpawnRefused\n"
+        "install(armed=False)\n"
+        "try:\n    subprocess.Popen(['dd', '--version'])\n    print('RAN')\n"
+        "except SpawnRefused:\n    print('REFUSED')\n"
+        "except Exception as ex:\n    print('OTHER:' + type(ex).__name__)\n",
+        env={"PATH": ABSPATH},
+    )
+    assert r.stdout.strip().splitlines()[-1] == "REFUSED", (
+        f"unarmed guard must refuse even a pinned spawn: {r.stdout!r} {r.stderr!r}")
 
 
 # ---- MEDIUM 7 (105j) + MEDIUM 4 (105k): the click public-submodule launchers, proven refused -------

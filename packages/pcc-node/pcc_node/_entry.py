@@ -26,15 +26,18 @@ def run() -> None:
     # and the operating runtime must stay unarmed (item 124 / #471). Landlock + AppArmor together are
     # the hard guarantee; neither alone is (AppArmor leaves the python path, Landlock the loader gadget).
     paths = [p for n in sorted(spawn_guard.EXECUTABLES) if (p := shutil.which(n))]
-    if not _landlock.restrict(paths) and os.getenv("PCC_ALLOW_NO_LANDLOCK") != "1":
+    landlock_ok = _landlock.restrict(paths)
+    if not landlock_ok and os.getenv("PCC_ALLOW_NO_LANDLOCK") != "1":
         raise SystemExit(
             "Refused: Landlock (Linux 5.13+) is unavailable, so pcc-node cannot confine execve in "
             "process, and AppArmor alone cannot stop `python3 -c ...`. Run on a Landlock kernel, or "
-            "load the AppArmor profile and set PCC_ALLOW_NO_LANDLOCK=1 to run with Layer 1 only "
-            "(deploy/README.md). Fail-closed by default."
+            "load the AppArmor profile and set PCC_ALLOW_NO_LANDLOCK=1 to run UNARMED (Layer 1 only; "
+            "device execution refused). See deploy/README.md. Fail-closed by default."
         )
-    # Layer 3, the accidental-spawn check: the in-process audit hook, then the CLI under both.
-    spawn_guard.install()
+    # Layer 3, the accidental-spawn check: the in-process audit hook, then the CLI under both. When
+    # Landlock did not apply (the PCC_ALLOW_NO_LANDLOCK opt-out), install UNARMED -- the hook refuses
+    # every device spawn, so the node runs but executes no device command (item 124 / #471).
+    spawn_guard.install(armed=landlock_ok)
     from .cli import main
 
     main()
