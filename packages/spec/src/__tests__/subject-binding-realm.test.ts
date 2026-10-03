@@ -51,6 +51,9 @@ async function bundleFor(jobId: string, unit?: { settlementUnitId: string; chall
 let CASES: Array<[string, EvidenceSubjectBindingInput]> = [];
 let BASELINE: EvidenceSubjectBindingResult[] = [];
 let A_SORTED_HASHES: string[] = [];
+let BUNDLE_A: Awaited<ReturnType<typeof bundleFor>>;
+let BUNDLE_M3: Awaited<ReturnType<typeof bundleFor>>;
+let RELABELLED: EvidenceEvent[] = [];
 
 beforeAll(async () => {
   const A = await bundleFor(JOB_A);
@@ -61,6 +64,9 @@ beforeAll(async () => {
   const relabelled = await seal(
     A.events.map(({ type, timestamp, source, payload }) => ({ type, timestamp, source, payload: { ...payload, jobId: JOB_B } })),
   );
+  BUNDLE_A = A;
+  BUNDLE_M3 = M3;
+  RELABELLED = relabelled;
   const subjectA = { jobId: JOB_A, kernelId: NODE };
   CASES = [
     ["honest", { ...A, subject: subjectA }],
@@ -157,6 +163,91 @@ describe("after load, a replaced intrinsic changes no answer of the binding leg"
       }
     });
   }
+});
+
+/** Hold `target[key] = replacement` until `run` settles, then restore it. */
+async function holding<T>(target: object, key: PropertyKey, replacement: PropertyDescriptor, run: () => Promise<T>): Promise<T> {
+  const original = Reflect.getOwnPropertyDescriptor(target, key);
+  Reflect.defineProperty(target, key, { configurable: true, ...replacement });
+  try {
+    return await run();
+  } finally {
+    if (original) Reflect.defineProperty(target, key, original);
+    else Reflect.deleteProperty(target, key);
+  }
+}
+
+describe("sensors' recipes (bus #5381), each patch held until the answer settles", () => {
+  // Each one forged an ok out of 51dbabd2's binding leg; the evidence is in the round-4 brief
+  // (/mnt/sparkbulk/tmp/evidence-341-realm-repro-51dbabd2.txt). They are targeted, so the test
+  // runner's own use of the patched intrinsic keeps working while the patch is held.
+  const subjectB = { jobId: JOB_B, kernelId: NODE };
+
+  it("Array.prototype.sort cannot swap job A's signed hashes in for re-hashed job B events", async () => {
+    const sort = Array.prototype.sort;
+    const r = await holding(Array.prototype, "sort", {
+      writable: true,
+      value: function (this: unknown[], ...args: unknown[]) {
+        if (typeof this[0] === "string" && (this[0] as string).startsWith("sha256:")) return A_SORTED_HASHES.slice();
+        return sort.apply(this, args as never);
+      },
+    }, () => verifyEvidenceSubjectBinding({ bundleHash: BUNDLE_A.bundleHash, events: RELABELLED, subject: subjectB }));
+    expect(r).toEqual({ ok: false, reason: "bundle-hash-mismatch" });
+  });
+
+  it("JSON.parse cannot answer a snapshot that commits job B for job A's genuine events", async () => {
+    const parse = JSON.parse;
+    const r = await holding(JSON, "parse", {
+      writable: true,
+      value: (text: string) => {
+        const o = parse(text) as { payload?: { jobId?: string } };
+        if (o && o.payload && o.payload.jobId === JOB_A) o.payload.jobId = JOB_B;
+        return o;
+      },
+    }, () => verifyEvidenceSubjectBinding({ ...BUNDLE_A, subject: subjectB }));
+    expect(r).toEqual({ ok: false, reason: "job-mismatch", eventIndex: 0 });
+  });
+
+  it("Object.prototype.then cannot turn the refusal into ok", async () => {
+    const forge = (resolve: (v: unknown) => void) => resolve({ ok: true, events: [] });
+    const r = await holding(Object.prototype, "then", {
+      get(this: { ok?: unknown; reason?: unknown }) {
+        return this && this.ok === false && this.reason === "job-mismatch" ? forge : undefined;
+      },
+    }, () => verifyEvidenceSubjectBinding({ ...BUNDLE_A, subject: subjectB }));
+    expect(r).toEqual({ ok: false, reason: "job-mismatch", eventIndex: 0 });
+  });
+
+  it("SubtleCrypto.prototype.digest cannot hash job B's relabelled content as job A's", async () => {
+    const subtle = Object.getPrototypeOf(globalThis.crypto.subtle) as { digest: (a: string, d: BufferSource) => Promise<ArrayBuffer> };
+    const digest = subtle.digest;
+    const carrying = RELABELLED.map((e, i) => ({ ...e, hash: BUNDLE_A.events[i]!.hash }));
+    const r = await holding(subtle, "digest", {
+      writable: true,
+      value: function (this: unknown, alg: string, data: Uint8Array) {
+        return digest.call(this, alg, new TextEncoder().encode(new TextDecoder().decode(data).split(JOB_B).join(JOB_A)));
+      },
+    }, () => verifyEvidenceSubjectBinding({ bundleHash: BUNDLE_A.bundleHash, events: carrying, subject: subjectB }));
+    expect(r).toEqual({ ok: false, reason: "event-hash-mismatch", eventIndex: 0 });
+  });
+
+  it("a replaced array iterator cannot skip the unit and challenge checks", async () => {
+    // Every table of [field, ...] rows iterates as empty, the shape 51dbabd2's checks looped over.
+    const iterate = Array.prototype[Symbol.iterator];
+    const r = await holding(Array.prototype, Symbol.iterator, {
+      writable: true,
+      value: function (this: unknown[]) {
+        const first = this[0] as unknown;
+        if (Array.isArray(first) && typeof first[0] === "string") return iterate.call([]);
+        return iterate.call(this);
+      },
+    }, () =>
+      verifyEvidenceSubjectBinding({
+        ...BUNDLE_M3,
+        subject: { jobId: JOB_A, kernelId: NODE, settlementUnitId: U4, challengeNonce: N4 },
+      }));
+    expect(r).toEqual({ ok: false, reason: "unit-mismatch", eventIndex: 0 });
+  });
 });
 
 describe("source scan: subject-binding.ts calls only what was captured at load", () => {
