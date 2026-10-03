@@ -823,11 +823,26 @@ describe("the rules catch each known way around them (self-test)", () => {
     expect(caught(code)).toContain("global-write");
   });
 
+  // astra A03h F1 (MEDIUM): binding forms the mutation-target check didn't record.
+  it.each([
+    ["a class field", 'class Patch {\n  clip = navigator.clipboard;\n  run() {\n    Object.defineProperty(this.clip, "writeText", { value: observe });\n  }\n}'],
+    ["a parameter default", 'function patch(clip = navigator.clipboard) {\n  Object.defineProperty(clip, "writeText", { value: observe });\n}'],
+    ["a for-of over a literal", 'for (const clip of [navigator.clipboard]) {\n  Object.defineProperty(clip, "writeText", { value: observe });\n}'],
+    ["a for-of over a named list", 'const clips = [navigator.clipboard];\nfor (const clip of clips) delete clip.writeText;'],
+    ["a this-field assigned in a method", "class Patch {\n  setup() { this.clip = navigator.clipboard; }\n  run() { this.clip.writeText = observe; }\n}"],
+    ["an object literal's property", "const handles = { clip: navigator.clipboard };\nhandles.clip.writeText = observe;"],
+  ])("astra A03h F1: the mutation-target check follows %s", (_form, code) => {
+    expect(caught(code)).toContain("global-write");
+  });
+
   it.each([
     "const name = ordinary.constructor.name;",
     "if (value.constructor === Rows) merge(value);",
     'const isPlain = typeof value.constructor === "function";',
-  ])("astra A03g F2: reading a constructor's name, or comparing it, is let through: %s", (code) => {
+    'const name = ordinary["constructor"]["name"];',
+    'const name = ordinary.constructor["name"];',
+    'const name = ordinary["constructor"].name;',
+  ])("astra A03g F2 (A03h: by either access): reading a constructor's name, or comparing it, is let through: %s", (code) => {
     expect(caught(code)).toEqual([]);
   });
 
