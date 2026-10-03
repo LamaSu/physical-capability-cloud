@@ -603,4 +603,19 @@ describe("LLMAgent.chat: the history's tool-use pairing is validated (Q7-A)", ()
     const result = await agent.chat("say hi");
     await accepted(result.messages);
   });
+
+  it("Q5-1: a stray tool_result in an ASSISTANT message is refused, not silently skipped (validateChatHistory only checked tool_result inside USER messages)", async () => {
+    await refused([user("a"), assistant([toolResult("ghost")])]);
+  });
+
+  it("Q5-1: the mirror case — a stray tool_use in a USER message is refused, not silently skipped (validateChatHistory only checked tool_use inside ASSISTANT messages)", async () => {
+    await refused([user([toolUse("t1")]), assistant([text("done")])]);
+  });
+
+  it("Q5-1: a wrong-role block is refused even mixed in with content that would otherwise be valid for that role", async () => {
+    // an assistant message with a legitimate tool_use ALONGSIDE a stray tool_result
+    await refused([user("a"), assistant([toolUse("t1"), toolResult("ghost")]), user([toolResult("t1")]), assistant([text("done")])]);
+    // a user message with a legitimate tool_result ALONGSIDE a stray tool_use
+    await refused([user("a"), assistant([toolUse("t1")]), user([toolResult("t1"), toolUse("t2")]), assistant([text("done")])]);
+  });
 });

@@ -199,6 +199,11 @@ function validateChatHistory(history: ReadonlyArray<Anthropic.MessageParam>): vo
     if (message.role === "user") {
       let afterOtherContent = false;
       for (const block of blocks) {
+        // Q5-1: tool_use belongs only to an assistant turn. Checking only for
+        // tool_result here (treating anything else as ordinary "other content")
+        // let a stray tool_use in a user message through uncaught, straight to
+        // the model — the mirror of the tool_result-in-assistant case below.
+        if (block.type === "tool_use") throw invalid(index, "a tool_use block appears in a USER message; tool_use belongs only in an assistant message");
         if (block.type !== "tool_result") {
           afterOtherContent = true;
           continue;
@@ -214,6 +219,10 @@ function validateChatHistory(history: ReadonlyArray<Anthropic.MessageParam>): vo
     }
     if (message.role === "assistant") {
       for (const block of blocks) {
+        // Q5-1: tool_result belongs only to a user turn. The old loop only
+        // matched tool_use and silently `continue`d past anything else,
+        // including a stray tool_result — never billed, never caught.
+        if (block.type === "tool_result") throw invalid(index, "a tool_result block appears in an ASSISTANT message; tool_result belongs only in a user message");
         if (block.type !== "tool_use") continue;
         if (typeof block.id !== "string" || block.id === "") throw invalid(index, "a tool_use has no id");
         if (seen.has(block.id)) throw invalid(index, `tool_use id "${block.id}" appears twice`);
