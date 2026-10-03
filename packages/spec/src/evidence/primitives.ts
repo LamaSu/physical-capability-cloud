@@ -79,7 +79,12 @@ export type PrimitiveStatus = "active" | "reserved" | "deprecated";
  * verifierStatus — implementation-tracking axis BEYOND the §5.1 normative
  * fields. It is deliberately NOT part of VOCAB_MANIFEST_HASH: it changes as the
  * oracle lane ships verifiers, which is not a vocabulary-contract change.
- *   - "live"    — machinery exists and runs today (no new verifier needed).
+ *   - "live"    — the oracle verifies it at /settle today. LOCKSTEP RULE
+ *                 (evidence #3195, agreed by the oracle #3274): the "live" ids
+ *                 are exactly the oracle's /settle verified set. Machinery
+ *                 elsewhere (a kernel that signs, a gateway route that checks)
+ *                 does not make a primitive live; only /settle running its
+ *                 verifier does, because that is the check money waits on.
  *   - "stub"    — the vocabulary defines it first-class; the oracle verifier is
  *                 stubbed/planned and fails CLOSED at verification time (spec §8)
  *                 until built (the "separate oracle lane").
@@ -165,10 +170,15 @@ export const EvidencePrimitiveDefSchema = z.object({
 
 // ── The v1 cut — 16 primitives (spec §7.1) ──────────────────────────
 //
-// verifierStatus "live" = the four with machinery already built/wired that need
-// NO new verifier (spec §7.1 + task): approval.payer, receipt.kernel_signed,
-// confirm.execution_mode, decl.self_attested. All others are "stub": defined
-// first-class here, oracle verifier built in the separate oracle lane.
+// verifierStatus "live" = the oracle's /settle verified set (the lockstep rule
+// above). Today that is decl.self_attested alone (oracle, bus #3274).
+// approval.payer, receipt.kernel_signed and confirm.execution_mode have working
+// machinery outside /settle (the payer-approval route, kernel signing, the mock
+// gate), and spec §7.1 first listed them as live on that basis. /settle does not
+// run them yet, so they are "stub" and fail CLOSED under
+// requireImplementedVerifier. All others are "stub" too: defined first-class
+// here, with the oracle verifier built in the separate oracle lane. The oracle
+// flips a primitive here in the same change that makes /settle run it.
 //
 // Encoding conventions for the special primitives (documented so the golden hash
 // and the eligibility lint are reproducible):
@@ -179,7 +189,7 @@ export const EvidencePrimitiveDefSchema = z.object({
 //   - envelope ⬖ (pay.escrow_receipt): tierSupport [0..3], conditions:"inherited".
 
 export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
-  // #28 — Family G (attest). BUILT + WIRED + TESTED. The tier≥2 human floor (D8).
+  // #28 — Family G (attest). BUILT + WIRED + TESTED (gateway). The tier≥2 human floor (D8).
   {
     id: "approval.payer",
     wire: "pcc.ev.approval.payer.v1",
@@ -198,7 +208,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     authRequirement: "actor-signed",
     tierSupport: [{ tier: 2 }, { tier: 3 }],
     objectivityBand: "B5",
-    verifierStatus: "live",
+    verifierStatus: "stub", // /settle does not verify payer approvals yet (O8d)
   },
 
   // #29 — Family G (attest). Rubric sign-off; same machinery as #28, wiring pending.
@@ -245,7 +255,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
       { tier: 3 },
     ],
     objectivityBand: "B1",
-    verifierStatus: "live",
+    verifierStatus: "stub", // /settle does not run the execution-mode gate yet
     dependsOn: ["receipt.kernel_signed"],
     gates: true,
   },
@@ -377,7 +387,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     verifierStatus: "stub",
   },
 
-  // #22 — Family F (receipt). Digital connectors' tier 1-2 EARNED. LIVE emit-side ×7.
+  // #22 — Family F (receipt). Digital connectors' tier 1-2 EARNED. LIVE emit-side ×7, not yet verified at /settle.
   {
     id: "receipt.kernel_signed",
     wire: "pcc.ev.receipt.kernel_signed.v1",
@@ -400,7 +410,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
       },
     ],
     objectivityBand: "B1",
-    verifierStatus: "live",
+    verifierStatus: "stub", // /settle does not verify kernel receipts yet
     dependsOn: ["ident.registered_key"],
   },
 
@@ -596,11 +606,11 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
   // extracted to evidence/verifiers/). Binding status (sensors lane, bus #2063):
   // #52 machine.execution_log now HAS a real PrimitiveVerifier binding —
   // `makeExecutionLogVerifier` in oracle-binding.ts wrapping verifyLogChain —
-  // but verifierStatus stays "stub" until a production consumer actually RUNS
-  // it ("live" = machinery exists and runs today; no public consumer wires the
-  // industrial verifier map yet, so it still fails CLOSED under
-  // requireImplementedVerifier — which is the honest state). #53-#55 remain
-  // interface-only stubs. Marking any of them "live" before a consumer runs the
+  // but verifierStatus stays "stub" until the oracle RUNS it at /settle (the
+  // lockstep rule: "live" = in the /settle verified set; the oracle confirmed
+  // it does not run #52 today, bus #3006), so it still fails CLOSED under
+  // requireImplementedVerifier — which is the honest state. #53-#55 remain
+  // interface-only stubs. Marking any of them "live" before /settle runs the
   // binding would let a CSD settle a record the settlement path cannot yet
   // authenticate.
 

@@ -23,11 +23,12 @@
  *   - #55 process.batch_record          → composition glue over #52/#53/#54 +
  *     the existing event-sequence rule
  *
- * `verifierStatus` in `primitives.ts` stays `"stub"` for #52 until a production
- * consumer actually RUNS this binding (the oracle's evaluator, private repo) —
- * "live" means machinery exists and runs today, and the run half is not this
- * file's to claim. Flipping it is hash-safe (verifierStatus is excluded from
- * VOCAB_MANIFEST_HASH) and happens with the consumer wiring, not before.
+ * `verifierStatus` in `primitives.ts` stays `"stub"` for #52 until the oracle's
+ * /settle actually RUNS this binding (private repo) — "live" means "in the
+ * /settle verified set" (the lockstep rule in primitives.ts), and the run half
+ * is not this file's to claim. Flipping it is hash-safe (verifierStatus is
+ * excluded from VOCAB_MANIFEST_HASH) and happens with the /settle wiring, not
+ * before.
  */
 
 import { makeStubVerifier, type PrimitiveVerifier, type PrimitiveVerifyResult } from "../verifier-interface.js";
