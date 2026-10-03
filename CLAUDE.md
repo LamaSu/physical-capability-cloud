@@ -272,9 +272,9 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/kernels` | List all kernels. Optional `?status=` filter. Returns `{kernels: KernelDTO[]}`. |
-| GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. |
+| GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. Its `recentJobs` hold only the jobs you may read; `recentJobsScope` says so (`all`, `readable_by_caller` or `unavailable`). |
 | GET | `/api/kernels/:kernelId/devices` | List devices. Returns `{devices: DeviceStatusDTO[]}`. |
-| GET | `/api/kernels/:kernelId/jobs` | List jobs for kernel. Returns `{jobs: JobDTO[]}`. |
+| GET | `/api/kernels/:kernelId/jobs` | List the kernel's jobs you may read (its operator and an admin: all of them; a buyer: its own). Returns `{jobs: JobDTO[]}`. No credential: 401; no proven wallet: 403. |
 | POST | `/api/kernels` | Register/upsert a kernel. Body: `CreateKernelInput`. |
 | POST | `/api/kernels/:kernelId/heartbeat` | Send heartbeat. |
 | POST | `/api/kernels/:kernelId/announce` | Announce capabilities to the network. |

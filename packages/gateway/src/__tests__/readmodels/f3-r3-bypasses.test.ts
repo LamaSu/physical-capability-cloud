@@ -85,7 +85,8 @@ beforeAll(async () => {
   const { telemetryRoutes } = await import("../../routes/telemetry.js");
   const { jobRoutes } = await import("../../routes/jobs.js");
   const { topicSSE } = await import("../../sse/topic-sse.js");
-  for (const r of [batchRoutes, telemetryRoutes, jobRoutes, topicSSE]) await app.register(r);
+  const { kernelRoutes } = await import("../../routes/kernels.js");
+  for (const r of [batchRoutes, telemetryRoutes, jobRoutes, topicSSE, kernelRoutes]) await app.register(r);
   await app.listen({ port: 0, host: "127.0.0.1" });
   port = (app.server.address() as AddressInfo).port;
 }, 60_000);
@@ -297,5 +298,33 @@ describe("HIGH: recordBindingsOf finds every job and kernel a record names, and 
     const record: Record<string, unknown> = { jobId: "job-001" };
     record.self = record;
     expect(recordBindingsOf(record)).toEqual({ jobs: ["job-001"], kernels: [], malformed: false });
+  });
+});
+
+describe("found while fixing r3: a kernel's job list and its recent jobs follow the job read rule", () => {
+  const ids = (jobs: Array<{ id: string }>) => jobs.map((job) => job.id).sort();
+
+  it("GET /api/kernels/:kernelId/jobs: identity first, then only the jobs the caller may read", async () => {
+    expect((await get("/api/kernels/kernel-nyc/jobs", ANON)).statusCode).toBe(401);
+    expect((await get("/api/kernels/kernel-nyc/jobs", UNPROVEN)).statusCode).toBe(403);
+    expect((await get("/api/kernels/kernel-nyc/jobs", STRANGER_H)).json().jobs).toEqual([]);
+    expect(ids((await get("/api/kernels/kernel-nyc/jobs", BUYER_H)).json().jobs)).toEqual(["job-003"]);
+    const operator = ids((await get("/api/kernels/kernel-nyc/jobs", OPERATOR_H)).json().jobs);
+    expect(operator).toContain("job-001");
+    expect(operator).toEqual(ids((await get("/api/kernels/kernel-nyc/jobs", ADMIN_H)).json().jobs));
+  });
+
+  it("GET /api/kernels/:kernelId stays public, but its recentJobs hold only the jobs the caller may read", async () => {
+    for (const headers of [ANON, UNPROVEN, STRANGER_H]) {
+      const res = await get("/api/kernels/kernel-nyc", headers);
+      expect(res.statusCode).toBe(200);
+      expect(res.json().kernel.recentJobs).toEqual([]);
+      expect(res.json().kernel.recentJobsScope).toBe("readable_by_caller");
+      expect(res.body).not.toContain("job-001");
+    }
+    expect(ids((await get("/api/kernels/kernel-nyc", BUYER_H)).json().kernel.recentJobs)).toEqual(["job-003"]);
+    const admin = (await get("/api/kernels/kernel-nyc", ADMIN_H)).json().kernel;
+    expect(admin.recentJobsScope).toBe("all");
+    expect(ids(admin.recentJobs)).toContain("job-001");
   });
 });
