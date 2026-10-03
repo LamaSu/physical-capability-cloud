@@ -420,30 +420,44 @@ const PARITY_VECTORS = [
   { name: "revocation_ignored_depth_1200", kind: "revocation", accept: false, json: REVOCATION_WITH(NEST(1199)) },
   { name: "revocation_ignored_long_integer", kind: "revocation", accept: true, json: REVOCATION_WITH("1" + "0".repeat(5000)) },
   { name: "revocation_long_integer", kind: "revocation", accept: false, json: REVOCATION_TEXT("1" + "0".repeat(5000)) },
+  // Depth is measured on the TEXT (cross-family review A01b-q1): a later duplicate key must not hide a deeper value.
+  { name: "revocation_ignored_shadowed_depth_64", kind: "revocation", accept: true, json: REVOCATION_WITH(NEST(63) + ',"unused":0') },
+  { name: "revocation_ignored_shadowed_depth_65", kind: "revocation", accept: false, json: REVOCATION_WITH(NEST(64) + ',"unused":0') },
+  { name: "revocation_ignored_shadowed_depth_20000", kind: "revocation", accept: false, json: REVOCATION_WITH(NEST(19999) + ',"unused":0') },
+  { name: "revocation_ignored_brackets_in_string", kind: "revocation", accept: true, json: REVOCATION_WITH('"' + "[".repeat(100) + '"') },
+  { name: "revocation_ignored_escaped_backslash_then_depth", kind: "revocation", accept: false, json: REVOCATION_WITH('["\\\\",' + NEST(70) + "]") },
 ];
 
-/** parseSigningInputJson's depth rule (signing-preimage.ts): any container deeper than 64 refuses. */
-function nestingExceeds(value, limit) {
-  const stack = [[value, 1]];
-  while (stack.length > 0) {
-    const [v, depth] = stack.pop();
-    if (typeof v !== "object" || v === null) continue;
-    if (depth > limit) return true;
-    for (const child of Array.isArray(v) ? v : Object.values(v)) {
-      if (typeof child === "object" && child !== null) stack.push([child, depth + 1]);
+/** parseSigningInputJson's depth rule (signing-preimage.ts textNestingExceeds): measured on the TEXT, before decoding. */
+function textNestingExceeds(text, limit) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === 0x5c) escaped = true;
+      else if (c === 0x22) inString = false;
+    } else if (c === 0x22) {
+      inString = true;
+    } else if (c === 0x5b || c === 0x7b) {
+      if (++depth > limit) return true;
+    } else if (c === 0x5d || c === 0x7d) {
+      depth--;
     }
   }
   return false;
 }
 
 function evaluateParityVector(v) {
+  if (textNestingExceeds(v.json, SIGNING_JSON_MAX_DEPTH)) return { reject: true };
   let parsed;
   try {
     parsed = JSON.parse(v.json);
   } catch {
     return { reject: true };
   }
-  if (nestingExceeds(parsed, SIGNING_JSON_MAX_DEPTH)) return { reject: true };
   try {
     const bytes = v.kind === "revocation" ? sessionRevocationPreimage(parsed) : sessionKeyDelegationPreimage(parsed);
     return { preimage_utf8: bytes.toString("utf8") };
