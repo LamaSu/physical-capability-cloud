@@ -469,6 +469,14 @@ describe("a run's assurance tier is one of AssuranceTier's, refused before anyth
     expect.soft(machine.commands, "commands sent").toEqual([]);
   });
 
+  it.each([0, 1, 2, 3] as const)("tier %s is accepted: the run reaches the machine", async (tier) => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine(`m-tier-ok-${tier}`);
+    const result = await new JobRunner(machine, [], null, emitter).run({ jobId: `job-tier-ok-${tier}`, stepId: STEP, gcodeHash: gcode(95), assuranceTier: tier });
+    expect.soft(result.error ?? "", "not refused for its tier").not.toBe("the run's assurance tier must be 0, 1, 2 or 3");
+    expect.soft(machine.commands, "commands sent").toContain("load_gcode");
+  });
+
   it.each([[-1], [1.5], [4], ["2"], [null], [undefined], [Number.NaN]] as const)("tier %s is refused before anything is held", async (tier) => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const machine = testMachine(`m-tier-${String(tier)}`);
