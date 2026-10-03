@@ -652,6 +652,66 @@ describe("PrinterLogAdapter lifecycle (astra pack 196)", () => {
   });
 });
 
+describe("PrinterLogAdapter: a collaborator that re-enters during the first poll (astra pack 198)", () => {
+  it("astra's recipe: quiesceEvidence() asked from inside the first poll waits for the start, and nothing is emitted after it answers", async () => {
+    const firstPoll = deferredLine();
+    let log!: PrinterLogAdapter;
+    let hook: { resolved: boolean; seen?: number } | undefined;
+    let calls = 0;
+    const logProvider = (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 1) {
+        hook = ask(log, events);
+        return firstPoll.promise;
+      }
+      return Promise.resolve(null);
+    };
+    log = new PrinterLogAdapter("log-reenter-quiesce", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider });
+    const events = record(log);
+
+    const started = log.startRecording("job-a");
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook?.resolved, "the hook, asked from inside the first poll").toBe(false);
+    firstPoll.resolve("line 1");
+    await started;
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(entries(events), "entries").toEqual(["line 1"]);
+    // The recording now runs: the hook still waits, for its stop.
+    expect.soft(hook?.resolved, "the hook, while the recording runs").toBe(false);
+    await log.stopRecording();
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook?.resolved, "the hook, once stopped").toBe(true);
+    expect.soft(hook?.seen, "events emitted when it answered").toBe(events.length);
+  });
+
+  it("a stop asked from inside the first poll waits for the start, then stops the recording with its summary", async () => {
+    const firstPoll = deferredLine();
+    let log!: PrinterLogAdapter;
+    let stop: Promise<{ value?: unknown; error?: string }> | undefined;
+    let calls = 0;
+    const logProvider = (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 1) {
+        stop = settle(log.stopRecording());
+        return firstPoll.promise;
+      }
+      return Promise.resolve(null);
+    };
+    log = new PrinterLogAdapter("log-reenter-stop", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider });
+    const events = record(log);
+
+    const started = settle(log.startRecording("job-b"));
+    firstPoll.resolve("line 1");
+    await started;
+    const outcome = await stop!;
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(outcome.error, "the stop's refusal").toBeUndefined();
+    expect.soft((outcome.value as { payload?: Record<string, unknown> } | undefined)?.payload, "its summary").toMatchObject({ jobId: "job-b", chainLength: 1 });
+    expect.soft(events.at(-1)?.type, "the last event").toBe("printer_job_verified");
+    expect.soft(vi.getTimerCount(), "timers left").toBe(0);
+  });
+});
+
 describe("PrinterLogAdapter under JobRunner (astra pack 196): its start at step 2, its stop at step 6, and the stop its failure path retries", () => {
   it("each run's calls meet the lifecycle: a summary per recorded run, a failed stop retried before the run returns, and a failed start's stop refused", async () => {
     vi.useRealTimers(); // real hashing (crypto.subtle) and a real run, as in job-runner-evidence-settled.test.ts

@@ -235,13 +235,22 @@ export class PrinterLogAdapter implements SensorAdapter {
       }
       return this.starting ?? Promise.resolve(); // the same job: idempotent
     }
-    // idle or stopFailed: a new recording, outstanding work until the start settles.
-    const start = this.work.track(this.startOnce(jobId));
+    // idle or stopFailed: a new recording, outstanding work until the start settles. The work
+    // and the start's promise are in place BEFORE startOnce runs: it calls the collaborators
+    // (logCaptureService.reset(), then the log provider) synchronously, and either may re-enter
+    // the adapter. A quiesceEvidence() from inside them must wait for this start, and a
+    // stopRecording() must find it to wait for (astra pack 198).
+    const end = this.work.begin();
+    let settle!: { resolve: () => void; reject: (err: unknown) => void };
+    const start = new Promise<void>((resolve, reject) => {
+      settle = { resolve, reject };
+    });
     this.starting = start;
     const clear = () => {
       if (this.starting === start) this.starting = null;
     };
     start.then(clear, clear);
+    void this.startOnce(jobId).then(settle.resolve, settle.reject).finally(end);
     return start;
   }
 
