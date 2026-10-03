@@ -149,6 +149,10 @@ export interface EvidenceWindowAttestation {
   generation: string;
   startedAt?: string;
   opCount?: number;
+  /** On a close: every evidence notification the window scheduled for the job. */
+  notified?: number;
+  /** On a close: how many of those notifications could not be written. */
+  failedWrites?: number;
 }
 
 /** Parameters for `backend.run` — execute a PLR protocol */

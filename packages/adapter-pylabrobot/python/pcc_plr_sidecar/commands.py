@@ -16,7 +16,7 @@ from collections import OrderedDict
 from typing import Any, TYPE_CHECKING
 
 from .dispatcher import RPC_ERROR_CODES, RpcException
-from .evidence import RecordingWindowBusy
+from .evidence import RecordingWindow, RecordingWindowBusy
 
 if TYPE_CHECKING:
     from .backend_loader import BackendLoader
@@ -38,9 +38,10 @@ class Commands:
     ) -> None:
         self.loader = loader
         self.evidence = evidence
-        # Windows this process closed, by (deviceId, jobId): the drain's watermark and the op
-        # count, so a retried evidence.stopRecording answers as the first did. The last 64.
-        self._closed: "OrderedDict[tuple[str, str], tuple[int, int]]" = OrderedDict()
+        # Windows this process closed, by (deviceId, jobId): the drain's watermark and the window
+        # (its counts are final once that drain is done), so a retried evidence.stopRecording
+        # answers as the first did. The last 64.
+        self._closed: "OrderedDict[tuple[str, str], tuple[int, RecordingWindow]]" = OrderedDict()
         # Devices with a backend.run in flight: one run per device (astra pack 473).
         self._running: set[str] = set()
 
@@ -282,7 +283,7 @@ class Commands:
         window = self.evidence.stop_recording(device_id, job_id)
         key = (device_id, job_id)
         if window is not None:
-            self._closed[key] = (self.evidence.watermark(), window.op_count)
+            self._closed[key] = (self.evidence.watermark(), window)
             while len(self._closed) > 64:
                 self._closed.popitem(last=False)
         elif key not in self._closed:
@@ -293,16 +294,20 @@ class Commands:
                 f"no recording window for job {job_id} on device {device_id} in this sidecar",
                 {"generation": self.evidence.generation},
             )
-        mark, op_count = self._closed[key]
+        mark, closed = self._closed[key]
         # A barrier: every notification scheduled before the window closed is written
         # before this answer, so once the TS adapter has it, it has all of the job's
         # evidence (astra pack 186). A retried close of the same window answers the same
         # way, once that drain is done. Notifications scheduled later are not waited for.
         await self.evidence.drain_through(mark)
+        # After the drain, the window's counts are final: how many notifications it scheduled,
+        # and how many of their writes failed. The TS adapter proves it received every one.
         return {
             "ok": True,
             "jobId": job_id,
-            "opCount": op_count,
+            "opCount": closed.op_count,
+            "notified": closed.notified,
+            "failedWrites": closed.failed_writes,
             "generation": self.evidence.generation,
         }
 

@@ -17,6 +17,9 @@ from typing import Any, Awaitable, Callable, Optional
 
 NotificationWriter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
+# Not a logger the EvidenceHandler listens to, so a failure logged here is never itself evidence.
+log = logging.getLogger("pcc_plr_sidecar.evidence")
+
 
 @dataclass
 class RecordingWindow:
@@ -26,6 +29,11 @@ class RecordingWindow:
     job_id: str
     started_at: datetime
     op_count: int = 0
+    # Every notification scheduled into the window, and those whose write failed. Once the window
+    # is closed and drained, evidence.stopRecording attests both, so the TS adapter can prove it
+    # received each one: a write that fails is never silently lost (refvertical #5668).
+    notified: int = 0
+    failed_writes: int = 0
 
 
 class RecordingWindowBusy(Exception):
@@ -229,6 +237,8 @@ class EvidenceHandler(logging.Handler):
             # its job's notifications end at that barrier, so this one is dropped.
             if window is not None and self._windows.get(window.device_id) is not window:
                 return
+            if window is not None:
+                window.notified += 1
             self._last_seq += 1
             seq = self._last_seq
             self._pending.add(seq)
@@ -236,16 +246,24 @@ class EvidenceHandler(logging.Handler):
         # threadsafely onto the running loop.
         try:
             loop.call_soon_threadsafe(
-                lambda: loop.create_task(self._write_tracked(seq, method, params))
+                lambda: loop.create_task(self._write_tracked(seq, method, params, window))
             )
         except RuntimeError:
             # Loop is closed — drop silently. No drain can be waiting on a closed loop.
             with self._lock:
                 self._pending.discard(seq)
 
-    async def _write_tracked(self, seq: int, method: str, params: dict[str, Any]) -> None:
+    async def _write_tracked(
+        self, seq: int, method: str, params: dict[str, Any], window: Optional[RecordingWindow] = None,
+    ) -> None:
         try:
             await self._writer(method, params)
+        except Exception:  # noqa: BLE001
+            # Counted on its window before the drain can end, so the barrier attests it.
+            with self._lock:
+                if window is not None:
+                    window.failed_writes += 1
+            log.exception("an evidence notification could not be written")
         finally:
             with self._lock:
                 self._pending.discard(seq)
