@@ -325,8 +325,9 @@ function FundWalletTab() {
           </div>
 
           <div className="space-y-2">
-            <p className="text-[10px] uppercase tracking-wider text-white/40">Country</p>
+            <label htmlFor="wallet-yc-country" className="block text-[10px] uppercase tracking-wider text-white/40">Country</label>
             <select
+              id="wallet-yc-country"
               value={ycCountryIdx}
               onChange={(e) => { setYcCountryIdx(Number(e.target.value)); setYcChannel(0); }}
               className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white/70 focus:border-green-500/30 focus:outline-none transition-colors"
@@ -474,8 +475,9 @@ function WithdrawTab() {
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <p className="text-[10px] text-white/30">Country</p>
+                <label htmlFor="wallet-withdraw-country" className="block text-[10px] text-white/30">Country</label>
                 <select
+                  id="wallet-withdraw-country"
                   value={countryIdx}
                   onChange={(e) => { setCountryIdx(Number(e.target.value)); setPayoutMethod(0); }}
                   className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white/70 focus:border-green-500/30 focus:outline-none transition-colors"
@@ -487,8 +489,9 @@ function WithdrawTab() {
               </div>
 
               <div className="space-y-1.5">
-                <p className="text-[10px] text-white/30">Payout Method</p>
+                <label htmlFor="wallet-withdraw-payout-method" className="block text-[10px] text-white/30">Payout Method</label>
                 <select
+                  id="wallet-withdraw-payout-method"
                   value={payoutMethod}
                   onChange={(e) => setPayoutMethod(Number(e.target.value))}
                   className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white/70 focus:border-green-500/30 focus:outline-none transition-colors"
@@ -524,8 +527,8 @@ function WithdrawTab() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <p className="text-[10px] text-white/30">Network</p>
-                  <select className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white/70 focus:border-green-500/30 focus:outline-none transition-colors">
+                  <label htmlFor="wallet-withdraw-network" className="block text-[10px] text-white/30">Network</label>
+                  <select id="wallet-withdraw-network" className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white/70 focus:border-green-500/30 focus:outline-none transition-colors">
                     <option className="bg-[#0a0a0a]">M-PESA</option>
                     <option className="bg-[#0a0a0a]">MTN Mobile Money</option>
                     <option className="bg-[#0a0a0a]">Airtel Money</option>

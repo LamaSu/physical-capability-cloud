@@ -127,6 +127,15 @@ function typeInto(input: Element | null | undefined, value: string): void {
   });
 }
 
+function selectValue(select: Element | null | undefined, value: string): void {
+  if (!(select instanceof HTMLSelectElement)) throw new Error("select was not rendered");
+  const setValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
+  act(() => {
+    setValue.call(select, value);
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
 // Values the old page invented, as it rendered them.
 const INVENTED = /14,150|1,234\.56|1234\.56|6,420|\$1\.00|1,617\.30|Settlement contract|0x91E6/;
 const PROTOTYPE_ROWS = /fr_00\d|Agent job submission|323,460|1 USD = 100 credits/;
@@ -352,5 +361,38 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     expect(text()).toContain("This endpoint requires one of the following scopes: operator, admin.");
     expect(text()).not.toContain("Usable on PCC now");
     expect(button("Create wallet — no card")).toBeDefined();
+  });
+});
+
+// ── Accessible names for every combobox (design #4004) ───────────────────────
+
+/** Every <select> currently rendered must have a label[for] or an aria-label. */
+function expectEveryComboboxIsNamed(): void {
+  const selects = [...container.querySelectorAll("select")];
+  expect(selects.length).toBeGreaterThan(0);
+  for (const select of selects) {
+    const ariaLabel = select.getAttribute("aria-label")?.trim();
+    const labelled = !!select.id && !!container.querySelector(`label[for="${select.id}"]`);
+    expect(Boolean(ariaLabel) || labelled, `<select id="${select.id}"> has no accessible name`).toBe(true);
+  }
+}
+
+describe("accessible names for /wallet's selects (design #4004)", () => {
+  it("gives every combobox a label[for] or an aria-label", async () => {
+    window.history.replaceState(null, "", "/wallet?demo=1");
+    stubFetch({});
+    await renderPage();
+
+    // Fund Wallet tab (the default): the Yellowcard deposit-country combobox.
+    expectEveryComboboxIsNamed();
+
+    // Withdraw tab: destination-country and payout-method comboboxes.
+    await click(button("Withdraw"));
+    expectEveryComboboxIsNamed();
+
+    // Switch to a mobile-money payout method so the Network combobox also renders.
+    selectValue(container.querySelector("select#wallet-withdraw-payout-method"), "1");
+    expect(container.querySelector("select#wallet-withdraw-network")).not.toBeNull();
+    expectEveryComboboxIsNamed();
   });
 });
