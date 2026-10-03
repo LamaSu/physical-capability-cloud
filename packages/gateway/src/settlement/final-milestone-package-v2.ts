@@ -768,6 +768,46 @@ export interface OperatorSignatureVerifier {
   ): boolean | Promise<boolean>;
 }
 
+// Captured at MODULE LOAD, before any other code in the process has had a
+// chance to run and replace them (evidence-lane round 3, cross-family E9,
+// finding 2). `deepFreeze` below calls ONLY these, never the live
+// `Object.freeze` / `Object.isFrozen` / `Object.keys` globals, so a caller
+// that monkey-patches those into no-ops AFTER this module has loaded cannot
+// turn this module's own freeze into one.
+const captureObjectFreeze = Object.freeze;
+const captureObjectIsFrozen = Object.isFrozen;
+const captureObjectKeys = Object.keys;
+
+/**
+ * F2 (evidence-lane round 3, cross-family E9): deep-freeze `value` and every
+ * plain object/array reachable from it, using the captured intrinsics above.
+ * The constructor's freeze used to be `Object.freeze(body)` /
+ * `Object.freeze(signatures)` — TOP LEVEL ONLY. `body.unitBinding`,
+ * `body.producer`, every other nested body object, and each signature ENTRY
+ * stayed mutable: a caller holding the returned `MintablePackage` could
+ * mutate them after `assertMintablePackage` succeeded, and
+ * `mintablePackageDigest` would then hash a package that was never verified.
+ *
+ * Recurses via the captured `Object.keys` (which, for an array, returns its
+ * index keys, so an array of signature entries is walked element by element
+ * with no special-casing). Skips anything already frozen (via the captured
+ * `Object.isFrozen`), so re-freezing an already-deep-frozen value — exactly
+ * what the constructor does to `body`, which `assert` deep-freezes earlier —
+ * is a fast no-op, not a re-walk. Only ever called here on plain,
+ * non-circular, JSON-shaped data (a validated body, a canonicalized
+ * signature list), so it does not need cycle detection to be safe.
+ */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== "object" || captureObjectIsFrozen(value)) {
+    return value;
+  }
+  captureObjectFreeze(value);
+  for (const key of captureObjectKeys(value as object)) {
+    deepFreeze((value as Record<string, unknown>)[key]);
+  }
+  return value;
+}
+
 /**
  * F3: the nominal brand that makes `assertMintablePackage` the ONLY mint-bound
  * seam. The private field `#brand` makes TypeScript compare this class
@@ -777,24 +817,65 @@ export interface OperatorSignatureVerifier {
  * be enough for this — TypeScript's structural check for classes only treats
  * them as nominal when they carry a private or protected MEMBER.) The private
  * constructor additionally means nothing outside this class can construct one
- * at runtime, so the `instanceof` check in `mintablePackageDigest`
- * (`package-digest-v2.ts`) is meaningful even against a
- * `as unknown as MintablePackage` type assertion.
+ * at runtime through normal means.
  *
- * `body` and `signatures` are deep-frozen copies the caller cannot reach (both
+ * THE RUNTIME CHECK IS `#brand in x`, NOT `instanceof` (evidence-lane round 3,
+ * cross-family E9, finding 1 — the prior doc here overclaimed `instanceof`'s
+ * strength; it does not hold). `instanceof` walks the prototype chain, or —
+ * if the class defines one — calls `Symbol.hasInstance`; neither requires the
+ * private field to have ever been set by THIS class's own constructor. Two
+ * routes forge it:
+ *   - `Object.create(MintablePackage.prototype)` puts a hand-built object,
+ *     carrying its own `body`/`signatures` but no `#brand`, on the right
+ *     prototype chain WITHOUT ever running the constructor — it still passes
+ *     `instanceof MintablePackage`;
+ *   - `Object.defineProperty(MintablePackage, Symbol.hasInstance, { value: ()
+ *     => true })` replaces what `instanceof` means for this class, for every
+ *     check, everywhere, for anything, including a bare `{}`.
+ * Either route let `mintablePackageDigest` hash a package nobody verified.
+ * `#brand in x` (exposed as the static `isMintable`, below) is immune to
+ * both: it is a direct test for the internal slot that only this class's own
+ * constructor installs on an object it built itself — it does not walk a
+ * prototype chain and does not consult `Symbol.hasInstance`, so no override
+ * reachable from outside this class can forge it. `mintablePackageDigest`
+ * (`package-digest-v2.ts`) calls `MintablePackage.isMintable`, never
+ * `instanceof`.
+ *
+ * `body` and `signatures` are DEEP-frozen (evidence-lane round 3, finding 2 —
+ * was shallow; see `deepFreeze` above) copies the caller cannot reach (both
  * already came back from `validatePackageBody` / `canonicalSignatures`, which
- * never alias the caller's objects).
+ * never alias the caller's objects). The freeze itself happens the moment
+ * `assert` validates the body — before any await and before any injected
+ * reader or verifier call reaches it (evidence-lane round 3, finding 3) — not
+ * here in the constructor at the end of `assert`, which is the stale timing
+ * this class used to have; see `assert`'s own doc for why that window
+ * mattered. The constructor's own freeze calls below are what close the
+ * window for `signatures` (built fresh by `canonicalSignatures`, frozen here
+ * for the first time) and are a defensive, idempotent no-op for `body`
+ * (already deep-frozen by `assert` by the time it reaches here).
  */
 export class MintablePackage {
   readonly body: FinalMilestonePackageV2Body;
   readonly signatures: readonly PackageSignature[];
-  /** Exists only to make this class nominal (see class doc). Never read. */
+  /** Makes this class nominal and backs `isMintable`'s `#brand in x` runtime check (see class doc). Never read for its value. */
   readonly #brand = true;
 
   private constructor(body: FinalMilestonePackageV2Body, signatures: PackageSignature[]) {
-    this.body = Object.freeze(body);
-    this.signatures = Object.freeze(signatures);
-    Object.freeze(this);
+    this.body = deepFreeze(body);
+    this.signatures = deepFreeze(signatures);
+    captureObjectFreeze(this);
+  }
+
+  /**
+   * F3 (evidence-lane round 3, cross-family E9): the ergonomic private-brand
+   * check, `#brand in x` — see the class doc for why this is the runtime
+   * boundary instead of `instanceof`. `in` throws if its right-hand operand
+   * is not an object, so `typeof x === "object" && x !== null` runs first and
+   * short-circuits, making this return `false` instead of throwing for every
+   * non-object input (a number, a string, `null`, `undefined`, a boolean).
+   */
+  static isMintable(x: unknown): x is MintablePackage {
+    return typeof x === "object" && x !== null && #brand in x;
   }
 
   /**
@@ -826,6 +907,19 @@ export class MintablePackage {
    *    refused until one is wired in; see the STOP note above
    *    MINT_SIGNER_PROFILE and `OperatorSignatureVerifier`'s own doc.
    *
+   * FROZEN IMMEDIATELY, BEFORE ANY AWAIT (evidence-lane round 3, cross-family
+   * E9, finding 3): `valid` is deep-frozen (see `deepFreeze` above) the
+   * instant it comes back from `validatePackageBody`, before the
+   * interim-nonce check and before any of the three injected calls below
+   * (the kernel registry, the challenge reader, the D1 verifier) ever see
+   * it. Each of those three can be arbitrary caller-supplied code, and two
+   * of them receive a reference INTO `valid` directly (`valid.unitBinding`
+   * to the challenge reader; the same `valid.unitBinding` inside the D1
+   * verifier's input object). Freezing here — not in the constructor at the
+   * very end of this method, which is where the freeze used to happen —
+   * means an injected reader that tries to mutate what it was handed throws
+   * in strict mode instead of silently changing what gets minted.
+   *
    * READ ONCE. Every input is read exactly once into a local copy (the body through
    * `validatePackageBody`'s returned copy, each signature entry's fields and the
    * list's length and indices through `copySignatureEntries`, the registry signer's
@@ -845,6 +939,7 @@ export class MintablePackage {
     operatorVerifier: OperatorSignatureVerifier | null | undefined,
   ): Promise<MintablePackage> {
     const valid = validatePackageBody(body);
+    deepFreeze(valid);
     if (isInterimNonce(valid)) {
       throw new PackageNotMintableError(
         "$.challengeBinding.nonce",

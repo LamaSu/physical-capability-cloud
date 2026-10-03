@@ -197,11 +197,20 @@ export function packageDigestV2Unchecked(body: unknown, sigs: unknown): Hex {
  * A structural fake (`{body, signatures}` built by hand, not through the
  * guard) is never a `MintablePackage`: TypeScript refuses the assignment at
  * compile time (the class has a private field, so it is compared nominally),
- * and the `instanceof` check below refuses it at runtime too, so a caller
- * cannot route around the guard even with a type assertion.
+ * and `MintablePackage.isMintable` — the `#brand in x` ergonomic brand check,
+ * NOT `instanceof` (evidence-lane round 3, cross-family E9, finding 1) —
+ * refuses it at runtime too. `instanceof` is forgeable: either by
+ * `Object.create(MintablePackage.prototype)` (puts an object on the right
+ * prototype chain without ever running the constructor) or by replacing
+ * `MintablePackage[Symbol.hasInstance]` (redefines what `instanceof` even
+ * means for this class, for every check). `#brand in x` is neither of those
+ * checks — it does not walk a prototype chain and does not consult
+ * `Symbol.hasInstance` — so a caller cannot route around the guard even with
+ * a type assertion. See `MintablePackage`'s own class doc for the full
+ * reasoning.
  */
 export function mintablePackageDigest(mintable: MintablePackage): Hex {
-  if (!(mintable instanceof MintablePackage)) {
+  if (!MintablePackage.isMintable(mintable)) {
     throw new PackageNotMintableError(
       "$",
       "argument is not a MintablePackage produced by assertMintablePackage",

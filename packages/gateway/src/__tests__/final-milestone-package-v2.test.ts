@@ -34,7 +34,12 @@ import {
   type OperatorSignatureVerifier,
   type OperatorSignatureVerifierInput,
 } from "../settlement/final-milestone-package-v2.js";
-import { packageDigestV2Unchecked, canonicalSignatures, type PackageSignature } from "../settlement/package-digest-v2.js";
+import {
+  packageDigestV2Unchecked,
+  canonicalSignatures,
+  mintablePackageDigest,
+  type PackageSignature,
+} from "../settlement/package-digest-v2.js";
 import { COMPROMISED_DEVICE_PUBLIC_KEYS } from "@pcc/spec";
 import { signWithPrivateKeyHex } from "../auth/ed25519.js";
 
@@ -853,6 +858,94 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
       await expect(assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, mismatched, VERIFIER)).rejects.toThrow(
         PackageNotMintableError,
       );
+    });
+  });
+
+  // ── evidence-lane round 3 (fixer-zulu), cross-family E9: three gaps found
+  // by the evidence lane's own review of tango's and xray's work (not astra).
+  // See triage-E9-358-fixer-tango.md, "Round 3 (fixer-zulu)".
+  describe("evidence-lane round 3, finding 2 — the freeze is deep, not shallow", () => {
+    it("mutating body.unitBinding after a successful assert throws (strict mode) and never moves the digest", async () => {
+      const minted = await assertMintablePackage(MINTABLE, [D2, D1], REGISTRY, CHALLENGES, VERIFIER);
+      const digestBefore = mintablePackageDigest(minted);
+      expect(() => {
+        (minted.body.unitBinding as { milestoneIndex: string }).milestoneIndex = "9";
+      }).toThrow(TypeError);
+      expect(minted.body.unitBinding.milestoneIndex).toBe(MINTABLE.unitBinding.milestoneIndex);
+      expect(mintablePackageDigest(minted)).toBe(digestBefore);
+    });
+
+    it("mutating body.producer after a successful assert throws (strict mode) — every nested body object is frozen, not just unitBinding", async () => {
+      const minted = await assertMintablePackage(MINTABLE, [D2, D1], REGISTRY, CHALLENGES, VERIFIER);
+      expect(() => {
+        (minted.body.producer as { kernelId: string }).kernelId = "kernel-attacker";
+      }).toThrow(TypeError);
+    });
+
+    it("mutating a signature entry after a successful assert throws (strict mode) and never moves the digest", async () => {
+      const minted = await assertMintablePackage(MINTABLE, [D2, D1], REGISTRY, CHALLENGES, VERIFIER);
+      const digestBefore = mintablePackageDigest(minted);
+      expect(() => {
+        (minted.signatures[0] as { sig: string }).sig = `0x${"ff".repeat(65)}`;
+      }).toThrow(TypeError);
+      expect(mintablePackageDigest(minted)).toBe(digestBefore);
+    });
+
+    it("the freeze survives a caller replacing the global Object.freeze with a no-op, because the intrinsic was captured at module load", async () => {
+      const realFreeze = Object.freeze;
+      try {
+        // @ts-expect-error -- deliberately breaking the global for this test
+        Object.freeze = (x: unknown) => x;
+        const minted = await assertMintablePackage(MINTABLE, [D2, D1], REGISTRY, CHALLENGES, VERIFIER);
+        expect(() => {
+          (minted.body.unitBinding as { milestoneIndex: string }).milestoneIndex = "9";
+        }).toThrow(TypeError);
+      } finally {
+        Object.freeze = realFreeze;
+      }
+    });
+  });
+
+  describe("evidence-lane round 3, finding 3 — the validated body is frozen before any injected call, not after", () => {
+    it("a ChallengeReader that tries to mutate the unitBinding it receives cannot change what gets minted", async () => {
+      let attempted = false;
+      let mutationThrew = false;
+      const mutatingChallenges: ChallengeReader = {
+        recordFor: async (unitBinding) => {
+          attempted = true;
+          try {
+            (unitBinding as { milestoneIndex: string }).milestoneIndex = "9999";
+          } catch {
+            mutationThrew = true;
+          }
+          return {
+            nonce: MINTABLE.challengeBinding.nonce,
+            tChallengeRef: MINTABLE.challengeBinding.tChallengeRef,
+            state: "issued",
+          };
+        },
+      };
+      const minted = await assertMintablePackage(MINTABLE, [D2, D1], REGISTRY, mutatingChallenges, VERIFIER);
+      expect(attempted).toBe(true);
+      expect(mutationThrew).toBe(true);
+      expect(minted.body.unitBinding.milestoneIndex).toBe(MINTABLE.unitBinding.milestoneIndex);
+    });
+
+    it("the SAME frozen unitBinding reaches the D1 verifier too — a verifier that tries to mutate it also fails to change anything", async () => {
+      let mutationThrew = false;
+      const spyVerifier: OperatorSignatureVerifier = {
+        verifyOperatorSignature: async (input) => {
+          try {
+            (input.unitBinding as { milestoneIndex: string }).milestoneIndex = "9999";
+          } catch {
+            mutationThrew = true;
+          }
+          return input.signer === D1.signer && input.sig === D1.sig;
+        },
+      };
+      const minted = await assertMintablePackage(MINTABLE, [D2, D1], REGISTRY, CHALLENGES, spyVerifier);
+      expect(mutationThrew).toBe(true);
+      expect(minted.body.unitBinding.milestoneIndex).toBe(MINTABLE.unitBinding.milestoneIndex);
     });
   });
 });

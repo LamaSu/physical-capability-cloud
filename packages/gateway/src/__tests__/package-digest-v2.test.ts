@@ -575,6 +575,48 @@ describe("mintablePackageDigest — the only money-bound digest (F3)", () => {
       );
     }
   });
+
+  // ── evidence-lane round 3 (fixer-zulu), cross-family E9, finding 1: the
+  // `instanceof` check used to be forgeable two ways. See
+  // triage-E9-358-fixer-tango.md, "Round 3 (fixer-zulu)".
+  describe("evidence-lane round 3, finding 1 — the brand check is #brand in x, not instanceof", () => {
+    it("refuses an Object.create(MintablePackage.prototype) fake carrying its own body/signatures", () => {
+      // Object.create puts the fake on the right prototype chain WITHOUT ever
+      // running the private constructor, so it has no #brand. Before this
+      // fix, mintablePackageDigest's `instanceof` check could not tell this
+      // apart from a real MintablePackage and would digest it — "the digest
+      // then covers a package nobody verified."
+      const fake = Object.create(MintablePackage.prototype) as MintablePackage;
+      (fake as { body: unknown }).body = MINTABLE_BODY;
+      (fake as { signatures: unknown }).signatures = [D1, D2];
+      expect(fake instanceof MintablePackage).toBe(true); // the forgery itself still works
+      expect(() => mintablePackageDigest(fake)).toThrow(PackageNotMintableError);
+      expect(() => mintablePackageDigest(fake)).toThrow(/not a MintablePackage/);
+    });
+
+    it("refuses a fake even when Symbol.hasInstance is overridden to always answer true", () => {
+      const original = Object.getOwnPropertyDescriptor(MintablePackage, Symbol.hasInstance);
+      Object.defineProperty(MintablePackage, Symbol.hasInstance, { value: () => true, configurable: true });
+      try {
+        const fake = { body: MINTABLE_BODY, signatures: [D1, D2] } as unknown as MintablePackage;
+        expect(fake instanceof MintablePackage).toBe(true); // instanceof now lies for EVERYTHING
+        expect(() => mintablePackageDigest(fake)).toThrow(PackageNotMintableError);
+      } finally {
+        if (original) Object.defineProperty(MintablePackage, Symbol.hasInstance, original);
+        else delete (MintablePackage as unknown as Record<symbol, unknown>)[Symbol.hasInstance];
+      }
+    });
+
+    it("MintablePackage.isMintable agrees with a real mint and disagrees with both forgeries and every non-object", async () => {
+      const real = await assertMintablePackage(MINTABLE_BODY, [D1, D2], REGISTRY, CHALLENGES, OPERATOR_VERIFIER);
+      expect(MintablePackage.isMintable(real)).toBe(true);
+      expect(MintablePackage.isMintable(Object.create(MintablePackage.prototype))).toBe(false);
+      expect(MintablePackage.isMintable({ body: MINTABLE_BODY, signatures: [D1, D2] })).toBe(false);
+      for (const bad of [null, undefined, "x", 7, true, []]) {
+        expect(MintablePackage.isMintable(bad)).toBe(false);
+      }
+    });
+  });
 });
 
 describe("packageDigestV2Unchecked — rules the published golden blocks (STOPPED, not applied)", () => {
