@@ -27,6 +27,11 @@ export interface StoryIPRegistration {
   registeredAt: string;
   /** Which Story chain this was registered on */
   chain: "story" | "story-aeneid";
+  /**
+   * True when produced by PCC's in-memory Story simulator (STORY_MOCK), never by a chain call or
+   * read. A simulated value must not be shown as a real registration, payment or balance.
+   */
+  simulated?: boolean;
 }
 
 /**
@@ -122,6 +127,11 @@ export interface StoryDerivativeLink {
   txHash: string;
   /** ISO 8601 timestamp */
   linkedAt: string;
+  /**
+   * True when produced by PCC's in-memory Story simulator (STORY_MOCK), never by a chain call or
+   * read. A simulated value must not be shown as a real registration, payment or balance.
+   */
+  simulated?: boolean;
 }
 
 /** Revenue snapshot for an IP Asset's Royalty Vault. */
@@ -144,6 +154,11 @@ export interface StoryRevenueSnapshot {
   }>;
   /** ISO 8601 timestamp of the last payment into this vault */
   lastPaymentAt: string;
+  /**
+   * True when produced by PCC's in-memory Story simulator (STORY_MOCK), never by a chain call or
+   * read. A simulated value must not be shown as a real registration, payment or balance.
+   */
+  simulated?: boolean;
 }
 
 /**
@@ -167,4 +182,9 @@ export interface StoryDispute {
   createdAt: string;
   /** ISO 8601 timestamp — only set when status is "resolved" */
   resolvedAt?: string;
+  /**
+   * True when produced by PCC's in-memory Story simulator (STORY_MOCK), never by a chain call or
+   * read. A simulated value must not be shown as a real registration, payment or balance.
+   */
+  simulated?: boolean;
 }
