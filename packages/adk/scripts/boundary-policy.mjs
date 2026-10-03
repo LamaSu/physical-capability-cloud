@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 /**
@@ -131,15 +131,65 @@ function readPackage(dir, project) {
   return { name, version, dir: relative(project, dir) };
 }
 
-/** Packages bundled inside `dir` (its own node_modules), at any depth up to 16. */
-function bundledPackages(dir, owner, project, found, depth) {
+/** Whether `path` is a directory, following a symlink to its target. */
+function isDirectory(path) {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The entries in one node_modules directory as `[name, dir]`, scopes expanded. A scope directory
+ * can be a symlink, so the directory test follows links; a package entry may itself be a symlink,
+ * left for the caller to canonicalize.
+ */
+function moduleEntries(modules) {
+  const out = [];
+  for (const child of readdirSync(modules, { withFileTypes: true })) {
+    if (child.name.startsWith(".")) continue; // .bin, .pnpm, .modules.yaml
+    const dir = join(modules, child.name);
+    if (child.name.startsWith("@") && isDirectory(dir)) {
+      for (const scoped of readdirSync(dir, { withFileTypes: true })) {
+        if (scoped.name.startsWith(".")) continue;
+        out.push([`${child.name}/${scoped.name}`, join(dir, scoped.name)]);
+      }
+    } else {
+      out.push([child.name, dir]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Packages bundled inside `dir` (its own node_modules), at any depth (verdict 101c). A published
+ * package's own node_modules holds only what shipped with it, so every entry is accounted for: a
+ * readable package is recorded with `bundledIn`, and anything else -- a directory with no
+ * package.json, or a symlink that will not resolve -- is an opaque entry the policy fails closed
+ * on, never a silent skip. Symlinks are canonicalized against `seen`, so a cycle can neither spin
+ * nor hide a target the walk already passed; there is no depth limit (the README's "at any depth").
+ */
+function bundledPackages(dir, owner, project, found, seen) {
   const modules = join(dir, "node_modules");
-  if (depth > 16 || !existsSync(modules)) return;
-  for (const [, child] of packageDirs(modules)) {
+  if (!existsSync(modules)) return;
+  for (const [name, child] of moduleEntries(modules)) {
+    let real;
+    try {
+      real = realpathSync(child);
+    } catch {
+      found.push({ opaque: `${name} is a symlink that does not resolve`, dir: relative(project, child), bundledIn: owner });
+      continue;
+    }
+    if (seen.has(real)) continue;
+    seen.add(real);
     const pkg = readPackage(child, project);
-    if (!pkg) continue;
+    if (!pkg) {
+      found.push({ opaque: `${name} has no package.json`, dir: relative(project, child), bundledIn: owner });
+      continue;
+    }
     found.push({ ...pkg, bundledIn: owner });
-    bundledPackages(child, owner, project, found, depth + 1);
+    bundledPackages(child, owner, project, found, seen);
   }
 }
 
@@ -153,6 +203,7 @@ export function installedPackages(project) {
   const store = join(project, "node_modules", ".pnpm");
   if (!existsSync(store)) throw new Error(`${store} is missing; the consumer was not installed by pnpm`);
   const found = [];
+  const seen = new Set();
   for (const entry of readdirSync(store, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name === "node_modules") continue;
     const modules = join(store, entry.name, "node_modules");
@@ -162,7 +213,7 @@ export function installedPackages(project) {
       const pkg = readPackage(dir, project);
       if (!pkg) continue;
       found.push(pkg);
-      bundledPackages(dir, pkg.name, project, found, 0);
+      bundledPackages(dir, pkg.name, project, found, seen);
     }
   }
   return found;
@@ -171,7 +222,14 @@ export function installedPackages(project) {
 /** Problems with the packages installed in the consumer project: `[{ name, version, dir, bundledIn? }]`. */
 export function installedProblems(installed, { packed }) {
   const problems = [];
-  for (const { name, version, dir, bundledIn } of installed) {
+  for (const entry of installed) {
+    if (entry.opaque) {
+      // The walk could not read into an entry under a package's own node_modules. Fail closed:
+      // the public kit must not ship something the graph check cannot see into (verdict 101c).
+      problems.push(`installed graph has an opaque entry at ${entry.dir}, bundled inside ${entry.bundledIn}: ${entry.opaque}`);
+      continue;
+    }
+    const { name, version, dir, bundledIn } = entry;
     const where = `${name}@${version} (${dir})`;
     if (typeof name !== "string" || name === "") problems.push(`installed package without a name at ${dir}`);
     else if (isChainClient(name)) problems.push(`installed graph contains chain client ${where}`);
