@@ -249,13 +249,35 @@ setInterval(() => {
 // Fingerprint Builder
 // ---------------------------------------------------------------------------
 
+/**
+ * A URL with no query and no fragment (N107): the query and fragment carry values (OAuth codes,
+ * one-time tokens), and no value of a request leaves the gateway through this monitor.
+ */
+const pathOnly = (url: string) => url.split(/[?#]/, 1)[0] ?? "";
+
+/**
+ * What an attack event says about the content that matched (N107): its type, where it was, the
+ * request's path and how long the content was. Never the content: a URL, cookie or body that
+ * matched a pattern can also hold the caller's credentials.
+ */
+function attackSummary(req: FastifyRequest, attackType: AttackType, attackSource: string, content: string) {
+  const path = pathOnly(req.url);
+  return {
+    attackType,
+    attackSource,
+    attackLength: content.length,
+    attackPayload: `${attackType} in ${attackSource}, ${content.length} chars, at ${path}`,
+  };
+}
+
 function buildFingerprint(req: FastifyRequest) {
+  const referer = req.headers["referer"];
   return {
     ip: req.ip,
     method: req.method,
-    path: req.url.split("?")[0],
+    path: pathOnly(req.url),
     userAgent: req.headers["user-agent"] ?? "unknown",
-    referer: req.headers["referer"] ?? "direct",
+    referer: typeof referer === "string" ? pathOnly(referer) : "direct",
     acceptLanguage: req.headers["accept-language"] ?? "unknown",
     contentType: req.headers["content-type"] ?? "none",
     cfCountry: req.headers["cf-ipcountry"] ?? req.headers["x-vercel-ip-country"] ?? "unknown",
@@ -331,12 +353,10 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
     if (urlAttack) {
       emitSecurityEvent("attack_detected", {
         ...fp,
-        attackType: urlAttack,
-        attackSource: "url",
-        attackPayload: req.url.slice(0, 500),
+        ...attackSummary(req, urlAttack, "url", req.url),
         severity: "critical",
       });
-      app.log.warn({ msg: "ATTACK_DETECTED", type: urlAttack, ip: req.ip, source: "url", url: req.url });
+      app.log.warn({ msg: "ATTACK_DETECTED", type: urlAttack, ip: req.ip, source: "url", path: fp.path });
       // BLOCK known attacks — detection-only is insufficient for tonight
       return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
     }
@@ -347,8 +367,8 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         const str = `${k}=${v}`;
         const attack = detectAttack(str);
         if (attack) {
-          emitSecurityEvent("attack_detected", { ...fp, attackType: attack, attackSource: "query", attackPayload: str.slice(0, 500), severity: "critical" });
-          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "query", url: req.url });
+          emitSecurityEvent("attack_detected", { ...fp, ...attackSummary(req, attack, "query", str), severity: "critical" });
+          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "query", path: fp.path });
           return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
         }
       }
@@ -360,7 +380,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
       if (val && typeof val === "string") {
         const attack = detectAttack(val);
         if (attack) {
-          emitSecurityEvent("attack_detected", { ...fp, attackType: attack, attackSource: `header:${h}`, attackPayload: val.slice(0, 300), severity: "critical" });
+          emitSecurityEvent("attack_detected", { ...fp, ...attackSummary(req, attack, `header:${h}`, val), severity: "critical" });
           app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: `header:${h}` });
           return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
         }
@@ -411,12 +431,10 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
       const fp = buildFingerprint(req);
       emitSecurityEvent("attack_detected", {
         ...fp,
-        attackType: attack,
-        attackSource: "body",
-        attackPayload: scanTarget.slice(0, 500),
+        ...attackSummary(req, attack, "body", bodyStr),
         severity: "critical",
       });
-      app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "body", url: req.url });
+      app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "body", path: fp.path });
       return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
     }
   });
