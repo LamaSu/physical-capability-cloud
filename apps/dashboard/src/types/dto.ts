@@ -221,6 +221,10 @@ export interface ComplianceReportDTO {
   tierCompliance: Record<AssuranceTier, boolean>;
   recentEvidence: EvidenceSummaryDTO[];
   driftAlerts: DriftAlertDTO[];
+  /** Whose evidence the report is computed from: all of the kernel's, or only what the caller may read. */
+  evidenceScope: "all" | "readable_by_caller";
+  /** How many bundles' events fed ALCOA+, tier compliance and drift. */
+  bundlesConsidered: number;
   /** Assurance score rollup in [0.0, 1.0] — weighted ALCOA+ compliance scalar */
   assuranceScore?: number;
 }

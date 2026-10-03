@@ -26,7 +26,7 @@ import { swfAccrue } from "./swf.js";
 import { releaseMilestoneByJobActivity } from "../activities/escrow.js";
 import { buildSettlementStatusRead, loadLegacySettlement } from "../readmodels/legacy-settlement.js";
 import { JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
-import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
+import { gateJobRead, gateJobRecordRead, hasValidVerifierReadKey, refuseJobRead } from "../readmodels/job-read-gate.js";
 import {
   isBatchEnabled,
   getSmartAccountAddress,
@@ -270,9 +270,31 @@ export async function settlementRoutes(app: FastifyInstance) {
     const param = req.params.jobId;
 
     if (isEvidenceHashForm(param)) {
+      // The envelope is a job's evidence (cross-family review r2 of #441, CRITICAL). Its hash
+      // names it and does not authorize reading it: other responses, and the chain, disclose
+      // hashes. It is served to the settlement oracle's verifier read key, to an admin, or to a
+      // party to the bundle's job (gateJobRecordRead: identity first, then the bundle lookup).
+      // Anyone else gets exactly what an unknown hash gets: the job-id form's answer below.
       const repos = getRepos();
-      const bundle = repos.evidence.findByHash(param);
-      if (bundle) {
+      const found: { bundle?: ReturnType<typeof repos.evidence.findByHash> } = {};
+      // The bundle row is the record: gateJobRecordRead judges it by its own job, kernel and tenant first.
+      const lookup = () => (found.bundle = repos.evidence.findByHash(param));
+      const verifier = hasValidVerifierReadKey(req as unknown as { headers: Record<string, unknown> });
+      if (verifier) {
+        try {
+          lookup();
+        } catch (error) {
+          req.log.error({ err: error }, "evidence by hash: bundle read failed");
+          return reply.status(503).send({
+            error: "read_model_unavailable",
+            message: "The job record could not be read. Try again shortly.",
+          });
+        }
+      }
+      const gate = verifier ? null : gateJobRecordRead(req, lookup);
+      if (gate && !gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
+      const bundle = found.bundle;
+      if (bundle && (verifier || gate?.ok)) {
         const events = repos.evidence.findEventsByBundle(bundle.id);
         const canonical = buildCanonicalEvidenceEnvelope(
           {
@@ -297,12 +319,12 @@ export async function settlementRoutes(app: FastifyInstance) {
         // whitespace are load-bearing for the oracle's byte re-hash).
         return reply.type("application/json; charset=utf-8").send(canonical);
       }
-      // No bundle with that hash — fall through to the jobId lookup so a
-      // hypothetical hash-shaped jobId keeps its pre-existing behavior.
+      // No bundle with that hash, or one this caller may not read: fall through to the jobId
+      // lookup, so both answer as a hypothetical hash-shaped jobId always has.
     }
 
-    // The job-id form reads a job's evidence, so it is object-authorized (F3). The hash
-    // form above is content-addressed (the oracle fetches by the committed hash).
+    // The job-id form reads a job's evidence, so it is object-authorized (F3), as the hash form
+    // above is (review r2 of #441).
     const gate = gateJobRead(req, param);
     if (!gate.ok) {
       return refuseJobRead(reply, gate, { error: "SETTLEMENT_NOT_FOUND", message: `evidence '${param}' not found` });

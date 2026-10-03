@@ -288,7 +288,7 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | PATCH | `/api/jobs/:jobId/status` | Update job status. Body: `{status, progress?}`. |
 | POST | `/api/jobs/submit` | Submit a job. Body: `{kernelId, capabilityId, params, assuranceTier}`. |
 
-**Read access:** a job's record, status, evidence, drift alerts, execution and settlement (`GET /api/jobs/:jobId` and its `/status`, `/execution`, `/settlement`, `/evidence` and `/drift-alerts`, plus `GET /api/settlement/:jobId` and `GET /api/evidence/:jobId`) are readable only by an admin (`X-Admin-Key`), the operator of the job's kernel, or the job's recorded buyer. Anyone else gets the same 404 as for a job that does not exist; an unauthenticated caller gets 401. A kernel's batches (`GET /api/batches`, `GET /api/batches/:batchId`) and its kernel, device and batch streams are readable only by an admin or the kernel's operator (a SIWE-proven wallet); a job's buyer reads its batches through `GET /api/batches/by-job/:jobId`, which shows only that job's slots. Log lines and sensor readings are filtered per record: a record is kept only when the caller may read every job (or, naming no job, every kernel) it names, and a record naming neither is an admin's. Every slot and event of a kernel's record that names a job also follows that job's read rule, under `TENANT_ENFORCE` too, so a tenant-scoped admin or an operator sees only its tenant's jobs there; records are judged exactly as they are sent. A batch's `runConfig` and its batch-level events show only to a caller who sees every slot of the batch, and a sample event only with its slot; otherwise `runConfig` is null and `runConfigWithheld` is true. A shared batch (`/api/batches/shared/*`) is a public opportunity: anyone sees its kernel, capability, price, timing and how many slots are taken; only an admin or the kernel's operator sees its claims, and only they or the claimant a claim names (its proven wallet) may release it.
+**Read access:** a job's record, status, evidence, drift alerts, execution and settlement (`GET /api/jobs/:jobId` and its `/status`, `/execution`, `/settlement`, `/evidence`, `/evidence/provenance` and `/drift-alerts`, plus `GET /api/settlement/:jobId` and `GET /api/evidence/:jobId`) are readable only by an admin (`X-Admin-Key`), the operator of the job's kernel, or the job's recorded buyer. Anyone else gets the same 404 as for a job that does not exist; an unauthenticated caller gets 401. The canonical evidence envelope by hash (`GET /api/evidence/:hash`) is readable by an admin, a party to the bundle's job, or the settlement oracle's verifier read key (header `X-Verifier-Key`, gateway env `PCC_VERIFIER_READ_KEY`). The route is behind the API gate, so the oracle sends that header together with its ordinary API credential (`Authorization: Bearer ...`); the key alone is refused 401. Anyone else gets the same answer as for an unknown hash. A kernel's batches (`GET /api/batches`, `GET /api/batches/:batchId`) and its kernel, device and batch streams are readable only by an admin or the kernel's operator (a SIWE-proven wallet); a job's buyer reads its batches through `GET /api/batches/by-job/:jobId`, which shows only that job's slots. Log lines and sensor readings are filtered per record: a record is kept only when the caller may read every job (or, naming no job, every kernel) it names, and a record naming neither is an admin's. Every slot and event of a kernel's record that names a job also follows that job's read rule, under `TENANT_ENFORCE` too, so a tenant-scoped admin or an operator sees only its tenant's jobs there; records are judged exactly as they are sent. A batch's `runConfig` and its batch-level events show only to a caller who sees every slot of the batch, and a sample event only with its slot; otherwise `runConfig` is null and `runConfigWithheld` is true. A shared batch (`/api/batches/shared/*`) is a public opportunity: anyone sees its kernel, capability, price, timing and how many slots are taken; only an admin or the kernel's operator sees its claims, and only they or the claimant a claim names (its proven wallet) may release it.
 
 ### Escrow & Settlement
 
@@ -307,9 +307,10 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/evidence` | List all evidence bundles. |
-| GET | `/api/capabilities/:capabilityId/compliance` | Full compliance report. Returns `ComplianceReportDTO`. |
+| GET | `/api/capabilities/:capabilityId/compliance` | Compliance report, computed only from evidence you may read: an admin and the kernel's operator get all of the kernel's recent evidence, anyone else the bundles of its own jobs. `evidenceScope` (`all` or `readable_by_caller`) and `bundlesConsidered` say which. No credential: 401; no proven wallet: 403. Returns `ComplianceReportDTO`. |
 | GET | `/api/jobs/:jobId/drift-alerts` | Real-time drift alerts. Returns `DriftAlertDTO[]`. |
 | GET | `/api/jobs/:jobId/evidence` | Evidence bundles for a job. Returns `EvidenceSummaryDTO[]`. |
+| GET | `/api/jobs/:jobId/evidence/provenance` | What the gateway can truthfully say about a job's evidence. Returns `EvidenceProvenanceDTO` (`pcc.evidence-provenance/v1`). Per bundle: the claimed tier, event counts (`fabricated` and `gatewayAuthored` apart), the signer as stored (`checked: false`), `integrity` recomputed on read (`event_bundle_hash` is evidence integrity; `gateway_envelope` is only the gateway's storage integrity; `no_model_reproduces` is not proof of tampering; `not_recomputable` without events), `tierCoverage` from recorded non-fabricated event types (self-reported, not a verification), `archive: not_recorded`, and METHOD+path inspect pointers. `verification` is `no_verdict_recorded`: the gateway stores no verifier or oracle verdict. |
 | GET | `/api/compliance/evidence/:bundleId` | Facade-enriched evidence bundle. |
 | GET | `/api/compliance/evidence/:bundleId/tier-compliance` | Tier compliance check. Returns `TierComplianceResult`. |
 | POST | `/api/jobs/:jobId/attestations/aggregate` | Aggregate verifier attestations. Body: `{attestations}`. Returns `AggregatedAttestationDTO`. |
@@ -703,6 +704,8 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   tierCompliance: Record<0|1|2|3, boolean>;
   recentEvidence: EvidenceSummaryDTO[];
   driftAlerts: DriftAlertDTO[];
+  evidenceScope: "all"|"readable_by_caller"; // whose evidence fed the report
+  bundlesConsidered: number;         // bundles whose events fed ALCOA+, tiers and drift
 }
 ```
 
@@ -967,6 +970,7 @@ These are the operator-facing environment variables for configuring a PCC node o
 | `EVIDENCE_STORAGE` | Evidence backend: `local`, `helia`, `storacha` | `local` |
 | `LIT_PROTOCOL_REAL` | Enable Lit Protocol encryption | `false` |
 | `SSE_AUTH_REQUIRED` | Enforce auth on SSE streams | `false` |
+| `PCC_VERIFIER_READ_KEY` | Gateway: the settlement oracle's read key for `GET /api/evidence/:hash` (sent as `X-Verifier-Key`); at least 32 characters; unset grants nothing | none |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint for traces | none |
 | `IDEMPOTENCY_TTL_MS` | Idempotency cache TTL in ms | `86400000` (24h) |
 

@@ -33,6 +33,7 @@ import type {
   AgentRole,
   PopulationContext,
   CaptureVerificationSummaryDTO,
+  ComplianceReportAccess,
 } from "./types.js";
 import {
   populateEvidenceSummaryDTO,
@@ -102,8 +103,16 @@ export class ComplianceFacade extends BaseFacade {
   async getEvidenceForJob(jobId: string): Promise<Result<EvidenceSummaryDTO[]>> {
     return this.execute("getEvidenceForJob", async () => {
       const rawBundles = this.repos.evidence.findByJob(jobId) as RawEvidenceBundle[];
-      return populateEvidenceList(rawBundles);
+      return populateEvidenceList(rawBundles.map((b) => this.withEvents(b)));
     });
+  }
+
+  /**
+   * Bundle rows carry no events, so without this every eventCount read 0 (readmodels'
+   * evidence facts map, item B). Attach the bundle's stored events.
+   */
+  private withEvents(raw: RawEvidenceBundle): RawEvidenceBundle {
+    return { ...raw, events: this.repos.evidence.findEventsByBundle(raw.id) as RawEvidenceBundle["events"] };
   }
 
   /**
@@ -113,7 +122,7 @@ export class ComplianceFacade extends BaseFacade {
     return this.execute("getBundle", async () => {
       const raw = this.repos.evidence.findById(bundleId) as RawEvidenceBundle | undefined;
       if (!raw) throw new NotFoundError("evidence bundle", bundleId);
-      return populateEvidenceSummaryDTO(raw);
+      return populateEvidenceSummaryDTO(this.withEvents(raw));
     });
   }
 
@@ -179,6 +188,7 @@ export class ComplianceFacade extends BaseFacade {
   async generateComplianceReport(
     capabilityId: string,
     _ctx?: Partial<PopulationContext>,
+    access?: ComplianceReportAccess,
   ): Promise<Result<ComplianceReportDTO>> {
     return this.execute("generateComplianceReport", async () => {
       const capability = this.repos.capabilities.findById(capabilityId);
@@ -186,9 +196,14 @@ export class ComplianceFacade extends BaseFacade {
 
       const kernelId: string = capability.kernelId;
 
-      // Load up to 20 recent bundles for this kernel
+      // Load up to 20 recent bundles for this kernel, of the evidence this caller may read
+      // (cross-family review r2 of #441, CRITICAL): every input below (events, capture verdicts,
+      // drift, the evidence list) comes from these bundles only. Without an access rule (an
+      // internal caller) the report covers all of the kernel's evidence.
       const allKernelBundles = this.repos.evidence.findByKernel(kernelId) as RawEvidenceBundle[];
-      const recentBundles = allKernelBundles
+      const wholeKernel = !access || access.readsKernel(kernelId);
+      const bundlesInScope = wholeKernel ? allKernelBundles : allKernelBundles.filter((b) => access.readsJob(b.jobId));
+      const recentBundles = bundlesInScope
         .slice()
         .sort(
           (a, b) =>
@@ -279,6 +294,8 @@ export class ComplianceFacade extends BaseFacade {
         tierCompliance,
         recentEvidence,
         driftAlerts,
+        evidenceScope: wholeKernel ? "all" : "readable_by_caller",
+        bundlesConsidered: bundlesWithEvents.length,
         assuranceScore,
       };
       if (captureVerification) {

@@ -175,6 +175,10 @@ describe("a stranger's proven wallet gets what a missing job gets; the party and
       expect((await get(`/api/compliance/evidence/${bundleId}${suffix}`, PARTY)).statusCode, suffix).toBe(200);
     }
     expect((await get(`/api/compliance/evidence/${bundleId}`, ANON)).statusCode).toBe(401);
+    // #441 r1b CRITICAL: the bundle answer now carries its eventCount (the events are loaded for it).
+    // The job's party reads it; a stranger, here another tenant's caller, does not.
+    expect((await get(`/api/compliance/evidence/${bundleId}`, PARTY)).body).toContain("eventCount");
+    expect((await get(`/api/compliance/evidence/${bundleId}`, STRANGER_H)).body).not.toContain("eventCount");
   });
 
   it("POST /api/query: the job intents answer only the caller's jobs", async () => {

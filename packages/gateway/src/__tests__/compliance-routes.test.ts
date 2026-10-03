@@ -126,6 +126,9 @@ const mockKernelsRepo = {
 vi.mock("../readmodels/job-read-gate.js", () => ({
   gateJobRead: () => ({ ok: true, job: { id: "mock-job" }, as: "admin" }),
   gateJobRecordRead: () => ({ ok: true, job: { id: "mock-job" }, as: "admin" }),
+  jobReadScopeOf: () => ({ ok: true, as: "admin", jobIds: null }),
+  kernelScopeOf: () => ({ ok: true, kernels: null }),
+  scopeAllows: () => true,
   refuseJobRead: () => {
     throw new Error("the gate is mocked open in this file");
   },
@@ -221,7 +224,13 @@ describe("complianceRoutes", () => {
       });
 
       expect(mockFacade.generateComplianceReport).toHaveBeenCalledOnce();
-      expect(mockFacade.generateComplianceReport).toHaveBeenCalledWith(CAPABILITY_ID);
+      // The route passes the caller's evidence access rule (review r2 of #441); the gate is mocked
+      // open here, and readmodels/px7-r3-evidence-bypass.test.ts tests the rule on a real store.
+      expect(mockFacade.generateComplianceReport).toHaveBeenCalledWith(
+        CAPABILITY_ID,
+        undefined,
+        expect.objectContaining({ readsKernel: expect.any(Function), readsJob: expect.any(Function) }),
+      );
     });
 
     it("returns 404 when capability is not found", async () => {
