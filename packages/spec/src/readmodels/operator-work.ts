@@ -14,8 +14,8 @@
  *     as such in `sources`; it is never an empty list that looks like "no work".
  *
  * OperatorIncomeDTO lists what the gateway's escrow records show for the caller's kernel
- * jobs. Its totals are sums of its rows only, and it says plainly that no per-operator
- * payout history exists yet.
+ * jobs. Its totals sum every row across all pages, not only the page shown, and it says
+ * plainly that no per-operator payout history exists yet.
  */
 import type { MoneyStateView, PayoutState } from "./job-execution.js";
 
@@ -148,21 +148,30 @@ export interface OperatorWorkPay {
   unit: string | null;
   /**
    * What backs the amount:
-   *   escrowed           a real escrow record holds this job's milestone, and neither record's
-   *                      status contests it: the escrow is funded, active or completing (or a
-   *                      V-next funded state), and the milestone is funded, locked or releasing
-   *                      (record only). A dispute recorded elsewhere (the job's own status, shown
-   *                      as the item's phase) is not read here.
+   *   escrowed           a real escrow record holds this job's milestone, and nothing contests
+   *                      it: the escrow is funded, active or completing (or a V-next funded or
+   *                      release-allocated state), the milestone is funded, locked or releasing,
+   *                      the job's own status is not disputed, and no open dispute is recorded on
+   *                      the milestone (record only)
+   *   contested          a real escrow record holds this job's milestone, but its outcome is
+   *                      contested: a V-next contest or escalation state (primary asserted,
+   *                      challenged, backup pending or asserted), a disputed escrow or milestone,
+   *                      the job's own disputed status, or an open dispute (filed, under review)
+   *                      on the milestone. The money is not the operator's until that resolves.
+   *   refund_pending     the escrow record says a refund to the payer is decided but not yet made
+   *                      (refund allocated): the payer is not yet refunded, and the operator will
+   *                      not be paid this milestone
    *   not_held           a real escrow record that says it does not hold this job's money:
    *                      never funded (created, unfunded, pending), refunded to the payer, or
    *                      released (record only; a recorded release is never proof of payment)
    *   declared_unfunded  a price the poster declared; nothing funds it
    *   simulated          a mock-settlement escrow: no money exists
    *   unknown            no amount, or a settlement link that is ambiguous, conflicting,
-   *                      unreadable or missing this job's milestone, or a record that is
-   *                      contested (disputed, challenged, slashed), expired or unrecognized
+   *                      unreadable or missing this job's milestone, a record that is slashed,
+   *                      expired or unrecognized, disputes that could not be read, a dispute
+   *                      resolved for the challenger, or a dispute status the gateway does not know
    */
-  funding: "escrowed" | "not_held" | "declared_unfunded" | "simulated" | "unknown";
+  funding: "escrowed" | "contested" | "refund_pending" | "not_held" | "declared_unfunded" | "simulated" | "unknown";
   fundingRef: string | null;
   basis: "job_offer_pricing" | "escrow_milestone_record" | null;
 }
@@ -276,6 +285,13 @@ export interface OperatorWorkDTO {
   truncated: boolean;
   /** The offset of the next page, or null on the last page. The list is re-read each time, so it can change between pages. */
   nextOffset: number | null;
+  /**
+   * A digest of the whole sorted list (its item ids, in order). Send it as `?snapshot=` with each
+   * next page: when the list has changed since, the gateway answers 409 list_changed (with the
+   * current snapshot) instead of a page that could repeat or skip items, and the client starts
+   * again at offset 0.
+   */
+  snapshot: string;
   sources: Record<OperatorWorkSource, OperatorWorkSourceState>;
 }
 
@@ -323,6 +339,8 @@ export interface OperatorIncomeDTO {
   truncated: boolean;
   /** The offset of the next page, or null on the last page. */
   nextOffset: number | null;
+  /** A digest of the whole sorted row list; send it as `?snapshot=` with each next page (409 list_changed when it moved). */
+  snapshot: string;
   /** Sums of every row (all pages, not only this one), per payout status and currency. */
   totalsByStatus: OperatorIncomeTotal[];
   /** Rows, across all pages, left out of the totals because their amount or decimals are unknown. */
