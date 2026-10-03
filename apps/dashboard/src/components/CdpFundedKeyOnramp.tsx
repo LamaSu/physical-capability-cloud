@@ -95,11 +95,16 @@ function parseCheckout(v: unknown, wallet: Wallet): { url: string } | { note: st
   }
   if (url.origin !== CHECKOUT_ORIGIN || !url.pathname.startsWith("/buy")) return null;
   // What the checkout sells, on which network: its own locks, which must agree with the answer (astra 408d).
+  // Each lock must appear exactly once: a second copy could say something else to whoever reads it (astra 408g).
   const params = url.searchParams;
-  if (params.get("defaultAsset") !== "USDC" || params.get("defaultNetwork") !== "base") return null;
+  const sole = (key: string): string | null => {
+    const values = params.getAll(key);
+    return values.length === 1 ? values[0]! : null;
+  };
+  if (sole("defaultAsset") !== "USDC" || sole("defaultNetwork") !== "base") return null;
   let assets: unknown;
   try {
-    assets = JSON.parse(params.get("assets") ?? "");
+    assets = JSON.parse(sole("assets") ?? "");
   } catch {
     return null;
   }
@@ -107,7 +112,7 @@ function parseCheckout(v: unknown, wallet: Wallet): { url: string } | { note: st
   // Where the money goes: {"<address>": ["base"]}, this wallet and nothing else.
   let addresses: unknown;
   try {
-    addresses = JSON.parse(url.searchParams.get("addresses") ?? "");
+    addresses = JSON.parse(sole("addresses") ?? "");
   } catch {
     return null;
   }
