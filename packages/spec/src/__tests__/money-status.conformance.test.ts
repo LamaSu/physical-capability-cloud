@@ -15,7 +15,7 @@
  *
  * Spec: genui read-route contract sec-A + rules 1 and 12.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -531,5 +531,72 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
     await new Promise((r) => setTimeout(r, 60)); // later polls reject
     expect(pill()).not.toContain("st-settled");
     expect(pill()).toContain("st-unknown");
+  });
+});
+
+describe("astra r3 (#313 @9250c578): F5, generic request success is never green (verify before fix)", () => {
+  const man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
+  type W = Window & { __PCC_HOST__?: boolean; __PCC_HOST_OPERATIONS__?: string[]; __PCC_HOST_BRIDGE__?: unknown; __PCC_UI_BOOTED__?: boolean };
+  // `reply` answers only the requests a test expects (null = not this test's). Anything else never settles,
+  // so a run window left polling by an earlier test stays frozen instead of being revived by these stubs.
+  function bootWith(manifest: string, reply: (url: string, method: string) => { status: number; body?: unknown } | null, host?: { ops: string[]; result: unknown }) {
+    const w = window as unknown as W;
+    document.documentElement.removeAttribute("data-theme");
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    w.__PCC_UI_BOOTED__ = false;
+    delete w.__PCC_HOST__; delete w.__PCC_HOST_OPERATIONS__; delete w.__PCC_HOST_BRIDGE__;
+    if (host) {
+      w.__PCC_HOST__ = true;
+      w.__PCC_HOST_OPERATIONS__ = host.ops;
+      w.__PCC_HOST_BRIDGE__ = { callOperation: () => Promise.resolve(host.result) };
+    }
+    const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+    const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest"; mNode.textContent = manifest;
+    document.body.appendChild(mNode); // no #pcc-snapshot node: LIVE mode
+    (window as unknown as { fetch: unknown }).fetch = (url: unknown, init?: { method?: string }) => {
+      const r = reply(String(url), (init && init.method) || "GET");
+      if (r === null) return new Promise(() => {});
+      return Promise.resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: () => null }, json: () => Promise.resolve(r.body ?? {}), text: () => Promise.resolve(JSON.stringify(r.body ?? {})) });
+    };
+    // eslint-disable-next-line no-eval
+    (0, eval)(kitSrc);
+  }
+  const click = (label: string) => {
+    const b = Array.from(document.querySelectorAll("button")).find((x) => (x.textContent || "").trim() === label) as HTMLButtonElement | undefined;
+    if (!b) throw new Error("no button " + label);
+    b.click();
+  };
+  afterEach(() => { const w = window as unknown as W; delete w.__PCC_HOST__; delete w.__PCC_HOST_OPERATIONS__; delete w.__PCC_HOST_BRIDGE__; });
+
+  it("F5 (HIGH): an ordinary POST that returns 200 {} is acknowledged, never green", async () => {
+    bootWith(man([{ kind: "actions", actions: [{ id: "fb", label: "Send note", kind: "post", path: "/api/feedback", body: { note: "hi" } }] }]),
+      (url, method) => (method === "POST" && new URL(url).pathname === "/api/feedback" ? { status: 200, body: {} } : null));
+    await flush();
+    click("Send note");
+    await flush();
+    const st = document.querySelector(".pcc-action-status") as HTMLElement;
+    expect(st.textContent).toContain("Done");
+    expect(st.className).not.toContain("st-settled");
+  });
+
+  it("F5 (HIGH): a hosted typed operation that resolves without isError is acknowledged, never green", async () => {
+    bootWith(man([{ kind: "actions", actions: [{ id: "q", label: "Get a quote", operation_id: "capability.request_quote", arguments: {} }] }]),
+      () => null, { ops: ["capability.request_quote"], result: { content: [{ type: "text", text: "{}" }] } });
+    await flush();
+    click("Get a quote");
+    await flush();
+    const st = document.querySelector(".pcc-action-status") as HTMLElement;
+    expect(st.textContent).toContain("Done");
+    expect(st.className).not.toContain("st-settled");
+  });
+
+  // F5's third path (rebindApproval: a resolved approval's header pill) cannot be clicked at this head:
+  // the approval window's Approve/Deny foot is removed again by winShell._setFoot (a master bug that
+  // #342 fixes: _setFoot there removes only .pcc-foot-meta). The source pin below covers that line, and
+  // #342's suite renders it end to end once it carries this head.
+  it("F5: no code path assigns the green class directly; only the settlement-read classifier yields it", () => {
+    expect(kitSrc).not.toMatch(/className\s*=\s*'[^']*st-settled/);
+    expect(kitSrc).not.toMatch(/['"]pcc-(?:pill|action-status) st-settled['"]/);
   });
 });

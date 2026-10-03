@@ -1104,7 +1104,8 @@
   }
   function rebindApproval(ctx, w, wrap) {
     var pill = wrap.querySelector('.pcc-pill');
-    if (pill) { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-settled'; }
+    // A successful approval POST resolves the REQUEST, not the money: neutral, never green (astra r3 F5).
+    if (pill) { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-ack'; }
   }
   function approvalDetails(info) {
     var box = el('div', 'pcc-approval');
@@ -1315,7 +1316,8 @@
         status.className = 'pcc-action-status st-failed';
         status.textContent = hostOpErrorText(result) || 'Operation failed';
       } else {
-        status.className = 'pcc-action-status st-settled';
+        // The operation ran; that is not a settlement read, so it is acknowledged, never green (astra r3 F5).
+        status.className = 'pcc-action-status st-ack';
         status.textContent = 'Done' + (ctx && ctx.tx && ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
       }
     }, function (err) {
@@ -1368,7 +1370,8 @@
     var idemHeader = body.idempotencyKey;
     ctx.tx.send(method, action.path, body, idemHeader).then(function (res) {
       if (res.ok) {
-        status.className = 'pcc-action-status st-settled';
+        // An HTTP 2xx means the request was accepted, not that money moved: neutral (astra r3 F5).
+        status.className = 'pcc-action-status st-ack';
         status.textContent = 'Done' + (ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
         if (typeof opts.rebind === 'function') opts.rebind();
       } else {
@@ -1730,6 +1733,7 @@
       '.pcc-actionbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}',
       '.pcc-action-status{font:400 13px/18px var(--font);color:var(--ink-2);display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;}',
       '.pcc-action-status.st-settled{color:var(--signal);}',
+      '.pcc-action-status.st-ack{color:var(--ink-2);}',
       '.pcc-action-status.st-failed{color:var(--deny);}',
       '.pcc-confirm-q{color:var(--ink-2);}',
       /* run */
