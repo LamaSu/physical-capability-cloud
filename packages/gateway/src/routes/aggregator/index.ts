@@ -31,6 +31,7 @@ import { invokeRoutes } from "./invoke.js";
 import { receiptsRoutes } from "./receipts.js";
 import { randomBytes } from "node:crypto";
 import { agntcyAdminRoutes } from "./agntcy.js";
+import { lit } from "../../observability/closed-schema.js";
 
 /** Process-singleton registry used by every aggregator route. */
 let _registry: IndexedToolRegistry | undefined;
@@ -76,9 +77,7 @@ export function getX402GateConfig(): X402GateConfig | undefined {
   if (!payTo || !/^0x[a-fA-F0-9]{40}$/.test(payTo)) {
     // Misconfigured: log + treat as disabled so we don't gate calls with no payee.
     // eslint-disable-next-line no-console
-    console.warn(
-      "[x402] PCC_X402_ENABLED=true but PCC_AGGREGATOR_TREASURY is missing or invalid; gate disabled",
-    );
+    console.warn(lit("[x402] PCC_X402_ENABLED=true but PCC_AGGREGATOR_TREASURY is missing or invalid; gate disabled"));
     return undefined;
   }
   const hmacSecretHex = resolveHmacKey();
@@ -131,9 +130,7 @@ function resolveHmacKey(): string {
   // Ephemeral fallback — production deploys MUST set one of the above so
   // the gateway can verify priceTags across restarts.
   // eslint-disable-next-line no-console
-  console.warn(
-    "[x402] no PCC_X402_HMAC_KEY or PCC_AGGREGATOR_HMAC_KEY set; using ephemeral key (priceTags will not verify across restarts)",
-  );
+  console.warn(lit("[x402] no PCC_X402_HMAC_KEY or PCC_AGGREGATOR_HMAC_KEY set; using ephemeral key (priceTags will not verify across restarts)"));
   return randomBytes(32).toString("hex");
 }
 
