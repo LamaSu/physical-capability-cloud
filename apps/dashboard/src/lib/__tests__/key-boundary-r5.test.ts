@@ -40,6 +40,21 @@ describe("astra A03d N1: the key can't change behind the identity signal", () =>
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
   });
 
+  it("a sign-out clears the wallet session's fields with the key, in one change", () => {
+    adoptApiKey(KEY_A);
+    useAuthStore.getState().setAddress("0xabc");
+    useAuthStore.getState().setSession("siwe-token");
+    const onChange = vi.fn();
+    const stop = onIdentityChange(onChange);
+    try {
+      useAuthStore.getState().logout();
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(useAuthStore.getState()).toMatchObject({ isAuthenticated: false, address: null, sessionToken: null, error: null });
+    } finally {
+      stop();
+    }
+  });
+
   it("a key set directly signs the store in", () => {
     setStoredApiKey(KEY_A);
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
