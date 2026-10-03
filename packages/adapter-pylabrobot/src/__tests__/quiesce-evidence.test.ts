@@ -17,10 +17,10 @@ async function tick(): Promise<void> {
 function answerLast(transport: InMemoryTransport, deviceId: string, jobId: string): string {
   const sent = transport.lastSent() as { id: string; method: string };
   const results: Record<string, unknown> = {
-    "backend.init": { ok: true, deviceId, plrBackend: "chatterbox" },
-    "evidence.startRecording": { ok: true },
+    "backend.init": { ok: true, deviceId, plrBackend: "chatterbox", generation: "gen-q" },
+    "evidence.startRecording": { ok: true, jobId, generation: "gen-q" },
     "backend.run": { ok: true, jobId, opCount: 1, durationMs: 10 },
-    "evidence.stopRecording": { ok: true },
+    "evidence.stopRecording": { ok: true, jobId, generation: "gen-q" },
     "backend.shutdown": { ok: true },
   };
   transport.respondSuccess(sent.id, results[sent.method]);
@@ -66,9 +66,9 @@ describe("PyLabRobotAdapter.quiesceEvidence", () => {
     const startP = adapter.execute({ type: "start", payload: { jobId: "j-q" } });
     const hook = ask(adapter, events);
     await tick();
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-q-real", plrBackend: "chatterbox" }); // backend.init
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-q-real", plrBackend: "chatterbox", generation: "gen-q" }); // backend.init
     await tick();
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true }); // evidence.startRecording
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-q", generation: "gen-q" }); // evidence.startRecording
     await tick();
     transport.notify("evidence", { type: "aspirate", deviceId: "dev-q-real", jobId: "j-q", timestamp: new Date().toISOString(), payload: { well: "A1" } });
     await tick();
@@ -76,7 +76,7 @@ describe("PyLabRobotAdapter.quiesceEvidence", () => {
     transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-q", opCount: 1, durationMs: 10 }); // backend.run
     await tick();
     expect(hook.resolved, "evidence.stopRecording is in flight").toBe(false);
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true }); // evidence.stopRecording
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-q", generation: "gen-q" }); // evidence.stopRecording
     await startP;
     await tick();
 
@@ -95,7 +95,7 @@ describe("PyLabRobotAdapter.quiesceEvidence", () => {
     const statusP = adapter.getStatus();
     const hook = ask(adapter, events);
     await tick();
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-q-status", plrBackend: "chatterbox" }); // backend.init
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-q-status", plrBackend: "chatterbox", generation: "gen-q" }); // backend.init
     await tick();
     expect(hook.resolved, "backend.status is in flight").toBe(false);
     transport.respondSuccess((transport.lastSent() as { id: string }).id, { status: "idle", progress: 0 }); // backend.status
@@ -324,7 +324,7 @@ describe("astra pack 191 HIGH: a barrier that fails proves nothing, so the run f
       const retried = transport.lastSent() as { id: string; method: string; params: { jobId: string } };
       expect.soft(retried.method, "the retry").toBe("evidence.stopRecording");
       expect.soft(retried.params.jobId, "the retried barrier's job").toBe("j-bar");
-      transport.respondSuccess(retried.id, { ok: true });
+      transport.respondSuccess(retried.id, { ok: true, jobId: "j-bar", generation: "gen-q" });
       await vi.advanceTimersByTimeAsync(0);
       expect.soft(hook.resolved, "the hook, once the retried barrier answered").toBe(true);
       void adapter.execute({ type: "start", payload: { jobId: "j-after" } });
@@ -360,7 +360,7 @@ describe("astra pack 191 HIGH: a barrier that fails proves nothing, so the run f
     const second = transport.lastSent() as { id: string; method: string };
     expect.soft(second.method, "the second retry").toBe("evidence.stopRecording");
     expect.soft(hook.resolved, "the hook, before an answer").toBe(false);
-    transport.respondSuccess(second.id, { ok: true });
+    transport.respondSuccess(second.id, { ok: true, jobId: "j-bar-f", generation: "gen-q" });
     await vi.advanceTimersByTimeAsync(0);
     expect.soft(hook.resolved, "the hook, once answered").toBe(true);
     await disposeNow(transport, adapter);
