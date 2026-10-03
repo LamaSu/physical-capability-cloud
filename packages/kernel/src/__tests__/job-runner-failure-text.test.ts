@@ -360,14 +360,14 @@ describe("run() is total, and what it takes is released even when a release thro
     expect.soft(again.success, "the same step, run again").toBe(true);
   });
 
-  it("session.close() throws while a failed registration releases: the step and its lease are still released", async () => {
+  it("an adapter id that cannot be read while a failed registration releases: the step and its lease are still released", async () => {
     const emitter = new PartialEmitter(KERNEL_ID);
     const machine = testMachine("m-212-close");
     let hostile = false;
     const ownId = machine.id;
     Object.defineProperty(machine, "id", {
       get: () => {
-        if (hostile) throw Object.create(null); // the session's close reads it
+        if (hostile) throw Object.create(null); // the session's close reads it for its log label
         return ownId;
       },
     });
@@ -433,3 +433,57 @@ describe("run() is total, and what it takes is released even when a release thro
   });
 });
 
+
+describe("an adapter whose id cannot be read never leaves its hook's rejection unhandled (evidence-session, tracked from pack 212)", () => {
+  /** An emitter whose registerStep registers and then throws, once. */
+  class PartialEmitter extends EvidenceEmitter {
+    failOnce = true;
+    beforeThrow: () => void = () => {};
+    override registerStep(jobId: string, stepId: string, tier: Parameters<EvidenceEmitter["registerStep"]>[2]): void {
+      super.registerStep(jobId, stepId, tier);
+      if (this.failOnce) {
+        this.failOnce = false;
+        this.beforeThrow();
+        throw new Error("registry wedged");
+      }
+    }
+  }
+  /** A machine whose id can be made unreadable, and whose hook rejects (with no text form) while `rejecting`. */
+  function hostileMachine(id: string) {
+    const machine = testMachine(id);
+    const state = { hostile: false, rejecting: false };
+    Object.defineProperty(machine, "id", {
+      get: () => {
+        if (state.hostile) throw Object.create(null);
+        return id;
+      },
+    });
+    machine.quiesceEvidence = () => (state.rejecting ? Promise.reject(Object.create(null)) : Promise.resolve());
+    return { machine, state };
+  }
+
+  it("a failed registration closes the session: the hook rejects, the id cannot be read, and nothing is unhandled", async () => {
+    const { machine, state } = hostileMachine("m-close-label");
+    const emitter = new PartialEmitter(KERNEL_ID);
+    emitter.beforeThrow = () => {
+      state.hostile = true;
+      state.rejecting = true;
+    };
+    const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-close-label", stepId: STEP, gcodeHash: gcode(88), assuranceTier: 1 }));
+    expect.soft(out.value?.error, "why").toBe("the run's step could not be registered: registry wedged");
+    expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
+    expect.soft(console.error, "the hook's failure, logged").toHaveBeenCalledWith(expect.stringMatching(/adapter \(unreadable id\) could not confirm its evidence is complete/));
+  });
+
+  it("a refused start asks a rejected hook again: the id cannot be read, and nothing is unhandled", async () => {
+    const { machine, state } = hostileMachine("m-reask-label");
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    state.rejecting = true;
+    const first = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-reask-1", stepId: STEP, gcodeHash: gcode(89), assuranceTier: 1 }));
+    expect.soft(first.value?.success, "the first run, whose hook rejected").toBe(false);
+    state.hostile = true;
+    const second = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-reask-2", stepId: STEP, gcodeHash: gcode(89), assuranceTier: 1 }));
+    expect.soft(second.rejected, "run() rejected").toBeUndefined();
+    expect.soft(second.unhandled.length, "unhandled rejections").toBe(0);
+  });
+});
