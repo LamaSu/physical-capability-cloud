@@ -536,6 +536,18 @@ describe("the rules catch each known way around them (self-test)", () => {
     }
   });
 
+  it("the same through an alias of Object, a helper library, or any call handed a built-in's prototype", () => {
+    for (const code of [
+      'const O = Object;\nO.defineProperty(Headers.prototype, "set", { value: observe });',
+      "_.assign(Headers.prototype, { set: observe });",
+      "$.extend(Request.prototype, { clone: observe });",
+      "merge(Headers.prototype, overrides);",
+      "patch(Headers.prototype, observe);",
+    ]) {
+      expect(caught(code), code).toContain("global-write");
+    }
+  });
+
   it("the syntax rules let through what the app does", () => {
     for (const [code, rel] of [
       ['window.location.href = "/";', "pages/Probe.ts"],
