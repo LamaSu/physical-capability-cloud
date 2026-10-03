@@ -30,4 +30,24 @@ describe("astra A03e N1: one listener can't stop the identity change", () => {
       keys.setStoredApiKey(null);
     }
   });
+
+  it("a listener that changes the key on every change is stopped with an error, not a stack overflow, and the store still follows", async () => {
+    vi.resetModules();
+    const keys = await import("../authorized-fetch.js");
+    const auth = await import("../../stores/auth-store.js");
+    let n = 0;
+    const stopLooping = keys.onStoredKeyChange(() => {
+      n += 1;
+      keys.setStoredApiKey([KEY_B, String(n)].join("-"));
+    });
+    try {
+      expect(() => keys.setStoredApiKey(KEY_B)).toThrow("kept changing the key");
+      expect(n).toBeGreaterThan(1);
+      expect(auth.useAuthStore.getState().isAuthenticated).toBe(true);
+    } finally {
+      stopLooping();
+      keys.setStoredApiKey(null);
+    }
+    expect(auth.useAuthStore.getState().isAuthenticated).toBe(false);
+  });
 });

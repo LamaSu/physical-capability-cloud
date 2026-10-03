@@ -206,6 +206,33 @@ function rootOf(n: ts.Node): ts.Node {
 
 const isAssignment = (k: ts.SyntaxKind) => k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
 
+/** Object's methods that change another object's properties or prototype. */
+const MUTATION_APIS = new Set(["defineProperty", "defineProperties", "assign", "setPrototypeOf"]);
+/** The legacy accessor definers, called on the object they change. */
+const LEGACY_DEFINERS = new Set(["__defineGetter__", "__defineSetter__"]);
+/** Built-ins a request, its headers or the key pass through, or that hold everything else. */
+const BUILTINS = new Set([
+  "Headers", "Request", "Response", "Storage", "Navigator", "Window", "Document", "XMLHttpRequest", "WebSocket",
+  "EventSource", "URL", "Blob", "FormData", "Object", "Function", "Array", "Promise", "JSON", "fetch",
+]);
+
+/** The object a mutation API call changes: Object.defineProperty(target, …), or target.__defineGetter__(…). */
+function mutationTarget(call: ts.CallExpression): ts.Expression | null {
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return null;
+  if (ts.isIdentifier(callee.expression) && callee.expression.text === "Object" && MUTATION_APIS.has(callee.name.text)) {
+    return call.arguments[0] ?? null;
+  }
+  return LEGACY_DEFINERS.has(callee.name.text) ? callee.expression : null;
+}
+
+/** A global (window, navigator, document …), anything reached from one, a built-in, or any prototype. */
+function isProtected(target: ts.Expression, sf: ts.SourceFile): boolean {
+  const root = rootOf(target);
+  if (ts.isIdentifier(root) && (WRITE_ROOTS.has(root.text) || BUILTINS.has(root.text))) return true;
+  return /(?:^|\.)prototype(?:\.|$)/.test(target.getText(sf).replace(/\s+/g, ""));
+}
+
 /** A use of the global object other than reading a named member (window.x) or asking its type (typeof window). */
 function globalAliases(sf: ts.SourceFile): ts.Node[] {
   return nodes(sf, (n) => {
@@ -301,6 +328,11 @@ const RULES: Rule[] = [
     owners: [BOUNDARY],
     find: (sf) =>
       nodes(sf, (n) => {
+        // The same replacement through a mutation API (astra A03e F1): Object.defineProperty(Headers.prototype, …).
+        if (ts.isCallExpression(n)) {
+          const target = mutationTarget(n);
+          return target !== null && isProtected(target, sf);
+        }
         if (!ts.isBinaryExpression(n) || !isAssignment(n.operatorToken.kind)) return false;
         const target = n.left;
         if (ts.isIdentifier(target)) return target.text === "fetch";
@@ -512,6 +544,8 @@ describe("the rules catch each known way around them (self-test)", () => {
       ["const el = <p>The challenge window opens, then funds release.</p>;", "pages/Probe.tsx"],
       ["const frame = trace.frames[0];", "pages/Probe.ts"],
       ["setTimeout(() => setOpen(false), 300);", "pages/Probe.ts"],
+      ["const merged = Object.assign({}, defaults, overrides);", "pages/Probe.ts"],
+      ['Object.defineProperty(instance, "label", { value: "x" });', "pages/Probe.ts"],
     ]) {
       expect(caught(code, rel), code).toEqual([]);
     }
