@@ -15,14 +15,25 @@ that touches the device, and it keeps two promises:
    genuine Ed25519 key (pynacl), and every record it returns is a signed
    ``log_hash_chain_entry`` from :class:`~pcc_node.log_capture.LogCapture`.
 
+3. **Device I/O is bounded** (verdict 117). Every device answer is capped in
+   size, every request runs against the operation's total deadline, a run id
+   of "." or ".." is refused before it can change a path, and :meth:`cancel`
+   stops a run between reads. A timeout or a cancel leaves the device's state
+   unknown, and the result says so.
+4. **Each job is its own log chain**, starting at GENESIS, so every job's
+   evidence verifies on its own.
+
 This first cut drives generic-HTTP devices, the kind with their own run API
 (``POST /runs``, poll ``GET /runs/{runId}``). OctoPrint and Opentrons bindings
-come next; the emergency stop's device half joins after #454 merges.
+come next. It must not be armed for physical work until the emergency stop's
+device half returns (held out of #454), since nothing here can stop a device
+whose run outlived its deadline.
 """
 
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +50,11 @@ log = logging.getLogger("pcc-node.operating.runtime")
 _SLOT = re.compile(r"^\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 _RUN_ID = "{runId}"
 _METHODS = ("POST", "PUT")
+# Bounds on what a device may send back (verdict 117).
+_MAX_RESPONSE_BYTES = 1 << 20
+_MAX_LOG_BYTES = 4 << 20
+_REQUEST_TIMEOUT_S = 30.0
+_IDLE_CHECK_S = 10.0
 
 
 class BindingError(ValueError):
@@ -137,6 +153,8 @@ def _check_path(path: Any, where: str, *, run_id: bool = False) -> str:
     """A device path the profile fixes: absolute, one host, no traversal, no query."""
     if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
         raise BindingError(f"{where} must be an absolute path such as /runs")
+    if run_id and path.count(_RUN_ID) != 1:
+        raise BindingError(f"{where} must hold exactly one {{runId}}")
     bare = path.replace(_RUN_ID, "x") if run_id else path
     if re.search(r"[\s\\@?#%]|\.\.|://|[{}]", bare):
         raise BindingError(f"{where} may hold only a plain path" + (" and {runId}" if run_id else ""))
@@ -204,19 +222,59 @@ class _NoRedirect(HTTPRedirectHandler):
 _OPENER = build_opener(_NoRedirect)
 
 
-def _request(method: str, url: str, body: Any = None, timeout: float = 30) -> Tuple[int, Any]:
-    """One device request. Returns (status, parsed body); status 0 on a connection error."""
+class _Abort(Exception):
+    """A device request stopped before its answer was complete: why, as a result error."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _read_bounded(source: Any, max_bytes: int, deadline: float, clock: Callable[[], float],
+                  cancelled: Callable[[], bool]) -> str:
+    """Read an answer in pieces, never more than max_bytes, never past the deadline."""
+    read1 = getattr(source, "read1", None)
+    chunks, total = [], 0
+    while True:
+        if cancelled():
+            raise _Abort("cancelled")
+        if clock() >= deadline:
+            raise _Abort("timeout")
+        chunk = read1(65536) if read1 is not None else source.read(max_bytes + 1 - total)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise _Abort("device_response_too_large")
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
+def _request(method: str, url: str, body: Any = None, *, deadline: float, clock: Callable[[], float],
+             cancelled: Callable[[], bool] = lambda: False, max_bytes: int = _MAX_RESPONSE_BYTES) -> Tuple[int, Any]:
+    """One device request, bounded in size and by the deadline.
+
+    Returns (status, parsed body), with status 0 on a connection error, or
+    raises _Abort when the deadline passes, the run is cancelled, or the
+    answer is too large.
+    """
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise _Abort("timeout")
     headers = {"User-Agent": USER_AGENT}
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    timeout = min(_REQUEST_TIMEOUT_S, remaining)
     try:
         with _OPENER.open(Request(url, data=data, headers=headers, method=method), timeout=timeout) as resp:
-            status, raw = resp.status, resp.read().decode("utf-8", "replace")
+            status, raw = resp.status, _read_bounded(resp, max_bytes, deadline, clock, cancelled)
     except HTTPError as e:
-        status, raw = e.code, e.read().decode("utf-8", "replace")
+        status, raw = e.code, _read_bounded(e, max_bytes, deadline, clock, cancelled)
     except (URLError, OSError) as e:
+        if clock() >= deadline:
+            raise _Abort("timeout")
         return 0, {"error": str(e)}
     try:
         return status, json.loads(raw)
@@ -247,15 +305,17 @@ class AdapterRuntime:
         *,
         source: str = "device",
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Optional[Callable[[float], None]] = None,
     ) -> None:
         self._base = _check_base_url(url)
-        self._capture = LogCapture(public_hex, secret_hex)  # fails closed without Ed25519
+        self._signer = LogCapture(public_hex, secret_hex).signer  # fails closed without Ed25519
+        self._keys = (public_hex, secret_hex)
         self._status = status
         self._bindings = dict(bindings)
         self._source = source
         self._clock = clock
-        self._sleep = sleep
+        self._cancelled = threading.Event()
+        self._sleep = sleep or self._cancelled.wait
 
     @classmethod
     def from_profile(cls, device: Dict[str, Any], public_hex: str, secret_hex: str, **kwargs) -> "AdapterRuntime":
@@ -275,11 +335,19 @@ class AdapterRuntime:
     @property
     def signer(self) -> str:
         """The ``0x``-prefixed Ed25519 public key that signs this runtime's evidence."""
-        return self._capture.signer
+        return self._signer
+
+    def cancel(self) -> None:
+        """Stop the run in progress at its next read or poll. The device's state is then unknown."""
+        self._cancelled.set()
 
     def is_idle(self) -> bool:
         """True only if the device answers and reports an idle state. Anything else is busy."""
-        status, body = _request("GET", self._base + self._status.path)
+        try:
+            status, body = _request("GET", self._base + self._status.path,
+                                    deadline=self._clock() + _IDLE_CHECK_S, clock=self._clock)
+        except _Abort:
+            return False
         if status != 200 or not isinstance(body, dict):
             return False
         return body.get(self._status.field) in self._status.idle
@@ -294,32 +362,55 @@ class AdapterRuntime:
         except KeyError as missing:
             return RunResult(False, error=f"param_missing:{missing.args[0]}")
 
-        status, started = _request(binding.method, self._base + binding.path, body)
+        self._cancelled.clear()
+        deadline = self._clock() + binding.timeout_s
+
+        def call(method: str, path: str, payload: Any = None, max_bytes: int = _MAX_RESPONSE_BYTES):
+            return _request(method, self._base + path, payload, deadline=deadline, clock=self._clock,
+                            cancelled=self._cancelled.is_set, max_bytes=max_bytes)
+
+        try:
+            status, started = call(binding.method, binding.path, body)
+        except _Abort as stop:
+            # The device may or may not have started: its state is unknown.
+            return RunResult(False, error=_stopped(stop.reason))
         if not 200 <= status < 300:
             return RunResult(False, error=f"device_refused:{status}")
         run_id = started.get(binding.run_id_field) if isinstance(started, dict) else None
         if not isinstance(run_id, (str, int)) or isinstance(run_id, bool) or str(run_id) == "":
             return RunResult(False, error="no_run_id")
         run_id = str(run_id)
+        if run_id in (".", "..") or len(run_id) > 256:
+            return RunResult(False, error="bad_run_id")  # "." and ".." would change the polled path
         segment = quote(run_id, safe="")  # the device's id stays one path segment
 
-        deadline = self._clock() + binding.timeout_s
         record: Any = started
         state = None
-        while True:
-            status, polled = _request("GET", self._base + binding.poll_path.replace(_RUN_ID, segment))
-            if status == 200 and isinstance(polled, dict):
-                record, state = polled, polled.get(binding.state_field)
-                if state in binding.done or state in binding.failed:
-                    break
-            if self._clock() >= deadline:
-                evidence = self._evidence(operation, run_id, record, None)
-                return RunResult(False, output=record, evidence=evidence, error="timeout")
-            self._sleep(binding.poll_interval_s)
+        try:
+            while True:
+                status, polled = call("GET", _run_path(binding.poll_path, segment))
+                if status == 200 and isinstance(polled, dict):
+                    record, state = polled, polled.get(binding.state_field)
+                    if state in binding.done or state in binding.failed:
+                        break
+                if self._cancelled.is_set():
+                    raise _Abort("cancelled")
+                if self._clock() >= deadline:
+                    raise _Abort("timeout")
+                self._sleep(binding.poll_interval_s)
+                if self._cancelled.is_set():
+                    raise _Abort("cancelled")
+        except _Abort as stop:
+            evidence = self._evidence(operation, run_id, record, None)
+            return RunResult(False, output=record, evidence=evidence, error=_stopped(stop.reason))
 
         log_text = None
         if binding.log_path is not None:
-            status, fetched = _request("GET", self._base + binding.log_path.replace(_RUN_ID, segment))
+            try:
+                status, fetched = call("GET", _run_path(binding.log_path, segment), max_bytes=_MAX_LOG_BYTES)
+            except _Abort as stop:
+                log.warning("run %s: log not fetched (%s)", run_id, stop.reason)
+                status, fetched = 0, None
             if status == 200:
                 log_text = fetched if isinstance(fetched, str) else canonicalize(fetched)
         evidence = self._evidence(operation, run_id, record, log_text)
@@ -328,12 +419,29 @@ class AdapterRuntime:
         return RunResult(False, output=record, evidence=evidence, error=f"run_{state}")
 
     def _evidence(self, operation: str, run_id: str, record: Any, log_text: Optional[str]) -> dict:
-        """The device's own account of the run, as signed log-chain entries."""
+        """The device's own account of the run, as signed log-chain entries.
+
+        Each job gets a fresh chain from GENESIS, so its evidence verifies on its own.
+        """
+        capture = LogCapture(*self._keys)
         captured_at = _now()
-        chain = [self._capture.capture(
+        chain = [capture.capture(
             canonicalize({"operation": operation, "record": record, "runId": run_id}),
             f"{self._source}:run", captured_at, entry_id=f"{run_id}:record",
         )]
         if log_text is not None:
-            chain.append(self._capture.capture(log_text, f"{self._source}:log", captured_at, entry_id=f"{run_id}:log"))
+            chain.append(capture.capture(log_text, f"{self._source}:log", captured_at, entry_id=f"{run_id}:log"))
         return {"operation": operation, "runId": run_id, "record": record, "logChain": chain, "signer": self.signer}
+
+
+def _run_path(template: str, segment: str) -> str:
+    """The device path for one run. The run id is one quoted segment, never "." or ".."."""
+    path = template.replace(_RUN_ID, segment)
+    if any(part in (".", "..") for part in path.split("/")):
+        raise _Abort("bad_run_id")
+    return path
+
+
+def _stopped(reason: str) -> str:
+    """A result error for a stopped request. After a timeout or cancel the device's state is unknown."""
+    return f"{reason}:device_state_unknown" if reason in ("timeout", "cancelled") else reason

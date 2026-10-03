@@ -239,7 +239,7 @@ class TestEvidence:
             pub, sec = _keys()
             runtime = AdapterRuntime.from_profile(_profile(d.url), pub, sec, clock=lambda: next(ticks), sleep=lambda s: None)
             result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]})
-            assert (result.ok, result.error) == (False, "timeout")
+            assert (result.ok, result.error) == (False, "timeout:device_state_unknown")
         finally:
             d.close()
 
