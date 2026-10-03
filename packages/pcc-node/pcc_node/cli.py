@@ -32,7 +32,6 @@ from .register import (
     provision_api_key,
     register_kernel,
     register_devices,
-    announce_capabilities,
     register_signing_key,
 )
 from .log_capture import LogSigningRefused
@@ -189,7 +188,7 @@ def _resolve_target(pcc_base, config_file):
 
 def _target_banner(base, source):
     """The first lines `pcc-node start` prints (N57): the gateway this node will
-    register with and take jobs from, and what starting creates there."""
+    register with (it takes no jobs), and what starting creates there."""
     if base == PUBLIC_GATEWAY:
         where = "public PCC network, test-net payments"
     elif source == "flag":
@@ -427,15 +426,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     except LogSigningRefused as exc:
         click.echo(f"  Skipping signing-key registration (dev key): {exc}")
 
-    # Announce capabilities
-    if devices:
-        announce_capabilities(
-            config.pcc_base,
-            config.pcc_api_key,
-            config.kernel_id,
-            devices,
-            secret_key=secret_key,
-        )
+    # No capability announcement: this node takes no jobs (verdict 68d, finding 3).
 
     # First-run diagnostics banner (no-op if already acknowledged)
     _maybe_prompt_diagnostics(config)
@@ -446,7 +437,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
 
     # Start daemon
     click.echo("")
-    click.echo("Node running. Accepting jobs.")
+    click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
     click.echo(f"  Dashboard: {config.pcc_base}/operator")
     click.echo("  Press Ctrl+C to stop.")
     click.echo("")
@@ -733,7 +724,7 @@ def ui_serve(port, ui_dir):
 @click.argument("template")
 @click.option("--port", default=3200, help="Server port (default: 3200)")
 def ui_open(template, port):
-    """Install and open a built-in template in the browser."""
+    """Install a built-in template and print the URL to open it at."""
     from .ui_gen import install_template, list_templates
 
     available = list_templates()
@@ -746,9 +737,7 @@ def ui_open(template, port):
         filename = install_template(template)
         url = f"http://localhost:{port}/{filename}"
         click.echo(f"Installed: {filename}")
-        click.echo(f"URL: {url}")
-        import webbrowser
-        webbrowser.open(url)
+        click.echo(f"Open it in your browser: {url}")
     except FileNotFoundError as e:
         click.echo(f"Error: {e}")
 
