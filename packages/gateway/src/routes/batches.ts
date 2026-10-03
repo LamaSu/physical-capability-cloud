@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { SampleSlot } from "@pcc/spec";
 
 // SharedBatch + BatchSlotClaim types inlined until spec rebuilds
@@ -16,9 +16,25 @@ interface BatchSlotClaim {
   amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
+import { getKernelFacade } from "../facades/index.js";
 
 // ── In-memory shared batch storage ────────────────────────────────
 const sharedBatches = new Map<string, SharedBatch>();
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * The authenticated caller (an API key's operator, else a session's user), as
+ * apiGate set it, trimmed. Null when there is none or it is blank, so a blank
+ * identity never matches anything.
+ */
+function callerIdentity(req: FastifyRequest): string | null {
+  const r = req as unknown as { operatorId?: unknown; userId?: unknown };
+  const raw = r.operatorId ?? r.userId;
+  if (typeof raw !== "string") return null;
+  const id = raw.trim();
+  return id ? id : null;
+}
 
 export async function batchRoutes(app: FastifyInstance) {
   // List batch manifests — from in-memory BatchTracker (live lifecycle state)
@@ -66,9 +82,20 @@ export async function batchRoutes(app: FastifyInstance) {
   // Multi-User Shared Batches — multiple users share one run
   // ═════════════════════════════════════════════════════════════════
 
-  /** POST /api/batches/shared — Create a shared batch run */
+  /**
+   * POST /api/batches/shared — Create a shared batch run.
+   *
+   * N55: a shared batch is the kernel operator's priced offer, so only the
+   * operator of the kernel it names may create one (the kernel-operator check of
+   * routes/lob.ts and routes/carrier.ts). No identity: 401. Unknown kernel: 404.
+   * A kernel with no operator, or the zero address, has nobody to act for it:
+   * 403 kernel_unowned. Anyone else: 403 not_kernel_operator.
+   */
   app.post("/api/batches/shared", async (req, reply) => {
-    const body = req.body as {
+    const caller = callerIdentity(req);
+    if (!caller) return reply.status(401).send({ error: "unauthenticated" });
+
+    const body = (req.body ?? {}) as {
       kernelId: string;
       capabilityType: string;
       totalSlots: number;
@@ -81,6 +108,20 @@ export async function batchRoutes(app: FastifyInstance) {
 
     if (!body.kernelId || !body.capabilityType || !body.totalSlots || !body.pricePerSlot) {
       return reply.status(400).send({ error: "kernelId, capabilityType, totalSlots, and pricePerSlot required" });
+    }
+
+    const kernelRes = await getKernelFacade().getById(body.kernelId);
+    if (!kernelRes.success) {
+      const notFound = kernelRes.error.httpStatus === 404;
+      return reply.status(notFound ? 404 : 502).send({ error: notFound ? "kernel_not_found" : "kernel_lookup_failed" });
+    }
+    const recorded = (kernelRes.data as { operatorAddress?: unknown }).operatorAddress;
+    const owner = typeof recorded === "string" ? recorded.trim() : "";
+    if (!owner || owner.toLowerCase() === ZERO_ADDRESS) {
+      return reply.status(403).send({ error: "kernel_unowned" }); // nobody to act for it: fail closed
+    }
+    if (owner.toLowerCase() !== caller.toLowerCase()) {
+      return reply.status(403).send({ error: "not_kernel_operator" });
     }
 
     const batch: SharedBatch = {
