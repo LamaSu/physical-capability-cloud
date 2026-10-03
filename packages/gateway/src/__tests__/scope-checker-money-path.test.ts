@@ -20,6 +20,15 @@
  *
  * The load-bearing assertions are the negative ones: a caller without the
  * required scope must never reach the route handler.
+ *
+ * ── UPDATED: money routes now require `settlement`, not `operator` ─
+ * This file previously asserted "ALLOWS escrow funding to an operator-scoped
+ * key", which was correct for the rules as they then stood. The rules have
+ * DELIBERATELY changed: `operator` (what every self-service signup receives) no
+ * longer satisfies a money route; funds movement requires the separately-granted
+ * `settlement` scope. The old assertion is therefore inverted below into an
+ * explicit DENY case rather than deleted — the previously-passing behaviour is
+ * exactly the exposure being closed, so it is worth pinning in its new form.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -27,16 +36,19 @@ import Fastify, { type FastifyInstance } from "fastify";
 
 // ── Mock the repo layer the middleware reads ──────────────────────
 let keyScopes: string;
+/** Rows the governance table returns. Empty → hardcoded defaults are used. */
+let dbScopeRows: Array<{ method: string; routePattern: string; requiredScopes: string[] }> = [];
 
 vi.mock("../db.js", () => ({
   getRepos: () => ({
-    // Empty governance table → middleware falls back to DEFAULT_SCOPE_REQUIREMENTS
-    governance: { findAllEndpointScopes: () => [] },
+    governance: { findAllEndpointScopes: () => dbScopeRows },
     apiKeys: { findById: () => ({ id: "key-1", scopes: keyScopes }) },
   }),
 }));
 
-const { scopeChecker } = await import("../middleware/scope-checker.js");
+const { scopeChecker, __resetScopeCacheForTests } = await import(
+  "../middleware/scope-checker.js"
+);
 
 /** Build an app with the scope-checker mounted and a key pre-attached. */
 async function buildApp(): Promise<FastifyInstance> {
@@ -55,6 +67,16 @@ async function buildApp(): Promise<FastifyInstance> {
   app.get("/api/escrow", ok);
   app.get("/api/capabilities/types", ok);
   app.post("/api/contributors/schedule", ok);
+  // Registered so the "settlement does not satisfy an operator route" negative
+  // control proves a 403 FROM THE SCOPE CHECK, not an incidental 404.
+  app.post("/api/kernels/register", ok);
+  // Nested admin route — proves "/api/admin/**" covers more than one segment.
+  app.get("/api/admin/keys/wildcard-audit", ok);
+  // Money-path routes that do not exist yet, registered so the floor's coverage
+  // of the settlement prefix and of a bare money root is provable rather than
+  // an incidental 404.
+  app.post("/api/settlement/units/:unitId/close", ok);
+  app.post("/api/escrow", ok);
   await app.ready();
   return app;
 }
@@ -62,6 +84,157 @@ async function buildApp(): Promise<FastifyInstance> {
 describe("scope-checker — money-path authorization", () => {
   beforeEach(() => {
     keyScopes = JSON.stringify(["contributor:read", "contributor:write"]);
+    dbScopeRows = [];
+    // The rule cache is module-level with a 5-minute TTL. Without this, a test
+    // that changes dbScopeRows asserts against rules a previous test loaded.
+    __resetScopeCacheForTests();
+  });
+
+  // ── A persisted rule must not be able to WEAKEN the money path ────
+  //
+  // refreshScopeCache REPLACES the hardcoded defaults wholesale as soon as the
+  // endpointScopes table has any rows. A single stale row — an escrow rule
+  // still naming `operator`, written before the settlement split — would
+  // therefore silently restore the old, weaker authorization with nothing in
+  // the code to say so. Caught by cross-family review of PR #309; MONEY_PATH_FLOOR
+  // is applied over DB rules to make that impossible.
+  describe("DB-persisted rules cannot loosen the money path", () => {
+    it("IGNORES a stale DB rule that grants escrow writes to operator", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/escrow/**", requiredScopes: ["operator", "admin"] },
+        { method: "POST", routePattern: "/api/kernels/*", requiredScopes: ["operator", "admin"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
+    it("still honours a DB rule on a NON-money route (the table is not ignored)", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/kernels/*", requiredScopes: ["template_author"] },
+      ];
+      keyScopes = JSON.stringify(["template_author"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/kernels/register" });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+
+    // Second-opinion sol review via bridge 1c0cff0a (#1526). The floor was
+    // appended AFTER the surviving rules, and isMoneyPath() only filters
+    // patterns that START with a money prefix — so a BROAD rule like
+    // "/api/**" survived the filter, tied the floor on wildcard count (2 vs 2),
+    // and won on stable-sort insertion order. The "immutable" floor was not.
+    it("IGNORES a broad DB rule that would otherwise shadow the money floor", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/**", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
+    it("IGNORES a broad DB rule on fiat-ramp too", async () => {
+      dbScopeRows = [
+        { method: "*", routePattern: "/api/**", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    // The admin namespace has the same property: a security rule whose presence
+    // depends on the DB happening to be empty is not a rule.
+    it("keeps /api/admin/** gated even when governance rows exist", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/kernels/*", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it("a settlement key still passes the money path when DB rows exist", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/kernels/*", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["settlement"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+  });
+
+  // ── /api/settlement/** is a money prefix and needs floor rules ────
+  //
+  // It is listed in MONEY_PATH_PREFIXES (so writes there default-deny) but had
+  // NO floor rules, meaning a settlement write was denied to EVERYONE —
+  // including an admin or settlement key. No such route exists today, so this
+  // was latent; adding one would have shipped it dead on arrival.
+  describe("settlement writes are gated, not bricked", () => {
+    it("DENIES a settlement write to an operator key", async () => {
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/settlement/units/u1/close" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it("ALLOWS a settlement write to a settlement key", async () => {
+      keyScopes = JSON.stringify(["settlement"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/settlement/units/u1/close" });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+
+    // Pattern "/api/escrow/**" compiles to ^/api/escrow/.*$ which does NOT match
+    // the bare root, while isMoneyPath() treats the root as money — so a root
+    // money write was denied even to admin.
+    it("ALLOWS a settlement-scoped write to a money-path ROOT", async () => {
+      keyScopes = JSON.stringify(["settlement"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/escrow" });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+  });
+
+  // ── Nested admin routes are actually covered by the admin rule ────
+  describe("admin namespace is gated at every depth", () => {
+    it("DENIES a nested admin route to a non-admin key", async () => {
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
+    it("ALLOWS a nested admin route to an admin key", async () => {
+      keyScopes = JSON.stringify(["admin"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
   });
 
   describe("funds movement is gated", () => {
@@ -93,8 +266,34 @@ describe("scope-checker — money-path authorization", () => {
       await app.close();
     });
 
-    it("ALLOWS escrow funding to an operator-scoped key", async () => {
+    // INVERTED, deliberately (was: "ALLOWS escrow funding to an operator-scoped
+    // key"). `operator` is what every self-service signup receives, so letting
+    // it move funds meant completing a signup form bought funds-movement
+    // authority. Now it does not.
+    it("DENIES escrow funding to an operator-scoped key — operator is NOT money authority", async () => {
       keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      expect(res.json().required_scopes).toContain("settlement");
+      await app.close();
+    });
+
+    it("DENIES fiat payout to an operator-scoped key", async () => {
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
+    it("ALLOWS escrow funding to a settlement-scoped key", async () => {
+      keyScopes = JSON.stringify(["operator", "settlement"]);
       const app = await buildApp();
       const res = await app.inject({
         method: "POST",
@@ -102,6 +301,38 @@ describe("scope-checker — money-path authorization", () => {
       });
       expect(res.statusCode).toBe(200);
       expect(res.json().reached).toBe(true);
+      await app.close();
+    });
+
+    it("ALLOWS fiat payout to a settlement-scoped key", async () => {
+      keyScopes = JSON.stringify(["settlement"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().reached).toBe(true);
+      await app.close();
+    });
+
+    it("still ALLOWS admin at the money path (settlement is not the only key)", async () => {
+      keyScopes = JSON.stringify(["admin"]);
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+      });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+
+    // NEGATIVE CONTROL on the grant itself: `settlement` must buy the money
+    // path and NOTHING more. If it ever starts satisfying an operator-only
+    // route, the split has collapsed back into a second superuser scope.
+    it("settlement alone does NOT satisfy an operator-only route", async () => {
+      keyScopes = JSON.stringify(["settlement"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/kernels/register" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
       await app.close();
     });
   });

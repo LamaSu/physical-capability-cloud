@@ -146,12 +146,46 @@ export function __resetAnonA2aDiscoverForTest(): void {
   anonA2aDiscoverAttempts.clear();
 }
 
+// ── Anonymous SIWE nonce-issuance limiter ────────────────────────────────────
+// Same principle as the A2A limiter above. GET /api/auth/nonce is necessarily
+// PUBLIC — it is how a caller with no credential bootstraps one — and it was
+// previously both unlimited AND doing real work per call (a full nonce-map
+// sweep plus a SQLite session DELETE), i.e. an unauthenticated amplification
+// path. Cross-family review of PR #309 flagged it. A legitimate client needs
+// ONE nonce per login, so 60/min/IP is far more than a human or agent needs and
+// far less than a flood needs.
+const siweNonceAttempts = new Map<string, { count: number; windowStart: number }>();
+const SIWE_NONCE_LIMIT = 60;
+const SIWE_NONCE_WINDOW_MS = 60_000; // 1 minute
+
+export function canSiweNonce(ip: string): boolean {
+  const now = Date.now();
+  const entry = siweNonceAttempts.get(ip);
+  if (!entry || now - entry.windowStart > SIWE_NONCE_WINDOW_MS) {
+    siweNonceAttempts.set(ip, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= SIWE_NONCE_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+/** Test hook — clears the nonce-issuance window between suites. */
+export function __resetSiweNonceForTest(): void {
+  siweNonceAttempts.clear();
+}
+
 // Cleanup stale SIWE entries periodically
 setInterval(() => {
   const now = Date.now();
   for (const [ip, entry] of siweVerifyAttempts) {
     if (now - entry.windowStart > SIWE_VERIFY_WINDOW_MS) {
       siweVerifyAttempts.delete(ip);
+    }
+  }
+  for (const [ip, entry] of siweNonceAttempts) {
+    if (now - entry.windowStart > SIWE_NONCE_WINDOW_MS) {
+      siweNonceAttempts.delete(ip);
     }
   }
 }, 120_000);
