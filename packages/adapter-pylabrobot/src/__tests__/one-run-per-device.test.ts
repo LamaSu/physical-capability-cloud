@@ -49,7 +49,7 @@ function heldSidecar(openFails?: string): {
         held.set(String(p.jobId), () => transport.respondSuccess(id, { ok: true, jobId: p.jobId, opCount: 1, durationMs: 5 }));
         return;
       case "evidence.stopRecording":
-        return answer({ ok: true, jobId: p.jobId, opCount: 1, generation: "g1" });
+        return answer({ ok: true, jobId: p.jobId, opCount: 1, notified: transport.evidenceSent(String(p.jobId)), failedWrites: 0, generation: "g1" });
       default:
         return answer({ ok: true });
     }
@@ -180,7 +180,7 @@ describe("one run per device (astra pack 473 (a))", () => {
         if (sidecarStillRunning) {
           return queueMicrotask(() => transport.respondError(id, -32005, "device dev-one is still running", { jobId: p.jobId, generation: "g1" }));
         }
-        return answer({ ok: true, jobId: p.jobId, opCount: 1, generation: "g1" });
+        return answer({ ok: true, jobId: p.jobId, opCount: 1, notified: transport.evidenceSent(String(p.jobId)), failedWrites: 0, generation: "g1" });
       }
       return answer({ ok: true });
     };

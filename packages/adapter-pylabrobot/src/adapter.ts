@@ -127,6 +127,23 @@ function attests(answer: unknown, jobId: string, generation: string): boolean {
   return a.ok === true && a.jobId === jobId && a.generation === generation;
 }
 
+/**
+ * Why an attested close does not prove the job's evidence complete, or null. The sidecar says how
+ * many notifications its window sent for the job and how many of their writes failed; none may
+ * have failed, and the adapter must have received exactly that many. A write that fails, or a line
+ * the adapter could not read, is then never silently missing from the job's evidence (refvertical
+ * #5668, steward #5413).
+ */
+function evidenceShortfall(answer: EvidenceWindowAttestation, jobId: string, received: number): string | null {
+  const { notified, failedWrites } = answer;
+  if (typeof notified !== "number" || typeof failedWrites !== "number") {
+    return `the sidecar did not attest how many notifications it sent for job ${jobId}`;
+  }
+  if (failedWrites !== 0) return `${failedWrites} of the ${notified} notifications the sidecar sent for job ${jobId} could not be written`;
+  if (notified !== received) return `the sidecar sent ${notified} notifications for job ${jobId}, and ${received} arrived`;
+  return null;
+}
+
 function describeAnswer(answer: unknown): string {
   try {
     return JSON.stringify(answer) ?? String(answer);
@@ -145,6 +162,8 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   private evidenceListeners: EvidenceCallback[] = [];
   private currentCollector: EvidenceCollector | null = null;
   private currentJobId: string | null = null;
+  /** The current job's evidence notifications received from the sidecar (refvertical #5668). */
+  private received = 0;
   /**
    * The job whose start is in flight, from the moment it is accepted until it returns. The
    * adapter records one job at a time: its collector and currentJobId are single, and the
@@ -404,6 +423,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     const collector = this.makeCollector();
     this.currentCollector = collector;
     this.currentJobId = jobId;
+    this.received = 0;
     collector.startRecording(jobId);
     // The job's recording window, attested by this sidecar process: nothing physical runs
     // without it (astra pack 194). A window that failed to open may be open after all, so the
@@ -433,15 +453,21 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       // The run's notifications can still be on their way: the barrier first, so each has
       // reached the collector before it emits execution_completed and stops.
       const barrier = await this.sidecarBarrier(jobId, generation);
-      if (barrier !== null) {
+      if ("failed" in barrier) {
         // Nothing proves the job's evidence complete: the run fails, with no execution_completed,
         // and the adapter is held until the process that recorded the job proves its window
         // closed (astra packs 191 and 194).
-        return await this.failRun(collector, jobId, `evidence barrier failed: ${barrier}`, undefined, {
+        return await this.failRun(collector, jobId, `evidence barrier failed: ${barrier.failed}`, undefined, {
           jobId,
           generation,
           requireWindow: true,
         });
+      }
+      // The close is proven, so nothing more is on its way: the run fails if any of the job's
+      // notifications is missing, and nothing is held (refvertical #5668).
+      const shortfall = evidenceShortfall(barrier.attested, jobId, this.received);
+      if (shortfall !== null) {
+        return await this.failRun(collector, jobId, `evidence incomplete: ${shortfall}`, undefined, null);
       }
       const bufferedEvents = collector.stopRecording(jobId, {
         opCount: result.opCount,
@@ -472,9 +498,9 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       return await this.failRun(
         collector,
         jobId,
-        barrier === null ? reason : `${reason}; evidence barrier failed: ${barrier}`,
+        "failed" in barrier ? `${reason}; evidence barrier failed: ${barrier.failed}` : reason,
         err,
-        barrier === null ? null : { jobId, generation, requireWindow: true },
+        "failed" in barrier ? { jobId, generation, requireWindow: true } : null,
       );
     }
   }
@@ -784,22 +810,23 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   /**
    * Close the sidecar's recording window, a barrier: the sidecar answers only after writing
    * every notification it scheduled for the job. Null once the process that recorded the job
-   * attests the close (its generation, this job); otherwise why not (an error, the 5 s
-   * timeout, no sidecar, or an answer that attests nothing). A barrier that fails proves
-   * nothing about what is still on its way, so the caller fails the run and holds the adapter.
+   * attests the close (its generation, this job), with that answer; otherwise why not (an
+   * error, the 5 s timeout, no sidecar, or an answer that attests nothing). A barrier that fails
+   * proves nothing about what is still on its way, so the caller fails the run and holds the
+   * adapter.
    */
-  private async sidecarBarrier(jobId: string, generation: string): Promise<string | null> {
-    if (!this.sidecar) return "no sidecar to answer evidence.stopRecording";
+  private async sidecarBarrier(jobId: string, generation: string): Promise<{ attested: EvidenceWindowAttestation } | { failed: string }> {
+    if (!this.sidecar) return { failed: "no sidecar to answer evidence.stopRecording" };
     try {
       const answer = await this.sidecar.call<EvidenceWindowAttestation>(
         RPC_METHODS.EVIDENCE_STOP_RECORDING,
         { deviceId: this.id, jobId },
         5_000,
       );
-      if (attests(answer, jobId, generation)) return null;
-      return `evidence.stopRecording did not attest job ${jobId}'s window in sidecar ${generation}: ${describeAnswer(answer)}`;
+      if (attests(answer, jobId, generation)) return { attested: answer };
+      return { failed: `evidence.stopRecording did not attest job ${jobId}'s window in sidecar ${generation}: ${describeAnswer(answer)}` };
     } catch (err) {
-      return `evidence.stopRecording did not answer: ${err instanceof Error ? err.message : String(err)}`;
+      return { failed: `evidence.stopRecording did not answer: ${err instanceof Error ? err.message : String(err)}` };
     }
   }
 
@@ -831,6 +858,9 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       );
       return;
     }
+    // Received for the job, whatever happens to it next: the barrier compares this count with
+    // what the sidecar sent, to find a notification lost on the way (refvertical #5668).
+    this.received += 1;
     // Lifecycle is the adapter's own: a completion is published only after the barrier has
     // proven the job's evidence complete. One the sidecar sends is dropped (astra pack 194).
     if (ADAPTER_LIFECYCLE.has(params.type)) {

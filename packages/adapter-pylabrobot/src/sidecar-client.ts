@@ -428,7 +428,19 @@ export class InMemoryTransport implements SidecarTransport {
 
   /** Test helper: emit a notification (no id) */
   notify(method: string, params?: Record<string, unknown>): void {
+    const jobId = params?.jobId;
+    if (method === "evidence" && typeof jobId === "string") this.evidenceByJob.set(jobId, this.evidenceSent(jobId) + 1);
     this.receive(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
+  }
+
+  private evidenceByJob = new Map<string, number>();
+
+  /**
+   * Test helper: how many `evidence` notifications this transport emitted for `jobId`. A fake
+   * sidecar attests that count when it closes the job's window, as the real one does (`notified`).
+   */
+  evidenceSent(jobId: string): number {
+    return this.evidenceByJob.get(jobId) ?? 0;
   }
 
   /** Test helper: parse the most-recently-sent request as JSON */

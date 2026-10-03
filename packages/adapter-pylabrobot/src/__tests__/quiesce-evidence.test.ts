@@ -20,7 +20,8 @@ function answerLast(transport: InMemoryTransport, deviceId: string, jobId: strin
     "backend.init": { ok: true, deviceId, plrBackend: "chatterbox", generation: "gen-q" },
     "evidence.startRecording": { ok: true, jobId, generation: "gen-q" },
     "backend.run": { ok: true, jobId, opCount: 1, durationMs: 10 },
-    "evidence.stopRecording": { ok: true, jobId, generation: "gen-q" },
+    // The close attests every notification this fake sent for the job, none failed (refvertical #5668).
+    "evidence.stopRecording": { ok: true, jobId, generation: "gen-q", notified: transport.evidenceSent(jobId), failedWrites: 0 },
     "backend.shutdown": { ok: true },
   };
   transport.respondSuccess(sent.id, results[sent.method]);
@@ -76,7 +77,7 @@ describe("PyLabRobotAdapter.quiesceEvidence", () => {
     transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-q", opCount: 1, durationMs: 10 }); // backend.run
     await tick();
     expect(hook.resolved, "evidence.stopRecording is in flight").toBe(false);
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-q", generation: "gen-q" }); // evidence.stopRecording
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-q", generation: "gen-q", notified: transport.evidenceSent("j-q"), failedWrites: 0 }); // evidence.stopRecording
     await startP;
     await tick();
 

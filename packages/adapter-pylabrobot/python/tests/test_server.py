@@ -282,7 +282,7 @@ def test_a_window_is_attested_with_this_process_generation_on_open_and_close():
     gen = init["result"]["generation"]
     assert isinstance(gen, str) and len(gen) >= 16
     assert opened["result"]["generation"] == gen and opened["result"]["jobId"] == "job-1"
-    assert closed["result"] == {"ok": True, "jobId": "job-1", "opCount": 0, "generation": gen}
+    assert closed["result"] == {"ok": True, "jobId": "job-1", "opCount": 0, "notified": 0, "failedWrites": 0, "generation": gen}
     # A retried close of the same window answers as the first did.
     assert again["result"] == closed["result"]
 
@@ -442,3 +442,75 @@ def test_a_running_jobs_window_cannot_be_closed_until_its_run_ends():
     assert open_b["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], f"job B's window while job A's is open: {open_b}"
     assert [(n["type"], n["jobId"]) for n in notes] == [("aspirate", "job-A")]
     assert close_a_after["result"]["jobId"] == "job-A" and close_a_after["result"]["opCount"] == 1
+
+
+# ── the barrier attests what it sent (refvertical #5668) ────────────────────
+
+
+class FlakyStdout(CapturingStdout):
+    """Captures lines; the first write of a notification of `fail_type` raises."""
+
+    def __init__(self, fail_type: str) -> None:
+        super().__init__()
+        self.fail_type = fail_type
+        self.failed = 0
+
+    def write(self, s: str) -> None:
+        for piece in s.split("\n"):
+            if piece and self.failed == 0 and json.loads(piece).get("params", {}).get("type") == self.fail_type:
+                self.failed += 1
+                raise OSError("write failed")
+        super().write(s)
+
+
+def _two_op_job(out: CapturingStdout) -> tuple[dict, list[dict]]:
+    async def scenario():
+        s = Server(stdout=out)
+        await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        await _call(s, out, "2", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-1"})
+        sent: list[dict] = []
+        await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "3", "method": "backend.run", "params": {
+            "deviceId": "dev-1", "jobId": "job-1", "protocolSource": "inline-ops",
+            "protocolInline": [{"op": "aspirate", "well": "A1"}, {"op": "dispense", "well": "B1"}],
+        }}))
+        await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "4", "method": "evidence.stopRecording", "params": {"deviceId": "dev-1", "jobId": "job-1"}}))
+        await asyncio.sleep(0.05)
+        msgs = out.pop_messages()
+        sent = [m for m in msgs if m.get("method") == "evidence" and m["params"].get("jobId") == "job-1"]
+        stop = next(m for m in msgs if m.get("id") == "4")
+        return stop, sent
+
+    return asyncio.run(scenario())
+
+
+def test_the_close_attests_how_many_notifications_its_window_sent():
+    stop, sent = _two_op_job(CapturingStdout())
+    assert stop["result"]["notified"] == len(sent) == 2
+    assert stop["result"]["failedWrites"] == 0
+
+
+def test_a_notification_whose_write_fails_is_counted_and_attested_never_silently_lost():
+    out = FlakyStdout("dispense")
+    stop, sent = _two_op_job(out)
+    assert out.failed == 1
+    assert [m["params"]["type"] for m in sent] == ["aspirate"]
+    # The window scheduled two, and one write failed: the TS adapter sees both facts.
+    assert stop["result"]["notified"] == 2
+    assert stop["result"]["failedWrites"] == 1
+
+
+def test_a_retried_close_attests_the_same_counts():
+    async def scenario():
+        out = FlakyStdout("dispense")
+        s = Server(stdout=out)
+        await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        await _call(s, out, "2", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-1"})
+        await _call(s, out, "3", "backend.run", {"deviceId": "dev-1", "jobId": "job-1", "protocolSource": "inline-ops",
+                                                 "protocolInline": [{"op": "aspirate", "well": "A1"}, {"op": "dispense", "well": "B1"}]})
+        first = await _call(s, out, "4", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-1"})
+        again = await _call(s, out, "5", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-1"})
+        return first, again
+
+    first, again = asyncio.run(scenario())
+    assert first["result"]["failedWrites"] == 1
+    assert again["result"] == first["result"]
