@@ -127,7 +127,7 @@ import { setupRoutes } from "../routes/setup.js";
 import { capabilityRoutes } from "../routes/capabilities.js";
 import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { adminObservabilityRoutes } from "../routes/admin-observability.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { initKernelService, resetKernelService, _mockService } from "../services/kernel-service.js";
 
 function opFunnelRows(): Array<Record<string, unknown>> {
@@ -945,7 +945,7 @@ describe("#469 round-2 follow-ups", () => {
     expect(opFunnelRows().filter((r) => r.action === "test_job_passed")).toHaveLength(0);
   });
 
-  it("R1b: submitJob reporting a different deviceId than the one requested is not credited", async () => {
+  it("R1b: submitJob reporting a different deviceId than the one requested is not credited, even when that other device is otherwise an identical revision", async () => {
     await app.inject({
       method: "POST",
       url: "/api/setup/register-device",
@@ -956,8 +956,19 @@ describe("#469 round-2 follow-ups", () => {
       url: "/api/setup/register-device",
       payload: { kernelId: "kernel-nyc", deviceId: "dev-r1b-other", ...OCTO_DEVICE },
     });
+    // Force both rows to the IDENTICAL revision (including lastUpdated, which
+    // the route would otherwise stamp with two distinct timestamps) so the
+    // ONLY thing distinguishing them is their id. Without this, sameDeviceRevision's
+    // lastUpdated comparison would incidentally also block credit on a
+    // lastUpdated mismatch, masking a dropped submitResult.deviceId===deviceId
+    // guard in a mutation test.
+    const repos = getRepos();
+    const FIXED_TS = "2026-01-01T00:00:00.000Z";
+    repos.kernels.updateDevice("dev-r1b-req", { lastUpdated: FIXED_TS });
+    repos.kernels.updateDevice("dev-r1b-other", { lastUpdated: FIXED_TS });
     // The service reports it ran the job on a DIFFERENT (also real, also
-    // kernel-nyc) device than the one the caller named in the request.
+    // kernel-nyc, now byte-identical-revision) device than the one the
+    // caller named in the request.
     _mockService.submitJob.mockResolvedValueOnce({ jobId: "j-r1b", deviceId: "dev-r1b-other", status: "accepted" });
     const res = await app.inject({
       method: "POST",
