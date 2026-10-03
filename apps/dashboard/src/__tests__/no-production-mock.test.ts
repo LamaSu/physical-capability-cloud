@@ -380,6 +380,22 @@ describe("no production mock (ratchet)", () => {
     expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx", "pages/probe/ProbePage.tsx"], [test])).toEqual(["pages/probe/ProbePage.tsx"]);
   });
 
+  it.each([
+    ["an expect( only in a comment", 'import { ProbePage } from "../ProbePage.js";\nit("x", () => {\n  render(<ProbePage />);\n  // expect(\n});'],
+    ["JSX in a function nothing calls", 'import { ProbePage } from "../ProbePage.js";\nconst NeverCalled = () => <ProbePage />;\nit("x", () => {\n  expect(1).toBe(1);\n});'],
+    ["another export of a namespace import", 'import * as page from "../ProbePage.js";\nit("x", () => {\n  render(<page.Helper />);\n  expect(text()).toContain("unavailable");\n});'],
+    ["a render and an assertion in different tests", 'import { ProbePage } from "../ProbePage.js";\nit("a", () => {\n  render(<ProbePage />);\n});\nit("b", () => {\n  expect(1).toBe(1);\n});'],
+  ])("the ratchet doesn't count %s (astra 408g MEDIUM)", (_what, test) => {
+    expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test])).toEqual(["pages/ProbePage.tsx"]);
+  });
+
+  it("a namespace import's own page component, or a helper the test calls, counts (self-test)", () => {
+    const viaNamespace = 'import * as page from "../ProbePage.js";\nit("x", () => {\n  render(<page.ProbePage />);\n  expect(text()).toContain("unavailable");\n});';
+    const viaHelper = 'import { ProbePage } from "../ProbePage.js";\nfunction renderPage() {\n  root.render(<ProbePage />);\n}\nit("x", async () => {\n  renderPage();\n  expect(text()).toContain("unavailable");\n});';
+    expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [viaNamespace])).toEqual([]);
+    expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [viaHelper])).toEqual([]);
+  });
+
   it("the scanner detects each pattern (self-test)", () => {
     const sample = [
       "const MOCK_TREASURY = {};",

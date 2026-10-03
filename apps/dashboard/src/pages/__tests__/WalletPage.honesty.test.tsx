@@ -482,6 +482,23 @@ describe("Funded Key tab: shows what the gateway returns", () => {
   });
 
   it.each([
+    ["defaultAsset", "&defaultAsset=BTC"],
+    ["defaultNetwork", "&defaultNetwork=ethereum"],
+    ["assets", `&assets=${encodeURIComponent(JSON.stringify(["BTC"]))}`],
+    ["addresses", `&addresses=${encodeURIComponent(JSON.stringify({ [OTHER]: ["base"] }))}`],
+  ])("a checkout URL that repeats its %s lock is not offered (astra 408g HIGH)", async (_what, repeated) => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false, usableNow: true } },
+      "/api/fiat-ramp/coinbase/onramp": { status: 200, body: onrampAnswer(WALLET_2, coinbaseCheckout(WALLET_2) + repeated) },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    await click(button(/Add funds with a card/));
+    expect([...container.querySelectorAll("a")].some((a) => a.textContent?.includes("Open card checkout"))).toBe(false);
+  });
+
+  it.each([
     ["another spender", { spender: "0x5555555555555555555555555555555555555555" }],
     ["another allowance", { allowanceUSDC: 500, allowance: "500000000" }],
     ["an on-chain allowance that disagrees", { allowance: "50" }],
