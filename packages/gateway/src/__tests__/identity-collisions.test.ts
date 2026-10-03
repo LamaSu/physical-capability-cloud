@@ -11,6 +11,33 @@ import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { generateApiKey } from "../auth/api-key-auth.js";
 import { findIdentityCollisions, collisionAuditExit } from "../auth/identity-collisions.js";
 
+/** Every table and column SOURCES reads (AZ-9 round 4: presence comes from SQLite's catalog). */
+const FULL_SCHEMA: Readonly<Record<string, readonly string[]>> = {
+  api_keys: ["operator_id"],
+  shop_kernels: ["operator_address"],
+  machine_registrations: ["tenant_id", "operator"],
+  job_offers: ["poster_did"],
+  ui_artifacts: ["owner"],
+};
+type FakeReader = { prepare(sql: string): { all(...p: unknown[]): unknown[] } };
+/** Answers the catalog queries (sqlite_master, pragma_table_info) from `schema`; every other query goes to `reader`. */
+function withCatalog(reader: FakeReader, schema: Readonly<Record<string, readonly string[]>> = FULL_SCHEMA): FakeReader {
+  return {
+    prepare(sql: string) {
+      if (sql.includes("sqlite_master")) return { all: (t: unknown) => (schema[String(t)] ? [{ name: String(t) }] : []) };
+      if (sql.includes("pragma_table_info")) return { all: (t: unknown, c: unknown) => ((schema[String(t)] ?? []).includes(String(c)) ? [{ name: String(c) }] : []) };
+      return reader.prepare(sql);
+    },
+  };
+}
+const EMPTY_ROWS: FakeReader = { prepare: () => ({ all: () => [] as unknown[] }) };
+const schemaWithout = (table: string, column?: string): Record<string, readonly string[]> => {
+  const s: Record<string, readonly string[]> = { ...FULL_SCHEMA };
+  if (column === undefined) delete s[table];
+  else s[table] = (s[table] ?? []).filter((c) => c !== column);
+  return s;
+};
+
 let seq = 0;
 function key(operatorId: string): void {
   const { keyHash, keyPrefix } = generateApiKey();
@@ -79,15 +106,22 @@ describe("collisionAuditExit — the pre-deploy audit fails closed (AZ-9)", () =
     "ui_artifacts.owner",
   ];
 
-  it("[neg] a Reader whose prepare() always throws skips every source, and the exit is 4 (not 0)", () => {
-    // A genuine SQLite absence (AZ-9 round 3: only this shape is an absence; anything else is failed).
-    const throwing = { prepare() { throw Object.assign(new Error("no such table: absent_everywhere"), { code: "SQLITE_ERROR" }); } };
-    const { collisions, read, skipped } = findIdentityCollisions(throwing);
+  it("[neg] a database whose catalog lists NONE of the sources skips every source, and the exit is 4 (not 0)", () => {
+    const { collisions, read, skipped } = findIdentityCollisions(withCatalog(EMPTY_ROWS, {}));
     expect(collisions).toEqual([]);
     expect(read).toEqual([]);
     expect(skipped.length).toBe(ALL_SOURCES.length);
     const verdict = collisionAuditExit({ newMerges: 0, read, skipped, allowedAbsent: [] });
     expect(verdict.code).toBe(4);
+  });
+
+  it("[neg] a Reader whose prepare() always throws (the catalog too) FAILS every source, and the exit is 4", () => {
+    const throwing = { prepare(): never { throw Object.assign(new Error("no such table: absent_everywhere"), { code: "SQLITE_ERROR" }); } };
+    const { read, skipped, failed } = findIdentityCollisions(throwing);
+    expect(read).toEqual([]);
+    expect(skipped).toEqual([]);
+    expect(failed.length).toBe(ALL_SOURCES.length);
+    expect(collisionAuditExit({ newMerges: 0, read, skipped, failed, allowedAbsent: ALL_SOURCES }).code).toBe(4);
   });
 
   it("[neg] a required source (api_keys / shop_kernels) that is unreadable is exit 4, even if allowlisted", () => {
@@ -118,12 +152,12 @@ describe("collisionAuditExit — the pre-deploy audit fails closed (AZ-9)", () =
 describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95b)", () => {
   const CORRUPT = () => Object.assign(new Error("database disk image is malformed"), { code: "SQLITE_CORRUPT" });
   function readerFailing(sourceTable: string, err: () => Error) {
-    return {
+    return withCatalog({
       prepare(sql: string) {
         if (sql.includes(`FROM ${sourceTable}`)) throw err();
         return { all: () => [] as unknown[] };
       },
-    };
+    });
   }
 
   it("[neg] astra's reproduction: an allowlisted source whose query fails with SQLITE_CORRUPT is exit 4, not 0", () => {
@@ -138,25 +172,23 @@ describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95
     expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["job_offers.poster_did"] } as never).code).toBe(4);
   });
 
-  it("control: a CONFIRMED missing table on an allowlisted source is still exit 0", () => {
-    const missing = () => Object.assign(new Error("no such table: ui_artifacts"), { code: "SQLITE_ERROR" });
-    const out = findIdentityCollisions(readerFailing("ui_artifacts", missing));
+  it("control: a table the CATALOG lacks, on an allowlisted source, is still exit 0", () => {
+    const out = findIdentityCollisions(withCatalog(EMPTY_ROWS, schemaWithout("ui_artifacts")));
     expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never).code).toBe(0);
   });
 
-  it("control: a CONFIRMED missing column on an allowlisted source is exit 0", () => {
-    const missing = () => Object.assign(new Error("no such column: owner"), { code: "SQLITE_ERROR" });
-    const out = findIdentityCollisions(readerFailing("ui_artifacts", missing));
+  it("control: a column the CATALOG lacks, on an allowlisted source, is exit 0", () => {
+    const out = findIdentityCollisions(withCatalog(EMPTY_ROWS, schemaWithout("ui_artifacts", "owner")));
     expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never).code).toBe(0);
   });
 
   it("[neg] a query that fails part-way through .all() is a FAILED read (exit 4), even when allowlisted", () => {
-    const reader = {
+    const reader = withCatalog({
       prepare(sql: string) {
         if (sql.includes("FROM ui_artifacts")) return { all: () => { throw CORRUPT(); } };
         return { all: () => [] as unknown[] };
       },
-    };
+    });
     const out = findIdentityCollisions(reader);
     expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never).code).toBe(4);
   });
@@ -174,7 +206,7 @@ describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95
   });
 
   it("an EMPTY table counts as read", () => {
-    const out = findIdentityCollisions({ prepare: () => ({ all: () => [] as unknown[] }) });
+    const out = findIdentityCollisions(withCatalog(EMPTY_ROWS));
     expect(out.read.length).toBe(7);
     expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: [] } as never).code).toBe(0);
   });
@@ -187,12 +219,12 @@ describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95
 // (what better-sqlite3, the store's driver, throws). Anything else is `failed`.
 describe("AZ-9 round 3: absence is a genuine SQLite error, never message text alone (astra pack 95c)", () => {
   function readerThrowing(sourceTable: string, thrown: () => unknown) {
-    return {
+    return withCatalog({
       prepare(sql: string) {
         if (sql.includes(`FROM ${sourceTable}`)) throw thrown();
         return { all: () => [] };
       },
-    };
+    });
   }
   const allowUi = ["ui_artifacts.owner"];
   const exitFor = (out: ReturnType<typeof findIdentityCollisions>) =>
@@ -239,30 +271,33 @@ describe("AZ-9 round 3: absence is a genuine SQLite error, never message text al
 
   it("[neg] a failure while PROCESSING rows (after .all()) is reported as failed, exit 4, not thrown out of the audit", () => {
     const poisoned = { get v(): string { throw new Error("row decode failed"); } };
-    const reader = {
+    const reader = withCatalog({
       prepare(sql: string) {
         return { all: () => (sql.includes("FROM ui_artifacts") ? [poisoned] : []) };
       },
-    };
+    });
     const out = findIdentityCollisions(reader);
     expect(out.failed).toContain("ui_artifacts.owner");
     expect(out.read).not.toContain("ui_artifacts.owner");
     expect(exitFor(out)).toBe(4);
   });
 
-  it("a GENUINE missing table and missing column from the real driver (the store's better-sqlite3 client) stay confirmed absences", async () => {
+  it("[neg] round 4: a GENUINE driver error ('no such table' / 'no such column' from the real better-sqlite3) from a source the catalog LISTS is failed, never excused", async () => {
     process.env.PCC_DB_PATH = ":memory:";
     const { initStore, getStore } = await import("../db.js");
     initStore({ seed: false });
-    const client = (getStore().db as unknown as { $client: { prepare(sql: string): { all(): unknown[] } } }).$client;
+    const client = (getStore().db as unknown as { $client: { prepare(sql: string): { all(...p: unknown[]): unknown[] } } }).$client;
     const cases: Array<[string, string]> = [
       ["FROM ui_artifacts", "FROM ui_artifacts_absent_95c"],
       ["SELECT DISTINCT owner AS v FROM ui_artifacts", "SELECT DISTINCT owner_absent_95c AS v FROM api_keys"],
     ];
     for (const [needle, replacement] of cases) {
+      // The catalog is asked about the real ui_artifacts.owner (present); only the DATA query is redirected,
+      // so the real driver throws its genuine absence error for a source the catalog says exists.
       const out = findIdentityCollisions({ prepare: (sql: string) => client.prepare(sql.replace(needle, replacement)) });
-      expect(out.skipped, replacement).toContain("ui_artifacts.owner");
-      expect(out.failed, replacement).toEqual([]);
+      expect(out.failed, replacement).toContain("ui_artifacts.owner");
+      expect(out.skipped, replacement).not.toContain("ui_artifacts.owner");
+      expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] }).code, replacement).toBe(4);
     }
   });
 });
