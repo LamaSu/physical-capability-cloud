@@ -366,3 +366,172 @@ describe("rule 1, envelope-invalid: one plain copy, valid as OperationalEnvelope
     expect(invalid).toBeGreaterThan(1000);
   });
 });
+
+const ASPIRATE = { name: "aspirate", params: { volumeUl: 150 } };
+
+describe("rule 2, state-invalid: the runtime's state is one plain copy, well formed", () => {
+  const hex = "21".repeat(32);
+  const newline = String.fromCharCode(10);
+
+  it("refuses a state that is not an object, or lacks a field", () => {
+    for (const bad of [null, undefined, [], "x", 1, true]) {
+      expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, bad)), String(bad)).toBe("state-invalid");
+    }
+    for (const field of ["adapterManifestDigest", "jobStartedAtMs", "nowMs", "recentCommandsAtMs"]) {
+      const state: Record<string, unknown> = { ...stateFor(OT2) };
+      delete state[field];
+      expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, state)), field).toBe("state-invalid");
+    }
+  });
+
+  it("refuses an adapterManifestDigest that is not sha256: + 64 lowercase hex, checked by structure", () => {
+    // Uppercase needs hex letters: "21".repeat(32) has none, so its uppercase is the same valid digest.
+    for (const digest of [`sha256:${"AB".repeat(32)}`, `sha256:${"Ab".repeat(32)}`, `sha256:${hex.slice(1)}`, `sha256:${hex}0`, `sha256:${hex}${newline}`, `0x${hex}`, `SHA256:${hex}`, hex, 7, null]) {
+      expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { adapterManifestDigest: digest as string }))), String(digest)).toBe("state-invalid");
+    }
+  });
+
+  it("refuses times that are not finite numbers, and a job that starts after now", () => {
+    for (const t of ["1790985600000", null, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, [T0], {}]) {
+      expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { nowMs: t as number }))), `nowMs ${String(t)}`).toBe("state-invalid");
+      expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { jobStartedAtMs: t as number }))), `start ${String(t)}`).toBe("state-invalid");
+    }
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { jobStartedAtMs: T0 + 1, nowMs: T0 })))).toBe("state-invalid");
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { jobStartedAtMs: T0, nowMs: T0 })))).toBe("allowed");
+  });
+
+  it("refuses recentCommandsAtMs unless it is a dense list of finite numbers", () => {
+    const cases: unknown[] = [null, "x", { 0: T0 }, [T0, "1790985600000"], [T0, null], [Number.NaN], [Number.POSITIVE_INFINITY], [{}], [[T0]], [, T0], [undefined]]; // eslint-disable-line no-sparse-arrays
+    for (const recent of cases) {
+      expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { recentCommandsAtMs: recent as number[] }))), JSON.stringify(recent)).toBe("state-invalid");
+    }
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { recentCommandsAtMs: [] })))).toBe("allowed");
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { recentCommandsAtMs: [T0 - 1e9, T0 + 1, -5] })))).toBe("allowed");
+  });
+
+  it("refuses a getter or a proxy in the state without running it, and ignores plain extra keys", () => {
+    let reads = 0;
+    const getter = { ...stateFor(OT2) };
+    Object.defineProperty(getter, "nowMs", { enumerable: true, configurable: true, get: () => (reads++, T0) });
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, getter))).toBe("state-invalid");
+    let traps = 0;
+    const counting: ProxyHandler<object> = new Proxy({}, { get: () => (traps++, undefined) });
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, new Proxy(stateFor(OT2), counting)))).toBe("state-invalid");
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, { ...stateFor(OT2), recentCommandsAtMs: new Proxy([T0], counting) }))).toBe("state-invalid");
+    expect(reads).toBe(0);
+    expect(traps).toBe(0);
+    // The spec lists the fields a state must have; other plain keys carry nothing and are ignored.
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, { ...stateFor(OT2), deviceId: "ot2-sim-1" }))).toBe("allowed");
+  });
+
+  it("comes after the envelope: an invalid envelope with a malformed state is envelope-invalid", () => {
+    expect(codeOf(checkRuntimeCommand(changed(OT2, (e) => (e.strict = false)), ASPIRATE, null))).toBe("envelope-invalid");
+  });
+});
+
+describe("rule 3, adapter-mismatch: the running adapter is the one the envelope commits", () => {
+  it("refuses another adapter's manifest digest, for the stop too", () => {
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { adapterManifestDigest: OTHER_MANIFEST })))).toBe("adapter-mismatch");
+    expect(codeOf(checkRuntimeCommand(OT2, STOP, stateFor(OT2, { adapterManifestDigest: OTHER_MANIFEST })))).toBe("adapter-mismatch");
+    // The plate reader's adapter is not the OT-2's.
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(PLATE)))).toBe("adapter-mismatch");
+  });
+
+  it("comes after the state and before the command", () => {
+    // A malformed digest is a malformed state, not a mismatch.
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { adapterManifestDigest: OT2_MANIFEST.toUpperCase() })))).toBe("state-invalid");
+    expect(codeOf(checkRuntimeCommand(OT2, { name: "", params: [] }, stateFor(OT2, { adapterManifestDigest: OTHER_MANIFEST })))).toBe("adapter-mismatch");
+  });
+});
+
+describe("rule 4, command-malformed: plain data, exactly {name, params}", () => {
+  const malformed = (command: unknown) => codeOf(checkRuntimeCommand(OT2, command, stateFor(OT2)));
+
+  it("refuses a command that is not an object, or not exactly {name, params}", () => {
+    for (const bad of [null, undefined, "aspirate", 1, [], [ASPIRATE]]) expect(malformed(bad), String(bad)).toBe("command-malformed");
+    expect(malformed({ name: "aspirate" })).toBe("command-malformed");
+    expect(malformed({ params: { volumeUl: 150 } })).toBe("command-malformed");
+    expect(malformed({ ...ASPIRATE, id: "c-1" })).toBe("command-malformed");
+    expect(malformed({ ...ASPIRATE, volumeUl: 150 })).toBe("command-malformed");
+    // An undefined member is dropped, as JSON drops it.
+    expect(malformed({ ...ASPIRATE, id: undefined })).toBe("allowed");
+  });
+
+  it("refuses a name that is not a non-blank string (JavaScript's trim decides blank)", () => {
+    const blanks = ["", " ", String.fromCharCode(9), String.fromCharCode(10, 32), String.fromCharCode(0xfeff), String.fromCharCode(0x3000), String.fromCharCode(0x2028)];
+    for (const name of blanks) expect(malformed({ name, params: {} }), JSON.stringify(name)).toBe("command-malformed");
+    for (const name of [7, null, true, ["aspirate"], { name: "aspirate" }]) expect(malformed({ name, params: {} }), JSON.stringify(name)).toBe("command-malformed");
+  });
+
+  it("refuses params that are not a plain object", () => {
+    for (const params of [[], [150], null, "volumeUl=150", 150, new Date(0), new Map([["volumeUl", 150]]), new (class { volumeUl = 150; })()]) {
+      expect(malformed({ name: "aspirate", params }), String(params)).toBe("command-malformed");
+    }
+    // A null-prototype params object is plain data.
+    expect(malformed({ name: "aspirate", params: Object.assign(Object.create(null), { volumeUl: 150 }) })).toBe("allowed");
+  });
+
+  it("refuses a proxy or a getter anywhere in the command, without running it", () => {
+    let reads = 0;
+    let traps = 0;
+    const counting: ProxyHandler<object> = new Proxy({}, { get: () => (traps++, undefined) });
+    const getterOn = (target: object, key: string, value: unknown) =>
+      Object.defineProperty(target, key, { enumerable: true, configurable: true, get: () => (reads++, value) });
+    expect(malformed(new Proxy({ ...ASPIRATE }, counting))).toBe("command-malformed");
+    expect(malformed({ name: "aspirate", params: new Proxy({ volumeUl: 150 }, counting) })).toBe("command-malformed");
+    expect(malformed({ name: "read", params: { seconds: 1, wavelengthNm: 405, wells: new Proxy(["A1"], counting) } })).toBe("command-malformed");
+    expect(malformed(getterOn({ params: { volumeUl: 150 } }, "name", "aspirate"))).toBe("command-malformed");
+    expect(malformed(getterOn({ name: "aspirate" }, "params", { volumeUl: 150 }))).toBe("command-malformed");
+    expect(malformed({ name: "aspirate", params: getterOn({}, "volumeUl", 150) })).toBe("command-malformed");
+    expect(reads).toBe(0);
+    expect(traps).toBe(0);
+  });
+
+  it("refuses values that are not JSON data: NaN, Infinity, a hole, undefined in a list, a cycle, a key named __proto__", () => {
+    for (const v of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, () => 150, Symbol("v"), 150n]) {
+      expect(malformed({ name: "aspirate", params: { volumeUl: v } }), String(v)).toBe("command-malformed");
+    }
+    const run = (labwareSlot: unknown) => malformed({ name: "runProtocol", params: { minutes: 10, labwareSlot } });
+    expect(run([, 1])).toBe("command-malformed"); // eslint-disable-line no-sparse-arrays
+    expect(run([undefined])).toBe("command-malformed");
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    expect(run(cycle)).toBe("command-malformed");
+    expect(malformed({ name: "aspirate", params: JSON.parse('{"volumeUl": 150, "__proto__": {"volumeUl": 1}}') })).toBe("command-malformed");
+  });
+
+  it("comes before unknown-command", () => {
+    expect(malformed({ name: " ", params: {} })).toBe("command-malformed");
+    expect(malformed({ name: "blowout", params: [] })).toBe("command-malformed");
+  });
+});
+
+describe("rule 5, unknown-command: only a declared command, matched exactly", () => {
+  it("refuses a name not in envelope.commands, including near misses and inherited names", () => {
+    const names = [
+      "blowout", "Aspirate", " aspirate", "aspirate ", "read", "toString", "constructor", "__proto__", "hasOwnProperty",
+      // Not whitespace to JavaScript's trim, so not blank: a runtime that strips them (Python's str.strip does) would say command-malformed.
+      String.fromCharCode(0x1c), String.fromCharCode(0x85),
+    ];
+    for (const name of names) expect(codeOf(checkRuntimeCommand(OT2, { name, params: {} }, stateFor(OT2))), JSON.stringify(name)).toBe("unknown-command");
+    expect(codeOf(checkRuntimeCommand(PLATE, { name: "aspirate", params: { volumeUl: 150 } }, stateFor(PLATE)))).toBe("unknown-command");
+  });
+
+  it("allows each declared command with valid params", () => {
+    const ot2: Array<[string, Record<string, unknown>]> = [
+      ["aspirate", { volumeUl: 150 }],
+      ["dispense", { volumeUl: 150 }],
+      ["setModuleTemp", { celsius: 37 }],
+      ["runProtocol", { minutes: 60, labwareSlot: 3 }],
+      ["transfer", { aspirateUl: 100, dispenseUl: 100, slot: 2 }],
+      ["stop", {}],
+    ];
+    for (const [name, params] of ot2) expect(checkRuntimeCommand(OT2, { name, params }, stateFor(OT2)), name).toEqual({ allowed: true });
+    const plate: Array<[string, Record<string, unknown>]> = [
+      ["setIncubation", { celsius: 37 }],
+      ["read", { seconds: 30, wavelengthNm: 450, wells: ["A1", "H12"] }],
+      ["stop", {}],
+    ];
+    for (const [name, params] of plate) expect(checkRuntimeCommand(PLATE, { name, params }, stateFor(PLATE)), name).toEqual({ allowed: true });
+  });
+});
