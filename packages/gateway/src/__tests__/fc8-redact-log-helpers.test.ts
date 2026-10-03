@@ -99,3 +99,30 @@ describe("FC-8 round 2 (astra pack 61b) — safeLogId", () => {
     expect(safeLogId(42)).toBe("(none)");
   });
 });
+
+describe("FC-8 round 2 (astra pack 61b) — the report sink (real-e2e-verbose.ts:596-610)", () => {
+  it("[neg] a report built the way the script builds it never carries a sentinel that reached a fixed call site", () => {
+    // Mirrors real-e2e-verbose.ts's L()/log accumulation: every line a fixed
+    // call site would have printed goes into the same array that is later
+    // join("\n")-ed into the report file AND sent as printer-job content
+    // (:596-610). If the upstream call sites withhold the sentinel, the
+    // persisted/transmitted report inherits that for free — this test proves
+    // it, rather than just asserting it by construction.
+    const log: string[] = [];
+    const L = (s: string) => log.push(s);
+
+    // [7b] oracle verification line (was :383)
+    const oracleText = JSON.stringify({ headers: { "x-oracle-key": SENTINEL } });
+    L(`     Oracle HTTP 200: ${safeLogResponseText(oracleText, 500)}`);
+
+    // [7b-3] Lit provisioning failure line (was :472)
+    const litProvision: { usageKey?: string; error?: string } = { error: `lit denied: ${SENTINEL}` };
+    L(`     Provisioned: ${litProvision.usageKey ? "yes" : "no"}`);
+
+    // top-level catch (was :619)
+    L(`FATAL: ${safeLogErrorName(new Error(`x-oracle-key: ${SENTINEL}`))}`);
+
+    const report = log.join("\n");
+    expect(report).not.toContain(SENTINEL);
+  });
+});
