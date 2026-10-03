@@ -422,10 +422,13 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     const all: RElement[] = [];
     const walk = (e: RElement): void => { all.push(e); for (const c of e.children as RElement[]) walk(c); };
     walk(mount);
+    const classes = (e: RElement): string[] => e.className.split(" ");
     const notice = all.find((e) => e.textContent === WITHHELD_PROSE)!;
-    expect(notice.className).toBe("pcc-text pcc-withheld");
+    expect(classes(notice)).toEqual(expect.arrayContaining(["pcc-text", "pcc-withheld"]));
+    for (const c of ["pcc-agent", "pcc-untrusted"]) expect(classes(notice)).not.toContain(c);
+    expect(classes(notice).some((c) => c.startsWith("pcc-src-"))).toBe(false); // a PCC constant has no source class
     const agent = all.find((e) => e.textContent === "Pick a kernel")!;
-    expect(agent.className).toBe("pcc-text pcc-agent pcc-untrusted");
+    expect(classes(agent)).toEqual(expect.arrayContaining(["pcc-text", "pcc-agent", "pcc-untrusted"]));
     const html = buildMcpAppIrDashboardHtml("n0nce");
     expect(html).toContain(".pcc-agent{");
     expect(html).toContain('content:"agent-authored"');
