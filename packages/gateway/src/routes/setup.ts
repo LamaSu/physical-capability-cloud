@@ -113,6 +113,10 @@ interface RegisterDeviceBody {
    *  EmitterDeclSchema and persisted on the device row. A MATCHING artifact —
    *  it never mints tier; the oracle verifies instances at settlement. */
   emits?: EmitterDecl[];
+  /** Operator-reported firmware version string. Trimmed and capped at 64
+   *  chars; non-string values are ignored. Stored as "unknown" when the
+   *  sanitized value is absent or empty. */
+  firmware?: string;
 }
 
 interface TestJobBody {
@@ -130,6 +134,17 @@ function slugify(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
+}
+
+/**
+ * Sanitize an operator-supplied firmware string: non-strings are ignored
+ * (returns undefined), whitespace is trimmed, and the result is capped at
+ * 64 chars. An empty result after trimming is treated as absent.
+ */
+function sanitizeFirmware(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim().slice(0, 64);
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function buildDeviceConfig(desc: DeviceDescription, kernelId: string, index: number): DeviceConfig {
@@ -544,12 +559,25 @@ export async function setupRoutes(app: FastifyInstance) {
   app.post<{ Body: RegisterDeviceBody }>(
     "/api/setup/register-device",
     async (req, reply) => {
-      const { kernelId, deviceId, type, model, adapterType, adapterConfig, capabilities, emits } =
-        req.body;
+      // An absent or null body still gets the missing-fields 400 (astra pack 111 MEDIUM 5).
+      const body = (req.body ?? {}) as RegisterDeviceBody;
+      const { kernelId, deviceId, type, model, adapterType, adapterConfig, capabilities, emits, firmware } =
+        body;
 
       if (!kernelId || !deviceId || !type || !adapterType) {
-        return reply.code(400).send({ error: "missing_required_fields" });
+        const missing: string[] = [];
+        if (!kernelId) missing.push("kernelId");
+        if (!deviceId) missing.push("deviceId");
+        if (!type) missing.push("type");
+        if (!adapterType) missing.push("adapterType");
+        return reply.code(400).send({
+          error: "missing_required_fields",
+          missing,
+          message: `Missing required field(s): ${missing.join(", ")}. Note: deviceId is operator-chosen and must stay stable across re-registrations (example: "sim-pr1-0001").`,
+        });
       }
+
+      const sanitizedFirmware = sanitizeFirmware(firmware);
 
       if (!VALID_ADAPTER_TYPES.includes(adapterType as AdapterType)) {
         return reply.code(400).send({
@@ -605,6 +633,8 @@ export async function setupRoutes(app: FastifyInstance) {
             healthStatus: existing.healthStatus ?? "healthy",
             // Supply-side emitter manifest — update when provided, else preserve.
             emits: validatedEmits ?? existing.emits ?? undefined,
+            // Firmware — update when provided, else preserve the existing value.
+            firmware: sanitizedFirmware ?? existing.firmware,
           });
           action = "updated";
         } else {
@@ -613,7 +643,7 @@ export async function setupRoutes(app: FastifyInstance) {
             kernelId,
             type,
             model: model ?? "unknown",
-            firmware: "unknown",
+            firmware: sanitizedFirmware ?? "unknown",
             status: "idle",
             contributesToCapabilities: capabilities ?? [],
             lastUpdated: now,
