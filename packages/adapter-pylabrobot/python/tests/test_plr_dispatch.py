@@ -329,12 +329,12 @@ async def test_evidence_start_recording_refuses_a_different_job_while_the_device
     )
     assert resp["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], resp
 
-    # the lease holder's own job ("job-x", see _run) may still (re)arm its
-    # window without conflict
+    # R39 r5: not even the lease holder's own job ("job-x", see _run) may re-arm
+    # the window mid-run; the run owns it until it ends.
     own = await asyncio.wait_for(
         call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-x"}, "41"), timeout=2.0,
     )
-    assert "error" not in own, own
+    assert own.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], own
 
     release.set()
     await asyncio.wait_for(task_a, timeout=2.0)
@@ -510,6 +510,51 @@ async def test_stop_recording_never_closes_another_jobs_window(fake_plr):
     await call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-b"}, "93")
     window = s.evidence.get_window("lh1")
     assert window is not None and window.job_id == "job-a", window
+
+
+@pytest.mark.parametrize("first,second", [
+    ({"host": "10.0.0.5"}, {"host": "10.0.0.5"}),
+    ({"url": "http://10.0.0.5:31950"}, {"url": "http://10.0.0.5:31950"}),
+    ({"ot2Url": "10.0.0.5"}, {"host": "10.0.0.5"}),
+    ({"ot2Url": "10.0.0.5"}, {"url": "10.0.0.5:31950"}),
+])
+async def test_every_accepted_ot2_address_spelling_is_one_locked_endpoint(fake_plr, first, second):
+    # R39 r5 (CRIT2): _create_ot2 accepts ot2Url, host and url; the endpoint lock must too.
+    s, out = _server()
+    deck = {"deckLayout": dict(DECK, type="OTDeck")}
+    a = await call(s, out, "backend.init", {"deviceId": "ot-a", "plrBackend": "ot2", "backendConfig": {**first, **deck}}, "86")
+    assert "error" not in a, a
+    b = await call(s, out, "backend.init", {"deviceId": "ot-b", "plrBackend": "ot2", "backendConfig": {**second, **deck}}, "87")
+    assert b.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], b
+
+
+async def test_two_sidecars_cannot_drive_one_ot2_named_by_host(fake_plr):
+    s1, out1 = _server()
+    s2, out2 = _server()
+    cfg = {"host": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}
+    a = await call(s1, out1, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "88")
+    assert "error" not in a, a
+    b = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "89")
+    assert b.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], b
+
+
+async def test_no_job_can_close_or_restart_the_window_while_a_run_holds_the_lease(fake_plr):
+    # R39 r5 (CRIT2 evidence): not even the lease holder's own job id; the run owns its window.
+    import asyncio
+
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
+    task = asyncio.create_task(_run(s, out, TRANSFER))  # jobId "job-x"
+    await entered.wait()
+    stop = await asyncio.wait_for(call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-x"}, "94"), timeout=2.0)
+    assert stop.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], stop
+    restart = await asyncio.wait_for(call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-x"}, "95"), timeout=2.0)
+    assert restart.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], restart
+    window = s.evidence.get_window("lh1")
+    assert window is not None and window.job_id == "job-x"
+    release.set()
+    await asyncio.wait_for(task, timeout=2.0)
 
 
 async def test_tips_can_be_dropped_into_a_named_spot(fake_plr):
@@ -981,6 +1026,37 @@ async def test_the_directory_swap_is_refused_where_there_is_no_proc(fake_plr, tm
     real_isdir = os_module.path.isdir
     monkeypatch.setattr(os_module.path, "isdir", lambda p: False if str(p).startswith("/proc") else real_isdir(p))
     await test_a_directory_swapped_for_a_symlink_after_the_boundary_check_is_refused_not_read(fake_plr, tmp_path, monkeypatch)
+
+
+async def test_a_layout_root_swapped_for_a_symlink_after_the_check_is_refused(fake_plr, tmp_path, monkeypatch):
+    # R39 r5 (MED8): the anchor itself. PCC_PLR_LAYOUT_DIR renamed away and replaced by a symlink
+    # to an outside directory holding the same relative path, after realpath().
+    import os as os_module
+
+    layouts = tmp_path / "layouts"
+    layouts.mkdir()
+    (layouts / "deck.json").write_text(json.dumps(DECK))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "deck.json").write_text(json.dumps(dict(DECK, name="leaked-outside-deck", children=[])))
+    monkeypatch.setenv("PCC_PLR_LAYOUT_DIR", str(layouts))
+    expected_real = os_module.path.realpath(str(layouts / "deck.json"))
+    original_realpath = os_module.path.realpath
+    state = {"swapped": False}
+
+    def racy_realpath(p, *a, **kw):
+        result = original_realpath(p, *a, **kw)
+        if not state["swapped"] and result == expected_real:
+            state["swapped"] = True
+            os_module.rename(str(layouts), str(tmp_path / "layouts-moved"))
+            os_module.symlink(str(elsewhere), str(layouts))
+        return result
+
+    monkeypatch.setattr(os_module.path, "realpath", racy_realpath)
+    s, out = _server()
+    resp = await init(s, out, deckLayoutPath="deck.json")
+    assert resp.get("error", {}).get("code") == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert _deserialized(fake_plr) == []
 
 
 # ── astra r1 on #378: PLR's own tracking is on, and liquids are declared ─────

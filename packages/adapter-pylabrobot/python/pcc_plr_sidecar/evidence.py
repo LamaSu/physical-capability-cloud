@@ -55,11 +55,30 @@ class EvidenceHandler(logging.Handler):
         # task does not exist yet, per device. drain() waits for them too.
         self._queued: dict[str, int] = {}
         self._queued_lock = threading.Lock()
+        # R39 r5: devices whose run has ended its evidence. A write for a sealed
+        # device is dropped, never scheduled, so nothing can still be pending or
+        # fail after backend.run reported success. Checked and set under
+        # _queued_lock, the same lock that counts cross-thread writes.
+        self._sealed: set[str] = set()
         self.setFormatter(logging.Formatter("%(message)s"))
 
     # ── recording window lifecycle ─────────────────────────────────────────
 
+    def unseal(self, device_id: str) -> None:
+        """Accept writes for ``device_id`` again (a run starts, or a window opens or closes)."""
+        with self._queued_lock:
+            self._sealed.discard(device_id)
+
+    async def seal_and_drain(self, device_id: str) -> None:
+        """End a run's evidence (R39 r5): seal the device, so no write can be
+        accepted for it from here on, from any thread, then drain every write
+        accepted before the seal. When this returns, none is pending."""
+        with self._queued_lock:
+            self._sealed.add(device_id)
+        await self.drain(device_id)
+
     def start_recording(self, device_id: str, job_id: str) -> RecordingWindow:
+        self.unseal(device_id)
         window = RecordingWindow(
             device_id=device_id,
             job_id=job_id,
@@ -73,6 +92,7 @@ class EvidenceHandler(logging.Handler):
         window = self._windows.get(device_id)
         if window is None or window.job_id != job_id:
             return None
+        self.unseal(device_id)
         return self._windows.pop(device_id)
 
     def is_recording(self, device_id: str) -> bool:
@@ -187,12 +207,20 @@ class EvidenceHandler(logging.Handler):
         except RuntimeError:
             running_loop = None
         if running_loop is self._loop:
+            if device_id is not None:
+                with self._queued_lock:
+                    if device_id in self._sealed:
+                        return  # the run already ended its evidence (R39 r5)
             self._create_and_track(method, params, device_id)
         else:
             # Count it now, in the calling thread, so a drain() that starts
             # before the loop runs the callback still waits for it (R39 r4).
+            # A sealed device takes no more writes (R39 r5): the check and the
+            # count are one step under the lock seal_and_drain takes.
             if device_id is not None:
                 with self._queued_lock:
+                    if device_id in self._sealed:
+                        return
                     self._queued[device_id] = self._queued.get(device_id, 0) + 1
             try:
                 self._loop.call_soon_threadsafe(self._create_queued, method, params, device_id)

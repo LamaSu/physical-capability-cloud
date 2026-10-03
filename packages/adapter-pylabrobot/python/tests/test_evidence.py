@@ -188,3 +188,26 @@ async def test_drain_waits_for_a_write_queued_from_another_thread():
     worker.join()  # the event loop is blocked here: the queued callback has not run
     await handler.drain("dev-1")
     assert len(written) == 1, written
+
+
+@pytest.mark.asyncio
+async def test_no_write_from_another_thread_is_left_pending_after_the_final_drain():
+    # R39 r5 (HIGH5): once backend.run's final drain has returned, a write a worker thread queues
+    # for that run must not be left pending (or fail) after the run reported success.
+    import threading
+
+    async def failing_writer(method, params):
+        raise RuntimeError("stdout pipe broken")
+
+    loop = asyncio.get_running_loop()
+    handler = EvidenceHandler(writer=failing_writer, loop=loop)
+    handler.start_recording("dev-1", "job-1")
+    finish = getattr(handler, "seal_and_drain", None) or handler.drain
+    await finish("dev-1")  # the run's final drain: nothing pending, it returns
+    worker = threading.Thread(target=lambda: handler.emit_event("dev-1", "log_line", {"line": "late"}))
+    worker.start()
+    worker.join()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    pending = [t for t in handler._pending.get("dev-1", []) if not t.cancelled()]
+    assert pending == [], "a write was accepted for the run after its final drain"

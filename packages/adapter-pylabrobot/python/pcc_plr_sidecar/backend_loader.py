@@ -172,15 +172,26 @@ class DeviceBusy(Exception):
     its physical endpoint is already driven elsewhere."""
 
 
+def _ot2_address(config: dict[str, Any]) -> tuple[str, int]:
+    """The OT-2 a config names, as (host, port): ``ot2Url``, else ``host``, else
+    ``url``. The ONE resolution both _create_ot2 (what is driven) and the
+    endpoint lock (what is locked) use, so no accepted spelling can drive a
+    robot without locking it (R39 r5)."""
+    ot2_url = config.get("ot2Url") or config.get("host") or config.get("url")
+    if not ot2_url or not isinstance(ot2_url, str):
+        raise ValueError(
+            "OT-2 backendConfig must include 'ot2Url' (e.g. 'http://192.168.1.50:31950')",
+        )
+    return _parse_ot2_url(ot2_url)
+
+
 def _hardware_endpoint(plr_backend: str, config: dict[str, Any]) -> Optional[str]:
     """The physical endpoint a hardware-capable backend drives, normalized, or
-    None for a simulator or the stub. Two spellings of one OT-2 are one endpoint."""
+    None for a simulator or the stub. Every spelling of one OT-2 is one endpoint.
+    Raises ValueError, as _create_ot2 would, when the config names no OT-2."""
     if plr_backend.strip().lower() != "ot2":
         return None
-    url = config.get("ot2Url")
-    if not isinstance(url, str) or not url:
-        return None  # _create_ot2 refuses a missing ot2Url
-    host, port = _parse_ot2_url(url)
+    host, port = _ot2_address(config)
     return f"ot2://{host.lower()}:{port}"
 
 
@@ -408,10 +419,12 @@ def _max_volume(config: dict[str, Any]) -> float:
 
 
 def _open_inside(base: str, real: str) -> int:
-    """Open ``real`` for reading by walking from ``base`` one component at a time,
-    each opened relative to the directory above it with ``O_NOFOLLOW`` (R39 r4,
-    MED8). A component swapped for a symlink after the boundary check, at any
-    depth, fails the walk instead of leading it outside ``base``, on any POSIX
+    """Open ``real`` for reading by walking from ``/`` one component at a time,
+    each opened relative to the directory above it with ``O_NOFOLLOW`` (R39
+    r4/r5, MED8). ``real`` and ``base`` are both resolved, so a legitimate path
+    has no symlink on it: a component swapped for a symlink after the boundary
+    check, at ANY depth, the layout root and its own parents included, fails the
+    walk instead of leading it outside ``PCC_PLR_LAYOUT_DIR``, on any POSIX
     system, with no reliance on ``/proc``. A platform that cannot open relative
     to a directory fd (Windows) refuses layout files: pass ``deckLayout`` inline.
     """
@@ -419,13 +432,15 @@ def _open_inside(base: str, real: str) -> int:
     directory = getattr(os, "O_DIRECTORY", None)
     if nofollow is None or directory is None or os.open not in os.supports_dir_fd:
         raise ValueError("deckLayoutPath is not supported on this platform; pass deckLayout inline")
-    parts = [part for part in os.path.relpath(real, base).split(os.sep) if part not in ("", ".")]
+    if not os.path.isabs(real) or os.path.commonpath([base, real]) != base or real == base:
+        raise ValueError("deckLayoutPath must name a file inside PCC_PLR_LAYOUT_DIR")
+    parts = [part for part in real.split(os.sep) if part not in ("", ".")]
     if not parts or ".." in parts:
         raise ValueError("deckLayoutPath must name a file inside PCC_PLR_LAYOUT_DIR")
     try:
-        dir_fd = os.open(base, os.O_RDONLY | directory)
+        dir_fd = os.open(os.sep, os.O_RDONLY | directory)
     except OSError as e:
-        raise ValueError("PCC_PLR_LAYOUT_DIR could not be opened") from e
+        raise ValueError("deckLayoutPath could not be opened") from e
     try:
         for name in parts[:-1]:
             try:
@@ -438,8 +453,10 @@ def _open_inside(base: str, real: str) -> int:
             dir_fd = next_fd
         try:
             return os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=dir_fd)
-        except OSError as e:
+        except FileNotFoundError as e:
             raise ValueError("deckLayoutPath must name an existing .json file") from e
+        except OSError as e:
+            raise ValueError("deckLayoutPath changed between check and read; refusing") from e
     finally:
         os.close(dir_fd)
 
@@ -448,9 +465,9 @@ def _read_layout_file(path: Any) -> Any:
     """Read ``deckLayoutPath``: a .json file inside PCC_PLR_LAYOUT_DIR, at most 5 MB.
 
     R39 MED8: the path is resolved and boundary-checked, then opened exactly
-    once by walking from the layout directory one component at a time with
-    ``O_NOFOLLOW`` (:func:`_open_inside`), so a symlink swapped in at any depth
-    after the check is refused rather than followed outside
+    once by walking from ``/`` one component at a time with ``O_NOFOLLOW``
+    (:func:`_open_inside`), so a symlink swapped in at any depth after the
+    check, the layout root included, is refused rather than followed outside
     ``PCC_PLR_LAYOUT_DIR``. Everything is read from that one fd, never a second
     open of the path.
     """
@@ -829,14 +846,9 @@ async def _create_ot2(config: dict[str, Any], other_hardware_loaded: bool) -> tu
     from pylabrobot.liquid_handling.backends import OpentronsOT2Backend
     from pylabrobot.resources.opentrons import OTDeck
 
-    ot2_url = config.get("ot2Url") or config.get("host") or config.get("url")
-    if not ot2_url or not isinstance(ot2_url, str):
-        raise ValueError(
-            "OT-2 backendConfig must include 'ot2Url' (e.g. 'http://192.168.1.50:31950')",
-        )
+    host, port = _ot2_address(config)
     if config.get("ot2ApiKey") or config.get("apiKey"):
         log.warning("ot2ApiKey is not used: OpentronsOT2Backend takes no API key")
-    host, port = _parse_ot2_url(ot2_url)
     _max_volume(config)
     tracking = _configure_tracking(config, hardware=True, other_hardware_loaded=other_hardware_loaded)
     deck, stripped = _load_deck(config, OTDeck, frozenset({"OTDeck"}), hardware=True)

@@ -144,6 +144,8 @@ class Commands:
                     f"deviceId {device_id} has not finished setup; call backend.init first",
                     {"deviceId": device_id, "jobId": job_id},
                 )
+            # This run's evidence is open until its final seal_and_drain (R39 r5).
+            self.evidence.unseal(device_id)
             window = self.evidence.get_window(device_id)
             if window is None or window.job_id != job_id:
                 # Auto-start this job's window if the TS adapter didn't pre-arm it.
@@ -231,7 +233,7 @@ class Commands:
         run before `backend.run` returns. If a write failed, surface it as an
         error rather than letting the caller report clean success."""
         try:
-            await self.evidence.drain(device_id)
+            await self.evidence.seal_and_drain(device_id)
         except Exception as e:  # noqa: BLE001 — any drain failure voids success
             raise RpcException(
                 RPC_ERROR_CODES["INTERNAL_ERROR"],
@@ -310,7 +312,10 @@ class Commands:
         # while that lease is held.
         if self.loader.has(device_id):
             handle = self.loader.get(device_id)
-            if handle.busy and handle.busy_job_id != job_id:
+            # R39 r5: the running job owns its window. While a run holds the
+            # lease, no request may open, replace or close the window, not
+            # even one naming the running job.
+            if handle.busy or handle.setting_up:
                 raise RpcException(
                     RPC_ERROR_CODES["DEVICE_BUSY"],
                     f"deviceId {device_id} is busy running job {handle.busy_job_id}",
@@ -326,7 +331,10 @@ class Commands:
         # lease; a different job may not close it either.
         if self.loader.has(device_id):
             handle = self.loader.get(device_id)
-            if handle.busy and handle.busy_job_id != job_id:
+            # R39 r5: the running job owns its window. While a run holds the
+            # lease, no request may open, replace or close the window, not
+            # even one naming the running job.
+            if handle.busy or handle.setting_up:
                 raise RpcException(
                     RPC_ERROR_CODES["DEVICE_BUSY"],
                     f"deviceId {device_id} is busy running job {handle.busy_job_id}",
