@@ -20,6 +20,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { SensorAdapter } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 import type { LogCaptureService } from "../log-capture-service.js";
 
 // ---------------------------------------------------------------------------
@@ -89,6 +90,11 @@ export class PrinterLogAdapter implements SensorAdapter {
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private chainLength = 0;
   private latestEntryHash: string | null = null;
+  /** The recording, from startRecording until stopRecording has emitted its summary, and each poll in flight. */
+  private readonly work = new OutstandingWork();
+  private endRecording: (() => void) | null = null;
+  /** Polls the timer started that have not finished: stopRecording waits for them. */
+  private readonly polls = new Set<Promise<void>>();
 
   /** True when no logProvider was supplied and the simulated script is used. */
   private readonly usingSimulatedProvider: boolean;
@@ -145,15 +151,27 @@ export class PrinterLogAdapter implements SensorAdapter {
 
     // Reset the chain so each job starts fresh
     this.logCaptureService.reset();
+    this.endRecording = this.work.begin();
 
-    // Poll immediately, then on interval
-    await this.poll();
+    // Poll immediately, then on interval. A first poll that fails starts nothing: the
+    // recording ends here, so nothing is left outstanding (astra pack 186).
+    try {
+      await this.poll();
+    } catch (err) {
+      this.recording = false;
+      this.jobId = null;
+      this.endRecording?.();
+      this.endRecording = null;
+      throw err;
+    }
 
     this.pollTimer = setInterval(() => {
-      this.poll().catch(() => {
+      const poll = this.poll().catch(() => {
         // Non-fatal poll errors are silently swallowed to avoid crashing the
         // adapter loop; real implementations would log here.
       });
+      this.polls.add(poll);
+      void this.work.track(poll).then(() => this.polls.delete(poll));
     }, this.pollIntervalMs);
   }
 
@@ -162,12 +180,28 @@ export class PrinterLogAdapter implements SensorAdapter {
    * The summary event type is `printer_job_verified`.
    */
   async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
+    try {
+      return await this.finishRecording();
+    } finally {
+      // Ended once the summary is emitted, or once stopping failed: nothing more is
+      // scheduled either way. A poll still in flight is counted on its own.
+      this.endRecording?.();
+      this.endRecording = null;
+    }
+  }
+
+  private async finishRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
     this.recording = false;
 
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+
+    // A poll the timer started before this stop is the job's: wait for it first, so each
+    // entry is captured under this job, in the log's order, and the summary covers it
+    // (astra pack 186). Like the final poll, it waits on the log source.
+    await Promise.all([...this.polls]);
 
     // Do a final poll to capture any remaining lines
     if (this.jobId) {
@@ -224,6 +258,16 @@ export class PrinterLogAdapter implements SensorAdapter {
     this.listeners.push(callback);
   }
 
+  /**
+   * Resolves once no recording is running (stopRecording has made its final poll and
+   * emitted printer_job_verified) and no poll is in flight. A poll the timer started just
+   * before stopRecording can still emit a log_hash_chain_entry after stopRecording returns;
+   * this waits for it. At once when nothing is outstanding.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
@@ -231,6 +275,8 @@ export class PrinterLogAdapter implements SensorAdapter {
     }
     this.recording = false;
     this.listeners = [];
+    this.endRecording?.();
+    this.endRecording = null;
   }
 
   // ---------------------------------------------------------------------------
