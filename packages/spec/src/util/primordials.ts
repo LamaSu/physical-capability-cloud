@@ -273,20 +273,23 @@ ObjectFreeze(PINNED_CONSTRUCTOR);
  *     constructor whose "promise" is a forged thenable (astra pack 187).
  *
  * `await promise` takes the engine's thenable path, since `constructor` is not
- * %Promise%: it calls the own `then`, which reads only the frozen species, and
- * the value is then resolved as any resolution is, looking `then` up on it if
- * it is an object. So hand out only promises that settle with a primitive or
- * an object with no prototype (admission's result, the set digest, a
- * boolean). A promise this package awaits itself, and never hands out, takes
- * `awaitedHere`, on whose value `await` looks nothing up.
+ * %Promise%: it calls the own `then`, which reads the own `constructor` and
+ * the frozen record's species, and builds its promise with PinnedSpecies and
+ * the Promise captured at load. Nothing it reads is on Promise.prototype or
+ * the global Promise. The value is then resolved as any resolution is,
+ * looking `then` up on it if it is an object. So hand out only promises that
+ * settle with a primitive or an object with no prototype (admission's result,
+ * the set digest, a boolean). A promise this package awaits itself, and never
+ * hands out, takes `awaitedHere`, on whose value `await` looks nothing up.
  *
  * The boundary: the promise returned, its own methods, and the promises they
  * return. A static that a caller calls after the change, such as
  * `Promise.all`, `Promise.race` or `Promise.resolve`, reads the global Promise
  * and its statics as they are then (`Promise.all` looks up `resolve` on its
- * receiver, and `then` on each promise it makes) and is outside it.
- * `promise.constructor` is not the global Promise; `instanceof Promise` still
- * holds.
+ * receiver, and `then` on each promise it makes) and is outside it. So is what
+ * a caller's own callback returns: a derived promise follows it, as `then`
+ * does. `promise.constructor` is not the global Promise; `instanceof Promise`
+ * still holds.
  */
 export function ownPromise<T>(promise: Promise<T>): Promise<T> {
   ObjectDefineProperty(promise, "constructor", fixedDescriptor(PINNED_CONSTRUCTOR));
