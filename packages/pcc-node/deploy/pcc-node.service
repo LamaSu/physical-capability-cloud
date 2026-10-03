@@ -29,7 +29,7 @@ RestartSec=5
 # equivalent policy; on neither, pcc-node still refuses to arm unless PCC_ALLOW_NO_LANDLOCK=1 (README).
 AppArmorProfile=pcc-node
 
-# === Service hygiene (NOT an exec allowlist -- that is L1 above) ====================================
+# === Service hygiene (NOT the exec allowlist -- that is the AppArmor + Landlock layers) =============
 # A dedicated, ephemeral user; persistent key/state under /var/lib/pcc-node; config under /etc/pcc-node.
 # These replace the retired, unsound NoExecPaths=/ + ExecPaths= directives (verdict 105m: systemd
 # cannot split mmap from execve, so it could never be the exact allowlist).

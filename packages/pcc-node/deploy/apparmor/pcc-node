@@ -1,6 +1,8 @@
-# AppArmor profile for pcc-node -- Layer 1, the HARD exec allowlist (steward ruling 10/03, verdict 105n).
+# AppArmor profile for pcc-node -- one half of the hard exec allowlist (steward ruling 10/03, verdict 105n).
 #
-# This is the mechanism that actually guarantees "pcc-node executes only its pinned device utilities".
+# The hard guarantee "pcc-node executes only its pinned device utilities" is the INTERSECTION of this
+# profile and the mandatory in-process Landlock, never this profile alone: AppArmor closes the loader
+# residual Landlock leaves, and Landlock closes interpreter re-execution (python3) this profile must allow.
 # AppArmor has SEPARATE permissions for execute-as-program (x) and executable memory-map (m). That is
 # the control the in-process Landlock layer (L2) lacks: Landlock must grant the ELF loader EXECUTE so
 # dynamically-linked utilities can run, and its execute right does not govern mmap, so
@@ -54,8 +56,9 @@ profile pcc-node flags=(attach_disconnected) {
   # Camera capture (verdict 105n MEDIUM3): the pinned utilities v4l2-ctl/ffmpeg/dd run under this
   # profile (ix), so they inherit these grants -- the video devices and the frame scratch file that
   # pcc_node/camera.py reads and writes. Without them the profile denies real capture operations.
+  # rw (not rwk): camera.py creates/reads/overwrites/removes the file but never locks it (105n LOW).
   /dev/video[0-9]* rw,
-  /tmp/pcc_frame.jpg rwk,
+  /tmp/pcc_frame.jpg rw,
 
   network inet stream,
   network inet6 stream,
