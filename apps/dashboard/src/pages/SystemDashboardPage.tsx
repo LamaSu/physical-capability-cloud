@@ -223,7 +223,8 @@ function serverReadState(report: SystemReport, key: string): ReadState {
  */
 function sectionState(report: SystemReport, key: string, rows: unknown[] | null): ReadState {
   const server = serverReadState(report, key);
-  if (server !== "available") return server;
+  if (server === "unavailable") return server;
+  // Rows are checked whatever the handler says of its reads, so an older gateway's malformed rows aren't counted either (astra 408e item 6).
   if (rows !== null && rows.length > 0 && !rows.every(hasId)) return "malformed";
   return server;
 }
