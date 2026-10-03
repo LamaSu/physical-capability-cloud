@@ -166,15 +166,39 @@ function rig(caseId: string, inj: Injector) {
     async dispose() {},
   };
   const cameraListeners: Array<(e: Emitted) => void> = [];
+  /**
+   * A complete LO-SE-1 capture for this rig's job, as a PullCameraAdapter emits it (#489): a
+   * camera event counts toward a tier only as one.
+   */
+  const capture = (type: "camera_snapshot" | "cv_inspection_result"): Emitted => {
+    const timestamp = new Date().toISOString();
+    const imageHash = `sha256:${"cd".repeat(32)}`;
+    const base = {
+      jobId: `job-${caseId}`,
+      acquiredAt: timestamp,
+      imageHash,
+      storageRef: `photo:${imageHash}`,
+      frameStored: false,
+      rawSizeBytes: 15_000,
+      captureMode: "kernel-pull",
+      captureClass: "CC0",
+      device: { path: "/dev/video0", identity: "SER-1" },
+      declaredChallengeId: null,
+      declaredChallengeAnchor: null,
+      antiSpoofScore: 1,
+    };
+    const payload = type === "camera_snapshot" ? base : { ...base, passed: true, confidence: 100, findings: ["ok"], referenceHash: null, model: "anti-spoof-heuristic" };
+    return { type, timestamp, source: cameraSource, payload };
+  };
   const camera: CameraAdapter = {
     id: `c-${caseId}`,
     source: cameraSource,
     async captureSnapshot() {
-      for (const l of [...cameraListeners]) l(event("camera_snapshot", cameraSource, { imageHash: "sha256:before" }));
+      for (const l of [...cameraListeners]) l(capture("camera_snapshot"));
       return { imageHash: "sha256:before", storageRef: "mem://before" };
     },
     async runInspection() {
-      for (const l of [...cameraListeners]) l(event("cv_inspection_result", cameraSource, { passed: true }));
+      for (const l of [...cameraListeners]) l(capture("cv_inspection_result"));
       return { passed: true, confidence: 1, findings: [], imageHash: "sha256:after" };
     },
     onEvidence(callback) {
