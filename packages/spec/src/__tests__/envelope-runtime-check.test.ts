@@ -535,3 +535,131 @@ describe("rule 5, unknown-command: only a declared command, matched exactly", ()
     for (const [name, params] of plate) expect(checkRuntimeCommand(PLATE, { name, params }, stateFor(PLATE)), name).toEqual({ allowed: true });
   });
 });
+
+/** n copies of one send time. */
+function sends(n: number, at: number): number[] {
+  return Array.from({ length: n }, () => at);
+}
+
+/** run_duration and job_duration are both [.., 120] min: a 7,200,000 ms deadline. */
+const DEADLINE_MS = 120 * MIN;
+const NOW = T0 + 10 * MIN;
+
+describe("rule 7, past-deadline: elapsed time against the deadline limit's max", () => {
+  const at = (env: OperationalEnvelopeV1, elapsedMs: number, command: unknown = ASPIRATE) =>
+    codeOf(checkRuntimeCommand(env, command, stateFor(env, { jobStartedAtMs: T0, nowMs: T0 + elapsedMs })));
+
+  it("allows a command at exactly the deadline and refuses one 1 ms past it (strictly greater)", () => {
+    expect(at(OT2, DEADLINE_MS)).toBe("allowed");
+    expect(at(OT2, DEADLINE_MS + 1)).toBe("past-deadline");
+    expect(at(OT2, DEADLINE_MS - 1)).toBe("allowed");
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { jobStartedAtMs: 0, nowMs: DEADLINE_MS + 0.5 })))).toBe("past-deadline");
+    expect(at(OT2, 0)).toBe("allowed");
+    expect(at(OT2, 1e12)).toBe("past-deadline");
+  });
+
+  it("uses the limit's max in minutes (x 60000), never its min, and the plate reader's own deadline", () => {
+    // run_duration is [0, 120] min: an hour in is inside it, though past the min of 0.
+    expect(at(OT2, 60 * MIN)).toBe("allowed");
+    // job_duration is [1, 120] min: 30 s in is allowed although it is below the min.
+    const read = { name: "read", params: { seconds: 30, wavelengthNm: 450, wells: "all" } };
+    expect(at(PLATE, 30_000, read)).toBe("allowed");
+    expect(at(PLATE, DEADLINE_MS, read)).toBe("allowed");
+    expect(at(PLATE, DEADLINE_MS + 1, read)).toBe("past-deadline");
+    // A shorter confirmed max moves the deadline with it.
+    const short = changed(OT2, (e) => (e.limits[3].max = 1.5));
+    expect(at(short, 90_000)).toBe("allowed");
+    expect(at(short, 90_001)).toBe("past-deadline");
+    // 0 is a real bound: a 0-minute deadline allows only elapsed 0.
+    const none = changed(OT2, (e) => (e.limits[3].max = 0));
+    expect(at(none, 0)).toBe("allowed");
+    expect(at(none, 1)).toBe("past-deadline");
+  });
+
+  it("comes before the rate and the params", () => {
+    const state = stateFor(OT2, { jobStartedAtMs: T0, nowMs: T0 + DEADLINE_MS + 1, recentCommandsAtMs: sends(60, T0 + DEADLINE_MS) });
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, state))).toBe("past-deadline");
+    expect(codeOf(checkRuntimeCommand(OT2, { name: "aspirate", params: { volumeUl: "x", extra: 1 } }, state))).toBe("past-deadline");
+  });
+});
+
+describe("rule 8, rate-limited: commands sent in (now - 60 s, now]", () => {
+  const with_ = (env: OperationalEnvelopeV1, recentCommandsAtMs: number[], command: unknown = ASPIRATE) =>
+    codeOf(checkRuntimeCommand(env, command, stateFor(env, { nowMs: NOW, recentCommandsAtMs })));
+
+  it("refuses when this command would exceed maxCommandsPerMinute: 59 sent is fine, 60 is the limit", () => {
+    expect(with_(OT2, sends(59, NOW - 1000))).toBe("allowed");
+    expect(with_(OT2, sends(60, NOW - 1000))).toBe("rate-limited");
+    const read = { name: "read", params: { seconds: 30, wavelengthNm: 450, wells: "all" } };
+    expect(with_(PLATE, sends(29, NOW - 1000), read)).toBe("allowed");
+    expect(with_(PLATE, sends(30, NOW - 1000), read)).toBe("rate-limited");
+  });
+
+  it("the window is (now - 60000, now]: an entry at exactly now - 60000 is outside, now - 59999 and now are inside", () => {
+    expect(with_(OT2, sends(60, NOW - 60_000))).toBe("allowed");
+    expect(with_(OT2, sends(60, NOW - 59_999))).toBe("rate-limited");
+    expect(with_(OT2, sends(60, NOW))).toBe("rate-limited");
+    expect(with_(OT2, sends(60, NOW - 60_000.5))).toBe("allowed");
+    expect(with_(OT2, sends(60, NOW - 59_999.5))).toBe("rate-limited");
+    // A send time after now (a clock step) is outside the window.
+    expect(with_(OT2, sends(60, NOW + 1))).toBe("allowed");
+  });
+
+  it("counts only the window, in any order and at any length", () => {
+    const mixed = [...sends(1000, NOW - 3_600_000), ...sends(59, NOW - 30_000), ...sends(5, NOW + 5), NOW - 60_000];
+    expect(with_(OT2, mixed.reverse())).toBe("allowed");
+    expect(with_(OT2, [...mixed, NOW - 1])).toBe("rate-limited");
+  });
+
+  it("comes before the params", () => {
+    expect(with_(OT2, sends(60, NOW), { name: "aspirate", params: { volumeUl: 150, extra: 1 } })).toBe("rate-limited");
+  });
+});
+
+describe("rule 6, the stop: always sendable, past the deadline and at the rate limit; its params are still checked", () => {
+  const late = (env: OperationalEnvelopeV1, sent: number) =>
+    stateFor(env, { jobStartedAtMs: T0, nowMs: T0 + DEADLINE_MS + 1, recentCommandsAtMs: sends(sent, T0 + DEADLINE_MS) });
+  const onTime = (env: OperationalEnvelopeV1, sent: number) => stateFor(env, { nowMs: NOW, recentCommandsAtMs: sends(sent, NOW) });
+
+  it("allows the adapter stop past the deadline, at the rate limit, and at both", () => {
+    expect(codeOf(checkRuntimeCommand(OT2, STOP, late(OT2, 0)))).toBe("allowed");
+    expect(codeOf(checkRuntimeCommand(OT2, STOP, onTime(OT2, 60)))).toBe("allowed");
+    expect(codeOf(checkRuntimeCommand(OT2, STOP, late(OT2, 60)))).toBe("allowed");
+    expect(codeOf(checkRuntimeCommand(OT2, STOP, late(OT2, 10_000)))).toBe("allowed");
+  });
+
+  it("refuses a non-stop command at each", () => {
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, late(OT2, 0)))).toBe("past-deadline");
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, onTime(OT2, 60)))).toBe("rate-limited");
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, late(OT2, 60)))).toBe("past-deadline");
+  });
+
+  it("checks the stop's params: one it does not declare is refused even when the stop is late", () => {
+    expect(codeOf(checkRuntimeCommand(OT2, { name: "stop", params: { force: true } }, late(OT2, 60)))).toBe("undeclared-param");
+  });
+
+  it("exempts the command eStop.stopCommand names, not a command called stop", () => {
+    const halt = changed(OT2, (e) => {
+      e.commands[5].name = "halt";
+      e.eStop.stopCommand = "halt";
+    });
+    expect(codeOf(checkRuntimeCommand(halt, { name: "halt", params: {} }, late(halt, 60)))).toBe("allowed");
+    const aspirateStops = changed(OT2, (e) => (e.eStop.stopCommand = "aspirate"));
+    expect(codeOf(checkRuntimeCommand(aspirateStops, STOP, late(aspirateStops, 0)))).toBe("past-deadline");
+    expect(codeOf(checkRuntimeCommand(aspirateStops, ASPIRATE, late(aspirateStops, 60)))).toBe("allowed");
+  });
+
+  it("exempts nothing under a hardware stop: the plate reader's stop command is an ordinary command", () => {
+    expect(codeOf(checkRuntimeCommand(PLATE, STOP, late(PLATE, 0)))).toBe("past-deadline");
+    expect(codeOf(checkRuntimeCommand(PLATE, STOP, onTime(PLATE, 30)))).toBe("rate-limited");
+    expect(codeOf(checkRuntimeCommand(PLATE, STOP, onTime(PLATE, 29)))).toBe("allowed");
+  });
+
+  it("is not exempt from rules 1 to 5", () => {
+    expect(codeOf(checkRuntimeCommand(changed(OT2, (e) => (e.strict = false)), STOP, late(OT2, 0)))).toBe("envelope-invalid");
+    expect(codeOf(checkRuntimeCommand(OT2, STOP, { ...late(OT2, 0), nowMs: "now" }))).toBe("state-invalid");
+    expect(codeOf(checkRuntimeCommand(OT2, STOP, { ...late(OT2, 0), adapterManifestDigest: OTHER_MANIFEST }))).toBe("adapter-mismatch");
+    expect(codeOf(checkRuntimeCommand(OT2, { name: "stop" }, late(OT2, 0)))).toBe("command-malformed");
+    expect(codeOf(checkRuntimeCommand(OT2, { name: "Stop", params: {} }, late(OT2, 0)))).toBe("unknown-command");
+  });
+});
