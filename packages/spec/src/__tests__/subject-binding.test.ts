@@ -98,8 +98,9 @@ describe("LO-EV-9 evidence subject binding — positive controls", () => {
     // The same signed bundleHash verifies with other ids, in another order, and returns them as given.
     expect(events.map((e) => e.id)).toEqual(reordered.map((e) => e.id));
     expect(events.map((e) => e.hash)).toEqual(reordered.map((e) => e.hash));
-    // What the bundle commits is the SET of event hashes.
+    // What the bundle commits is the sorted MULTISET of event hashes: a duplicate changes it.
     expect(events.map((e) => e.hash).sort()).toEqual(b.events.map((e) => e.hash).sort());
+    expect(await hashBundle([b.events[0]!, b.events[0]!])).not.toBe(await hashBundle([b.events[0]!]));
   });
 
   it("reads JSON-round-tripped events (the stored form) the same way", async () => {

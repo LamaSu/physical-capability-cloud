@@ -65,8 +65,9 @@
  * copies, deep-frozen. A consumer that evaluates the events further (levels,
  * admission) must evaluate them, not its own objects.
  *
- * WHAT THE RESULT DOES NOT COMMIT (E11b LOW). The bundle hash commits the SET
- * of event hashes (hashBundle sorts them), and each event hash commits `type`,
+ * WHAT THE RESULT DOES NOT COMMIT (E11b LOW). The bundle hash commits the
+ * sorted MULTISET of event hashes (hashBundle sorts them and keeps duplicates),
+ * and each event hash commits `type`,
  * `timestamp`, `source` and `payload`. An event's `id` and the ORDER of
  * `events` are not committed. They come back as the caller supplied them, for
  * display and archiving, and the same signed `bundleHash` verifies with any

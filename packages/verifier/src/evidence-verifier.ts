@@ -9,6 +9,12 @@
  *   4. Consistency checks between events (e.g., power profile matches execution duration)
  *   5. (Optional) Challenge freshness -- anti-replay proof
  *   6. (Optional) Step completeness -- workflow step coverage
+ *
+ * ONLY COMMITTED FIELDS DECIDE (E11c). The bundle hash commits the sorted multiset of event hashes,
+ * and each event hash commits `type`, `timestamp`, `source` and `payload`. An event's `id` and the
+ * order of `events` are not committed, so neither may change a verdict. The lifecycle and power
+ * events checked in step 4 are chosen by committed fields (timestamp, then hash), never by position.
+ * A workflow step in step 6 is covered only by a committed `payload.stepId`, never by an event's `id`.
  *   7. Assurance score rollup
  *   8. Produces a VerificationAttestation
  */
@@ -42,6 +48,37 @@ export interface DigitalVerifyOptions {
   executionProof?: ExecutionProof;
   /** Block timestamp to use for challenge age check. Defaults to Date.now()/1000. */
   currentBlockTimestamp?: bigint;
+}
+
+/**
+ * The event of `type` that comes first (`earliest`) or last (`latest`) by committed fields: its
+ * timestamp, then its hash. Never by array position, and never by the unsigned `id` (E11c). An
+ * unparseable timestamp sorts where the duration check then fails closed: as the latest start, or
+ * as the earliest completion.
+ */
+function selectByCommittedOrder(
+  events: readonly EvidenceEvent[],
+  type: string,
+  which: "earliest" | "latest",
+): EvidenceEvent | undefined {
+  const unparseableAs = which === "latest" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+  let chosen: EvidenceEvent | undefined;
+  let chosenTime = 0;
+  for (const event of events) {
+    if (event.type !== type) continue;
+    const parsed = new Date(event.timestamp).getTime();
+    const time = Number.isNaN(parsed) ? unparseableAs : parsed;
+    const better =
+      chosen === undefined ||
+      (which === "earliest"
+        ? time < chosenTime || (time === chosenTime && event.hash < chosen.hash)
+        : time > chosenTime || (time === chosenTime && event.hash > chosen.hash));
+    if (better) {
+      chosen = event;
+      chosenTime = time;
+    }
+  }
+  return chosen;
 }
 
 export class EvidenceVerifier {
@@ -117,9 +154,10 @@ export class EvidenceVerifier {
       }
     }
 
-    // 4. Consistency checks
-    const executionStarted = bundle.events.find((e) => e.type === "execution_started");
-    const executionCompleted = bundle.events.find((e) => e.type === "execution_completed");
+    // 4. Consistency checks. The latest start and the earliest completion, by committed fields (E11c):
+    // a positive duration then means every completion follows every start, whatever the order.
+    const executionStarted = selectByCommittedOrder(bundle.events, "execution_started", "latest");
+    const executionCompleted = selectByCommittedOrder(bundle.events, "execution_completed", "earliest");
     if (executionStarted && executionCompleted) {
       const startTime = new Date(executionStarted.timestamp).getTime();
       const endTime = new Date(executionCompleted.timestamp).getTime();
@@ -134,7 +172,7 @@ export class EvidenceVerifier {
       });
 
       // Check power profile consistency (if present)
-      const powerSummary = bundle.events.find((e) => e.type === "power_profile_summary");
+      const powerSummary = selectByCommittedOrder(bundle.events, "power_profile_summary", "earliest");
       if (powerSummary) {
         const powerDuration = (powerSummary.payload as any).durationSeconds;
         const durationRatio = powerDuration / durationSec;
@@ -173,14 +211,15 @@ export class EvidenceVerifier {
 
     // 6. Step completeness check (workflow coverage)
     if (options?.workflowSteps && options.workflowSteps.length > 0) {
+      // A step is covered only by a COMMITTED payload.stepId: the unsigned event id never counts (E11c).
       const traces: StepTrace[] = bundle.events
         .filter(
           (e) =>
-            e.type === "workflow_step_completed" ||
-            e.type === "execution_completed",
+            (e.type === "workflow_step_completed" || e.type === "execution_completed") &&
+            typeof (e.payload as any)?.stepId === "string",
         )
         .map((e) => ({
-          stepId: (e.payload as any).stepId ?? e.id,
+          stepId: (e.payload as any).stepId,
           outputHash: (e.payload as any).outputHash ?? e.hash,
           outputSummary: (e.payload as any).outputSummary ?? "",
           durationMs: (e.payload as any).durationMs,
