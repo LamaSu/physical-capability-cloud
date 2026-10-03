@@ -106,6 +106,19 @@ const ALLOWED_SSE_ORIGINS = new Set([
  */
 type StreamProjector = (event: StreamEvent) => { type: string; payload: unknown } | null;
 
+/** The longest id or event name a frame carries (N49 round 6). */
+const MAX_SSE_FIELD_LENGTH = 256;
+
+/**
+ * Whether a value can go on an SSE `id:` or `event:` line as it is (N49 round 6).
+ * Those lines end at the first CR or LF, so a publisher's id or type holding
+ * one could add lines or whole frames to the stream; a NUL is refused too.
+ * Data is always JSON.stringify'd, which escapes all three, so data needs no guard.
+ */
+function isSafeSseField(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_SSE_FIELD_LENGTH && !/[\r\n\0]/.test(value);
+}
+
 export async function topicSSE(app: FastifyInstance) {
   // Connection limit gate for all SSE topic streams (auth is checked per-route)
   app.addHook("onRequest", async (req, reply) => {
@@ -120,6 +133,12 @@ export async function topicSSE(app: FastifyInstance) {
    * Helper to set up an SSE connection for given topics. A stream passes
    * `project` when its topic is shared by subscribers who may not see every
    * event as published; without one, events are written as published.
+   *
+   * Every frame is guarded (N49 round 6): an event whose type is not a safe
+   * line is dropped, and a publisher id that is not one is left out of the
+   * frame. A stream that passes `cursorIds` never writes the publisher's id at
+   * all: each frame's id is the hub's own cursor for the topic, and
+   * Last-Event-ID is read back as that cursor.
    */
   function setupSSE(
     req: { raw: { on: (event: string, cb: () => void) => void }; ip?: string },
@@ -128,6 +147,7 @@ export async function topicSSE(app: FastifyInstance) {
     lastEventId?: string,
     origin?: string,
     project?: StreamProjector,
+    cursorIds = false,
   ) {
     // Strict origin validation — reject unknown origins with default
     const allowOrigin = origin && ALLOWED_SSE_ORIGINS.has(origin)
@@ -145,7 +165,7 @@ export async function topicSSE(app: FastifyInstance) {
 
     const unsubscribe = streamHub.subscribe(
       topics,
-      (event) => {
+      (event, cursor) => {
         let type = event.type;
         let data = event.payload;
         if (project) {
@@ -159,7 +179,16 @@ export async function topicSSE(app: FastifyInstance) {
           type = projected.type;
           data = projected.payload;
         }
-        const payload = `id: ${event.id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+        // A type that could end its line early would let the event write
+        // lines of its own choosing: drop the event.
+        if (!isSafeSseField(type)) return;
+        // The frame's id: the hub's cursor on a cursor stream (no cursor, no
+        // id), else the publisher's id when it is a safe line.
+        const id = cursorIds
+          ? (cursor ? String(cursor.seq) : undefined)
+          : (isSafeSseField(event.id) ? event.id : undefined);
+        const idLine = id === undefined ? "" : `id: ${id}\n`;
+        const payload = `${idLine}event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
         try {
           reply.raw.write(payload);
         } catch {
@@ -167,6 +196,7 @@ export async function topicSSE(app: FastifyInstance) {
         }
       },
       lastEventId,
+      cursorIds ? { cursor: "seq" } : undefined,
     );
 
     const heartbeat = setInterval(() => {
@@ -243,6 +273,10 @@ export async function topicSSE(app: FastifyInstance) {
   // future producer), not inside any one producer. Only the aggregate
   // batch-level events pass; per-sample events stay on the authenticated,
   // owner-projected HTTP surface (routes/batches.ts viewEvents).
+  // The whole frame is the stream's, not the publisher's (round 6): its id is
+  // the hub's cursor on this topic, so no publisher id (which could name a
+  // sample, a job or a result) reaches a subscriber, and Last-Event-ID resumes
+  // from that cursor. Anything else as Last-Event-ID replays nothing.
   app.get("/sse/stream/batch/:batchId", async (req, reply) => {
     const auth = await resolveSSEAuth(req);
     if (!auth.authenticated) {
@@ -261,7 +295,7 @@ export async function topicSSE(app: FastifyInstance) {
       });
       return message ? { type: message.type, payload: message.payload } : null;
     };
-    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin, project);
+    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin, project, true);
     await new Promise(() => {});
   });
 }

@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { topicSSE } from "../sse/topic-sse.js";
-import { streamHub } from "../sse/stream-hub.js";
+import { StreamHub, streamHub } from "../sse/stream-hub.js";
 import { BatchProducer } from "../sse/producers.js";
 import { generateBatchEvent, resetBatchGenerator } from "../sse/mock-data-generator.js";
 import { batchTracker, sensorPipeline } from "../services.js";
@@ -171,14 +171,24 @@ function publishOnBatchTopic(batchId: string, type: string, payload: unknown, id
   return id;
 }
 
+let marker = 1_000_000;
+
+/** True when `frames` holds the batch_sealed frame whose slotCount is `slotCount`. */
+function hasSealed(frames: Frame[], slotCount: number): boolean {
+  return frames.some((f) => f.event === "batch_sealed" && f.data !== undefined && JSON.parse(f.data).slotCount === slotCount);
+}
+
 /**
  * Publishes a legitimate batch_sealed and waits for its frame. The stream writes
  * in publish order, so once this frame has arrived every event published before
  * it has already been through the stream: a safe point for a "was not sent" check.
+ * It finds its frame by a unique slotCount, not by the frame id: since round 6 the
+ * batch stream's ids are its own cursors, never the publisher's ids.
  */
 async function barrier(client: SseClient, batchId: string): Promise<void> {
-  const id = publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 1 });
-  await client.waitFor((frames) => frames.some((f) => f.id === id));
+  const slotCount = ++marker;
+  publishOnBatchTopic(batchId, "batch_sealed", { slotCount });
+  await client.waitFor((frames) => hasSealed(frames, slotCount));
 }
 
 /** A reading as Alice's instrument would report it for her sample in the victim batch. */
@@ -291,15 +301,15 @@ describe("N49 r5 F1: the shared batch stream is projected at the stream boundary
     const secret = `hash-${uid()}`;
     const sub = await subscribeBatch(batchId);
 
-    const sealedId = publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 12, resultHash: secret, sampleLabel: secret });
-    const doneId = publishOnBatchTopic(batchId, "batch_completed", { completed: 10, failed: 2, resultHash: secret, slotId: secret, tags: { secret } });
-    await sub.waitFor((frames) => frames.some((f) => f.id === doneId));
+    publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 12, resultHash: secret, sampleLabel: secret });
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 10, failed: 2, resultHash: secret, slotId: secret, tags: { secret } });
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_completed"));
 
-    const byId = (id: string) => sub.frames().find((f) => f.id === id)!;
-    expect(byId(sealedId)).toMatchObject({ event: "batch_sealed" });
-    expect(JSON.parse(byId(sealedId).data!)).toEqual({ batchId, slotCount: 12 });
-    expect(byId(doneId)).toMatchObject({ event: "batch_completed" });
-    expect(JSON.parse(byId(doneId).data!)).toEqual({ batchId, completed: 10, failed: 2 });
+    const [sealed, done] = sub.events(); // in publish order
+    expect(sealed).toMatchObject({ event: "batch_sealed" });
+    expect(JSON.parse(sealed.data!)).toEqual({ batchId, slotCount: 12 });
+    expect(done).toMatchObject({ event: "batch_completed" });
+    expect(JSON.parse(done.data!)).toEqual({ batchId, completed: 10, failed: 2 });
     expect(sub.text).not.toContain(secret);
   });
 
@@ -331,10 +341,11 @@ describe("N49 r5 F1: the shared batch stream is projected at the stream boundary
     // Published BEFORE anyone subscribes: they sit in the hub's replay buffer.
     publishOnBatchTopic(batchId, "sensor_reading", { ...aliceReading(batchId, { tag: secret, sampleId: "s", jobId: "j" }), id: "reading-2" });
     publishOnBatchTopic(batchId, "sample_added", { slotId: secret, position: "A1", sampleLabel: secret });
-    const doneId = publishOnBatchTopic(batchId, "batch_completed", { completed: 3, failed: 1, resultHash: secret });
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 3, failed: 1, resultHash: secret });
 
-    const sub = await subscribe(`/sse/stream/batch/${batchId}`, { ...bob, "last-event-id": "an-event-this-hub-never-saw" });
-    await sub.waitFor((frames) => frames.some((f) => f.id === doneId));
+    // "0" is the stream's cursor before its first event, so everything buffered is replayed.
+    const sub = await subscribe(`/sse/stream/batch/${batchId}`, { ...bob, "last-event-id": "0" });
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_completed"));
     await barrier(sub, batchId);
 
     expect(sub.text).not.toContain(secret);
@@ -376,5 +387,187 @@ describe("N49 r5 F1: the shared batch stream is projected at the stream boundary
     const frames = await sub.waitFor((all) => all.some((f) => f.id === id));
     expect(frames.find((f) => f.id === id)).toMatchObject({ event: "job_progress" });
     expect(JSON.parse(frames.find((f) => f.id === id)!.data!)).toEqual({ jobId, progress: 40, note: "plain job data" });
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// N49 round 6 (CRITICAL): the SSE envelope bypassed the projection. setupSSE
+// wrote the publisher's raw event.id into each frame, so an allowlisted
+// batch_sealed or batch_completed could carry a sample id, a job id or a result
+// hash in its id, and an id holding CR/LF could inject whole frames. Replay
+// matched Last-Event-ID against those same publisher ids. Now the batch
+// stream's frame id is its own per-topic cursor, assigned by the hub at
+// publish, and every stream guards its id and event lines.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Publishes a uniquely marked batch_sealed and waits until every client has it. */
+async function barrierAll(subs: SseClient[], batchId: string): Promise<void> {
+  const slotCount = ++marker;
+  publishOnBatchTopic(batchId, "batch_sealed", { slotCount });
+  for (const sub of subs) await sub.waitFor((frames) => hasSealed(frames, slotCount));
+}
+
+describe("N49 r6: the batch stream's SSE envelope carries nothing from the publisher", () => {
+  it("an allowlisted batch event's publisher id never reaches the wire; the frame id is the stream's own cursor", async () => {
+    const batchId = `env-${uid()}`;
+    const secret = `secret-sample-${uid()}`;
+    const sub = await subscribeBatch(batchId);
+
+    publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 1 }, secret);
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_sealed"));
+
+    expect(sub.text).not.toContain(secret);
+    expect(sub.events().map((f) => f.id)).toEqual(["1"]); // the first event on this topic
+  });
+
+  it("an id carrying CR/LF cannot inject a frame or an event", async () => {
+    const batchId = `inject-${uid()}`;
+    const secret = `secret-${uid()}`;
+    const sub = await subscribeBatch(batchId);
+
+    publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 2 }, `x\nevent: sensor_reading\ndata: ${secret}\n\nid: y`);
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 1, failed: 0 }, `x\r\ndata: ${secret}`);
+    await barrier(sub, batchId);
+
+    expect(sub.text).not.toContain(secret);
+    expect(sub.text).not.toContain("sensor_reading");
+    expect(sub.events().map((f) => [f.event, f.id])).toEqual([
+      ["batch_sealed", "1"],
+      ["batch_completed", "2"],
+      ["batch_sealed", "3"],
+    ]);
+  });
+
+  it("Last-Event-ID resumes from the stream's own cursor: exactly the later events, each with its cursor id", async () => {
+    const batchId = `resume-${uid()}`;
+    const secret = `secret-${uid()}`;
+    const first = await subscribeBatch(batchId);
+    publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 4 }, `${secret}-a`);
+    await first.waitFor((frames) => frames.some((f) => f.event === "batch_sealed"));
+    const seen = first.events()[0];
+    first.close();
+
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 3, failed: 1 }, `${secret}-b`);
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 4, failed: 0 }, `${secret}-c`);
+
+    const again = await subscribe(`/sse/stream/batch/${batchId}`, { ...bob, "last-event-id": seen.id ?? "" });
+    await again.waitFor((frames) => frames.filter((f) => f.event === "batch_completed").length >= 2);
+    await barrier(again, batchId);
+
+    expect(seen.id).toBe("1");
+    expect(again.events().map((f) => [f.event, f.id])).toEqual([
+      ["batch_completed", "2"],
+      ["batch_completed", "3"],
+      ["batch_sealed", "4"],
+    ]);
+    expect(first.text + again.text).not.toContain(secret);
+  });
+
+  it("a Last-Event-ID that is not this stream's cursor replays nothing, so it is no oracle and leaks nothing", async () => {
+    const batchId = `oracle-${uid()}`;
+    const secret = `secret-${uid()}`;
+    publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 5 }, secret); // buffered before anyone subscribes
+
+    const known = await subscribe(`/sse/stream/batch/${batchId}`, { ...bob, "last-event-id": secret });
+    const unknown = await subscribe(`/sse/stream/batch/${batchId}`, { ...bob, "last-event-id": `never-${uid()}` });
+    await barrierAll([known, unknown], batchId);
+
+    for (const sub of [known, unknown]) {
+      expect(sub.text).not.toContain(secret);
+      expect(sub.events()).toHaveLength(1); // only the live barrier: nothing was replayed
+    }
+  });
+
+  it("each batch topic counts its own cursor", async () => {
+    const a = `count-a-${uid()}`;
+    const b = `count-b-${uid()}`;
+    const subA = await subscribeBatch(a);
+    const subB = await subscribeBatch(b);
+
+    publishOnBatchTopic(a, "batch_sealed", { slotCount: 1 });
+    publishOnBatchTopic(a, "batch_completed", { completed: 1, failed: 0 });
+    publishOnBatchTopic(b, "batch_sealed", { slotCount: 1 });
+    await subA.waitFor((frames) => frames.filter((f) => f.event !== undefined).length >= 2);
+    await subB.waitFor((frames) => frames.filter((f) => f.event !== undefined).length >= 1);
+
+    expect(subA.events().map((f) => f.id)).toEqual(["1", "2"]);
+    expect(subB.events().map((f) => f.id)).toEqual(["1"]);
+  });
+
+  it("every stream guards its frame: a kernel event whose id carries CR/LF arrives without an id line and injects nothing", async () => {
+    const kernelId = `kernel-${uid()}`;
+    const secret = `secret-${uid()}`;
+    const sub = await subscribe(`/sse/stream/kernel/${kernelId}`);
+    await sub.waitFor((frames) => frames.length >= 1);
+
+    streamHub.publish([{ type: "kernel", id: kernelId }], {
+      id: `k\nevent: injected\ndata: ${secret}`, type: "kernel_status", timestamp: new Date().toISOString(),
+      topic: { type: "kernel", id: kernelId }, payload: { status: "online" },
+    });
+    const frames = await sub.waitFor((all) => all.some((f) => f.event === "kernel_status"));
+
+    expect(sub.text).not.toContain("injected");
+    expect(sub.text).not.toContain(secret);
+    const frame = frames.find((f) => f.event === "kernel_status")!;
+    expect(frame.id).toBeUndefined();
+    expect(JSON.parse(frame.data!)).toEqual({ status: "online" });
+  });
+
+  it("every stream drops an event whose type could break the frame", async () => {
+    const kernelId = `kernel-${uid()}`;
+    const secret = `secret-${uid()}`;
+    const sub = await subscribe(`/sse/stream/kernel/${kernelId}`);
+    await sub.waitFor((frames) => frames.length >= 1);
+    const publish = (id: string, type: string, payload: unknown) =>
+      streamHub.publish([{ type: "kernel", id: kernelId }], { id, type, timestamp: new Date().toISOString(), topic: { type: "kernel", id: kernelId }, payload });
+
+    publish("t1", `kernel_status\ndata: ${secret}`, { status: "x" });
+    publish("t2", "kernel_status\r", { status: "y" });
+    publish("t3", "kernel_status", { status: "online" }); // well formed: the barrier
+    await sub.waitFor((all) => all.some((f) => f.id === "t3"));
+
+    expect(sub.text).not.toContain(secret);
+    expect(sub.events().map((f) => f.id)).toEqual(["t3"]);
+  });
+
+  it("a job stream keeps the publisher's id when it is a safe one (only the batch stream switched to cursors)", async () => {
+    const jobId = `job-${uid()}`;
+    const sub = await subscribe(`/sse/stream/job/${jobId}`);
+    await sub.waitFor((frames) => frames.length >= 1);
+
+    streamHub.publish([{ type: "job", id: jobId }], {
+      id: "evt-safe-1", type: "job_progress", timestamp: new Date().toISOString(),
+      topic: { type: "job", id: jobId }, payload: { progress: 10 },
+    });
+    const frames = await sub.waitFor((all) => all.some((f) => f.event === "job_progress"));
+    expect(frames.find((f) => f.event === "job_progress")!.id).toBe("evt-safe-1");
+  });
+});
+
+describe("StreamHub cursors (N49 r6)", () => {
+  it("gives each topic its own monotonic cursor and, in cursor mode, replays only after a cursor; legacy mode is unchanged", () => {
+    const hub = new StreamHub(10);
+    const topic = { type: "batch" as const, id: "b1" };
+    const event = (id: string) => ({ id, type: "batch_sealed", timestamp: "t", topic, payload: {} });
+    hub.publish([topic], event("p1"));
+    hub.publish([topic], event("p2"));
+    hub.publish([topic], event("p3"));
+
+    const resumed: Array<[string, number | undefined]> = [];
+    hub.subscribe([topic], (e, cursor) => resumed.push([e.id, cursor?.seq]), "1", { cursor: "seq" });
+    expect(resumed).toEqual([["p2", 2], ["p3", 3]]);
+
+    const notACursor: string[] = [];
+    hub.subscribe([topic], (e) => notACursor.push(e.id), "p1", { cursor: "seq" });
+    expect(notACursor).toEqual([]);
+
+    const legacy: string[] = [];
+    hub.subscribe([topic], (e) => legacy.push(e.id), "p1");
+    expect(legacy).toEqual(["p2", "p3"]);
+
+    const live: Array<[string, number | undefined]> = [];
+    hub.subscribe([topic], (e, cursor) => live.push([e.id, cursor?.seq]));
+    hub.publish([topic], event("p4"));
+    expect(live).toEqual([["p4", 4]]);
   });
 });
