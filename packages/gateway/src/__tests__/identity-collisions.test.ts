@@ -381,3 +381,36 @@ describe("AZ-9 round 4: a source the catalog says EXISTS is never excused, whate
     }
   });
 });
+
+// AZ-9 round 4 hardening (found by the author, before review): SQLite resolves table and column names
+// case-insensitively, and a source may be a VIEW. A catalog check that compared names exactly, or listed
+// only tables, would read a present source as ABSENT, which an allowlist then excuses: fail OPEN.
+describe("AZ-9 round 4: the catalog check matches SQLite's own name resolution (mixed case, views)", () => {
+  type Raw = { prepare(sql: string): { all(...p: unknown[]): unknown[] }; exec(sql: string): unknown };
+  const raw = () => (getStore().db as unknown as { $client: Raw }).$client;
+  /** Points the ui_artifacts source (its data query AND what the catalog is asked) at `target`, with column `col`. */
+  const pointedAt = (target: string, col: string) => {
+    const client = raw();
+    return {
+      prepare: (sql: string) => {
+        const stmt = client.prepare(sql.replace("SELECT DISTINCT owner AS v FROM ui_artifacts", `SELECT DISTINCT ${col} AS v FROM ${target}`));
+        return { all: (...p: unknown[]) => stmt.all(...p.map((x) => (x === "ui_artifacts" ? target : x === "owner" ? col : x))) };
+      },
+    };
+  };
+
+  it("[neg] a table stored as UI_Artifacts_Case95e with column Owner is PRESENT when asked in lower case (read, never skipped)", () => {
+    raw().exec('CREATE TABLE IF NOT EXISTS "UI_Artifacts_Case95e" ("Owner" TEXT); INSERT INTO "UI_Artifacts_Case95e" ("Owner") VALUES (\'case95e@x.test\')');
+    const out = findIdentityCollisions(pointedAt("ui_artifacts_case95e", "owner"));
+    expect(out.read).toContain("ui_artifacts.owner");
+    expect(out.skipped).not.toContain("ui_artifacts.owner");
+    expect(out.failed).not.toContain("ui_artifacts.owner");
+  });
+
+  it("[neg] a source that is a VIEW is PRESENT (read, never skipped)", () => {
+    raw().exec('CREATE TABLE IF NOT EXISTS ui_base_view95e (owner TEXT); CREATE VIEW IF NOT EXISTS ui_view95e AS SELECT owner FROM ui_base_view95e');
+    const out = findIdentityCollisions(pointedAt("ui_view95e", "owner"));
+    expect(out.read).toContain("ui_artifacts.owner");
+    expect(out.skipped).not.toContain("ui_artifacts.owner");
+  });
+});

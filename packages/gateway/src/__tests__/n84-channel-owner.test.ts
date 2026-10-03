@@ -249,7 +249,7 @@ beforeAll(async () => {
   keyA = provisionApiKey({ operatorId: A, scopes: ["operator"] }).rawKey;
   keyB = provisionApiKey({ operatorId: B, scopes: ["operator"] }).rawKey;
   keyC = provisionApiKey({ operatorId: C, scopes: ["operator"] }).rawKey;
-});
+}, 60_000); // boots the whole gateway: under a loaded host it can exceed the default 10 s hook timeout
 
 beforeEach(() => {
   _clearOperatorChannelsForTests();
