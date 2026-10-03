@@ -116,5 +116,22 @@ chk(!attestationSetRoot.toString().includes('satisfied') && !roleDigest.toString
 // (9) attestor set is bound: changing an attestation (score) -> different attestationHash -> different root
 chk(attestationSetRoot([inspectorRole], { inspector: [{ ...A1, score: 50 }, A2] }).toLowerCase() !== root.toLowerCase(), 'D4: mutating an attestation (score) -> different attestationHash -> different root');
 
+// (10) EMPTY role set (oracle #4836, 10/02): a unit whose funded program names NO attestation roles still
+// has a root. It is the same formula over an empty role-digest array, so it stays bound to the funded
+// program. Not ZERO32 (that would drop the program binding) and not sha256(canonicalize([])) (that
+// would put a second hash family into a keccak tree). The oracle mirror (recon d34cc48) pins these two values.
+const emptyRoot = (fph) => keccak256(enc(['bytes32', 'bytes32', 'bytes32[]'], [ATTSET_DOMAIN, fph, []]));
+const EMPTY_GOLDENS = [
+  ['0x' + '00'.repeat(32), '0xfa5d8d6e62798ae6c9a812af6ebcb3a9e74b26bf2f7334911769b136ed2fd8f9'],
+  ['0x' + 'ab'.repeat(32), '0x96c3e7c793a4bc2dda245ef16c490b408f5ee6aaf200b4008750eb93750d942a'],
+];
+for (const [fph, want] of EMPTY_GOLDENS) {
+  const got = emptyRoot(fph);
+  console.log(`  empty roles, fundedProgramHash ${fph.slice(0, 6)}..  attestationSetRoot ${got}`);
+  chk(got.toLowerCase() === want, `D4 empty set (oracle #4836): fundedProgramHash ${fph.slice(0, 6)}.. -> ${want}`);
+}
+chk(attestationSetRoot([], {}).toLowerCase() === emptyRoot(fundedProgramHash).toLowerCase(), 'D4 empty set: the production-shaped attestationSetRoot([]) equals the empty-array formula (no refusal)');
+chk(emptyRoot('0x' + '00'.repeat(32)) !== emptyRoot('0x' + 'ab'.repeat(32)), 'D4 empty set: the root still binds the funded program');
+
 console.log(`\n${ok ? 'attestationSetRoot GOLDEN VERIFIED (D4 ratified): registry-snapshot policy pinned to fundedProgramHash, preimage incl comment+timestamp, duplicate roles+attestors REJECTED, satisfied EXCLUDED, role/quorum/snapshot bound. Conformance target for the production attestation-root builder; oracle cross-confirms. Attestor sigs = ECDSA low-s (runtime evaluator verifies). OPEN: confirm the exact attestationHash preimage (canonical-object vs concat) with oracle.' : 'DIVERGENCE -- blocker'}`);
 process.exit(ok ? 0 : 1);
