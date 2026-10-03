@@ -22,7 +22,12 @@ import {
   populateJobDetailDTO,
   populateJobList,
 } from "./populators/job.populator.js";
+import {
+  populateDeviceRegistrationDTO,
+  type DeviceRegistrationDTO,
+} from "./populators/device.populator.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { redactDiagnostic } from "../redaction.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
@@ -365,12 +370,13 @@ export class JobFacade extends BaseFacade {
   }
 
   /**
-   * Register a device for a kernel.
+   * Register a device for a kernel. The response is the explicit registration view
+   * (populateDeviceRegistrationDTO), never the stored row.
    * Replaces: POST /api/devices/register
    */
   async registerDevice(
     body: RegisterDeviceInput,
-  ): Promise<Result<{ device: unknown }>> {
+  ): Promise<Result<{ device: DeviceRegistrationDTO | undefined }>> {
     return this.execute("registerDevice", async () => {
       const { kernelId, id, type, model, adapterType, adapterConfig, capabilities } = body;
 
@@ -398,17 +404,39 @@ export class JobFacade extends BaseFacade {
         healthStatus: "healthy",
       });
 
-      return { device };
+      // An explicit view, not the row (N71): the row holds adapterConfig, and with a
+      // rest-spread every column added later would be public.
+      return { device: populateDeviceRegistrationDTO(device) };
     });
   }
 
   /**
-   * Get devices for a kernel.
+   * The public view of a device row (N71, operator item 86). It is the same view
+   * GET /api/kernels/:kernelId/devices returns (kernel.facade.ts getDevices). A
+   * row's adapterConfig is the device's connection config (hosts, tokens, API
+   * keys): no response carries it, and dispatch reads it from the row. This
+   * endpoint used to return the raw rows to any key, for any kernel. (What a
+   * caller sends in is its own: POST /api/setup/generate-config hands it back.)
+   */
+  private publicDevice(d: any) {
+    return {
+      id: d.id,
+      type: d.type,
+      model: d.model,
+      status: d.status ?? "offline",
+      healthStatus: d.healthStatus ?? "unknown",
+      adapterType: d.adapterType ?? undefined,
+      capabilities: d.capabilities ?? d.contributesToCapabilities ?? [],
+    };
+  }
+
+  /**
+   * Get devices for a kernel (the public view; see publicDevice).
    * Replaces: GET /api/devices/:kernelId
    */
   async getDevicesForKernel(kernelId: string): Promise<Result<unknown[]>> {
     return this.execute("getDevicesForKernel", async () => {
-      return this.repos.kernels.findDevicesByKernel(kernelId);
+      return this.repos.kernels.findDevicesByKernel(kernelId).map((d: any) => this.publicDevice(d));
     });
   }
 
@@ -434,7 +462,11 @@ export class JobFacade extends BaseFacade {
         // non-fatal
       }
 
-      return { healthy: result.healthy, details: result.details ?? null };
+      // Scrubbed here as well as in the service: this is what leaves the API (N71).
+      return {
+        healthy: result.healthy,
+        details: typeof result.details === "string" ? redactDiagnostic(result.details) : (result.details ?? null),
+      };
     });
   }
 

@@ -18,6 +18,7 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { redactDiagnostic } from "../redaction.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -587,7 +588,10 @@ export class KernelService {
   }
 
   /**
-   * Ping a device adapter for health.
+   * Ping a device adapter for health. `details` is the adapter's status, or, when the adapter
+   * throws, its message with credentials scrubbed: that text leaves the gateway in the health
+   * response, and an error often quotes the URL the device was configured with, userinfo
+   * included (Node's fetch does) (N71).
    */
   async checkDeviceHealth(deviceId: string): Promise<{ healthy: boolean; details?: string }> {
     const machine = this.machines.get(deviceId);
@@ -601,7 +605,7 @@ export class KernelService {
     } catch (err) {
       return {
         healthy: false,
-        details: err instanceof Error ? err.message : "unknown_error",
+        details: err instanceof Error ? redactDiagnostic(err.message) : "unknown_error",
       };
     }
   }
