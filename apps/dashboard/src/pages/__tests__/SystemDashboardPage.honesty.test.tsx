@@ -137,6 +137,9 @@ const REPORT = {
     ESCROW_CONTRACT_ADDRESS: "0x7e57000000000000000000000000000000c0ffee",
     NODE_ENV: "production",
   },
+  // Every facade/repo read behind this report succeeded: additive field
+  // (astra 408b F1) the route always sends now, empty when nothing failed.
+  unavailable: [] as string[],
 };
 
 const EMPTY_REPORT = {
@@ -155,6 +158,7 @@ const EMPTY_REPORT = {
     ESCROW_CONTRACT_ADDRESS: null,
     NODE_ENV: null,
   },
+  unavailable: [] as string[],
 };
 
 const ROUTE = "/api/telemetry/system";
@@ -351,6 +355,34 @@ describe("gateway answering", () => {
     expect(valueIn("Gateway", "Uptime")).toBe("42s");
     expectNoFixtures(t);
     expect(t).not.toContain("Couldn't load");
+  });
+
+  it("a section the gateway flags unavailable renders 'couldn't be read', never 'lists no' (astra 408b F1)", async () => {
+    stubFetch({ [ROUTE]: { status: 200, body: { ...EMPTY_REPORT, unavailable: ["kernels", "jobs"] } } });
+    const t = (await renderPage()).text();
+    expect(t).toContain("couldn't be read");
+    expect(t).not.toContain("The report lists no kernels.");
+    expect(t).not.toContain("The report lists no jobs.");
+    // Sections the gateway did NOT flag still read as genuinely empty.
+    expect(t).toContain("The report lists no capabilities.");
+    expect(valueIn("Kernels", "Registered")).toBeNull();
+  });
+
+  it("when the gateway doesn't report per-section availability at all, an empty list reads 'unreported', not confidently empty (astra 408b F1)", async () => {
+    const { unavailable: _omit, ...legacyEmptyReport } = EMPTY_REPORT;
+    stubFetch({ [ROUTE]: { status: 200, body: legacyEmptyReport } });
+    const t = (await renderPage()).text();
+    expect(t).toContain("didn't report whether");
+    expect(t).not.toContain("The report lists no kernels.");
+  });
+
+  it("a malformed row makes its section unavailable rather than counted (astra 408b F6)", async () => {
+    stubFetch({ [ROUTE]: { status: 200, body: { ...REPORT, db: { ...REPORT.db, kernels: [{}] } } } });
+    const t = (await renderPage()).text();
+    expect(t).toContain("couldn't be read");
+    expect(valueIn("Kernels", "Registered")).toBeNull();
+    // Other sections, whose rows are still well-formed, are unaffected.
+    expect(valueIn("Jobs", "Jobs")).toBe("5");
   });
 
   it("a full page of jobs is counted as a lower bound", async () => {

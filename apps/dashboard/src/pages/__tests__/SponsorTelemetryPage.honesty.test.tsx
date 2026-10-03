@@ -186,17 +186,19 @@ describe("live data", () => {
     expect(text()).not.toContain("Mock");
   });
 
-  it("an answer that names no integration shows an empty state, not zeros", async () => {
+  it("an answer that names no integration is unavailable, not a confident empty state (astra 408b F3)", async () => {
     stubFetch({ [ROUTE]: { status: 200, body: { timestamp: "2026-09-24T12:00:00.000Z" } } });
     const { text } = await renderPage();
-    expect(text()).toContain("No integrations reported");
-    expect(text()).not.toMatch(/of 6 integrations|Couldn't load/);
+    expect(text()).toContain("Couldn't load integration status");
+    expect(text()).not.toContain("No integrations reported");
+    expect(text()).not.toMatch(/of 6 integrations/);
   });
 
-  it("an answer that isn't an object is not left loading forever", async () => {
+  it("an answer that isn't an object is unavailable, not a confident 'no integrations' (astra 408b F3)", async () => {
     stubFetch({ [ROUTE]: { status: 200, body: null } });
     const { text } = await renderPage();
-    expect(text()).toContain("No integrations reported");
+    expect(text()).toContain("Couldn't load integration status");
+    expect(text()).not.toContain("No integrations reported");
     expect(text()).not.toMatch(/Refreshing|of 6 integrations/);
   });
 

@@ -280,6 +280,29 @@ describe("gateway unreachable", () => {
     expect(t).not.toContain("half-a-t");
   });
 
+  it("a trace or span with a status outside the known vocabulary is unavailable, never rendered as healthy (astra 408b F4)", async () => {
+    const bogusRoot = {
+      traceId: "bad0000000000000000000000000000",
+      spanId: "bad0000000000001",
+      operation: "kernel.job.weird",
+      service: "kernel",
+      status: "bogus",
+      startTime: Date.now() - 1_000,
+      attributes: {},
+    };
+    const bogusTrace = {
+      traceId: bogusRoot.traceId,
+      rootSpan: bogusRoot,
+      spans: [bogusRoot],
+      startTime: bogusRoot.startTime,
+      status: "bogus",
+    };
+    stubFetch({ "/api/traces": { status: 200, body: { traces: [bogusTrace], total: 1 } } });
+    const t = (await renderPage()).text();
+    expect(t).toContain("Couldn't load traces");
+    expect(t).not.toContain("kernel.job.weird");
+  });
+
   it("a streamed trace does not stand in for a failed read", async () => {
     FakeEventSource.mode = "open";
     stubFetch({});

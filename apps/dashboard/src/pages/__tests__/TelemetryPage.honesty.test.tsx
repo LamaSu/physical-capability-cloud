@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { TelemetryPage } from "../TelemetryPage.js";
+import { useUIStore } from "../../stores/ui-store.js";
 
 // ── fetch stub ───────────────────────────────────────────────────────────────
 
@@ -150,6 +151,8 @@ const LIVE: Routes = {
         totalEvents: 42,
         byPhase: { escrow_fund: { total: 2, failed: 1 } },
         eventsPerMinute: 3.5,
+        // 1 success of 2 terminal results (astra 408b F2's additive denominator).
+        terminalCount: 2,
       },
       phases: [],
     },
@@ -183,7 +186,7 @@ const EMPTY: Routes = {
   "/api/telemetry/stats": {
     status: 200,
     body: {
-      stats: { totalJobs: 0, activeJobs: 0, avgDuration_ms: 0, successRate: 0, totalEvents: 0, byPhase: {}, eventsPerMinute: 0 },
+      stats: { totalJobs: 0, activeJobs: 0, avgDuration_ms: 0, successRate: 0, totalEvents: 0, byPhase: {}, eventsPerMinute: 0, terminalCount: 0 },
       phases: [],
     },
   },
@@ -364,6 +367,48 @@ describe("gateway answering", () => {
     expect(t).toMatch(/Success Rate—/);
     expect(t).not.toContain("0%");
     expect(t).not.toContain("Couldn't load");
+  });
+
+  it("a failed phase followed by a retry shows '—', not an invented 0% (astra 408b F2)", async () => {
+    // One job: job_started failed once (byPhase.job_started.failed = 1), then
+    // retried — its LAST event is "started", so there is still no terminal
+    // result. The gateway's own terminalCount says so; the page must not
+    // fall back to "any failed phase -> 0%".
+    stubFetch({
+      ...EMPTY,
+      "/api/telemetry/stats": {
+        status: 200,
+        body: {
+          stats: {
+            totalJobs: 1,
+            activeJobs: 1,
+            avgDuration_ms: 0,
+            successRate: 0,
+            totalEvents: 2,
+            byPhase: { job_started: { total: 2, failed: 1 } },
+            eventsPerMinute: 0,
+            terminalCount: 0,
+          },
+          phases: [],
+        },
+      },
+    });
+    const t = (await renderPage()).text();
+    expect(t).toMatch(/Success Rate—/);
+    expect(t).not.toContain("0%");
+  });
+
+  it("a log entry missing its required fields fails the read, not rendered as a garbled row (astra 408b F5)", async () => {
+    stubFetch({ ...EMPTY, "/api/telemetry/logs": { status: 200, body: { entries: [{}], total: 1, sources: [] } } });
+    const t = (await renderPage()).text();
+    expect(t).toContain("Couldn't load logs");
+    expect(t).not.toContain("Invalid Date");
+  });
+
+  it("the page subtitle describes bounded telemetry, not 'full pipeline visibility' (astra 408b F7, LOW)", async () => {
+    stubFetch(EMPTY);
+    await renderPage();
+    expect(useUIStore.getState().currentPageSubtitle).not.toContain("Full pipeline visibility");
   });
 
   it("a failed refresh keeps the earlier data and marks it stale", async () => {
