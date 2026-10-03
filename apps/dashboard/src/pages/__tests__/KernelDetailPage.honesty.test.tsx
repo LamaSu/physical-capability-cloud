@@ -129,6 +129,14 @@ describe("KernelDetailPage", () => {
     expect(t).not.toContain("No active jobs");
   });
 
+  it("a capability list the snapshot left out is 'not reported', not 'no capabilities' (astra 408a MEDIUM)", async () => {
+    const { capabilityTypes: _c, ...partial } = SNAPSHOT.kernel as Record<string, unknown>;
+    stubKernel({ status: 200, body: { kernel: { ...partial, capabilityCount: 1 } } });
+    const t = await render("kernel-real-1");
+    expect(t).not.toContain("No capabilities registered");
+    expect(t).toContain("The gateway didn't report this kernel's capabilities.");
+  });
+
   it("says 'not found' only when the gateway answers KERNEL_NOT_FOUND", async () => {
     stubKernel({ status: 404, body: { error: "KERNEL_NOT_FOUND", message: "kernel 'k-x' not found" } });
     const t = await render("no-such-kernel");

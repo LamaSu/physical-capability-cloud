@@ -189,6 +189,13 @@ describe("no production mock (ratchet)", () => {
     expect(leaks).toEqual([]);
   });
 
+  it("a page with no honesty test is caught, so a fixture no pattern sees can't ship unchecked (astra 408a MEDIUM)", () => {
+    // astra's example: a new page rendering const rows = [{ name: "Sample machine", price: 25 }] matches no pattern.
+    expect(PATTERNS.some(([, rx]) => new RegExp(rx.source, rx.flags).test('const rows = [{ name: "Sample machine", price: 25 }];'))).toBe(false);
+    // So every page must have an honesty test, or be listed, with a reason, as not yet tested.
+    expect(pagesWithoutHonestyTest(["pages/NewSamplePage.tsx"], [])).toEqual(["pages/NewSamplePage.tsx"]);
+  });
+
   it("the scanner detects each pattern (self-test)", () => {
     const sample = [
       "const MOCK_TREASURY = {};",

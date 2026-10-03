@@ -348,6 +348,51 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     expect(text()).toContain("REVOKED");
   });
 
+  it("a wallet answer without an explicit mock: false is not taken for a real wallet (astra 408a HIGH)", async () => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": {
+        status: 200,
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true },
+      },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    expect(text()).not.toContain("Usable on PCC now");
+    expect(button(/Add funds with a card/)).toBeUndefined();
+  });
+
+  it("a checkout without the provider's identity, or off Coinbase's checkout, is not offered (astra 408a HIGH)", async () => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": {
+        status: 200,
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+      },
+      "/api/fiat-ramp/coinbase/onramp": { status: 200, body: { onrampUrl: "https://example.test/pay" } },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    await click(button(/Add funds with a card/));
+    expect([...container.querySelectorAll("a")].some((a) => a.textContent?.includes("Open card checkout"))).toBe(false);
+  });
+
+  it("a spend permission the answer doesn't confirm in full is not shown ACTIVE (astra 408a HIGH)", async () => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": {
+        status: 200,
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+      },
+      "/api/fiat-ramp/cdp/spend-permission": { status: 200, body: { permissionId: "x" } },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    typeInto(container.querySelector('input[placeholder="Agent address (0x…)"]'), "0x4444444444444444444444444444444444444444");
+    await click(button("Issue scoped key"));
+    expect(text()).not.toContain("ACTIVE");
+  });
+
   it("a gateway error is shown with its reason, and no wallet appears", async () => {
     stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
