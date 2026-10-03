@@ -657,6 +657,36 @@ describe("the rules catch each known way around them (self-test)", () => {
     }
   });
 
+  it.each([
+    'const p = Headers["prototype"];\nObject.defineProperty(p, "set", { value: observe });',
+    'const nav = navigator.valueOf();\nObject.defineProperty(nav, "sendBeacon", { value: observe });',
+  ])("astra A03g F1: a protected object reached by a literal element read, or a read returning its receiver: %s", (code) => {
+    expect(caught(code)).toContain("global-write");
+  });
+
+  it.each([
+    ["global-write", 'const p = new Headers()["__proto__"];\np.set = observe;'],
+    ["global-write", 'const proto = Object["getPrototypeOf"](new Headers());\nproto.set = observe;'],
+    ["global-write", "const H = Headers.valueOf();\nH.prototype.set = observe;"],
+    ["global-write", 'const sp = Storage["proto" + "type"];\nsp.setItem = observe;'],
+    ["global-write", "const a = Array.prototype.reverse();\na.push = observe;"],
+    ["window-handle", 'const w = document["defaultView"];'],
+    ["code-from-string", '(() => 0)["constructor"]("return this")();'],
+    ["global-write", "const d = document.documentElement.parentNode;\nd.title = observe;"],
+    ["global-write", "const d = document.getRootNode();\nd.title = observe;"],
+    ["global-write", 'const d = node.ownerDocument;\nObject.defineProperty(d, "cookie", { get: observe });'],
+  ])("A03g F1's family, self-found (%s): %s", (rule, code) => {
+    expect(caught(code)).toContain(rule);
+  });
+
+  it.each([
+    "const name = ordinary.constructor.name;",
+    "if (value.constructor === Object) merge(value);",
+    'const isPlain = typeof value.constructor === "function";',
+  ])("astra A03g F2: reading a constructor's name, or comparing it, is let through: %s", (code) => {
+    expect(caught(code)).toEqual([]);
+  });
+
   it("the syntax rules let through what the app does", () => {
     for (const [code, rel] of [
       ['window.location.href = "/";', "pages/Probe.ts"],
