@@ -49,6 +49,7 @@
   var LIST_ROW_CAP = LIM.listRows;
   var WITHHELD_PROSE = "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
   var LOOKALIKE = {
+    // Cyrillic
     "\u0430": "a",
     "\u0435": "e",
     "\u043E": "o",
@@ -61,9 +62,32 @@
     "\u0455": "s",
     "\u0501": "d",
     "\u04BB": "h",
+    "\u051B": "q",
+    "\u051D": "w",
+    "\u04CF": "l",
+    "\u0410": "A",
+    "\u0412": "B",
+    "\u0415": "E",
+    "\u041A": "K",
+    "\u041C": "M",
+    "\u041D": "H",
+    "\u041E": "O",
+    "\u0420": "P",
+    "\u0421": "C",
+    "\u0422": "T",
+    "\u0425": "X",
+    "\u0406": "I",
+    "\u0408": "J",
+    "\u0405": "S",
+    "\u04AE": "Y",
+    "\u051A": "Q",
+    "\u051C": "W",
+    "\u04C0": "I",
+    // Greek
     "\u0391": "A",
     "\u0392": "B",
     "\u0395": "E",
+    "\u0396": "Z",
     "\u0397": "H",
     "\u0399": "I",
     "\u039A": "K",
@@ -72,44 +96,188 @@
     "\u039F": "O",
     "\u03A1": "P",
     "\u03A4": "T",
-    "\u03A7": "X",
     "\u03A5": "Y",
+    "\u03A7": "X",
     "\u03BF": "o",
     "\u03B1": "a",
-    "\u03C1": "p"
+    "\u03C1": "p",
+    "\u03BD": "v",
+    "\u03B9": "i",
+    "\u03BA": "k",
+    "\u03C5": "u",
+    "\u03C7": "x",
+    "\u03B5": "e",
+    "\u03C4": "t",
+    // Latin letters with no compatibility decomposition: dotless i and j, IPA, small capitals, strokes, hooks
+    "\u0131": "i",
+    "\u0237": "j",
+    "\u0251": "a",
+    "\u0261": "g",
+    "\u0269": "i",
+    "\u1D00": "a",
+    "\u0299": "b",
+    "\u1D04": "c",
+    "\u1D05": "d",
+    "\u1D07": "e",
+    "\uA730": "f",
+    "\u0262": "g",
+    "\u029C": "h",
+    "\u026A": "i",
+    "\u1D0A": "j",
+    "\u1D0B": "k",
+    "\u029F": "l",
+    "\u1D0D": "m",
+    "\u0274": "n",
+    "\u1D0F": "o",
+    "\u1D18": "p",
+    "\u0280": "r",
+    "\uA731": "s",
+    "\u1D1B": "t",
+    "\u1D1C": "u",
+    "\u1D20": "v",
+    "\u1D21": "w",
+    "\u028F": "y",
+    "\u1D22": "z",
+    "\u0111": "d",
+    "\u0180": "b",
+    "\u0268": "i",
+    "\u0142": "l",
+    "\xF8": "o",
+    "\u0127": "h",
+    "\u0167": "t",
+    "\u01A5": "p",
+    "\u0257": "d",
+    "\u0256": "d",
+    "\u0188": "c",
+    "\u0253": "b",
+    "\u0192": "f",
+    "\u0266": "h",
+    "\u0199": "k",
+    "\u0271": "m",
+    "\u0272": "n",
+    "\u0273": "n",
+    "\u0282": "s",
+    "\u01AD": "t",
+    "\u0288": "t",
+    "\u01B4": "y",
+    "\u0225": "z",
+    "\u024D": "r",
+    "\u0247": "e",
+    "\u023C": "c",
+    "\u0249": "j",
+    "\u0110": "D",
+    "\u0141": "L",
+    "\xD8": "O",
+    "\u0126": "H",
+    "\u0166": "T",
+    "\u0197": "I",
+    "\u01A4": "P",
+    "\u018A": "D",
+    "\u0187": "C",
+    "\u0181": "B",
+    "\u0191": "F",
+    "\u0198": "K",
+    "\u01AC": "T",
+    "\u01B3": "Y",
+    "\u0224": "Z",
+    "\u024C": "R",
+    "\u0246": "E",
+    "\u023B": "C"
   };
+  var INVISIBLE_RE = /[\p{M}\p{Cf}\u115f\u1160\u3164\uffa0]/gu;
+  var MONEY_EMOJI_RE = /[\u{1F4B0}-\u{1F4B8}\u{1F911}\u{1FA99}]/gu;
   function foldForClaims(text) {
-    let t = text.normalize("NFKC").replace(/[\u200b-\u200f\u2060\ufeff\u00ad]/g, "");
-    t = t.replace(/[\u0370-\u03ff\u0400-\u04ff\u0500-\u052f]/g, (c) => LOOKALIKE[c] ?? c);
-    return t;
+    let t = text.normalize("NFKD").replace(INVISIBLE_RE, "").normalize("NFKC");
+    t = t.replace(/\u2800/g, " ").replace(MONEY_EMOJI_RE, " $ ");
+    t = t.replace(/[^\x00-\x7f]/g, (c) => LOOKALIKE[c] ?? c);
+    return t.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ").replace(/\s+/g, " ").toLowerCase();
   }
-  var AMOUNT_RE = /[$\u20ac\u00a3\u00a5\u20bf]\s?\d|\d[\d,._]*\s?(?:usd|usdc|usdt|eurc|eur|gbp|jpy|eth|weth|btc|wbtc|dai|sol|matic|pol|cents?|dollars?)\b|\b(?:usd|usdc|usdt|eurc|eur|gbp|eth|btc|dai)\s?\d/i;
-  var CLAIM_RE = /\b(?:paid|unpaid|payout|payouts|received|refund|refunded|refunds|settled|released|verified|confirmed|funded|charged|deposited|withdrawn|balance|balances|credited|debited|approved|guaranteed)\b/i;
+  var LEET_I = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "@": "a", "$": "s", "!": "i", "|": "i" };
+  var LEET_L = { ...LEET_I, "1": "l", "|": "l" };
+  var LEET_RE = /[0134578@$!|]/g;
+  var HAS_LEET = /[0134578@$!|]/;
+  var views = (f) => HAS_LEET.test(f) ? [f, f.replace(LEET_RE, (c) => LEET_I[c]), f.replace(LEET_RE, (c) => LEET_L[c])] : [f];
+  var SPACED_RE = /(?<![a-z0-9])[a-z](?:[^a-z0-9]{1,3}[a-z](?![a-z0-9])){2,}/g;
+  var spacedRuns = (v) => (v.match(SPACED_RE) ?? []).map((r) => r.replace(/[^a-z]/g, "")).join(" ");
+  var CUR_CODE = "usdc|usdt|usde|usd|eurc|eur|gbp|jpy|cny|rmb|inr|chf|cad|aud|krw|rub|brl|mxn|eth|weth|btc|wbtc|dai|sol|matic|pol|xrp|ltc|bnb|busd|tusd|pyusd|gusd|frax|sats?|gwei|wei";
+  var CUR_WORD = "dollars?|bucks|cents?|euros?|pence|quid|yen|yuan|renminbi|rupees?|rubles?|roubles?|pesos?|francs?|satoshis?|bitcoins?|ethers?|stablecoins?";
+  var MAGNITUDE = "thousand|million|billion|trillion|mil|mio|mrd|mm|mn|bn|tn|k|m|b|t";
+  var NUMBER_WORD = "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion|dozen|half";
+  var CURRENCY = `(?:\\p{Sc}|(?:${CUR_CODE}|${CUR_WORD})\\b)`;
+  var AMOUNT_RE = new RegExp(
+    `\\p{Sc} ?(?:\\d|(?:${NUMBER_WORD})\\b)|${CURRENCY}(?<=\\d[\\d,._]{0,40} ?(?:${MAGNITUDE})? ?[(\\[]? ?${CURRENCY})|\\b(?:${NUMBER_WORD})\\b[ -]{0,3}(?:(?:${MAGNITUDE})\\b[ -]{0,3})?${CURRENCY}|\\ban? (?:${CUR_WORD})\\b|\\b(?:${CUR_CODE}|${CUR_WORD})[ :=]{0,3}\\d`,
+    //                                 USD 5, usdc:100
+    "u"
+  );
+  var CLAIM_WORDS = [
+    "paid|unpaid|prepaid|repaid|overpaid|underpaid|payout|payouts|paidout|received|refund|refunds|refunded|reimbursed",
+    "settled|released|verified|confirmed|approved|guaranteed|funded|charged|deposited|withdrawn|credited|debited",
+    "remitted|disbursed|escrowed|balance|balances",
+    "pagad[oa]s?|pago|abonad[oa]s?|reembolsad[oa]s?|reembolso|liquidad[oa]s?|cobrad[oa]s?|acreditad[oa]s?|depositad[oa]s?",
+    "verificad[oa]s?|confirmad[oa]s?|aprobad[oa]s?|aprovad[oa]s?|recibid[oa]s?|recebid[oa]s?|creditad[oa]s?|debitad[oa]s?|quitad[oa]s?|saldo",
+    "payee?s?|rembourse[es]?|remboursee?s?|remboursement|credite[es]?|creditee?s?|debite[es]?|debitee?s?|verifiee?s?",
+    "confirmee?s?|approuvee?s?|encaissee?s?|recue?s?|solde",
+    "bezahlt|gezahlt|ausgezahlt|uberwiesen|ueberwiesen|erstattet|ruckerstattet|rueckerstattet|gutgeschrieben|abgebucht",
+    "bestatigt|bestaetigt|verifiziert|genehmigt|beglichen|eingegangen|kontostand|guthaben",
+    "pagat[oaie]|rimborsat[oaie]|rimborso|accreditat[oaie]|addebitat[oaie]|verificat[oaie]|confermat[oaie]|approvat[oaie]",
+    "saldat[oaie]|incassat[oaie]|ricevut[oaie]",
+    "betaald|terugbetaald|uitbetaald|geverifieerd|bevestigd|goedgekeurd|ontvangen|gestort",
+    "zaplacon[oay]|oplacon[oay]|zwrocon[oay]|potwierdzon[oay]|zweryfikowan[oay]",
+    "odendi|onaylandi|dogrulandi|iade|bakiye|dibayar|lunas|dikembalikan|terverifikasi|disetujui"
+  ].join("|");
+  var CLAIM_RE = new RegExp(`\\b(?:${CLAIM_WORDS})\\b`);
+  var CLAIM_IN_RUN_RE = new RegExp(`(?:${CLAIM_WORDS})`);
+  var SCRIPT_CLAIM_WORDS = ["\u043E\u043F\u043B\u0430\u0447\u0435\u043D", "\u0432\u044B\u043F\u043B\u0430\u0447\u0435\u043D", "\u0441\u043F\u043B\u0430\u0447\u0435\u043D", "\u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0435\u043D", "\u0432\u043E\u0437\u0432\u0440\u0430\u0442", "\u0437\u0430\u0447\u0438\u0441\u043B\u0435\u043D", "\u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043D", "\u043F\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0436\u0435\u043D", "\u043F\u0440\u043E\u0432\u0435\u0440\u0435\u043D", "\u043E\u0434\u043E\u0431\u0440\u0435\u043D", "\u0431\u0430\u043B\u0430\u043D\u0441", "\u043F\u043E\u043B\u0443\u0447\u0435\u043D", "\u5DF2\u4ED8", "\u5DF2\u652F\u4ED8", "\u652F\u4ED8\u6210\u529F", "\u9000\u6B3E", "\u5DF2\u7ED3\u7B97", "\u5DF2\u7D50\u7B97", "\u5DF2\u786E\u8BA4", "\u5DF2\u78BA\u8A8D", "\u5DF2\u9A8C\u8BC1", "\u5DF2\u9A57\u8B49", "\u5230\u8D26", "\u5230\u8CEC", "\u4F59\u989D", "\u9918\u984D", "\u5DF2\u6536\u6B3E", "\u5DF2\u6279\u51C6", "\u652F\u6255\u6E08", "\u652F\u6255\u3044\u6E08", "\u652F\u6255\u5B8C\u4E86", "\u652F\u6255\u3044\u5B8C\u4E86", "\u5165\u91D1\u6E08", "\u8FD4\u91D1", "\u6C7A\u6E08\u6E08", "\u6C7A\u6E08\u5B8C\u4E86", "\u78BA\u8A8D\u6E08", "\u627F\u8A8D\u6E08", "\u6B8B\u9AD8", "\uC9C0\uAE09\uC644\uB8CC", "\uACB0\uC81C\uC644\uB8CC", "\uACB0\uC81C\uB428", "\uC9C0\uAE09\uB428", "\uD658\uBD88", "\uC794\uC561", "\uC785\uAE08\uC644\uB8CC", "\uD655\uC778\uB428", "\uC2B9\uC778\uB428", "\u0645\u062F\u0641\u0648\u0639", "\u062A\u0645\u0627\u0644\u062F\u0641\u0639", "\u0627\u0633\u062A\u0631\u062F\u0627\u062F", "\u0631\u0635\u064A\u062F", "\u092D\u0941\u0917\u0924\u093E\u0928\u0915\u093F\u092F\u093E", "\u092D\u0941\u0917\u0924\u093E\u0928\u0939\u094B\u0917\u092F\u093E"].flatMap((w) => [foldForClaims(w), foldForClaims(w.toUpperCase())]).map((w) => w.replace(/\s+/g, ""));
+  var SCRIPT_CLAIM_RE = new RegExp([...new Set(SCRIPT_CLAIM_WORDS)].join("|"), "u");
+  var NOTICE_RE = /\bwithh[eo]ld/;
+  var NOTICE_IN_RUN_RE = /withh[eo]ld/;
+  var MONEY_WORDS = [CLAIM_RE, CLAIM_IN_RUN_RE];
+  var NOTICE_WORDS = [NOTICE_RE, NOTICE_IN_RUN_RE];
+  function wordsIn(f, checks) {
+    for (const v of views(f)) {
+      const runs = spacedRuns(v);
+      for (const [word, inRun] of checks) if (word.test(v) || inRun.test(runs)) return true;
+    }
+    return false;
+  }
+  var scriptIn = (f) => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_RE.test(f.replace(/ /g, ""));
+  function statesAmount(text) {
+    return AMOUNT_RE.test(foldForClaims(text));
+  }
   function isMoneyClaim(text) {
-    const t = foldForClaims(text);
-    return AMOUNT_RE.test(t) || CLAIM_RE.test(t);
+    const f = foldForClaims(text);
+    return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS]);
   }
-  function proseText(text) {
-    return isMoneyClaim(text) ? WITHHELD_PROSE : text;
+  function mentionsWithheld(text) {
+    return wordsIn(foldForClaims(text), [NOTICE_WORDS]);
+  }
+  function isProseClaim(text) {
+    const f = foldForClaims(text);
+    return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS]);
   }
   var RECORD_STATUS_NOTE = " - reported by the record, not confirmed by a settlement read";
-  var MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/i;
+  var MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/;
   function isMoneyState(value) {
-    const t = foldForClaims(value).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[^A-Za-z0-9]+/g, " ");
-    return MONEY_STATE_RE.test(t);
+    return MONEY_STATE_RE.test(foldForClaims(value).replace(/[^a-z0-9]+/g, " "));
   }
   function recordValueText(field, value) {
     return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
   }
-  var LIST_PROFILES = {
-    "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], freeText: [] },
-    "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"], freeText: ["name", "location.label"] },
-    "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"], freeText: ["name", "location.label"] }
-  };
-  function listFreeTextFields(path) {
-    return LIST_PROFILES[path]?.freeText ?? [];
+  var RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
+  var WITHHELD_FIELD = "withheld: stated money or verification";
+  function boundValueText(field, value) {
+    if (value === "") return value;
+    if (/(^|\.)status$/.test(field) && !statesAmount(value) && !mentionsWithheld(value)) {
+      if (isMoneyState(value)) return value + RECORD_STATUS_NOTE;
+      return isMoneyClaim(value) ? value + RECORD_CLAIM_NOTE : value;
+    }
+    return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
   }
-  var WITHHELD_FIELD = "withheld: stated money";
+  var LIST_PROFILES = {
+    "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+    "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
+    "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] }
+  };
   function listProfileViolation(path, props) {
     const prof = LIST_PROFILES[path];
     if (!prof) return `no list field profile for ${path}`;
@@ -335,6 +503,18 @@
     if (v.arguments !== void 0 && !isPlain(v.arguments)) return false;
     return true;
   }
+  var FACADE_READ = "no business-state write; one telemetry event (facade read)";
+  var FUNNEL = "; with PCC_FUNNEL_ENABLED=true a 'discover' funnel audit row + PostHog event per request trace";
+  var EFFECT_REVIEWED_READS = [
+    { route: "/api/jobs", handler: "routes/jobs.ts GET /api/jobs -> JobFacade.list", effect: FACADE_READ },
+    { route: "/api/jobs/:", handler: "routes/jobs.ts GET /api/jobs/:jobId -> JobFacade.getById", effect: FACADE_READ },
+    { route: "/api/jobs/:/status", handler: "routes/job-submit.ts GET /api/jobs/:jobId/status -> JobFacade.getStatus", effect: FACADE_READ },
+    { route: "/api/kernels", handler: "routes/kernels.ts GET /api/kernels -> KernelFacade.list", effect: FACADE_READ },
+    { route: "/api/kernels/:", handler: "routes/kernels.ts GET /api/kernels/:kernelId -> KernelFacade.getById", effect: FACADE_READ },
+    { route: "/api/capabilities", handler: "routes/capabilities.ts GET /api/capabilities -> CapabilityFacade list", effect: FACADE_READ + FUNNEL },
+    { route: "/api/capabilities/:", handler: "routes/capabilities.ts GET /api/capabilities/:capId -> CapabilityFacade.getById", effect: FACADE_READ + FUNNEL },
+    { route: "/sse/stream/job/:", handler: "sse/topic-sse.ts GET /sse/stream/job/:jobId (auth + ownership check, topic subscribe)", effect: "no business-state write; per-IP connection counter; never opened by the browser kit" }
+  ];
   function bindMatchesPolicy(bind, key) {
     const policy = BIND_POLICY[key];
     if (!policy) return `no bind policy for ${key}`;
@@ -369,6 +549,41 @@
     } else if (bind.schema !== void 0) return "unexpected bind.schema";
     return null;
   }
+  function proseNode(type, id, words, fixed = {}) {
+    const node = { type, id, props: { ...fixed, [type === "field-label" ? "label" : "text"]: words }, untrusted: true };
+    if (isProseClaim(words)) withhold(node);
+    return node;
+  }
+  function withhold(node) {
+    node.props = node.type === "heading" ? { level: node.props?.level, withheld: true } : { withheld: true };
+    delete node.untrusted;
+  }
+  function isWithheldProse(node) {
+    return node.props?.withheld === true;
+  }
+  function agentWords(node) {
+    if (node.untrusted !== true || !node.props) return null;
+    const w = node.type === "field-label" ? node.props.label : node.props.text;
+    return typeof w === "string" ? w : null;
+  }
+  function agentProse(node, out = []) {
+    if (agentWords(node) !== null) out.push(node);
+    for (const c of node.children ?? []) agentProse(c, out);
+    return out;
+  }
+  function splitClaim(nodes) {
+    return nodes.length > 1 && isProseClaim(nodes.map((n) => agentWords(n) ?? "").join(" "));
+  }
+  function withholdSplitClaims(title, sections) {
+    const all = () => [title, ...sections].flatMap((n) => agentProse(n));
+    if (!splitClaim(all())) return;
+    for (const s of sections) {
+      const p = agentProse(s);
+      if (splitClaim(p)) p.forEach(withhold);
+    }
+    const rest = all();
+    if (splitClaim(rest)) rest.forEach(withhold);
+  }
   function dashboardManifestToIr(m) {
     if (!isPlain(m)) return { ok: false, reason: "manifest not a plain object" };
     if (!deepClean(m)) return { ok: false, reason: "prototype/nonfinite/symbol in manifest" };
@@ -376,7 +591,6 @@
     if (!onlyKeys(mm, ["csd", "title", "description", "theme", "sections"])) return { ok: false, reason: "unexpected top-level key" };
     const rawTitle = strictStr(mm.title, LIM.title);
     if (rawTitle === null) return { ok: false, reason: "title invalid" };
-    const title = proseText(rawTitle);
     if (!Array.isArray(mm.sections)) return { ok: false, reason: "sections not array" };
     if (mm.sections.length > LIM.sections) return { ok: false, reason: "too many sections" };
     let count = 0;
@@ -397,7 +611,7 @@
         const h = strictStr(secRaw.heading, LIM.title);
         if (h === null) return { ok: false, reason: "section.heading invalid" };
         if (!budget()) return { ok: false, reason: "node budget" };
-        children.push({ type: "heading", id: nextId(), props: { level: 2, text: proseText(h) }, untrusted: true });
+        children.push(proseNode("heading", nextId(), h, { level: 2 }));
       }
       for (const w of secRaw.windows) {
         const r = mapWindow(w, nextId, budget, bindBudget);
@@ -408,7 +622,8 @@
       sectionNodes.push({ type: "section", id: nextId(), children });
     }
     if (!budget()) return { ok: false, reason: "node budget" };
-    const titleNode = { type: "heading", id: nextId(), props: { level: 1, text: title }, untrusted: true };
+    const titleNode = proseNode("heading", nextId(), rawTitle, { level: 1 });
+    withholdSplitClaims(titleNode, sectionNodes);
     if (!budget()) return { ok: false, reason: "node budget" };
     return { ok: true, doc: { ir: "pcc-dashboard-ir/v1", title: titleNode, root: { type: "root", id: nextId(), children: sectionNodes } } };
   }
@@ -425,7 +640,7 @@
         {
           const text = strictStr(w.text);
           if (text === null) return { ok: false, reason: "note.text" };
-          return { ok: true, node: { type: "text", id, props: { text: proseText(text) }, untrusted: true } };
+          return { ok: true, node: proseNode("text", id, text) };
         }
       case "metric":
         if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
@@ -499,7 +714,7 @@
           const children = [];
           for (const l of labels.labels) {
             if (!budget()) return { ok: false, reason: "node budget" };
-            children.push({ type: "field-label", id: nextId(), props: { label: l }, untrusted: true });
+            children.push(proseNode("field-label", nextId(), l));
           }
           return { ok: true, node: { type: "form-summary", id, children } };
         }
@@ -525,7 +740,7 @@
             if (!isOpDescriptor(a)) return { ok: false, reason: "action grammar" };
             const label = strictStr(a.label, LIM.title);
             if (label === null) return { ok: false, reason: "action.label" };
-            children.push({ type: "badge", id: nextId(), props: { text: proseText(label), tone: "neutral" }, untrusted: true });
+            children.push(proseNode("badge", nextId(), label, { tone: "neutral" }));
           }
           return { ok: true, node: { type: "grid", id, props: { kind: "actions-readonly" }, children } };
         }
@@ -573,7 +788,7 @@
       const rawLabel = typeof def.title === "string" ? def.title : key;
       const s = strictStr(rawLabel, LIM.title);
       if (s === null) return { ok: false, reason: "field label" };
-      labels.push(proseText(s));
+      labels.push(s);
     }
     return { ok: true, labels };
   }
@@ -604,7 +819,7 @@
   function sourceClassOf(node) {
     const spec = NODE_SCHEMA[node.type];
     if (!spec) return null;
-    if (spec.prose) return "proposed";
+    if (spec.prose) return isWithheldProse(node) ? null : "proposed";
     const key = policyKeyOf(node);
     const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : void 0;
     return policy ? policy.sourceClass : null;
@@ -639,6 +854,8 @@
         return typeof v === "string" && GRID_KINDS.has(v);
       case "plan-kind":
         return typeof v === "string" && PLAN_KINDS.has(v);
+      case "true":
+        return v === true;
       case "selector":
         return isSelector(v);
     }
@@ -661,11 +878,13 @@
       if (typeof n.id !== "string" || !/^n[0-9]+$/.test(n.id) || ids.has(n.id)) return "id format/dup";
       ids.add(n.id);
       const spec = NODE_SCHEMA[n.type];
+      const withheld = spec.prose === true && isPlain(n.props) && hasOwn(n.props, "withheld");
+      const pspec = withheld ? n.type === "heading" ? { level: "level", withheld: "true" } : { withheld: "true" } : spec.props ?? {};
       if (n.props !== void 0) {
-        if (!isPlain(n.props) || !onlyKeys(n.props, Object.keys(spec.props ?? {}))) return `props off-schema for ${n.type}`;
-        for (const [k, v] of Object.entries(n.props)) if (!propType(v, spec.props[k])) return `prop ${k} wrong type on ${n.type}`;
+        if (!isPlain(n.props) || !onlyKeys(n.props, Object.keys(pspec))) return `props off-schema for ${n.type}`;
+        for (const [k, v] of Object.entries(n.props)) if (!propType(v, pspec[k])) return `prop ${k} wrong type on ${n.type}`;
       }
-      for (const req of spec.required ?? []) if (!n.props || !hasOwn(n.props, req)) return `missing prop ${req} on ${n.type}`;
+      for (const req of withheld ? Object.keys(pspec) : spec.required ?? []) if (!n.props || !hasOwn(n.props, req)) return `missing prop ${req} on ${n.type}`;
       if (n.type === "approval-notice" && n.props?.notice !== APPROVAL_NOTICE) return "approval-notice text not the fixed PCC sentence";
       if (n.type === "card") {
         const k = n.props?.kind;
@@ -694,11 +913,15 @@
         if (off) return off;
       }
       if (spec.prose) {
-        const p = n.props ?? {};
-        const t = typeof p.text === "string" ? p.text : typeof p.label === "string" ? p.label : "";
-        if (t !== WITHHELD_PROSE && isMoneyClaim(t)) return `prose ${n.type} states an amount or a money/verification status`;
+        if (withheld) {
+          if (n.untrusted !== void 0) return `withheld ${n.type} is PCC's notice, never untrusted`;
+        } else {
+          if (n.untrusted !== true) return `prose ${n.type} not untrusted`;
+          const p = n.props ?? {};
+          const t = typeof p.text === "string" ? p.text : typeof p.label === "string" ? p.label : "";
+          if (isProseClaim(t)) return `prose ${n.type} states an amount or a money/verification status, or mentions the withheld notice`;
+        }
       }
-      if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
       if (!spec.prose && n.untrusted !== void 0) return `non-prose ${n.type} marked untrusted`;
       if (spec.childless) {
         if (n.children !== void 0) return `${n.type} may not have children`;
@@ -726,7 +949,10 @@
     const e1 = walk(doc.title, 0);
     if (e1) return { ok: false, reason: `title: ${e1}` };
     const e2 = walk(doc.root, 0);
-    return e2 ? { ok: false, reason: e2 } : { ok: true };
+    if (e2) return { ok: false, reason: e2 };
+    const sections = doc.root.children ?? [];
+    if (splitClaim([doc.title, ...sections].flatMap((n) => agentProse(n)))) return { ok: false, reason: "agent prose states a claim across nodes" };
+    return { ok: true };
   }
 
   // src/mcp/dashboard-ir-renderer.ts
@@ -746,6 +972,8 @@
     "form-summary": "pcc-form",
     "field-label": "pcc-field",
     untrusted: "pcc-untrusted",
+    agent: "pcc-agent",
+    withheld: "pcc-withheld",
     invalid: "pcc-invalid",
     value: "pcc-value",
     row: "pcc-row",
@@ -799,8 +1027,8 @@
       fields: Object.freeze([
         { label: "Name", key: "name", required: true },
         { label: "Type", key: "type", required: true },
-        { label: "Base cost", key: "pricing.baseCost" },
-        { label: "Currency", key: "pricing.currency" },
+        { label: "Base cost", key: "pricing.baseCost", money: true },
+        { label: "Currency", key: "pricing.currency", money: true },
         { label: "Assurance tiers", key: "assuranceTiers", list: true },
         { label: "Available", key: "available", bool: true }
       ])
@@ -832,15 +1060,15 @@
           else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
           else if (typeof x === "boolean") parts.push(String(x));
         }
-        if (parts.length) return parts.join(", ");
+        if (parts.length) return boundValueText(k, parts.join(", "));
       }
       return UNAVAILABLE;
     }
     for (const k of keys) {
       const v = readSelector(data, k);
       if (v === "") continue;
-      if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
-      return recordValueText(k, v);
+      if (f.bool && (v === "true" || v === "false")) return v === "true" ? "Yes" : "No";
+      return f.money ? v : boundValueText(k, v);
     }
     return UNAVAILABLE;
   }
@@ -871,6 +1099,10 @@
     }
     return e;
   }
+  function paintProse(doc, cls, n, key) {
+    if (n.props?.withheld === true) return el(doc, cls + " " + CLS.withheld, WITHHELD_PROSE);
+    return el(doc, cls + " " + CLS.agent, String(n.props?.[key] ?? ""), true);
+  }
   var PAINTERS = Object.freeze({
     root: (d, n) => {
       const e = el(d, CLS.root);
@@ -882,8 +1114,8 @@
       paintChildren(d, n, e);
       return e;
     },
-    heading: (d, n) => el(d, CLS.heading, String(n.props?.text ?? ""), n.untrusted),
-    text: (d, n) => el(d, CLS.text, String(n.props?.text ?? ""), n.untrusted),
+    heading: (d, n) => paintProse(d, CLS.heading, n, "text"),
+    text: (d, n) => paintProse(d, CLS.text, n, "text"),
     stat: (d, n) => {
       const e = el(d, CLS.stat);
       e.appendChild(el(d, CLS.heading, String(n.props?.label ?? "")));
@@ -908,7 +1140,7 @@
     },
     // rows appended by bindList
     badge: (d, n) => {
-      const e = el(d, CLS.badge, String(n.props?.text ?? ""), true);
+      const e = paintProse(d, CLS.badge, n, "text");
       e.setAttr("data-tone", String(n.props?.tone ?? "neutral"));
       return e;
     },
@@ -924,7 +1156,7 @@
       paintChildren(d, n, e);
       return e;
     },
-    "field-label": (d, n) => el(d, CLS["field-label"], String(n.props?.label ?? ""), true)
+    "field-label": (d, n) => paintProse(d, CLS["field-label"], n, "label")
   });
   function paintNode(doc, node) {
     const p = PAINTERS[node.type];
@@ -962,27 +1194,25 @@
     mount.appendChild(paintNode(doc, ir.title));
     mount.appendChild(paintNode(doc, ir.root));
   }
-  function bindListRows(doc, listEl, node, rows, path = "") {
+  function bindListRows(doc, listEl, node, rows) {
     const rowTitle = String(node.props?.rowTitle ?? "");
     const rowMeta = Array.isArray(node.props?.rowMeta) ? node.props.rowMeta : [];
     const statusFrom = typeof node.props?.statusFrom === "string" ? node.props.statusFrom : "";
     const limit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
-    const freeText = listFreeTextFields(path);
-    const text = (field, v) => freeText.includes(field) && isMoneyClaim(v) ? WITHHELD_FIELD : v;
     let shown = 0;
     for (const row of rows) {
       if (shown >= limit) break;
       if (row === null || typeof row !== "object") continue;
-      const title = recordValueText(rowTitle, readSelector(row, rowTitle));
+      const title = boundValueText(rowTitle, readSelector(row, rowTitle));
       if (title === "") continue;
       const line = el(doc, CLS.row);
-      line.appendChild(el(doc, CLS.heading, text(rowTitle, title), true));
+      line.appendChild(el(doc, CLS.heading, title, true));
       for (const m of rowMeta) {
-        const v = recordValueText(m, readSelector(row, m));
-        line.appendChild(v !== "" ? el(doc, CLS.meta, text(m, v), true) : el(doc, CLS.meta + " " + CLS.absent, "not reported"));
+        const v = boundValueText(m, readSelector(row, m));
+        line.appendChild(v !== "" ? el(doc, CLS.meta, v, true) : el(doc, CLS.meta + " " + CLS.absent, "not reported"));
       }
       if (statusFrom) {
-        const st = recordValueText(statusFrom, readSelector(row, statusFrom));
+        const st = boundValueText(statusFrom, readSelector(row, statusFrom));
         line.appendChild(st !== "" ? el(doc, CLS.badge, st, true) : el(doc, CLS.badge + " " + CLS.absent, "not reported"));
       }
       listEl.appendChild(line);
@@ -1470,7 +1700,7 @@
         if (!listRowsReadable(node, rows)) return "partial collection";
         if (rows.length === 0 && src === null) return "empty result without a source time";
         const staging = document.createElement("div");
-        bindListRows(rdoc, wrapEl(staging), node, rows, node.bind?.path ?? "");
+        bindListRows(rdoc, wrapEl(staging), node, rows);
         el2.replaceChildren(...Array.from(staging.childNodes));
         return true;
       }, () => {

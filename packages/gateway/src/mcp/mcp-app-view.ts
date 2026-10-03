@@ -1265,8 +1265,14 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
 <meta name="color-scheme" content="dark light">
 <title>PCC Dashboard</title>
 <style>
+/* PX-5 (build-controlled): manifest prose is agent-authored and is marked so; PCC's withheld
+   notice (and every other PCC constant) is not. Bound values are data, not agent prose. */
+.pcc-agent{border-left:2px dashed currentColor;padding-left:6px}
+.pcc-text.pcc-agent::before,.pcc-heading.pcc-agent::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
+.pcc-withheld{font-style:italic}
 /* PX-4 provenance (build-controlled; the design lane owns the final visual language).
-   Authority is DERIVED, never manifest-chosen: agent-authored prose is marked proposed;
+   Authority is DERIVED, never manifest-chosen: agent-authored prose is also marked proposed
+   (the same marking as pcc-agent; a withheld notice has no source class);
    bound data carries a text "as of" line that says "stale" when it is. */
 .pcc-src-proposed{border-left:2px dashed currentColor;padding-left:6px}
 .pcc-text.pcc-src-proposed::before,.pcc-heading.pcc-src-proposed::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}

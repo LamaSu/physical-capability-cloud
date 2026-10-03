@@ -331,7 +331,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     // empty set; an empty result without a source time is not evidence of absence.
     if (rows.length === 0 && src === null) return "empty result without a source time";
     const staging = document.createElement("div"); // paint off-DOM: a rejected payload never touches the view
-    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows, node.bind?.path ?? "");
+    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows);
     el.replaceChildren(...Array.from(staging.childNodes));
     return true;
   }, () => { el.replaceChildren(); }); push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded)); });

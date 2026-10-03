@@ -45,50 +45,175 @@ const LIM = {
 /** The row cap for a list, whatever the manifest's `limit` (DOM-node budget). */
 export const LIST_ROW_CAP = LIM.listRows;
 
-// ── Manifest prose may not present money (PX-5 review #2504) ─────────────────────────────
-// Prose (the title, section headings, notes, action and field labels) renders as agent-authored
-// text, but text-only rendering does not establish provenance: "Payment received - verified" or
-// "1,000,000 USDC" in a note would still read as a financial fact. Money facts come ONLY from
-// PCC-owned schema cards, so prose that states an amount or a money / verification status is
-// replaced by this fixed PCC notice (adapter), and a prose node carrying such text is invalid
-// (validator). Detection folds width variants, zero-width characters and common Cyrillic/Greek
-// look-alikes before matching; it is a backstop to the visible agent-authored marking, not the
-// only line.
+// ── Manifest prose may not present money (PX-5 review #2504; astra r2 F1, F4) ─────────────
+// Prose (the title, section headings, notes, action and field labels) is agent-authored. It is
+// marked `untrusted`, and the view renders it visibly as agent-authored (`pcc-agent`). That does
+// not stop "Payment received - verified" or "1,000,000 USDC" from reading as a financial fact, so
+// money facts come ONLY from PCC-owned schema cards: prose that states an amount or a money or
+// verification status is WITHHELD. A withheld node keeps no agent words at all: it becomes PCC's
+// structural notice (`props.withheld: true`, never `untrusted`) and the renderer paints
+// WITHHELD_PROSE from its own constant. Agent prose that mentions the notice ("withheld") is
+// withheld too, so the notice can only ever come from PCC.
+//
+// The detector is lexical, so it folds before it matches: compatibility forms (width, circled and
+// mathematical letters), combining marks, format and bidi controls (zero-width, RTL override,
+// soft hyphen), invisible fillers, Cyrillic, Greek, small-capital and stroke look-alikes, dotless
+// and dotted i, camel and snake joins, letter-spaced words ("p a i d") and digit or symbol
+// spellings ("p41d"). It matches amounts (a currency symbol, code, word or money emoji next to a
+// number, a number word or a magnitude, in either order) and payment or verification words in
+// English and other major languages. A claim may not be split across prose either: each section's
+// agent prose, then the whole dashboard's, is also checked as one text (see withholdSplitClaims).
+// It remains a backstop to the agent-authored marking, not a proof that prose is harmless.
 export const WITHHELD_PROSE =
   "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
+// Case-aware: each capital maps to the Latin capital it imitates, before lowercasing.
 const LOOKALIKE: Readonly<Record<string, string>> = {
+  // Cyrillic
   "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x",
-  "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u04bb": "h", "\u0391": "A", "\u0392": "B",
-  "\u0395": "E", "\u0397": "H", "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
-  "\u03a1": "P", "\u03a4": "T", "\u03a7": "X", "\u03a5": "Y", "\u03bf": "o", "\u03b1": "a", "\u03c1": "p",
+  "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u04bb": "h", "\u051b": "q", "\u051d": "w",
+  "\u04cf": "l", "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041a": "K", "\u041c": "M", "\u041d": "H",
+  "\u041e": "O", "\u0420": "P", "\u0421": "C", "\u0422": "T", "\u0425": "X", "\u0406": "I", "\u0408": "J",
+  "\u0405": "S", "\u04ae": "Y", "\u051a": "Q", "\u051c": "W", "\u04c0": "I",
+  // Greek
+  "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H", "\u0399": "I", "\u039a": "K",
+  "\u039c": "M", "\u039d": "N", "\u039f": "O", "\u03a1": "P", "\u03a4": "T", "\u03a5": "Y", "\u03a7": "X",
+  "\u03bf": "o", "\u03b1": "a", "\u03c1": "p", "\u03bd": "v", "\u03b9": "i", "\u03ba": "k", "\u03c5": "u",
+  "\u03c7": "x", "\u03b5": "e", "\u03c4": "t",
+  // Latin letters with no compatibility decomposition: dotless i and j, IPA, small capitals, strokes, hooks
+  "\u0131": "i", "\u0237": "j", "\u0251": "a", "\u0261": "g", "\u0269": "i", "\u1d00": "a", "\u0299": "b",
+  "\u1d04": "c", "\u1d05": "d", "\u1d07": "e", "\ua730": "f", "\u0262": "g", "\u029c": "h", "\u026a": "i",
+  "\u1d0a": "j", "\u1d0b": "k", "\u029f": "l", "\u1d0d": "m", "\u0274": "n", "\u1d0f": "o", "\u1d18": "p",
+  "\u0280": "r", "\ua731": "s", "\u1d1b": "t", "\u1d1c": "u", "\u1d20": "v", "\u1d21": "w", "\u028f": "y",
+  "\u1d22": "z", "\u0111": "d", "\u0180": "b", "\u0268": "i", "\u0142": "l", "\u00f8": "o", "\u0127": "h",
+  "\u0167": "t", "\u01a5": "p", "\u0257": "d", "\u0256": "d", "\u0188": "c", "\u0253": "b", "\u0192": "f",
+  "\u0266": "h", "\u0199": "k", "\u0271": "m", "\u0272": "n", "\u0273": "n", "\u0282": "s", "\u01ad": "t",
+  "\u0288": "t", "\u01b4": "y", "\u0225": "z", "\u024d": "r", "\u0247": "e", "\u023c": "c", "\u0249": "j",
+  "\u0110": "D", "\u0141": "L", "\u00d8": "O", "\u0126": "H", "\u0166": "T", "\u0197": "I", "\u01a4": "P",
+  "\u018a": "D", "\u0187": "C", "\u0181": "B", "\u0191": "F", "\u0198": "K", "\u01ac": "T", "\u01b3": "Y",
+  "\u0224": "Z", "\u024c": "R", "\u0246": "E", "\u023b": "C",
 };
+// Marks, format/bidi controls and invisible fillers vanish; a braille blank reads as a space.
+const INVISIBLE_RE = /[\p{M}\p{Cf}\u115f\u1160\u3164\uffa0]/gu;
+const MONEY_EMOJI_RE = /[\u{1F4B0}-\u{1F4B8}\u{1F911}\u{1FA99}]/gu;
+/** The one fold every check uses: lowercase Latin skeleton of what a reader sees. Whitespace runs
+ *  collapse to one space, as HTML renders them; that also keeps every match below linear-time. */
 function foldForClaims(text: string): string {
-  let t = text.normalize("NFKC").replace(/[\u200b-\u200f\u2060\ufeff\u00ad]/g, "");
-  t = t.replace(/[\u0370-\u03ff\u0400-\u04ff\u0500-\u052f]/g, (c) => LOOKALIKE[c] ?? c);
-  return t;
+  let t = text.normalize("NFKD").replace(INVISIBLE_RE, "").normalize("NFKC");
+  t = t.replace(/\u2800/g, " ").replace(MONEY_EMOJI_RE, " $ ");
+  t = t.replace(/[^\x00-\x7f]/g, (c) => LOOKALIKE[c] ?? c);
+  return t.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ").replace(/\s+/g, " ").toLowerCase();
 }
-const AMOUNT_RE = /[$\u20ac\u00a3\u00a5\u20bf]\s?\d|\d[\d,._]*\s?(?:usd|usdc|usdt|eurc|eur|gbp|jpy|eth|weth|btc|wbtc|dai|sol|matic|pol|cents?|dollars?)\b|\b(?:usd|usdc|usdt|eurc|eur|gbp|eth|btc|dai)\s?\d/i;
-const CLAIM_RE = /\b(?:paid|unpaid|payout|payouts|received|refund|refunded|refunds|settled|released|verified|confirmed|funded|charged|deposited|withdrawn|balance|balances|credited|debited|approved|guaranteed)\b/i;
-export function isMoneyClaim(text: string): boolean {
-  const t = foldForClaims(text);
-  return AMOUNT_RE.test(t) || CLAIM_RE.test(t);
+// Digit and symbol spellings, read both ways for "1" (i and l).
+const LEET_I: Readonly<Record<string, string>> = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "@": "a", "$": "s", "!": "i", "|": "i" };
+const LEET_L: Readonly<Record<string, string>> = { ...LEET_I, "1": "l", "|": "l" };
+const LEET_RE = /[0134578@$!|]/g;
+const HAS_LEET = /[0134578@$!|]/;
+const views = (f: string): string[] => (HAS_LEET.test(f) ? [f, f.replace(LEET_RE, (c) => LEET_I[c]!), f.replace(LEET_RE, (c) => LEET_L[c]!)] : [f]);
+// A run of three or more single letters split by up to three separators is read as one word ("p a i d").
+// Word boundaries mean nothing inside such a run, so a claim word anywhere in it counts ("p a i d x").
+const SPACED_RE = /(?<![a-z0-9])[a-z](?:[^a-z0-9]{1,3}[a-z](?![a-z0-9])){2,}/g;
+const spacedRuns = (v: string): string => (v.match(SPACED_RE) ?? []).map((r) => r.replace(/[^a-z]/g, "")).join(" ");
+const CUR_CODE = "usdc|usdt|usde|usd|eurc|eur|gbp|jpy|cny|rmb|inr|chf|cad|aud|krw|rub|brl|mxn|eth|weth|btc|wbtc|dai|sol|matic|pol|xrp|ltc|bnb|busd|tusd|pyusd|gusd|frax|sats?|gwei|wei";
+const CUR_WORD = "dollars?|bucks|cents?|euros?|pence|quid|yen|yuan|renminbi|rupees?|rubles?|roubles?|pesos?|francs?|satoshis?|bitcoins?|ethers?|stablecoins?";
+const MAGNITUDE = "thousand|million|billion|trillion|mil|mio|mrd|mm|mn|bn|tn|k|m|b|t";
+const NUMBER_WORD = "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion|dozen|half";
+const CURRENCY = `(?:\\p{Sc}|(?:${CUR_CODE}|${CUR_WORD})\\b)`;
+// Every repeat is bounded and every branch starts at a rare token (a currency, a number word), so a
+// hostile run of digits, spaces or hyphens costs linear time, also across a whole dashboard's prose.
+// "5 USDC" is found from the currency, with a bounded look back for the number before it.
+const AMOUNT_RE = new RegExp(
+  `\\p{Sc} ?(?:\\d|(?:${NUMBER_WORD})\\b)` + //                                   $5, $ 5, $five
+  `|${CURRENCY}(?<=\\d[\\d,._]{0,40} ?(?:${MAGNITUDE})? ?[(\\[]? ?${CURRENCY})` + //     5 USDC, 1m USDC, 5$, 1 $ USDC
+  `|\\b(?:${NUMBER_WORD})\\b[ -]{0,3}(?:(?:${MAGNITUDE})\\b[ -]{0,3})?${CURRENCY}` + // one million dollars
+  `|\\ban? (?:${CUR_WORD})\\b` + //                                                  a dollar
+  `|\\b(?:${CUR_CODE}|${CUR_WORD})[ :=]{0,3}\\d`, //                                 USD 5, usdc:100
+  "u",
+);
+// Payment and verification words: English, Spanish, French, German, Italian, Portuguese, Dutch,
+// Polish, Turkish and Indonesian, as folded (accents stripped, lowercase).
+const CLAIM_WORDS = [
+  "paid|unpaid|prepaid|repaid|overpaid|underpaid|payout|payouts|paidout|received|refund|refunds|refunded|reimbursed",
+  "settled|released|verified|confirmed|approved|guaranteed|funded|charged|deposited|withdrawn|credited|debited",
+  "remitted|disbursed|escrowed|balance|balances",
+  "pagad[oa]s?|pago|abonad[oa]s?|reembolsad[oa]s?|reembolso|liquidad[oa]s?|cobrad[oa]s?|acreditad[oa]s?|depositad[oa]s?",
+  "verificad[oa]s?|confirmad[oa]s?|aprobad[oa]s?|aprovad[oa]s?|recibid[oa]s?|recebid[oa]s?|creditad[oa]s?|debitad[oa]s?|quitad[oa]s?|saldo",
+  "payee?s?|rembourse[es]?|remboursee?s?|remboursement|credite[es]?|creditee?s?|debite[es]?|debitee?s?|verifiee?s?",
+  "confirmee?s?|approuvee?s?|encaissee?s?|recue?s?|solde",
+  "bezahlt|gezahlt|ausgezahlt|uberwiesen|ueberwiesen|erstattet|ruckerstattet|rueckerstattet|gutgeschrieben|abgebucht",
+  "bestatigt|bestaetigt|verifiziert|genehmigt|beglichen|eingegangen|kontostand|guthaben",
+  "pagat[oaie]|rimborsat[oaie]|rimborso|accreditat[oaie]|addebitat[oaie]|verificat[oaie]|confermat[oaie]|approvat[oaie]",
+  "saldat[oaie]|incassat[oaie]|ricevut[oaie]",
+  "betaald|terugbetaald|uitbetaald|geverifieerd|bevestigd|goedgekeurd|ontvangen|gestort",
+  "zaplacon[oay]|oplacon[oay]|zwrocon[oay]|potwierdzon[oay]|zweryfikowan[oay]",
+  "odendi|onaylandi|dogrulandi|iade|bakiye|dibayar|lunas|dikembalikan|terverifikasi|disetujui",
+].join("|");
+const CLAIM_RE = new RegExp(`\\b(?:${CLAIM_WORDS})\\b`);
+const CLAIM_IN_RUN_RE = new RegExp(`(?:${CLAIM_WORDS})`);
+// The same words in non-Latin scripts (Russian and Ukrainian, Chinese, Japanese, Korean, Arabic,
+// Hindi), matched in the folded text with spaces removed. Each is folded like the text (lower and
+// upper case), so a look-alike or all-capitals spelling still matches.
+const SCRIPT_CLAIM_WORDS: readonly string[] = ["\u043e\u043f\u043b\u0430\u0447\u0435\u043d", "\u0432\u044b\u043f\u043b\u0430\u0447\u0435\u043d", "\u0441\u043f\u043b\u0430\u0447\u0435\u043d", "\u0432\u043e\u0437\u0432\u0440\u0430\u0449\u0435\u043d", "\u0432\u043e\u0437\u0432\u0440\u0430\u0442", "\u0437\u0430\u0447\u0438\u0441\u043b\u0435\u043d", "\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d", "\u043f\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0436\u0435\u043d", "\u043f\u0440\u043e\u0432\u0435\u0440\u0435\u043d", "\u043e\u0434\u043e\u0431\u0440\u0435\u043d", "\u0431\u0430\u043b\u0430\u043d\u0441", "\u043f\u043e\u043b\u0443\u0447\u0435\u043d", "\u5df2\u4ed8", "\u5df2\u652f\u4ed8", "\u652f\u4ed8\u6210\u529f", "\u9000\u6b3e", "\u5df2\u7ed3\u7b97", "\u5df2\u7d50\u7b97", "\u5df2\u786e\u8ba4", "\u5df2\u78ba\u8a8d", "\u5df2\u9a8c\u8bc1", "\u5df2\u9a57\u8b49", "\u5230\u8d26", "\u5230\u8cec", "\u4f59\u989d", "\u9918\u984d", "\u5df2\u6536\u6b3e", "\u5df2\u6279\u51c6", "\u652f\u6255\u6e08", "\u652f\u6255\u3044\u6e08", "\u652f\u6255\u5b8c\u4e86", "\u652f\u6255\u3044\u5b8c\u4e86", "\u5165\u91d1\u6e08", "\u8fd4\u91d1", "\u6c7a\u6e08\u6e08", "\u6c7a\u6e08\u5b8c\u4e86", "\u78ba\u8a8d\u6e08", "\u627f\u8a8d\u6e08", "\u6b8b\u9ad8", "\uc9c0\uae09\uc644\ub8cc", "\uacb0\uc81c\uc644\ub8cc", "\uacb0\uc81c\ub428", "\uc9c0\uae09\ub428", "\ud658\ubd88", "\uc794\uc561", "\uc785\uae08\uc644\ub8cc", "\ud655\uc778\ub428", "\uc2b9\uc778\ub428", "\u0645\u062f\u0641\u0648\u0639", "\u062a\u0645\u0627\u0644\u062f\u0641\u0639", "\u0627\u0633\u062a\u0631\u062f\u0627\u062f", "\u0631\u0635\u064a\u062f", "\u092d\u0941\u0917\u0924\u093e\u0928\u0915\u093f\u092f\u093e", "\u092d\u0941\u0917\u0924\u093e\u0928\u0939\u094b\u0917\u092f\u093e"]
+  .flatMap((w) => [foldForClaims(w), foldForClaims(w.toUpperCase())]).map((w) => w.replace(/\s+/g, ""));
+const SCRIPT_CLAIM_RE = new RegExp([...new Set(SCRIPT_CLAIM_WORDS)].join("|"), "u"); // the words hold no regex syntax
+const NOTICE_RE = /\bwithh[eo]ld/;
+const NOTICE_IN_RUN_RE = /withh[eo]ld/;
+type WordCheck = readonly [word: RegExp, inRun: RegExp];
+const MONEY_WORDS: WordCheck = [CLAIM_RE, CLAIM_IN_RUN_RE];
+const NOTICE_WORDS: WordCheck = [NOTICE_RE, NOTICE_IN_RUN_RE];
+/** Any of the word checks in any spelling view of the folded text (views are built once). */
+function wordsIn(f: string, checks: readonly WordCheck[]): boolean {
+  for (const v of views(f)) {
+    const runs = spacedRuns(v);
+    for (const [word, inRun] of checks) if (word.test(v) || inRun.test(runs)) return true;
+  }
+  return false;
 }
-function proseText(text: string): string { return isMoneyClaim(text) ? WITHHELD_PROSE : text; }
+const scriptIn = (f: string): boolean => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_RE.test(f.replace(/ /g, ""));
+
+/** Does the text state an amount (a currency next to a number)? */
+export function statesAmount(text: string): boolean { return AMOUNT_RE.test(foldForClaims(text)); }
+/** Does the text state an amount or a payment or verification status? */
+export function isMoneyClaim(text: string): boolean { const f = foldForClaims(text); return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS]); }
+/** Does the text mention PCC's withheld notice ("withheld", "withhold")? Only PCC may say that. */
+export function mentionsWithheld(text: string): boolean { return wordsIn(foldForClaims(text), [NOTICE_WORDS]); }
+/** Agent prose that may not be shown: a money claim, or a mention of PCC's notice (one fold). */
+export function isProseClaim(text: string): boolean {
+  const f = foldForClaims(text);
+  return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS]);
+}
 
 // A bound RECORD status is the record's own word, never a payment fact: a job row can literally say
 // "settled" with nothing paid (#313; pcc-design #3013). Any value read from a field named `status`
 // (status, job.status, kernel.status) whose word is a money state gets PCC's fixed qualifier, in every
 // sink (metric, run card, list badge and list meta). Narrower than CLAIM_RE on purpose ("verified",
-// "approved" are not money states). Lookalikes, zero-width characters, fullwidth forms and camel,
+// "approved" are not money states). Look-alikes, zero-width characters, fullwidth forms and camel,
 // snake or kebab joins ("SETTLED_RELEASED", "payoutPending") are folded first.
 export const RECORD_STATUS_NOTE = " - reported by the record, not confirmed by a settlement read";
-const MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/i;
+const MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/;
 export function isMoneyState(value: string): boolean {
-  const t = foldForClaims(value).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[^A-Za-z0-9]+/g, " ");
-  return MONEY_STATE_RE.test(t);
+  return MONEY_STATE_RE.test(foldForClaims(value).replace(/[^a-z0-9]+/g, " "));
 }
 export function recordValueText(field: string, value: string): string {
   return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
+}
+
+// ── Bound values (astra r2 F2) ────────────────────────────────────────────────────────────
+// A fetched value is data, but a free field still carries words: a capability NAMED "Paid $1M -
+// verified" would read as a payment fact in a list title or a card. Every bound value the view shows
+// passes boundValueText. A record's status word is qualified, never hidden (#3013): a money state
+// with RECORD_STATUS_NOTE, any other payment or verification word ("verified", "pagado") with
+// RECORD_CLAIM_NOTE. Any other value that states money or verification, and any status that states
+// an amount or mentions the notice, is replaced by WITHHELD_FIELD. Only a PCC card's own money fields
+// (the price and its currency) show money, and they never pass through here.
+export const RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
+export const WITHHELD_FIELD = "withheld: stated money or verification";
+export function boundValueText(field: string, value: string): string {
+  if (value === "") return value;
+  if (/(^|\.)status$/.test(field) && !statesAmount(value) && !mentionsWithheld(value)) {
+    if (isMoneyState(value)) return value + RECORD_STATUS_NOTE;
+    return isMoneyClaim(value) ? value + RECORD_CLAIM_NOTE : value;
+  }
+  return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
 }
 
 // ── PCC-owned list field profiles (PX-5 review #2504) ────────────────────────────────────
@@ -97,17 +222,14 @@ export function recordValueText(field: string, value: string): string {
 // appear only in schema cards. Escrow is not a list route at all.
 // Source classes per field (PX-4 review #2524): every profile field is registry state the route
 // serves (authoritative); none is agent-generated content, so a list can never show proposed
-// content under an authoritative class. `freeText` fields are operator-authored text inside that
-// registry state: they render as untrusted text and are withheld if they state money.
-const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[]; freeText: readonly string[] }>> = {
-  "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], freeText: [] },
-  "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"], freeText: ["name", "location.label"] },
-  "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"], freeText: ["name", "location.label"] },
+// content under an authoritative class. Operator-authored text inside that registry state (names,
+// location labels) renders as untrusted text, and like every bound value it passes boundValueText
+// (#344 astra r2 F2): if it states money or verification, it is withheld.
+const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
+  "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+  "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
+  "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] },
 };
-/** The operator-authored free-text fields of a list route's profile ([] if none / unknown). */
-export function listFreeTextFields(path: string): readonly string[] { return LIST_PROFILES[path]?.freeText ?? []; }
-/** Shown in place of a free-text field that states money (short form of WITHHELD_PROSE). */
-export const WITHHELD_FIELD = "withheld: stated money";
 function listProfileViolation(path: string, props: Record<string, unknown>): string | null {
   const prof = LIST_PROFILES[path];
   if (!prof) return `no list field profile for ${path}`;
@@ -373,22 +495,32 @@ function isOpDescriptor(v: unknown): boolean {
 
 // ── Shared bind gate — the ONE policy check both adapter and validator call ────────
 // ── Effect review of every bindable read (PX-5 review #2504: GET-only is not effect-free) ─────
-// Each route a manifest can bind was read at its handler (2026-09-24, master ac86a404): it only
-// reads through a facade list/get and changes no PCC state. One cross-cutting effect exists: with
-// PCC_FUNNEL_ENABLED=true the funnel tracker (services/funnel-tracker.ts, registered in server.ts)
-// writes one "discover" audit line per request trace for a 2xx GET under /api/capabilities, so a
-// polling dashboard adds audit lines (observability only; no entity changes). The SSE job stream is
-// authenticated and never opened by the browser kit (credentials:"omit", no SSE transport).
+// Each route a manifest can bind was read at its handler (2026-09-24, master ac86a404; re-read
+// 2026-09-29 for astra r2 F3). None changes PCC business state: no job, kernel, capability, money,
+// approval or registry write. They are NOT free of operational effects, and each entry names its own:
+//  - every facade read runs through BaseFacade.execute, which emits one telemetry event
+//    (facades/base.facade.ts emitTelemetry -> telemetry.ts emit: an in-memory per-job event buffer and
+//    rate counter, a StreamHub publish to SSE subscribers, a Sentry breadcrumb);
+//  - with PCC_FUNNEL_ENABLED=true, a 2xx GET under /api/capabilities records a "discover" funnel stage
+//    once per request trace (services/funnel-tracker.ts): a durable audit row, a PostHog event and an
+//    OTel span event, so a polling dashboard adds audit rows. The flag is off unless exactly "true".
+// The browser binder sends no credentials (credentials:"omit"), so its reads never resolve an API key
+// and never meter API-key usage (auth/api-key-auth.ts increments usage on each token resolution).
+// Other /mcp/apps calls that do carry a key (the typed quote op, the proxy tools) are metered: whether
+// a read-only app call should meter is an auth-policy question for the gateway owner, not settled here.
+// The SSE job stream is authenticated and never opened by the browser kit (no SSE transport).
 // A test pins this list to BIND_POLICY: a new bindable route needs a new entry, i.e. a new review.
+const FACADE_READ = "no business-state write; one telemetry event (facade read)";
+const FUNNEL = "; with PCC_FUNNEL_ENABLED=true a 'discover' funnel audit row + PostHog event per request trace";
 export const EFFECT_REVIEWED_READS: ReadonlyArray<{ route: string; handler: string; effect: string }> = [
-  { route: "/api/jobs", handler: "routes/jobs.ts GET /api/jobs -> JobFacade.list", effect: "read only" },
-  { route: "/api/jobs/:", handler: "routes/jobs.ts GET /api/jobs/:jobId -> JobFacade.getById", effect: "read only" },
-  { route: "/api/jobs/:/status", handler: "routes/job-submit.ts GET /api/jobs/:jobId/status -> JobFacade.getStatus", effect: "read only" },
-  { route: "/api/kernels", handler: "routes/kernels.ts GET /api/kernels -> KernelFacade.list", effect: "read only" },
-  { route: "/api/kernels/:", handler: "routes/kernels.ts GET /api/kernels/:kernelId -> KernelFacade.getById", effect: "read only" },
-  { route: "/api/capabilities", handler: "routes/capabilities.ts GET /api/capabilities -> CapabilityFacade list", effect: "read only; funnel 'discover' audit line when PCC_FUNNEL_ENABLED" },
-  { route: "/api/capabilities/:", handler: "routes/capabilities.ts GET /api/capabilities/:capId -> CapabilityFacade.getById", effect: "read only; funnel 'discover' audit line when PCC_FUNNEL_ENABLED" },
-  { route: "/sse/stream/job/:", handler: "sse/topic-sse.ts GET /sse/stream/job/:jobId (auth + ownership check, topic subscribe)", effect: "read only; per-IP connection counter" },
+  { route: "/api/jobs", handler: "routes/jobs.ts GET /api/jobs -> JobFacade.list", effect: FACADE_READ },
+  { route: "/api/jobs/:", handler: "routes/jobs.ts GET /api/jobs/:jobId -> JobFacade.getById", effect: FACADE_READ },
+  { route: "/api/jobs/:/status", handler: "routes/job-submit.ts GET /api/jobs/:jobId/status -> JobFacade.getStatus", effect: FACADE_READ },
+  { route: "/api/kernels", handler: "routes/kernels.ts GET /api/kernels -> KernelFacade.list", effect: FACADE_READ },
+  { route: "/api/kernels/:", handler: "routes/kernels.ts GET /api/kernels/:kernelId -> KernelFacade.getById", effect: FACADE_READ },
+  { route: "/api/capabilities", handler: "routes/capabilities.ts GET /api/capabilities -> CapabilityFacade list", effect: FACADE_READ + FUNNEL },
+  { route: "/api/capabilities/:", handler: "routes/capabilities.ts GET /api/capabilities/:capId -> CapabilityFacade.getById", effect: FACADE_READ + FUNNEL },
+  { route: "/sse/stream/job/:", handler: "sse/topic-sse.ts GET /sse/stream/job/:jobId (auth + ownership check, topic subscribe)", effect: "no business-state write; per-IP connection counter; never opened by the browser kit" },
 ];
 /** Regex sources of every route (and SSE route) BIND_POLICY lets a manifest bind. */
 export function bindPolicyRouteSources(): string[] {
@@ -433,6 +565,52 @@ function bindMatchesPolicy(bind: IrBind, key: string): string | null {
   return null;
 }
 
+// ── Agent prose nodes (PX-5 review #2504; astra r2 F1, F4) ─────────────────────────────
+type ProseType = "heading" | "text" | "badge" | "field-label";
+/** An agent-prose node: the words, marked untrusted, or PCC's withheld notice if they may not be shown. */
+function proseNode(type: ProseType, id: string, words: string, fixed: Record<string, string | number> = {}): IrNode {
+  const node: IrNode = { type, id, props: { ...fixed, [type === "field-label" ? "label" : "text"]: words }, untrusted: true };
+  if (isProseClaim(words)) withhold(node);
+  return node;
+}
+/** Turn an agent-prose node, in place, into PCC's structural notice: no agent words remain. */
+function withhold(node: IrNode): void {
+  node.props = node.type === "heading" ? { level: node.props?.level as number, withheld: true } : { withheld: true };
+  delete node.untrusted;
+}
+/** Is this node PCC's withheld notice (a prose slot whose agent words were withheld)? */
+export function isWithheldProse(node: IrNode): boolean { return node.props?.withheld === true; }
+/** The agent words a node shows, or null (PCC's notice, a PCC constant, a container, bound data). */
+function agentWords(node: IrNode): string | null {
+  if (node.untrusted !== true || !node.props) return null;
+  const w = node.type === "field-label" ? node.props.label : node.props.text;
+  return typeof w === "string" ? w : null;
+}
+/** Every agent-prose node at or under `node`, in paint order. */
+function agentProse(node: IrNode, out: IrNode[] = []): IrNode[] {
+  if (agentWords(node) !== null) out.push(node);
+  for (const c of node.children ?? []) agentProse(c, out);
+  return out;
+}
+/** Do these texts, painted next to each other, state what none states alone ("$" then "100")? They
+ *  are read as a reader sees separate elements: with a gap between them, so single letters spread
+ *  over several labels still fold into one word ("p", "a", "i", "d"). */
+function splitClaim(nodes: readonly IrNode[]): boolean {
+  return nodes.length > 1 && isProseClaim(nodes.map((n) => agentWords(n) ?? "").join(" "));
+}
+/** A claim may not be split across prose: the whole dashboard's agent prose (title included) is also
+ *  checked as ONE text. A claim found only there withholds the agent prose of each section whose own
+ *  prose states it, and, if the rest still states it across sections, all remaining agent prose. A
+ *  section that states a claim states it in the dashboard's text too, so a dashboard that passes needs
+ *  this one check; validateIr makes the same dashboard-wide check on the finished tree. */
+function withholdSplitClaims(title: IrNode, sections: readonly IrNode[]): void {
+  const all = (): IrNode[] => [title, ...sections].flatMap((n) => agentProse(n));
+  if (!splitClaim(all())) return;
+  for (const s of sections) { const p = agentProse(s); if (splitClaim(p)) p.forEach(withhold); }
+  const rest = all();
+  if (splitClaim(rest)) rest.forEach(withhold);
+}
+
 // ── The adapter ─────────────────────────────────────────────────────────────────
 export function dashboardManifestToIr(m: DashboardManifest | null | undefined): IrResult {
   if (!isPlain(m)) return { ok: false, reason: "manifest not a plain object" };
@@ -441,7 +619,6 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
   if (!onlyKeys(mm, ["csd", "title", "description", "theme", "sections"])) return { ok: false, reason: "unexpected top-level key" };
   const rawTitle = strictStr(mm.title, LIM.title);
   if (rawTitle === null) return { ok: false, reason: "title invalid" };
-  const title = proseText(rawTitle);
   if (!Array.isArray(mm.sections)) return { ok: false, reason: "sections not array" };
   if (mm.sections.length > LIM.sections) return { ok: false, reason: "too many sections" };
 
@@ -461,14 +638,15 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
       const h = strictStr(secRaw.heading, LIM.title);
       if (h === null) return { ok: false, reason: "section.heading invalid" };
       if (!budget()) return { ok: false, reason: "node budget" };
-      children.push({ type: "heading", id: nextId(), props: { level: 2, text: proseText(h) }, untrusted: true });
+      children.push(proseNode("heading", nextId(), h, { level: 2 }));
     }
     for (const w of secRaw.windows) { const r = mapWindow(w, nextId, budget, bindBudget); if (!r.ok) return r; children.push(r.node); }
     if (!budget()) return { ok: false, reason: "node budget" };
     sectionNodes.push({ type: "section", id: nextId(), children });
   }
   if (!budget()) return { ok: false, reason: "node budget" };
-  const titleNode: IrNode = { type: "heading", id: nextId(), props: { level: 1, text: title }, untrusted: true };
+  const titleNode = proseNode("heading", nextId(), rawTitle, { level: 1 });
+  withholdSplitClaims(titleNode, sectionNodes);
   if (!budget()) return { ok: false, reason: "node budget" };
   return { ok: true, doc: { ir: "pcc-dashboard-ir/v1", title: titleNode, root: { type: "root", id: nextId(), children: sectionNodes } } };
 }
@@ -486,7 +664,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
     case "note":
       if (!onlyKeys(w, ["kind", "text"])) return { ok: false, reason: "note extra key" };
       { const text = strictStr(w.text); if (text === null) return { ok: false, reason: "note.text" };
-        return { ok: true, node: { type: "text", id, props: { text: proseText(text) }, untrusted: true } }; }
+        return { ok: true, node: proseNode("text", id, text) }; }
     case "metric":
       // `format` intentionally NOT accepted (see file header). select is top-level + required.
       if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
@@ -543,7 +721,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
       if (w.submit !== undefined && !isOpDescriptor(w.submit)) return { ok: false, reason: "form.submit grammar" };
       { const labels = fieldLabels(w.schema); if (!labels.ok) return labels;
         const children: IrNode[] = [];
-        for (const l of labels.labels) { if (!budget()) return { ok: false, reason: "node budget" }; children.push({ type: "field-label", id: nextId(), props: { label: l }, untrusted: true }); }
+        for (const l of labels.labels) { if (!budget()) return { ok: false, reason: "node budget" }; children.push(proseNode("field-label", nextId(), l)); }
         return { ok: true, node: { type: "form-summary", id, children } }; }
     case "approval":
       if (!onlyKeys(w, ["kind", "binding", "approve", "deny"])) return { ok: false, reason: "approval extra key" };
@@ -566,7 +744,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
           if (!budget()) return { ok: false, reason: "node budget" };
           if (!isOpDescriptor(a)) return { ok: false, reason: "action grammar" };
           const label = strictStr((a as Record<string, unknown>).label, LIM.title); if (label === null) return { ok: false, reason: "action.label" };
-          children.push({ type: "badge", id: nextId(), props: { text: proseText(label), tone: "neutral" }, untrusted: true });
+          children.push(proseNode("badge", nextId(), label, { tone: "neutral" }));
         }
         return { ok: true, node: { type: "grid", id, props: { kind: "actions-readonly" }, children } }; }
     default:
@@ -612,13 +790,13 @@ function fieldLabels(schema: unknown): { ok: true; labels: string[] } | { ok: fa
     if (def.title !== undefined && strictStr(def.title, LIM.title) === null) return { ok: false, reason: "form field title" };
     const rawLabel = typeof def.title === "string" ? def.title : key;
     const s = strictStr(rawLabel, LIM.title); if (s === null) return { ok: false, reason: "field label" };
-    labels.push(proseText(s));
+    labels.push(s);
   }
   return { ok: true, labels };
 }
 
 // ── Independent whole-tree validator — MIRRORS every adapter guarantee ─────────────
-type PropT = "s400" | "s2000" | "number" | "limit" | "boolean" | "string[]" | "level" | "tone" | "card-kind" | "grid-kind" | "plan-kind" | "selector";
+type PropT = "s400" | "s2000" | "number" | "limit" | "boolean" | "true" | "string[]" | "level" | "tone" | "card-kind" | "grid-kind" | "plan-kind" | "selector";
 type PropSpec = Record<string, PropT>;
 interface NodeSpec { props?: PropSpec; required?: readonly string[]; optional?: readonly string[]; bindKey?: string; needsBind?: boolean; noBind?: boolean; prose?: boolean; parentOf?: readonly IrNodeType[]; childless?: boolean; minChildren?: number; maxChildren?: number }
 const NODE_SCHEMA: Record<IrNodeType, NodeSpec> = {
@@ -650,13 +828,14 @@ export function policyKeyOf(node: IrNode): string | null {
 /** Authority class of an IR node (PX-4), DERIVED from its structure and the server-owned
  *  bind registry, never read from the node or the manifest. Prose (manifest-authored
  *  words) is always `proposed`; a bindable node takes the class its route is registered
- *  with; PCC constants (the fixed approval sentence, the static receipt pointer) and
- *  containers are not data and return null. A forged IR cannot carry a class of its own:
- *  validateIr rejects any node key outside the closed set. */
+ *  with; PCC constants (the fixed approval sentence, the static receipt pointer, the
+ *  withheld notice that replaces prose) and containers are not data and return null. A
+ *  forged IR cannot carry a class of its own: validateIr rejects any node key outside the
+ *  closed set, and a withheld slot carries no words. */
 export function sourceClassOf(node: IrNode): RenderSourceClass | null {
   const spec = NODE_SCHEMA[node.type as IrNodeType];
   if (!spec) return null;
-  if (spec.prose) return "proposed";
+  if (spec.prose) return isWithheldProse(node) ? null : "proposed";
   const key = policyKeyOf(node);
   const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : undefined;
   return policy ? policy.sourceClass : null;
@@ -684,6 +863,7 @@ function propType(v: unknown, t: PropT): boolean {
     case "card-kind": return typeof v === "string" && CARD_KINDS.has(v);
     case "grid-kind": return typeof v === "string" && GRID_KINDS.has(v);
     case "plan-kind": return typeof v === "string" && PLAN_KINDS.has(v);
+    case "true": return v === true;
     case "selector": return isSelector(v);
   }
 }
@@ -705,12 +885,15 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
     if (typeof n.id !== "string" || !/^n[0-9]+$/.test(n.id) || ids.has(n.id)) return "id format/dup";
     ids.add(n.id);
     const spec = NODE_SCHEMA[n.type as IrNodeType];
-    // props: exact keys, exact types, required present via own-property
+    // props: exact keys, exact types, required present via own-property. A withheld prose slot is
+    // PCC's structural notice: exactly its fixed keys (level for a heading, withheld), no agent words.
+    const withheld = spec.prose === true && isPlain(n.props) && hasOwn(n.props, "withheld");
+    const pspec: PropSpec = withheld ? (n.type === "heading" ? { level: "level", withheld: "true" } : { withheld: "true" }) : spec.props ?? {};
     if (n.props !== undefined) {
-      if (!isPlain(n.props) || !onlyKeys(n.props, Object.keys(spec.props ?? {}))) return `props off-schema for ${n.type}`;
-      for (const [k, v] of Object.entries(n.props)) if (!propType(v, (spec.props as PropSpec)[k])) return `prop ${k} wrong type on ${n.type}`;
+      if (!isPlain(n.props) || !onlyKeys(n.props, Object.keys(pspec))) return `props off-schema for ${n.type}`;
+      for (const [k, v] of Object.entries(n.props)) if (!propType(v, pspec[k]!)) return `prop ${k} wrong type on ${n.type}`;
     }
-    for (const req of spec.required ?? []) if (!n.props || !hasOwn(n.props as object, req)) return `missing prop ${req} on ${n.type}`;
+    for (const req of withheld ? Object.keys(pspec) : spec.required ?? []) if (!n.props || !hasOwn(n.props as object, req)) return `missing prop ${req} on ${n.type}`;
     // approval-notice text is the ONE fixed PCC sentence — never manifest prose
     if (n.type === "approval-notice" && (n.props as any)?.notice !== APPROVAL_NOTICE) return "approval-notice text not the fixed PCC sentence";
     // card kind ⇒ exact companion props
@@ -743,14 +926,18 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       const off = typeof bp === "string" ? listProfileViolation(bp, (n.props ?? {}) as Record<string, unknown>) : "list without a bound path";
       if (off) return off;
     }
-    // prose may not state an amount or a money / verification status (review #2504)
+    // prose provenance (review #2504; astra r2 F1, F4): agent words are untrusted and may not state
+    // an amount or a money / verification status, nor mention PCC's notice. PCC's withheld notice
+    // carries no words (the renderer paints its own constant) and is never untrusted.
     if (spec.prose) {
-      const p = (n.props ?? {}) as { text?: unknown; label?: unknown };
-      const t = typeof p.text === "string" ? p.text : typeof p.label === "string" ? p.label : "";
-      if (t !== WITHHELD_PROSE && isMoneyClaim(t)) return `prose ${n.type} states an amount or a money/verification status`;
+      if (withheld) { if (n.untrusted !== undefined) return `withheld ${n.type} is PCC's notice, never untrusted`; }
+      else {
+        if (n.untrusted !== true) return `prose ${n.type} not untrusted`;
+        const p = (n.props ?? {}) as { text?: unknown; label?: unknown };
+        const t = typeof p.text === "string" ? p.text : typeof p.label === "string" ? p.label : "";
+        if (isProseClaim(t)) return `prose ${n.type} states an amount or a money/verification status, or mentions the withheld notice`;
+      }
     }
-    // prose provenance
-    if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
     if (!spec.prose && n.untrusted !== undefined) return `non-prose ${n.type} marked untrusted`;
     // children: exact parent/child grammar; containers require an array, leaves forbid it
     if (spec.childless) { if (n.children !== undefined) return `${n.type} may not have children`; }
@@ -773,5 +960,9 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
     return null;
   };
   const e1 = walk(doc.title, 0); if (e1) return { ok: false, reason: `title: ${e1}` };
-  const e2 = walk(doc.root, 0); return e2 ? { ok: false, reason: e2 } : { ok: true };
+  const e2 = walk(doc.root, 0); if (e2) return { ok: false, reason: e2 };
+  // a claim may not be split across prose (mirror of withholdSplitClaims) on the now well-formed tree
+  const sections = (doc.root as unknown as IrNode).children ?? [];
+  if (splitClaim([doc.title as unknown as IrNode, ...sections].flatMap((n) => agentProse(n)))) return { ok: false, reason: "agent prose states a claim across nodes" };
+  return { ok: true };
 }

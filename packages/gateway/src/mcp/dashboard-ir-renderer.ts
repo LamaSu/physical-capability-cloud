@@ -20,7 +20,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema } from "./dashboard-ir.js";
-import { sourceClassOf, LIST_ROW_CAP, isMoneyClaim, listFreeTextFields, WITHHELD_FIELD, recordValueText } from "./dashboard-ir.js";
+import { sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, boundValueText } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -36,12 +36,13 @@ export interface RElement {
 }
 export interface RDocument { createElement(tag: string): RElement; }
 
-const CLS: Record<IrNodeType | "untrusted" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fresh" | "stale" | "unavail" | "empty" | "timeUnknown" | "absent", string> = {
+const CLS: Record<IrNodeType | "untrusted" | "agent" | "withheld" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fresh" | "stale" | "unavail" | "empty" | "timeUnknown" | "absent", string> = {
   root: "pcc-ir", section: "pcc-section", heading: "pcc-heading", text: "pcc-text",
   stat: "pcc-stat", card: "pcc-card", receipt: "pcc-receipt", list: "pcc-list",
   badge: "pcc-badge", grid: "pcc-grid", "approval-notice": "pcc-approval",
   plan: "pcc-plan", "form-summary": "pcc-form", "field-label": "pcc-field",
-  untrusted: "pcc-untrusted", invalid: "pcc-invalid", value: "pcc-value", row: "pcc-row", meta: "pcc-meta",
+  untrusted: "pcc-untrusted", agent: "pcc-agent", withheld: "pcc-withheld",
+  invalid: "pcc-invalid", value: "pcc-value", row: "pcc-row", meta: "pcc-meta",
   note: "pcc-note", schemaCard: "pcc-schema-card", field: "pcc-fieldlabel",
   fresh: "pcc-fresh", stale: "pcc-stale", unavail: "pcc-unavail", empty: "pcc-empty",
   timeUnknown: "pcc-time-unknown", absent: "pcc-absent",
@@ -96,7 +97,9 @@ function el(doc: RDocument, cls: string, text?: string, untrusted?: boolean): RE
 // or (c) mint a privileged-looking "receipt" — the settlement record is always framed
 // read-only with an explicit "not proof of payment" warning.
 const UNAVAILABLE = "—"; // em dash — honest "not available", never a partial fake
-interface SchemaField { label: string; key: string | readonly string[]; list?: boolean; bool?: boolean; required?: boolean }
+// `money`: the card's own price fields. They are the one place a PCC card shows money, so they are
+// the only bound values that skip boundValueText (astra r2 F2).
+interface SchemaField { label: string; key: string | readonly string[]; list?: boolean; bool?: boolean; required?: boolean; money?: boolean }
 interface SchemaSpec { heading: string; note?: string; fields: readonly SchemaField[] }
 // Only the DATA-BEARING cards have a schema (a public/known-shape GET). The settlement
 // record is NOT here — it is a static pointer (see SETTLEMENT_NOTICE + the receipt painter).
@@ -106,8 +109,8 @@ export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.fr
     fields: Object.freeze([
       { label: "Name", key: "name", required: true },
       { label: "Type", key: "type", required: true },
-      { label: "Base cost", key: "pricing.baseCost" },
-      { label: "Currency", key: "pricing.currency" },
+      { label: "Base cost", key: "pricing.baseCost", money: true },
+      { label: "Currency", key: "pricing.currency", money: true },
       { label: "Assurance tiers", key: "assuranceTiers", list: true },
       { label: "Available", key: "available", bool: true },
     ]),
@@ -151,15 +154,16 @@ function readField(data: unknown, f: SchemaField): string {
         else if (typeof x === "boolean") parts.push(String(x));
         // non-scalar array elements are skipped (never stringified)
       }
-      if (parts.length) return parts.join(", ");
+      if (parts.length) return boundValueText(k, parts.join(", "));
     }
     return UNAVAILABLE;
   }
   for (const k of keys) {
     const v = readSelector(data, k);
     if (v === "") continue;
-    if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
-    return recordValueText(k, v); // a record's money-state status word is qualified (#3013)
+    if (f.bool && (v === "true" || v === "false")) return v === "true" ? "Yes" : "No";
+    // the price fields show money as the card's own; every other value is checked (#3013; astra r2 F2)
+    return f.money ? v : boundValueText(k, v);
   }
   return UNAVAILABLE;
 }
@@ -202,11 +206,18 @@ function paintSchemaCard(doc: RDocument, rootCls: string, schema: BindSchema): R
   }
   return e;
 }
+/** A prose slot. Agent words render as untrusted, visibly agent-authored text (`pcc-agent`). A
+ *  withheld slot is PCC's notice: the renderer paints its OWN constant, so the notice never comes
+ *  from IR or manifest text, and it is not marked untrusted or agent-authored (astra r2 F4). */
+function paintProse(doc: RDocument, cls: string, n: IrNode, key: "text" | "label"): RElement {
+  if (n.props?.withheld === true) return el(doc, cls + " " + CLS.withheld, WITHHELD_PROSE);
+  return el(doc, cls + " " + CLS.agent, String(n.props?.[key] ?? ""), true);
+}
 const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
   root: (d, n) => { const e = el(d, CLS.root); paintChildren(d, n, e); return e; },
   section: (d, n) => { const e = el(d, CLS.section); paintChildren(d, n, e); return e; },
-  heading: (d, n) => el(d, CLS.heading, String(n.props?.text ?? ""), n.untrusted),
-  text: (d, n) => el(d, CLS.text, String(n.props?.text ?? ""), n.untrusted),
+  heading: (d, n) => paintProse(d, CLS.heading, n, "text"),
+  text: (d, n) => paintProse(d, CLS.text, n, "text"),
   stat: (d, n) => {
     const e = el(d, CLS.stat);
     e.appendChild(el(d, CLS.heading, String(n.props?.label ?? ""))); // PCC-owned metric label (trusted)
@@ -226,12 +237,12 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
     return e;
   },
   list: (d) => { const e = el(d, CLS.list); return e; }, // rows appended by bindList
-  badge: (d, n) => { const e = el(d, CLS.badge, String(n.props?.text ?? ""), true); e.setAttr("data-tone", String(n.props?.tone ?? "neutral")); return e; },
+  badge: (d, n) => { const e = paintProse(d, CLS.badge, n, "text"); e.setAttr("data-tone", String(n.props?.tone ?? "neutral")); return e; },
   grid: (d, n) => { const e = el(d, CLS.grid); paintChildren(d, n, e); return e; },
   "approval-notice": (d, n) => el(d, CLS["approval-notice"], String(n.props?.notice ?? "")),
   plan: (d) => el(d, CLS.plan, "Composition (view-only)"),
   "form-summary": (d, n) => { const e = el(d, CLS["form-summary"]); paintChildren(d, n, e); return e; },
-  "field-label": (d, n) => el(d, CLS["field-label"], String(n.props?.label ?? ""), true),
+  "field-label": (d, n) => paintProse(d, CLS["field-label"], n, "label"),
 });
 function paintNode(doc: RDocument, node: IrNode): RElement {
   const p = PAINTERS[node.type];
@@ -287,27 +298,25 @@ export function renderIrDoc(doc: RDocument, mount: RElement, ir: IrDoc): void {
 /** Schema-validated dynamic ROW rendering for a list node: read ONLY the declared
  * selectors from each fetched row via own-property traversal; drop rows that yield
  * no title. Every field reaches the DOM via textContent. */
-export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[], path = ""): number {
+export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[]): number {
   const rowTitle = String(node.props?.rowTitle ?? "");
   const rowMeta = Array.isArray(node.props?.rowMeta) ? (node.props!.rowMeta as string[]) : [];
   const statusFrom = typeof node.props?.statusFrom === "string" ? node.props!.statusFrom : "";
   // Hard DOM-node cap whatever the manifest says: omitting `limit` must not lift it.
   const limit = Math.min(typeof node.props?.limit === "number" ? node.props!.limit : LIST_ROW_CAP, LIST_ROW_CAP);
-  const freeText = listFreeTextFields(path);
-  // Operator-authored free text inside registry rows may not state money (it renders untrusted).
-  const text = (field: string, v: string): string => (freeText.includes(field) && isMoneyClaim(v) ? WITHHELD_FIELD : v);
   let shown = 0;
   for (const row of rows) {
     if (shown >= limit) break;
     if (row === null || typeof row !== "object") continue;
-    // Every bound value passes recordValueText: a record's money-state status word is qualified (#3013).
-    const title = recordValueText(rowTitle, readSelector(row, rowTitle));
+    // Every bound value passes boundValueText: a record's status word is qualified (#3013); any other
+    // value that states money or verification is withheld (astra r2 F2).
+    const title = boundValueText(rowTitle, readSelector(row, rowTitle));
     if (title === "") continue; // drop malformed row (no valid title)
     const line = el(doc, CLS.row);
-    line.appendChild(el(doc, CLS.heading, text(rowTitle, title), true));
+    line.appendChild(el(doc, CLS.heading, title, true));
     // A selected field the row lacks is shown as explicitly absent, never silently omitted.
-    for (const m of rowMeta) { const v = recordValueText(m, readSelector(row, m)); line.appendChild(v !== "" ? el(doc, CLS.meta, text(m, v), true) : el(doc, CLS.meta + " " + CLS.absent, "not reported")); }
-    if (statusFrom) { const st = recordValueText(statusFrom, readSelector(row, statusFrom)); line.appendChild(st !== "" ? el(doc, CLS.badge, st, true) : el(doc, CLS.badge + " " + CLS.absent, "not reported")); }
+    for (const m of rowMeta) { const v = boundValueText(m, readSelector(row, m)); line.appendChild(v !== "" ? el(doc, CLS.meta, v, true) : el(doc, CLS.meta + " " + CLS.absent, "not reported")); }
+    if (statusFrom) { const st = boundValueText(statusFrom, readSelector(row, statusFrom)); line.appendChild(st !== "" ? el(doc, CLS.badge, st, true) : el(doc, CLS.badge + " " + CLS.absent, "not reported")); }
     listEl.appendChild(line);
     shown++;
   }
@@ -332,7 +341,7 @@ export function listRowsReadable(node: IrNode, rows: unknown[]): boolean {
 export function bindScalar(node: IrNode, data: unknown): string {
   const sel = node.bind?.select;
   if (!sel) return "";
-  return recordValueText(sel, readSelector(data, sel)); // a status metric's money-state word is qualified (#3013)
+  return boundValueText(sel, readSelector(data, sel)); // a status word is qualified (#3013); other claims withheld (astra r2 F2)
 }
 
 /**
