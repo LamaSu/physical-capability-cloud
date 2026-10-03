@@ -844,6 +844,52 @@ function commandMapGaps(commandMap: CommandMapV1, template: DeviceClassTemplate)
   return gaps;
 }
 
+/** No quantities: the `cannotSet` of an envelope whose map sets every bounded quantity. */
+const NO_QUANTITIES: readonly string[] = deepFreeze(newList<string>(0));
+
+/** The required quantities that carry a limit: all of them except `cannotSet`, in template order. */
+function boundedRequirements(template: DeviceClassTemplate, cannotSet: readonly string[]): QuantityRequirement[] {
+  return filterList(template.requires, (r) => !includesValue(cannotSet, r.quantity));
+}
+
+/**
+ * Why a committed `cannotSet` is malformed for this template, or null. When
+ * present it is a non-empty list of distinct required quantities, never the
+ * deadline, in template order: one canonical form, so one decision has one digest.
+ */
+function cannotSetShapeProblem(cannotSet: unknown, template: DeviceClassTemplate): string | null {
+  if (!ArrayIsArray(cannotSet) || cannotSet.length === 0) return "cannotSet, when present, lists at least one quantity";
+  let previous = -1;
+  for (let i = 0; i < cannotSet.length; i++) {
+    const quantity: unknown = cannotSet[i];
+    let at = -1;
+    for (let j = 0; j < template.requires.length; j++) if (template.requires[j]!.quantity === quantity) at = j;
+    if (at < 0) return `cannotSet names ${quoted(quantity)}, which is not a quantity of a ${template.id}`;
+    if (quantity === template.deadline) {
+      return `cannotSet names the deadline ${template.deadline}: the runtime stops a job on its elapsed time, whatever the device can set`;
+    }
+    if (at <= previous) return "cannotSet lists each quantity once, in template order";
+    previous = at;
+  }
+  return null;
+}
+
+/**
+ * Why the command map's coverage and `cannotSet` disagree, or null. Every
+ * quantity no declared parameter sets must be one the operator confirmed the
+ * device cannot set, and a quantity some parameter sets never can be: its
+ * limit is what the runtime enforces on that parameter.
+ */
+function coverageProblem(gaps: readonly string[], cannotSet: readonly string[]): string | null {
+  const unconfirmed = filterList(gaps, (q) => !includesValue(cannotSet, q));
+  if (unconfirmed.length > 0) {
+    return `no declared parameter sets ${joinStrings(unconfirmed, ", ")}, and the operator has not confirmed that the device cannot set it`;
+  }
+  const settable = filterList(cannotSet, (q) => !includesValue(gaps, q));
+  if (settable.length > 0) return `cannotSet names ${joinStrings(settable, ", ")}, but a declared parameter sets it`;
+  return null;
+}
+
 function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate } {
   const reasons = newList<string>(0);
   const template = templateOf(input?.deviceClass);
@@ -1000,12 +1046,15 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
       why: "the runtime refuses anything outside the declared command surface; it cannot be guessed",
     });
   } else {
+    // One question per quantity no declared parameter sets: the operator adds the
+    // parameter that sets it, or confirms the device cannot set it (`cannotSet`).
+    // Never a default: a bound no command reaches is not a bound.
     const gaps = commandMapGaps(commandMap, template);
-    if (gaps.length > 0) {
+    for (let i = 0; i < gaps.length; i++) {
       append(questions, {
-        about: "command-map",
-        ask: `No declared command parameter sets ${joinStrings(gaps, ", ")}. Which parameters do?`,
-        why: "a limit no parameter maps to is never enforced",
+        about: `cannot-set:${gaps[i]!}`,
+        ask: `No declared command parameter sets ${gaps[i]!}. Add the parameter that sets it to the command map, or confirm that the device cannot set it.`,
+        why: "a limit no parameter maps to is never enforced, so the operator says whether the device can set it",
       });
     }
   }
@@ -1113,6 +1162,13 @@ export interface EnvelopeDecision {
   maxCommandsPerMinute?: number;
   supervision?: Supervision;
   hazards?: Hazard[];
+  /**
+   * The required quantities this device cannot set, as the operator confirms
+   * them: exactly the quantities no parameter of the confirmed command map
+   * sets, never the deadline (the runtime stops a job on its elapsed time).
+   * Each answers that quantity's questions; no limit is committed for it.
+   */
+  cannotSet?: string[];
 }
 
 /** The part of a confirmed envelope the digest commits, including who confirmed it and when. */
@@ -1120,7 +1176,7 @@ export interface SafetyEnvelopeBody {
   envelopeVersion: 1;
   deviceClass: string;
   device: DeviceIdentity;
-  /** In template order, one per required quantity. */
+  /** In template order, one per required quantity, except the quantities in `cannotSet`. */
   limits: EnvelopeLimit[];
   eStop: EStopDeclaration;
   maxCommandsPerMinute: number;
@@ -1128,6 +1184,13 @@ export interface SafetyEnvelopeBody {
   /** In canonical order; empty means the operator said none. */
   hazards: Hazard[];
   commandMap: CommandMapV1;
+  /**
+   * Required quantities no declared parameter sets, as the operator confirmed
+   * them (`EnvelopeDecision.cannotSet`), in template order. Omitted when there
+   * are none, so an envelope whose map sets every quantity commits exactly
+   * what it did before this field existed.
+   */
+  cannotSet?: string[];
   confirmation: { confirmedBy: string; confirmedAt: string };
 }
 
@@ -1242,7 +1305,7 @@ function provenanceProblems(limit: Record<string, unknown>, quantity: string, un
   return problems;
 }
 
-const BODY_KEYS: readonly string[] = deepFreeze(["envelopeVersion", "deviceClass", "device", "limits", "eStop", "maxCommandsPerMinute", "supervision", "hazards", "commandMap", "confirmation"]);
+const BODY_KEYS: readonly string[] = deepFreeze(["envelopeVersion", "deviceClass", "device", "limits", "eStop", "maxCommandsPerMinute", "supervision", "hazards", "commandMap", "cannotSet", "confirmation"]);
 const LIMIT_KEYS: readonly string[] = deepFreeze(["quantity", "unit", "param", "min", "max", "proposedBy", "sources"]);
 const DEVICE_KEYS: readonly string[] = deepFreeze(["deviceId", "adapterType", "adapterVersion", "vendor", "model"]);
 
@@ -1278,11 +1341,18 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
     append(problems, "confirmedAt must be an ISO-8601 time");
   }
   if (extraKeys(confirmation, ["confirmedBy", "confirmedAt"]).length > 0) append(problems, "confirmation holds only confirmedBy and confirmedAt");
-  if (!ArrayIsArray(envelope.limits) || envelope.limits.length !== template.requires.length) {
-    append(problems, `limits must hold exactly one limit per required quantity, in template order (${joinStrings(mapList(template.requires, (r) => r.quantity), ", ")})`);
+  let cannotSet: readonly string[] = NO_QUANTITIES;
+  if (hasOwn(envelope, "cannotSet")) {
+    const shape = cannotSetShapeProblem(envelope.cannotSet, template);
+    if (shape) append(problems, shape);
+    else cannotSet = envelope.cannotSet as string[];
+  }
+  const bounded = boundedRequirements(template, cannotSet);
+  if (!ArrayIsArray(envelope.limits) || envelope.limits.length !== bounded.length) {
+    append(problems, `limits must hold exactly one limit per required quantity not in cannotSet, in template order (${joinStrings(mapList(bounded, (r) => r.quantity), ", ")})`);
   } else {
-    for (let i = 0; i < template.requires.length; i++) {
-      const req = template.requires[i]!;
+    for (let i = 0; i < bounded.length; i++) {
+      const req = bounded[i]!;
       const limit: unknown = envelope.limits[i];
       if (!isRecord(limit) || limit.quantity !== req.quantity) {
         append(problems, `limit ${i} must be ${req.quantity}`);
@@ -1318,8 +1388,8 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
   const map = commandMapProblem(envelope.commandMap, template);
   if (map) append(problems, `commandMap: ${map}`);
   else {
-    const gaps = commandMapGaps(envelope.commandMap, template);
-    if (gaps.length > 0) append(problems, `commandMap: no declared parameter sets ${joinStrings(gaps, ", ")}`);
+    const coverage = coverageProblem(commandMapGaps(envelope.commandMap, template), cannotSet);
+    if (coverage) append(problems, `commandMap: ${coverage}`);
   }
   return problems;
 }
@@ -1407,6 +1477,38 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     append(answered, edit.quantity);
   }
 
+  // The quantities the operator confirms the device cannot set. Each must be one no declared
+  // parameter sets, and never the deadline. Each answers that quantity's questions, and no
+  // limit is committed for it.
+  const cannotSet = newList<string>(0);
+  const declared: unknown = decision.cannotSet;
+  if (declared !== undefined) {
+    const gaps = draft.commandMap === null ? newList<string>(0) : commandMapGaps(draft.commandMap, template);
+    const quantities = mapList(template.requires, (r) => r.quantity);
+    if (!ArrayIsArray(declared)) append(reasons, "cannotSet must be a list of quantities");
+    else {
+      for (let i = 0; i < declared.length; i++) {
+        const quantity: unknown = declared[i];
+        if (typeof quantity !== "string" || !includesValue(quantities, quantity)) {
+          append(reasons, `cannotSet names ${quoted(quantity)}, which is not a quantity of a ${template.id}`);
+        } else if (quantity === template.deadline) {
+          append(reasons, `cannotSet names the deadline ${quantity}: the runtime stops a job on its elapsed time, whatever the device can set`);
+        } else if (includesValue(cannotSet, quantity)) {
+          append(reasons, `cannotSet names ${quantity} twice`);
+        } else if (!includesValue(gaps, quantity)) {
+          append(reasons, `cannotSet names ${quantity}, but a declared parameter sets it`);
+        } else if (includesValue(edited, quantity)) {
+          append(reasons, `cannotSet names ${quantity}, and an edit bounds it; one confirmation says one thing`);
+        } else {
+          append(cannotSet, quantity);
+          append(answered, `cannot-set:${quantity}`);
+          append(answered, quantity);
+        }
+      }
+    }
+  }
+  const bounded = boundedRequirements(template, cannotSet);
+
   const eStop = decision.eStop ?? draft.eStop;
   if (decision.eStop) append(answered, "e-stop");
   const rate = decision.maxCommandsPerMinute ?? draft.maxCommandsPerMinute;
@@ -1420,8 +1522,8 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     const q = draft.questions[i]!;
     if (!includesValue(answered, q.about)) append(reasons, `unanswered: ${q.ask}`);
   }
-  for (let i = 0; i < template.requires.length; i++) {
-    if (!hasOwn(limits, template.requires[i]!.quantity)) append(reasons, `no confirmed limit for ${template.requires[i]!.quantity}`);
+  for (let i = 0; i < bounded.length; i++) {
+    if (!hasOwn(limits, bounded[i]!.quantity)) append(reasons, `no confirmed limit for ${bounded[i]!.quantity}`);
   }
   if (draft.commandMap === null) append(reasons, "the adapter has not declared its commands; draft again with its command map");
   const stopProblem = eStopProblem(eStop, template, draft.commandMap);
@@ -1438,7 +1540,7 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     envelopeVersion: 1,
     deviceClass: draft.deviceClass,
     device: { ...draft.device },
-    limits: mapList(template.requires, (r) => limits[r.quantity]!),
+    limits: mapList(bounded, (r) => limits[r.quantity]!),
     // Only the declaration's own fields are committed.
     eStop: {
       mechanism: eStop.mechanism,
@@ -1448,6 +1550,8 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     supervision: supervision as Supervision,
     hazards: canonicalHazards(hazards),
     commandMap: draft.commandMap,
+    // In template order, and only when there is one: the digest of every other envelope is unchanged.
+    ...(cannotSet.length > 0 ? { cannotSet: mapList(filterList(template.requires, (r) => includesValue(cannotSet, r.quantity)), (r) => r.quantity) } : {}),
     confirmation: { confirmedBy: decision.confirmedBy, confirmedAt: decision.confirmedAt },
   };
   // What confirm returns is the snapshot it hashed: frozen, and exactly what the digest covers.
@@ -1625,7 +1729,9 @@ export function compileSafetyEnvelope(
   const { body: envelope, digest: committedDigest } = committedSnapshot(confirmed, registration, verifyRegistration);
   const template = templateOf(envelope.deviceClass)!;
 
-  const parameters = mapList(template.requires, (req, i): CsdParameter => {
+  // One parameter per limit: a quantity the device cannot set has neither (`cannotSet`).
+  const bounded = boundedRequirements(template, envelope.cannotSet ?? NO_QUANTITIES);
+  const parameters = mapList(bounded, (req, i): CsdParameter => {
     const limit = envelope.limits[i]!;
     return {
       key: req.param,
@@ -1639,7 +1745,7 @@ export function compileSafetyEnvelope(
       unit: limit.unit,
     };
   });
-  const definitions = mapList(template.requires, (req, i): ParameterDefinition => {
+  const definitions = mapList(bounded, (req, i): ParameterDefinition => {
     const limit = envelope.limits[i]!;
     return {
       name: req.param,
@@ -1685,12 +1791,26 @@ export function supervisionPolicy(
   return template ? supervisionPolicyProblem(supervision, eStop, template) : null;
 }
 
-/** Why a command map is malformed or leaves a bounded quantity unset, for a known class; null when it is complete. */
-export function commandMapIssue(commandMap: unknown, deviceClass: string): string | null {
+/**
+ * Why a command map is malformed for a known class, or disagrees with
+ * `cannotSet` about which bounded quantities it sets; null when it is complete.
+ */
+export function commandMapIssue(commandMap: unknown, deviceClass: string, cannotSet: readonly string[] = NO_QUANTITIES): string | null {
   const template = templateOf(deviceClass);
   if (!template) return `unknown deviceClass ${quoted(deviceClass)}`;
   const problem = commandMapProblem(commandMap, template);
   if (problem) return problem;
-  const gaps = commandMapGaps(commandMap as CommandMapV1, template);
-  return gaps.length > 0 ? `no declared parameter sets ${joinStrings(gaps, ", ")}` : null;
+  return coverageProblem(commandMapGaps(commandMap as CommandMapV1, template), cannotSet);
+}
+
+/**
+ * Why a runtime envelope's `cannotSet` is malformed for a known class, or
+ * null. Unlike a confirmed body's, it is always present, and empty when the
+ * map sets every bounded quantity.
+ */
+export function cannotSetIssue(cannotSet: unknown, deviceClass: string): string | null {
+  const template = templateOf(deviceClass);
+  if (!template) return `unknown deviceClass ${quoted(deviceClass)}`;
+  if (ArrayIsArray(cannotSet) && cannotSet.length === 0) return null;
+  return cannotSetShapeProblem(cannotSet, template);
 }

@@ -7,6 +7,7 @@
     "114b: the schema now refuses an unknown deviceClass outright (see 'unknown-class-generic-rules-only', moved here from 'valid'), limits must be in the template's exact order and units, an adapter-stop's command must be one of the declared commands, and deadlineQuantity must be the template's own deadline.",
     "153 (round 3): adapterVersion is the adapter's release manifest digest (sha256: + 64 lowercase hex); an unbounded parameter is {reason, allowed}, and a runtime passes only a value in allowed (same type and value); a reference source carries the bound it cites (value) and its unit.",
     "round 4: the template's deadline (deadlineQuantity) needs no command parameter: the runtime enforces it as elapsed time, and a parameter that does set it is checked against the same limit. A list-valued parameter declares unbounded.allowedItems: a runtime passes a non-empty list of distinct items, each in allowedItems (compared by type and value); a single value must be in allowed.",
+    "Addendum 5 (template fit): a required quantity that no declared command parameter sets is one the operator confirms the device cannot set (decision.cannotSet, never the deadline). The confirmed body commits cannotSet in template order, and omits it when empty, so every other envelope's digest is unchanged. Its limits are the template's minus cannotSet. The runtime envelope always carries cannotSet (possibly empty), and its limits are the template's minus cannotSet.",
     "registration: the registry signs statementDigest = 'sha256:' + lowercase hex(sha256(UTF-8(canonicalize({domain, deviceId, envelopeDigest, registeredAt})))) with Ed25519; the signed message is the UTF-8 of statementDigest itself (LO-EV-1 signingPreimage, 71 bytes). Signatures are not in this file: verify with the registry's key."
   ],
   "digest": {
@@ -393,6 +394,191 @@
         },
         "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"setIncubation\",\"params\":[{\"name\":\"celsius\",\"quantity\":\"incubation_temperature\",\"unit\":\"degC\"}]},{\"name\":\"read\",\"params\":[{\"name\":\"seconds\",\"quantity\":\"read_duration\",\"unit\":\"s\"},{\"name\":\"wavelengthNm\",\"unbounded\":{\"allowed\":[405,450,600],\"reason\":\"an optical setting, not a safety quantity\"}},{\"name\":\"plateFormat\",\"unbounded\":{\"allowed\":[\"96-well\"],\"reason\":\"the plate format; this reader takes 96-well plates only\"}},{\"name\":\"wells\",\"unbounded\":{\"allowed\":[\"all\"],\"allowedItems\":[\"A1\",\"A2\",\"A3\",\"A4\",\"A5\",\"A6\",\"A7\",\"A8\",\"A9\",\"A10\",\"A11\",\"A12\",\"B1\",\"B2\",\"B3\",\"B4\",\"B5\",\"B6\",\"B7\",\"B8\",\"B9\",\"B10\",\"B11\",\"B12\",\"C1\",\"C2\",\"C3\",\"C4\",\"C5\",\"C6\",\"C7\",\"C8\",\"C9\",\"C10\",\"C11\",\"C12\",\"D1\",\"D2\",\"D3\",\"D4\",\"D5\",\"D6\",\"D7\",\"D8\",\"D9\",\"D10\",\"D11\",\"D12\",\"E1\",\"E2\",\"E3\",\"E4\",\"E5\",\"E6\",\"E7\",\"E8\",\"E9\",\"E10\",\"E11\",\"E12\",\"F1\",\"F2\",\"F3\",\"F4\",\"F5\",\"F6\",\"F7\",\"F8\",\"F9\",\"F10\",\"F11\",\"F12\",\"G1\",\"G2\",\"G3\",\"G4\",\"G5\",\"G6\",\"G7\",\"G8\",\"G9\",\"G10\",\"G11\",\"G12\",\"H1\",\"H2\",\"H3\",\"H4\",\"H5\",\"H6\",\"H7\",\"H8\",\"H9\",\"H10\",\"H11\",\"H12\"],\"reason\":\"which wells to read; a well name sets no physical quantity\"}}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:1010101010101010101010101010101010101010101010101010101010101010\",\"deviceId\":\"pr-sim-1\"},\"deviceClass\":\"lab-plate-reader\",\"eStop\":{\"mechanism\":\"hardware\"},\"envelopeVersion\":1,\"hazards\":[],\"limits\":[{\"max\":42.5,\"min\":25,\"param\":\"incubationTemperature\",\"proposedBy\":\"reference\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"citation\":{\"doc\":\"Betriebshandbuch\",\"section\":\"§4.2 – Betriebstemperatur\",\"url\":\"https://example.org/manual.pdf\"},\"claim\":\"Inkubation ab 25 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-29\",\"unit\":\"degC\",\"value\":{\"min\":25}},{\"citation\":{\"doc\":\"Datasheet Rev C\",\"section\":\"Table 3\"},\"claim\":\"incubator rated to 42.5 °C\",\"kind\":\"reference\",\"retrievedAt\":\"2026-09-28T09:15:00Z\",\"unit\":\"degC\",\"value\":{\"max\":42.5}}],\"unit\":\"degC\"},{\"max\":600,\"min\":1,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":120,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":30,\"supervision\":\"attended\"}}",
         "envelopeDigest": "0x92f2241c6d208e147f31ca7608ca54a3e9bdbfffc83400b1aa3d216807702be7"
+      },
+      {
+        "name": "plate-reader-sim-pr1-cannot-set",
+        "envelope": {
+          "cannotSet": [
+            "incubation_temperature",
+            "read_duration"
+          ],
+          "commandMap": {
+            "commands": [
+              {
+                "name": "runPlate",
+                "params": [
+                  {
+                    "name": "plateFormat",
+                    "unbounded": {
+                      "allowed": [
+                        "96-well"
+                      ],
+                      "reason": "the plate format; this reader takes 96-well plates only"
+                    }
+                  },
+                  {
+                    "name": "wavelengthNm",
+                    "unbounded": {
+                      "allowed": [
+                        405,
+                        450,
+                        600
+                      ],
+                      "reason": "an optical setting, not a safety quantity"
+                    }
+                  },
+                  {
+                    "name": "wells",
+                    "unbounded": {
+                      "allowed": [
+                        "all"
+                      ],
+                      "allowedItems": [
+                        "A1",
+                        "A2",
+                        "A3",
+                        "A4",
+                        "A5",
+                        "A6",
+                        "A7",
+                        "A8",
+                        "A9",
+                        "A10",
+                        "A11",
+                        "A12",
+                        "B1",
+                        "B2",
+                        "B3",
+                        "B4",
+                        "B5",
+                        "B6",
+                        "B7",
+                        "B8",
+                        "B9",
+                        "B10",
+                        "B11",
+                        "B12",
+                        "C1",
+                        "C2",
+                        "C3",
+                        "C4",
+                        "C5",
+                        "C6",
+                        "C7",
+                        "C8",
+                        "C9",
+                        "C10",
+                        "C11",
+                        "C12",
+                        "D1",
+                        "D2",
+                        "D3",
+                        "D4",
+                        "D5",
+                        "D6",
+                        "D7",
+                        "D8",
+                        "D9",
+                        "D10",
+                        "D11",
+                        "D12",
+                        "E1",
+                        "E2",
+                        "E3",
+                        "E4",
+                        "E5",
+                        "E6",
+                        "E7",
+                        "E8",
+                        "E9",
+                        "E10",
+                        "E11",
+                        "E12",
+                        "F1",
+                        "F2",
+                        "F3",
+                        "F4",
+                        "F5",
+                        "F6",
+                        "F7",
+                        "F8",
+                        "F9",
+                        "F10",
+                        "F11",
+                        "F12",
+                        "G1",
+                        "G2",
+                        "G3",
+                        "G4",
+                        "G5",
+                        "G6",
+                        "G7",
+                        "G8",
+                        "G9",
+                        "G10",
+                        "G11",
+                        "G12",
+                        "H1",
+                        "H2",
+                        "H3",
+                        "H4",
+                        "H5",
+                        "H6",
+                        "H7",
+                        "H8",
+                        "H9",
+                        "H10",
+                        "H11",
+                        "H12"
+                      ],
+                      "reason": "which wells to read; a well name sets no physical quantity"
+                    }
+                  }
+                ]
+              },
+              {
+                "name": "stop",
+                "params": []
+              }
+            ]
+          },
+          "confirmation": {
+            "confirmedAt": "2026-09-29T20:00:00Z",
+            "confirmedBy": "operator:fixture"
+          },
+          "device": {
+            "adapterType": "generic-http",
+            "adapterVersion": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+            "deviceId": "sim-pr1"
+          },
+          "deviceClass": "lab-plate-reader",
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "envelopeVersion": 1,
+          "hazards": [],
+          "limits": [
+            {
+              "max": 30,
+              "min": 1,
+              "param": "jobDuration",
+              "proposedBy": "operator",
+              "quantity": "job_duration",
+              "sources": [
+                {
+                  "field": "safety.limits",
+                  "kind": "operator"
+                }
+              ],
+              "unit": "min"
+            }
+          ],
+          "maxCommandsPerMinute": 20,
+          "supervision": "attended"
+        },
+        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"cannotSet\":[\"incubation_temperature\",\"read_duration\"],\"commandMap\":{\"commands\":[{\"name\":\"runPlate\",\"params\":[{\"name\":\"plateFormat\",\"unbounded\":{\"allowed\":[\"96-well\"],\"reason\":\"the plate format; this reader takes 96-well plates only\"}},{\"name\":\"wavelengthNm\",\"unbounded\":{\"allowed\":[405,450,600],\"reason\":\"an optical setting, not a safety quantity\"}},{\"name\":\"wells\",\"unbounded\":{\"allowed\":[\"all\"],\"allowedItems\":[\"A1\",\"A2\",\"A3\",\"A4\",\"A5\",\"A6\",\"A7\",\"A8\",\"A9\",\"A10\",\"A11\",\"A12\",\"B1\",\"B2\",\"B3\",\"B4\",\"B5\",\"B6\",\"B7\",\"B8\",\"B9\",\"B10\",\"B11\",\"B12\",\"C1\",\"C2\",\"C3\",\"C4\",\"C5\",\"C6\",\"C7\",\"C8\",\"C9\",\"C10\",\"C11\",\"C12\",\"D1\",\"D2\",\"D3\",\"D4\",\"D5\",\"D6\",\"D7\",\"D8\",\"D9\",\"D10\",\"D11\",\"D12\",\"E1\",\"E2\",\"E3\",\"E4\",\"E5\",\"E6\",\"E7\",\"E8\",\"E9\",\"E10\",\"E11\",\"E12\",\"F1\",\"F2\",\"F3\",\"F4\",\"F5\",\"F6\",\"F7\",\"F8\",\"F9\",\"F10\",\"F11\",\"F12\",\"G1\",\"G2\",\"G3\",\"G4\",\"G5\",\"G6\",\"G7\",\"G8\",\"G9\",\"G10\",\"G11\",\"G12\",\"H1\",\"H2\",\"H3\",\"H4\",\"H5\",\"H6\",\"H7\",\"H8\",\"H9\",\"H10\",\"H11\",\"H12\"],\"reason\":\"which wells to read; a well name sets no physical quantity\"}}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:3131313131313131313131313131313131313131313131313131313131313131\",\"deviceId\":\"sim-pr1\"},\"deviceClass\":\"lab-plate-reader\",\"eStop\":{\"mechanism\":\"adapter-stop\",\"stopCommand\":\"stop\"},\"envelopeVersion\":1,\"hazards\":[],\"limits\":[{\"max\":30,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":20,\"supervision\":\"attended\"}}",
+        "envelopeDigest": "0x160ecb9f691854314a8077a91225e13680543be8ff59881ed323b9c1e804265a"
       }
     ]
   },
@@ -418,6 +604,16 @@
         },
         "preimage": "{\"deviceId\":\"pr-sim-1\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x92f2241c6d208e147f31ca7608ca54a3e9bdbfffc83400b1aa3d216807702be7\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
         "statementDigest": "sha256:9b7af43c7954ae2465efade45b26d985ae4ec7577d31ae5759a3c5c6a043c0a6"
+      },
+      {
+        "name": "plate-reader-sim-pr1-cannot-set",
+        "statement": {
+          "deviceId": "sim-pr1",
+          "envelopeDigest": "0x160ecb9f691854314a8077a91225e13680543be8ff59881ed323b9c1e804265a",
+          "registeredAt": "2026-09-29T20:05:00Z"
+        },
+        "preimage": "{\"deviceId\":\"sim-pr1\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x160ecb9f691854314a8077a91225e13680543be8ff59881ed323b9c1e804265a\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
+        "statementDigest": "sha256:151933e5fc57180b9f64ed9b6439dcb93848b2cadadb04d4477305a5a9638bb7"
       }
     ]
   },
@@ -459,6 +655,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -548,6 +745,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "setIncubation",
@@ -709,6 +907,176 @@
           "supervision": "attended",
           "hazards": []
         }
+      },
+      {
+        "name": "plate-reader-sim-pr1-cannot-set",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x160ecb9f691854314a8077a91225e13680543be8ff59881ed323b9c1e804265a",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "sim-pr1",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 30
+            }
+          ],
+          "cannotSet": [
+            "incubation_temperature",
+            "read_duration"
+          ],
+          "commands": [
+            {
+              "name": "runPlate",
+              "params": [
+                {
+                  "name": "plateFormat",
+                  "unbounded": {
+                    "reason": "the plate format; this reader takes 96-well plates only",
+                    "allowed": [
+                      "96-well"
+                    ]
+                  }
+                },
+                {
+                  "name": "wavelengthNm",
+                  "unbounded": {
+                    "reason": "an optical setting, not a safety quantity",
+                    "allowed": [
+                      405,
+                      450,
+                      600
+                    ]
+                  }
+                },
+                {
+                  "name": "wells",
+                  "unbounded": {
+                    "reason": "which wells to read; a well name sets no physical quantity",
+                    "allowed": [
+                      "all"
+                    ],
+                    "allowedItems": [
+                      "A1",
+                      "A2",
+                      "A3",
+                      "A4",
+                      "A5",
+                      "A6",
+                      "A7",
+                      "A8",
+                      "A9",
+                      "A10",
+                      "A11",
+                      "A12",
+                      "B1",
+                      "B2",
+                      "B3",
+                      "B4",
+                      "B5",
+                      "B6",
+                      "B7",
+                      "B8",
+                      "B9",
+                      "B10",
+                      "B11",
+                      "B12",
+                      "C1",
+                      "C2",
+                      "C3",
+                      "C4",
+                      "C5",
+                      "C6",
+                      "C7",
+                      "C8",
+                      "C9",
+                      "C10",
+                      "C11",
+                      "C12",
+                      "D1",
+                      "D2",
+                      "D3",
+                      "D4",
+                      "D5",
+                      "D6",
+                      "D7",
+                      "D8",
+                      "D9",
+                      "D10",
+                      "D11",
+                      "D12",
+                      "E1",
+                      "E2",
+                      "E3",
+                      "E4",
+                      "E5",
+                      "E6",
+                      "E7",
+                      "E8",
+                      "E9",
+                      "E10",
+                      "E11",
+                      "E12",
+                      "F1",
+                      "F2",
+                      "F3",
+                      "F4",
+                      "F5",
+                      "F6",
+                      "F7",
+                      "F8",
+                      "F9",
+                      "F10",
+                      "F11",
+                      "F12",
+                      "G1",
+                      "G2",
+                      "G3",
+                      "G4",
+                      "G5",
+                      "G6",
+                      "G7",
+                      "G8",
+                      "G9",
+                      "G10",
+                      "G11",
+                      "G12",
+                      "H1",
+                      "H2",
+                      "H3",
+                      "H4",
+                      "H5",
+                      "H6",
+                      "H7",
+                      "H8",
+                      "H9",
+                      "H10",
+                      "H11",
+                      "H12"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": []
+        }
       }
     ],
     "invalid": [
@@ -748,6 +1116,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -846,6 +1215,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -950,6 +1320,7 @@
               "max": 10
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1042,6 +1413,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1142,6 +1514,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1240,6 +1613,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1313,6 +1687,7 @@
           "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
           "strict": true,
           "limits": [],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1412,6 +1787,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1491,6 +1867,7 @@
               "max": 2
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1588,6 +1965,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1686,6 +2064,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1784,6 +2163,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1881,6 +2261,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -1979,6 +2360,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2081,6 +2463,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2179,6 +2562,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2277,6 +2661,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2375,6 +2760,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2473,6 +2859,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2571,6 +2958,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2669,6 +3057,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2767,6 +3156,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2865,6 +3255,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -2962,6 +3353,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3059,6 +3451,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3157,6 +3550,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3255,6 +3649,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3349,6 +3744,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "deadlineQuantity": "run_duration",
           "maxCommandsPerMinute": 60,
           "eStop": {
@@ -3401,6 +3797,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3499,6 +3896,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3597,6 +3995,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3694,6 +4093,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3792,6 +4192,7 @@
               "max": 300
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3893,6 +4294,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -3991,6 +4393,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4093,6 +4496,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4199,6 +4603,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4308,6 +4713,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4416,6 +4822,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4524,6 +4931,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4629,6 +5037,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4735,6 +5144,7 @@
               "max": 120
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4826,6 +5236,7 @@
               "max": 2
             }
           ],
+          "cannotSet": [],
           "commands": [
             {
               "name": "aspirate",
@@ -4884,6 +5295,1212 @@
         },
         "paths": [
           "deviceClass"
+        ]
+      },
+      {
+        "name": "cannot-set-missing",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "cannotSet"
+        ]
+      },
+      {
+        "name": "cannot-set-the-deadline",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "cannotSet": [
+            "run_duration"
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "cannotSet"
+        ]
+      },
+      {
+        "name": "cannot-set-unknown-quantity",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "cannotSet": [
+            "spindle_speed"
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "cannotSet"
+        ]
+      },
+      {
+        "name": "cannot-set-a-settable-quantity",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "cannotSet": [
+            "module_temperature"
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands"
+        ]
+      },
+      {
+        "name": "cannot-set-yet-limited",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x3448faaca8a40e115755ef4b4a47991c287e569a14857d3f488654d207fffafc",
+          "deviceClass": "liquid-handler-ot2",
+          "deviceId": "ot2-sim-1",
+          "adapterType": "opentrons",
+          "adapterVersion": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "aspirate_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "dispense_volume",
+              "unit": "uL",
+              "min": 0.5,
+              "max": 300
+            },
+            {
+              "quantity": "module_temperature",
+              "unit": "degC",
+              "min": 4,
+              "max": 95
+            },
+            {
+              "quantity": "run_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "cannotSet": [
+            "module_temperature"
+          ],
+          "commands": [
+            {
+              "name": "aspirate",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "aspirate_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "dispense",
+              "params": [
+                {
+                  "name": "volumeUl",
+                  "quantity": "dispense_volume",
+                  "unit": "uL"
+                }
+              ]
+            },
+            {
+              "name": "setModuleTemp",
+              "params": [
+                {
+                  "name": "celsius",
+                  "quantity": "module_temperature",
+                  "unit": "degC"
+                }
+              ]
+            },
+            {
+              "name": "runProtocol",
+              "params": [
+                {
+                  "name": "minutes",
+                  "quantity": "run_duration",
+                  "unit": "min"
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "run_duration",
+          "maxCommandsPerMinute": 60,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat",
+            "mechanical"
+          ]
+        },
+        "paths": [
+          "commands",
+          "limits",
+          "limits.2.quantity"
+        ]
+      },
+      {
+        "name": "cannot-set-out-of-order",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x160ecb9f691854314a8077a91225e13680543be8ff59881ed323b9c1e804265a",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "sim-pr1",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 30
+            }
+          ],
+          "cannotSet": [
+            "read_duration",
+            "incubation_temperature"
+          ],
+          "commands": [
+            {
+              "name": "runPlate",
+              "params": [
+                {
+                  "name": "plateFormat",
+                  "unbounded": {
+                    "reason": "the plate format; this reader takes 96-well plates only",
+                    "allowed": [
+                      "96-well"
+                    ]
+                  }
+                },
+                {
+                  "name": "wavelengthNm",
+                  "unbounded": {
+                    "reason": "an optical setting, not a safety quantity",
+                    "allowed": [
+                      405,
+                      450,
+                      600
+                    ]
+                  }
+                },
+                {
+                  "name": "wells",
+                  "unbounded": {
+                    "reason": "which wells to read; a well name sets no physical quantity",
+                    "allowed": [
+                      "all"
+                    ],
+                    "allowedItems": [
+                      "A1",
+                      "A2",
+                      "A3",
+                      "A4",
+                      "A5",
+                      "A6",
+                      "A7",
+                      "A8",
+                      "A9",
+                      "A10",
+                      "A11",
+                      "A12",
+                      "B1",
+                      "B2",
+                      "B3",
+                      "B4",
+                      "B5",
+                      "B6",
+                      "B7",
+                      "B8",
+                      "B9",
+                      "B10",
+                      "B11",
+                      "B12",
+                      "C1",
+                      "C2",
+                      "C3",
+                      "C4",
+                      "C5",
+                      "C6",
+                      "C7",
+                      "C8",
+                      "C9",
+                      "C10",
+                      "C11",
+                      "C12",
+                      "D1",
+                      "D2",
+                      "D3",
+                      "D4",
+                      "D5",
+                      "D6",
+                      "D7",
+                      "D8",
+                      "D9",
+                      "D10",
+                      "D11",
+                      "D12",
+                      "E1",
+                      "E2",
+                      "E3",
+                      "E4",
+                      "E5",
+                      "E6",
+                      "E7",
+                      "E8",
+                      "E9",
+                      "E10",
+                      "E11",
+                      "E12",
+                      "F1",
+                      "F2",
+                      "F3",
+                      "F4",
+                      "F5",
+                      "F6",
+                      "F7",
+                      "F8",
+                      "F9",
+                      "F10",
+                      "F11",
+                      "F12",
+                      "G1",
+                      "G2",
+                      "G3",
+                      "G4",
+                      "G5",
+                      "G6",
+                      "G7",
+                      "G8",
+                      "G9",
+                      "G10",
+                      "G11",
+                      "G12",
+                      "H1",
+                      "H2",
+                      "H3",
+                      "H4",
+                      "H5",
+                      "H6",
+                      "H7",
+                      "H8",
+                      "H9",
+                      "H10",
+                      "H11",
+                      "H12"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": []
+        },
+        "paths": [
+          "cannotSet",
+          "commands",
+          "limits",
+          "limits.0.quantity"
+        ]
+      },
+      {
+        "name": "cannot-set-twice",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x160ecb9f691854314a8077a91225e13680543be8ff59881ed323b9c1e804265a",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "sim-pr1",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 30
+            }
+          ],
+          "cannotSet": [
+            "incubation_temperature",
+            "incubation_temperature"
+          ],
+          "commands": [
+            {
+              "name": "runPlate",
+              "params": [
+                {
+                  "name": "plateFormat",
+                  "unbounded": {
+                    "reason": "the plate format; this reader takes 96-well plates only",
+                    "allowed": [
+                      "96-well"
+                    ]
+                  }
+                },
+                {
+                  "name": "wavelengthNm",
+                  "unbounded": {
+                    "reason": "an optical setting, not a safety quantity",
+                    "allowed": [
+                      405,
+                      450,
+                      600
+                    ]
+                  }
+                },
+                {
+                  "name": "wells",
+                  "unbounded": {
+                    "reason": "which wells to read; a well name sets no physical quantity",
+                    "allowed": [
+                      "all"
+                    ],
+                    "allowedItems": [
+                      "A1",
+                      "A2",
+                      "A3",
+                      "A4",
+                      "A5",
+                      "A6",
+                      "A7",
+                      "A8",
+                      "A9",
+                      "A10",
+                      "A11",
+                      "A12",
+                      "B1",
+                      "B2",
+                      "B3",
+                      "B4",
+                      "B5",
+                      "B6",
+                      "B7",
+                      "B8",
+                      "B9",
+                      "B10",
+                      "B11",
+                      "B12",
+                      "C1",
+                      "C2",
+                      "C3",
+                      "C4",
+                      "C5",
+                      "C6",
+                      "C7",
+                      "C8",
+                      "C9",
+                      "C10",
+                      "C11",
+                      "C12",
+                      "D1",
+                      "D2",
+                      "D3",
+                      "D4",
+                      "D5",
+                      "D6",
+                      "D7",
+                      "D8",
+                      "D9",
+                      "D10",
+                      "D11",
+                      "D12",
+                      "E1",
+                      "E2",
+                      "E3",
+                      "E4",
+                      "E5",
+                      "E6",
+                      "E7",
+                      "E8",
+                      "E9",
+                      "E10",
+                      "E11",
+                      "E12",
+                      "F1",
+                      "F2",
+                      "F3",
+                      "F4",
+                      "F5",
+                      "F6",
+                      "F7",
+                      "F8",
+                      "F9",
+                      "F10",
+                      "F11",
+                      "F12",
+                      "G1",
+                      "G2",
+                      "G3",
+                      "G4",
+                      "G5",
+                      "G6",
+                      "G7",
+                      "G8",
+                      "G9",
+                      "G10",
+                      "G11",
+                      "G12",
+                      "H1",
+                      "H2",
+                      "H3",
+                      "H4",
+                      "H5",
+                      "H6",
+                      "H7",
+                      "H8",
+                      "H9",
+                      "H10",
+                      "H11",
+                      "H12"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": []
+        },
+        "paths": [
+          "cannotSet",
+          "commands",
+          "limits",
+          "limits.0.quantity"
+        ]
+      },
+      {
+        "name": "cannot-set-omits-an-unset-quantity",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x160ecb9f691854314a8077a91225e13680543be8ff59881ed323b9c1e804265a",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "sim-pr1",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 30
+            }
+          ],
+          "cannotSet": [
+            "incubation_temperature"
+          ],
+          "commands": [
+            {
+              "name": "runPlate",
+              "params": [
+                {
+                  "name": "plateFormat",
+                  "unbounded": {
+                    "reason": "the plate format; this reader takes 96-well plates only",
+                    "allowed": [
+                      "96-well"
+                    ]
+                  }
+                },
+                {
+                  "name": "wavelengthNm",
+                  "unbounded": {
+                    "reason": "an optical setting, not a safety quantity",
+                    "allowed": [
+                      405,
+                      450,
+                      600
+                    ]
+                  }
+                },
+                {
+                  "name": "wells",
+                  "unbounded": {
+                    "reason": "which wells to read; a well name sets no physical quantity",
+                    "allowed": [
+                      "all"
+                    ],
+                    "allowedItems": [
+                      "A1",
+                      "A2",
+                      "A3",
+                      "A4",
+                      "A5",
+                      "A6",
+                      "A7",
+                      "A8",
+                      "A9",
+                      "A10",
+                      "A11",
+                      "A12",
+                      "B1",
+                      "B2",
+                      "B3",
+                      "B4",
+                      "B5",
+                      "B6",
+                      "B7",
+                      "B8",
+                      "B9",
+                      "B10",
+                      "B11",
+                      "B12",
+                      "C1",
+                      "C2",
+                      "C3",
+                      "C4",
+                      "C5",
+                      "C6",
+                      "C7",
+                      "C8",
+                      "C9",
+                      "C10",
+                      "C11",
+                      "C12",
+                      "D1",
+                      "D2",
+                      "D3",
+                      "D4",
+                      "D5",
+                      "D6",
+                      "D7",
+                      "D8",
+                      "D9",
+                      "D10",
+                      "D11",
+                      "D12",
+                      "E1",
+                      "E2",
+                      "E3",
+                      "E4",
+                      "E5",
+                      "E6",
+                      "E7",
+                      "E8",
+                      "E9",
+                      "E10",
+                      "E11",
+                      "E12",
+                      "F1",
+                      "F2",
+                      "F3",
+                      "F4",
+                      "F5",
+                      "F6",
+                      "F7",
+                      "F8",
+                      "F9",
+                      "F10",
+                      "F11",
+                      "F12",
+                      "G1",
+                      "G2",
+                      "G3",
+                      "G4",
+                      "G5",
+                      "G6",
+                      "G7",
+                      "G8",
+                      "G9",
+                      "G10",
+                      "G11",
+                      "G12",
+                      "H1",
+                      "H2",
+                      "H3",
+                      "H4",
+                      "H5",
+                      "H6",
+                      "H7",
+                      "H8",
+                      "H9",
+                      "H10",
+                      "H11",
+                      "H12"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": []
+        },
+        "paths": [
+          "commands",
+          "limits",
+          "limits.0.quantity"
+        ]
+      },
+      {
+        "name": "cannot-set-but-limited-anyway",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x160ecb9f691854314a8077a91225e13680543be8ff59881ed323b9c1e804265a",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "sim-pr1",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 30
+            }
+          ],
+          "cannotSet": [],
+          "commands": [
+            {
+              "name": "runPlate",
+              "params": [
+                {
+                  "name": "plateFormat",
+                  "unbounded": {
+                    "reason": "the plate format; this reader takes 96-well plates only",
+                    "allowed": [
+                      "96-well"
+                    ]
+                  }
+                },
+                {
+                  "name": "wavelengthNm",
+                  "unbounded": {
+                    "reason": "an optical setting, not a safety quantity",
+                    "allowed": [
+                      405,
+                      450,
+                      600
+                    ]
+                  }
+                },
+                {
+                  "name": "wells",
+                  "unbounded": {
+                    "reason": "which wells to read; a well name sets no physical quantity",
+                    "allowed": [
+                      "all"
+                    ],
+                    "allowedItems": [
+                      "A1",
+                      "A2",
+                      "A3",
+                      "A4",
+                      "A5",
+                      "A6",
+                      "A7",
+                      "A8",
+                      "A9",
+                      "A10",
+                      "A11",
+                      "A12",
+                      "B1",
+                      "B2",
+                      "B3",
+                      "B4",
+                      "B5",
+                      "B6",
+                      "B7",
+                      "B8",
+                      "B9",
+                      "B10",
+                      "B11",
+                      "B12",
+                      "C1",
+                      "C2",
+                      "C3",
+                      "C4",
+                      "C5",
+                      "C6",
+                      "C7",
+                      "C8",
+                      "C9",
+                      "C10",
+                      "C11",
+                      "C12",
+                      "D1",
+                      "D2",
+                      "D3",
+                      "D4",
+                      "D5",
+                      "D6",
+                      "D7",
+                      "D8",
+                      "D9",
+                      "D10",
+                      "D11",
+                      "D12",
+                      "E1",
+                      "E2",
+                      "E3",
+                      "E4",
+                      "E5",
+                      "E6",
+                      "E7",
+                      "E8",
+                      "E9",
+                      "E10",
+                      "E11",
+                      "E12",
+                      "F1",
+                      "F2",
+                      "F3",
+                      "F4",
+                      "F5",
+                      "F6",
+                      "F7",
+                      "F8",
+                      "F9",
+                      "F10",
+                      "F11",
+                      "F12",
+                      "G1",
+                      "G2",
+                      "G3",
+                      "G4",
+                      "G5",
+                      "G6",
+                      "G7",
+                      "G8",
+                      "G9",
+                      "G10",
+                      "G11",
+                      "G12",
+                      "H1",
+                      "H2",
+                      "H3",
+                      "H4",
+                      "H5",
+                      "H6",
+                      "H7",
+                      "H8",
+                      "H9",
+                      "H10",
+                      "H11",
+                      "H12"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": []
+        },
+        "paths": [
+          "commands"
         ]
       }
     ]

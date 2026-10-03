@@ -20,6 +20,10 @@
  *     `allowed` list, or a non-empty list of distinct items each in its
  *     `allowedItems`, compared by type and value; there is no free-form
  *     parameter.
+ *   - `cannotSet` names the template's quantities that no declared command
+ *     parameter sets, as the operator confirmed them. They carry no limit,
+ *     and need none: the command surface is closed, so nothing can set them.
+ *     The deadline is never among them.
  *   - The adapter is the one the envelope commits: a runtime refuses an
  *     adapter whose release manifest digest is not `adapterVersion`.
  *   - At most `maxCommandsPerMinute` commands in any 60-second window, per
@@ -63,6 +67,7 @@ import {
   EnvelopeRefused,
   HAZARDS,
   SUPERVISION_MODES,
+  cannotSetIssue,
   checkCommittedEnvelope,
   commandMapIssue,
   isAdapterManifestDigest,
@@ -89,6 +94,9 @@ import {
 } from "./primordials.js";
 
 const NonBlank = z.string().refine((s) => trim(s).length > 0, { message: "must not be blank" });
+
+/** No quantities: the `cannotSet` of an envelope whose map sets every bounded quantity. */
+const NO_QUANTITIES: readonly string[] = deepFreeze(newList<string>(0));
 
 /** True when no two values are equal by type and value (compared as their JSON). */
 function allDistinct(values: readonly unknown[]): boolean {
@@ -170,6 +178,8 @@ export const OperationalEnvelopeV1Schema = z
       .refine((s): boolean => isAdapterManifestDigest(s), { message: "must be sha256: + 64 lowercase hex (the adapter's manifest digest)" }),
     strict: z.literal(true),
     limits: z.array(OperationalLimitSchema).min(1),
+    /** The template quantities no declared command parameter sets, as the operator confirmed them, in template order; may be empty. */
+    cannotSet: z.array(NonBlank),
     commands: z.array(OperationalCommandSchema).min(1),
     /** The limit whose max is a whole job's deadline. */
     deadlineQuantity: NonBlank,
@@ -199,12 +209,17 @@ export const OperationalEnvelopeV1Schema = z
         }
       }
     }
-    // Exactly the template's quantities, in its order and units.
-    if (env.limits.length !== template.requires.length) {
-      issue(["limits"], `limits must be exactly ${joinStrings(mapList(template.requires, (r) => r.quantity), ", ")}`);
+    // `cannotSet`: distinct template quantities in template order, never the deadline.
+    const cannotSetProblem = cannotSetIssue(env.cannotSet, env.deviceClass);
+    if (cannotSetProblem) issue(["cannotSet"], cannotSetProblem);
+    const cannotSet = cannotSetProblem ? NO_QUANTITIES : env.cannotSet;
+    // Exactly the template's quantities except `cannotSet`, in its order and units.
+    const bounded = filterList(template.requires, (r) => !includesValue(cannotSet, r.quantity));
+    if (env.limits.length !== bounded.length) {
+      issue(["limits"], `limits must be exactly ${joinStrings(mapList(bounded, (r) => r.quantity), ", ")}`);
     }
-    for (let i = 0; i < template.requires.length; i++) {
-      const req = template.requires[i]!;
+    for (let i = 0; i < bounded.length; i++) {
+      const req = bounded[i]!;
       const limit = env.limits[i];
       if (!limit) continue;
       if (limit.quantity !== req.quantity) issue(["limits", i, "quantity"], `limit ${i} must be ${req.quantity}`);
@@ -219,7 +234,7 @@ export const OperationalEnvelopeV1Schema = z
     }
     const policy = supervisionPolicy(env.supervision, env.eStop, env.deviceClass);
     if (policy) issue(["supervision"], policy);
-    const map = commandMapIssue({ commands: env.commands }, env.deviceClass);
+    const map = commandMapIssue({ commands: env.commands }, env.deviceClass, cannotSet);
     if (map) issue(["commands"], map);
     const deadlines = filterList(env.limits, (l) => l.quantity === env.deadlineQuantity);
     const deadline = deadlines.length > 0 ? deadlines[0] : undefined;
@@ -260,6 +275,7 @@ export function compileOperationalEnvelope(
     adapterVersion: envelope.device.adapterVersion,
     strict: true,
     limits: mapList(envelope.limits, (l) => ({ quantity: l.quantity, unit: l.unit, min: l.min, max: l.max })),
+    cannotSet: mapList(envelope.cannotSet ?? NO_QUANTITIES, (q) => q),
     commands: mapList(envelope.commandMap.commands, (c) => ({
       name: c.name,
       params: mapList(c.params, (p) =>

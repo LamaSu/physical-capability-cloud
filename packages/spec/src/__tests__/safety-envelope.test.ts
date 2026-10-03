@@ -1334,12 +1334,12 @@ describe("astra 114b findings", () => {
     expect(() => compileRegistered(bad)).toThrow(/v1 does not allow unattended operation/);
   });
 
-  it("the map gap: a command map that sets no read_duration gives a command-map question", () => {
+  it("the map gap: a command map that sets no read_duration asks whether the device can set it (Addendum 5)", () => {
     const input = fullyAnsweredInput("lab-plate-reader");
     input.commandMap = { commands: COMMAND_MAPS["lab-plate-reader"]!.commands.filter((c) => c.name !== "read") };
     const draft = draftSafetyEnvelope(input);
-    expect(draft.questions.map((q) => q.about)).toContain("command-map");
-    expect(draft.questions.find((q) => q.about === "command-map")?.ask).toMatch(/read_duration/);
+    expect(draft.questions.map((q) => q.about)).toContain("cannot-set:read_duration");
+    expect(draft.questions.find((q) => q.about === "cannot-set:read_duration")?.ask).toMatch(/read_duration.*cannot set it/);
   });
 
   it("(round 4) the deadline (job_duration) needs no parameter: the runtime enforces it as elapsed time", () => {
@@ -1858,4 +1858,110 @@ describe("astra 153: every shape is closed, so nothing is committed and then ign
       expect(() => compileRegistered(b as unknown as SafetyEnvelopeBody)).toThrow(reason);
     });
   }
+});
+
+// ── Addendum 5: template fit ("cannot set") ────────────────────────
+
+describe("template fit (Addendum 5): a quantity no command sets is one the operator confirms the device cannot set", () => {
+  const WELLS = [..."ABCDEFGH"].flatMap((row) => Array.from({ length: 12 }, (_, i) => `${row}${i + 1}`));
+  const SIM_PR1: CommandMapV1 = {
+    commands: [
+      {
+        name: "runPlate",
+        params: [
+          { name: "plateFormat", unbounded: { reason: "the plate format", allowed: ["96-well"] } },
+          { name: "wavelengthNm", unbounded: { reason: "an optical setting", allowed: [405, 450, 600] } },
+          { name: "wells", unbounded: { reason: "which wells to read", allowed: ["all"], allowedItems: WELLS } },
+        ],
+      },
+      { name: "stop", params: [] },
+    ],
+  };
+  function simInput(): SafetyEnvelopeInput {
+    return {
+      deviceClass: "lab-plate-reader",
+      device: { deviceId: "sim-pr1", adapterType: "generic-http", adapterVersion: MANIFEST },
+      commandMap: SIM_PR1,
+      intake: {
+        limits: [{ field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 30 }],
+        eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
+        supervision: "attended",
+        hazards: [],
+        maxCommandsPerMinute: 20,
+      },
+      references: [],
+    };
+  }
+  const BOTH = ["incubation_temperature", "read_duration"];
+  const jobDurationParam = DEVICE_CLASS_TEMPLATES["lab-plate-reader"]!.requires.find((r) => r.quantity === "job_duration")!.param;
+
+  it("the draft asks once per unset quantity, never the deadline, and proposes no bound for them", () => {
+    const draft = draftSafetyEnvelope(simInput());
+    const abouts = draft.questions.map((q) => q.about);
+    expect(abouts).toContain("cannot-set:incubation_temperature");
+    expect(abouts).toContain("cannot-set:read_duration");
+    expect(abouts.filter((a) => a.startsWith("cannot-set:"))).toHaveLength(2);
+    expect(draft.limits.map((l) => l.quantity)).toEqual(["job_duration"]);
+  });
+
+  it("confirm commits cannotSet in template order and limits without those quantities, and both compilers follow", () => {
+    const c = confirmSafetyEnvelope(simInput(), confirmDecision({ cannotSet: ["read_duration", "incubation_temperature"] }));
+    expect(c.envelope.cannotSet).toEqual(BOTH);
+    expect(c.envelope.limits.map((l) => l.quantity)).toEqual(["job_duration"]);
+    expect(confirmedBodyProblems(c.envelope)).toEqual([]);
+    const csd = compileOwn(c);
+    expect(csd.parameters.map((p) => p.key)).toEqual([jobDurationParam]);
+    expect(csd.composition.parameters.map((p) => p.name)).toEqual([jobDurationParam]);
+  });
+
+  it("without the answer confirm refuses: an unset quantity is never dropped silently", () => {
+    expect(() => confirmSafetyEnvelope(simInput(), confirmDecision())).toThrow(EnvelopeRefused);
+    expect(() => confirmSafetyEnvelope(simInput(), confirmDecision({ cannotSet: ["incubation_temperature"] }))).toThrow(/read_duration/);
+  });
+
+  it.each([
+    ["the deadline", ["incubation_temperature", "read_duration", "job_duration"], /the deadline job_duration/],
+    ["an unknown quantity", ["incubation_temperature", "read_duration", "spindle_speed"], /"spindle_speed", which is not a quantity of a lab-plate-reader/],
+    ["a quantity twice", ["incubation_temperature", "incubation_temperature", "read_duration"], /twice/],
+    ["something that is not a list", "incubation_temperature" as unknown as string[], /a list of quantities/],
+  ])("confirm refuses cannotSet naming %s", (_label, cannotSet, reason) => {
+    expect(() => confirmSafetyEnvelope(simInput(), confirmDecision({ cannotSet }))).toThrow(reason);
+  });
+
+  it("confirm refuses cannotSet naming a quantity a declared parameter sets", () => {
+    const input = fullyAnsweredInput("lab-plate-reader");
+    expect(() => confirmSafetyEnvelope(input, confirmDecision({ cannotSet: ["incubation_temperature"] }))).toThrow(/a declared parameter sets it/);
+  });
+
+  it("confirm refuses an edit that bounds a quantity cannotSet names", () => {
+    expect(() => confirmSafetyEnvelope(simInput(), confirmDecision({ cannotSet: BOTH, edits: [{ quantity: "read_duration", min: 1, max: 60 }] }))).toThrow(
+      /an edit bounds it/,
+    );
+  });
+
+  it("an envelope whose map sets every quantity commits no cannotSet, so its digest is what it was", () => {
+    const c = confirmSafetyEnvelope(fullyAnsweredInput("lab-plate-reader"), confirmDecision());
+    expect(Object.keys(c.envelope)).not.toContain("cannotSet");
+  });
+
+  describe("a hand-built body is held to the same rules", () => {
+    const good = () => structuredClone(confirmSafetyEnvelope(simInput(), confirmDecision({ cannotSet: BOTH })).envelope) as unknown as Record<string, any>;
+    it.each([
+      ["out of template order", (b: Record<string, any>) => (b.cannotSet = ["read_duration", "incubation_temperature"]), /template order/],
+      ["empty but present", (b: Record<string, any>) => (b.cannotSet = []), /at least one quantity/],
+      ["naming the deadline", (b: Record<string, any>) => (b.cannotSet = ["incubation_temperature", "read_duration", "job_duration"]), /deadline/],
+      ["omitting an unset quantity", (b: Record<string, any>) => (b.cannotSet = ["incubation_temperature"]), /read_duration/],
+      ["absent while quantities are unset", (b: Record<string, any>) => delete b.cannotSet, /no declared parameter sets/],
+      [
+        "with a limit for a quantity it names",
+        (b: Record<string, any>) => b.limits.unshift({ ...b.limits[0], quantity: "read_duration", unit: "s", param: "readDuration" }),
+        /limits must hold exactly one limit per required quantity not in cannotSet/,
+      ],
+    ])("refused: cannotSet %s", (_label, change, problem) => {
+      const b = good();
+      change(b);
+      expect(confirmedBodyProblems(b as unknown as SafetyEnvelopeBody).join("; ")).toMatch(problem);
+      expect(() => compileRegistered(b as unknown as SafetyEnvelopeBody)).toThrow(EnvelopeRefused);
+    });
+  });
 });
