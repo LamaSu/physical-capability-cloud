@@ -44,7 +44,11 @@ export class GenericSensorAdapter {
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private recording = false;
-  private samples: Array<{ timestamp: string; value: number }> = [];
+  /**
+   * The recording running now: its job and its samples. A read keeps the recording it was
+   * started for, and a read of a recording that was replaced is dropped (astra pack 186).
+   */
+  private current: { jobId: string; samples: Array<{ timestamp: string; value: number }> } | null = null;
   /** The recording's sampling timer and each read in flight: what can still emit. */
   private readonly work = new OutstandingWork();
   private endRecording: (() => void) | null = null;
@@ -65,23 +69,27 @@ export class GenericSensorAdapter {
     // A recording already running is replaced: its timer used to be overwritten and left sampling.
     this.stopSampling();
     this.recording = true;
-    this.samples = [];
+    const recording = { jobId, samples: [] as Array<{ timestamp: string; value: number }> };
+    this.current = recording;
 
     const interval = this.config.sampleIntervalMs ?? 1000;
     this.endRecording = this.work.begin();
     this.pollTimer = setInterval(() => {
-      void this.work.track(this.sample(jobId));
+      void this.work.track(this.sample(recording));
     }, interval);
   }
 
-  private async sample(jobId: string): Promise<void> {
+  private async sample(recording: { jobId: string; samples: Array<{ timestamp: string; value: number }> }): Promise<void> {
+    const { jobId } = recording;
     try {
       const value = this.config.mockMode
         ? this.generateMockValue()
         : await this.readValue();
+      // The recording was replaced while this read was in flight: neither job gets it.
+      if (this.current !== recording) return;
 
       const sample = { timestamp: new Date().toISOString(), value };
-      this.samples.push(sample);
+      recording.samples.push(sample);
 
       this.emit({
         type: "power_profile_sample",
@@ -103,7 +111,8 @@ export class GenericSensorAdapter {
     this.recording = false;
     this.stopSampling();
 
-    const values = this.samples.map(s => s.value);
+    const samples = this.current?.samples ?? [];
+    const values = samples.map(s => s.value);
     const stats = values.length > 0 ? {
       min: Math.min(...values),
       max: Math.max(...values),
@@ -122,9 +131,9 @@ export class GenericSensorAdapter {
         channel: this.config.channel,
         unit: this.config.unit,
         sampleCount: values.length,
-        durationMs: this.samples.length * (this.config.sampleIntervalMs ?? 1000),
+        durationMs: samples.length * (this.config.sampleIntervalMs ?? 1000),
         statistics: stats,
-        samples: this.samples,
+        samples,
       },
     };
   }
