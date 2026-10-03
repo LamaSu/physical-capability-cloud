@@ -87,7 +87,7 @@ export function KernelLeaderboardPage() {
   }
 
   // useAllCapabilities rejects an answer without an items array.
-  const { items: capabilities, total, complete } = capabilitiesQ.data;
+  const { items: capabilities, total, complete, pages } = capabilitiesQ.data;
   const kernels = kernelsQ.data;
   const rows = buildLeaderboard(capabilities, kernels);
   // A failed refresh leaves the last successful read on screen, labelled with its age.
@@ -121,6 +121,11 @@ export function KernelLeaderboardPage() {
         <p role="status" className="text-xs text-amber-200/70">
           Ranked over the first {capabilities.length} of the {total} capabilities the gateway lists. Kernels
           whose capabilities weren't read may be missing or placed differently.
+        </p>
+      )}
+      {pages > 1 && (
+        <p className="text-xs text-white/30">
+          Read in {pages} pages; the gateway gives no snapshot across pages.
         </p>
       )}
       {/* KPI strip */}
