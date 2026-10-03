@@ -13,10 +13,11 @@
 
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
-import { getRepos } from "../db.js";
+import { getRepos, getStore } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
+import { commitRelayEvidence } from "../services/relay-evidence-commitment.js";
 import { v4 as uuidv4 } from "uuid";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 
@@ -119,6 +120,15 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         };
       }
 
+      // The stored bundle belongs to the job's kernel. A body naming another kernel is
+      // refused, never stored under it (N80: stored evidence tells the truth).
+      if (kernelId !== undefined && job.kernelId && kernelId !== job.kernelId) {
+        return reply.code(409).send({
+          error: "kernel_mismatch",
+          message: `evidence names kernel ${kernelId}, but job ${jobId} belongs to kernel ${job.kernelId}`,
+        });
+      }
+
       // Store evidence bundle
       const bundleId = `ev-${uuidv4()}`;
       const now = new Date().toISOString();
@@ -128,8 +138,17 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       // discarding the signature and writing a gateway placeholder. This only
       // PERSISTS the truth of what the device signed; it does NOT verify it or gate
       // settlement. The oracle #52 verifier (stubbed, fail-closed) still owns whether
-      // this evidence may settle. Old nodes / non-bundle evidence fall back to the
-      // placeholder, unchanged.
+      // this evidence may settle. Evidence without a device signature keeps the
+      // placeholder SIGNATURE (a gateway placeholder, never device-signed).
+      //
+      // The stored bundleHash is never made up (N80, rehearsal R0 G3). It used to be
+      // `sha256-<bundleId>` for any unsigned body, with no events stored, so it committed
+      // to nothing that was received. commitRelayEvidence recomputes LO-EV event hashes, or
+      // the hash of a device-signed document that names THIS job and its kernel (adk #4322),
+      // and refuses everything else: a supplied hash its content does not reproduce, a
+      // document signed for another job or kernel (409), a bare device digest that names no
+      // job, an ambiguous envelope, malformed events, and a document the gateway could not
+      // keep (cross-family review E4).
       //
       // assuranceTier stays 0 ON PURPOSE (fails closed): an UNVERIFIED bundle
       // "actually supports" only the tier-0 permissionless floor (eligibility.ts).
@@ -138,7 +157,13 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       // release tier from unverified evidence. The tier is lifted only once the gated
       // #52 verifier confirms the evidence on deployed infra (SEAM-2 ready-but-gated).
       const captured = extractNodeSignedBundle(evidence);
-      const bundleHash = captured?.bundleHash ?? `sha256-${bundleId}`;
+      // The job context comes from the job row, never from the evidence.
+      const committed = await commitRelayEvidence(evidence, captured, { jobId: job.id, kernelId: job.kernelId ?? null });
+      if (!committed.ok) {
+        const conflict = committed.refusal.error === "job_mismatch" || committed.refusal.error === "kernel_mismatch";
+        return reply.code(conflict ? 409 : 422).send({ ...committed.refusal, stored: false, jobId });
+      }
+      const { bundleHash, hashModel, events } = committed.commitment;
       const kernelSignature = captured
         ? captured.kernelSignature
         : {
@@ -148,16 +173,34 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
           };
 
       try {
-        repos.evidence.insert({
-          id: bundleId,
-          jobId,
-          stepId: job.stepId ?? "operator-relay",
-          kernelId: kernelId ?? job.kernelId,
-          assuranceTier: 0,
-          bundleHash,
-          kernelSignature,
-          sessionKeyAuthorization: captured?.sessionKeyAuthorization ?? null,
-          createdAt: now,
+        // One transaction (cross-family review E4, finding 2): the bundle and its events
+        // commit together or not at all, so a failed event insert never leaves a stored
+        // bundle whose hash its missing events cannot reproduce.
+        getStore().db.transaction(() => {
+          repos.evidence.insert({
+            id: bundleId,
+            jobId,
+            stepId: job.stepId ?? "operator-relay",
+            kernelId: job.kernelId ?? kernelId,
+            assuranceTier: 0,
+            bundleHash,
+            kernelSignature,
+            sessionKeyAuthorization: captured?.sessionKeyAuthorization ?? null,
+            createdAt: now,
+          });
+          if (events.length > 0) {
+            repos.evidence.insertEvents(
+              events.map((ev, i) => ({
+                id: `${bundleId}:${i}`,
+                bundleId,
+                type: ev.type,
+                timestamp: ev.timestamp,
+                source: ev.source as { deviceId: string; deviceType: string; kernelId: string },
+                payload: ev.payload,
+                hash: ev.hash,
+              })),
+            );
+          }
         });
       } catch (insertErr) {
         // Evidence insert failed — still acknowledge receipt
@@ -175,9 +218,17 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         stored: true,
         jobId,
         bundleId,
+        // What was committed: the stored hash, how it was made, and how many LO-EV
+        // events were stored with it (0 when the body carried none in that form).
+        contentHash: bundleHash,
+        hashModel,
+        eventsStored: events.length,
         // True when the node's real device-signed (#236) bundle was captured
         // (real Ed25519 signature persisted); false when the placeholder was used.
         deviceSigned: !!captured,
+        // Nothing here verifies a signature: capture persists it, and the gated #52
+        // verifier owns verification.
+        signatureVerified: false,
         timestamp: now,
       };
     } catch (err) {
