@@ -46,6 +46,11 @@ log = logging.getLogger("pcc-node.executor")
 #: produced is refused as stale. Overridable via PCC_NODE_LEASE_FRESHNESS_S.
 DEFAULT_LEASE_FRESHNESS_S = 30
 
+#: The longest a granted lease lets this node BEGIN actuating, in seconds,
+#: counted from just before the node asked for it (#400 r8, F3). The
+#: gateway's leaseMs can shorten it, never lengthen it.
+LEASE_WINDOW_MAX_S = 5.0
+
 #: Default local fencing directory (one attempted-call marker per call id,
 #: ever). Overridable via PCC_NODE_FENCE_DIR.
 DEFAULT_FENCE_DIR = os.path.join(os.path.expanduser("~"), ".pcc-node", "relay-fence")
@@ -309,6 +314,47 @@ def _lease_freshness_bound_s():
     return parsed, True
 
 
+def _lease_window_s(lease_ms):
+    """The time a granted lease leaves to begin actuating: the gateway's leaseMs
+    when it is a positive finite number, never more than LEASE_WINDOW_MAX_S."""
+    if isinstance(lease_ms, bool) or not isinstance(lease_ms, (int, float)):
+        return LEASE_WINDOW_MAX_S
+    if lease_ms != lease_ms or not (0 < lease_ms < float("inf")):  # NaN, <= 0, inf
+        return LEASE_WINDOW_MAX_S
+    return min(lease_ms / 1000.0, LEASE_WINDOW_MAX_S)
+
+
+def lease_refusal_at_entry(call, deadline):
+    """Re-check the lease right before an adapter is entered (#400 r8, F3).
+
+    The gateway re-checked the stop, the scope, the budget and the breaker when
+    it granted the lease. Whatever changes after that grant can't reach this
+    node, so the grant is an expiring authority: the node may BEGIN actuating
+    only before `deadline`, and only while the poll answer is still fresh.
+    Returns the not_executed reason to report, or None to proceed.
+    """
+    now = time.monotonic()
+    if deadline is None or now > deadline:
+        return "not_executed:lease_expired"
+    freshness_s, freshness_ok = _lease_freshness_bound_s()
+    received_at = call.get("_receivedAt")
+    if (not freshness_ok or isinstance(received_at, bool)
+            or not isinstance(received_at, (int, float)) or now - received_at > freshness_s):
+        return "not_executed:stale"
+    return None
+
+
+def _report_error(kernel, call_id, error, pcc_base, api_key):
+    status, _data = pcc_request(
+        "POST", relay_path(kernel, "/tool-result"),
+        body={"callId": call_id, "error": error},
+        base_url=pcc_base,
+        api_key=api_key,
+    )
+    if status != 200:
+        log.error(f"Failed to report {error} for {call_id}: HTTP {status}")
+
+
 def _resolve_fence_dir(fence_dir=None):
     if fence_dir:
         return fence_dir
@@ -329,21 +375,23 @@ def acquire_execution_lease(call, pcc_base, api_key, kernel, fence_dir=None):
       d. the gateway grants a lease for it right now -- re-checking e-stop,
          scope, budget, breaker and the claim's age server-side.
 
-    Returns (ok, report_error):
-      (True, None)         -- leased; the caller may run the adapter.
-      (False, "<reason>")  -- refused; report "<reason>" via tool-result so
-                               the gateway can close the call.
-      (False, None)        -- refused silently; do NOT report. Either the
-                               gateway already closed this call (409/404), or
-                               an earlier attempt on this node already
-                               reported it (the fence).
+    Returns (ok, report_error, deadline):
+      (True, None, deadline) -- leased until `deadline` (time.monotonic()); the
+                                caller may run an adapter only after
+                                lease_refusal_at_entry(call, deadline) is None.
+      (False, "<reason>", None) -- refused; report "<reason>" via tool-result so
+                                the gateway can close the call.
+      (False, None, None)    -- refused silently; do NOT report. Either the
+                                gateway already closed this call (409/404), or
+                                an earlier attempt on this node already
+                                reported it (the fence).
     """
     call_id = call.get("id", "unknown")
 
     # (a) claim token: missing means a gateway without leases. Fail closed.
     claim_token = call.get("claimToken")
     if not isinstance(claim_token, str) or not claim_token:
-        return False, "not_executed:no_lease"
+        return False, "not_executed:no_lease", None
 
     # (b) freshness: an untrustworthy configured bound is itself a reason to
     # refuse -- we cannot tell whether the call is fresh, so treat it as
@@ -354,14 +402,14 @@ def acquire_execution_lease(call, pcc_base, api_key, kernel, fence_dir=None):
             "PCC_NODE_LEASE_FRESHNESS_S does not parse as a positive, finite "
             "number; refusing to start the execution-lease guard (fail closed)"
         )
-        return False, "not_executed:stale"
+        return False, "not_executed:stale", None
 
     received_at = call.get("_receivedAt")
     if isinstance(received_at, bool) or not isinstance(received_at, (int, float)):
         # No receipt time recorded for this call: cannot prove freshness.
-        return False, "not_executed:stale"
+        return False, "not_executed:stale", None
     if (time.monotonic() - received_at) > freshness_s:
-        return False, "not_executed:stale"
+        return False, "not_executed:stale", None
 
     # (c) local fencing: one attempt per call id, ever, on this node. The
     # marker is created BEFORE the lease request below, so a crash after a
@@ -372,7 +420,7 @@ def acquire_execution_lease(call, pcc_base, api_key, kernel, fence_dir=None):
         os.chmod(fdir, 0o700)
     except OSError as e:
         log.error(f"Cannot create fence dir {fdir!r} for call {call_id}: {e}")
-        return False, "not_executed:fence_unavailable"
+        return False, "not_executed:fence_unavailable", None
 
     fence_name = hashlib.sha256(str(call_id).encode("utf-8")).hexdigest()
     fence_path = os.path.join(fdir, fence_name)
@@ -382,10 +430,10 @@ def acquire_execution_lease(call, pcc_base, api_key, kernel, fence_dir=None):
         # This node already attempted this call: the first attempt reported
         # it (or the gateway already closed it). Refuse silently.
         log.info(f"Call {call_id} already attempted on this node; refusing (fenced)")
-        return False, None
+        return False, None, None
     except OSError as e:
         log.error(f"Cannot create fence marker for call {call_id}: {e}")
-        return False, "not_executed:fence_unavailable"
+        return False, "not_executed:fence_unavailable", None
 
     try:
         with os.fdopen(fd, "w") as f:
@@ -406,6 +454,9 @@ def acquire_execution_lease(call, pcc_base, api_key, kernel, fence_dir=None):
     # (d) the lease itself: a short timeout, never retried here. Run only on
     # 200 with a JSON body whose "started" is exactly true.
     start_path = relay_path(kernel, f"/tool-call/{quote(str(call_id), safe='')}/start")
+    # The lease window is counted from BEFORE the request, so a slow answer can
+    # only shorten the time left to begin, never stretch it (r8, F3).
+    asked_at = time.monotonic()
     try:
         status, data = pcc_request(
             "POST", start_path,
@@ -414,16 +465,16 @@ def acquire_execution_lease(call, pcc_base, api_key, kernel, fence_dir=None):
         )
     except Exception as e:
         log.warning(f"Lease request transport error for call {call_id}: {e}")
-        return False, "not_executed:lease_unavailable"
+        return False, "not_executed:lease_unavailable", None
 
     if status == 409:
         log.info(f"Lease refused for call {call_id} (409 lease_refused): {data!r}")
-        return False, None
+        return False, None, None
     if status == 404:
         log.info(f"Lease refused for call {call_id} (404): the gateway doesn't know this call")
-        return False, None
+        return False, None, None
     if status == 200 and isinstance(data, dict) and data.get("started") is True:
-        return True, None
+        return True, None, asked_at + _lease_window_s(data.get("leaseMs"))
 
     # 503 policy_unavailable, any other status, a transport error (status 0,
     # as http_util reports it) or a 200 whose body doesn't carry
@@ -432,7 +483,7 @@ def acquire_execution_lease(call, pcc_base, api_key, kernel, fence_dir=None):
     # closed and report it the same way so the gateway can still close the
     # call rather than leave it stuck).
     log.warning(f"Lease not granted for call {call_id}: HTTP {status} {data!r}")
-    return False, "not_executed:lease_unavailable"
+    return False, "not_executed:lease_unavailable", None
 
 
 def execute_and_report(call, adapters, pcc_base, api_key, kernel_id):
@@ -469,26 +520,32 @@ def execute_and_report(call, adapters, pcc_base, api_key, kernel_id):
         return False
 
     # #400 F3: re-check the execution lease BEFORE any adapter is touched.
-    leased, report_error = acquire_execution_lease(call, pcc_base, api_key, kernel)
+    leased, report_error, deadline = acquire_execution_lease(call, pcc_base, api_key, kernel)
     if not leased:
         if report_error:
-            r_status, _r_data = pcc_request(
-                "POST", relay_path(kernel, "/tool-result"),
-                body={"callId": call_id, "error": report_error},
-                base_url=pcc_base,
-                api_key=api_key,
-            )
-            if r_status != 200:
-                log.error(f"Failed to report lease refusal for {call_id}: HTTP {r_status}")
+            _report_error(kernel, call_id, report_error, pcc_base, api_key)
         else:
             log.info(f"Call {call_id} refused (lease); nothing reported")
         return False
 
     log.info(f"Executing {tool_name}({json.dumps(tool_args)[:100]}) [call={call_id}]")
 
-    # Try each adapter until one handles it
+    # Try each adapter until one handles it. The lease is re-checked right before
+    # each adapter is entered (r8, F3): a grant that has lapsed runs nothing.
     result = json.dumps({"error": f"No adapter for tool: {tool_name}"})
+    may_have_run = False
     for adapter in adapters:
+        refusal = lease_refusal_at_entry(call, deadline)
+        if refusal:
+            if may_have_run:
+                # An earlier adapter raised after it was entered and may have moved
+                # the device: that is a device outcome, not a refusal.
+                log.warning(f"Lease for {call_id} lapsed after an adapter error; stopping")
+                _report_error(kernel, call_id, "lease_lapsed_after_adapter_error", pcc_base, api_key)
+            else:
+                log.warning(f"Lease for {call_id} lapsed before actuation ({refusal}); refusing")
+                _report_error(kernel, call_id, refusal, pcc_base, api_key)
+            return False
         try:
             r = adapter.execute(tool_name, tool_args)
             parsed = json.loads(r)
@@ -496,6 +553,7 @@ def execute_and_report(call, adapters, pcc_base, api_key, kernel_id):
                 result = r
                 break
         except Exception as e:
+            may_have_run = True
             log.warning(f"Adapter {adapter.device_type} error: {e}")
             continue
 

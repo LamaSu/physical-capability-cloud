@@ -1912,6 +1912,36 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       }
     });
 
+    it("r7 MEDIUM: a stop that lands while the governor is consulted refuses a scoped write without spending its budget", async () => {
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      const spy = governorThatRuns(() => engageStop());
+      try {
+        const res = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+        expect(res.statusCode).toBe(409);
+        expect(res.json().error).toBe("kernel_emergency_stopped");
+        expect(relayRows()).toHaveLength(0);
+        expect(scopeRows()[0].commandCount).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("r7 MEDIUM: a queued scoped write spends exactly one command; a refused one spends none", async () => {
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      const denied = vi.spyOn(getSafetyGateway(), "validateOnly").mockImplementation(
+        async () => ({ allowed: false, reason: "governor_denied" }) as never,
+      );
+      try {
+        expect((await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER))).statusCode).toBe(403);
+      } finally {
+        denied.mockRestore();
+      }
+      expect(scopeRows()[0].commandCount).toBe(0);
+      const queued = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+      expect(queued.statusCode).toBe(201);
+      expect(scopeRows()[0].commandCount).toBe(1);
+    });
+
     it("a policy that turns unreadable while the safety governor is consulted refuses the call 503", async () => {
       const spy = governorThatRuns(() => setPolicyText("{not json"));
       try {
@@ -2530,7 +2560,7 @@ describe("N4b-gw r7 F3: the execution lease", () => {
     const { id, token } = await submitAndClaim();
     const first = await start(id, token);
     expect(first.statusCode).toBe(200);
-    expect(first.json()).toMatchObject({ started: true, callId: id });
+    expect(first.json()).toMatchObject({ started: true, callId: id, leaseMs: 5000 });
     expect(rowOf(id).status).toBe("executing");
     expect(rowOf(id).startedAt).toBeTruthy();
     const second = await start(id, token);

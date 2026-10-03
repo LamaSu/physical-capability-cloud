@@ -281,7 +281,7 @@ claim, then start with the token, and the token is opaque to the node.
    It then moves the row `claimed` → `executing` exactly once.
    | Answer | Meaning for the executor |
    |--------|--------------------------|
-   | 200 `{"started": true, "callId", "startedAt"}` | Run it. Nothing else may run. |
+   | 200 `{"started": true, "callId", "startedAt", "leaseMs": 5000}` | Run it, beginning within `leaseMs` (below). Nothing else may run. |
    | 409 `{"error": "lease_refused", "reason"}` | Don't run it, and don't report it. A stop, scope, budget, breaker or stale-claim refusal has already closed the call as `rejected` with that reason. `token_mismatch` and `not_claimed` leave the row as it is: the call isn't this executor's to start. |
    | 404 | Don't run it, and don't report it (no such call on this kernel). |
    | 400 `claim_token_required`, 503, any other answer, a transport error or a timeout | Don't run it. Report it as `not_executed:lease_unavailable`, so the gateway closes it. |
@@ -325,6 +325,25 @@ and fails closed at every step:
    reported. A fence that can't be created reports `not_executed:fence_unavailable`.
 4. **The lease**, as above, with a 10 s timeout. The call runs only on 200 with
    `"started": true` exactly.
+5. **At adapter entry** (r8). The grant is an expiring authority. The node may
+   BEGIN actuating only within the lease window, counted from just before it sent
+   the start request, so a slow answer can only shorten it. The window is the
+   gateway's `leaseMs`, capped at the node's own 5 s. Right before EACH adapter
+   is entered, the node re-checks the window and the poll's freshness:
+   - The window has lapsed: it reports `not_executed:lease_expired` and runs
+     nothing.
+   - The poll answer is stale: it reports `not_executed:stale`.
+   - An earlier adapter raised after it was entered: that adapter may have moved
+     the device, so the node stops and reports `lease_lapsed_after_adapter_error`,
+     a device outcome.
+
+**What the lease can't do.** The gateway's last check of the stop, the scope,
+the budget and the breaker is at the grant. A stop, revoke or breaker trip that
+lands after a call's grant can't reach that call, but a granted call that hasn't
+begun within 5 s never begins. So no relayed call can start more than 5 s after
+a stop, and one that is already running is the operator node's to stop.
+**`RELAY_LEASE_ENFORCE=off` must never be used on an armed (physically
+actuating) deployment:** it serves executors that take no lease at all.
 
 ## Validation Flow
 
@@ -351,10 +370,12 @@ Check scope:
     ├── commandCount >= maxCommands? → REJECT ("command limit reached")
     │
     ▼
-ALLOW → increment commandCount → safety governor admission check
+ALLOW → safety governor admission check
     → emergency stop read once more, right before the insert (engaged → 409,
       unreadable → 503; the read and the insert share one synchronous step)
-    → queue for the executor
+    → queue for the executor; a scoped non-safe call's commandCount is charged
+      here, in the same synchronous step as the insert (a refusal anywhere above
+      spends no budget)
 
 Executor polls GET /api/relay/:kernelId/tool-call/pending (operator only)
     │

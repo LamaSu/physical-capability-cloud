@@ -342,6 +342,102 @@ class TestExecutionLeaseGuard:
         adapter.execute.assert_not_called()
         assert posted == []
 
+    def _late_grant(self, advance_s, lease_ms=5000, adapters=None, call_id="c-late"):
+        """r7 F3 (CRITICAL): the gateway grants the lease, but the grant reaches the node
+        `advance_s` seconds after the node asked for it. Returns (result, adapters, posts).
+        Each call in one test needs its own call_id: the fence refuses a repeated id."""
+        clock = [1000.0]
+        if adapters is None:
+            adapter = mock.Mock()
+            adapter.device_type = "test"
+            adapter.execute.return_value = json.dumps({"ok": True})
+            adapters = [adapter]
+        call = {
+            "id": call_id, "kernelId": "k1", "toolName": "t", "args": {},
+            "claimToken": "tok-late", "_receivedAt": 1000.0,
+        }
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            if path.endswith("/start"):
+                clock[0] += advance_s
+                answer = {"started": True, "callId": call_id}
+                if lease_ms is not None:
+                    answer["leaseMs"] = lease_ms
+                return 200, answer
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            result = execute_and_report(call, adapters, "http://pcc", "key", "k1")
+        return result, adapters, posts
+
+    @pytest.mark.parametrize("advance_s", [31.0, 6.0])
+    def test_a_grant_that_arrives_after_the_lease_window_never_reaches_the_adapter(self, advance_s):
+        """r7 F3 (CRITICAL) reproduction: a valid 200 started:true that reaches the node after
+        the freshness bound (31 s) or after the lease window (6 s) must not run."""
+        result, adapters, posts = self._late_grant(advance_s)
+        assert result is False
+        adapters[0].execute.assert_not_called()
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": "c-late", "error": "not_executed:lease_expired"}),
+        ]
+
+    def test_a_grant_inside_the_lease_window_runs(self):
+        result, adapters, posts = self._late_grant(1.0)
+        assert result is True
+        adapters[0].execute.assert_called_once()
+
+    def test_the_gateway_can_shorten_the_lease_window_but_never_lengthen_it(self):
+        expired = {"callId": None, "error": "not_executed:lease_expired"}
+        result, adapters, posts = self._late_grant(2.0, lease_ms=1000, call_id="c-short")
+        assert result is False
+        adapters[0].execute.assert_not_called()
+        assert posts[-1][2] == dict(expired, callId="c-short")
+        result, adapters, posts = self._late_grant(6.0, lease_ms=60000, call_id="c-long")
+        assert result is False  # capped at the node's own window
+        adapters[0].execute.assert_not_called()
+        assert posts[-1][2] == dict(expired, callId="c-long")
+        result, adapters, _posts = self._late_grant(1.0, lease_ms=None, call_id="c-none")
+        assert result is True  # no leaseMs: the node's own window applies
+        adapters[0].execute.assert_called_once()
+        result, adapters, _posts = self._late_grant(0.5, lease_ms=1000, call_id="c-inside")
+        assert result is True
+        adapters[0].execute.assert_called_once()
+
+    def test_the_lease_is_rechecked_before_every_adapter(self):
+        clock_box = {}
+
+        def first_execute(tool, args):
+            clock_box["advance"]()
+            return json.dumps({"error": "Unknown tool: t"})
+
+        first = mock.Mock()
+        first.device_type = "first"
+        first.execute.side_effect = first_execute
+        second = mock.Mock()
+        second.device_type = "second"
+        second.execute.return_value = json.dumps({"ok": True})
+        clock = [1000.0]
+        clock_box["advance"] = lambda: clock.__setitem__(0, clock[0] + 6.0)
+        call = {"id": "c-two", "kernelId": "k1", "toolName": "t", "args": {}, "claimToken": "tok-two", "_receivedAt": 1000.0}
+        posts = []
+
+        def fake(method, path, body=None, **_kwargs):
+            if path.endswith("/start"):
+                return 200, {"started": True, "leaseMs": 5000}
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("pcc_node.executor.pcc_request", side_effect=fake):
+            result = execute_and_report(call, [first, second], "http://pcc", "key", "k1")
+        assert result is False
+        first.execute.assert_called_once()
+        second.execute.assert_not_called()
+        assert posts[-1][2] == {"callId": "c-two", "error": "not_executed:lease_expired"}
+
     def test_200_started_true_runs_adapter_once_and_reports_result(self):
         adapter = mock.Mock()
         adapter.device_type = "test"

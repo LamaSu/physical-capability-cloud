@@ -124,6 +124,14 @@ const CLAIM_TIMEOUT_ERROR = "claim_timeout";
 
 /** A claim older than this cannot be started: the executor sat on it too long. */
 const LEASE_MAX_AGE_MS = 60_000;
+/**
+ * How long after the start a granted lease lets the executor BEGIN actuating
+ * (r8, F3). The start's 200 says so (`leaseMs`). pcc-node anchors the window
+ * before it sends the start request and re-checks it right before each adapter
+ * call, so a slow answer can't stretch it. A stop or revoke after a grant can't
+ * reach a call already granted, but every grant is dead within this window.
+ */
+const LEASE_VALIDITY_MS = 5_000;
 const CLAIM_TOKEN_RE = /^[0-9a-f]{64}$/;
 
 function leaseEnforced(): boolean {
@@ -643,6 +651,11 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     if (stopAtEntry !== "clear") return stopRefusal(reply, stopAtEntry);
 
     // Validate scope if provided
+    // A scoped non-safe call spends one command of its scope's budget, charged only
+    // when the call is queued (r7 MEDIUM): a refusal after this point (the safety
+    // governor, an unavailable governor, the stop read again before the insert)
+    // spends nothing.
+    let chargesBudget = false;
     if (scopeId) {
       const scope = db
         .select()
@@ -728,11 +741,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
           });
         }
 
-        // Increment command count for non-safe tools
-        db.update(executionScopes)
-          .set({ commandCount: scope.commandCount + 1 })
-          .where(eq(executionScopes.id, scopeId))
-          .run();
+        chargesBudget = true;
       }
     }
 
@@ -793,6 +802,14 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const id = generateId("tc");
     const now = new Date().toISOString();
 
+    // The budget is charged with the insert, in the same synchronous section, as an
+    // increment in SQL (no lost update between two submits).
+    if (chargesBudget && scopeId) {
+      db.update(executionScopes)
+        .set({ commandCount: sql`${executionScopes.commandCount} + 1` })
+        .where(eq(executionScopes.id, scopeId))
+        .run();
+    }
     db.insert(toolCallRelay).values({
       id,
       scopeId: scopeId ?? null,
@@ -1090,7 +1107,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     if ((started as { changes?: number }).changes !== 1) {
       return reply.status(409).send({ error: "lease_refused", reason: "not_claimed" });
     }
-    return { started: true, callId, startedAt: now };
+    return { started: true, callId, startedAt: now, leaseMs: LEASE_VALIDITY_MS };
   });
 
   // POST /api/relay/:kernelId/tool-result
