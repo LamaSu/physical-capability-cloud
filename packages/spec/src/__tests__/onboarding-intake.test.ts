@@ -3413,11 +3413,12 @@ describe("astra pack 120c", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("CRITICAL 1c: an unrecognized credential used as an answer key is never echoed in the report", () => {
+  it("CRITICAL 1c: an unrecognized credential used as an answer key is never echoed in the report or in redactIntakeSecrets output (item 5)", () => {
     const secret = "sk-" + "proj-" + "B".repeat(40);
     const r = fullFor();
     const input = { schema: r.schema, answers: { ...r.answers, [secret]: human("x") } };
     expect(JSON.stringify(validateIntake(input, "register"))).not.toContain(secret);
+    expect(JSON.stringify(redactIntakeSecrets(input))).not.toContain(secret);
   });
 
   it("HIGH 3: the subject is what matters, NOT the record — B validated under subject dev-1 passes; the same events under a dev-2 subject fail", () => {
