@@ -439,8 +439,8 @@ export class KernelFacade extends BaseFacade {
       const inserted = repos.kernels.insert(kernelData);
 
       trackServerEvent(
-        "kernel_registered",
-        { kernelId: id, name: kernelData.name, operatorAddress: kernelData.operatorAddress },
+        lit("kernel_registered"),
+        { kernelId: declare.id(id), name: declare.id(kernelData.name), operatorAddress: declare.id(kernelData.operatorAddress) },
         actorId,
       );
       auditService.log({
