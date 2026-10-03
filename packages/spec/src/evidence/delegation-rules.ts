@@ -45,12 +45,43 @@
  * Seconds are whole: a fractional part is dropped before comparing.
  */
 
+import { hasOwn, uncurryThis } from "../util/primordials.js";
+
 export const EVIDENCE_DELEGATION_TIME_RULES_CONTRACT = "pcc.evidence.delegation-time-rules.v1";
 
 /** Clock tolerance between a device, the gateway and the oracle, in seconds. */
 export const EVIDENCE_CLOCK_SKEW_SECONDS = 300;
 
-const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/;
+/** `text`'s ASCII digits in [from, to) as a number, or -1 when one of them is not a digit. */
+function digitsAt(text: string, from: number, to: number): number {
+  let n = 0;
+  for (let i = from; i < to; i++) {
+    const unit = StringCharCodeAt(text, i);
+    if (unit < 0x30 || unit > 0x39) return -1;
+    n = n * 10 + (unit - 0x30);
+  }
+  return n;
+}
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
+/** Days from 1970-01-01 to a valid proleptic-Gregorian date (year >= 1970), by integer arithmetic only. */
+function daysFromCivil(year: number, month: number, day: number): number {
+  const y = month <= 2 ? year - 1 : year;
+  const era = (y - (y % 400)) / 400;
+  const yearOfEra = y - era * 400;
+  const shiftedMonth = month > 2 ? month - 3 : month + 9;
+  const dayOfYear = (153 * shiftedMonth + 2 - ((153 * shiftedMonth + 2) % 5)) / 5 + day - 1;
+  const dayOfEra = yearOfEra * 365 + (yearOfEra - (yearOfEra % 4)) / 4 - (yearOfEra - (yearOfEra % 100)) / 100 + dayOfYear;
+  return era * 146097 + dayOfEra - 719468;
+}
 
 /**
  * Unix seconds of an RFC 3339 timestamp with an explicit offset, the fraction
@@ -58,31 +89,62 @@ const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))
  * calendar date that does not exist, a leap second, a year before 1970, more
  * than 9 fractional digits, a non-string). A mirror in another language
  * applies the same rules (delegation-rules.vectors.json).
+ *
+ * The grammar is `YYYY-MM-DDTHH:MM:SS[.f{1,9}](Z|(+|-)HH:MM)`, read code unit by
+ * code unit; the date is checked against the calendar and turned into days by
+ * integer arithmetic. No RegExp, no Date and no global is consulted at call
+ * time, so nothing replaced after this module loads can change an answer (the
+ * binding leg calls this; see subject-binding.ts). It answers exactly what the
+ * RegExp-and-Date.UTC version it replaces answered (a differential test pins it).
  */
 export function parseEvidenceTimestamp(ts: unknown): number | null {
   if (typeof ts !== "string") return null;
-  const m = RFC3339.exec(ts);
-  if (!m) return null;
-  const year = Number(m[1]);
-  const month = Number(m[2]);
-  const day = Number(m[3]);
-  const hour = Number(m[4]);
-  const minute = Number(m[5]);
-  const second = Number(m[6]);
-  if (year < 1970 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
-  const ms = Date.UTC(year, month - 1, day, hour, minute, second);
-  const date = new Date(ms);
-  // Date.UTC rolls an impossible date over (Feb 30 -> Mar 2) and maps years
-  // 0-99 to 19xx: the round trip catches both.
-  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
-  let offsetSeconds = 0;
-  if (m[8] !== "Z") {
-    const offsetHours = Number(m[10]);
-    const offsetMinutes = Number(m[11]);
-    if (offsetHours > 23 || offsetMinutes > 59) return null;
-    offsetSeconds = (offsetHours * 60 + offsetMinutes) * 60 * (m[9] === "-" ? -1 : 1);
+  const length = ts.length;
+  if (length < 20) return null;
+  if (
+    StringCharCodeAt(ts, 4) !== 0x2d ||
+    StringCharCodeAt(ts, 7) !== 0x2d ||
+    StringCharCodeAt(ts, 10) !== 0x54 ||
+    StringCharCodeAt(ts, 13) !== 0x3a ||
+    StringCharCodeAt(ts, 16) !== 0x3a
+  ) {
+    return null;
   }
-  return ms / 1000 - offsetSeconds;
+  const year = digitsAt(ts, 0, 4);
+  const month = digitsAt(ts, 5, 7);
+  const day = digitsAt(ts, 8, 10);
+  const hour = digitsAt(ts, 11, 13);
+  const minute = digitsAt(ts, 14, 16);
+  const second = digitsAt(ts, 17, 19);
+  if (year < 0 || month < 0 || day < 0 || hour < 0 || minute < 0 || second < 0) return null;
+  let at = 19;
+  if (StringCharCodeAt(ts, at) === 0x2e) {
+    let end = at + 1;
+    while (end < length) {
+      const unit = StringCharCodeAt(ts, end);
+      if (unit < 0x30 || unit > 0x39) break;
+      end++;
+    }
+    const fractionDigits = end - (at + 1);
+    if (fractionDigits < 1 || fractionDigits > 9) return null;
+    at = end;
+  }
+  let offsetSeconds = 0;
+  const designator = StringCharCodeAt(ts, at);
+  if (designator === 0x5a) {
+    if (at + 1 !== length) return null;
+  } else if (designator === 0x2b || designator === 0x2d) {
+    if (at + 6 !== length || StringCharCodeAt(ts, at + 3) !== 0x3a) return null;
+    const offsetHours = digitsAt(ts, at + 1, at + 3);
+    const offsetMinutes = digitsAt(ts, at + 4, at + 6);
+    if (offsetHours < 0 || offsetMinutes < 0 || offsetHours > 23 || offsetMinutes > 59) return null;
+    offsetSeconds = (offsetHours * 60 + offsetMinutes) * 60 * (designator === 0x2d ? -1 : 1);
+  } else {
+    return null;
+  }
+  if (year < 1970 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  if (day > daysInMonth(year, month)) return null;
+  return daysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second - offsetSeconds;
 }
 
 export type DelegationScopeRuleCode =
@@ -108,9 +170,11 @@ export interface DelegationScopeExpectation {
 // Captured when this module loads, so that code run later (a patched `Object`, a
 // polluted prototype) cannot change how the rules read the evidence they judge.
 const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-const objectHasOwnProperty = Object.prototype.hasOwnProperty;
 const isArray = Array.isArray;
 const isSafeInteger = Number.isSafeInteger;
+// The time path (parseEvidenceTimestamp, parseEvidenceTimeBound, checkEventTimes) runs inside
+// the LO-EV-9 binding leg, which must not look anything up at call time.
+const StringCharCodeAt = uncurryThis(String.prototype.charCodeAt) as (text: string, index: number) => number;
 
 /** What `ownData` answers for a property that is not an own data property. */
 const NOT_OWN_DATA = Symbol("not-own-data");
@@ -126,7 +190,7 @@ const NOT_OWN_DATA = Symbol("not-own-data");
 function ownData(holder: unknown, key: string | number): unknown {
   if (typeof holder !== "object" || holder === null) return NOT_OWN_DATA;
   const descriptor = getOwnPropertyDescriptor(holder, key);
-  return descriptor !== undefined && objectHasOwnProperty.call(descriptor, "value") ? descriptor.value : NOT_OWN_DATA;
+  return descriptor !== undefined && hasOwn(descriptor, "value") ? descriptor.value : NOT_OWN_DATA;
 }
 
 /**
@@ -187,13 +251,6 @@ function judgeDelegationScope(delegation: unknown, expected: DelegationScopeExpe
   return { ok: true };
 }
 
-/** An own property's value, or undefined: never one read through the prototype chain. */
-function ownValue(o: unknown, key: string): unknown {
-  return typeof o === "object" && o !== null && Object.prototype.hasOwnProperty.call(o, key)
-    ? (o as Record<string, unknown>)[key]
-    : undefined;
-}
-
 export type EventTimeRuleCode =
   | "malformed-window"
   | "malformed-time-bounds"
@@ -216,13 +273,16 @@ export interface EvidenceTimeBounds {
   end: string;
 }
 
-const UNIX_SECONDS = /^(0|[1-9][0-9]*)$/;
-
-/** Unix seconds from a bound's decimal string; null for anything else (a number included). */
+/**
+ * Unix seconds from a bound's decimal string; null for anything else (a number
+ * included): `0`, or a non-zero digit followed by digits, that is a safe integer.
+ * Read code unit by code unit, as `parseEvidenceTimestamp` is.
+ */
 export function parseEvidenceTimeBound(value: unknown): number | null {
-  if (typeof value !== "string" || !UNIX_SECONDS.test(value)) return null;
-  const n = Number(value);
-  return Number.isSafeInteger(n) ? n : null;
+  if (typeof value !== "string" || value.length === 0) return null;
+  if (value.length > 1 && StringCharCodeAt(value, 0) === 0x30) return null;
+  const n = digitsAt(value, 0, value.length);
+  return n >= 0 && isSafeInteger(n) ? n : null;
 }
 
 /**
@@ -236,13 +296,16 @@ export function checkEventTimes(
   bounds?: EvidenceTimeBounds,
   skewSeconds: number = EVIDENCE_CLOCK_SKEW_SECONDS,
 ): EventTimeResult {
+  // Own data only, each read once; nothing here is looked up at call time.
+  const notBefore = ownData(window, "notBefore");
+  const notAfter = ownData(window, "notAfter");
   if (
-    typeof window !== "object" ||
-    window === null ||
-    !Number.isSafeInteger(window.notBefore) ||
-    !Number.isSafeInteger(window.notAfter) ||
-    window.notBefore > window.notAfter ||
-    !Number.isSafeInteger(skewSeconds) ||
+    typeof notBefore !== "number" ||
+    typeof notAfter !== "number" ||
+    !isSafeInteger(notBefore) ||
+    !isSafeInteger(notAfter) ||
+    notBefore > notAfter ||
+    !isSafeInteger(skewSeconds) ||
     skewSeconds < 0
   ) {
     return { ok: false, reason: "malformed-window" };
@@ -251,21 +314,20 @@ export function checkEventTimes(
   let end: number | null = null;
   if (bounds !== undefined) {
     // Own properties only, as for event timestamps: an inherited bound is not the package's.
-    start = parseEvidenceTimeBound(ownValue(bounds, "start"));
-    end = parseEvidenceTimeBound(ownValue(bounds, "end"));
+    const startValue = ownData(bounds, "start");
+    const endValue = ownData(bounds, "end");
+    start = parseEvidenceTimeBound(startValue === NOT_OWN_DATA ? undefined : startValue);
+    end = parseEvidenceTimeBound(endValue === NOT_OWN_DATA ? undefined : endValue);
     if (start === null || end === null) return { ok: false, reason: "malformed-time-bounds" };
     if (start > end) return { ok: false, reason: "time-bounds-inverted" };
   }
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i];
-    const t = parseEvidenceTimestamp(
-      typeof e === "object" && e !== null && Object.prototype.hasOwnProperty.call(e, "timestamp")
-        ? (e as { timestamp: unknown }).timestamp
-        : undefined,
-    );
-    if (t === null) return { ok: false, reason: "event-time-malformed", eventIndex: i };
-    const seconds = Math.floor(t);
-    if (seconds < window.notBefore - skewSeconds || seconds > window.notAfter + skewSeconds) {
+  const length = ownData(events, "length");
+  const count = typeof length === "number" && isSafeInteger(length) && length >= 0 ? length : 0;
+  for (let i = 0; i < count; i++) {
+    const timestamp = ownData(ownData(events, i), "timestamp");
+    const seconds = parseEvidenceTimestamp(timestamp === NOT_OWN_DATA ? undefined : timestamp);
+    if (seconds === null) return { ok: false, reason: "event-time-malformed", eventIndex: i };
+    if (seconds < notBefore - skewSeconds || seconds > notAfter + skewSeconds) {
       return { ok: false, reason: "event-time-outside-window", eventIndex: i };
     }
     if (start !== null && end !== null && (seconds < start - skewSeconds || seconds > end + skewSeconds)) {
