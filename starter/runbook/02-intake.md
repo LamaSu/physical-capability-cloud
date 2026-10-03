@@ -28,7 +28,7 @@ Ask these together. Skip one only if the human has already answered it.
 | 7 | What do you charge per job, and in which currency? | The price is yours to set; it is never defaulted. |
 | 8 | When may it take jobs? (days, hours, time zone) | Jobs outside those hours are refused. |
 
-**Payouts: tell, don't ask.** PCC cannot yet pay a wallet the human names (phase 0), so this machine takes test jobs only, and no money moves, until it can. Say so. Don't ask for a wallet, and promise no payouts.
+**Payouts: tell, don't ask.** PCC cannot yet pay a wallet the human names (phase 0), so this machine takes no job that carries money, and no money moves, until it can. Say so. Don't ask for a wallet, and promise no payouts.
 
 ## Record the answers with their source
 Write `.pcc/intake.json`. Each answer says whether it was **asked** (the human said it), **inferred** (you determined it) or **researched** (cited, then confirmed by the human).

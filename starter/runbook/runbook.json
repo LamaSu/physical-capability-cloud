@@ -1,6 +1,6 @@
 {
   "schema": "pcc-adk/runbook@1",
-  "title": "Device to registered, exercised kernel: onboarding a machine as a PCC operator",
+  "title": "Device to registered kernel: onboarding a machine as a PCC operator",
   "status": "second cut, written against master 753feb43 and pcc-node 0.1.1; each phase lists what is still pending",
   "target": {
     "env": "PCC_BASE",

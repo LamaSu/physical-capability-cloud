@@ -337,6 +337,11 @@ class TestRound5(unittest.TestCase):
         trigger = self.index["events"]["verify.estop-drill-failed"]["trigger"]
         self.assertNotRegex(trigger, r"(?i)accepted a new job")
 
+    def test_no_summary_says_a_test_job_ran(self):
+        # C2 follow-through: the runbook no longer ends with a test job, so no summary may say it does.
+        for path, text in text_files():
+            self.assertNotRegex(text, r"(?i)exercised by one test job|one test job on the device|takes test jobs only", path.name)
+
     def test_phase_7_points_at_the_envelope_check_where_it_is(self):
         # LOW: phase 6's sections were renumbered in round 4.
         self.assertNotIn("phase 6 step 2.", phase_text("07-operate.md"))
