@@ -262,6 +262,32 @@ describe("JobResult.failure: where a failed run failed (#5417)", () => {
     expect.soft(result?.failure, "where").toEqual({ origin: "configuration" });
   });
 
+  it("a failed run whose sensor's stop rejects, on a sensor whose id cannot be read: the stop is logged, and nothing is left unhandled", async () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const machine = testMachine("m-origin-hostile-sensor");
+    machine.failing = "start";
+    const sensor = sensorOf("sensor-hostile-id", { stop: async () => Promise.reject(new Error("stop failed")) });
+    Object.defineProperty(sensor, "id", {
+      get: () => {
+        throw Object.create(null);
+      },
+    });
+    const unhandled: unknown[] = [];
+    const on = (err: unknown) => void unhandled.push(err);
+    process.on("unhandledRejection", on);
+    let result: JobResult | null;
+    try {
+      result = await new JobRunner(machine, [sensor], null, emitter).run(job("job-origin-hostile-sensor", 75)).then((r) => r, () => null);
+      await new Promise((r) => setTimeout(r, 30));
+    } finally {
+      process.off("unhandledRejection", on);
+    }
+    expect.soft(result, "run() rejected").not.toBeNull();
+    expect.soft(result?.failure, "where").toEqual({ origin: "machine", adapterId: "m-origin-hostile-sensor" });
+    expect.soft(unhandled.length, "unhandled rejections").toBe(0);
+    expect.soft(console.error, "the failed stop, logged").toHaveBeenCalledWith(expect.stringMatching(/stopping sensor \(unreadable id\) after a failed run/), expect.anything());
+  });
+
   it("a successful run, and a busy refusal, name no failure", async () => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const ok = await new JobRunner(testMachine("m-origin-ok"), [], null, emitter).run(job("job-origin-ok", 71, 0));

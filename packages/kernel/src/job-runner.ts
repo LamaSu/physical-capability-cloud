@@ -422,12 +422,14 @@ export class JobRunner {
       if (!quiesceAsked) {
         quiesceAsked = true;
         for (const sensor of recording) {
-          // A stop that throws, or rejects, is logged: it cannot abort this cleanup.
-          const failed = (err: unknown) => console.error(`[job-runner] stopping sensor ${sensor.id} after a failed run:`, err);
+          // A stop that throws, or rejects, is logged: it cannot abort this cleanup. The sensor's
+          // id is read without throwing, so the log cannot throw either.
+          const logFailedStop = (err: unknown) =>
+            console.error(`[job-runner] stopping sensor ${adapterIdOf(sensor) ?? "(unreadable id)"} after a failed run:`, err);
           try {
-            Promise.resolve(sensor.stopRecording()).catch(failed);
+            Promise.resolve(sensor.stopRecording()).catch(logFailedStop);
           } catch (err) {
-            failed(err);
+            logFailedStop(err);
           }
         }
         try {
