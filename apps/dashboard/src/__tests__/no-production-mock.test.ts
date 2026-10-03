@@ -29,7 +29,8 @@
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, posix, relative, sep } from "node:path";
+import ts from "typescript";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** @pcc/ui's source: shell chrome such as the StatusBar lives there. Its files are keyed "ui:<path>". */
@@ -132,6 +133,7 @@ const UNTESTED_PAGES: Record<string, string> = {
   "pages/NegotiationSessionPage.tsx": "no page test yet",
   "pages/OnboardChatPage.tsx": "no page test yet",
   "pages/OnboardKitPage.tsx": "no page test yet",
+  "pages/OnboardLandingPage.tsx": "no rendering test: OnboardLandingPage.test.tsx checks its source text only (astra 408d)",
   "pages/OnboardWizardPage.tsx": "no page test yet",
   "pages/OperatorDashboardPage.tsx": "fixtures, owned by operator-ux f0734fab",
   "pages/OperatorMachineDetailPage.tsx": "fixtures, owned by operator-ux f0734fab",
@@ -180,27 +182,74 @@ function pageModules(): string[] {
   return out.sort();
 }
 
-/** The source of every test in apps/dashboard/src. */
-function testSources(): string[] {
-  const out: string[] = [];
+interface TestSource {
+  /** The test file's path from src/, e.g. pages/__tests__/WalletPage.honesty.test.tsx. */
+  path: string;
+  text: string;
+}
+
+/** Every test in apps/dashboard/src, with its path. */
+function testSources(): TestSource[] {
+  const out: TestSource[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
       const full = join(dir, name);
       if (statSync(full).isDirectory()) walk(full);
-      else if (/\.test\.(ts|tsx)$/.test(name)) out.push(readFileSync(full, "utf-8"));
+      else if (/\.test\.(ts|tsx)$/.test(name)) out.push({ path: relPath(full), text: readFileSync(full, "utf-8") });
     }
   };
   walk(SRC);
   return out;
 }
 
-/** The pages no test imports: none of `tests` names the page's module in an import path. */
-function pagesWithoutHonestyTest(pages: string[], tests: string[]): string[] {
-  return pages.filter((page) => {
-    const base = page.split("/").pop()!.replace(/\.tsx$/, "");
-    const imported = new RegExp(`['"](?:\\.{1,2}/)+(?:[\\w-]+/)*${base}(?:\\.js|\\.tsx)?['"]`);
-    return !tests.some((test) => imported.test(test));
-  });
+/**
+ * The pages a test renders and checks (astra 408d): it imports the page by a
+ * relative path that resolves to that exact module, uses the imported
+ * component (JSX, or createElement), and asserts something. A bare import,
+ * an unused binding, or a file with no expect() renders nothing for anyone.
+ */
+function pagesRenderedBy(test: TestSource): string[] {
+  if (!/\bexpect\s*\(/.test(test.text)) return [];
+  const sf = ts.createSourceFile(test.path, test.text, ts.ScriptTarget.Latest, true, test.path.endsWith(".ts") ? ts.ScriptKind.TS : ts.ScriptKind.TSX);
+  // Every name used as a component: <Name …>, <ns.Name …>, createElement(Name, …).
+  const rendered = new Set<string>();
+  const visit = (n: ts.Node) => {
+    if (ts.isJsxOpeningElement(n) || ts.isJsxSelfClosingElement(n)) {
+      let tag: ts.Node = n.tagName;
+      while (ts.isPropertyAccessExpression(tag)) tag = tag.expression;
+      if (ts.isIdentifier(tag)) rendered.add(tag.text);
+    }
+    if (ts.isCallExpression(n) && n.arguments[0] && ts.isIdentifier(n.arguments[0])) {
+      const callee = n.expression;
+      const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
+      if (name === "createElement") rendered.add(n.arguments[0].text);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  const out: string[] = [];
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier) || !stmt.importClause) continue;
+    const spec = stmt.moduleSpecifier.text;
+    if (!spec.startsWith(".")) continue;
+    const clause = stmt.importClause;
+    const names = [
+      ...(clause.name ? [clause.name.text] : []),
+      ...(clause.namedBindings && ts.isNamedImports(clause.namedBindings) ? clause.namedBindings.elements.map((e) => e.name.text) : []),
+      ...(clause.namedBindings && ts.isNamespaceImport(clause.namedBindings) ? [clause.namedBindings.name.text] : []),
+    ];
+    if (!names.some((name) => rendered.has(name))) continue;
+    out.push(posix.normalize(posix.join(posix.dirname(test.path), spec)).replace(/\.(js|jsx|ts|tsx)$/, "") + ".tsx");
+  }
+  return out;
+}
+
+/** The pages no test renders and checks. A test given as text alone sits in pages/__tests__/. */
+function pagesWithoutHonestyTest(pages: string[], tests: Array<string | TestSource>): string[] {
+  const covered = new Set(
+    tests.flatMap((test) => pagesRenderedBy(typeof test === "string" ? { path: "pages/__tests__/probe.test.tsx", text: test } : test)),
+  );
+  return pages.filter((page) => !covered.has(page));
 }
 
 function productionFiles(dir: string): string[] {
@@ -309,8 +358,9 @@ describe("no production mock (ratchet)", () => {
   it("an import of the page itself counts, and a page with a similar name doesn't (self-test)", () => {
     // Made-up pages: this file is itself a test, so naming a real page here would count as its test.
     const pages = ["pages/ProbePage.tsx", "pages/probe/ProbeStep.tsx"];
-    expect(pagesWithoutHonestyTest(pages, ['import { ProbePage } from "../ProbePage.js";', 'import { ProbeStep } from "../../pages/probe/ProbeStep.js";'])).toEqual([]);
-    expect(pagesWithoutHonestyTest(pages, ['import { OtherProbePage } from "../OtherProbePage.js";'])).toEqual(pages);
+    const checks = (name: string, from: string) => `import { ${name} } from "${from}";\nit("x", () => {\n  render(<${name} />);\n  expect(text()).toContain("unavailable");\n});`;
+    expect(pagesWithoutHonestyTest(pages, [checks("ProbePage", "../ProbePage.js"), checks("ProbeStep", "../../pages/probe/ProbeStep.js")])).toEqual([]);
+    expect(pagesWithoutHonestyTest(pages, [checks("OtherProbePage", "../OtherProbePage.js")])).toEqual(pages);
   });
 
   it("an import that renders nothing, or a test that asserts nothing, doesn't count (astra 408d MEDIUM)", () => {
