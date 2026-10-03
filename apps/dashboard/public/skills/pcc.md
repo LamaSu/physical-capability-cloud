@@ -67,12 +67,12 @@ For any binary artifact (STL files, photo evidence, reference images), upload th
 
 **Executor success is not outcome success.** The gateway returning `{ status: "ok" }` from a job-offer post means the offer is on the board, NOT that food is at the door. To verify outcomes you must:
 
-1. Poll `GET /api/job-offers/:id`. It answers `{offer, events}`: wait until `offer.status` is `"settled"` or `"delivered"`, and read the `events` timeline for what happened.
-2. Read only evidence the gateway actually serves. An offer has no evidence field, and on the current gateway an operator cannot deliver on an offer (PATCH is poster-only, board N81). So evidence comes as storage CIDs the operator shares (`GET /api/storage/:cid`), or, for work run as a job, from `GET /api/jobs/:jobId/evidence`.
+1. Poll `GET /api/job-offers/:id`. It answers `{offer, events}`: read `offer.status` and the `events` timeline. `offer.status` is a claim, not proof: `delivered` means someone posted a `delivered` event (`POST /api/job-offers/:id/events`), and on the current gateway any authenticated caller can post one, with no evidence. Nothing sets `settled` today.
+2. Report an outcome only from evidence the gateway actually serves. An offer has no evidence field, so evidence comes as storage CIDs the operator shares (`GET /api/storage/:cid`), or, for work run as a job, from `GET /api/jobs/:jobId/evidence`. Say what it shows, and that PCC has not verified it.
 3. If the request involved an external system (Domino's, Uber, etc.) and there's an `externalRef` in the offer's requirements, the gateway will have a `sourceVerifyUrl` checking it — trust the gateway's `verified` flag, not your own optimism.
 4. If the user asked for something time-bound ("food before 7pm"), check that the timestamp is satisfied before reporting "ordered". A status of `open` past the deadline = nobody claimed it.
 
-Never report "ordered", "delivered", "complete", "done" unless you have read the gateway's status field and seen it say so.
+Never report "ordered", "delivered", "complete" or "done" from a status alone: only from evidence you have read.
 
 ## Do
 
@@ -163,8 +163,8 @@ User: "Order me a pizza for delivery to 728 Geary St SF."
 3. On user confirmation: `POST /api/job-offers` with `capabilityType=pizza.order`, `requirements={ shopId, items, deliveryAddress, customer }`, `pricing={ model:'fixed', amount: shopPrice, currency:'USD' }`, `idempotencyKey='pizza-728geary-{timestamp}'`.
 4. Separately: `GET /api/capabilities?type=courier.dispatch&within=...` — find a driver.
 5. `POST /api/job-offers` with `capabilityType=courier.dispatch`, `requirements={ pickup:{shopAddress}, dropoff:{userAddress}, pickupReadyAt }`, `pricing={ model:'fixed' }`.
-6. Poll `GET /api/job-offers/:id` for both — wait for `offer.status` to be `settled`, and read each offer's `events`. Look at any photo the operator shares as a storage CID.
-7. Report to user only after BOTH offers show `offer.status` `settled` or `delivered`.
+6. Poll `GET /api/job-offers/:id` for both, reading `offer.status` and each offer's `events`. A `delivered` status is a claim: any caller can post it, with no evidence.
+7. Report to the user only what evidence shows: a photo the operator or courier shares as a storage CID. Say that PCC has not verified it.
 
 ### Print an STL
 
@@ -176,7 +176,7 @@ User: "I have an STL file. Print it on an FDM printer near me."
 4. `POST /api/job-offers` with `capabilityType=manufacturing.fdm`, `requirements={ stl_cid, material:'PLA', infill:0.2, layer_height:0.2 }`, `pricing={ model:'quote-required' }` (let operator quote).
 5. Wait for operator to claim + quote. Show user the quote. On confirmation, accept.
 6. Operator prints and shares a photo as a storage CID (an offer has no evidence field).
-7. `GET /api/storage/<cid>` to view the photo. Confirm to user only once `offer.status` says so.
+7. `GET /api/storage/<cid>` to view the photo. Confirm to the user only what it shows; `offer.status` alone proves nothing.
 8. (optional) chain into `courier.dispatch` for delivery using shop pickup location.
 
 ### Operator browse
@@ -188,7 +188,7 @@ User: "I run a 3D-print shop. Tell me when there's an FDM job in my area."
 1. `GET /api/job-offers/open?capabilityType=manufacturing.fdm&within=<their-coords>,50` — list current offers.
 2. Format the list with price, deadline, requirements summary.
 3. If they want to claim one: `POST /api/job-offers/:id/claim` with their `kernelId`.
-4. Help them keep evidence after printing (`POST /api/storage` with the photo's raw bytes). On the current gateway an operator cannot deliver on an offer: PATCH is poster-only (403), so the offer stays `claimed` (board N81).
+4. Help them keep evidence after printing (`POST /api/storage` with the photo's raw bytes) and share its CID with the buyer. To mark progress or delivery, post an event: `POST /api/job-offers/:id/events` with `{"event": "delivered"}`. That marks the offer `delivered`, but it is only a claim: the buyer checks the photo.
 
 ## When the user is an operator (not a buyer)
 

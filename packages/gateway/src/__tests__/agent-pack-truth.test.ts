@@ -14,7 +14,7 @@
  *   - `pip install pcc-node` resolves to nothing while 0.1.0 is yanked, and
  *     without the crypto extra a node cannot sign evidence at all.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -225,14 +225,16 @@ describe("item 2b: attempt reporting follows painpoints' contract v1", () => {
     const p = report!.input_schema.properties;
     expect(p.kind.enum).toEqual(["attempt"]);
     expect(p.contract.enum).toEqual([1]);
-    expect(p.phase.enum).toEqual(PHASES);
-    expect(p.outcome.enum).toEqual(OUTCOMES);
-    expect(p.proposal.properties.target.enum).toEqual(["runbook", "agent-package", "docs", "code", "process", "other"]);
-    expect(p.tokens.properties.source.enum).toEqual(["self_reported", "harness", "metered", "unknown"]);
+    // Contract v1 accepts other values too (102g F3); the known lists are the first anyOf branch.
+    expect(p.phase.anyOf[0].enum).toEqual(PHASES);
+    expect(p.outcome.anyOf[0].enum).toEqual([...OUTCOMES, "budget-stop"]);
+    expect(p.proposal.properties.target.enum).toEqual(["runbook", "agent-package", "docs", "code", "process", "other", null]);
+    expect(p.tokens.properties.source.enum).toEqual(["self_reported", "harness", "metered", "unknown", null]);
   });
 
-  it("requires what today's server needs, and never carries a transcript", () => {
-    expect([...(report!.input_schema.required ?? [])].sort()).toEqual(["kind", "outcome", "phase", "seq", "sessionId", "summary"]);
+  it("requires what contract v1 requires, and never carries a transcript", () => {
+    // summary is optional in contract v1 (102g F3); the description still says to send it while today's server needs it.
+    expect([...(report!.input_schema.required ?? [])].sort()).toEqual(["kind", "outcome", "phase", "seq", "sessionId"]);
     expect(report!.input_schema.properties.transcript).toBeUndefined();
     expect(report!.input_schema.properties.consent.properties.transcript.enum).toEqual([false]);
   });
@@ -332,10 +334,17 @@ describe("verdict 102f: the pack's claims hold, and its schema enforces contract
     });
   });
 
-  it("F4: every pcc-node install line is resolvable: a pinned commit backs >=0.1.1 until it is on PyPI", () => {
+  it("F4: every pcc-node install line asks for >=0.1.1 only beside the pinned-commit fallback (the git fetch itself is not exercised here)", () => {
     let installs = 0;
-    for (const [file, text] of [...PACK, ["CLAUDE.md", readFileSync(join(REPO, "CLAUDE.md"), "utf8")] as [string, string]]) {
-      const lines = [...text.matchAll(/(?:python3? -m )?(?:uv )?pip3? install[^\n`\\]*pcc-node[^\n`\\]*/gi)].map((m) => m[0]);
+    for (const [file, raw] of [...PACK, ["CLAUDE.md", readFileSync(join(REPO, "CLAUDE.md"), "utf8")] as [string, string]]) {
+      const text = raw.replace(/\\\n\s*/g, " "); // join shell line continuations
+      const lines = [...text.matchAll(/pip3?\b[^\n`]*?\binstall\b[^\n`]*pcc-node[^\n`]*/gi)].map((m) => m[0]);
+      for (const line of lines) {
+        // A version spec on pcc-node is exactly >=0.1.1, or the pinned commit.
+        for (const spec of line.matchAll(/pcc-node(?:\[[^\]]*\])?\s*([<>=!~][^\s"'`;&|\\]*)/g)) {
+          expect(spec[1], `${file}: ${line}`).toBe(">=0.1.1");
+        }
+      }
       installs += lines.length;
       if (lines.some((l) => />=0\.1\.1/.test(l))) {
         expect(text, `${file}: a >=0.1.1 install needs the pinned-commit fallback`).toMatch(/pcc-node\[crypto\] @ git\+https:\/\/github\.com\/LamaSu\/physical-capability-cloud@[0-9a-f]{40}#subdirectory=packages\/pcc-node/);
@@ -364,7 +373,7 @@ describe("verdict 102f: the pack's claims hold, and its schema enforces contract
     expect(source("routes/capabilities.ts")).toMatch(/\.post[\s\S]{0,120}["'`]\/api\/capabilities["'`]/);
   });
 
-  it("F6: an @pcc package the pack tells agents to install is publishable", () => {
+  it("F6: an @pcc package the pack tells agents to install is not private in this repo (npm resolution is not exercised)", () => {
     const publishable = new Map<string, boolean>();
     for (const root of ["packages", "apps"]) {
       for (const entry of readdirSync(join(REPO, root), { withFileTypes: true })) {
@@ -412,5 +421,162 @@ describe("verdict 102f: the pack's claims hold, and its schema enforces contract
         }
       }
     }
+  });
+});
+
+describe("verdict 102g: offers are claims, the report schema is contract v1, and claims are bound to the running gateway", () => {
+  type Tool = { name: string; description: string; endpoint: { method: string; path: string }; input_schema: Record<string, unknown> };
+  const tools = (pkg as unknown as { tools: Tool[] }).tools;
+  const tool = (name: string) => {
+    const t = tools.find((x) => x.name === name);
+    if (!t) throw new Error(`no tool ${name}`);
+    return t;
+  };
+  /** Every string in the JSON package, decoded, so a check never depends on JSON escaping. */
+  const strings = (o: unknown): string[] =>
+    typeof o === "string" ? [o] : Array.isArray(o) ? o.flatMap(strings)
+      : o && typeof o === "object" ? Object.values(o).flatMap(strings) : [];
+  const CLAUDE_MD = readFileSync(join(REPO, "CLAUDE.md"), "utf8");
+  const COPIES: Array<[string, string]> = [
+    ["agent-package.json (decoded)", strings(pkg).join("\n")],
+    ...SKILLS.map((p): [string, string] => [p, readFileSync(join(REPO, p), "utf8")]),
+  ];
+
+  let app: import("fastify").FastifyInstance;
+  let posterKey: string;
+  let strangerKey: string;
+
+  beforeAll(async () => {
+    process.env.PCC_DB_PATH = ":memory:";
+    const { createGateway } = await import("../server.js");
+    ({ app } = await createGateway(0));
+    await app.ready();
+    const { provisionApiKey } = await import("../auth/api-key-auth.js");
+    posterKey = provisionApiKey({ operatorId: "poster@example.com", name: "poster", scopes: ["*"] }).rawKey;
+    strangerKey = provisionApiKey({ operatorId: "stranger@example.com", name: "stranger", scopes: ["*"] }).rawKey;
+  }, 120_000);
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  it("F1/F2: no copy reads an offer's delivered or settled status as a finished outcome", () => {
+    const stale = [
+      /status === "(settled|delivered)"/,
+      /status=(settled|delivered)/,
+      /until `offer\.status` is `"settled"` or `"delivered"`/,
+      /`offer\.status` `settled` or `delivered`/,
+      /`offer\.status` to be `settled`/,
+      /Stop on status in \{settled, delivered/,
+      /reported done \+ evidence submitted/,
+      /call it complete only at `settled`/,
+      /only terminal "ordered = arrived" state/,
+      /terminal 'ordered = arrived' state/,
+      /evidence field of the offer/,
+      /evidence\?: \{ cid/,
+      /cannot deliver on an offer|has no route to deliver on an offer/,
+      /\(`settled` \/ `completed` \/ `delivered`\)/,
+    ];
+    for (const [file, text] of COPIES) {
+      for (const pattern of stale) expect(text, `${file}: ${pattern}`).not.toMatch(pattern);
+      if (/job-offers/.test(text)) {
+        expect(text, `${file}: says a delivered offer is only a claim`).toMatch(/`delivered`[\s\S]{0,200}?\bclaim\b/);
+      }
+    }
+  });
+
+  it("F1 (binding): on this gateway any key can mark an offer delivered, with no evidence", async () => {
+    const created = await app.inject({
+      method: "POST", url: "/api/job-offers", headers: { authorization: `Bearer ${posterKey}` },
+      payload: { capabilityType: "pizza.order", requirements: { shopId: "shop-1", items: ["margherita"] },
+        pricing: { amount: 18.5, currency: "USD", model: "fixed" } },
+    });
+    expect(created.statusCode, created.body).toBeLessThan(300);
+    const body = created.json() as { id?: string; offer?: { id: string } };
+    const id = body.offer?.id ?? body.id;
+    const delivered = await app.inject({
+      method: "POST", url: `/api/job-offers/${id}/events`, headers: { authorization: `Bearer ${strangerKey}` },
+      payload: { event: "delivered" },
+    });
+    expect(delivered.statusCode, delivered.body).toBe(200);
+    const got = await app.inject({ method: "GET", url: `/api/job-offers/${id}` });
+    // If this stops holding (claimant binding or required evidence), the pack's offer text must change.
+    expect((got.json() as { offer: { status: string } }).offer.status).toBe("delivered");
+  });
+
+  describe("F3: pcc_report_attempt's schema is contract v1, exactly", () => {
+    const base = {
+      kind: "attempt", contract: 1, sessionId: "6f1c2a4e-8b7d-4c3f-9a21-0d5e6b7c8f90", seq: 4, phase: "register",
+      outcome: "failed", durationMs: 41200, summary: "POST /api/kernels returned 400",
+      ids: { kernelId: "kernel_bench" }, harness: { name: "claude-code", version: "2.3.1", model: "claude-opus-5-5" },
+      tokens: { in: null, out: null, source: "unknown" }, consent: { transcript: false },
+    };
+    async function status(body: unknown): Promise<number> {
+      const { default: Fastify } = await import("fastify");
+      const v = Fastify({ ajv: { customOptions: { removeAdditional: false, coerceTypes: false, useDefaults: false } } });
+      v.post("/v", { schema: { body: tool("pcc_report_attempt").input_schema } }, async () => ({ ok: true }));
+      const res = await v.inject({ method: "POST", url: "/v", payload: body as object });
+      await v.close();
+      return res.statusCode;
+    }
+    const { summary: _omit, ...withoutSummary } = base;
+
+    it.each([
+      ["a report without summary", withoutSummary],
+      ["the budget-stop spelling", { ...base, outcome: "budget-stop" }],
+      ["an unknown outcome", { ...base, outcome: "timed_out" }],
+      ["an unknown phase", { ...base, phase: "calibrate" }],
+      ["an unknown harness, with its label", { ...base, harness: { name: "cursor", label: "Cursor IDE", version: null, model: null } }],
+      ["null for each unknown optional field", {
+        ...base, durationMs: null, summary: null, detail: null, traceId: null,
+        device: { make: null, model: null, class: null }, env: { os: null, python: null, pccNode: null },
+        pack: { version: null, digest: null }, ids: { kernelId: null, capabilityId: null, kitId: null, jobId: null },
+      }],
+    ])("accepts %s, as contract v1 does", async (_label, body) => {
+      expect(await status(body)).toBe(200);
+    });
+
+    it("still tells agents to send a summary while today's server requires one", () => {
+      expect(tool("pcc_report_attempt").description).toMatch(/summary/);
+    });
+  });
+
+  it("F4: no copy says pcc-node start provisions a key by itself, or that the daemon polls jobs", () => {
+    for (const [file, text] of [...COPIES, ["CLAUDE.md", CLAUDE_MD] as [string, string]]) {
+      expect(text, file).not.toMatch(/key provisioning, and kernel registration|generates Ed25519 keys, provisions an API key|Provisions an API key from the gateway/);
+    }
+    expect(tool("operator_poll_jobs").description).not.toMatch(/Used by pcc-node daemon/);
+  });
+
+  it("F4 (binding): the gateway refuses the empty-email provisioning pcc-node 0.1.1 sends", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/auth/provision", payload: { email: "", name: "pcc-node" } });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("F5: the route claims hold in the running gateway, not just in its source text", async () => {
+    const auth = { authorization: `Bearer ${posterKey}` };
+    // N76: onboarding starts at POST /api/onboard/start.
+    expect(app.hasRoute({ method: "POST", url: "/api/onboard/start" })).toBe(true);
+    // The oracle tools say the gateway answers 404: it does, for each of their endpoints.
+    const oracle = tools.filter((t) => t.endpoint.path.startsWith("/api/oracle/"));
+    expect(oracle.length).toBeGreaterThan(0);
+    for (const t of oracle) {
+      const res = await app.inject({ method: t.endpoint.method as "GET" | "POST", url: t.endpoint.path, headers: auth,
+        ...(t.endpoint.method === "GET" ? {} : { payload: {} }) });
+      expect(res.statusCode, t.name).toBe(404);
+    }
+    // N75: announcing capabilities stores none.
+    const { getRepos } = await import("../db.js");
+    const kernelId = "kernel_announce_probe";
+    const before = getRepos().capabilities.findByKernel(kernelId).length;
+    const announced = await app.inject({ method: "POST", url: `/api/kernels/${kernelId}/capabilities`, headers: auth,
+      payload: { capabilities: [{ type: "lab.absorbance", name: "probe" }] } });
+    expect(announced.statusCode, announced.body).toBeLessThan(500);
+    expect(getRepos().capabilities.findByKernel(kernelId).length).toBe(before);
+    // create_capability's route stores a capability that can be read back.
+    const created = await app.inject({ method: "POST", url: tool("create_capability").endpoint.path, headers: auth,
+      payload: { kernelId: "kernel_create_probe", type: "lab.absorbance", name: "probe capability" } });
+    expect(created.statusCode, created.body).toBeLessThan(300);
+    expect(getRepos().capabilities.findByKernel("kernel_create_probe").length).toBeGreaterThan(0);
   });
 });

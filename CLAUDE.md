@@ -589,7 +589,7 @@ pip install "pcc-node[crypto]>=0.1.1"
 pcc-node start
 ```
 
-This auto-detects hardware, generates Ed25519 keys, provisions an API key, registers the kernel, and starts a daemon that keeps the kernel online. From 0.1.1 the daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+This auto-detects hardware, generates Ed25519 keys, registers the kernel with the API key you give it (`PCC_API_KEY` or `--api-key`), and starts a daemon that keeps the kernel online. Without a key it stops: the gateway refuses to provision one without an email, so provision it first (`POST /api/auth/provision`). From 0.1.1 the daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
 
 ---
 
@@ -1007,7 +1007,7 @@ pcc-node start
 This single command:
 1. Auto-detects connected hardware (printers, lab equipment, cameras)
 2. Generates Ed25519 signing keys
-3. Provisions an API key from the gateway
+3. Uses the API key you give it (`PCC_API_KEY` or `--api-key`); without one it stops, because the gateway refuses to provision a key without an email
 4. Registers a kernel
 5. Starts a daemon that keeps the kernel online. From 0.1.1 it takes no jobs: they run through the operating agent's typed operations
 

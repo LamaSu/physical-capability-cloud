@@ -196,8 +196,10 @@ curl -X POST "$PCC_BASE/api/job-offers" \
 `pricing.model` is `fixed`, `quote-required`, or `per-unit`. Always set
 `idempotencyKey` — reposting the same key returns the original offer
 instead of double-posting. An operator claims it
-(`POST /api/job-offers/:id/claim`), and you poll `GET /api/job-offers/:id`
-for `status`. Browse what's currently open (no auth) with
+(`POST /api/job-offers/:id/claim`), and you poll `GET /api/job-offers/:id`,
+which answers `{offer, events}`: read `offer.status`. A `delivered` status is only a
+claim: on the current gateway any authenticated caller can post a `delivered`
+event, with no evidence. Browse what's currently open (no auth) with
 `GET /api/job-offers/open?capabilityType=<type>`.
 
 For a binary artifact the job needs (an STL file, a reference photo),
@@ -222,16 +224,16 @@ or a negotiation commit means the request is on the board — not that the
 part is printed or the food is at the door. Before telling the user
 something happened:
 
-1. Poll job/escrow status until it reaches a terminal state
-   (`settled` / `completed` / `delivered`), not just `queued` or `open`.
-2. Read the evidence the operator submitted
+1. Poll job or offer status, but treat it as a claim: an offer's `delivered`
+   needs no evidence, and nothing sets `settled` today.
+2. Read the evidence the operator submitted, and report only what it shows
    (`GET /api/jobs/:jobId/evidence`, or fetch any CID via
    `GET /api/storage/:cid`).
 3. If the request had a deadline, confirm the timestamp was actually met —
    `open` past the deadline means nobody claimed it.
 
-Never say "ordered", "printed", or "delivered" unless you observed the
-status field say so.
+Never say "ordered", "printed", or "delivered" from a status alone: only
+from evidence you have read.
 
 ## Assurance tiers (how much evidence backs a job)
 
@@ -268,8 +270,10 @@ If the user says "I run a print shop" or "I have an OT-2" or "I'm a
 courier," they're offering capability, not buying it. Provision a key, then
 `POST /api/kernels` to register their site and `POST /api/capabilities` to
 publish what it offers. `pip install "pcc-node[crypto]>=0.1.1" && pcc-node start` does
-hardware auto-detection, key provisioning, and kernel registration in one
-command for operators who'd rather run a CLI than call the API directly. Until
+hardware auto-detection and kernel registration in one command for operators
+who'd rather run a CLI than call the API directly. It needs an API key: provision
+one first and pass it as `PCC_API_KEY` or `--api-key`. Without one it stops,
+because the gateway refuses to provision a key without an email. Until
 0.1.1 is on PyPI, install `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"`.
 From 0.1.1 the node keeps the kernel online but takes no jobs itself: jobs run
 through the operating agent's typed operations.
