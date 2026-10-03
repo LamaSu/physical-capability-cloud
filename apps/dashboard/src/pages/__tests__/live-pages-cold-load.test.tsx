@@ -143,4 +143,111 @@ describe("KernelsPage: kernel.location must never render as a React child", () =
     expect(error).toBeNull();
     expect(text).toContain("Geo Kernel");
   });
+
+  // astra's #488 follow-up review (H488-coldload-hotfix-269f36ee.astra.verdict.md):
+  //
+  // MEDIUM — a gateway kernel's location is untrusted JSON (apps/dashboard/src/api/gateway.ts
+  // returns res.json() with no runtime validation), but KernelsPage.tsx:62 calls
+  // `.toFixed()` on `location.lat` / `location.lng` unconditionally whenever `location` is
+  // truthy. A non-numeric, NaN, or partially-missing coordinate pair reaches `.toFixed()`
+  // and crashes the page instead of falling back to "Location not set".
+  it("renders a kernel with a non-numeric lat as \"Location not set\" instead of crashing", async () => {
+    state.kernels = [
+      {
+        id: "kernel-geo-bad-string",
+        name: "String Coord Kernel",
+        operatorAddress: "0x00",
+        location: { lat: "37.77", lng: -122.42 },
+        physicalAddress: "",
+        maxAssuranceTier: 2,
+        status: "online",
+        lastHeartbeat: new Date().toISOString(),
+        version: "1.0",
+        capabilityCount: 0,
+        capabilityTypes: [],
+        totalJobsCompleted: 0,
+        isStale: false,
+      },
+    ];
+    const { KernelsPage } = await import("../KernelsPage.js");
+    const { error, text } = await coldLoad(KernelsPage as React.ComponentType);
+    expect(error).toBeNull();
+    expect(text).toContain("Location not set");
+  });
+
+  it("renders a kernel with a NaN lat as \"Location not set\" instead of crashing", async () => {
+    state.kernels = [
+      {
+        id: "kernel-geo-bad-nan",
+        name: "NaN Coord Kernel",
+        operatorAddress: "0x00",
+        location: { lat: NaN, lng: 1 },
+        physicalAddress: "",
+        maxAssuranceTier: 2,
+        status: "online",
+        lastHeartbeat: new Date().toISOString(),
+        version: "1.0",
+        capabilityCount: 0,
+        capabilityTypes: [],
+        totalJobsCompleted: 0,
+        isStale: false,
+      },
+    ];
+    const { KernelsPage } = await import("../KernelsPage.js");
+    const { error, text } = await coldLoad(KernelsPage as React.ComponentType);
+    expect(error).toBeNull();
+    expect(text).toContain("Location not set");
+  });
+
+  it("renders a kernel with a missing lat as \"Location not set\" instead of crashing", async () => {
+    state.kernels = [
+      {
+        id: "kernel-geo-bad-missing",
+        name: "Missing Lat Kernel",
+        operatorAddress: "0x00",
+        location: { lng: 1 },
+        physicalAddress: "",
+        maxAssuranceTier: 2,
+        status: "online",
+        lastHeartbeat: new Date().toISOString(),
+        version: "1.0",
+        capabilityCount: 0,
+        capabilityTypes: [],
+        totalJobsCompleted: 0,
+        isStale: false,
+      },
+    ];
+    const { KernelsPage } = await import("../KernelsPage.js");
+    const { error, text } = await coldLoad(KernelsPage as React.ComponentType);
+    expect(error).toBeNull();
+    expect(text).toContain("Location not set");
+  });
+
+  // LOW — the "Geo Kernel" case above has a non-empty physicalAddress, so it never
+  // exercises the coordinate-formatting branch at all: it asserts only the kernel name.
+  // This case has no physicalAddress and no location.label, so the coordinate text is
+  // what actually renders — covering the branch the MEDIUM fix above changes.
+  it("renders the formatted coordinates when there is no address or label", async () => {
+    state.kernels = [
+      {
+        id: "kernel-geo-coords-only",
+        name: "Coordinate Only Kernel",
+        operatorAddress: "0x00",
+        location: { lat: 37.77, lng: -122.42 },
+        physicalAddress: "",
+        maxAssuranceTier: 2,
+        status: "online",
+        lastHeartbeat: new Date().toISOString(),
+        version: "1.0",
+        capabilityCount: 0,
+        capabilityTypes: [],
+        totalJobsCompleted: 0,
+        isStale: false,
+      },
+    ];
+    const { KernelsPage } = await import("../KernelsPage.js");
+    const { error, text } = await coldLoad(KernelsPage as React.ComponentType);
+    expect(error).toBeNull();
+    expect(text).toContain("37.7700, -122.4200");
+  });
 });
