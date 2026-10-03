@@ -40,11 +40,12 @@ const PATTERNS: Array<[RegExp, string]> = [
 ];
 
 // A hex key printed in pieces (N89): groups of 2+ hex digits, each optionally
-// 0x-prefixed, split by one or two spaces, a comma, or a line break (real or
-// JSON-escaped) with any indentation: a wrapped key, a hexdump, a Buffer printout.
-// Redacted when the groups hold 64 or more digits in all, at least one of them a
-// letter a-f, so a list of decimal numbers survives.
-const HEX_GROUPS = /(?<![0-9a-fA-F])(?:0[xX])?[0-9a-fA-F]{2,}(?:(?:[ \t]{1,2}|,[ \t]?|[ \t]*(?:\r?\n|\\r\\n|\\n)[ \t]*)(?:0[xX])?[0-9a-fA-F]{2,})+(?![0-9a-fA-F])/g;
+// 0x-prefixed, split by any run of whitespace (line breaks included), commas,
+// colons or JSON-escaped line breaks: a wrapped or spaced key, a hexdump, a Buffer
+// printout, a byte list. Redacted when the groups hold 64 or more digits in all, at
+// least one of them a letter a-f, so a list of decimal numbers survives. A group is
+// a whole word: it never starts or ends inside one ("sha256:" keeps its "a256").
+const HEX_GROUPS = /(?<=^|[^0-9A-Za-z_]|\\[nrt])(?:0[xX])?[0-9a-fA-F]{2,}(?![0-9A-Za-z_])(?:(?:[\s,:]|\\[nrt])+(?:0[xX])?[0-9a-fA-F]{2,}(?![0-9A-Za-z_]))+/g;
 
 function redactHexGroups(run: string): string {
   const digits = run.replace(/0[xX](?=[0-9a-fA-F])/g, "").replace(/\\[rn]|[^0-9a-fA-F]/g, "");
@@ -53,103 +54,126 @@ function redactHexGroups(run: string): string {
 
 // A PKCS#8 private key in base64 or base64url, whole or wrapped (N89): what
 // /api/auth/provision returns as private_key_pkcs8_base64. It is recognised by
-// decoding its DER header (a SEQUENCE holding version 0 or 1, then the algorithm
-// SEQUENCE), not by how it looks, so a public key (SPKI has no version) and other
-// base64 survive. Every "M" is a candidate, whatever precedes it (a "/" or "-" in a
-// path must not shield a key); the DER check is the discriminator. The span runs as
-// far as the DER length says, across the gaps skipWrap allows.
-const PKCS8_CANDIDATE = /M/g;
-
+// decoding its DER structure (a SEQUENCE holding version 0 or 1, the algorithm
+// SEQUENCE with an OID, then the key's OCTET STRING, all inside the declared
+// length), not by how it looks, so a public key (SPKI has no version) and other
+// base64 survive. Whitespace never shields it: the detector reads a stream of the
+// text's base64 characters in which any run of spaces, tabs, line breaks or JSON
+// escapes (\n \r \t) between them is skipped (N89 round 3), and every "M" in that
+// stream is a candidate. The redacted span runs as far as the DER length says.
 function isBase64Char(c: string | undefined): boolean {
   return c !== undefined && /[A-Za-z0-9+/_-]/.test(c);
 }
 
-/**
- * The index just past a gap inside a wrapped or grouped key, or `i` when there is
- * none: up to 8 spaces or tabs, then optionally one line break (real or
- * JSON-escaped) and any indentation.
- */
-function skipWrap(s: string, i: number): number {
-  let j = i;
-  for (let k = 0; k < 8 && (s[j] === " " || s[j] === "\t"); k++) j++;
-  let lineBreak = 0;
-  if (s.startsWith("\r\n", j)) lineBreak = 2;
-  else if (s[j] === "\n") lineBreak = 1;
-  else if (s.startsWith("\\r\\n", j)) lineBreak = 4;
-  else if (s.startsWith("\\n", j)) lineBreak = 2;
-  if (lineBreak === 0) return j;
-  j += lineBreak;
-  while (s[j] === " " || s[j] === "\t") j++;
-  return j;
+/** The length of the whitespace unit at `i` (a space, tab or line break, or a JSON escape \n \r \t), or 0. */
+function gapLength(s: string, i: number): number {
+  const c = s[i];
+  if (c === " " || c === "\t" || c === "\n" || c === "\r") return 1;
+  if (c === "\\" && (s[i + 1] === "n" || s[i + 1] === "r" || s[i + 1] === "t")) return 2;
+  return 0;
 }
 
-/** Reads up to `count` base64 characters from `start`, across wraps. */
-function readBase64(s: string, start: number, count: number): { chars: string; end: number } {
+/** The text's base64 characters with their offsets; runs are split by "\0" wherever a non-base64, non-whitespace character sits. */
+function base64Stream(s: string): { chars: string; offsets: number[] } {
   let chars = "";
-  let i = start;
-  let end = start;
-  while (chars.length < count && i < s.length) {
+  const offsets: number[] = [];
+  for (let i = 0; i < s.length; ) {
     if (isBase64Char(s[i])) {
       chars += s[i];
-      end = ++i;
+      offsets.push(i);
+      i++;
       continue;
     }
-    const j = skipWrap(s, i);
-    if (j === i || !isBase64Char(s[j])) break;
-    i = j;
+    const gap = gapLength(s, i);
+    if (gap > 0) {
+      i += gap;
+      continue;
+    }
+    if (chars.length > 0 && chars[chars.length - 1] !== "\0") {
+      chars += "\0";
+      offsets.push(-1);
+    }
+    i++;
   }
-  return { chars, end };
+  return { chars, offsets };
 }
 
-/** The DER byte length of a PKCS#8 PrivateKeyInfo whose first 16 base64 characters are `head`, or null. */
-function pkcs8Length(head: string): number | null {
-  const b = Buffer.from(head.replace(/-/g, "+").replace(/_/g, "/"), "base64");
-  if (b.length < 12 || b[0] !== 0x30) return null;
+function decodeBase64(chars: string): Buffer {
+  return Buffer.from(chars.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+}
+
+/** The DER byte length of a PKCS#8 PrivateKeyInfo starting at `chars[at]`, or null. */
+function pkcs8Length(chars: string, at: number): number | null {
+  const run = (n: number) => {
+    const piece = chars.slice(at, at + n);
+    const cut = piece.indexOf("\0");
+    return cut < 0 ? piece : piece.slice(0, cut);
+  };
+  const head = run(16);
+  // 0x30 encodes as "M", and a length byte below 0x80 or 0x81/0x82 puts the next
+  // character in A-P (index < 16): a cheap filter before decoding.
+  if (head.length < 16 || !/^M[A-P]/.test(head)) return null;
+  let b = decodeBase64(head);
   let hdr: number;
   let len: number;
   if (b[1]! < 0x80) [hdr, len] = [2, b[1]!];
   else if (b[1] === 0x81) [hdr, len] = [3, b[2]!];
   else if (b[1] === 0x82) [hdr, len] = [4, (b[2]! << 8) | b[3]!];
   else return null;
-  const versionThenAlgorithm = b[hdr] === 0x02 && b[hdr + 1] === 0x01 && (b[hdr + 2] === 0x00 || b[hdr + 2] === 0x01) && b[hdr + 3] === 0x30;
-  if (!versionThenAlgorithm) return null;
-  // The version, the algorithm SEQUENCE and at least an empty key OCTET STRING must
-  // fit inside the declared length (N89 round 2: "30 00 02 01 00 30 …" is not a key).
+  // version INTEGER 0 or 1, then the algorithm SEQUENCE, which opens with an OID
+  if (b[hdr] !== 0x02 || b[hdr + 1] !== 0x01 || (b[hdr + 2] !== 0x00 && b[hdr + 2] !== 0x01) || b[hdr + 3] !== 0x30) return null;
   const algorithmLength = b[hdr + 4]!;
-  if (algorithmLength >= 0x80 || 3 + 2 + algorithmLength + 2 > len) return null;
+  if (algorithmLength < 2 || algorithmLength >= 0x80) return null;
+  const octetAt = hdr + 5 + algorithmLength;
+  // the key's OCTET STRING follows the algorithm SEQUENCE
+  const need = octetAt + 4;
+  const more = run(Math.ceil(need / 3) * 4);
+  if (more.length * 3 < need * 4) return null;
+  b = decodeBase64(more);
+  if (b[hdr + 5] !== 0x06 || b[octetAt] !== 0x04) return null;
+  let octetTotal: number;
+  if (b[octetAt + 1]! < 0x80) octetTotal = 2 + b[octetAt + 1]!;
+  else if (b[octetAt + 1] === 0x81) octetTotal = 3 + b[octetAt + 2]!;
+  else if (b[octetAt + 1] === 0x82) octetTotal = 4 + ((b[octetAt + 2]! << 8) | b[octetAt + 3]!);
+  else return null;
+  // everything must sit inside the declared outer length
+  if (octetAt - hdr + octetTotal > len) return null;
   return hdr + len;
 }
 
 function redactPkcs8Keys(s: string): string {
+  const { chars, offsets } = base64Stream(s);
   let out = "";
   let last = 0;
-  PKCS8_CANDIDATE.lastIndex = 0;
-  for (let m = PKCS8_CANDIDATE.exec(s); m; m = PKCS8_CANDIDATE.exec(s)) {
-    const head = readBase64(s, m.index, 16);
-    const derLength = head.chars.length === 16 ? pkcs8Length(head.chars) : null;
+  for (let k = chars.indexOf("M"); k >= 0; k = chars.indexOf("M", k + 1)) {
+    const derLength = pkcs8Length(chars, k);
     if (derLength === null) continue;
-    let end = readBase64(s, m.index, Math.ceil((derLength * 4) / 3)).end;
-    for (let k = 0; k < 2 && s[end] === "="; k++) end++;
-    out += s.slice(last, m.index) + "[redacted-private-key]";
+    let count = Math.ceil((derLength * 4) / 3);
+    const cut = chars.indexOf("\0", k);
+    const runEnd = cut >= 0 ? cut : chars.length;
+    if (k + count > runEnd) count = runEnd - k; // a truncated key: what is there goes
+    let end = offsets[k + count - 1]! + 1;
+    for (let p = 0; p < 2 && s[end] === "="; p++) end++;
+    out += s.slice(last, offsets[k]) + "[redacted-private-key]";
     last = end;
-    PKCS8_CANDIDATE.lastIndex = end;
+    k += count - 1;
   }
   return out + s.slice(last);
 }
 
 // The value of a secret-named label (N89), in every form a pasted response or
 // config takes: "name": "value", 'name': 'value', name: value, name=value, and
-// \"name\":\"value\" inside JSON held in a JSON string (up to 7 escaping backslashes,
-// four levels of encoding). A quoted value is redacted up to the matching quote or,
+// \"name\":\"value\" inside JSON held in a JSON string (any depth of escaping). A quoted value is redacted up to the matching quote or,
 // unterminated, to the end. A YAML key (only indentation, or "- ", before it on its
 // line) followed by ":" owns the rest of its line and the lines below indented
 // deeper, so a block scalar's body or a multi-word value goes too. Elsewhere an
 // unquoted value is one token; after ":" it must look like a credential (a digit or
 // symbol, or 12+ characters), so prose such as "the password: wrong" survives. A
 // single status word ("password=required") is never a secret.
-const LABEL = /(?<![A-Za-z0-9_\\])(\\{0,7}["']|)([A-Za-z_][A-Za-z0-9_.-]{0,63})\1[ \t]*([:=])[ \t]*/g;
-const QUOTE_TOKEN = /\\{0,7}["']/y;
-const UNQUOTED_VALUE = /[^\s,;&)\]}'"<>]+/y;
+const LABEL = /(?<![A-Za-z0-9_\\])(\\*["']|)([A-Za-z_][A-Za-z0-9_.-]{0,63})\1[ \t]*([:=])[ \t]*/g;
+const QUOTE_TOKEN = /\\*["']/y;
+// A token value; a marker a rule above left at its start counts as part of it.
+const UNQUOTED_VALUE = /(?:\[redacted[^\]\s]*\])?[^\s,;&)\]}'"<>]*/y;
 const STATUS_WORD = /^(?:required|missing|invalid|empty|null|none|nil|undefined|true|false|yes|no|unset|hidden|redacted|masked|\*+)$/i;
 const YAML_BLOCK = /^[|>][-+0-9]*$/;
 
@@ -230,8 +254,6 @@ function redactLabeledSecrets(s: string): string {
     if (quote) {
       from = valueAt + quote[0].length;
       to = closingQuote(s, from, quote[0].slice(-1), quote[0].length - 1);
-    } else if (s.startsWith("[redacted", valueAt)) {
-      continue; // a rule above already took it
     } else if (column !== null) {
       const restEnd = lineEnd(s, valueAt);
       const rest = s.slice(valueAt, restEnd).replace(/[,;]+$/, "");

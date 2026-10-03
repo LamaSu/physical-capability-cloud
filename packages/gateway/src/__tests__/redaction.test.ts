@@ -299,6 +299,67 @@ describe("redactSecrets: private keys in the forms /api/auth/provision returns (
     expect(redactSecrets(s4)).not.toContain("hunter2pass");
   });
 
+  // ── Round 3 (pp-n89-478-redaction-r3-9b14b68f) ──────────────────────────────
+
+  it("redacts a PKCS#8 key split by any amount of whitespace (round 3 Ca, Cb)", () => {
+    for (const input of [
+      `material: ${b64.slice(0, 8)}         ${b64.slice(8)}`,
+      `material: ${b64.slice(0, 8)}${" ".repeat(40)}${b64.slice(8)}`,
+      `material: ${wrap(b64, 8, "\t\t\t")}`,
+      `material:\n${b64.slice(0, 16)}\n\n\n${b64.slice(16)}`,
+      JSON.stringify({ note: `k:\n${b64.slice(0, 16)}\n\n${b64.slice(16)}` }),
+    ]) {
+      expect(leaks(redactSecrets(input), b64)).toBe(false);
+    }
+    expect(redactSecrets(`private_key_pkcs8_base64: ${b64.slice(0, 16)}\n\n${b64.slice(16)}`)).toBe("private_key_pkcs8_base64: [redacted-private-key]");
+  });
+
+  it("redacts a hex key split by any run of spaces, tabs, line breaks, commas or colons (round 3 Cc)", () => {
+    for (const input of [
+      `material: ${hexKey.match(/.{1,8}/g)!.join("   ")}`,
+      `material: ${hexKey.match(/.{2}/g)!.join(":")}`,
+      `material: ${hexKey.match(/.{1,16}/g)!.join("\n\n")}`,
+      `material: ${hexKey.match(/.{1,8}/g)!.join("\t")}`,
+    ]) {
+      expect(leaks(redactSecrets(input), hexKey)).toBe(false);
+    }
+  });
+
+  it("redacts a secret label at any depth of JSON escaping (round 3 Cd)", () => {
+    let s5: string = JSON.stringify({ password: "hunter2pass" });
+    for (let i = 0; i < 4; i++) s5 = JSON.stringify(s5);
+    expect(redactSecrets(s5)).not.toContain("hunter2pass");
+  });
+
+  it("redacts a YAML value whose marker is followed by more material", () => {
+    expect(redactSecrets(`password: ${"ab".repeat(32)} hunter2`)).toBe("password: [redacted]");
+    expect(redactSecrets(`private_key=[redacted-hex]tail`)).toBe("private_key=[redacted]");
+  });
+
+  it("does not treat a DER prefix without the algorithm OID and the key OCTET STRING as a key (round 3 M3)", () => {
+    for (const keep of ["MAcCAQAwAAUAQUFB", "MAACAQAwAEFBQUFB"]) expect(redactSecrets(keep)).toBe(keep);
+    // Each check alone: NULL where the OCTET STRING belongs, no OID tag, and an
+    // OCTET STRING longer than the declared outer length.
+    const der = (hex: string) => Buffer.from(hex + "41414141", "hex").toString("base64");
+    for (const hex of ["300c020100300506032b65700500", "300c020100300505032b65700400", "300c020100300506032b65700405"]) {
+      expect(redactSecrets(der(hex))).toBe(der(hex));
+    }
+    expect(redactSecrets(der("300c020100300506032b65700400"))).toMatch(/^\[redacted-private-key\]/);
+  });
+
+  it("keeps a hex word inside a longer word, and the label in front of a hex run", () => {
+    expect(redactSecrets("cdefghij is a word")).toBe("cdefghij is a word");
+    expect(redactSecrets(`${hexKey.match(/.{2}/g)!.join(" ")} cafeteria`)).toBe("[redacted-hex] cafeteria");
+    expect(redactSecrets(`sha256: ${hexKey.match(/.{2}/g)!.join(" ")}`)).toBe("sha256: [redacted-hex]");
+  });
+
+  it("still redacts 32 bytes of hex labeled as a digest, and a line-leading 'Password:' value: both have a secret's shape", () => {
+    // Kept by decision (round 3 M1, M2): a public digest's bytes and a private key's
+    // bytes look the same, and a line-leading "Password:" can carry the password.
+    expect(redactSecrets("sha256: 9f 86 d0 81 88 4c 7d 65 9a 2f ea a0 c5 5a d0 15 a3 bf 4f 1b 2b 0b 82 2c d1 5d 6c 15 b0 f0 0a 08")).toBe("sha256: [redacted-hex]");
+    expect(redactSecrets("Password: must be at least 12 characters")).toBe("Password: [redacted]");
+  });
+
   it("stays linear on hostile input", () => {
     const hostile = [
       '"password": "' + '\\"'.repeat(30_000),
@@ -316,6 +377,9 @@ describe("redactSecrets: private keys in the forms /api/auth/provision returns (
       ("password: x\n" + "  y\n".repeat(20)).repeat(200),
       ('\\\\\\\"password\\\\\\\":\\\\\\\"').repeat(2_000),
       "Mx ".repeat(21_000),
+      ("M" + " ".repeat(1_000)).repeat(60),
+      ("ab" + " ".repeat(1_000) + "x").repeat(60),
+      ("9f:".repeat(30) + "zz\n").repeat(600),
     ];
     for (const input of hostile) {
       const t0 = performance.now();
