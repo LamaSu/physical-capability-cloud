@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { EquipmentClass, MarketSnapshot, ROIProjection, MarketplaceListing, MarketplaceOrder, MarketplaceCategory } from "@pcc/spec";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 const mockClasses: EquipmentClass[] = [
   {
@@ -347,11 +348,11 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       updatedAt: ts,
     };
     mockListings.push(listing);
-    trackServerEvent("marketplace_listing_created", {
-      listingId: listing.id,
-      category: listing.category,
-      pricePerUnit: listing.pricePerUnit,
-      currency: listing.currency,
+    trackServerEvent(lit("marketplace_listing_created"), {
+      listingId: declare.id(listing.id),
+      category: declare.id(listing.category),
+      pricePerUnit: declare.id(listing.pricePerUnit),
+      currency: declare.id(listing.currency),
     }, (req as any).operatorId);
     auditService.log({
       eventType: "marketplace.listing_created",
@@ -419,11 +420,11 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       updatedAt: ts,
     };
     mockOrders.push(order);
-    trackServerEvent("marketplace_order_placed", {
-      orderId: order.id,
-      listingId: order.listingId,
-      quantity: order.quantity,
-      totalPrice: order.totalPrice,
+    trackServerEvent(lit("marketplace_order_placed"), {
+      orderId: declare.id(order.id),
+      listingId: declare.id(order.listingId),
+      quantity: declare.id(order.quantity),
+      totalPrice: declare.id(order.totalPrice),
     }, (req as any).operatorId);
     auditService.log({
       eventType: "marketplace.order_placed",
