@@ -44,10 +44,9 @@ function principalOf(req: FastifyRequest): string | null {
 
 /**
  * Whether this caller may publish: an API key holding one of KIT_PUBLISH_SCOPES,
- * decided HERE (astra k1-511). The scope-checker's defaults cannot be relied on:
- * a governance table with any rows replaces them (HIGH 1), and the checker
- * skips callers without an API key (HIGH 2). A SIWE session carries no scopes,
- * so it cannot show a publishing role and is refused until sessions have one.
+ * decided HERE (astra k1-511), so it holds for any deployment configuration.
+ * A SIWE session carries no scopes, so it cannot show a publishing role and is
+ * refused until sessions have one.
  */
 function publishRefusal(
   req: FastifyRequest,

@@ -124,13 +124,10 @@ describe("scope-checker — Capability Kit routes", () => {
 
 // ── astra k1-511 HIGH 1 and HIGH 2: the kit routes check the publishing role themselves ──
 //
-// The scope-checker's defaults above are not enough on their own:
-//   - HIGH 1: a governance table with ANY rows replaces the defaults (refreshScopeCache uses all
-//     rows or all defaults), so the kit rules can be absent and a contributor:read key would publish;
-//   - HIGH 2: the checker returns early for a caller without an API key (a SIWE session).
-// So routes/kits.ts decides the publishing role itself. These tests mount ONLY kitRoutes (no
-// scope-checker at all), which is exactly the situation of a deployment whose policy table lacks
-// the kit rules. The mocked apiKeys repo above supplies the key's scopes to getCallerScopes.
+// routes/kits.ts decides the publishing role itself, so it holds for any deployment
+// configuration. These tests mount ONLY kitRoutes (no scope-checker at all), so no endpoint
+// scope rule for /api/kits applies. The mocked apiKeys repo above supplies the key's scopes to
+// getCallerScopes.
 
 const { kitRoutes } = await import("../routes/kits.js");
 const { KitRegistry } = await import("../services/kit-registry.js");
