@@ -158,8 +158,15 @@ is checked as data before PLR builds anything from it, on both paths:
   `metadata.strippedFunctions`) and never deserialized. Keys starting with `__`,
   non-finite numbers, strings over 4 KiB, more than 100,000 values or nesting
   deeper than 32 are refused. A file is at most 5 MB;
-- every labware on the deck has a size and a location, lies inside the deck and
-  overlaps no other labware;
+- every resource has a size and a location, and lies inside its immediate
+  parent and inside the deck in **x, y and z** (R39 CRIT4: z was unchecked
+  before this; the deck's own `size_z` is the height bound). Deck-level
+  siblings overlap no other deck-level labware. Nesting (holders, adapters,
+  plates in carriers) is checked recursively: a child's position is relative
+  to its immediate parent, and its absolute position must still fit the deck;
+- any resource carrying a nonzero `rotation` is refused outright — rotated
+  footprints are not computed, so a rotated placement is never silently
+  checked against its unrotated box (R39 CRIT4);
 - only then is it loaded with `Resource.deserialize(..., allow_marshal=False)`, and
   the result must be the expected deck class.
 

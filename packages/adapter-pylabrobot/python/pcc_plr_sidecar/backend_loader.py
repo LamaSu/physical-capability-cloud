@@ -20,8 +20,11 @@ anything from it (:func:`checked_layout`):
   must be one of ``LAYOUT_TYPES``;
 - serialized functions are stripped, never deserialized, and it is then loaded
   with ``Resource.deserialize(..., allow_marshal=False)`` on both paths;
-- size, depth, key and number limits apply, and every labware placed on the deck
-  must lie inside it without overlapping another.
+- size, depth, key and number limits apply, and every resource (recursively,
+  including nested holders/adapters/plates-in-carriers) must lie inside its
+  immediate parent and inside the deck in x, y AND z, with no rotation
+  (rotated footprints are refused, not computed); deck-level siblings may not
+  overlap another.
 
 ``deckLayoutPath`` is operator configuration, never job input, and it must name
 a ``.json`` file inside ``PCC_PLR_LAYOUT_DIR``.
@@ -339,10 +342,81 @@ def _box(resource: dict[str, Any], what: str) -> tuple[float, float, float]:
     return dims[0], dims[1], dims[2]
 
 
-def _check_deck_geometry(deck: dict[str, Any]) -> None:
-    """Every labware on the deck lies inside it, and no two overlap."""
-    deck_x, deck_y, _ = _box(deck, "the deck")
+def _check_no_rotation(resource: dict[str, Any], name: str) -> None:
+    """R39 CRIT4: rotated footprints are not computed, so any resource carrying
+    a non-identity ``rotation`` is refused outright, with a clear error, rather
+    than silently checked against its unrotated box. A resource with no
+    ``rotation`` key, or one whose x/y/z angles are all exactly 0, is fine.
+    """
+    rotation = resource.get("rotation")
+    if rotation is None:
+        return
+    if isinstance(rotation, dict):
+        angles = [rotation.get(a, 0) for a in ("x", "y", "z")]
+        if all(isinstance(a, (int, float)) and not isinstance(a, bool) and a == 0 for a in angles):
+            return
+    raise ValueError(f"{name} has a nonzero rotation; rotated footprints are not supported yet")
+
+
+def _check_resource_geometry(
+    resource: dict[str, Any],
+    *,
+    parent_label: str,
+    parent_origin: tuple[float, float, float],
+    parent_size: tuple[float, float, float],
+    deck_box: tuple[float, float, float, float, float, float],
+) -> tuple[float, float, float, float, float, float]:
+    """Check one resource against its immediate parent and against the deck, in
+    x, y AND z (R39 CRIT4), refuse any rotation, and recurse into its own
+    nested children (holders, adapters, plates in carriers) with THIS
+    resource as their new parent. Returns the resource's absolute
+    ``(x0, x1, y0, y1, z0, z1)`` box, for the caller's own overlap checks.
+    """
+    name = resource.get("name") if isinstance(resource.get("name"), str) else "a deck child"
+    _check_no_rotation(resource, name)
+    loc = resource.get("location")
+    if not isinstance(loc, dict) or not all(
+        isinstance(loc.get(a), (int, float)) and not isinstance(loc.get(a), bool) for a in ("x", "y", "z")
+    ):
+        raise ValueError(f"{name} needs a location with numeric x, y and z")
+    sx, sy, sz = _box(resource, name)
     tol = _GEOMETRY_TOLERANCE_MM
+    # location is relative to the immediate parent's own frame (PLR convention).
+    lx, ly, lz = float(loc["x"]), float(loc["y"]), float(loc["z"])
+    parent_sx, parent_sy, parent_sz = parent_size
+    if (
+        lx < -tol or ly < -tol or lz < -tol
+        or lx + sx > parent_sx + tol or ly + sy > parent_sy + tol or lz + sz > parent_sz + tol
+    ):
+        raise ValueError(f"{name} does not fit inside {parent_label}")
+    ax, ay, az = parent_origin[0] + lx, parent_origin[1] + ly, parent_origin[2] + lz
+    dx0, dx1, dy0, dy1, dz0, dz1 = deck_box
+    if ax < dx0 - tol or ay < dy0 - tol or az < dz0 - tol or ax + sx > dx1 + tol or ay + sy > dy1 + tol or az + sz > dz1 + tol:
+        raise ValueError(f"{name} does not fit on the deck")
+    box = (ax, ax + sx, ay, ay + sy, az, az + sz)
+    for nested in resource.get("children") or []:
+        if nested is None:
+            continue
+        if not isinstance(nested, dict):
+            raise ValueError(f"every child of {name} must be a serialized resource")
+        _check_resource_geometry(
+            nested, parent_label=name, parent_origin=(ax, ay, az),
+            parent_size=(sx, sy, sz), deck_box=deck_box,
+        )
+    return box
+
+
+def _check_deck_geometry(deck: dict[str, Any]) -> None:
+    """Every resource in the tree lies inside its immediate parent AND inside
+    the deck, in x, y and z (R39 CRIT4); no resource carries a rotation; deck-
+    level siblings (the work surface) may not overlap each other. Nested
+    siblings aren't cross-checked for overlap -- that's PLR's own placement
+    concern once a resource is actually assigned, out of scope here.
+    """
+    deck_x, deck_y, deck_z = _box(deck, "the deck")
+    _check_no_rotation(deck, "the deck")
+    tol = _GEOMETRY_TOLERANCE_MM
+    deck_box = (0.0, deck_x, 0.0, deck_y, 0.0, deck_z)
     placed: list[tuple[str, tuple[float, ...]]] = []
     for child in deck.get("children") or []:
         if child is None:
@@ -350,16 +424,10 @@ def _check_deck_geometry(deck: dict[str, Any]) -> None:
         if not isinstance(child, dict):
             raise ValueError("every deck child must be a serialized resource")
         name = child.get("name") if isinstance(child.get("name"), str) else "a deck child"
-        loc = child.get("location")
-        if not isinstance(loc, dict) or not all(
-            isinstance(loc.get(a), (int, float)) and not isinstance(loc.get(a), bool) for a in ("x", "y", "z")
-        ):
-            raise ValueError(f"{name} needs a location with numeric x, y and z")
-        sx, sy, sz = _box(child, name)
-        x, y, z = float(loc["x"]), float(loc["y"]), float(loc["z"])
-        if x < -tol or y < -tol or x + sx > deck_x + tol or y + sy > deck_y + tol:
-            raise ValueError(f"{name} does not fit on the deck")
-        box = (x, x + sx, y, y + sy, z, z + sz)
+        box = _check_resource_geometry(
+            child, parent_label="the deck", parent_origin=(0.0, 0.0, 0.0),
+            parent_size=(deck_x, deck_y, deck_z), deck_box=deck_box,
+        )
         for other, obox in placed:
             if all(box[2 * i] < obox[2 * i + 1] - tol and obox[2 * i] < box[2 * i + 1] - tol for i in range(3)):
                 raise ValueError(f"{name} overlaps {other} on the deck")

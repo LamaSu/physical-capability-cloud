@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from pcc_plr_sidecar.backend_loader import checked_layout
 from pcc_plr_sidecar.dispatcher import RPC_ERROR_CODES
 from pcc_plr_sidecar.server import Server
 
@@ -521,6 +522,75 @@ async def test_a_serialized_function_is_stripped_not_deserialized(fake_plr):
     sent = _deserialized(fake_plr)[0]
     assert sent["allow_marshal"] is False
     assert sent["data"]["children"][0]["compute_volume_from_height"] is None
+
+
+# ── R39 CRIT4: the geometry guard covers z, rotation and nested children ────
+
+async def test_a_negative_z_is_refused_before_deserialize(fake_plr):
+    bad = dict(DECK, children=[
+        dict(DECK["children"][0], location=dict(DECK["children"][0]["location"], z=-100)),
+        *DECK["children"][1:],
+    ])
+    s, out = _server()
+    resp = await init(s, out, deckLayout=bad)
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert _deserialized(fake_plr) == []
+
+
+async def test_z_beyond_the_decks_height_limit_is_refused(fake_plr):
+    bad = dict(DECK, children=[
+        dict(DECK["children"][0], location=dict(DECK["children"][0]["location"], z=500)),  # deck size_z is 200
+        *DECK["children"][1:],
+    ])
+    s, out = _server()
+    resp = await init(s, out, deckLayout=bad)
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert _deserialized(fake_plr) == []
+
+
+async def test_a_rotated_resource_is_refused(fake_plr):
+    bad = dict(DECK, children=[
+        dict(DECK["children"][0], rotation={"type": "Rotation", "x": 0, "y": 0, "z": 90}),
+        *DECK["children"][1:],
+    ])
+    s, out = _server()
+    resp = await init(s, out, deckLayout=bad)
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert _deserialized(fake_plr) == []
+
+
+def _holder(x: float, y: float, z: float, *, child: dict | None = None) -> dict:
+    """A ResourceHolder (e.g. a carrier) big enough to hold one labware item."""
+    holder = {
+        "type": "ResourceHolder", "name": "holder", "size_x": 50.0, "size_y": 50.0, "size_z": 10.0,
+        "location": {"x": x, "y": y, "z": z, "type": "Coordinate"},
+    }
+    if child is not None:
+        holder["children"] = [child]
+    return holder
+
+
+def test_a_nested_child_placed_outside_its_parent_is_refused(fake_plr):
+    # checked_layout() directly: the fake deserializer doesn't model
+    # ResourceHolder nesting, but the geometry guard runs before deserialize.
+    outside_its_parent = {
+        "type": "Plate", "name": "nested", "wells": {}, "size_x": 30.0, "size_y": 30.0, "size_z": 5.0,
+        "location": {"x": 45.0, "y": 45.0, "z": 0.0, "type": "Coordinate"},  # 45+30=75 > holder's 50
+    }
+    layout = dict(DECK, children=[_holder(20, 20, 0, child=outside_its_parent)])
+    with pytest.raises(ValueError):
+        checked_layout(layout, frozenset({"Deck", "OTDeck"}))
+
+
+def test_a_valid_nested_layout_passes(fake_plr):
+    inside_its_parent = {
+        "type": "Plate", "name": "nested", "wells": {}, "size_x": 30.0, "size_y": 30.0, "size_z": 5.0,
+        "location": {"x": 5.0, "y": 5.0, "z": 0.0, "type": "Coordinate"},
+    }
+    layout = dict(DECK, children=[_holder(20, 20, 0, child=inside_its_parent)])
+    cleaned, stripped = checked_layout(layout, frozenset({"Deck", "OTDeck"}))
+    assert stripped == 0
+    assert cleaned["children"][0]["children"][0]["name"] == "nested"
 
 
 async def test_layout_files_must_come_from_the_layout_directory(fake_plr, tmp_path, monkeypatch):
