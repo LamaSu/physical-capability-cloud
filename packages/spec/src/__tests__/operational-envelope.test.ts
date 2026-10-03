@@ -158,7 +158,7 @@ describe("compileOperationalEnvelope: the confirmed envelope, projected for the 
         { quantity: "module_temperature", unit: "degC", min: 4, max: 95 },
         { quantity: "run_duration", unit: "min", min: 0, max: 120 },
       ],
-      cannotSet: [],
+      deviceControlled: [],
       commands: OT2_MAP.commands,
       deadlineQuantity: "run_duration",
       maxCommandsPerMinute: 60,
@@ -377,7 +377,7 @@ describe("astra 114b findings", () => {
       [
         "adapterType",
         "adapterVersion",
-        "cannotSet",
+        "deviceControlled",
         "commands",
         "deadlineQuantity",
         "deviceClass",

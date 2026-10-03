@@ -58,9 +58,13 @@
  * values it may carry. There is no free-form parameter, so no opaque payload
  * can carry a physical control. The map and the adapter's manifest digest
  * (`device.adapterVersion`, `sha256:` of the reviewed adapter release) are
- * committed in the digest. Every bounded quantity must be set by some declared
- * parameter, so a strict runtime can refuse any command, parameter or value
- * outside the map, and any adapter whose manifest digest differs.
+ * committed in the digest. Every template quantity keeps a limit. One that no
+ * declared parameter sets is device-controlled: the operator states how its
+ * limit is enforced (telemetry or an independent cutoff), because "no command
+ * sets it" is not "the device cannot cause it". Only a template that does not
+ * list a quantity makes it absent (astra pack 173). So a strict runtime can
+ * refuse any command, parameter or value outside the map, and any adapter
+ * whose manifest digest differs.
  *
  * "Safety envelope" is this term exactly. It is not `evidence-envelope` (a
  * data-integrity wrapper) or onboard-kit's `workEnvelope` (part dimensions).
@@ -248,6 +252,13 @@ export interface CommandParamSpec {
   /** The template quantity this parameter sets, in `unit`; the runtime checks it against that limit. */
   quantity?: string;
   unit?: Unit;
+  /**
+   * An enumerated PHYSICAL parameter, such as a temperature preset: the only
+   * values it may carry, each inside the confirmed limit of `quantity`. It is
+   * distinct from `unbounded`, which claims the parameter sets no physical
+   * quantity at all (astra pack 173).
+   */
+  allowed?: number[];
   /** A parameter that sets no physical quantity; the runtime passes only the values in `allowed`. */
   unbounded?: UnboundedParam;
 }
@@ -328,6 +339,37 @@ export const DEVICE_CLASS_TEMPLATES: Readonly<Record<string, DeviceClassTemplate
         semanticType: "temperature",
         why: "the incubator heats the plate; outside the instrument's rated range it damages samples or the heater",
       },
+      {
+        quantity: "read_duration",
+        unit: "s",
+        param: "readDuration",
+        label: "Read duration",
+        step: 1,
+        semanticType: "duration",
+        why: "the longest single read the instrument is rated for",
+      },
+      {
+        quantity: "job_duration",
+        unit: "min",
+        param: "jobDuration",
+        label: "Job duration",
+        step: 1,
+        semanticType: "duration",
+        why: "the longest job the operator allows; the runtime stops the device past it",
+      },
+    ],
+    deadline: "job_duration",
+    outputPorts: {
+      absorbance: { semanticType: "absorbance-optical-density", required: true },
+    },
+  },
+  // Physical absence is a property of a reviewed template, never an operator's word at confirm
+  // (astra pack 173): this class has no incubator, so it does not list incubation_temperature.
+  "lab-plate-reader-absorbance": {
+    id: "lab-plate-reader-absorbance",
+    label: "Microplate reader (absorbance only, no incubator), generic HTTP",
+    movesOrHeats: true,
+    requires: [
       {
         quantity: "read_duration",
         unit: "s",
@@ -804,7 +846,9 @@ function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): 
       const param = params[j];
       if (!isRecord(param) || !nonEmpty(param.name)) return `command ${JSONStringify(command.name)} has a parameter without a name`;
       const at = `${command.name}.${param.name}`;
-      if (extraKeys(param, ["name", "quantity", "unit", "unbounded"]).length > 0) return `parameter ${at} has keys other than name, quantity, unit and unbounded`;
+      if (extraKeys(param, ["name", "quantity", "unit", "allowed", "unbounded"]).length > 0) {
+        return `parameter ${at} has keys other than name, quantity, unit, allowed and unbounded`;
+      }
       if (includesValue(paramNames, param.name)) return `parameter ${at} is declared twice`;
       append(paramNames, param.name);
       const mapped = param.quantity !== undefined || param.unit !== undefined;
@@ -815,6 +859,19 @@ function commandMapProblem(commandMap: unknown, template: DeviceClassTemplate): 
         const unit = unitOf(template, param.quantity);
         if (unit === undefined) return `parameter ${at} sets ${JSONStringify(param.quantity)}, which this class does not bound`;
         if (param.unit !== unit) return `parameter ${at} sets ${text(param.quantity)} in ${JSONStringify(param.unit)}, not ${unit}`;
+        if (param.allowed !== undefined) {
+          const allowed: unknown = param.allowed;
+          if (!ArrayIsArray(allowed) || allowed.length === 0) return `parameter ${at}: allowed, when given, lists at least one value`;
+          const seen = newList<number>(0);
+          for (let k = 0; k < allowed.length; k++) {
+            const value: unknown = allowed[k];
+            if (!finite(value)) return `parameter ${at}: an allowed value of a physical parameter is a finite number`;
+            if (includesValue(seen, value)) return `parameter ${at}: allowed lists ${text(value)} twice`;
+            append(seen, value);
+          }
+        }
+      } else if (param.allowed !== undefined) {
+        return `parameter ${at}: allowed values belong to a parameter that sets a quantity; one that sets none says why (unbounded)`;
       } else {
         const problem = unboundedProblem(param.unbounded, at);
         if (problem) return problem;
@@ -844,50 +901,100 @@ function commandMapGaps(commandMap: CommandMapV1, template: DeviceClassTemplate)
   return gaps;
 }
 
-/** No quantities: the `cannotSet` of an envelope whose map sets every bounded quantity. */
+/** No quantities, and no device-controlled entries: what an envelope whose map sets every quantity carries. */
 const NO_QUANTITIES: readonly string[] = deepFreeze(newList<string>(0));
+const NO_DEVICE_CONTROLLED: readonly DeviceControlledQuantity[] = deepFreeze(newList<DeviceControlledQuantity>(0));
 
-/** The required quantities that carry a limit: all of them except `cannotSet`, in template order. */
-function boundedRequirements(template: DeviceClassTemplate, cannotSet: readonly string[]): QuantityRequirement[] {
-  return filterList(template.requires, (r) => !includesValue(cannotSet, r.quantity));
+const DEVICE_CONTROLLED_KEYS: readonly string[] = deepFreeze(["quantity", "enforcement", "detail"]);
+
+/** The quantities a deviceControlled list names, in its order. */
+function controlledQuantities(controlled: readonly DeviceControlledQuantity[]): string[] {
+  return mapList(controlled, (d) => d.quantity);
 }
 
-/**
- * Why a committed `cannotSet` is malformed for this template, or null. When
- * present it is a non-empty list of distinct required quantities, never the
- * deadline, in template order: one canonical form, so one decision has one digest.
- */
-function cannotSetShapeProblem(cannotSet: unknown, template: DeviceClassTemplate): string | null {
-  if (!ArrayIsArray(cannotSet) || cannotSet.length === 0) return "cannotSet, when present, lists at least one quantity";
-  let previous = -1;
-  for (let i = 0; i < cannotSet.length; i++) {
-    const quantity: unknown = cannotSet[i];
-    let at = -1;
-    for (let j = 0; j < template.requires.length; j++) if (template.requires[j]!.quantity === quantity) at = j;
-    if (at < 0) return `cannotSet names ${quoted(quantity)}, which is not a quantity of a ${template.id}`;
-    if (quantity === template.deadline) {
-      return `cannotSet names the deadline ${template.deadline}: the runtime stops a job on its elapsed time, whatever the device can set`;
+/** `controlled` in template order, each entry copied field by field. */
+function inTemplateOrder(controlled: readonly DeviceControlledQuantity[], template: DeviceClassTemplate): DeviceControlledQuantity[] {
+  const out = newList<DeviceControlledQuantity>(0);
+  for (let i = 0; i < template.requires.length; i++) {
+    for (let j = 0; j < controlled.length; j++) {
+      const d = controlled[j]!;
+      if (d.quantity === template.requires[i]!.quantity) append(out, { quantity: d.quantity, enforcement: d.enforcement, detail: d.detail });
     }
-    if (at <= previous) return "cannotSet lists each quantity once, in template order";
+  }
+  return out;
+}
+
+/**
+ * Why a `deviceControlled` list is malformed for this template, or null. Each
+ * entry is exactly {quantity, enforcement, detail}: a required quantity other
+ * than the deadline, named once and in template order, "telemetry" or
+ * "cutoff", and a non-blank detail. A confirmed body carries the list only
+ * when non-empty (one canonical form per decision); the runtime envelope
+ * always carries it, so `allowEmpty` is for the runtime.
+ */
+function deviceControlledProblem(controlled: unknown, template: DeviceClassTemplate, allowEmpty: boolean): string | null {
+  if (!ArrayIsArray(controlled)) return "deviceControlled must be a list";
+  if (controlled.length === 0) return allowEmpty ? null : "deviceControlled, when present, lists at least one quantity";
+  let previous = -1;
+  for (let i = 0; i < controlled.length; i++) {
+    const entry: unknown = controlled[i];
+    if (!isRecord(entry) || extraKeys(entry, DEVICE_CONTROLLED_KEYS).length > 0) return "each deviceControlled entry is exactly {quantity, enforcement, detail}";
+    let at = -1;
+    for (let j = 0; j < template.requires.length; j++) if (template.requires[j]!.quantity === entry.quantity) at = j;
+    if (at < 0) return `deviceControlled names ${quoted(entry.quantity)}, which is not a quantity of a ${template.id}`;
+    if (entry.quantity === template.deadline) {
+      return `deviceControlled names the deadline ${template.deadline}: the runtime stops a job on its elapsed time`;
+    }
+    if (at <= previous) return "deviceControlled lists each quantity once, in template order";
     previous = at;
+    if (!includesValue(DEVICE_CONTROL_ENFORCEMENTS, entry.enforcement)) return `${text(entry.quantity)}: enforcement must be "telemetry" or "cutoff"`;
+    if (!nonEmpty(entry.detail)) return `${text(entry.quantity)}: a device-controlled quantity needs a detail naming its telemetry channel or its cutoff`;
   }
   return null;
 }
 
 /**
- * Why the command map's coverage and `cannotSet` disagree, or null. Every
- * quantity no declared parameter sets must be one the operator confirmed the
- * device cannot set, and a quantity some parameter sets never can be: its
- * limit is what the runtime enforces on that parameter.
+ * Why the command map's coverage and `deviceControlled` disagree, or null.
+ * Every quantity no declared parameter sets must be confirmed device-controlled,
+ * and a quantity some parameter sets never is: its limit is enforced on that
+ * parameter at dispatch.
  */
-function coverageProblem(gaps: readonly string[], cannotSet: readonly string[]): string | null {
-  const unconfirmed = filterList(gaps, (q) => !includesValue(cannotSet, q));
+function coverageProblem(gaps: readonly string[], controlled: readonly string[]): string | null {
+  const unconfirmed = filterList(gaps, (q) => !includesValue(controlled, q));
   if (unconfirmed.length > 0) {
-    return `no declared parameter sets ${joinStrings(unconfirmed, ", ")}, and the operator has not confirmed that the device cannot set it`;
+    return `no declared parameter sets ${joinStrings(unconfirmed, ", ")}, and the operator has not confirmed it as device-controlled (enforced by telemetry or an independent cutoff)`;
   }
-  const settable = filterList(cannotSet, (q) => !includesValue(gaps, q));
-  if (settable.length > 0) return `cannotSet names ${joinStrings(settable, ", ")}, but a declared parameter sets it`;
+  const settable = filterList(controlled, (q) => !includesValue(gaps, q));
+  if (settable.length > 0) return `deviceControlled names ${joinStrings(settable, ", ")}, but a declared parameter sets it`;
   return null;
+}
+
+/**
+ * Why an enumerated physical parameter allows a value outside its quantity's
+ * confirmed limit: one problem per value, and empty when every allowed value fits.
+ */
+function enumeratedProblems(commandMap: CommandMapV1, limits: readonly unknown[]): string[] {
+  const problems = newList<string>(0);
+  for (let i = 0; i < commandMap.commands.length; i++) {
+    const command = commandMap.commands[i]!;
+    for (let j = 0; j < command.params.length; j++) {
+      const param = command.params[j]!;
+      if (param.allowed === undefined || param.quantity === undefined) continue;
+      let limit: Record<string, unknown> | undefined;
+      for (let k = 0; k < limits.length; k++) {
+        const candidate: unknown = limits[k];
+        if (isRecord(candidate) && candidate.quantity === param.quantity) limit = candidate;
+      }
+      if (limit === undefined || !finite(limit.min) || !finite(limit.max)) continue;
+      for (let k = 0; k < param.allowed.length; k++) {
+        const value: unknown = param.allowed[k];
+        if (!finite(value) || value < (limit.min as number) || value > (limit.max as number)) {
+          append(problems, `parameter ${command.name}.${param.name} allows ${text(value)}, outside the ${param.quantity} limit ${text(limit.min)}..${text(limit.max)}`);
+        }
+      }
+    }
+  }
+  return problems;
 }
 
 function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate } {
@@ -1046,15 +1153,16 @@ export function draftSafetyEnvelope(given: SafetyEnvelopeInput): SafetyEnvelopeD
       why: "the runtime refuses anything outside the declared command surface; it cannot be guessed",
     });
   } else {
-    // One question per quantity no declared parameter sets: the operator adds the
-    // parameter that sets it, or confirms the device cannot set it (`cannotSet`).
-    // Never a default: a bound no command reaches is not a bound.
+    // One question per quantity no declared parameter sets. The operator adds the
+    // parameter that sets it, or confirms it device-controlled and how its limit is
+    // enforced. Its limit stays required either way: "no command sets it" is not
+    // "the device cannot cause it" (astra pack 173).
     const gaps = commandMapGaps(commandMap, template);
     for (let i = 0; i < gaps.length; i++) {
       append(questions, {
-        about: `cannot-set:${gaps[i]!}`,
-        ask: `No declared command parameter sets ${gaps[i]!}. Add the parameter that sets it to the command map, or confirm that the device cannot set it.`,
-        why: "a limit no parameter maps to is never enforced, so the operator says whether the device can set it",
+        about: `device-controlled:${gaps[i]!}`,
+        ask: `No declared command parameter sets ${gaps[i]!}. Add the parameter that sets it to the command map, or confirm it as device-controlled and say how its limit is enforced: by telemetry, or by an independent cutoff. Its limit is still required. If the device physically lacks it, choose the device class without it.`,
+        why: "a limit no parameter maps to cannot be checked at dispatch, so it must be enforced another way, never dropped",
       });
     }
   }
@@ -1163,12 +1271,35 @@ export interface EnvelopeDecision {
   supervision?: Supervision;
   hazards?: Hazard[];
   /**
-   * The required quantities this device cannot set, as the operator confirms
-   * them: exactly the quantities no parameter of the confirmed command map
-   * sets, never the deadline (the runtime stops a job on its elapsed time).
-   * Each answers that quantity's questions; no limit is committed for it.
+   * The required quantities no parameter of the confirmed command map sets,
+   * which the device can still cause (its firmware, a fixed program, a stored
+   * method): exactly those quantities, never the deadline. Each keeps its limit
+   * and states how that limit is enforced (astra pack 173).
    */
-  cannotSet?: string[];
+  deviceControlled?: DeviceControlledQuantity[];
+}
+
+/** How a device-controlled quantity's limit is enforced, since no command can set it. */
+export type DeviceControlEnforcement = "telemetry" | "cutoff";
+
+/** The enforcement kinds, frozen. */
+export const DEVICE_CONTROL_ENFORCEMENTS: readonly DeviceControlEnforcement[] = deepFreeze(["telemetry", "cutoff"] as DeviceControlEnforcement[]);
+
+/**
+ * A required quantity no command sets but the device can cause. Its limit is
+ * still required and still enforced:
+ *   - "telemetry": the runtime reads it during the job and stops the job when
+ *     it leaves the limit; a runtime with no such reading refuses the job;
+ *   - "cutoff": an independent interlock bounds it (a thermostat, a fuse, a
+ *     firmware-fixed program), which `detail` names.
+ * Physical absence is never declared here: only a template that does not list
+ * the quantity makes it absent.
+ */
+export interface DeviceControlledQuantity {
+  quantity: string;
+  enforcement: DeviceControlEnforcement;
+  /** The telemetry channel or the cutoff, in the operator's words; committed. */
+  detail: string;
 }
 
 /** The part of a confirmed envelope the digest commits, including who confirmed it and when. */
@@ -1176,7 +1307,7 @@ export interface SafetyEnvelopeBody {
   envelopeVersion: 1;
   deviceClass: string;
   device: DeviceIdentity;
-  /** In template order, one per required quantity, except the quantities in `cannotSet`. */
+  /** In template order, one per required quantity: a device-controlled quantity keeps its limit too. */
   limits: EnvelopeLimit[];
   eStop: EStopDeclaration;
   maxCommandsPerMinute: number;
@@ -1185,12 +1316,12 @@ export interface SafetyEnvelopeBody {
   hazards: Hazard[];
   commandMap: CommandMapV1;
   /**
-   * Required quantities no declared parameter sets, as the operator confirmed
-   * them (`EnvelopeDecision.cannotSet`), in template order. Omitted when there
-   * are none, so an envelope whose map sets every quantity commits exactly
-   * what it did before this field existed.
+   * The required quantities no declared parameter sets, as the operator
+   * confirmed them device-controlled, in template order. Omitted when there are
+   * none, so an envelope whose map sets every quantity commits exactly what it
+   * did before this field existed.
    */
-  cannotSet?: string[];
+  deviceControlled?: DeviceControlledQuantity[];
   confirmation: { confirmedBy: string; confirmedAt: string };
 }
 
@@ -1305,7 +1436,7 @@ function provenanceProblems(limit: Record<string, unknown>, quantity: string, un
   return problems;
 }
 
-const BODY_KEYS: readonly string[] = deepFreeze(["envelopeVersion", "deviceClass", "device", "limits", "eStop", "maxCommandsPerMinute", "supervision", "hazards", "commandMap", "cannotSet", "confirmation"]);
+const BODY_KEYS: readonly string[] = deepFreeze(["envelopeVersion", "deviceClass", "device", "limits", "eStop", "maxCommandsPerMinute", "supervision", "hazards", "commandMap", "deviceControlled", "confirmation"]);
 const LIMIT_KEYS: readonly string[] = deepFreeze(["quantity", "unit", "param", "min", "max", "proposedBy", "sources"]);
 const DEVICE_KEYS: readonly string[] = deepFreeze(["deviceId", "adapterType", "adapterVersion", "vendor", "model"]);
 
@@ -1341,18 +1472,17 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
     append(problems, "confirmedAt must be an ISO-8601 time");
   }
   if (extraKeys(confirmation, ["confirmedBy", "confirmedAt"]).length > 0) append(problems, "confirmation holds only confirmedBy and confirmedAt");
-  let cannotSet: readonly string[] = NO_QUANTITIES;
-  if (hasOwn(envelope, "cannotSet")) {
-    const shape = cannotSetShapeProblem(envelope.cannotSet, template);
+  let controlled: readonly string[] = NO_QUANTITIES;
+  if (hasOwn(envelope, "deviceControlled")) {
+    const shape = deviceControlledProblem(envelope.deviceControlled, template, false);
     if (shape) append(problems, shape);
-    else cannotSet = envelope.cannotSet as string[];
+    else controlled = controlledQuantities(envelope.deviceControlled as DeviceControlledQuantity[]);
   }
-  const bounded = boundedRequirements(template, cannotSet);
-  if (!ArrayIsArray(envelope.limits) || envelope.limits.length !== bounded.length) {
-    append(problems, `limits must hold exactly one limit per required quantity not in cannotSet, in template order (${joinStrings(mapList(bounded, (r) => r.quantity), ", ")})`);
+  if (!ArrayIsArray(envelope.limits) || envelope.limits.length !== template.requires.length) {
+    append(problems, `limits must hold exactly one limit per required quantity, in template order (${joinStrings(mapList(template.requires, (r) => r.quantity), ", ")})`);
   } else {
-    for (let i = 0; i < bounded.length; i++) {
-      const req = bounded[i]!;
+    for (let i = 0; i < template.requires.length; i++) {
+      const req = template.requires[i]!;
       const limit: unknown = envelope.limits[i];
       if (!isRecord(limit) || limit.quantity !== req.quantity) {
         append(problems, `limit ${i} must be ${req.quantity}`);
@@ -1388,8 +1518,12 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
   const map = commandMapProblem(envelope.commandMap, template);
   if (map) append(problems, `commandMap: ${map}`);
   else {
-    const coverage = coverageProblem(commandMapGaps(envelope.commandMap, template), cannotSet);
+    const coverage = coverageProblem(commandMapGaps(envelope.commandMap, template), controlled);
     if (coverage) append(problems, `commandMap: ${coverage}`);
+    if (ArrayIsArray(envelope.limits)) {
+      const enumerated = enumeratedProblems(envelope.commandMap, envelope.limits);
+      for (let i = 0; i < enumerated.length; i++) append(problems, `commandMap: ${enumerated[i]!}`);
+    }
   }
   return problems;
 }
@@ -1477,37 +1611,42 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     append(answered, edit.quantity);
   }
 
-  // The quantities the operator confirms the device cannot set. Each must be one no declared
-  // parameter sets, and never the deadline. Each answers that quantity's questions, and no
-  // limit is committed for it.
-  const cannotSet = newList<string>(0);
-  const declared: unknown = decision.cannotSet;
+  // The quantities the operator confirms device-controlled: no declared parameter sets them, but the
+  // device can still cause them, so each keeps its limit and names how that limit is enforced
+  // (astra pack 173). Each answers its coverage question; its limit question still needs an answer.
+  const controlled = newList<DeviceControlledQuantity>(0);
+  const declared: unknown = decision.deviceControlled;
   if (declared !== undefined) {
     const gaps = draft.commandMap === null ? newList<string>(0) : commandMapGaps(draft.commandMap, template);
     const quantities = mapList(template.requires, (r) => r.quantity);
-    if (!ArrayIsArray(declared)) append(reasons, "cannotSet must be a list of quantities");
+    if (!ArrayIsArray(declared)) append(reasons, "deviceControlled must be a list of {quantity, enforcement, detail}");
     else {
       for (let i = 0; i < declared.length; i++) {
-        const quantity: unknown = declared[i];
+        const entry: unknown = declared[i];
+        if (!isRecord(entry) || extraKeys(entry, DEVICE_CONTROLLED_KEYS).length > 0) {
+          append(reasons, "each deviceControlled entry is exactly {quantity, enforcement, detail}");
+          continue;
+        }
+        const quantity: unknown = entry.quantity;
         if (typeof quantity !== "string" || !includesValue(quantities, quantity)) {
-          append(reasons, `cannotSet names ${quoted(quantity)}, which is not a quantity of a ${template.id}`);
+          append(reasons, `deviceControlled names ${quoted(quantity)}, which is not a quantity of a ${template.id}`);
         } else if (quantity === template.deadline) {
-          append(reasons, `cannotSet names the deadline ${quantity}: the runtime stops a job on its elapsed time, whatever the device can set`);
-        } else if (includesValue(cannotSet, quantity)) {
-          append(reasons, `cannotSet names ${quantity} twice`);
+          append(reasons, `deviceControlled names the deadline ${quantity}: the runtime stops a job on its elapsed time`);
+        } else if (includesValue(controlledQuantities(controlled), quantity)) {
+          append(reasons, `deviceControlled names ${quantity} twice`);
         } else if (!includesValue(gaps, quantity)) {
-          append(reasons, `cannotSet names ${quantity}, but a declared parameter sets it`);
-        } else if (includesValue(edited, quantity)) {
-          append(reasons, `cannotSet names ${quantity}, and an edit bounds it; one confirmation says one thing`);
+          append(reasons, `deviceControlled names ${quantity}, but a declared parameter sets it`);
+        } else if (!includesValue(DEVICE_CONTROL_ENFORCEMENTS, entry.enforcement)) {
+          append(reasons, `${quantity}: enforcement must be "telemetry" or "cutoff"`);
+        } else if (!nonEmpty(entry.detail)) {
+          append(reasons, `${quantity}: a device-controlled quantity needs a detail naming its telemetry channel or its cutoff`);
         } else {
-          append(cannotSet, quantity);
-          append(answered, `cannot-set:${quantity}`);
-          append(answered, quantity);
+          append(controlled, { quantity, enforcement: entry.enforcement as DeviceControlEnforcement, detail: entry.detail });
+          append(answered, `device-controlled:${quantity}`);
         }
       }
     }
   }
-  const bounded = boundedRequirements(template, cannotSet);
 
   const eStop = decision.eStop ?? draft.eStop;
   if (decision.eStop) append(answered, "e-stop");
@@ -1522,8 +1661,8 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     const q = draft.questions[i]!;
     if (!includesValue(answered, q.about)) append(reasons, `unanswered: ${q.ask}`);
   }
-  for (let i = 0; i < bounded.length; i++) {
-    if (!hasOwn(limits, bounded[i]!.quantity)) append(reasons, `no confirmed limit for ${bounded[i]!.quantity}`);
+  for (let i = 0; i < template.requires.length; i++) {
+    if (!hasOwn(limits, template.requires[i]!.quantity)) append(reasons, `no confirmed limit for ${template.requires[i]!.quantity}`);
   }
   if (draft.commandMap === null) append(reasons, "the adapter has not declared its commands; draft again with its command map");
   const stopProblem = eStopProblem(eStop, template, draft.commandMap);
@@ -1540,7 +1679,7 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     envelopeVersion: 1,
     deviceClass: draft.deviceClass,
     device: { ...draft.device },
-    limits: mapList(bounded, (r) => limits[r.quantity]!),
+    limits: mapList(template.requires, (r) => limits[r.quantity]!),
     // Only the declaration's own fields are committed.
     eStop: {
       mechanism: eStop.mechanism,
@@ -1551,7 +1690,7 @@ export function confirmSafetyEnvelope(input: SafetyEnvelopeInput, given: Envelop
     hazards: canonicalHazards(hazards),
     commandMap: draft.commandMap,
     // In template order, and only when there is one: the digest of every other envelope is unchanged.
-    ...(cannotSet.length > 0 ? { cannotSet: mapList(filterList(template.requires, (r) => includesValue(cannotSet, r.quantity)), (r) => r.quantity) } : {}),
+    ...(controlled.length > 0 ? { deviceControlled: inTemplateOrder(controlled, template) } : {}),
     confirmation: { confirmedBy: decision.confirmedBy, confirmedAt: decision.confirmedAt },
   };
   // What confirm returns is the snapshot it hashed: frozen, and exactly what the digest covers.
@@ -1729,9 +1868,13 @@ export function compileSafetyEnvelope(
   const { body: envelope, digest: committedDigest } = committedSnapshot(confirmed, registration, verifyRegistration);
   const template = templateOf(envelope.deviceClass)!;
 
-  // One parameter per limit: a quantity the device cannot set has neither (`cannotSet`).
-  const bounded = boundedRequirements(template, envelope.cannotSet ?? NO_QUANTITIES);
-  const parameters = mapList(bounded, (req, i): CsdParameter => {
+  // One job input per command-settable quantity. A device-controlled quantity keeps its limit, in the
+  // conformance evidence below, but no command sets it, so a job cannot ask for it (astra pack 173).
+  const controlled = controlledQuantities(envelope.deviceControlled ?? NO_DEVICE_CONTROLLED);
+  const inputs = newList<number>(0);
+  for (let i = 0; i < template.requires.length; i++) if (!includesValue(controlled, template.requires[i]!.quantity)) append(inputs, i);
+  const parameters = mapList(inputs, (i): CsdParameter => {
+    const req = template.requires[i]!;
     const limit = envelope.limits[i]!;
     return {
       key: req.param,
@@ -1745,7 +1888,8 @@ export function compileSafetyEnvelope(
       unit: limit.unit,
     };
   });
-  const definitions = mapList(bounded, (req, i): ParameterDefinition => {
+  const definitions = mapList(inputs, (i): ParameterDefinition => {
+    const req = template.requires[i]!;
     const limit = envelope.limits[i]!;
     return {
       name: req.param,
@@ -1793,24 +1937,28 @@ export function supervisionPolicy(
 
 /**
  * Why a command map is malformed for a known class, or disagrees with
- * `cannotSet` about which bounded quantities it sets; null when it is complete.
+ * `deviceControlled` about which required quantities it sets; null when it is complete.
  */
-export function commandMapIssue(commandMap: unknown, deviceClass: string, cannotSet: readonly string[] = NO_QUANTITIES): string | null {
+export function commandMapIssue(commandMap: unknown, deviceClass: string, deviceControlled: readonly string[] = NO_QUANTITIES): string | null {
   const template = templateOf(deviceClass);
   if (!template) return `unknown deviceClass ${quoted(deviceClass)}`;
   const problem = commandMapProblem(commandMap, template);
   if (problem) return problem;
-  return coverageProblem(commandMapGaps(commandMap as CommandMapV1, template), cannotSet);
+  return coverageProblem(commandMapGaps(commandMap as CommandMapV1, template), deviceControlled);
 }
 
 /**
- * Why a runtime envelope's `cannotSet` is malformed for a known class, or
- * null. Unlike a confirmed body's, it is always present, and empty when the
- * map sets every bounded quantity.
+ * Why a runtime envelope's `deviceControlled` list is malformed for a known
+ * class, or null. Unlike a confirmed body's, it is always present, and empty
+ * when the map sets every required quantity.
  */
-export function cannotSetIssue(cannotSet: unknown, deviceClass: string): string | null {
+export function deviceControlledIssue(deviceControlled: unknown, deviceClass: string): string | null {
   const template = templateOf(deviceClass);
   if (!template) return `unknown deviceClass ${quoted(deviceClass)}`;
-  if (ArrayIsArray(cannotSet) && cannotSet.length === 0) return null;
-  return cannotSetShapeProblem(cannotSet, template);
+  return deviceControlledProblem(deviceControlled, template, true);
+}
+
+/** Why an enumerated physical parameter of `commandMap` allows a value outside its limit in `limits`; empty when none does. */
+export function enumeratedLimitIssues(commandMap: CommandMapV1, limits: readonly unknown[]): string[] {
+  return enumeratedProblems(commandMap, limits);
 }

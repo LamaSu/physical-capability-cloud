@@ -101,11 +101,12 @@ const NOT_HEX_INPUT: SafetyEnvelopeInput = (() => {
 })();
 
 /**
- * SIM-PR1 (Addendum 5): no command sets the incubator or a read duration, so the
- * operator confirms both as "cannot set". Built before any patch is applied.
+ * SIM-PR1 (Addendum 6): the absorbance-only class (no incubator), and a read
+ * duration its firmware fixes, so it is device-controlled and keeps its limit.
+ * Built before any patch is applied.
  */
 const SIM_PR1_INPUT: SafetyEnvelopeInput = {
-  deviceClass: "lab-plate-reader",
+  deviceClass: "lab-plate-reader-absorbance",
   device: { deviceId: "sim-pr1", adapterType: "generic-http", adapterVersion: MANIFEST },
   commandMap: {
     commands: [
@@ -120,7 +121,10 @@ const SIM_PR1_INPUT: SafetyEnvelopeInput = {
     ],
   },
   intake: {
-    limits: [{ field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 30 }],
+    limits: [
+      { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 60 },
+      { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 30 },
+    ],
     eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
     supervision: "attended",
     hazards: [],
@@ -128,7 +132,10 @@ const SIM_PR1_INPUT: SafetyEnvelopeInput = {
   },
   references: [],
 };
-const SIM_PR1_DECISION = { ...DECISION, cannotSet: ["read_duration", "incubation_temperature"] };
+const SIM_PR1_DECISION = {
+  ...DECISION,
+  deviceControlled: [{ quantity: "read_duration", enforcement: "cutoff" as const, detail: "firmware read timing" }],
+};
 
 /**
  * Everything the module produces from one input, stage by stage; a stage that
@@ -150,7 +157,7 @@ function runStages(): Record<Stage, unknown> {
   const registration = confirmed ? register(confirmed) : undefined;
   attempt("csd", () => compileSafetyEnvelope(confirmed!, registration!, verifyRegistry));
   attempt("runtime", () => compileOperationalEnvelope(confirmed!, registration!, verifyRegistry));
-  // Addendum 5: the "cannot set" path through confirm and both compilers.
+  // Addendum 6: the device-controlled path through confirm and both compilers.
   let cannotSet: ConfirmedSafetyEnvelope | undefined;
   attempt("cannotSetConfirmed", () => (cannotSet = confirmSafetyEnvelope(SIM_PR1_INPUT, SIM_PR1_DECISION)));
   const cannotSetRegistration = cannotSet ? register(cannotSet) : undefined;
