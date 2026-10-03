@@ -266,3 +266,79 @@ describe("AZ-9 round 3: absence is a genuine SQLite error, never message text al
     }
   });
 });
+
+// AZ-9 round 4 (astra pack 95d): no error's SHAPE can prove an absence, because any code that throws can
+// forge one (an ordinary Error with the right code and message, a subclass, accessors, a trailing newline,
+// a whitespace-free suffix, a processing failure shaped like an absence). Absence is read from SQLite's own
+// catalog BEFORE the source is queried; once the catalog says the source exists, ANY failure is `failed`.
+describe("AZ-9 round 4: a source the catalog says EXISTS is never excused, whatever its error looks like (astra pack 95d)", () => {
+  /** A fake database whose catalog lists every SOURCES table and column, and whose ui_artifacts query throws `thrown`. */
+  function presentButThrowing(thrown: () => unknown) {
+    const schema: Record<string, string[]> = {
+      api_keys: ["operator_id"], shop_kernels: ["operator_address"], machine_registrations: ["tenant_id", "operator"],
+      job_offers: ["poster_did"], ui_artifacts: ["owner"],
+    };
+    return {
+      prepare(sql: string) {
+        if (sql.includes("sqlite_master")) return { all: (t: unknown) => (schema[String(t)] ? [{ name: String(t) }] : []) };
+        if (sql.includes("pragma_table_info")) return { all: (t: unknown, c: unknown) => ((schema[String(t)] ?? []).includes(String(c)) ? [{ name: String(c) }] : []) };
+        if (sql.includes("FROM ui_artifacts")) throw thrown();
+        return { all: () => [] as unknown[] };
+      },
+    };
+  }
+  const allowUi = ["ui_artifacts.owner"];
+  const verdictOf = (out: ReturnType<typeof findIdentityCollisions>) =>
+    collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: allowUi }).code;
+  const forged: Array<[string, () => unknown]> = [
+    ["an ORDINARY Error with code SQLITE_ERROR and the exact absence message", () => Object.assign(new Error("no such table: ui_artifacts"), { code: "SQLITE_ERROR" })],
+    ["an Error SUBCLASS with the accepted shape", () => { class Spoof extends Error { code = "SQLITE_ERROR"; } return new Spoof("no such table: ui_artifacts"); }],
+    ["accessor-backed code and message", () => { const e = new Error("x"); Object.defineProperty(e, "code", { get: () => "SQLITE_ERROR" }); Object.defineProperty(e, "message", { get: () => "no such table: ui_artifacts" }); return e; }],
+    ["a TRAILING newline after an exact message", () => Object.assign(new Error("no such table: ui_artifacts\n"), { code: "SQLITE_ERROR" })],
+    ["a whitespace-free SUFFIX", () => Object.assign(new Error("no such table: ui_artifacts;other_failure"), { code: "SQLITE_ERROR" })],
+    ["a THROWING accessor (it must not escape the audit)", () => { const e = new Error("x"); Object.defineProperty(e, "code", { get: () => { throw new Error("accessor"); } }); return e; }],
+  ];
+  for (const [label, thrown] of forged) {
+    it(`[neg] astra's reproduction: ${label}, from a source the catalog lists, is failed (exit 4)`, () => {
+      const out = findIdentityCollisions(presentButThrowing(thrown));
+      expect(out.failed).toContain("ui_artifacts.owner");
+      expect(out.skipped).not.toContain("ui_artifacts.owner");
+      expect(verdictOf(out)).toBe(4);
+    });
+  }
+
+  it("[neg] astra's reproduction: a PROCESSING failure shaped like an absence is failed (exit 4)", () => {
+    const shaped = Object.assign(new Error("no such column: owner"), { code: "SQLITE_ERROR" });
+    const poisoned = { get v(): string { throw shaped; } };
+    const db = presentButThrowing(() => new Error("unused"));
+    const reader = {
+      prepare(sql: string) {
+        if (sql.includes("FROM ui_artifacts")) return { all: () => [poisoned] };
+        return db.prepare(sql);
+      },
+    };
+    const out = findIdentityCollisions(reader);
+    expect(out.failed).toContain("ui_artifacts.owner");
+    expect(verdictOf(out)).toBe(4);
+  });
+
+  it("the REAL driver's catalog decides absence: a missing table and a missing column are skipped, and nothing else is", () => {
+    const client = (getStore().db as unknown as { $client: { prepare(sql: string): { all(...p: unknown[]): unknown[] } } }).$client;
+    // Rename what the catalog is ASKED about, so the real better-sqlite3 catalog answers "absent" without touching the database.
+    const renamed = (from: string, to: string) => ({
+      prepare: (sql: string) => {
+        const stmt = client.prepare(sql);
+        return { all: (...p: unknown[]) => stmt.all(...p.map((x) => (x === from ? to : x))) };
+      },
+    });
+    for (const [what, reader] of [
+      ["missing table", renamed("ui_artifacts", "ui_artifacts_absent_95e")],
+      ["missing column", renamed("owner", "owner_absent_95e")],
+    ] as const) {
+      const out = findIdentityCollisions(reader);
+      expect(out.skipped, what).toEqual(["ui_artifacts.owner"]);
+      expect(out.failed, what).toEqual([]);
+      expect(verdictOf(out), what).toBe(0);
+    }
+  });
+});
