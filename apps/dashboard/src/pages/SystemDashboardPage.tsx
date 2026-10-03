@@ -155,6 +155,12 @@ interface SystemReport {
   };
   agents?: unknown;
   env?: unknown;
+  /**
+   * Additive (astra 408b F1): names each db.* collection above that's empty
+   * because its read failed, not because there's nothing to list. Absent
+   * entirely on an older gateway — see `readState`.
+   */
+  unavailable?: unknown;
 }
 
 /** The route asks the agent bus for at most this many recent messages (routes/status.ts). */
@@ -188,6 +194,41 @@ async function fetchSystemReport(): Promise<SystemReport> {
 /** The list the report sent, or null when it sent none. */
 function listOf(v: unknown): unknown[] | null {
   return Array.isArray(v) ? v : null;
+}
+
+/**
+ * A row with the minimal shape every stored record in this system has:
+ * every DTO (KernelDTO, JobDTO, ...) carries a non-empty string `id`. A row
+ * without one isn't a record this system would have stored (astra 408b F6).
+ */
+function hasId(row: unknown): boolean {
+  return isRecord(row) && typeof row.id === "string" && row.id !== "";
+}
+
+type ReadState = "available" | "unavailable" | "unreported";
+
+/** What the handler itself said about this db.* section (astra 408b F1). */
+function serverReadState(report: SystemReport, key: string): ReadState {
+  const u = report.unavailable;
+  if (!Array.isArray(u)) return "unreported"; // an older gateway: the field isn't sent at all
+  return u.includes(key) ? "unavailable" : "available";
+}
+
+/**
+ * The server's own per-section flag, combined with a client-side sanity
+ * check on the rows themselves (astra 408b F6): a non-empty list whose rows
+ * lack the minimal shape every stored record has is untrustworthy even when
+ * the server didn't flag it as unavailable.
+ */
+function sectionState(report: SystemReport, key: string, rows: unknown[] | null): ReadState {
+  const server = serverReadState(report, key);
+  if (server !== "available") return server;
+  if (rows !== null && rows.length > 0 && !rows.every(hasId)) return "unavailable";
+  return server;
+}
+
+function capitalize(s: string): string {
+  return s.length > 0 ? s[0]!.toUpperCase() + s.slice(1) : s;
 }
 
 /** A non-empty string field of a list entry. */
@@ -449,7 +490,7 @@ function LiveCard({
   );
 }
 
-/** A list the report sent empty. The route also sends empty lists when its read failed, so this says only what the report lists. */
+/** A list the report sent empty, and the handler confirmed its read succeeded. */
 function ListsNone({ what }: { what: string }) {
   return (
     <p data-live-state="empty" className="text-xs text-white/45 leading-relaxed">
@@ -463,12 +504,32 @@ function NotInReport({ what }: { what: string }) {
   return <p className="text-xs text-white/45 leading-relaxed">The report didn't include {what}.</p>;
 }
 
-function KernelsCard({ kernels }: { kernels: unknown[] | null }) {
+/** The handler named this section as a failed read (astra 408b F1), or its rows don't look like real records (F6). Never "lists no ...". */
+function SectionUnavailable({ what }: { what: string }) {
+  return (
+    <p data-live-state="unavailable" className="text-xs text-red-400/70 leading-relaxed">
+      {capitalize(what)} couldn't be read: the gateway reported this section's read failed.
+    </p>
+  );
+}
+
+/** No gateway said one way or the other (an older gateway, before the `unavailable` field existed): an empty list here is not confidently empty. */
+function SectionUnreported({ what }: { what: string }) {
+  return (
+    <p data-live-state="unreported" className="text-xs text-white/40 leading-relaxed">
+      This gateway didn't report whether its {what} read succeeded.
+    </p>
+  );
+}
+
+function KernelsCard({ kernels, state }: { kernels: unknown[] | null; state: ReadState }) {
   let body: React.ReactNode;
   if (kernels === null) {
     body = <NotInReport what="the kernel list" />;
+  } else if (state === "unavailable") {
+    body = <SectionUnavailable what="kernels" />;
   } else if (kernels.length === 0) {
-    body = <ListsNone what="kernels" />;
+    body = state === "unreported" ? <SectionUnreported what="kernels" /> : <ListsNone what="kernels" />;
   } else {
     const online = kernels.filter(
       (k) => isRecord(k) && isKernelOnline({ status: k.status as KernelDTO["status"], isStale: k.isStale === true }),
@@ -506,13 +567,15 @@ function KernelsCard({ kernels }: { kernels: unknown[] | null }) {
   );
 }
 
-function JobsCard({ jobs }: { jobs: unknown[] | null }) {
+function JobsCard({ jobs, state }: { jobs: unknown[] | null; state: ReadState }) {
   let body: React.ReactNode;
   let note = "Active means pending, queued, in progress or paused.";
   if (jobs === null) {
     body = <NotInReport what="the job list" />;
+  } else if (state === "unavailable") {
+    body = <SectionUnavailable what="jobs" />;
   } else if (jobs.length === 0) {
-    body = <ListsNone what="jobs" />;
+    body = state === "unreported" ? <SectionUnreported what="jobs" /> : <ListsNone what="jobs" />;
   } else {
     const atLeast = mayBeTruncated(jobs);
     const statusOf = (j: unknown) => textField(j, "status") ?? "";
@@ -560,12 +623,14 @@ function GatewayReportCard({ report }: { report: SystemReport }) {
   );
 }
 
-function CapabilitiesCard({ capabilities }: { capabilities: unknown[] | null }) {
+function CapabilitiesCard({ capabilities, state }: { capabilities: unknown[] | null; state: ReadState }) {
   let body: React.ReactNode;
   if (capabilities === null) {
     body = <NotInReport what="the capability list" />;
+  } else if (state === "unavailable") {
+    body = <SectionUnavailable what="capabilities" />;
   } else if (capabilities.length === 0) {
-    body = <ListsNone what="capabilities" />;
+    body = state === "unreported" ? <SectionUnreported what="capabilities" /> : <ListsNone what="capabilities" />;
   } else {
     body = (
       <div className="flex gap-4">
@@ -586,12 +651,14 @@ function CapabilitiesCard({ capabilities }: { capabilities: unknown[] | null }) 
   );
 }
 
-function RegistrationsCard({ registrations }: { registrations: unknown[] | null }) {
+function RegistrationsCard({ registrations, state }: { registrations: unknown[] | null; state: ReadState }) {
   let body: React.ReactNode;
   if (registrations === null) {
     body = <NotInReport what="the registration list" />;
+  } else if (state === "unavailable") {
+    body = <SectionUnavailable what="machine registrations" />;
   } else if (registrations.length === 0) {
-    body = <ListsNone what="machine registrations" />;
+    body = state === "unreported" ? <SectionUnreported what="machine registrations" /> : <ListsNone what="machine registrations" />;
   } else {
     body = (
       <>
@@ -611,12 +678,14 @@ function RegistrationsCard({ registrations }: { registrations: unknown[] | null 
   );
 }
 
-function EvidenceCard({ evidence }: { evidence: unknown[] | null }) {
+function EvidenceCard({ evidence, state }: { evidence: unknown[] | null; state: ReadState }) {
   let body: React.ReactNode;
   if (evidence === null) {
     body = <NotInReport what="the evidence list" />;
+  } else if (state === "unavailable") {
+    body = <SectionUnavailable what="evidence bundles" />;
   } else if (evidence.length === 0) {
-    body = <ListsNone what="evidence bundles" />;
+    body = state === "unreported" ? <SectionUnreported what="evidence bundles" /> : <ListsNone what="evidence bundles" />;
   } else {
     const byTier = new Map<string, number>();
     for (const bundle of evidence) {
@@ -709,13 +778,18 @@ function ConfigurationCard({ env }: { env: unknown }) {
 
 function LiveRows({ report }: { report: SystemReport }) {
   const { db } = report;
+  const kernels = listOf(db.kernels);
+  const jobs = listOf(db.jobs);
+  const capabilities = listOf(db.capabilities);
+  const registrations = listOf(db.registrations);
+  const evidence = listOf(db.evidence);
   return (
     <>
       <div>
         <SectionLabel>Infrastructure</SectionLabel>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <KernelsCard kernels={listOf(db.kernels)} />
-          <JobsCard jobs={listOf(db.jobs)} />
+          <KernelsCard kernels={kernels} state={sectionState(report, "kernels", kernels)} />
+          <JobsCard jobs={jobs} state={sectionState(report, "jobs", jobs)} />
           <GatewayReportCard report={report} />
         </div>
       </div>
@@ -723,9 +797,9 @@ function LiveRows({ report }: { report: SystemReport }) {
       <div>
         <SectionLabel>Registry and Evidence</SectionLabel>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <CapabilitiesCard capabilities={listOf(db.capabilities)} />
-          <RegistrationsCard registrations={listOf(db.registrations)} />
-          <EvidenceCard evidence={listOf(db.evidence)} />
+          <CapabilitiesCard capabilities={capabilities} state={sectionState(report, "capabilities", capabilities)} />
+          <RegistrationsCard registrations={registrations} state={sectionState(report, "registrations", registrations)} />
+          <EvidenceCard evidence={evidence} state={sectionState(report, "evidence", evidence)} />
         </div>
       </div>
 
