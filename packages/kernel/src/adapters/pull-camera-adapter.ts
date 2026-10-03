@@ -8,19 +8,32 @@
  * non-simulated camera evidence without job, nonce, acquisition-time or
  * device provenance.
  *
- * What each capture binds, inside the signed (hashed) payload:
+ * What each capture binds, inside the signed (hashed) payload. The key set is
+ * exactly the closed LO-SE-1 contract (kernelPullCaptureIssue in @pcc/spec),
+ * and the tier gate counts a camera event only when it meets it:
  *   - `jobId`: a capture without the job it is for is refused;
  *   - `acquiredAt`: the kernel's clock when the frame arrived, not a
  *     caller's claim;
+ *   - `imageHash`, `rawSizeBytes`: of the bytes the kernel acquired;
+ *   - `storageRef` and `frameStored`: whether the frame bytes were retained.
+ *     With no storage service they are not: the storageRef stays
+ *     `photo:<hash>` and `frameStored` is false. The "photo" factory builds
+ *     PhotoCaptureService without storage today;
  *   - `device {path, identity}`: checked against the configuration at every
  *     capture (the Linux sysfs serial, or the Windows dshow device name);
- *   - `challengeId`, and its anchor: the job's WorkflowChallenge, when one is
- *     supplied and still fresh. The challenge is rendered in the camera's
- *     field as a visual nonce, and the `capture.photo_nonced` verifier
- *     decodes it from the stored image. Decoding is not the kernel's job;
- *   - `captureMode: "kernel-pull"` and `captureClass`: "CC1" only with a
- *     fresh challenge for this job, otherwise "CC0" (which ComplianceFacade
- *     refuses at Tier 2+).
+ *   - `declaredChallengeId`, `declaredChallengeAnchor`: the job's
+ *     WorkflowChallenge id and anchor block hash, when one is supplied, scoped
+ *     to this job and still fresh; otherwise both null. They are UNVERIFIED
+ *     DECLARATIONS: the kernel authenticates neither the challenge's issuer nor
+ *     its anchor. The challenge is meant to be rendered in the camera's field
+ *     as a visual nonce, which a downstream verifier (`capture.photo_nonced`)
+ *     decodes from the stored bytes against the gateway's issued challenge.
+ *     The kernel claims neither;
+ *   - `captureMode: "kernel-pull"`, and `captureClass` ALWAYS "CC0" (which
+ *     ComplianceFacade refuses at Tier 2+). CC1, in the spec's types/capture.ts,
+ *     means operator-session signing plus a WebAuthn assertion plus a
+ *     multi-sensor trace, which a kernel camera never has. A caller-built
+ *     challenge used to make a capture CC1 (astra pack 155 HIGH 2).
  * A grabber failure, an empty frame or an identity mismatch is an error, and
  * no event is emitted.
  */
@@ -98,13 +111,29 @@ function nonEmpty(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
 }
 
-/** The challenge, when it is for this job and still fresh; otherwise null. */
-function freshChallenge(challenge: WorkflowChallenge | undefined, jobId: string, nowMs: number): WorkflowChallenge | null {
-  if (!challenge || challenge.scope !== jobId || !nonEmpty(challenge.challengeId)) return null;
-  const issuedAtSeconds = Number(challenge.anchor?.timestamp);
-  if (!Number.isFinite(issuedAtSeconds) || !Number.isFinite(challenge.maxAgeSeconds)) return null;
+/**
+ * The challenge as the payload declares it: its id and anchor block hash, when
+ * it is for this job, still fresh, and both are non-blank; otherwise null.
+ * Each field is read once, so what is checked is what is recorded. This is a
+ * declaration, not a verification: nothing here authenticates the issuer or
+ * the anchor.
+ */
+function declaredChallenge(
+  challenge: WorkflowChallenge | undefined,
+  jobId: string,
+  nowMs: number,
+): { id: string; anchor: string } | null {
+  if (!challenge) return null;
+  const id = challenge.challengeId;
+  const anchor = challenge.anchor;
+  const maxAgeSeconds = challenge.maxAgeSeconds;
+  if (challenge.scope !== jobId || !nonEmpty(id)) return null;
+  const issuedAtSeconds = Number(anchor?.timestamp);
+  if (!Number.isFinite(issuedAtSeconds) || !Number.isFinite(maxAgeSeconds)) return null;
   const ageSeconds = nowMs / 1000 - issuedAtSeconds;
-  return ageSeconds >= 0 && ageSeconds <= challenge.maxAgeSeconds ? challenge : null;
+  if (!(ageSeconds >= 0 && ageSeconds <= maxAgeSeconds)) return null;
+  const blockHash = anchor?.blockHash;
+  return nonEmpty(blockHash) ? { id, anchor: blockHash } : null;
 }
 
 export class PullCameraAdapter implements CameraAdapter {
@@ -180,7 +209,10 @@ export class PullCameraAdapter implements CameraAdapter {
     antiSpoofScore: number;
     payload: Record<string, unknown>;
   }> {
-    if (!context || !nonEmpty(context.jobId)) {
+    // Each context field is read once: what is checked is what is recorded.
+    const jobId = context?.jobId;
+    const challenge = context?.challenge;
+    if (!nonEmpty(jobId)) {
       throw new Error("[PullCameraAdapter] a capture needs the job it is for (context.jobId)");
     }
     const identity = await this.grabber.identity(this.device);
@@ -196,21 +228,25 @@ export class PullCameraAdapter implements CameraAdapter {
     const nowMs = this.options.now();
     const acquiredAt = new Date(nowMs).toISOString();
     const result = await this.photoCaptureService.capture(bytes, { deviceId: this.id });
-    const challenge = freshChallenge(context.challenge, context.jobId, nowMs);
+    const declared = declaredChallenge(challenge, jobId, nowMs);
+    // The bytes are retained only when a storage service stored them (storageCid set).
+    const frameStored = typeof result.storageCid === "string" && result.storageCid !== "";
     return {
       acquiredAt,
       antiSpoofScore: result.antiSpoofScore,
       payload: {
-        jobId: context.jobId,
-        challengeId: challenge?.challengeId ?? null,
-        challengeAnchor: challenge ? challenge.anchor.blockHash : null,
+        jobId,
         acquiredAt,
         imageHash: result.imageHash,
-        storageRef: result.storageCid ? `storacha://${result.storageCid}` : `photo:${result.imageHash}`,
+        storageRef: frameStored ? `storacha://${result.storageCid}` : `photo:${result.imageHash}`,
+        frameStored,
         rawSizeBytes: result.rawSizeBytes,
         captureMode: "kernel-pull",
-        captureClass: challenge ? "CC1" : "CC0",
+        // Always CC0: the kernel never has CC1's operator-session signing, WebAuthn and multi-sensor trace.
+        captureClass: "CC0",
         device: { path: this.device.device, identity: this.device.identity },
+        declaredChallengeId: declared?.id ?? null,
+        declaredChallengeAnchor: declared?.anchor ?? null,
         antiSpoofScore: result.antiSpoofScore,
       },
     };

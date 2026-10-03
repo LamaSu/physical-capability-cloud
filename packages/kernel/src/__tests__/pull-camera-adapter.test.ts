@@ -14,7 +14,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import type { EvidenceEvent, EvidenceSource, SHA256, WorkflowChallenge } from "@pcc/spec";
-import { isFabricated } from "@pcc/spec";
+import { isFabricated, kernelPullCaptureIssue } from "@pcc/spec";
 
 import {
   PullCameraAdapter,
@@ -295,9 +295,15 @@ describe("PullCameraAdapter — captureSnapshot happy path", () => {
 
     expect(event.payload.captureMode).toBe("kernel-pull");
     expect(event.payload.captureClass).toBe("CC0");
-    expect(event.payload.challengeId).toBeNull();
-    expect(event.payload.challengeAnchor).toBeNull();
+    // astra pack 155 HIGH 2: the challenge fields are declarations, renamed from challengeId/challengeAnchor.
+    expect(event.payload.declaredChallengeId).toBeNull();
+    expect(event.payload.declaredChallengeAnchor).toBeNull();
     expect(event.payload.device).toEqual({ path: DEVICE.device, identity: DEVICE.identity });
+    // No storage service: the frame is not retained, and the payload says so.
+    expect(event.payload.frameStored).toBe(false);
+    expect(event.payload.storageRef).toBe(`photo:${independentlyComputed.imageHash}`);
+    // The emitted payload is exactly the closed LO-SE-1 contract the tier gate applies.
+    expect(kernelPullCaptureIssue(event, jobId)).toBeNull();
 
     expect(event.source.simulated).toBeUndefined();
     expect(event.source.deviceType).toBe("camera");
@@ -311,24 +317,28 @@ describe("PullCameraAdapter — captureSnapshot happy path", () => {
 describe("PullCameraAdapter — WorkflowChallenge freshness", () => {
   const jobId = "job-challenge-test";
 
-  it("fresh challenge scoped to the job -> CC1, challengeId set, challengeAnchor is the block hash", async () => {
+  // astra pack 155 HIGH 2: a challenge never makes a capture CC1. A fresh one for
+  // the job is recorded as an unverified declaration (declaredChallengeId and
+  // declaredChallengeAnchor, renamed from challengeId and challengeAnchor).
+  it("fresh challenge scoped to the job -> CC0, with its id and block hash recorded as declarations", async () => {
     const { adapter, events } = makeAdapter();
     const challenge = makeChallenge({ jobId, ageSeconds: 10 });
     await adapter.captureSnapshot({ jobId, challenge });
     const payload = events[0]!.payload;
-    expect(payload.captureClass).toBe("CC1");
-    expect(payload.challengeId).toBe(challenge.challengeId);
-    expect(payload.challengeAnchor).toBe(challenge.anchor.blockHash);
+    expect(payload.captureClass).toBe("CC0");
+    expect(payload.declaredChallengeId).toBe(challenge.challengeId);
+    expect(payload.declaredChallengeAnchor).toBe(challenge.anchor.blockHash);
+    expect(kernelPullCaptureIssue(events[0]!, jobId)).toBeNull();
   });
 
-  it("stale challenge (age > maxAgeSeconds) -> CC0, challengeId and challengeAnchor null", async () => {
+  it("stale challenge (age > maxAgeSeconds) -> CC0, declaredChallengeId and declaredChallengeAnchor null", async () => {
     const { adapter, events } = makeAdapter();
     const challenge = makeChallenge({ jobId, ageSeconds: 700, maxAgeSeconds: 600 });
     await adapter.captureSnapshot({ jobId, challenge });
     const payload = events[0]!.payload;
     expect(payload.captureClass).toBe("CC0");
-    expect(payload.challengeId).toBeNull();
-    expect(payload.challengeAnchor).toBeNull();
+    expect(payload.declaredChallengeId).toBeNull();
+    expect(payload.declaredChallengeAnchor).toBeNull();
   });
 
   it("challenge scoped to a different job -> CC0", async () => {
@@ -337,8 +347,8 @@ describe("PullCameraAdapter — WorkflowChallenge freshness", () => {
     await adapter.captureSnapshot({ jobId, challenge });
     const payload = events[0]!.payload;
     expect(payload.captureClass).toBe("CC0");
-    expect(payload.challengeId).toBeNull();
-    expect(payload.challengeAnchor).toBeNull();
+    expect(payload.declaredChallengeId).toBeNull();
+    expect(payload.declaredChallengeAnchor).toBeNull();
   });
 
   it("challenge anchored in the future (negative age) -> CC0", async () => {
@@ -347,8 +357,50 @@ describe("PullCameraAdapter — WorkflowChallenge freshness", () => {
     await adapter.captureSnapshot({ jobId, challenge });
     const payload = events[0]!.payload;
     expect(payload.captureClass).toBe("CC0");
-    expect(payload.challengeId).toBeNull();
-    expect(payload.challengeAnchor).toBeNull();
+    expect(payload.declaredChallengeId).toBeNull();
+    expect(payload.declaredChallengeAnchor).toBeNull();
+  });
+
+  it.each(["", "   "])("a fresh challenge whose anchor blockHash is %j records neither declaration", async (blockHash) => {
+    const { adapter, events } = makeAdapter();
+    const challenge = makeChallenge({ jobId, ageSeconds: 10 });
+    challenge.anchor = { ...challenge.anchor, blockHash };
+    await adapter.captureSnapshot({ jobId, challenge });
+    const payload = events[0]!.payload;
+    expect(payload.captureClass).toBe("CC0");
+    expect(payload.declaredChallengeId).toBeNull();
+    expect(payload.declaredChallengeAnchor).toBeNull();
+    expect(kernelPullCaptureIssue(events[0]!, jobId)).toBeNull();
+  });
+
+  it("each challenge field is read once: a challengeId that changes between reads cannot reach the payload unchecked", async () => {
+    const { adapter, events } = makeAdapter();
+    const challenge = makeChallenge({ jobId, ageSeconds: 10 });
+    const reads: string[] = ["challenge-first-read", "   "];
+    Object.defineProperty(challenge, "challengeId", { get: () => reads.shift() ?? "", configurable: true });
+    await adapter.captureSnapshot({ jobId, challenge });
+    expect(events[0]!.payload.declaredChallengeId).toBe("challenge-first-read");
+    expect(reads).toEqual(["   "]);
+  });
+});
+
+describe("PullCameraAdapter: frameStored says whether the frame bytes were retained", () => {
+  it("with a storage service that stores the frame: frameStored true, and a storacha storageRef", async () => {
+    const storage = { isReady: () => true, init: async () => {} } as unknown as ConstructorParameters<typeof PhotoCaptureService>[0];
+    const { adapter, events } = makeAdapter({ photoCaptureService: new PhotoCaptureService(storage) });
+    await adapter.captureSnapshot({ jobId: "job-stored" });
+    const payload = events[0]!.payload;
+    expect(payload.frameStored).toBe(true);
+    expect(payload.storageRef).toMatch(/^storacha:\/\/./);
+    expect(kernelPullCaptureIssue(events[0]!, "job-stored")).toBeNull();
+  });
+
+  it("the cv_inspection_result carries the same capture fields, and meets the contract", async () => {
+    const { adapter, events } = makeAdapter();
+    await adapter.runInspection("sha256:ref", { jobId: "job-inspect-contract" });
+    expect(events[0]!.payload.frameStored).toBe(false);
+    expect(events[0]!.payload.referenceHash).toBe("sha256:ref");
+    expect(kernelPullCaptureIssue(events[0]!, "job-inspect-contract")).toBeNull();
   });
 });
 

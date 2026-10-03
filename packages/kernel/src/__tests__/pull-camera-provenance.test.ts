@@ -13,6 +13,8 @@ import { join } from "node:path";
 
 import { describe, it, expect, vi } from "vitest";
 import type { EvidenceEvent, EvidenceSource, SHA256, WorkflowChallenge } from "@pcc/spec";
+import type { EvidenceBundle } from "@pcc/spec";
+import { kernelPullCaptureIssue } from "@pcc/spec";
 
 import { PullCameraAdapter, ffmpegFrameGrabber, type CameraDeviceSpec, type FrameGrabber } from "../adapters/pull-camera-adapter.js";
 import type { CameraAdapter, MachineAdapter, SensorAdapter } from "../adapters/types.js";
@@ -392,5 +394,55 @@ describe("Fix A: the JobRunner checks the tier against its own jobId", () => {
     expect(r.success).toBe(false);
     expect(r.error).toContain("Tier 2 requirements not met");
     expect(r.error).toContain('payload.jobId "job-other" is not this job\'s "job-provenance-001"');
+  });
+});
+
+/**
+ * Delegates to `camera`, then waits 50ms after each capture call. JobRunner
+ * does not await addEvent (its hash is async), so this lets each event land
+ * before the runner checks the tier, as machineEmitting does for Tier 1.
+ */
+function settled(camera: CameraAdapter): CameraAdapter {
+  const pause = () => new Promise((r) => setTimeout(r, 50));
+  return {
+    id: camera.id,
+    source: camera.source,
+    async captureSnapshot(context) {
+      const r = await camera.captureSnapshot(context);
+      await pause();
+      return r;
+    },
+    async runInspection(referenceHash, context) {
+      const r = await camera.runInspection(referenceHash, context);
+      await pause();
+      return r;
+    },
+    onEvidence: (cb) => camera.onEvidence(cb),
+    dispose: () => camera.dispose(),
+  };
+}
+
+describe("Fix A end to end: a JobRunner with a PullCameraAdapter (fake grabber) at Tier 2", () => {
+  it("with authentic Tier 1 events it succeeds, and both camera events in its bundle meet the contract", async () => {
+    const pull = new PullCameraAdapter(
+      "cam-e2e",
+      KERNEL_ID,
+      { platform: "linux-v4l2", device: "/dev/video0", identity: "SER-1" },
+      new PhotoCaptureService(),
+      grabber("SER-1"),
+      { timeoutMs: 1_000, now: () => Date.now() },
+    );
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const bundles: EvidenceBundle[] = [];
+    emitter.onBundle((b) => bundles.push(b));
+    const r = await new JobRunner(machineEmitting(TIER1), [], settled(pull), emitter).run(JOB_CONFIG);
+    expect(r.error).toBeUndefined();
+    expect(r.success).toBe(true);
+    const camera = bundles[0]!.events.filter((e) => e.type === "camera_snapshot" || e.type === "cv_inspection_result");
+    expect(camera.map((e) => e.type).sort()).toEqual(["camera_snapshot", "cv_inspection_result"]);
+    for (const e of camera) {
+      expect(e.payload.captureClass).toBe("CC0");
+      expect(kernelPullCaptureIssue(e, JOB)).toBeNull();
+    }
   });
 });
