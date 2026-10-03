@@ -1,5 +1,6 @@
 import { initSentry, Sentry } from "./sentry.js";
 import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
+import { gatewayLoggerOptions, redactUrl } from "./observability-redact.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
 
@@ -180,7 +181,9 @@ export async function createGateway(port = 3200) {
   initKernelService();
 
   const app = Fastify({
-    logger: true,
+    // pino at level info; the request's URL and every line are redacted before they are written
+    // (observability-redact.ts; cross-family review r4 of #441, CRITICAL).
+    logger: gatewayLoggerOptions(),
     bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
@@ -219,7 +222,7 @@ export async function createGateway(port = 3200) {
     // For 5xx errors, report to Sentry before responding
     const statusCode = error.statusCode ?? 500;
     if (statusCode >= 500) {
-      Sentry.captureException(error, { extra: { url: request.url, method: request.method } });
+      Sentry.captureException(error, { extra: { url: redactUrl(request.url), method: request.method } });
     }
     const body: Record<string, unknown> = {
       error: statusCode >= 500 ? "internal_error" : "request_error",
@@ -403,7 +406,7 @@ export async function createGateway(port = 3200) {
         action: method.toLowerCase(),
         metadata: {
           method,
-          url: request.url,
+          url: redactUrl(request.url),
           statusCode: reply.statusCode,
           duration_ms: Math.round(reply.elapsedTime ?? 0),
         },

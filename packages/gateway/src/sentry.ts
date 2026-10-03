@@ -11,6 +11,7 @@
  */
 
 import * as Sentry from "@sentry/node";
+import { redactCredentials } from "./observability-redact.js";
 
 const SENTRY_DSN =
   process.env.SENTRY_DSN ||
@@ -38,58 +39,12 @@ export function initSentry(): void {
 }
 
 /**
- * Header and query-parameter names whose values are credentials or session secrets. It is the
- * SDK's own list for span attributes (@sentry/core utils/request.js SENSITIVE_HEADER_SNIPPETS),
- * which the SDK does not apply to an error event's request headers.
+ * The gateway's Sentry options: no default PII, and every record redacted as a whole before it is
+ * sent (observability-redact.ts; cross-family reviews r3 and r4 of #441). The installed SDK copies
+ * every request header and the request body into an error event, records the request's URL and
+ * headers as span attributes on a transaction, and keeps outgoing URLs in breadcrumbs; so error
+ * events, transactions, each span and each breadcrumb go through the same redaction.
  */
-const SECRET_NAME = /auth|token|secret|session|password|passwd|pwd|key|jwt|bearer|sso|saml|csrf|xsrf|credential|cookie/i;
-const REDACTED = "[redacted]";
-
-/** A query string with every credential-named parameter's value redacted. */
-function scrubQuery(query: string): string {
-  return query
-    .split("&")
-    .map((pair) => {
-      const eq = pair.indexOf("=");
-      const name = eq === -1 ? pair : pair.slice(0, eq);
-      let decoded = name;
-      try {
-        decoded = decodeURIComponent(name);
-      } catch {
-        // an undecodable name is judged as written
-      }
-      return eq !== -1 && SECRET_NAME.test(decoded) ? `${name}=${REDACTED}` : pair;
-    })
-    .join("&");
-}
-
-/**
- * Removes request credentials from an event before Sentry sends it (cross-family review r3 of
- * #441, CRITICAL). The installed SDK's request-data integration copies every request header into
- * an error event, so an error in a request carrying X-Verifier-Key, X-Admin-Key, Authorization or
- * a session cookie would send them. Redacted: every header whose name is credential-like, the
- * cookies, and credential-named query parameters in the query string and in the URL.
- */
-export function scrubSentryEvent<T extends { request?: Record<string, unknown> }>(event: T): T {
-  const request = event.request;
-  if (!request || typeof request !== "object") return event;
-  const headers = request.headers;
-  if (headers && typeof headers === "object") {
-    for (const name of Object.keys(headers as Record<string, unknown>)) {
-      if (SECRET_NAME.test(name)) (headers as Record<string, unknown>)[name] = REDACTED;
-    }
-  }
-  if ("cookies" in request) request.cookies = REDACTED;
-  if (typeof request.query_string === "string") request.query_string = scrubQuery(request.query_string);
-  else if (request.query_string !== undefined) request.query_string = REDACTED;
-  if (typeof request.url === "string") {
-    const q = request.url.indexOf("?");
-    if (q !== -1) request.url = request.url.slice(0, q + 1) + scrubQuery(request.url.slice(q + 1));
-  }
-  return event;
-}
-
-/** The gateway's Sentry options: no default PII, and every event scrubbed before it is sent. */
 export function sentryOptions(dsn: string): Sentry.NodeOptions {
   return {
     dsn,
@@ -102,8 +57,10 @@ export function sentryOptions(dsn: string): Sentry.NodeOptions {
       tags: { service: "pcc-gateway" },
     },
     sendDefaultPii: false,
-    beforeSend: (event) => scrubSentryEvent(event as never),
-    beforeSendTransaction: (event) => scrubSentryEvent(event as never),
+    beforeSend: (event) => redactCredentials(event),
+    beforeSendTransaction: (event) => redactCredentials(event),
+    beforeSendSpan: (span) => redactCredentials(span),
+    beforeBreadcrumb: (breadcrumb) => redactCredentials(breadcrumb),
   };
 }
 
