@@ -969,6 +969,8 @@ describe("N71 round 3 (astra pack 83b): the setup catch blocks answer with fixed
       // JSON body with a report_hint block (traceId, how-to-report), same as the
       // sibling test-job assertion below pins it.
       expect(bodyOf(res)).toMatchObject({ error: "upsert_failed", message: "Device registration failed" });
+      // ...and NOTHING else but that decoration: no exception text or other field rides along.
+      expect(Object.keys(bodyOf(res) as Record<string, unknown>).sort()).toEqual(["error", "message", "report_hint"]);
     } finally {
       spy.mockRestore();
     }
