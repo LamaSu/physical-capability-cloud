@@ -26,6 +26,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -274,7 +275,11 @@ export class JobFacade extends BaseFacade {
         pipelineTelemetry.emit(jobId, "job_submit", "completed", {
           metadata: { kernelId, stepId, external: true },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true }, actorId);
+        trackServerEvent(
+          lit("job_submitted"),
+          { kernelId: declare.id(kernelId), capabilityType: declare.id(body.capabilityId), external: declare.flag(true) },
+          actorId,
+        );
         auditService.log({
           eventType: "job.submitted",
           actor: actorId,
@@ -294,7 +299,7 @@ export class JobFacade extends BaseFacade {
         pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {
           metadata: { kernelId, stepId, deviceId: result.deviceId },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId }, actorId);
+        trackServerEvent(lit("job_submitted"), { kernelId: declare.id(kernelId), capabilityType: declare.id(body.capabilityId) }, actorId);
         auditService.log({
           eventType: "job.submitted",
           actor: actorId,
