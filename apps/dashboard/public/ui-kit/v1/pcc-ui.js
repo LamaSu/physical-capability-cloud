@@ -1040,22 +1040,28 @@
     // `live` is true only for a successful poll of the binding (never a snapshot or a stream event).
     function apply(statusVal, latestVal, data, full, live) {
       var bpath = w.binding && w.binding.path;
+      var cls = null; // this read's pill class, when it sets one
       if (full && isVNextRecord(data) && isMoneyData(bpath, data)) {
-        var rc = settlementReadClass(data, bpath, live); // a settlement read model: by its schema AND source
-        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + rc[0];
+        cls = settlementReadClass(data, bpath, live)[0]; // a settlement read model: by its schema AND source
+        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + cls;
       } else if (statusVal != null) {
-        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + dataStatusClass(bpath, data, statusVal, live);
+        cls = dataStatusClass(bpath, data, statusVal, live);
+        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + cls;
       } else if (full) {
         // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
         pill.textContent = 'unknown'; pill.className = 'pcc-pill st-unknown';
       }
       if (latestVal != null && latestVal !== '') {
-        // Status-sourced latest text is qualified like any other pill (astra r5 F8): same binding
-        // path (latestFrom === statusFrom) or a path whose last segment reads as a status/state/phase
-        // field. A free-text message (job.message, ev.message) is left exactly as the server sent it.
-        var latestIsStatus = w.latestFrom === w.statusFrom ||
-          (typeof w.latestFrom === 'string' && /status|state|phase/i.test(w.latestFrom.split('.').pop() || ''));
-        latest.textContent = latestIsStatus ? statusPillText(latestVal, false, isMoneyData(bpath, data)) : String(latestVal);
+        // The latest line (astra r5 F8). On a MONEY surface every latest line, a free-text message
+        // included, passes the fail-closed text rule. It is plain only for a money-safe word, or when
+        // this read is a VERIFIED final, so it never contradicts the green pill. On a non-money surface,
+        // status-sourced text (the status path itself, or a status/state/phase field) gets the neutral
+        // qualifier, and a free-text message is shown as the server sent it.
+        var money = isMoneyData(bpath, data);
+        var latestIsStatus = typeof w.latestFrom === 'string' &&
+          (w.latestFrom === w.statusFrom || /status|state|phase/i.test(w.latestFrom.split('.').pop() || ''));
+        var verifiedFinal = isVNextRecord(data) && (cls === 'st-settled' || cls === 'st-refunded');
+        latest.textContent = money || latestIsStatus ? statusPillText(latestVal, verifiedFinal, money) : String(latestVal);
       }
     }
     function feedLine(txt) {
@@ -1105,12 +1111,13 @@
       ctx.tx.streamSSE(w.binding.sse, function (ev) {
         apply(dot(ev, w.statusFrom) != null ? dot(ev, w.statusFrom) : ev.status,
               dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev, false, false);
-        // A feed line with no ev.type falls back to ev.status (astra r5 F8): qualify it in place, after
-        // apply() above has already consumed the raw value, so the feed line below never shows it bare.
-        if (ev && typeof ev === 'object' && !ev.type && ev.status != null) {
-          ev.status = statusPillText(ev.status, false, isMoneyData(w.binding && w.binding.path, ev));
-        }
-        feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' · ' : '') + (ev.type || ev.status || JSON.stringify(ev)));
+        // The feed line (astra r5 F8). On a money surface every label (the event's type, its status or
+        // the raw event) passes the fail-closed text rule. On a non-money surface a status label gets the
+        // neutral qualifier and an event kind is shown as sent. A stream event is never a verified read.
+        var feedMoney = isMoneyData(w.binding && w.binding.path, ev);
+        var label = ev.type || ev.status || JSON.stringify(ev);
+        var shown = feedMoney || (!ev.type && ev.status != null) ? statusPillText(label, false, feedMoney) : String(label);
+        feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' \u00b7 ' : '') + shown);
         wrap._setFoot(ctx.tx.lastTrace, false);
       }).catch(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }); // stream dropped → poll
     } else {
@@ -1245,10 +1252,11 @@
         for (var i = 0; i < events.length; i++) {
           var ev = events[i];
           var li = el('li', 'pcc-timeline-row');
-          // A timeline entry with no type/name falls back to ev.status (astra r5 F8): a receipt is
-          // always a money surface, so route it through the fail-closed qualifier, never bare.
-          var evLabel = ev.type || ev.name;
-          var evTxt = evLabel ? String(evLabel) : (ev.status != null ? statusPillText(ev.status, false, true) : 'event');
+          // Each entry is a server claim about this money record (astra r5 F8). Its label (type, name or
+          // status) passes the fail-closed text rule, and is plain only when this receipt is a VERIFIED
+          // final, like its pill. 'event' is PCC's own placeholder.
+          var evRaw = ev.type || ev.name || ev.status;
+          var evTxt = evRaw != null && evRaw !== '' ? statusPillText(evRaw, recVerified, true) : 'event';
           li.appendChild(el('span', 'pcc-timeline-type', evTxt));
           if (ev.timestamp) li.appendChild(el('span', 'pcc-mono pcc-timeline-ts', fmtTs(ev.timestamp)));
           tl.appendChild(li);

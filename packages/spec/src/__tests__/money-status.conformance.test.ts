@@ -898,4 +898,95 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
     const text = (document.querySelector(".pcc-pill") as HTMLElement).textContent;
     expect(text).toBe("reported status: running! - status unverified");
   });
+
+  // genui's review of the F8 fix (@c2dd8346), verify before fix: F8 asked for one fail-closed rule over
+  // every status-derived line, and three spellings of the same line still bypassed it on a money surface.
+  const UNIT = "0x" + "ab".repeat(32);
+  const RC_LIVE = `/api/settlement/units/${UNIT}/receipt`;
+  const LC_LIVE = `/api/settlement/units/${UNIT}/lifecycle`;
+  const LEGACY = { contractAddress: "0x" + "11".repeat(20), totalAmount: "5" };
+  const feedLines = () => Array.from(document.querySelectorAll(".pcc-feed-line")).map((e) => (e.textContent || "").trim());
+  const timelineRows = () => Array.from(document.querySelectorAll(".pcc-timeline-type")).map((e) => (e.textContent || "").trim());
+
+  it("F8 residual (HIGH): a money run window's free-text latest line is qualified, never bare", async () => {
+    bootRead(man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "message" }]),
+      (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "funded", message: "Payout released to payee" } : null));
+    await flush();
+    const latest = document.querySelector(".pcc-run-latest") as HTMLElement;
+    expect(latest.textContent).toBe("reported status: Payout released to payee - settlement unconfirmed");
+  });
+
+  it("F8 residual (HIGH): an SSE feed line from ev.type is qualified on a money surface, never bare", async () => {
+    const ssePath = "/sse/stream/escrow/e1";
+    bootSSE(man([{ kind: "run", binding: { path: "/api/escrow/e1", sse: ssePath }, statusFrom: "status", latestFrom: "message" }]), ssePath, { type: "PAID" });
+    await flush();
+    await flush();
+    expect(feedLines()).toEqual(["reported status: PAID - settlement unconfirmed"]);
+  });
+
+  it("F8 residual (HIGH): an SSE event with neither type nor status shows no bare JSON claim on a money surface", async () => {
+    const ssePath = "/sse/stream/escrow/e1";
+    bootSSE(man([{ kind: "run", binding: { path: "/api/escrow/e1", sse: ssePath }, statusFrom: "status", latestFrom: "message" }]), ssePath, { state: "paid" });
+    await flush();
+    await flush();
+    expect(feedLines()).toEqual(['reported status: {"state":"paid"} - settlement unconfirmed']);
+  });
+
+  it("F8 residual (HIGH): a receipt timeline entry from ev.type or ev.name is qualified, never bare", async () => {
+    bootRead(man([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]),
+      (u) => (new URL(u).pathname === "/api/escrow/e1"
+        ? { status: "funded", ...LEGACY, events: [{ type: "PAYOUT_SENT" }, { name: "released" }, { type: "pending" }, {}] }
+        : null));
+    await flush();
+    expect(timelineRows()).toEqual([
+      "reported status: PAYOUT_SENT - settlement unconfirmed",
+      "reported status: released - settlement unconfirmed",
+      "pending", // a money-safe word stays plain
+      "event", // PCC's own placeholder, not a server claim
+    ]);
+  });
+
+  it("F8 residual positive control: a VERIFIED final keeps its plain latest line and timeline (no contradiction with the green pill)", async () => {
+    bootRead(man([{ kind: "run", binding: { path: LC_LIVE }, statusFrom: "finalState", latestFrom: "phase" }]),
+      (u) => (new URL(u).pathname === LC_LIVE ? { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" } : null));
+    await flush();
+    expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className).toContain("st-settled");
+    expect((document.querySelector(".pcc-run-latest") as HTMLElement).textContent).toBe("settled");
+
+    bootRead(man([{ kind: "receipt", binding: { path: RC_LIVE } }]),
+      (u) => (new URL(u).pathname === RC_LIVE
+        ? { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", events: [{ type: "SETTLED_RELEASED" }] }
+        : null));
+    await flush();
+    expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-settled");
+    expect(timelineRows()).toEqual(["SETTLED_RELEASED"]);
+  });
+
+  it("F8 residual: a bare REFUNDED word (class st-refunded from the flat table) is not a verified final", async () => {
+    // Only a V-next record can be verified; a legacy record's bare word shares the class, never the trust.
+    bootRead(man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "status" }]),
+      (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "REFUNDED" } : null));
+    await flush();
+    expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className).toContain("st-refunded");
+    expect((document.querySelector(".pcc-run-latest") as HTMLElement).textContent).toBe("reported status: REFUNDED - settlement unconfirmed");
+
+    bootRead(man([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]),
+      (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "REFUNDED", ...LEGACY, events: [{ type: "REFUNDED" }] } : null));
+    await flush();
+    expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-refunded");
+    expect(timelineRows()).toEqual(["reported status: REFUNDED - settlement unconfirmed"]);
+  });
+
+  it("F8 residual non-money control: a job run keeps its free-text latest line and event kinds as sent", async () => {
+    bootRead(man([{ kind: "run", binding: { path: "/api/jobs/j1" }, statusFrom: "status", latestFrom: "message" }]),
+      (u) => (new URL(u).pathname === "/api/jobs/j1" ? { status: "running", message: "Printing layer 3" } : null));
+    await flush();
+    expect((document.querySelector(".pcc-run-latest") as HTMLElement).textContent).toBe("Printing layer 3");
+
+    const ssePath = "/sse/stream/jobs/j1";
+    bootSSE(man([{ kind: "run", binding: { path: "/api/jobs/j1", sse: ssePath }, statusFrom: "status", latestFrom: "message" }]), ssePath, { type: "log" });
+    await flush();
+    await flush();
+    expect(feedLines()).toEqual(["log"]);
+  });
 });
