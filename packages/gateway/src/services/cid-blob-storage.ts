@@ -31,6 +31,7 @@ import crypto from "node:crypto";
 import { CID } from "multiformats/cid";
 import * as raw from "multiformats/codecs/raw";
 import { create as createDigest } from "multiformats/hashes/digest";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // SHA-256 multihash code (0x12)
 const SHA256_CODE = 0x12;
@@ -392,7 +393,7 @@ export async function getCidBlobStorage(): Promise<ICidBlobStorage> {
       _blobStorage = new LocalBlobBackend();
     }
   } catch (err) {
-    console.warn(`[cid-blob-storage] ${backend} init failed, falling back to local:`, (err as Error).message);
+    console.warn(lit("[cid-blob-storage] backend init failed, falling back to local:"), declare.code(backend, ["local", "helia", "storacha"]), err);
     _blobStorage = new LocalBlobBackend();
   }
 
