@@ -12,7 +12,10 @@
  * records: they take the job read gate (F3 round 2, cross-family review r1 of #403). No
  * credential is 401, an unproven one 403; a proven wallet sees only the jobs it may read
  * (jobReadScopeOf) and a job it may not read looks like a job with no telemetry. Log lines
- * that name no job are not job records and stay readable (jobRecordFilterOf).
+ * and live events keep the record filter's rule (jobRecordFilterOf, F3 round 3): a record is
+ * kept only when the caller may read every job it names at any depth (or, naming no job, every
+ * kernel it names, as that kernel's operator). A line naming neither is an admin's: its text
+ * can name any job.
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";

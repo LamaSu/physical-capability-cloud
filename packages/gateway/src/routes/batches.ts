@@ -16,37 +16,50 @@ interface BatchSlotClaim {
   amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
-import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
+import { gateJobRead, gateKernelRead, kernelScopeOf, refuseJobRead } from "../readmodels/job-read-gate.js";
 
 // ── In-memory shared batch storage ────────────────────────────────
 const sharedBatches = new Map<string, SharedBatch>();
 
 export async function batchRoutes(app: FastifyInstance) {
-  // List batch manifests — from in-memory BatchTracker (live lifecycle state)
+  // A batch's slots name every sample's job, buyer and result (F3 round 3, cross-family review
+  // r2 of #403, CRITICAL), so a whole batch is the kernel's record: its operator's and an
+  // admin's (kernelScopeOf / gateKernelRead). No credential is 401, an unproven one 403. A
+  // stranger's list leaves the batch out, and its detail is a missing batch's answer.
   app.get<{ Querystring: { kernelId?: string; status?: string } }>(
     "/api/batches",
-    async (req) => {
-      const batches = batchTracker.getAllBatches({
-        kernelId: req.query.kernelId,
-        status: req.query.status as any,
-      });
+    async (req, reply) => {
+      const scope = kernelScopeOf(req);
+      if (!scope.ok) return refuseJobRead(reply, scope);
+      const batches = batchTracker
+        .getAllBatches({ kernelId: req.query.kernelId, status: req.query.status as any })
+        .filter((batch) => scope.kernels === null || scope.kernels.has(batch.kernelId));
       return { batches };
     },
   );
 
   // Batch detail with slots
-  app.get<{ Params: { batchId: string } }>("/api/batches/:batchId", async (req) => {
-    const batch = batchTracker.getBatch(req.params.batchId);
+  app.get<{ Params: { batchId: string } }>("/api/batches/:batchId", async (req, reply) => {
+    const gate = gateKernelRead(req, () => batchTracker.getBatch(req.params.batchId)?.kernelId);
+    if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
+    const batch = gate.ok ? batchTracker.getBatch(req.params.batchId) : undefined;
     if (!batch) return { error: "not_found" };
     return { batch, events: batchTracker.getEvents(req.params.batchId) };
   });
 
   // Batches containing a specific job's samples. They are that job's records, so the job
-  // read gate runs first (F3 round 2); a job the caller may not read has no batches.
+  // read gate runs first (F3 round 2); a job the caller may not read has no batches. A shared
+  // batch also holds other jobs' slots: the job's buyer sees only this job's slots; the
+  // operator of the batch's kernel, and an admin, see the whole batch (F3 round 3).
   app.get<{ Params: { jobId: string } }>("/api/batches/by-job/:jobId", async (req, reply) => {
     const gate = gateJobRead(req, req.params.jobId);
     if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
-    const batches = gate.ok ? batchTracker.getBatchesForJob(req.params.jobId) : [];
+    if (!gate.ok) return { batches: [] };
+    const whole = (batch: { kernelId: string }) =>
+      gate.as === "admin" || (gate.as === "kernel_operator" && batch.kernelId === gate.job.kernelId);
+    const batches = batchTracker.getBatchesForJob(req.params.jobId).map((batch) =>
+      whole(batch) ? batch : { ...batch, slots: batch.slots.filter((slot) => slot.jobId === req.params.jobId) },
+    );
     return { batches };
   });
 

@@ -7,7 +7,10 @@ import type { StreamTopic } from "@pcc/spec";
 import { streamHub } from "./stream-hub.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
 import { resolveSSEAuth } from "./sse-auth.js";
-import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
+import { gateJobRead, gateKernelRead, refuseJobRead, type KernelReadGate } from "../readmodels/job-read-gate.js";
+import { getStore } from "../db.js";
+import { schema, eq } from "@pcc/store";
+import { batchTracker } from "../services.js";
 
 // Strict origin allowlist — prevents subdomain spoofing attacks
 const ALLOWED_SSE_ORIGINS = new Set([
@@ -104,42 +107,52 @@ export async function topicSSE(app: FastifyInstance) {
     await new Promise(() => {});
   });
 
-  // Per-kernel streaming
+  // Per-kernel, per-device and per-batch streaming (F3 round 3, cross-family review r2 of #403,
+  // CRITICAL). These topics carry job-bound records: a sensor reading is published to its
+  // kernel's and device's topics, and its batch's, as well as its job's. So each takes the
+  // kernel's read rule: an admin or the kernel's operator (a proven wallet) subscribes; no
+  // credential is 401, an unproven one 403, and anyone else gets the 404 an unknown kernel,
+  // device or batch gets, before any subscription. A refused request gives back its slot.
+  const kernelStream = async (
+    req: import("fastify").FastifyRequest,
+    reply: import("fastify").FastifyReply,
+    what: string,
+    id: string,
+    kernelIdOf: () => string | null | undefined,
+    topic: StreamTopic,
+    opts: { kernelRow?: boolean } = {},
+  ) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      trackSSEClose(req.ip);
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
+    const gate: KernelReadGate = gateKernelRead(req, kernelIdOf, opts);
+    if (!gate.ok) {
+      trackSSEClose(req.ip);
+      return refuseJobRead(reply, gate, { error: "not_found", message: `${what} '${id}' not found` });
+    }
+    const lastEventId = req.headers["last-event-id"] as string | undefined;
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [topic], lastEventId, origin);
+    await new Promise(() => {});
+  };
+
   app.get("/sse/stream/kernel/:kernelId", async (req, reply) => {
-    const auth = await resolveSSEAuth(req);
-    if (!auth.authenticated) {
-      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
-    }
     const { kernelId } = req.params as { kernelId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
-    const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "kernel", id: kernelId }], lastEventId, origin);
-    await new Promise(() => {});
+    return kernelStream(req, reply, "kernel", kernelId, () => kernelId, { type: "kernel", id: kernelId }, { kernelRow: true });
   });
 
-  // Per-device streaming
   app.get("/sse/stream/device/:deviceId", async (req, reply) => {
-    const auth = await resolveSSEAuth(req);
-    if (!auth.authenticated) {
-      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
-    }
     const { deviceId } = req.params as { deviceId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
-    const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "device", id: deviceId }], lastEventId, origin);
-    await new Promise(() => {});
+    const kernelOfDevice = () =>
+      (getStore().db.select({ kernelId: schema.kernelDevices.kernelId }).from(schema.kernelDevices)
+        .where(eq(schema.kernelDevices.id, deviceId)).get() as { kernelId?: string } | undefined)?.kernelId;
+    return kernelStream(req, reply, "device", deviceId, kernelOfDevice, { type: "device", id: deviceId });
   });
 
-  // Per-batch streaming
   app.get("/sse/stream/batch/:batchId", async (req, reply) => {
-    const auth = await resolveSSEAuth(req);
-    if (!auth.authenticated) {
-      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
-    }
     const { batchId } = req.params as { batchId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
-    const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin);
-    await new Promise(() => {});
+    return kernelStream(req, reply, "batch", batchId, () => batchTracker.getBatch(batchId)?.kernelId, { type: "batch", id: batchId });
   });
 }

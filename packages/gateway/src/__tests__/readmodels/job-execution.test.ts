@@ -837,7 +837,7 @@ describe("GET /api/jobs/:jobId/execution", () => {
       insertJob("job-label-buyer", "s-l", "cwm-label");
       await insertSession("neg-label", "job-label-buyer", { userAgentId: "agent-buyer-1" });
       const job = getStore().repos.jobs.findById("job-label-buyer") as any;
-      const repos = { kernels: { findById: () => ({ operatorAddress: "ops@example.invalid" }) } };
+      const repos = { kernels: { findAll: () => [{ id: job.kernelId, operatorAddress: "ops@example.invalid" }] } };
       expect(authorizeJobRead(job, BUYER, repos as any, getStore().db)).toEqual({ allow: false, reason: "not_a_party" });
       expect((await get("job-label-buyer", BUYER)).statusCode).toBe(404);
     });

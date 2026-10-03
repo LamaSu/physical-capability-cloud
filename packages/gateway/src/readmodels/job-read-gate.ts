@@ -19,27 +19,42 @@
  * no credential is 401 and a credential without a PROVEN wallet is 403 identity_unverified,
  * both BEFORE the job row is read, so neither says whether the job exists. A proven wallet
  * (SIWE: WP-A's req.provenWallet) then needs the job: it reads the job row, applies
- * TENANT_ENFORCE, and must be the job's kernel operator or its recorded buyer
- * (authorizeJobRead). Anyone else, like a caller asking about a job that does not exist,
- * gets the route's own 404. An API key's operatorId or an email is never trusted as an
- * identity here: self-service provisioning lets anyone claim one.
+ * TENANT_ENFORCE, and must be the job's kernel operator or its recorded buyer. Anyone else,
+ * like a caller asking about a job that does not exist, gets the route's own 404. An API
+ * key's operatorId or an email is never trusted as an identity here: self-service
+ * provisioning lets anyone claim one.
  *
- * The routes that list or enumerate jobs use the same rule (F3 round 2, cross-family review
- * r1 of #403): jobReadScopeOf gives the set of jobs the caller may read (GET /api/jobs,
- * /api/telemetry/jobs and /active, /api/query's job intents), and the routes that mix
- * records of many jobs (log lines, the live log stream, sensor readings) leave out the
- * records of any other job, as if they did not exist (jobRecordFilterOf).
+ * The authorization reads take only the caller's wallet (jobReaderOf; cross-family review r2
+ * of #403, MEDIUM): the kernels it operates and the jobs whose single session names it. So a
+ * refusal costs the same reads whether the job exists or not; only the requested row's own
+ * lookup is keyed by the request.
+ *
+ * The routes that list or enumerate jobs use the same rule (F3 round 2): jobReadScopeOf
+ * gives the set of jobs the caller may read (GET /api/jobs, /api/telemetry/jobs and /active,
+ * /api/query's job intents).
+ *
+ * Records that belong to a KERNEL rather than one job (F3 round 3, review r2 of #403) take the
+ * kernel's rule (gateKernelRead, kernelScopeOf): an admin or the kernel's operator. That is
+ * the kernel, device and batch SSE streams, which carry job-bound sensor readings, and the
+ * batch list and detail, whose slots name every sample's job and buyer. A job's buyer reads
+ * its batches by job, where it sees only its own slots.
+ *
+ * Routes that mix records of many jobs and kernels (log lines, the live log stream, sensor
+ * readings) keep a record only when the caller may read EVERY job and kernel it names, at any
+ * depth (jobRecordFilterOf). A record that names neither is an admin's: its text can name any
+ * job.
  */
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import {
   JOB_READ_REFUSAL,
-  authorizeJobRead,
+  decideJobRead,
   jobReadCallerOf,
+  jobReaderOf,
   jobsReadableBy,
+  operatedKernelsOf,
   precheckJobRead,
-  type JobExecutionRepos,
   type JobRow,
 } from "./job-execution.js";
 
@@ -65,11 +80,11 @@ export function gateJobRead(req: FastifyRequest, jobId: string): JobReadGate {
 
   if (pre.as === "admin") return job ? { ok: true, job, as: "admin" } : { ok: false, kind: "not_found" };
   try {
-    // A missing job, a job in another tenant and a stranger's job all make the same kernel and
-    // negotiation-session reads, so the time a refusal takes does not say which it was (review
-    // r1 of #403, MEDIUM). For a missing job the reads are made and their answer discarded.
-    const decision = authorizeJobRead(found ?? phantomJob(jobId), pre.wallet, store.repos as unknown as JobExecutionRepos, store.db);
-    if (job && decision.allow) return { ok: true, job, as: decision.as };
+    // The caller's reader is built for every request, whether or not the job exists or is in
+    // the caller's tenant, from reads keyed by the wallet alone (review r2 of #403, MEDIUM).
+    const reader = jobReaderOf(pre.wallet, store.repos, store.db);
+    const decision = job ? decideJobRead(job, reader) : undefined;
+    if (job && decision?.allow) return { ok: true, job, as: decision.as };
     return { ok: false, kind: "not_found" };
   } catch (error) {
     req.log.error({ jobId, err: error }, "job read gate: authorization read failed");
@@ -102,18 +117,60 @@ export function gateJobRecordRead(req: FastifyRequest, jobIdOfRecord: () => stri
 const inTenant = (job: Pick<JobRow, "tenantId">, tenant: { tenantId: string | null } | undefined) =>
   !tenant || (job.tenantId ?? null) === tenant.tenantId;
 
-/** A job row with no kernel, for the authorization reads made when the job does not exist. */
-const phantomJob = (jobId: string): JobRow => ({
-  id: jobId,
-  stepId: "",
-  cwmId: "",
-  capabilityId: "",
-  kernelId: "",
-  status: "",
-  startedAt: null,
-  completedAt: null,
-  progress: null,
-});
+/**
+ * The gate for a record that belongs to a kernel (a kernel, a device or a batch): an admin or
+ * the kernel's operator, as a proven wallet. Identity first, as in gateJobRead. A proven
+ * wallet's operated kernels are read from its wallet alone, before `kernelIdOf` resolves the
+ * record to its kernel (a device's or a batch's); anyone who does not operate that kernel gets
+ * the not_found a missing kernel, device or batch gets. An admin reads any record that exists:
+ * `kernelRow` says the record is the kernel itself, named only by its id, so its row must exist.
+ */
+export type KernelReadGate =
+  | { ok: true; kernelId: string; as: "admin" | "kernel_operator" }
+  | { ok: false; kind: "unavailable" | "unauthenticated" | "identity_unverified" | "not_found" };
+
+export function gateKernelRead(
+  req: FastifyRequest,
+  kernelIdOf: () => string | null | undefined,
+  opts: { kernelRow?: boolean } = {},
+): KernelReadGate {
+  const pre = precheckJobRead(jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }));
+  if (!pre.proceed) return { ok: false, kind: pre.reason };
+  let kernelId: string | undefined;
+  let operated: ReadonlySet<string> | null = null;
+  try {
+    const store = getStore();
+    if (pre.as !== "admin") operated = operatedKernelsOf(pre.wallet, store.repos);
+    kernelId = kernelIdOf() ?? undefined;
+    if (pre.as === "admin" && opts.kernelRow && kernelId !== undefined && store.repos.kernels.findById(kernelId) == null) {
+      kernelId = undefined;
+    }
+  } catch (error) {
+    req.log.error({ err: error }, "kernel read gate: record read failed");
+    return { ok: false, kind: "unavailable" };
+  }
+  if (kernelId === undefined) return { ok: false, kind: "not_found" };
+  if (pre.as === "admin") return { ok: true, kernelId, as: "admin" };
+  // Operated kernels are registered kernels, so this also refuses a kernel that does not exist.
+  return operated!.has(kernelId) ? { ok: true, kernelId, as: "kernel_operator" } : { ok: false, kind: "not_found" };
+}
+
+/** The kernels whose records this caller may read: null for an admin (all of them). */
+export type KernelReadScope =
+  | { ok: true; kernels: ReadonlySet<string> | null }
+  | { ok: false; kind: "unavailable" | "unauthenticated" | "identity_unverified" };
+
+export function kernelScopeOf(req: FastifyRequest): KernelReadScope {
+  const pre = precheckJobRead(jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }));
+  if (!pre.proceed) return { ok: false, kind: pre.reason };
+  if (pre.as === "admin") return { ok: true, kernels: null };
+  try {
+    return { ok: true, kernels: operatedKernelsOf(pre.wallet, getStore().repos) };
+  } catch (error) {
+    req.log.error({ err: error }, "kernel read scope: kernel read failed");
+    return { ok: false, kind: "unavailable" };
+  }
+}
 
 /**
  * The jobs this caller may read, for the routes that list jobs or read records keyed by a
@@ -147,26 +204,94 @@ export function scopeAllows(scope: Extract<JobReadScope, { ok: true }>, jobId: u
   return scope.jobIds === null || (typeof jobId === "string" && scope.jobIds.has(jobId));
 }
 
+/** Keys that bind a record to jobs or kernels, in any of the shapes producers use. */
+const JOB_KEY = /^job_?id$/i;
+const JOB_LIST_KEY = /^job_?ids$/i;
+const KERNEL_KEY = /^kernel_?id$/i;
+const KERNEL_LIST_KEY = /^kernel_?ids$/i;
+const MAX_DEPTH = 8;
+
+export interface RecordBindings {
+  jobs: string[];
+  kernels: string[];
+  /** A binding key held something other than a nonempty string: the record cannot be placed. */
+  malformed: boolean;
+}
+
 /**
- * For a route that returns records of many jobs mixed with records of no job (log lines,
- * sensor readings): keeps a record that names no job, and a record that names a job only
- * when the caller may read that job (jobReadScopeOf). A caller with no credential or no
- * proven wallet keeps only the records that name no job. Refused only when the job or
- * authorization records could not be read.
+ * Every job and kernel a record names, at any depth (up to MAX_DEPTH), in objects and arrays.
+ * A binding key whose value is not a nonempty string, or a record nested deeper than
+ * MAX_DEPTH, is malformed: the filter then keeps the record only for an unscoped admin.
+ */
+export function recordBindingsOf(record: unknown): RecordBindings {
+  const out: RecordBindings = { jobs: [], kernels: [], malformed: false };
+  const seen = new WeakSet<object>();
+  const one = (value: unknown, into: string[]) => {
+    if (value === undefined || value === null) return;
+    if (typeof value === "string" && value.trim() !== "") into.push(value);
+    else out.malformed = true;
+  };
+  const many = (value: unknown, into: string[]) => {
+    if (value === undefined || value === null) return;
+    if (Array.isArray(value)) value.forEach((v) => one(v, into));
+    else out.malformed = true;
+  };
+  const walk = (value: unknown, depth: number) => {
+    if (value === null || typeof value !== "object") return;
+    if (seen.has(value as object)) return;
+    if (depth > MAX_DEPTH) {
+      out.malformed = true;
+      return;
+    }
+    seen.add(value as object);
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, depth + 1);
+      return;
+    }
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (JOB_KEY.test(key)) one(child, out.jobs);
+      else if (JOB_LIST_KEY.test(key)) many(child, out.jobs);
+      else if (KERNEL_KEY.test(key)) one(child, out.kernels);
+      else if (KERNEL_LIST_KEY.test(key)) many(child, out.kernels);
+      else walk(child, depth + 1);
+    }
+  };
+  walk(record, 0);
+  return out;
+}
+
+/**
+ * For a route that returns records of many jobs and kernels (log lines, sensor readings, live
+ * telemetry): keeps a record only when the caller may read every job it names, and, when it
+ * names no job, every kernel it names (the kernel's operator). A record that names neither is
+ * kept only for an admin: free text such as a log message can name any job. A malformed
+ * binding is kept only for an unscoped admin. Refused like the other gates: 401 without a
+ * credential, 403 without a proven wallet, 503 when the records the rule needs cannot be read.
  */
 export type JobRecordFilter =
   | { ok: true; keep: (record: unknown) => boolean }
-  | { ok: false; kind: "unavailable" };
+  | { ok: false; kind: "unavailable" | "unauthenticated" | "identity_unverified" };
 
 export function jobRecordFilterOf(req: FastifyRequest): JobRecordFilter {
   const scope = jobReadScopeOf(req);
-  if (!scope.ok && scope.kind === "unavailable") return { ok: false, kind: "unavailable" };
+  if (!scope.ok) return scope;
+  if (scope.as === "admin" && scope.jobIds === null) return { ok: true, keep: () => true };
+  let operated: ReadonlySet<string> | null = null;
+  if (scope.as === "proven") {
+    const kernels = kernelScopeOf(req);
+    if (!kernels.ok) return kernels;
+    operated = kernels.kernels;
+  }
+  const admin = scope.as === "admin";
   return {
     ok: true,
     keep: (record) => {
-      const jobId = (record as { jobId?: unknown } | null | undefined)?.jobId;
-      if (jobId === undefined || jobId === null) return true;
-      return scope.ok && scopeAllows(scope, jobId);
+      const bound = recordBindingsOf(record);
+      if (bound.malformed) return false;
+      if (bound.jobs.length > 0) return bound.jobs.every((jobId) => scopeAllows(scope, jobId));
+      if (admin) return true;
+      if (bound.kernels.length > 0) return operated !== null && bound.kernels.every((kernelId) => operated!.has(kernelId));
+      return false;
     },
   };
 }
@@ -179,7 +304,12 @@ export function jobRecordFilterOf(req: FastifyRequest): JobRecordFilter {
  */
 export function refuseJobRead(
   reply: FastifyReply,
-  gate: Extract<JobReadGate, { ok: false }> | Extract<JobReadScope, { ok: false }> | Extract<JobRecordFilter, { ok: false }>,
+  gate:
+    | Extract<JobReadGate, { ok: false }>
+    | Extract<JobReadScope, { ok: false }>
+    | Extract<JobRecordFilter, { ok: false }>
+    | Extract<KernelReadGate, { ok: false }>
+    | Extract<KernelReadScope, { ok: false }>,
   notFound: Record<string, unknown> = {},
 ) {
   if (gate.kind === "unavailable") {
