@@ -106,6 +106,15 @@ Two layers keep it from running twice (steward P0 #4698, readmodels #4558):
      approval, because the gateway's consume is then the durable record: a consumed
      approval never appears in the approved listing again. A WARNING says the local
      marks aren't durable.
+
+   **No symlinks on the state path with `OT2_AGENT_SERVER_CONSUME=off`.** A marker reached
+   through a symlink lives in the directories the link points into, which a sync of the
+   path as written would miss. So with `off`, the agent walks the state path one directory
+   at a time without following symlinks, creates the marker from the last one, and syncs
+   exactly the directories it walked. If any component of `OT2_AGENT_STATE_DIR` (or of the
+   default `~/.pcc/ot2-agent/handled`, home directory included) is a symlink, every job is
+   **refused**, and the error names the resolved path; set `OT2_AGENT_STATE_DIR` to it. The
+   default `required` mode still follows symlinks (its marks are best-effort there).
 2. **The gateway's consume route, for every other machine.** A marker on this machine
    cannot stop a *different* machine from running the same approval. So, with the default
    `OT2_AGENT_SERVER_CONSUME=required`, winning the local claim is necessary but not

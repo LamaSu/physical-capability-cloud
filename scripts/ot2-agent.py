@@ -16,6 +16,8 @@ import json
 import time
 import sys
 import os
+import errno
+import stat
 import hashlib
 import logging
 import threading
@@ -646,7 +648,11 @@ def _sync_dir_chain(path):
     fsyncing a directory persists the entries of its children, so this makes every component
     of `path` (and a mark inside it) reach stable storage, including directories an earlier,
     failed attempt created and never synced. Every directory is attempted; the first failure is
-    raised at the end."""
+    raised at the end.
+
+    It walks the path as written, so a symlink on it leaves the directories the link points into
+    unsynced: this is the best-effort sync for consume "required". With OFF, claim_job_once walks
+    the path with _open_dir_chain instead (#499 r3)."""
     current = os.path.abspath(path)
     first_error = None
     while True:
@@ -658,6 +664,70 @@ def _sync_dir_chain(path):
         if parent == current:
             break
         current = parent
+    if first_error is not None:
+        raise first_error
+
+
+def _open_dir_chain(path):
+    """Open every directory on the absolute path `path`, from the root down, creating any that is
+    missing (mode 0o700). Returns their fds, root first; the caller closes them.
+
+    Each directory is opened from the fd of the one above it, with O_NOFOLLOW, so the fds are
+    exactly the directories that a file created from the last one lives in: nothing renamed or
+    swapped while this runs can redirect the walk. A symlink anywhere on the path raises
+    OSError(ELOOP); anything else that is not a directory raises too. Raises OSError, or
+    NotImplementedError where a platform can't open relative to a directory fd."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory_only = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory_only is None:
+        raise OSError("this platform cannot walk a directory path without following symlinks")
+    flags = os.O_RDONLY | directory_only | nofollow
+    fds = [os.open(os.sep, os.O_RDONLY | directory_only)]
+
+    def open_child(name, walked):
+        try:
+            return os.open(name, flags, dir_fd=fds[-1])
+        except FileNotFoundError:
+            raise
+        except OSError as err:
+            try:
+                is_link = stat.S_ISLNK(os.stat(name, dir_fd=fds[-1], follow_symlinks=False).st_mode)
+            except OSError:
+                is_link = False
+            if is_link:
+                raise OSError(errno.ELOOP, "{} is a symlink".format(walked)) from err
+            raise
+
+    try:
+        walked = os.sep
+        for name in [part for part in path.split(os.sep) if part]:
+            walked = os.path.join(walked, name)
+            try:
+                fds.append(open_child(name, walked))
+                continue
+            except FileNotFoundError:
+                pass
+            try:
+                os.mkdir(name, 0o700, dir_fd=fds[-1])
+            except FileExistsError:
+                pass  # made by someone else since; open_child decides what it is
+            fds.append(open_child(name, walked))
+    except BaseException:
+        for fd in fds:
+            os.close(fd)
+        raise
+    return fds
+
+
+def _fsync_fds(fds):
+    """fsync every directory fd, the deepest first. Every one is attempted; the first failure is
+    raised at the end."""
+    first_error = None
+    for fd in reversed(fds):
+        try:
+            os.fsync(fd)
+        except OSError as err:
+            first_error = first_error or err
     if first_error is not None:
         raise first_error
 
@@ -681,7 +751,13 @@ def claim_job_once(record, require_durable=True):
     is the ONLY record), the approval is refused: after a power cut the mark could be gone,
     and the approval run again. Without it (consume "required"), the gateway's consume is the
     durable record, since a consumed approval is never listed again, so a mark that may not be
-    durable is logged and allowed."""
+    durable is logged and allowed.
+
+    With require_durable the state path is walked one directory at a time without following
+    symlinks (_open_dir_chain), the marker is created from the last directory's fd, and exactly
+    those directories are synced: the ones the marker really lives in. A symlink on the path
+    would put the marker in directories the path doesn't name, which a sync of the path would
+    miss (#499 r3), so it is refused, and the error names the path to use instead."""
     key = _job_key(record)
     if key is None:
         log.error("Refusing an approval with no usable id or jobId; it cannot be marked handled, "
@@ -701,44 +777,71 @@ def claim_job_once(record, require_durable=True):
         log.error("Cannot use the handled-job directory (%s), so approval %.80r is NOT run. "
                   "Fix it (OT2_AGENT_STATE_DIR) and the approval is picked up again.", err, key)
         return False
-    try:
-        _makedirs_durable(directory)
-    except OSError as err:
-        if not os.path.isdir(directory):
-            log.error("Cannot use the handled-job directory (%s), so approval %.80r is NOT run. "
-                      "Fix it (OT2_AGENT_STATE_DIR) and the approval is picked up again.", err, key)
+    chain = []
+    if require_durable:
+        try:
+            chain = _open_dir_chain(directory)
+        except (OSError, NotImplementedError) as err:
+            if getattr(err, "errno", None) == errno.ELOOP:
+                log.error("The handled-job directory %s has a symlink on its path (%s), so approval %.80r "
+                          "is NOT run: with OT2_AGENT_SERVER_CONSUME=off the mark is the only record, and a "
+                          "mark behind a symlink can't be made durable. Set OT2_AGENT_STATE_DIR to a path "
+                          "without symlinks (this one resolves to %s) and the approval is picked up again.",
+                          directory, err.strerror, key, os.path.realpath(directory))
+            else:
+                log.error("Cannot use the handled-job directory (%s), so approval %.80r is NOT run. "
+                          "Fix it (OT2_AGENT_STATE_DIR) and the approval is picked up again.", err, key)
             return False
-        durability_error = err  # the directory exists, but its entry may not survive a power cut
+    else:
+        try:
+            _makedirs_durable(directory)
+        except OSError as err:
+            if not os.path.isdir(directory):
+                log.error("Cannot use the handled-job directory (%s), so approval %.80r is NOT run. "
+                          "Fix it (OT2_AGENT_STATE_DIR) and the approval is picked up again.", err, key)
+                return False
+            durability_error = err  # the directory exists, but its entry may not survive a power cut
     marker = os.path.join(directory, digest)
     try:
-        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        if _first_time(("handled", digest)):
-            log.info("Approval %.80r was already handled (marker %s); not running it again", key, marker)
-        return False
-    except OSError as err:
-        log.error("Cannot mark approval %.80r handled in %s (%s), so it is NOT run. "
-                  "Fix the directory and the approval is picked up again.", key, directory, err)
-        return False
+        try:
+            if chain:
+                fd = os.open(digest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600, dir_fd=chain[-1])
+            else:
+                fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if _first_time(("handled", digest)):
+                log.info("Approval %.80r was already handled (marker %s); not running it again", key, marker)
+            return False
+        except OSError as err:
+            log.error("Cannot mark approval %.80r handled in %s (%s), so it is NOT run. "
+                      "Fix the directory and the approval is picked up again.", key, directory, err)
+            return False
 
-    # The marker now exists, so this approval never runs again, whatever fails from here on:
-    # the cost is a lost run, never a repeated one.
-    try:
-        with os.fdopen(fd, "wb") as marker_file:
-            marker_file.write(payload)
-            marker_file.flush()
-            os.fsync(marker_file.fileno())
-    except OSError as err:
-        log.error("Marked approval %.80r handled but could not finish writing %s (%s), so it is NOT "
-                  "run, and it will not run again unless it is re-approved or the marker is deleted.",
-                  key, marker, err)
-        return False
-    # The whole state path, every time: an earlier failed attempt may have created the chain
-    # without syncing it, and a mark is only as durable as every entry above it (#499 r2).
-    try:
-        _sync_dir_chain(directory)
-    except OSError as err:
-        durability_error = durability_error or err
+        # The marker now exists, so this approval never runs again, whatever fails from here on:
+        # the cost is a lost run, never a repeated one.
+        try:
+            with os.fdopen(fd, "wb") as marker_file:
+                marker_file.write(payload)
+                marker_file.flush()
+                os.fsync(marker_file.fileno())
+        except OSError as err:
+            log.error("Marked approval %.80r handled but could not finish writing %s (%s), so it is NOT "
+                      "run, and it will not run again unless it is re-approved or the marker is deleted.",
+                      key, marker, err)
+            return False
+        # The whole state path, every time: an earlier failed attempt may have created the chain
+        # without syncing it, and a mark is only as durable as every entry above it (#499 r2).
+        # With OFF, exactly the directories walked to create it (#499 r3).
+        try:
+            if chain:
+                _fsync_fds(chain)
+            else:
+                _sync_dir_chain(directory)
+        except OSError as err:
+            durability_error = durability_error or err
+    finally:
+        for open_fd in chain:
+            os.close(open_fd)
     if durability_error is not None:
         if require_durable:
             log.error("Marked approval %.80r handled but could not make the mark durable (%s), so it "

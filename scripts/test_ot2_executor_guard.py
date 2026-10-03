@@ -767,7 +767,9 @@ class DaemonLoopTestCase(FixtureCase):
 
     def setUp(self):
         super().setUp()
-        self.tmp = tempfile.mkdtemp()
+        # Resolved, so the state path has no symlink in it even where the temp root has one (macOS's
+        # /var): with OT2_AGENT_SERVER_CONSUME=off a symlinked state path is refused (#499 r3).
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         # Four levels down, so an id that climbed out of the state dir would still land inside self.tmp.
         self.state = os.path.join(self.tmp, "one", "two", "three", "handled")
@@ -870,12 +872,17 @@ class DaemonLoopTestCase(FixtureCase):
         return sent
 
     def fail_open(self, make_error):
-        """Make os.open raise make_error() for files in the state dir; every other open is real."""
+        """Make os.open raise make_error() for the state dir and the files in it, whether it is named by
+        path or relative to a directory fd (as with OT2_AGENT_SERVER_CONSUME=off); every other open is
+        real."""
         real_open = os.open
         state = self.state
 
         def open_or_fail(path, flags, *args, **kwargs):
-            if os.fspath(path).startswith(state):
+            target = os.fspath(path)
+            if kwargs.get("dir_fd") is not None:
+                target = os.path.join(os.readlink("/proc/self/fd/%d" % kwargs["dir_fd"]), target)
+            if target.startswith(state):
                 raise make_error()
             return real_open(path, flags, *args, **kwargs)
 
@@ -1462,3 +1469,88 @@ class MarkChainDurabilityTests(DaemonLoopTestCase):
             walk = os.path.dirname(walk)
         missing = [d for d in expected if d not in synced]
         self.assertEqual(missing, [], "B dispatched while these directories were never synced: {}".format(missing))
+
+
+class SymlinkedStatePathTests(DaemonLoopTestCase):
+    """#499 r3 CRITICAL: under OFF, a state path through a symlink must not dispatch on the strength of
+    syncing only the lexical path; the physical directories the mark lives in might never be synced."""
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc/self/fd to name a directory fd")
+    def test_with_consume_off_nothing_dispatches_before_every_physical_directory_of_the_mark_is_synced(self):
+        # The verdict's reproduction: record each directory fsync and each dispatch, in order.
+        link, physical = self._symlinked_state()
+        events = []
+        real_fsync = os.fsync
+
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                events.append(("sync", os.path.realpath(os.readlink("/proc/self/fd/%d" % fd))))
+            return real_fsync(fd)
+
+        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": link, "OT2_AGENT_SERVER_CONSUME": "off"}), \
+                mock.patch("os.fsync", fsync):
+            self.drive([[approval(43, id="sym-4")]], on_turn=lambda messages: events.append(("dispatch", None)))
+        physical_chain = []
+        walk = os.path.realpath(physical)
+        while True:
+            physical_chain.append(walk)
+            if walk == self.tmp:
+                break
+            walk = os.path.dirname(walk)
+        synced = set()
+        for kind, target in events:
+            if kind == "sync":
+                synced.add(target)
+                continue
+            missing = [d for d in physical_chain if d not in synced]
+            self.assertEqual(missing, [], "dispatched while these directories were never synced: {}".format(missing))
+
+    def _symlinked_state(self):
+        physical = os.path.join(self.tmp, "volatile", "a", "b", "handled")
+        os.makedirs(physical)
+        link = os.path.join(self.tmp, "stable", "handled-link")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(physical, link)
+        return link, physical
+
+    def test_with_consume_off_a_symlinked_state_path_is_refused(self):
+        link, physical = self._symlinked_state()
+        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": link, "OT2_AGENT_SERVER_CONSUME": "off"}):
+            sent = self.drive([[approval(40, id="sym-1")]] * 2)
+        self.assertEqual(sent, [])
+        self.assertTrue(any("symlink" in line for line in self.logs if line.startswith("ERROR")), self.logs)
+
+    def test_with_consume_off_a_symlinked_ancestor_is_refused_too(self):
+        real_parent = os.path.join(self.tmp, "volatile2", "deep")
+        os.makedirs(real_parent)
+        link_parent = os.path.join(self.tmp, "stable2")
+        os.symlink(real_parent, link_parent)
+        state = os.path.join(link_parent, "handled")
+        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": state, "OT2_AGENT_SERVER_CONSUME": "off"}):
+            sent = self.drive([[approval(41, id="sym-2")]])
+        self.assertEqual(sent, [])
+
+    def test_with_consume_off_the_physical_path_the_error_names_runs_the_approval_once(self):
+        link, physical = self._symlinked_state()
+        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": link, "OT2_AGENT_SERVER_CONSUME": "off"}):
+            self.assertEqual(self.drive([[approval(44, id="sym-5")]]), [])
+            self.assertTrue(any(physical in line for line in self.error_lines()), self.logs)
+        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": physical, "OT2_AGENT_SERVER_CONSUME": "off"}):
+            sent = self.drive([[approval(44, id="sym-5")]] * 2)
+        self.assertEqual(len(sent), 1, sent)
+        self.assertEqual(os.listdir(physical), [hashlib.sha256(b"sym-5").hexdigest()])
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc/self/fd to name a directory fd")
+    def test_with_consume_off_a_marker_that_cannot_be_created_means_the_job_does_not_run(self):
+        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}):
+            with self.fail_open(lambda: OSError(errno.ENOSPC, "No space left on device")):
+                self.assertEqual(self.drive([[approval(45, id="nospace")]] * 2), [])
+            self.assertEqual(self.markers(), [])
+            self.assertTrue(self.error_lines(), self.logs)
+            self.assertEqual(len(self.drive([[approval(45, id="nospace")]] * 2)), 1)
+
+    def test_with_consume_required_a_symlinked_state_path_still_runs_once(self):
+        link, _ = self._symlinked_state()
+        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": link}):
+            sent = self.drive([[approval(42, id="sym-3")]] * 2)
+        self.assertEqual(len(sent), 1, sent)
