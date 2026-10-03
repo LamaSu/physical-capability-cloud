@@ -32,11 +32,15 @@ function register(c: ConfirmedSafetyEnvelope): SafetyEnvelopeRegistration {
   return { ...statement, signature: Buffer.from(sign(null, registrationSigningPreimage(statement), REGISTRY.privateKey)).toString("hex") };
 }
 
+/** Round 3 (astra pack 176): a device-controlled limit is enforced through a channel the adapter declares. */
+const CHAMBER = { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC" as const, maxAgeMs: 5000 };
+
 function plateReader(commands: SafetyEnvelopeInput["commandMap"]): SafetyEnvelopeInput {
   return {
     deviceClass: "lab-plate-reader",
     device: { deviceId: "pr-173", adapterType: "generic-http", adapterVersion: MANIFEST },
     commandMap: commands,
+    telemetryMap: { channels: [CHAMBER] },
     intake: {
       limits: [
         { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 20, max: 40 },
@@ -52,7 +56,7 @@ function plateReader(commands: SafetyEnvelopeInput["commandMap"]): SafetyEnvelop
   };
 }
 const DECISION = { confirmedBy: "op-173", confirmedAt: "2026-10-03T08:55:00Z" };
-const TELEMETRY = { quantity: "incubation_temperature", enforcement: "telemetry" as const, detail: "chamber thermistor" };
+const TELEMETRY = { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "chamber.temperature_c" };
 
 describe("astra 173 CRITICAL 1: a quantity a mislabeled `unbounded` parameter moves never loses its limit", () => {
   it("astra's recipe: celsius declared unbounded {20, 200}; the temperature limit survives, enforced by telemetry", () => {
@@ -75,6 +79,7 @@ describe("astra 173 CRITICAL 1: a quantity a mislabeled `unbounded` parameter mo
     const limit = rt.limits.find((l) => l.quantity === "incubation_temperature");
     expect(limit && [limit.min, limit.max]).toEqual([20, 40]);
     expect(rt.deviceControlled).toEqual([TELEMETRY]);
+    expect(rt.telemetryChannels).toEqual([CHAMBER]);
   });
 });
 

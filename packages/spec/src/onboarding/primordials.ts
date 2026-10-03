@@ -186,6 +186,22 @@ export function isHex256Digest(value: unknown): value is string {
   return isPrefixedLowerHex(value, "0x", 64);
 }
 
+/**
+ * A lowercase ASCII token of 1 to `maxLength` code units: a letter, then
+ * letters, digits, ".", "_" or "-". Checked code unit by code unit, without a
+ * RegExp, like the digests above.
+ */
+export function isLowerToken(value: unknown, maxLength: number): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) return false;
+  for (let i = 0; i < value.length; i++) {
+    const unit = StringPrototypeCharCodeAt(value, i);
+    const letter = unit >= 0x61 && unit <= 0x7a;
+    const other = (unit >= 0x30 && unit <= 0x39) || unit === 0x2e || unit === 0x5f || unit === 0x2d;
+    if (!(letter || (i > 0 && other))) return false;
+  }
+  return true;
+}
+
 /** A value as text for a message, never calling a method on it. */
 export function text(v: unknown): string {
   if (typeof v === "string") return v;

@@ -101,13 +101,20 @@ const NOT_HEX_INPUT: SafetyEnvelopeInput = (() => {
 })();
 
 /**
- * SIM-PR1 (Addendum 6): the absorbance-only class (no incubator), and a read
- * duration its firmware fixes, so it is device-controlled and keeps its limit.
+ * SIM-PR1 (round 3, astra pack 176): a plate reader whose run command sets
+ * neither its plate temperature nor its read duration, so both are
+ * device-controlled, each enforced through a channel its adapter declares.
  * Built before any patch is applied.
  */
 const SIM_PR1_INPUT: SafetyEnvelopeInput = {
-  deviceClass: "lab-plate-reader-absorbance",
+  deviceClass: "lab-plate-reader",
   device: { deviceId: "sim-pr1", adapterType: "generic-http", adapterVersion: MANIFEST },
+  telemetryMap: {
+    channels: [
+      { id: "run.elapsed_s", quantity: "read_duration", unit: "s", maxAgeMs: 1000 },
+      { id: "status.temperature_c", quantity: "incubation_temperature", unit: "degC", maxAgeMs: 5000 },
+    ],
+  },
   commandMap: {
     commands: [
       {
@@ -122,7 +129,9 @@ const SIM_PR1_INPUT: SafetyEnvelopeInput = {
   },
   intake: {
     limits: [
-      { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 60 },
+      // max 40 and max 600: the values the replacements below raise, so a raised limit shows.
+      { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 15, max: 40 },
+      { field: "safety.limits", quantity: "read_duration", unit: "s", min: 0, max: 600 },
       { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 30 },
     ],
     eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
@@ -134,7 +143,34 @@ const SIM_PR1_INPUT: SafetyEnvelopeInput = {
 };
 const SIM_PR1_DECISION = {
   ...DECISION,
-  deviceControlled: [{ quantity: "read_duration", enforcement: "cutoff" as const, detail: "firmware read timing" }],
+  deviceControlled: [
+    { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "status.temperature_c" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "run.elapsed_s" },
+  ],
+};
+/** Round 3 refusals, built before any patch: a channel the map does not declare, a cutoff, and a value set out of order. */
+const UNRESOLVED_DECISION = {
+  ...DECISION,
+  deviceControlled: [
+    { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "status.temperature_k" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "run.elapsed_s" },
+  ],
+};
+const CUTOFF_DECISION = {
+  ...DECISION,
+  deviceControlled: [
+    { quantity: "incubation_temperature", enforcement: "cutoff", channel: "status.temperature_c" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "run.elapsed_s" },
+  ],
+} as unknown as typeof SIM_PR1_DECISION;
+const UNORDERED_SET_INPUT: SafetyEnvelopeInput = {
+  ...SIM_PR1_INPUT,
+  commandMap: {
+    commands: [
+      { name: "runPlate", params: [{ name: "wavelengthNm", unbounded: { reason: "an optical setting", allowed: [600, 405] } }] },
+      { name: "stop", params: [] },
+    ],
+  },
 };
 
 /**
@@ -179,6 +215,10 @@ function runStages(): Record<Stage, unknown> {
   refusal(() => confirmSafetyEnvelope(input(), { ...DECISION, edits: [{ quantity: "incubation_temperature", min: 20, max: 50 }] }));
   // Digests that are well formed except for their digits: a charCodeAt that reports every unit as "0" must not pass them (astra pack 167).
   refusal(() => draftSafetyEnvelope(NOT_HEX_INPUT));
+  // Round 3 (astra pack 176): an unresolved channel, a cutoff and an unordered set stay refused.
+  refusal(() => confirmSafetyEnvelope(SIM_PR1_INPUT, UNRESOLVED_DECISION));
+  refusal(() => confirmSafetyEnvelope(SIM_PR1_INPUT, CUTOFF_DECISION));
+  refusal(() => draftSafetyEnvelope(UNORDERED_SET_INPUT));
   refusal(() => registrationSigningPreimage({ deviceId: "pr-1", envelopeDigest: NOT_HEX_ENVELOPE_DIGEST, registeredAt: "2026-10-03T00:05:00Z" }));
   if (confirmed && registration) {
     // structuredClone, not a JSON round trip: the test's own code must not run a replaced intrinsic either.
@@ -292,6 +332,15 @@ function withPatch<T>(target: object, key: PropertyKey, replacement: unknown, ru
 }
 
 describe("astra 164 CRITICAL: an intrinsic replaced after load cannot change what R8 checks or emits", () => {
+  it("the untouched reference run confirms and compiles every stage, and refuses every refusal: no comparison below is between two failures", () => {
+    for (const stage of ["draft", "confirmed", "csd", "runtime", "cannotSetConfirmed", "cannotSetCsd", "cannotSetRuntime"] as const) {
+      expect(CLEAN[stage], stage).not.toContain('"threw"');
+    }
+    expect(CLEAN.cannotSetRuntime).toContain('"telemetryChannels"');
+    expect(CLEAN.refusals).not.toContain("ACCEPTED");
+    expect(JSON.parse(CLEAN.refusals)).toHaveLength(9);
+  });
+
   it("astra's recipe: with Array.prototype.map replaced, both compilers still emit the signed max 40", () => {
     const confirmed = confirmSafetyEnvelope(input(), DECISION);
     const registration = register(confirmed);
