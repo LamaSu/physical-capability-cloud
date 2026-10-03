@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+import { getJobFacade } from "../facades/index.js";
 
 /**
  * N111 — GET /api/jobs ignores its limit.
@@ -102,5 +103,16 @@ describe("N111 — GET /api/jobs paging", () => {
     expect(body.offset).toBe(0);
     expect(body.limit).toBe(50);
     expect(body.items.length).toBe(50); // total=70 > default limit=50
+  });
+
+  it("the facade itself never concatenates: string offset and limit from any caller are read as integers", async () => {
+    // The route's schema keeps strings away from this call path; the facade guards its other callers too.
+    const result = await getJobFacade().list({}, {}, { offset: "10", limit: "50" } as never);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.items.length).toBeLessThanOrEqual(50);
+    expect(result.data.offset).toBe(10);
+    expect(result.data.limit).toBe(50);
+    expect(result.data.hasMore).toBe(10 + result.data.items.length < result.data.total);
   });
 });
