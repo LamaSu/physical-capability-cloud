@@ -1,0 +1,183 @@
+/**
+ * Content hashes sort by UTF-16 code unit, never by locale collation
+ * (oracle #3348 / #3350). The vectors in util/code-unit-order.vectors.json
+ * are what a non-JS mirror reproduces. Code-unit order is byte order for
+ * ASCII strings only; the codeUnitOrder vector covers non-ASCII and lone
+ * surrogates. A Python recomputation (key=s.encode("utf-16-be",
+ * "surrogatepass")) matched every value.
+ */
+import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
+import { canonicalize } from "../util/canonical.js";
+import { compareCodeUnits } from "../util/code-unit-order.js";
+import {
+  computeMapSnapshotHash,
+  computeSetSnapshotHash,
+  MapEntrySchema,
+  SetEntrySchema,
+  type MapEntry,
+} from "../types/registry.js";
+import { computeWorkSchemaHash } from "../types/work-schema.js";
+import { assertJobSpecIsWellFormed, computeJobSpecHash, type JobSpec } from "../types/job-spec.js";
+import vectors from "../util/code-unit-order.vectors.json" with { type: "json" };
+
+const sha = (s: string) => `0x${createHash("sha256").update(s).digest("hex")}`;
+/** An independent reference order: element-wise over UTF-16 code units (charCodeAt). */
+const byCharCodes = (a: string, b: string): number => {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const d = a.charCodeAt(i) - b.charCodeAt(i);
+    if (d !== 0) return d;
+  }
+  return a.length - b.length;
+};
+const rotations = <T>(xs: readonly T[]): T[][] =>
+  xs.map((_, i) => [...xs.slice(i), ...xs.slice(0, i)]).concat([[...xs].reverse()]);
+
+describe("compareCodeUnits", () => {
+  it("orders by code unit: punctuation and digits as bytes do, uppercase before lowercase", () => {
+    const keys = vectors.mapSnapshot.entries.map((e) => e.key);
+    expect([...keys].sort(compareCodeUnits)).toEqual(vectors.mapSnapshot.sortedKeys);
+    expect([...keys].sort(byCharCodes)).toEqual(vectors.mapSnapshot.sortedKeys);
+    expect(["cmm_2", "cmm2", "cmm-1"].sort(compareCodeUnits)).toEqual(["cmm-1", "cmm2", "cmm_2"]);
+    expect(["0xab", "0xAB", "0xAb"].sort(compareCodeUnits)).toEqual(["0xAB", "0xAb", "0xab"]);
+    expect(compareCodeUnits("a", "a")).toBe(0);
+  });
+});
+
+// E1 finding 6: non-ASCII and lone-surrogate vectors, checked against an
+// independent comparison, so the contract holds beyond ASCII.
+describe("code-unit order beyond ASCII", () => {
+  const { strings, sorted, utf16be } = vectors.codeUnitOrder;
+  const utf16beHex = (s: string) =>
+    Array.from({ length: s.length }, (_, i) => s.charCodeAt(i).toString(16).padStart(4, "0")).join("");
+
+  it("compareCodeUnits and the independent reference both give the vector's order", () => {
+    for (const input of rotations(strings)) {
+      expect([...input].sort(compareCodeUnits)).toEqual(sorted);
+      expect([...input].sort(byCharCodes)).toEqual(sorted);
+    }
+  });
+
+  it("canonicalize orders object keys the same way", () => {
+    const obj = Object.fromEntries(strings.map((s, i) => [s, i]));
+    expect(Object.keys(JSON.parse(canonicalize(obj)))).toEqual(sorted);
+  });
+
+  it("the vector's UTF-16BE bytes are in byte order, so a mirror can sort by them", () => {
+    expect(sorted.map(utf16beHex)).toEqual(utf16be);
+    expect([...utf16be].sort()).toEqual(utf16be);
+  });
+
+  it("is neither UTF-8 byte order nor code-point order", () => {
+    const utf8 = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+    expect(compareCodeUnits("\u{10000}", "\uE000")).toBeLessThan(0);
+    expect(utf8("\u{10000}", "\uE000")).toBeGreaterThan(0);
+    expect("\u{10000}".codePointAt(0)!).toBeGreaterThan("\uE000".codePointAt(0)!);
+    // UTF-8 encoding replaces every lone surrogate with U+FFFD.
+    expect(utf8("\ud800", "\udc00")).toBe(0);
+    expect(compareCodeUnits("\ud800", "\udc00")).toBeLessThan(0);
+  });
+});
+
+describe("computeMapSnapshotHash sorts keys by code unit", () => {
+  const entries = vectors.mapSnapshot.entries as MapEntry[];
+
+  it("reproduces the vector, whatever the input order, and equals the independent code-unit reference", () => {
+    const reference = sha(canonicalize({ entries: [...entries].sort((a, b) => byCharCodes(a.key, b.key)) }));
+    expect(reference).toBe(vectors.mapSnapshot.snapshotHash);
+    for (const r of rotations(entries)) expect(computeMapSnapshotHash(r)).toBe(vectors.mapSnapshot.snapshotHash);
+  });
+
+  it("is not the hash over the ICU order the vector's entries are listed in", () => {
+    expect(sha(canonicalize({ entries }))).toBe(vectors.mapSnapshot.negativeIcuOrderHash);
+    expect(computeMapSnapshotHash(entries)).not.toBe(vectors.mapSnapshot.negativeIcuOrderHash);
+  });
+});
+
+// E1 finding 4: toLowerCase() applies full, Unicode-version-dependent case
+// mapping, so hash-bearing registry keys are printable ASCII (0x21-0x7e),
+// checked before lowercasing.
+describe("registry keys are printable ASCII before lowercasing", () => {
+  const refused = ["\u0130", "\u212A", "\uA7CB", "\u00e9", "a b", "a\t", "a\u007f", "\ud800", ""];
+
+  it("refuses U+0130, which JavaScript lowercases to two code units", () => {
+    expect("\u0130".toLowerCase()).toBe("i\u0307");
+    expect(() => computeSetSnapshotHash(["\u0130"])).toThrow(/printable ASCII/);
+    expect(() => computeMapSnapshotHash([{ key: "\u0130", value: 1 }])).toThrow(/printable ASCII/);
+  });
+
+  it("refuses non-ASCII, space, controls and the empty string in sets, maps and the entry schemas", () => {
+    // U+212A (Kelvin sign) lowercases to ASCII "k": the check must run before lowercasing.
+    for (const bad of refused) {
+      expect(() => computeSetSnapshotHash(["ok", bad])).toThrow(/printable ASCII/);
+      expect(() => computeMapSnapshotHash([{ key: bad, value: 1 }])).toThrow(/printable ASCII/);
+      expect(SetEntrySchema.safeParse(bad).success).toBe(false);
+      expect(MapEntrySchema.safeParse({ key: bad, value: 1 }).success).toBe(false);
+    }
+  });
+
+  it("accepts every printable ASCII character; lowercasing then touches A-Z only", () => {
+    const printable = Array.from({ length: 0x7e - 0x21 + 1 }, (_, i) => String.fromCharCode(0x21 + i)).join("");
+    expect(SetEntrySchema.safeParse(printable).success).toBe(true);
+    expect(MapEntrySchema.safeParse({ key: printable, value: 1 }).success).toBe(true);
+    const asciiLower = printable.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+    expect(computeSetSnapshotHash([printable])).toBe(computeSetSnapshotHash([asciiLower]));
+    expect(computeMapSnapshotHash([{ key: printable, value: 1 }])).toBe(computeMapSnapshotHash([{ key: asciiLower, value: 1 }]));
+  });
+});
+
+describe("computeWorkSchemaHash sorts event types and work products by code unit", () => {
+  it("reproduces the vector, whatever the input order", () => {
+    const s = vectors.workSchema.schema;
+    for (const eventTypes of rotations(s.eventTypes)) {
+      for (const workProducts of rotations(s.workProducts)) {
+        expect(computeWorkSchemaHash({ ...s, eventTypes, workProducts } as never)).toBe(vectors.workSchema.schemaHash);
+      }
+    }
+  });
+});
+
+describe("computeJobSpecHash sorts co-funders by code unit (case-sensitive)", () => {
+  it("reproduces the vector, whatever the input order", () => {
+    const j = vectors.jobSpec.job;
+    for (const cofundedBy of rotations(j.cofundedBy)) {
+      expect(computeJobSpecHash({ ...j, cofundedBy } as never)).toBe(vectors.jobSpec.jobSpecHash);
+    }
+  });
+});
+
+// E1 finding 3: duplicate buyers stay valid, so the co-funder order must be
+// total over the hashed content, not just over `buyer`.
+describe("computeJobSpecHash orders duplicate co-funders totally", () => {
+  const X = "0xab00000000000000000000000000000000000001";
+  const sealed = (cofundedBy: Array<{ buyer: string; amountCents: number }>): JobSpec => {
+    const job = {
+      ...vectors.jobSpec.job,
+      constraints: { deadlineSeconds: 3600, maxBudgetCents: 3, requiredAssuranceTier: 0 as const },
+      cofundedBy,
+      buyerSignature: "0x01",
+      sellerSignature: null,
+      createdAt: "2026-09-29T00:00:00.000Z",
+    };
+    return { ...job, jobSpecHash: computeJobSpecHash(job) };
+  };
+
+  it("reproduces the duplicate-buyer vector, whatever the input order", () => {
+    const d = vectors.jobSpecDuplicateBuyers;
+    for (const cofundedBy of rotations(d.cofundedBy)) {
+      expect(computeJobSpecHash({ ...vectors.jobSpec.job, cofundedBy } as never)).toBe(d.jobSpecHash);
+    }
+  });
+
+  it("the same buyer twice with amounts [1,2] or [2,1] hashes the same", () => {
+    const a = sealed([{ buyer: X, amountCents: 1 }, { buyer: X, amountCents: 2 }]);
+    const b = sealed([{ buyer: X, amountCents: 2 }, { buyer: X, amountCents: 1 }]);
+    expect(a.jobSpecHash).toBe(b.jobSpecHash);
+  });
+
+  it("a sealed job still verifies after its co-funder list is reordered; duplicates stay valid", () => {
+    const job = sealed([{ buyer: X, amountCents: 1 }, { buyer: X, amountCents: 2 }]);
+    expect(() => assertJobSpecIsWellFormed(job)).not.toThrow();
+    expect(() => assertJobSpecIsWellFormed({ ...job, cofundedBy: [...job.cofundedBy!].reverse() })).not.toThrow();
+  });
+});

@@ -70,6 +70,17 @@ export const useAuthStore = create<AuthState>((set) => {
 });
 
 /**
+ * Calls `onChange` whenever the signed-in identity changes: a key signed in or out, a
+ * different key, wallet or SIWE session. A cached read must not outlive the identity that
+ * made it, so App clears the query cache here (review r3 of #353).
+ */
+export function onIdentityChange(onChange: () => void): () => void {
+  return useAuthStore.subscribe((s, prev) => {
+    if (s.apiKey !== prev.apiKey || s.address !== prev.address || s.sessionToken !== prev.sessionToken) onChange();
+  });
+}
+
+/**
  * Returns auth headers for API calls.
  * Call outside of React components (in fetch helpers, etc).
  */

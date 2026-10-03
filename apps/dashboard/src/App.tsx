@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
-import { useAuthStore } from "./stores/auth-store.js";
+import { useAuthStore, onIdentityChange } from "./stores/auth-store.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -110,6 +110,10 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+// A cached read belongs to the identity that made it: clear the cache whenever the signed-in
+// identity changes, so the next identity never sees the previous one's jobs or money.
+onIdentityChange(() => queryClient.clear());
 
 // ---------------------------------------------------------------------------
 // Agent Chat Shell — full-height chat, no sidebar

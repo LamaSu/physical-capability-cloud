@@ -22,6 +22,7 @@ import { z } from "zod";
 import { PCC_URL, pccFetch, pccFetchEach } from "./api.js";
 import { registerCaptureTools } from "./tools/capture.js";
 import { registerNegotiateTools } from "./tools/negotiate.js";
+import { GET_EVIDENCE_DESCRIPTION, evidencePath } from "./tools/evidence.js";
 
 // ---------------------------------------------------------------------------
 // Tool result helper
@@ -428,12 +429,15 @@ server.tool(
 
 server.tool(
   "pcc_get_evidence",
-  "Get a specific evidence bundle by ID — includes encrypted data reference, IPFS CID, ZK proof status, Bittensor verification scores, and evaluator attestations.",
+  GET_EVIDENCE_DESCRIPTION,
   {
-    bundleId: z.string().describe("Evidence bundle ID"),
+    bundleId: z.string().optional().describe("One evidence bundle's ID (for example ev-…)"),
+    jobId: z.string().optional().describe("A job ID: returns every bundle recorded for that job"),
   },
-  async ({ bundleId }: { bundleId: string }) => {
-    const data = await pccFetch(`/api/evidence/${encodeURIComponent(bundleId)}`);
+  async ({ bundleId, jobId }: { bundleId?: string; jobId?: string }) => {
+    const target = evidencePath({ bundleId, jobId });
+    if ("error" in target) return { ...toolResult({ error: target.error }), isError: true };
+    const data = await pccFetch(target.path);
     return toolResult(data);
   },
 );

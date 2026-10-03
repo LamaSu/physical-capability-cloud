@@ -199,6 +199,64 @@ export function scoreCapability(
 export const DEFAULT_MATCH_THRESHOLD = 0.3;
 
 /**
+ * Does a capability's registry row actually DECLARE the terms a match would
+ * be priced and evidenced against, or would matching it require INVENTING
+ * one? `toMatched` used to default a missing `assuranceTiers` to `[0, 1]`
+ * and a missing/zero price to `"USDC" 0` — so the planner could propose,
+ * and show a buyer, a price and an evidence tier that no provider ever
+ * declared (board N23). `createMatcher` calls this for every candidate and
+ * skips (never matches) any capability that fails it, instead of matching
+ * it with invented terms.
+ */
+export function matchableTerms(
+  cap: CapabilityLite,
+):
+  | { ok: true; price: number; currency: string; assuranceTiers: number[] }
+  | {
+      ok: false;
+      reason:
+        | "no-declared-tiers"
+        | "invalid-tiers"
+        | "no-declared-pricing"
+        | "invalid-pricing"
+        | "zero-price";
+    } {
+  if (cap.assuranceTiers === undefined || cap.assuranceTiers === null) {
+    return { ok: false, reason: "no-declared-tiers" };
+  }
+  const VALID_TIERS = new Set([0, 1, 2, 3]);
+  const tiersOk =
+    Array.isArray(cap.assuranceTiers) &&
+    cap.assuranceTiers.length > 0 &&
+    cap.assuranceTiers.every((t) => typeof t === "number" && VALID_TIERS.has(t));
+  if (!tiersOk) {
+    return { ok: false, reason: "invalid-tiers" };
+  }
+  // Sorted set: deduplicated, ascending — matches matchedCapabilityDigest's
+  // own sort so a differently-ordered (or duplicated) declaration can never
+  // change the digest.
+  const assuranceTiers = [...new Set(cap.assuranceTiers)].sort((a, b) => a - b);
+
+  if (cap.pricing === undefined || cap.pricing === null) {
+    return { ok: false, reason: "no-declared-pricing" };
+  }
+  const { currency } = cap.pricing;
+  if (typeof currency !== "string" || currency.length === 0) {
+    return { ok: false, reason: "invalid-pricing" };
+  }
+  // Same headline capPrice reads: baseCost if present, else minimum.
+  const headline = cap.pricing.baseCost ?? cap.pricing.minimum;
+  if (typeof headline !== "string" || !/^[0-9]{1,30}(\.[0-9]{1,30})?$/.test(headline)) {
+    return { ok: false, reason: "invalid-pricing" };
+  }
+  const price = capPrice(cap);
+  if (price === 0) {
+    return { ok: false, reason: "zero-price" };
+  }
+  return { ok: true, price, currency, assuranceTiers };
+}
+
+/**
  * Build a CapabilityMatcher over a capability source. The source is a thunk so
  * the route can back it with the live CapabilityFacade and tests can back it
  * with an in-memory array — the scoring is identical either way.
@@ -223,8 +281,13 @@ export function createMatcher(
         if (effScore < threshold) continue;
         if (!strongHit && !hintHit) continue;
 
+        // Never match a capability whose price/currency/tiers would have to
+        // be invented rather than read from its declaration (board N23).
+        const terms = matchableTerms(cap);
+        if (!terms.ok) continue;
+
         if (!best || effScore > best.score) {
-          best = toMatched(cap, effScore);
+          best = toMatched(cap, effScore, terms);
         }
       }
       return best;
@@ -232,10 +295,12 @@ export function createMatcher(
   };
 }
 
-function toMatched(cap: CapabilityLite, score: number): MatchedCapability {
-  const price = capPrice(cap);
-  const currency = cap.pricing?.currency ?? "USDC";
-  const assuranceTiers = cap.assuranceTiers ?? [0, 1];
+function toMatched(
+  cap: CapabilityLite,
+  score: number,
+  terms: { price: number; currency: string; assuranceTiers: number[] },
+): MatchedCapability {
+  const { price, currency, assuranceTiers } = terms;
   return {
     capabilityId: cap.id,
     capabilityType: cap.type,

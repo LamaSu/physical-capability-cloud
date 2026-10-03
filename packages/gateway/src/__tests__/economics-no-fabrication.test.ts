@@ -3,7 +3,7 @@
  * Readmodels' server-side fabrication census (2026-09-24) assigned these to pcc-economics:
  *   - POST /api/swf/epochs/:epochId/distribute scored participants with Math.random() and then
  *     DISTRIBUTED the epoch on those scores;
- *   - /api/rewards/*, /api/certificates* and /api/treasury/summary served fixtures (a treasury of
+ *   - /api/rewards/* and /api/treasury/summary served fixtures (a treasury of
  *     "50000.00" USDC, "claimed" claims with a fake tx hash, a mint that reported minted:true).
  */
 
@@ -20,7 +20,7 @@ async function buildApp(): Promise<FastifyInstance> {
   return app;
 }
 
-describe("rewards, certificates and treasury: not available, never fabricated", () => {
+describe("rewards and treasury: not available, never fabricated", () => {
   let app: FastifyInstance;
   beforeEach(async () => {
     app = await buildApp();
@@ -35,9 +35,7 @@ describe("rewards, certificates and treasury: not available, never fabricated", 
     ["GET", "/api/rewards/kernels/kernel-biolab-01"],
     ["POST", "/api/rewards/claims"],
     ["GET", "/api/rewards/claims/claim_biolab_ep1"],
-    ["GET", "/api/certificates"],
-    ["GET", "/api/certificates/cnft_biolab_fdm_001"],
-    ["POST", "/api/certificates/mint"],
+    // Certificates follow board N80 (certificates-n80.test.ts): an empty list, 404, and a 501 mint that claims nothing.
     ["GET", "/api/treasury/summary"],
   ] as const)("%s %s answers 501 not_available with pointers and no invented values", async (method, url) => {
     const res = await app.inject({

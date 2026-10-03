@@ -56,6 +56,17 @@ export function swfAutoRegister(
 // Routes
 // ---------------------------------------------------------------------------
 
+/**
+ * The SWF is a design artifact (operator item 69, with the steward's concurrence): nothing funds it. A route
+ * that would create, deploy or pay out money in it answers this, and changes nothing.
+ */
+function unfunded(what: string) {
+  return {
+    error: "not_available",
+    message: `${what}, but nothing funds the SWF: it stays a design artifact, and its money routes answer 501. Nothing was changed.`,
+  };
+}
+
 export async function swfRoutes(app: FastifyInstance) {
   // ── Fund Summary ──────────────────────────────────────────────
 
@@ -145,22 +156,24 @@ export async function swfRoutes(app: FastifyInstance) {
     return reply.code(201).send({ epoch });
   });
 
-  // Distribution is REFUSED until real contribution inputs exist. This route used to score every
-  // participant with Math.random() (job count, reputation, uptime, votes) and then DISTRIBUTE the epoch
-  // on those scores: a write that allocated the fund by dice. Nothing records a participant's real job
-  // count, reputation, activity or votes per epoch, so there is no honest input to score from, and a
-  // distribution may not be computed from invented numbers (pcc-economics, readmodels census 2026-09-24).
-  app.post<{ Params: { epochId: string } }>(
-    "/api/swf/epochs/:epochId/distribute",
-    async (_req, reply) => {
-      return reply.code(501).send({
-        error: "not_available",
-        message:
-          "Epoch distribution needs each participant's real contribution for the epoch (jobs, reputation, activity, votes), " +
-          "and nothing records those yet. The epoch is not distributed rather than distributed on estimates.",
-        see: ["/api/swf/epochs/:epochId", "/api/swf/accruals"],
-      });
-    },
+  // Distributing an epoch divides its dividend pool by each participant's contribution
+  // score, and nothing computes a participant's per-epoch contribution (its jobs, reputation,
+  // activity and votes in the epoch; jobs and votes are recorded, the per-epoch score is not).
+  // This route drew those inputs from Math.random() and then DISTRIBUTED the epoch on them: a
+  // write that shared the fund out by chance. Boards N34 and N46 (money floor): it answers 501
+  // not_available BEFORE anything is read, scored or written, so the epoch is left exactly as it
+  // was. There is no demo path: the SWF stays a design artifact and its money routes stay 501
+  // (steward ruling, operator item 69; economics #3315).
+  app.post<{ Params: { epochId: string } }>("/api/swf/epochs/:epochId/distribute", async (_req, reply) =>
+    reply.code(501).send({
+      error: "not_available",
+      message:
+        "Per-epoch contribution scores (each participant's jobs, reputation, activity and votes in this epoch) " +
+        "are not computed on this gateway, " +
+        "so the epoch was not scored or distributed: without them, every participant's share would come " +
+        "from random numbers.",
+      see: ["GET /api/swf/epochs/:epochId", "GET /api/swf/accruals"],
+    }),
   );
 
   // ── Accruals ──────────────────────────────────────────────────
@@ -379,48 +392,16 @@ export async function swfRoutes(app: FastifyInstance) {
     },
   );
 
-  app.post<{ Params: { positionId: string } }>(
-    "/api/swf/equity/:positionId/activate",
-    async (req, reply) => {
-      try {
-        const position = swfService.activateEquityPosition(req.params.positionId);
-        return { position };
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        return reply.code(409).send({ error: "conflict", message });
-      }
-    },
+  // Activating a position marks its capital deployed, and recording revenue took a caller's
+  // `protocolFee` as the fund's income. Nothing funds the SWF, so both answer 501 before anything
+  // is read or written (astra EC2 F1; operator item 69).
+  app.post<{ Params: { positionId: string } }>("/api/swf/equity/:positionId/activate", async (_req, reply) =>
+    reply.code(501).send(unfunded("Activating an equity position would mark capital as deployed")),
   );
 
-  app.post("/api/swf/equity/record-revenue", async (req, reply) => {
-    const body = (req.body ?? {}) as {
-      equityPositionId?: string;
-      jobId?: string;
-      protocolFee?: number;
-    };
-
-    if (!body.equityPositionId || !body.jobId || body.protocolFee === undefined) {
-      return reply.code(400).send({
-        error: "bad_request",
-        message: "equityPositionId, jobId, and protocolFee are required",
-      });
-    }
-
-    try {
-      const revenue = swfService.recordEquityRevenue({
-        equityPositionId: body.equityPositionId,
-        jobId: body.jobId,
-        protocolFee: body.protocolFee,
-      });
-      const position = swfService.getEquityPortfolio().positions.find(
-        (p) => p.id === body.equityPositionId,
-      );
-      return { revenue, position };
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      return reply.code(409).send({ error: "conflict", message });
-    }
-  });
+  app.post("/api/swf/equity/record-revenue", async (_req, reply) =>
+    reply.code(501).send(unfunded("Recording equity revenue would take a caller-supplied protocolFee as the fund's income")),
+  );
 
   // ── Term Sheet Negotiation ──────────────────────────────────────
 
@@ -536,23 +517,11 @@ export async function swfRoutes(app: FastifyInstance) {
     },
   );
 
-  app.post<{ Params: { termSheetId: string } }>(
-    "/api/swf/terms/:termSheetId/accept",
-    async (req, reply) => {
-      const body = (req.body ?? {}) as { epochId?: string };
-      const epochId = body.epochId ?? swfService.getActiveEpoch()?.id;
-      if (!epochId) {
-        return reply.code(400).send({ error: "bad_request", message: "No active epoch" });
-      }
-
-      try {
-        const result = swfService.acceptTermSheet(req.params.termSheetId, epochId);
-        return { termSheet: result.termSheet, equityPosition: result.equityPosition };
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        return reply.code(409).send({ error: "conflict", message });
-      }
-    },
+  // Accepting a term sheet created an equity position from its seed amount: deployed capital the
+  // fund never had. 501 before anything is read or written (astra EC2 F1; operator item 69).
+  // Proposing, countering and rejecting move no money and stay available.
+  app.post<{ Params: { termSheetId: string } }>("/api/swf/terms/:termSheetId/accept", async (_req, reply) =>
+    reply.code(501).send(unfunded("Accepting a term sheet would create an equity position from its seed amount")),
   );
 
   app.post<{ Params: { termSheetId: string } }>(
