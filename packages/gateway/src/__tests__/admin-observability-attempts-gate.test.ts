@@ -30,6 +30,7 @@ let feedbackFile: string;
 let adminObservabilityRoutes: typeof import("../routes/admin-observability.js").adminObservabilityRoutes;
 
 const ADMIN = "op-admin-f4";
+let keys: Record<"admin" | "limited" | "wildcard" | "adminNotAllowlisted" | "wildcardNotAllowlisted", string>;
 
 beforeAll(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), "pcc-attempts-gate-"));
@@ -37,6 +38,14 @@ beforeAll(async () => {
   process.env.PCC_DB_PATH = join(tmpDir, "pcc.sqlite");
   initStore({ seed: false });
   ({ adminObservabilityRoutes } = await import("../routes/admin-observability.js"));
+  // Provisioned once: an operator may hold at most 5 active keys.
+  keys = {
+    admin: provisionApiKey({ operatorId: ADMIN, scopes: ["admin"] }).rawKey,
+    limited: provisionApiKey({ operatorId: ADMIN, scopes: ["operator"] }).rawKey,
+    wildcard: provisionApiKey({ operatorId: ADMIN, scopes: ["*"] }).rawKey,
+    adminNotAllowlisted: provisionApiKey({ operatorId: "op-not-allowlisted", scopes: ["admin"] }).rawKey,
+    wildcardNotAllowlisted: provisionApiKey({ operatorId: "op-wildcard-not-allowlisted", scopes: ["*"] }).rawKey,
+  };
 });
 
 async function buildRealApp(): Promise<FastifyInstance> {
@@ -44,6 +53,8 @@ async function buildRealApp(): Promise<FastifyInstance> {
   await app.register(apiGate);
   await app.register(scopeChecker);
   await app.register(adminObservabilityRoutes);
+  // A one-segment admin route, which the old /api/admin/* rule already covered.
+  app.get("/api/admin/ping", async () => ({ ok: true }));
   await app.ready();
   return app;
 }
@@ -80,7 +91,7 @@ describe("GET /api/admin/observability/attempts — F4: real production gate cha
       });
 
       it("403s an admin-scoped key whose operator is NOT in PCC_OBSERVABILITY_ADMINS", async () => {
-        const { rawKey } = provisionApiKey({ operatorId: "op-not-allowlisted", scopes: ["admin"] });
+        const rawKey = keys.adminNotAllowlisted;
         const app = await buildRealApp();
         try {
           const res = await app.inject({
@@ -95,7 +106,7 @@ describe("GET /api/admin/observability/attempts — F4: real production gate cha
       });
 
       it("200s an admin-scoped, allowlisted operator", async () => {
-        const { rawKey } = provisionApiKey({ operatorId: ADMIN, scopes: ["admin"] });
+        const rawKey = keys.admin;
         const app = await buildRealApp();
         try {
           const res = await app.inject({
@@ -109,8 +120,8 @@ describe("GET /api/admin/observability/attempts — F4: real production gate cha
         }
       });
 
-      it("a valid key WITHOUT admin scope, operator allowlisted: documents the real scope-checker behavior for this nested route", async () => {
-        const { rawKey } = provisionApiKey({ operatorId: ADMIN, scopes: ["operator"] });
+      it("403s a key without admin scope, even for an allowlisted operator (#490: /api/admin/** covers nested routes)", async () => {
+        const rawKey = keys.limited;
         const app = await buildRealApp();
         try {
           const res = await app.inject({
@@ -118,28 +129,43 @@ describe("GET /api/admin/observability/attempts — F4: real production gate cha
             url: `/api/admin/observability/attempts${query}`,
             headers: { authorization: `Bearer ${rawKey}` },
           });
-          // See the repro file (467-followups-repro.md, F4) for the full
-          // explanation: scope-checker's DEFAULT_SCOPE_REQUIREMENTS entry for
-          // "/api/admin/*" compiles (via patternToRegex) to
-          // ^/api/admin/[^/]*(?:\?.*)?$ — a SINGLE wildcard segment. It does
-          // NOT match a nested path like /api/admin/observability/attempts
-          // (two segments after /api/admin/), so with an empty/default
-          // governance table (as in any fresh deployment or test store with
-          // no seeded endpointScopes rows) scope-checker finds no matching
-          // requirement for this route and allows ANY authenticated,
-          // non-money-path request through regardless of scope. The ONLY
-          // thing gating this route today is isObservabilityAdmin()'s own
-          // operatorId allowlist check inside admin-observability.ts, which
-          // the tests above confirm still fails closed correctly. Fixing the
-          // scope-checker pattern itself (e.g. "/api/admin/**") is outside
-          // this task's file scope (middleware/scope-checker.ts is not one
-          // of the three files this lane is allowed to touch) and is NOT
-          // done here — flagged instead for the operator.
-          expect(res.statusCode).toBe(200);
+          expect(res.statusCode).toBe(403);
+          expect(res.json().error).toBe("insufficient_scope");
+          // The default table's /api/admin/** rule decided, not the fallback default-deny.
+          expect(res.json().message).toMatch(/^This endpoint requires one of the following scopes: admin\./);
+        } finally {
+          await app.close();
+        }
+      });
+
+      it("leaves a wildcard (*) key to the route's own allowlist", async () => {
+        const allowed = keys.wildcard;
+        const other = keys.wildcardNotAllowlisted;
+        const app = await buildRealApp();
+        try {
+          const ok = await app.inject({ method: "GET", url: `/api/admin/observability/attempts${query}`, headers: { authorization: `Bearer ${allowed}` } });
+          const no = await app.inject({ method: "GET", url: `/api/admin/observability/attempts${query}`, headers: { authorization: `Bearer ${other}` } });
+          expect(ok.statusCode).toBe(200);
+          expect(no.statusCode).toBe(403);
+          expect(no.json().error).not.toBe("insufficient_scope");
         } finally {
           await app.close();
         }
       });
     });
   }
+});
+
+describe("one-segment admin routes behave as before", () => {
+  it("403s a key without admin scope and passes an admin-scoped key", async () => {
+    const limited = keys.limited;
+    const admin = keys.admin;
+    const app = await buildRealApp();
+    try {
+      expect((await app.inject({ method: "GET", url: "/api/admin/ping", headers: { authorization: `Bearer ${limited}` } })).statusCode).toBe(403);
+      expect((await app.inject({ method: "GET", url: "/api/admin/ping", headers: { authorization: `Bearer ${admin}` } })).statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
 });

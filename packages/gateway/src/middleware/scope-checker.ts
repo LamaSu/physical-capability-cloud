@@ -56,7 +56,8 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   // Verifier endpoints — attestations on specific jobs
   { method: "POST",   pattern: "/api/jobs/*/attestations/*",        scopes: ["verifier", "admin"] },
   // Admin endpoints — full access
-  { method: "*",      pattern: "/api/admin/*",                      scopes: ["admin"] },
+  // "**", so nested admin routes (/api/admin/observability/…) need admin too (#490).
+  { method: "*",      pattern: "/api/admin/**",                     scopes: ["admin"] },
   // Template author endpoints — publish templates
   { method: "POST",   pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin"] },
   { method: "PUT",    pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin"] },
@@ -257,6 +258,19 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     //     note on why the global flip is a separate, sweep-gated change).
     if (!matchedRequirement) {
       const path = req.url.split("?")[0];
+      // An admin route with no matching requirement needs the admin scope, for EVERY
+      // method: admin reads are the exposure, unlike the money path below. This also
+      // holds when endpoint_scopes rows replace the default table and carry no admin
+      // rule (#490, gateway #4899).
+      if (path.startsWith("/api/admin/") && !callerScopes.includes("admin")) {
+        return reply.status(403).send({
+          error: "insufficient_scope",
+          message: "Admin routes need the admin scope.",
+          required_scopes: ["admin"],
+          caller_scopes: callerScopes,
+          docs: "https://capability.network/whitepaper.md",
+        });
+      }
       // Default-deny covers MUTATING methods only. Money-path reads stay open
       // (the dashboard does GET /api/escrow, and no GET requirement covers it),
       // because the exposure being closed here is funds MOVEMENT. A read-side
