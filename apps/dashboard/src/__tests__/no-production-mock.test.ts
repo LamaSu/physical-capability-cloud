@@ -202,46 +202,129 @@ function testSources(): TestSource[] {
   return out;
 }
 
+/** Calls that render a React tree: render(), root.render(), renderPage(), renderToStaticMarkup(), renderToString() and the like, or mount(). */
+const RENDERER = /^(?:render\w*|mount)$/;
+
+function calleeName(call: ts.CallExpression): string {
+  const c = call.expression;
+  return ts.isIdentifier(c) ? c.text : ts.isPropertyAccessExpression(c) ? c.name.text : "";
+}
+
+/** A test that runs: the callback of it() or test(), with .each, .only or .concurrent, but not .skip or .todo. */
+function testCallback(call: ts.CallExpression): ts.Node | null {
+  let callee: ts.Expression = call.expression;
+  if (ts.isCallExpression(callee)) callee = callee.expression; // it.each(table)(name, fn)
+  const modifiers: string[] = [];
+  while (ts.isPropertyAccessExpression(callee)) {
+    modifiers.push(callee.name.text);
+    callee = callee.expression;
+  }
+  if (!ts.isIdentifier(callee) || (callee.text !== "it" && callee.text !== "test")) return null;
+  if (modifiers.some((m) => m === "skip" || m === "todo")) return null;
+  const fn = [...call.arguments].reverse().find((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a));
+  return fn ?? null;
+}
+
 /**
- * The pages a test renders and checks (astra 408d): it imports the page by a
- * relative path that resolves to that exact module, uses the imported
- * component (JSX, or createElement), and asserts something. A bare import,
- * an unused binding, or a file with no expect() renders nothing for anyone.
+ * The pages a test file renders and checks (astra 408d, 408g). A page counts
+ * only when a test that runs both:
+ * - calls expect() (a call, not the word in a comment);
+ * - invokes a renderer whose arguments contain the page's own component,
+ *   directly or through a helper in the file that the test calls.
+ * The page's component is its module's export named after the file
+ * (WalletPage in WalletPage.tsx), imported by name, by default, or as
+ * ns.WalletPage from a namespace import. Another export of the module, JSX in
+ * a function nothing calls, or a render in one test and an assertion in
+ * another, renders and checks nothing.
  */
 function pagesRenderedBy(test: TestSource): string[] {
-  if (!/\bexpect\s*\(/.test(test.text)) return [];
   const sf = ts.createSourceFile(test.path, test.text, ts.ScriptTarget.Latest, true, test.path.endsWith(".ts") ? ts.ScriptKind.TS : ts.ScriptKind.TSX);
-  // Every name used as a component: <Name …>, <ns.Name …>, createElement(Name, …).
-  const rendered = new Set<string>();
-  const visit = (n: ts.Node) => {
-    if (ts.isJsxOpeningElement(n) || ts.isJsxSelfClosingElement(n)) {
-      let tag: ts.Node = n.tagName;
-      while (ts.isPropertyAccessExpression(tag)) tag = tag.expression;
-      if (ts.isIdentifier(tag)) rendered.add(tag.text);
-    }
-    if (ts.isCallExpression(n) && n.arguments[0] && ts.isIdentifier(n.arguments[0])) {
-      const callee = n.expression;
-      const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
-      if (name === "createElement") rendered.add(n.arguments[0].text);
-    }
-    ts.forEachChild(n, visit);
-  };
-  visit(sf);
-  const out: string[] = [];
+  // How this file names each page's component: WalletPage, W (imported as), or page.WalletPage.
+  const components = new Map<string, string>();
   for (const stmt of sf.statements) {
     if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier) || !stmt.importClause) continue;
     const spec = stmt.moduleSpecifier.text;
     if (!spec.startsWith(".")) continue;
+    const page = posix.normalize(posix.join(posix.dirname(test.path), spec)).replace(/\.(js|jsx|ts|tsx)$/, "") + ".tsx";
+    const component = page.split("/").pop()!.replace(/\.tsx$/, "");
     const clause = stmt.importClause;
-    const names = [
-      ...(clause.name ? [clause.name.text] : []),
-      ...(clause.namedBindings && ts.isNamedImports(clause.namedBindings) ? clause.namedBindings.elements.map((e) => e.name.text) : []),
-      ...(clause.namedBindings && ts.isNamespaceImport(clause.namedBindings) ? [clause.namedBindings.name.text] : []),
-    ];
-    if (!names.some((name) => rendered.has(name))) continue;
-    out.push(posix.normalize(posix.join(posix.dirname(test.path), spec)).replace(/\.(js|jsx|ts|tsx)$/, "") + ".tsx");
+    if (clause.name) components.set(clause.name.text, page);
+    const bindings = clause.namedBindings;
+    if (bindings && ts.isNamedImports(bindings)) {
+      for (const el of bindings.elements) if ((el.propertyName ?? el.name).text === component) components.set(el.name.text, page);
+    }
+    if (bindings && ts.isNamespaceImport(bindings)) components.set(`${bindings.name.text}.${component}`, page);
   }
-  return out;
+  if (components.size === 0) return [];
+  const nameOf = (e: ts.Node): string =>
+    ts.isIdentifier(e) ? e.text : ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.expression) ? `${e.expression.text}.${e.name.text}` : "";
+  const each = (n: ts.Node, visit: (m: ts.Node) => void) => {
+    visit(n);
+    ts.forEachChild(n, (child) => each(child, visit));
+  };
+  /** The page components a subtree builds: JSX elements, or createElement(Component, …). */
+  const pagesIn = (n: ts.Node, out: Set<string>) =>
+    each(n, (m) => {
+      const name =
+        ts.isJsxOpeningElement(m) || ts.isJsxSelfClosingElement(m)
+          ? nameOf(m.tagName)
+          : ts.isCallExpression(m) && calleeName(m) === "createElement" && m.arguments[0]
+            ? nameOf(m.arguments[0])
+            : "";
+      const page = components.get(name);
+      if (page) out.add(page);
+    });
+  /** The pages the renderer calls inside a subtree render. */
+  const rendersIn = (n: ts.Node, out: Set<string>) =>
+    each(n, (m) => {
+      if (ts.isCallExpression(m) && RENDERER.test(calleeName(m))) for (const arg of m.arguments) pagesIn(arg, out);
+    });
+  const callsIn = (n: ts.Node): string[] => {
+    const out: string[] = [];
+    each(n, (m) => {
+      if (ts.isCallExpression(m) && ts.isIdentifier(m.expression)) out.push(m.expression.text);
+    });
+    return out;
+  };
+  // Helpers this file declares (function name() {} or const name = () => {}), by name.
+  const helpers = new Map<string, ts.Node[]>();
+  each(sf, (m) => {
+    const add = (name: string, body: ts.Node) => helpers.set(name, [...(helpers.get(name) ?? []), body]);
+    if (ts.isFunctionDeclaration(m) && m.name && m.body) add(m.name.text, m.body);
+    if (ts.isVariableDeclaration(m) && ts.isIdentifier(m.name) && m.initializer && (ts.isArrowFunction(m.initializer) || ts.isFunctionExpression(m.initializer))) {
+      add(m.name.text, m.initializer.body);
+    }
+  });
+  /** What a test's body renders: its own renderer calls, and those of the helpers it calls, transitively. */
+  const renders = (body: ts.Node): Set<string> => {
+    const out = new Set<string>();
+    const seen = new Set<string>();
+    const queue = [body];
+    while (queue.length) {
+      const n = queue.pop()!;
+      rendersIn(n, out);
+      for (const called of callsIn(n)) {
+        if (seen.has(called) || !helpers.has(called)) continue;
+        seen.add(called);
+        queue.push(...helpers.get(called)!);
+      }
+    }
+    return out;
+  };
+  const asserts = (body: ts.Node): boolean => {
+    let found = false;
+    each(body, (m) => {
+      if (ts.isCallExpression(m) && ts.isIdentifier(m.expression) && m.expression.text === "expect") found = true;
+    });
+    return found;
+  };
+  const covered = new Set<string>();
+  each(sf, (m) => {
+    if (!ts.isCallExpression(m)) return;
+    const body = testCallback(m);
+    if (body && asserts(body)) for (const page of renders(body)) covered.add(page);
+  });
+  return [...covered];
 }
 
 /** The pages no test renders and checks. A test given as text alone sits in pages/__tests__/. */
@@ -385,6 +468,7 @@ describe("no production mock (ratchet)", () => {
     ["JSX in a function nothing calls", 'import { ProbePage } from "../ProbePage.js";\nconst NeverCalled = () => <ProbePage />;\nit("x", () => {\n  expect(1).toBe(1);\n});'],
     ["another export of a namespace import", 'import * as page from "../ProbePage.js";\nit("x", () => {\n  render(<page.Helper />);\n  expect(text()).toContain("unavailable");\n});'],
     ["a render and an assertion in different tests", 'import { ProbePage } from "../ProbePage.js";\nit("a", () => {\n  render(<ProbePage />);\n});\nit("b", () => {\n  expect(1).toBe(1);\n});'],
+    ["a skipped test", 'import { ProbePage } from "../ProbePage.js";\nit.skip("x", () => {\n  render(<ProbePage />);\n  expect(text()).toContain("unavailable");\n});'],
   ])("the ratchet doesn't count %s (astra 408g MEDIUM)", (_what, test) => {
     expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test])).toEqual(["pages/ProbePage.tsx"]);
   });
