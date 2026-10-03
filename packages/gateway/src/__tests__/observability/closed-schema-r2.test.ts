@@ -1,6 +1,8 @@
 /**
  * N107b round 2 (cross-family review r1 of #538, rm-n107b-538-r1-1da7717e, DO-NOT-SHIP). Each
  * finding is reproduced here, and the rule that closes it is pinned:
+ *   CRITICAL 1  caller-controlled trace and span ids, and the dynamic sampling context, left
+ *               through Sentry unhashed;
  *   MEDIUM 2    a child logger's nested bindings passed the line check untouched;
  *   MEDIUM 3    trust came from a value's spelling or key: an ISO timestamp, a number under a
  *               metric-like key, or a value equal to one of the gateway's literals left raw;
@@ -8,6 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { Writable } from "node:stream";
 import Fastify from "fastify";
+import { propagation, ROOT_CONTEXT, type TextMapPropagator } from "@opentelemetry/api";
 
 const posthogCaptures = vi.hoisted(() => [] as unknown[]);
 vi.mock("posthog-node", () => ({
@@ -26,6 +29,10 @@ vi.mock("posthog-node", () => ({
 
 // Built at runtime, so no literal here looks like a secret or is one of the gateway's literals.
 const mark = (name: string) => ["n107b", "r2", name, "5c1e"].join("-");
+// Hex markers, valid as Sentry trace and span ids.
+const TRACE = ["c0de", "c0de", "c0de", "c0de", "c0de", "c0de", "c0de", "c0de"].join("");
+const SPAN = ["5ba1", "5ba1", "5ba1", "5ba1"].join("");
+const PARENT = ["fa11", "fa11", "fa11", "fa11"].join("");
 // A valid ISO timestamp no server would write now.
 const STAMP = ["2031-07-19T04", "23", "55.817Z"].join(":");
 // A number a caller chose.
@@ -51,6 +58,75 @@ const capture = () => {
   });
   return { lines, stream };
 };
+
+describe("CRITICAL 1: a caller's trace and span ids, and its sampling context, never leave raw", () => {
+  it("an error event, a transaction, its spans and a standalone span: ids are remapped, the sampling context is closed", () => {
+    const dsc = {
+      trace_id: TRACE, public_key: mark("public"), environment: mark("env"), release: mark("release"), org_id: mark("org"),
+      transaction: mark("txn"), sampled: "true", sample_rate: "0.0001", sample_rand: "0.5", user_segment: mark("segment"), replay_id: mark("replay"),
+    };
+    const server = { publicKey: "serverpublic", environment: "production", release: "gw-1", sampleRate: 1 };
+    const event = sinks.closedSentryEvent({
+      event_id: "e1",
+      contexts: { trace: { trace_id: TRACE, span_id: SPAN, parent_span_id: PARENT } },
+      sdkProcessingMetadata: { dynamicSamplingContext: dsc, normalizedRequest: { url: mark("url") } },
+    }, server) as Record<string, any>;
+    const transaction = sinks.closedSentryTransaction({
+      type: "transaction",
+      contexts: { trace: { trace_id: TRACE, span_id: SPAN, parent_span_id: PARENT } },
+      spans: [{ trace_id: TRACE, span_id: PARENT, parent_span_id: SPAN }],
+      sdkProcessingMetadata: { dynamicSamplingContext: dsc },
+    }, server) as Record<string, any>;
+    const span = sinks.closedSentrySpan({ trace_id: TRACE, span_id: SPAN, parent_span_id: PARENT, segment_id: SPAN }) as Record<string, any>;
+    const sent = JSON.stringify([event, transaction, span]);
+    for (const value of [TRACE, SPAN, PARENT, ...Object.values(dsc).filter((v) => v.startsWith("n107b")), "0.0001", mark("url")]) {
+      expect(sent, value).not.toContain(value);
+    }
+    // The tree still links up: one mapping, at Sentry's id lengths.
+    const trace = event.contexts.trace;
+    expect(trace.trace_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(trace.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(trace.parent_span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(transaction.contexts.trace.trace_id).toBe(trace.trace_id);
+    expect(transaction.spans[0].parent_span_id).toBe(trace.span_id);
+    expect(transaction.spans[0].span_id).toBe(trace.parent_span_id);
+    expect(span.span_id).toBe(trace.span_id);
+    expect(span.segment_id).toBe(trace.span_id);
+    // The envelope header's sampling context: the remapped trace id, the decision, the server's own values.
+    for (const header of [event.sdkProcessingMetadata, transaction.sdkProcessingMetadata]) {
+      expect(header).toEqual({
+        dynamicSamplingContext: { trace_id: trace.trace_id, public_key: "serverpublic", environment: "production", release: "gw-1", sample_rate: "1", sampled: "true" },
+      });
+    }
+  });
+
+  it("the registered propagator never reads a request's trace headers; outgoing propagation is unchanged", async () => {
+    const extracted: unknown[] = [];
+    const registered: TextMapPropagator = {
+      inject: (_context, carrier, setter) => setter.set(carrier, "sentry-trace", "outgoing"),
+      extract: (context, carrier) => {
+        extracted.push(carrier);
+        return context;
+      },
+      fields: () => ["sentry-trace", "baggage"],
+    };
+    propagation.disable();
+    propagation.setGlobalPropagator(registered);
+    try {
+      const { closeIncomingTraces } = await import("../../sentry.js");
+      expect(closeIncomingTraces()).toBe(true);
+      expect(closeIncomingTraces(), "a second call wraps nothing").toBe(false);
+      propagation.extract(ROOT_CONTEXT, { "sentry-trace": `${TRACE}-${SPAN}-1`, traceparent: `00-${TRACE}-${SPAN}-01`, baggage: `sentry-release=${mark("bg")}` });
+      expect(extracted, "the registered propagator sees a request with no trace headers").toEqual([{}]);
+      const carrier: Record<string, string> = {};
+      propagation.inject(ROOT_CONTEXT, carrier);
+      expect(carrier).toEqual({ "sentry-trace": "outgoing" });
+      expect(propagation.fields()).toEqual(["sentry-trace", "baggage"]);
+    } finally {
+      propagation.disable();
+    }
+  }, 60_000);
+});
 
 describe("MEDIUM 2: every field the call did not declare is closed on the line, a child logger's bindings included", () => {
   it("nested bindings, bindings that shadow the logger's own fields, and undeclared fields write no marker", async () => {

@@ -5,7 +5,9 @@
  *     over the serialized line closes whatever reached it any other way (a child logger's bindings);
  *   - closeConsole(): request-path console output (inside a request's scope) leaves closed too;
  *   - closedSentryEvent / closedSentryTransaction / closedSentrySpan / closedBreadcrumb: Sentry's
- *     outbound events are rebuilt from closed fields only (sentry.ts wires them).
+ *     outbound events are rebuilt from closed fields only, trace and span ids remapped under the
+ *     telemetry key and the envelope's sampling context rebuilt (sentry.ts wires them, and keeps
+ *     a request's trace headers from being continued at all).
  */
 import type { FastifyLogFn } from "fastify";
 import { hostname } from "node:os";
@@ -21,6 +23,7 @@ import {
   emitted,
   isDeclared,
   keyedHash,
+  keyedHexId,
   METHODS,
   requestScope,
   routeTemplateOf,
@@ -340,13 +343,16 @@ export function closedSpanData(data: unknown): Json | undefined {
   return out;
 }
 
+const traceId = (id: unknown) => keyedHexId(id, 32);
+const spanId = (id: unknown) => keyedHexId(id, 16);
+
 function closedTrace(trace: unknown): Json | undefined {
   const t = obj(trace);
   if (!t) return undefined;
   return {
-    trace_id: t.trace_id,
-    span_id: t.span_id,
-    parent_span_id: t.parent_span_id,
+    trace_id: traceId(t.trace_id),
+    span_id: spanId(t.span_id),
+    parent_span_id: spanId(t.parent_span_id),
     op: coded(t.op, SPAN_OPS),
     status: coded(t.status, SPAN_STATUSES),
     origin: coded(t.origin, ORIGINS),
@@ -364,8 +370,12 @@ function closedContexts(contexts: unknown): Json | undefined {
   return out;
 }
 
-/** What the server itself sets on every event: its tags. */
+/** What the server itself sets on every event: its DSN's public key, environment, release, sample rate and tags. */
 export interface SentryServerValues {
+  publicKey?: string;
+  environment?: string;
+  release?: string;
+  sampleRate?: number;
   /** Tags the server set (initialScope), each with the one value it set. */
   tags?: Readonly<Record<string, string>>;
 }
@@ -380,6 +390,30 @@ function closedTags(tags: unknown, server: SentryServerValues): Json | undefined
     else out[keyedHash(key)] = closeValue(value);
   }
   return out;
+}
+
+/**
+ * The envelope header's dynamic sampling context, rebuilt from closed values only: the event's own
+ * trace id as remapped (the SDK can take an error event's context from the scope's propagation
+ * context while its trace context comes from the active span; the header now names the event's
+ * trace), the sampling decision, and what the server set (public key, environment, release,
+ * sample rate). A caller's baggage members (release, transaction, segment, replay, org) never
+ * reach it. Sentry reads it from sdkProcessingMetadata after beforeSend and beforeSendTransaction
+ * (@sentry/core: _processEvent, then sendEvent, then createEventEnvelope), and the rest of
+ * sdkProcessingMetadata never leaves the process.
+ */
+function closedSamplingContext(meta: unknown, trace: Json | undefined, server: SentryServerValues): Json {
+  const dsc = obj(obj(meta)?.dynamicSamplingContext);
+  if (!dsc) return {};
+  const out: Json = {};
+  const id = (typeof trace?.trace_id === "string" ? trace.trace_id : undefined) ?? traceId(dsc.trace_id);
+  if (id) out.trace_id = id;
+  if (server.publicKey) out.public_key = server.publicKey;
+  if (server.environment) out.environment = server.environment;
+  if (server.release) out.release = server.release;
+  if (typeof server.sampleRate === "number" && Number.isFinite(server.sampleRate)) out.sample_rate = String(server.sampleRate);
+  if (dsc.sampled === "true" || dsc.sampled === "false") out.sampled = dsc.sampled;
+  return { dynamicSamplingContext: out };
 }
 
 /** A breadcrumb: its type, category and level from Sentry's vocabularies, and its time. Its message and data never leave. */
@@ -421,8 +455,9 @@ function closedException(value: unknown): Json {
   };
 }
 
-/** The fields every Sentry event keeps: identity, time, platform, its trace and the SDK's own metadata. */
-function envelopeFields(e: Json): Json {
+/** The fields every Sentry event keeps: identity, time, platform and the SDK's own metadata. */
+function envelopeFields(e: Json, server: SentryServerValues): Json {
+  const contexts = closedContexts(e.contexts);
   return {
     event_id: e.event_id,
     timestamp: e.timestamp,
@@ -433,14 +468,14 @@ function envelopeFields(e: Json): Json {
     release: e.release,
     dist: e.dist,
     sdk: e.sdk,
-    contexts: closedContexts(e.contexts),
-    sdkProcessingMetadata: e.sdkProcessingMetadata,
+    contexts,
+    sdkProcessingMetadata: closedSamplingContext(e.sdkProcessingMetadata, obj(contexts?.trace), server),
   };
 }
 
 /**
  * An error event rebuilt from closed fields: the exception's class, its message as a keyed hash and
- * its code frames; the trace context; closed tags and extra; breadcrumbs as their
+ * its code frames; the trace context, its ids remapped; closed tags and extra; breadcrumbs as their
  * kind only. No request, user, server name, module list or context beyond the trace and runtime.
  */
 export function closedSentryEvent<T extends object>(event: T, server: SentryServerValues = {}): T {
@@ -448,7 +483,7 @@ export function closedSentryEvent<T extends object>(event: T, server: SentryServ
   const exception = obj(e.exception);
   const message = typeof e.message === "string" ? e.message : obj(e.message)?.formatted;
   return {
-    ...envelopeFields(e),
+    ...envelopeFields(e, server),
     exception: exception && Array.isArray(exception.values) ? { values: exception.values.map(closedException) } : undefined,
     message: typeof message === "string" ? closedText(message) : undefined,
     transaction: closedName(e.transaction),
@@ -459,14 +494,14 @@ export function closedSentryEvent<T extends object>(event: T, server: SentryServ
   } as unknown as T;
 }
 
-/** A span (a transaction's child, or a standalone span): ids, times, its op and closed data. */
+/** A span (a transaction's child, or a standalone span): ids remapped, times, its op and closed data. */
 export function closedSentrySpan<T extends object>(span: T): T {
   const s = span as Json;
   return {
-    span_id: s.span_id,
-    trace_id: s.trace_id,
-    parent_span_id: s.parent_span_id,
-    segment_id: s.segment_id,
+    span_id: spanId(s.span_id),
+    trace_id: traceId(s.trace_id),
+    parent_span_id: spanId(s.parent_span_id),
+    segment_id: spanId(s.segment_id),
     start_timestamp: s.start_timestamp,
     timestamp: s.timestamp,
     exclusive_time: s.exclusive_time,
@@ -485,7 +520,7 @@ export function closedSentryTransaction<T extends object>(event: T, server: Sent
   const e = event as Json;
   const info = obj(e.transaction_info);
   return {
-    ...envelopeFields(e),
+    ...envelopeFields(e, server),
     type: e.type,
     transaction: closedName(e.transaction),
     transaction_info: info ? { source: coded(info.source, SOURCES) } : undefined,

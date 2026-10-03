@@ -37,6 +37,15 @@ export function keyedHash(value: unknown): string {
   return "h:" + createHmac("sha256", KEY).update(text).digest("hex").slice(0, 32);
 }
 
+/**
+ * A trace or span id as Sentry may carry it: lowercase hex of the same length, keyed under the
+ * server secret. One id always maps to one id, so a trace tree still links up.
+ */
+export function keyedHexId(id: unknown, length: 16 | 32): string | undefined {
+  if (typeof id !== "string" || id === "") return undefined;
+  return createHmac("sha256", KEY).update(`sentry-id:${length}:${id}`).digest("hex").slice(0, length);
+}
+
 // ── Declared fields ────────────────────────────────────────────────────────
 
 type Emitted = string | number | boolean | null;

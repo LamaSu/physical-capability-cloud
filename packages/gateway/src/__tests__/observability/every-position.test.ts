@@ -9,11 +9,12 @@
  *   handlers:  a forced 500 (Sentry, the error log, the write audit), request-path console output,
  *              the security monitor's honeypot, provision (PostHog and audit producers), a 404,
  *              a route with a path parameter, and the payment stats;
- *   sinks:     the Sentry envelope (a capture transport under the gateway's own Sentry options),
- *              the gateway's log stream, stdout and stderr, every audit row, and PostHog
- *              (posthog-node mocked, so the gateway's own posthog-service runs).
- * Round 2 (cross-family review r1 of #538) adds a valid timestamp and a gateway literal as request
- * values.
+ *   sinks:     the Sentry envelope (a capture transport under the gateway's own Sentry options
+ *              and init path), the gateway's log stream, stdout and stderr, every audit row, and
+ *              PostHog (posthog-node mocked, so the gateway's own posthog-service runs).
+ * Round 2 (cross-family review r1 of #538) adds the trace headers a caller may send (sentry-trace,
+ * traceparent, baggage), a valid timestamp and a gateway literal as request values, and checks
+ * that Sentry does not continue the caller's trace at all.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import http from "node:http";
@@ -71,8 +72,13 @@ vi.setConfig({ testTimeout: 120_000 });
 
 // Every marker is built at runtime, so no literal here looks like a secret or is a gateway literal.
 const mark = (name: string) => ["n107b", "ep", name, "6d2a"].join("-");
-// Round 2 (cross-family review r1 of #538): a valid ISO timestamp no server writes now, and a
-// string the gateway's own source contains.
+// Round 2 (cross-family review r1 of #538): hex markers valid as trace and span ids, a valid ISO
+// timestamp no server writes now, and a string the gateway's own source contains.
+const hex = (unit: string, times: number) => Array.from({ length: times }, () => unit).join("");
+const TRACE = hex("c0de", 8);
+const SPAN = hex("5ba1", 4);
+const W3C_TRACE = hex("beef", 8);
+const W3C_SPAN = hex("d00d", 4);
 const STAMP = ["2031-07-19T04", "23", "55.817Z"].join(":");
 const GATEWAY_LITERAL = "[payment-gate] MPP payment check error — blocking request";
 const DSN = "https://public@o0.ingest.sentry.io/0";
@@ -107,12 +113,16 @@ beforeAll(async () => {
   process.env.PCC_ADMIN_KEY = ["n107b", "ep", "admin"].join("-");
   process.env.MOCK_SETTLEMENT = "true";
   process.env.POSTHOG_API_KEY = ["n107b", "ep", "posthog"].join("-");
-  // The gateway's own Sentry options; only the transport is a capture. Dedupe is off, so the
-  // gateway's own capture is not hidden behind the SDK's capture of the same error.
+  // The gateway's own Sentry options and init path; only the transport is a capture. Dedupe is off,
+  // so the gateway's own capture is not hidden behind the SDK's capture of the same error.
   // The gateway's own options; before N107b there were none, only master's defaults (the reproduction).
-  const sentryModule = (await import("../../sentry.js")) as { sentryOptions?: (dsn: string) => Sentry.NodeOptions };
+  const sentryModule = (await import("../../sentry.js")) as {
+    sentryOptions?: (dsn: string) => Sentry.NodeOptions;
+    startSentry?: (options: Sentry.NodeOptions) => void;
+  };
   const options: Sentry.NodeOptions = sentryModule.sentryOptions ? sentryModule.sentryOptions(DSN) : { dsn: DSN, tracesSampleRate: 1.0 };
-  Sentry.init({
+  const start = sentryModule.startSentry ?? ((o: Sentry.NodeOptions) => void Sentry.init(o));
+  start({
     ...options,
     integrations: (defaults) => {
       const own = typeof options.integrations === "function" ? options.integrations(defaults) : defaults;
@@ -183,7 +193,9 @@ describe("N107b: a marker in every request position reaches no sink and no conso
       xff: mark("xff"), auth: mark("auth"), cookie: mark("cookie"), reqId: mark("reqid"), custom: mark("custom"),
       json: mark("json"), prose: mark("prose"), form: mark("form"), email: mark("email"), name: mark("name"),
       capability: mark("capability"), consoleQuery: mark("consolequery"), notFound: mark("notfound"),
-      stamp: STAMP, literal: GATEWAY_LITERAL,
+      traceId: TRACE, spanId: SPAN, w3cTrace: W3C_TRACE, w3cSpan: W3C_SPAN, baggageRelease: mark("bgrelease"),
+      baggageTxn: mark("bgtxn"), baggageSegment: mark("bgsegment"), baggageOther: mark("bgother"), stamp: STAMP,
+      literal: GATEWAY_LITERAL,
     };
     const headers = {
       "user-agent": `ordinary-client ${m.ua}`,
@@ -194,12 +206,19 @@ describe("N107b: a marker in every request position reaches no sink and no conso
       cookie: `zq=${m.cookie}`,
       "request-id": m.reqId,
       "x-n107b-zq": m.custom,
+      // Distributed tracing headers a caller may send (round 2, CRITICAL 1).
+      "sentry-trace": `${m.traceId}-${m.spanId}-1`,
+      traceparent: `00-${m.w3cTrace}-${m.w3cSpan}-01`,
+      baggage: `sentry-trace_id=${m.traceId},sentry-public_key=public,sentry-release=${m.baggageRelease},sentry-transaction=${m.baggageTxn},sentry-user_segment=${m.baggageSegment},zq=${m.baggageOther}`,
     };
     const json = JSON.stringify({ password: m.json, zq: m.json, note: `the caller writes ${m.prose}` });
 
     // A forced 500: Sentry, the error log and the write audit.
     const failed = await request("POST", `/n107b-ep/throws?zq1=${m.query}&code=${m.code}#zq2=${m.fragment}`, { ...headers, "content-type": "application/json" }, json);
     expect(failed.status).toBe(500);
+    // A second forced 500 with the same trace headers: continued, it would join the first's trace.
+    const again = await request("POST", "/n107b-ep/throws", { ...headers, "content-type": "application/json" }, json);
+    expect(again.status).toBe(500);
     // A form body to the same route.
     await request("POST", "/n107b-ep/throws", { ...headers, "content-type": "application/x-www-form-urlencoded" }, `zq=${m.form}&code=${m.form}`);
     // Request-path console output.
@@ -240,5 +259,26 @@ describe("N107b: a marker in every request position reaches no sink and no conso
     );
     expect(found).toEqual({ sentry: [], log: [], console: [], audit: [], posthog: [] });
 
+    // Round 2, CRITICAL 1: Sentry does not continue the caller's trace, even remapped. Each event's
+    // envelope header carries a sampling context of closed members only, for the event's own trace.
+    const { keyedHash, keyedHexId } = await import("../../observability/closed-schema.js");
+    const events = sentryBodies.flatMap((body) => {
+      const lines = body.split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, any>);
+      const out: Array<{ header: Record<string, any>; type: string; item: Record<string, any> }> = [];
+      for (let i = 1; i + 1 < lines.length; i += 2) out.push({ header: lines[0]!, type: lines[i]!.type, item: lines[i + 1]! });
+      return out;
+    });
+    const traced = events.filter((e) => e.type === "event" || e.type === "transaction");
+    expect(traced.length, "events and transactions were sent").toBeGreaterThan(0);
+    for (const { header, item } of traced) {
+      expect(item.contexts.trace.trace_id).toMatch(/^[0-9a-f]{32}$/);
+      expect(item.contexts.trace.trace_id, "the caller's trace is not continued").not.toBe(keyedHexId(TRACE, 32));
+      if (header.trace) {
+        expect(header.trace.trace_id).toBe(item.contexts.trace.trace_id);
+        for (const key of Object.keys(header.trace)) expect(["trace_id", "public_key", "environment", "release", "sample_rate", "sampled"]).toContain(key);
+      }
+    }
+    const failures = traced.filter((e) => e.type === "event" && e.item.exception?.values?.[0]?.value === keyedHash("n107b forced failure"));
+    expect(new Set(failures.map((e) => e.item.contexts.trace.trace_id)).size, "the two forced 500s, sent with the same sentry-trace, are two traces").toBeGreaterThanOrEqual(2);
   });
 });
