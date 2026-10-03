@@ -55,3 +55,76 @@ describe("#562 r1 F1 reproduced (verify before fix): a wildcard response is the 
     for (const k of Object.keys(body)) expect(["items", "total", "offset", "limit", "hasMore", "asOf"]).toContain(k);
   });
 });
+
+describe("the fix (#562 r2): the projection is the only cross-origin body; everything else is unchanged", () => {
+  it("allowlisted origins and no-Origin requests still get the RAW body (#562 changes only cross-origin wildcard responses)", async () => {
+    // The raw anonymous body still carries the DLP fields for non-browser clients: that is the
+    // pre-existing server-side DLP gap, reported to the gateway (steward #6101), not #562's to change.
+    for (const headers of [{ origin: "https://capability.network" }, {}] as Array<Record<string, string>>) {
+      const body = (await app.inject({ method: "GET", url: "/api/kernels", headers })).json();
+      expect(Object.keys(body.kernels[0])).toContain("capabilityTypes"); // a raw-only field: the body is not projected
+    }
+  });
+
+  it("an auth-gated IR route answers an unknown origin with its status and an EMPTY body, nothing else", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/jobs", headers: { origin: UNKNOWN } });
+    expect(res.statusCode).toBe(401);
+    expect(res.headers["access-control-allow-origin"]).toBe("*");
+    expect(res.body).toBe("{}");
+  });
+
+  it("a CORS preflight stays a bodiless 204 (the projection only rewrites GETs)", async () => {
+    const res = await app.inject({ method: "OPTIONS", url: "/api/capabilities", headers: { origin: UNKNOWN, "access-control-request-method": "GET" } });
+    expect(res.statusCode).toBe(204);
+    expect(res.body).toBe("");
+  });
+
+  it("the closed IR still renders real rows from the projection (no row fails closed)", async () => {
+    const { listRowsOf, LIST_PROFILES } = await import("../mcp/dashboard-ir.js");
+    const { bindListRows, listRowsReadable, UNAVAILABLE } = await import("../mcp/dashboard-ir-renderer.js");
+    type El = { textContent: string; className: string; children: El[]; setAttr: (n: string, v: string) => void; appendChild: (c: El) => El };
+    const doc = { createElement(): El { const e: El = { textContent: "", className: "", children: [], setAttr() {}, appendChild(c) { e.children.push(c); return c; } }; return e; } };
+    const leaves = (e: El): string[] => [e.textContent, ...e.children.flatMap(leaves)].filter((t) => t !== "");
+    for (const path of ["/api/capabilities", "/api/kernels"]) {
+      const body = (await app.inject({ method: "GET", url: path, headers: { origin: UNKNOWN } })).json();
+      const rows = listRowsOf(path, body);
+      expect(rows && rows.length, path).toBeGreaterThan(0);
+      const prof = LIST_PROFILES[path]!;
+      const node = { type: "list", id: "n1", props: { rowTitle: prof.title[0], rowMeta: [...prof.meta], statusFrom: prof.status[0] }, bind: { path } } as any;
+      expect(listRowsReadable(node, rows!), path).toBe(true);
+      const el = doc.createElement();
+      bindListRows(doc as any, el as any, node, rows!, body);
+      expect(el.children.filter((c) => c.className === "pcc-row").length, path).toBe(rows!.length);
+      expect(leaves(el), path).not.toContain(UNAVAILABLE);
+    }
+  });
+});
+
+describe("projectIrRead (unit)", () => {
+  it("an unknown path or a non-object body projects to {}", async () => {
+    const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
+    expect(projectIrRead("/api/keys", { a: 1 })).toEqual({});
+    expect(projectIrRead("/api/capabilities", [1, 2])).toEqual({});
+    expect(projectIrRead("/api/capabilities", null)).toEqual({});
+  });
+  it("copies only primitive leaves by own-property paths; object leaves, inherited and prototype keys are dropped", async () => {
+    const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
+    const inherited = Object.create({ name: "inherited" });
+    const out = projectIrRead("/api/capabilities", {
+      items: [{ name: "A", id: "cap-1", type: "t", kernelId: "k-1", available: true, location: { lat: 1.2345, lng: 2.3456 }, operatorAddress: "0x1" }, inherited, 7],
+      total: 3, offset: 0, limit: 50, hasMore: false, asOf: "2026-10-03T00:00:00.000Z", secret: "x", __proto__: { polluted: 1 },
+    } as any);
+    expect(out).toEqual({ items: [{ name: "A", id: "cap-1", type: "t", kernelId: "k-1", available: true }, {}, {}], total: 3, offset: 0, limit: 50, hasMore: false, asOf: "2026-10-03T00:00:00.000Z" });
+  });
+  it("a PROFILE field whose value is an object is dropped whole (it could carry fields the IR never reads)", async () => {
+    const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
+    expect(projectIrRead("/api/capabilities", { items: [{ name: { physicalAddress: "x" }, id: "c-1" }] })).toEqual({ items: [{ id: "c-1" }] });
+  });
+  it("a capability detail keeps exactly its card fields; a kernel detail exactly its metric sources", async () => {
+    const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
+    expect(projectIrRead("/api/capabilities/Cap1", { name: "A", type: "t", pricing: { baseCost: "5", currency: "USDC", secretRate: 9 }, assuranceTiers: [0, 1], available: true, location: { lat: 1 }, physicalAddress: "x" }))
+      .toEqual({ name: "A", type: "t", pricing: { baseCost: "5", currency: "USDC" }, assuranceTiers: [0, 1], available: true });
+    expect(projectIrRead("/api/kernels/K1", { kernel: { status: "online", reputation: 5, operatorAddress: "0x1", location: { lat: 1 }, physicalAddress: "x" }, asOf: "2026-10-03T00:00:00.000Z" }))
+      .toEqual({ kernel: { status: "online", reputation: 5 }, asOf: "2026-10-03T00:00:00.000Z" });
+  });
+});

@@ -137,7 +137,7 @@ import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
-import { corsDelegator, securityHeaders } from "./middleware/security-hardening.js";
+import { corsDelegator, irCorsReadProjection, securityHeaders } from "./middleware/security-hardening.js";
 import { rateLimiter } from "./middleware/rate-limiter.js";
 import { dlpRedactor } from "./middleware/dlp-redactor.js";
 import { scopeChecker } from "./middleware/scope-checker.js";
@@ -291,6 +291,9 @@ export async function createGateway(port = 3200) {
   // Per request (corsDelegator): the credentialed allowlist exactly as before, plus credential-less
   // GET access to the closed IR's public read routes for the governed GenUI view (row 37).
   await app.register(cors, { delegator: corsDelegator });
+  // ...and such a wildcard response is the server-side IR projection, never the raw body
+  // (astra #562 r1 F1). This is a ROOT hook, so it wraps every route registered below.
+  app.addHook("onSend", irCorsReadProjection);
 
   // Security response headers (X-Frame-Options, CSP, HSTS, etc.)
   await securityHeaders(app);
