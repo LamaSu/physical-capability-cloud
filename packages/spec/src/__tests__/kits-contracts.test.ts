@@ -673,14 +673,14 @@ describe("astra pack 112b", () => {
   });
 
   it("the built-in public set is exactly the CSDs compiled into @pcc/spec, sorted by code unit and frozen", () => {
-    // Pinned: the 8 CSDs this branch's loadBuiltinCsds registers. Master's registers a 9th,
-    // pcc://capabilities/document-print-and-mail/v1 (2d808180, board N64), which this branch lacks. The set
-    // follows the registry, so when this branch merges master this pin fails by design: add that url here, in
-    // sorted position, in the same commit.
+    // Pinned: the 9 CSDs loadBuiltinCsds registers. The set follows the registry, so a new built-in CSD
+    // fails this pin by design: add its url here, in sorted position, in the same commit (as
+    // document-print-and-mail/v1 was when this branch merged master, which registers it since 2d808180).
     expect([...BUILTIN_PUBLIC_CAPABILITY_URLS]).toEqual([
       "pcc://capabilities/2d-print/v1",
       "pcc://capabilities/cnc-3axis/v2",
       "pcc://capabilities/courier-route/v1",
+      "pcc://capabilities/document-print-and-mail/v1",
       "pcc://capabilities/fdm/v2",
       "pcc://capabilities/hot-food-prep/v1",
       "pcc://capabilities/laser-cut/v2",

@@ -83,7 +83,7 @@ jobs:
   # — build once, deploy many.
   build-image:
     runs-on: ubuntu-latest
-    needs: [build-and-test, forge-tests]
+    needs: [build-and-test, forge-tests, scripts-python-tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     permissions:
       contents: read
@@ -118,15 +118,45 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push
+      # N5: build ONCE into the runner, CHECK that image, then push that same image (no second
+      # build). It must record this commit AND the digest of this checkout's source
+      # (scripts/source-digest.sh, computed in the Dockerfile right after COPY . .). A mismatch
+      # fails the job, so no image whose /api/health would misreport its source reaches GHCR.
+      - name: Build (loaded into the runner; checked before it is pushed)
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          load: true
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PCC_BUILD_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Check the image's recorded commit and source digest (N5)
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -eu
+          image="$(printf '%s\n' "$TAGS" | grep -m1 ":${GITHUB_SHA}\$")"
+          info="$(docker run --rm --entrypoint cat "$image" /app/BUILD_INFO.json)"
+          echo "BUILD_INFO.json: $info"
+          expected="$(sh scripts/source-digest.sh .)"
+          echo "checkout source digest: $expected"
+          printf '%s' "$info" | jq -e --arg c "$GITHUB_SHA" --arg d "$expected" \
+            '.commit == $c and .buildArg == "PCC_BUILD_SHA" and .sourceDigest == $d and .sourceDigestSpec == "pcc.source-digest/v1"' >/dev/null \
+            || { echo "::error::the image does not record this commit and this checkout's source digest"; exit 1; }
+
+      - name: Push the checked image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -eu
+          printf '%s\n' "$TAGS" | while read -r tag; do
+            [ -n "$tag" ] && docker push "$tag"
+          done
 
   # Retag the SHA image as `staging` (no rebuild).
   # Railway's staging environment watches ghcr.io/<repo>:staging and
@@ -228,3 +258,23 @@ jobs:
   # workflow_dispatch trigger. That "click to run" is our manual gate:
   # GitHub Free + private repos can't enforce required-reviewer rules on
   # environments, but a manual dispatch requires the same human intent.
+
+  # Board row N4a: the OT-2 executor start guard. Stdlib-only tests: no install step.
+  # Several Pythons, because ipaddress parsing changed between them (leading zeros,
+  # IPv6 zone ids); 3.10 is what current OT-2 robot software runs.
+  scripts-python-tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: OT-2 executor start-guard tests
+        run: python -m unittest -v scripts/test_ot2_executor_guard.py
