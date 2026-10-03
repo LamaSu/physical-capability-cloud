@@ -50,6 +50,7 @@ import { tenantOpts } from "../config/tenant-enforce.js";
 import {
   JOB_READ_REFUSAL,
   decideJobRead,
+  hasValidAdminKey,
   jobReadCallerOf,
   jobReaderOf,
   jobsReadableBy,
@@ -111,6 +112,19 @@ export function gateJobRecordRead(req: FastifyRequest, jobIdOfRecord: () => stri
   const gate = gateJobRead(req, jobId ?? "");
   if (!jobId && gate.ok) return { ok: false, kind: "not_found" };
   return gate;
+}
+
+/**
+ * The settlement oracle's read credential for evidence envelopes (cross-family review r2 of
+ * #441): true only when PCC_VERIFIER_READ_KEY is set to at least 32 characters and the request's
+ * X-Verifier-Key header equals it (constant-time). It reads an envelope by its hash and nothing
+ * else: it is not an identity, so every other route treats a request carrying it as having no
+ * credential. Unset, it grants nothing.
+ */
+export function hasValidVerifierReadKey(req: { headers: Record<string, unknown> }): boolean {
+  const expected = process.env.PCC_VERIFIER_READ_KEY;
+  if (typeof expected !== "string" || expected.length < 32) return false;
+  return hasValidAdminKey(req.headers["x-verifier-key"], expected);
 }
 
 /** TENANT_ENFORCE's rule, as the gate has applied it since #353: a tenant-less job matches only a tenant-less caller. */

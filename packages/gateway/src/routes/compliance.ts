@@ -20,7 +20,14 @@ import type { Result } from "@pcc/spec";
 import type { VerificationAttestation } from "@pcc/spec";
 import { getComplianceFacade } from "../facades/index.js";
 import { getRepos } from "../db.js";
-import { gateJobRead, gateJobRecordRead, refuseJobRead } from "../readmodels/job-read-gate.js";
+import {
+  gateJobRead,
+  gateJobRecordRead,
+  jobReadScopeOf,
+  kernelScopeOf,
+  refuseJobRead,
+  scopeAllows,
+} from "../readmodels/job-read-gate.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 //
@@ -58,7 +65,18 @@ export async function complianceRoutes(app: FastifyInstance) {
   app.get<{ Params: { capabilityId: string } }>(
     "/api/capabilities/:capabilityId/compliance",
     async (req, reply) => {
-      const result = await facade.generateComplianceReport(req.params.capabilityId);
+      // The report is computed from the kernel's job evidence (cross-family review r2 of #441,
+      // CRITICAL), so it follows the job read rule. Identity first: no credential is 401 and no
+      // proven wallet 403. An admin without a tenant and the kernel's operator get the report over
+      // all of the kernel's recent evidence; anyone else, over the bundles of jobs it may read.
+      const scope = jobReadScopeOf(req);
+      if (!scope.ok) return refuseJobRead(reply, scope);
+      const kernels = kernelScopeOf(req);
+      if (!kernels.ok) return refuseJobRead(reply, kernels);
+      const result = await facade.generateComplianceReport(req.params.capabilityId, undefined, {
+        readsKernel: (kernelId) => scope.jobIds === null || (kernels.kernels !== null && kernels.kernels.has(kernelId)),
+        readsJob: (jobId) => scopeAllows(scope, jobId),
+      });
       return sendResult(reply, result);
     },
   );

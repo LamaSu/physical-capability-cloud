@@ -33,6 +33,7 @@ import type {
   AgentRole,
   PopulationContext,
   CaptureVerificationSummaryDTO,
+  ComplianceReportAccess,
 } from "./types.js";
 import {
   populateEvidenceSummaryDTO,
@@ -187,6 +188,7 @@ export class ComplianceFacade extends BaseFacade {
   async generateComplianceReport(
     capabilityId: string,
     _ctx?: Partial<PopulationContext>,
+    access?: ComplianceReportAccess,
   ): Promise<Result<ComplianceReportDTO>> {
     return this.execute("generateComplianceReport", async () => {
       const capability = this.repos.capabilities.findById(capabilityId);
@@ -194,9 +196,14 @@ export class ComplianceFacade extends BaseFacade {
 
       const kernelId: string = capability.kernelId;
 
-      // Load up to 20 recent bundles for this kernel
+      // Load up to 20 recent bundles for this kernel, of the evidence this caller may read
+      // (cross-family review r2 of #441, CRITICAL): every input below (events, capture verdicts,
+      // drift, the evidence list) comes from these bundles only. Without an access rule (an
+      // internal caller) the report covers all of the kernel's evidence.
       const allKernelBundles = this.repos.evidence.findByKernel(kernelId) as RawEvidenceBundle[];
-      const recentBundles = allKernelBundles
+      const wholeKernel = !access || access.readsKernel(kernelId);
+      const bundlesInScope = wholeKernel ? allKernelBundles : allKernelBundles.filter((b) => access.readsJob(b.jobId));
+      const recentBundles = bundlesInScope
         .slice()
         .sort(
           (a, b) =>
@@ -287,6 +294,8 @@ export class ComplianceFacade extends BaseFacade {
         tierCompliance,
         recentEvidence,
         driftAlerts,
+        evidenceScope: wholeKernel ? "all" : "readable_by_caller",
+        bundlesConsidered: bundlesWithEvents.length,
         assuranceScore,
       };
       if (captureVerification) {

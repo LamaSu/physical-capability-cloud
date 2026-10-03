@@ -265,6 +265,16 @@ export interface ALCOAStatus {
   available: boolean;
 }
 
+/**
+ * Which of a kernel's evidence a compliance report may use, for one caller (review r2 of #441).
+ * readsKernel: the caller may read all of the kernel's evidence (an admin without a tenant, or the
+ * kernel's operator). Otherwise readsJob decides per bundle, by the bundle's job.
+ */
+export interface ComplianceReportAccess {
+  readsKernel(kernelId: string): boolean;
+  readsJob(jobId: string | null | undefined): boolean;
+}
+
 export interface ComplianceReportDTO {
   capabilityId: Id;
   kernelId: Id;
@@ -278,6 +288,15 @@ export interface ComplianceReportDTO {
   recentEvidence: EvidenceSummaryDTO[];
   /** Drift detection results (telemetry vs CWM expected) */
   driftAlerts: DriftAlertDTO[];
+  /**
+   * Whose evidence the report is computed from (cross-family review r2 of #441): "all" of the
+   * kernel's recent bundles, for an admin or the kernel's operator; or only the bundles of jobs
+   * the caller may read ("readable_by_caller"). No part of the report comes from evidence the
+   * caller may not read.
+   */
+  evidenceScope: "all" | "readable_by_caller";
+  /** How many bundles' events fed ALCOA+, tier compliance and drift: the 5 most recent in scope. */
+  bundlesConsidered: number;
   /** Assurance score rollup in [0.0, 1.0] — compressed compliance scalar */
   assuranceScore?: number;
   /**
