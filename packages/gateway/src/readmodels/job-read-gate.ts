@@ -327,16 +327,28 @@ export interface RecordBindings {
  * MAX_DEPTH, is malformed: the filter then keeps the record only for an unscoped admin.
  */
 export function recordBindingsOf(record: unknown): RecordBindings {
+  return walkBindings(record).bound;
+}
+
+/** One object of a record, with the batches and slots that object names itself. */
+interface BindingNode {
+  root: boolean;
+  batches: string[];
+  slots: string[];
+}
+
+function walkBindings(record: unknown): { bound: RecordBindings; nodes: BindingNode[] } {
   const out: RecordBindings = { jobs: [], kernels: [], slots: [], batches: [], malformed: false };
+  const nodes: BindingNode[] = [];
   const seen = new WeakSet<object>();
-  const one = (value: unknown, into: string[]) => {
+  const one = (value: unknown, ...into: string[][]) => {
     if (value === undefined || value === null) return;
-    if (typeof value === "string" && value.trim() !== "") into.push(value);
+    if (typeof value === "string" && value.trim() !== "") into.forEach((list) => list.push(value));
     else out.malformed = true;
   };
-  const many = (value: unknown, into: string[]) => {
+  const many = (value: unknown, ...into: string[][]) => {
     if (value === undefined || value === null) return;
-    if (Array.isArray(value)) value.forEach((v) => one(v, into));
+    if (Array.isArray(value)) value.forEach((v) => one(v, ...into));
     else out.malformed = true;
   };
   const walk = (value: unknown, depth: number) => {
@@ -351,20 +363,22 @@ export function recordBindingsOf(record: unknown): RecordBindings {
       for (const item of value) walk(item, depth + 1);
       return;
     }
+    const node: BindingNode = { root: depth === 0, batches: [], slots: [] };
+    nodes.push(node);
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
       if (JOB_KEY.test(key)) one(child, out.jobs);
       else if (JOB_LIST_KEY.test(key)) many(child, out.jobs);
       else if (KERNEL_KEY.test(key)) one(child, out.kernels);
       else if (KERNEL_LIST_KEY.test(key)) many(child, out.kernels);
-      else if (SLOT_KEY.test(key)) one(child, out.slots);
-      else if (SLOT_LIST_KEY.test(key)) many(child, out.slots);
-      else if (BATCH_KEY.test(key)) one(child, out.batches);
-      else if (BATCH_LIST_KEY.test(key)) many(child, out.batches);
+      else if (SLOT_KEY.test(key)) one(child, out.slots, node.slots);
+      else if (SLOT_LIST_KEY.test(key)) many(child, out.slots, node.slots);
+      else if (BATCH_KEY.test(key)) one(child, out.batches, node.batches);
+      else if (BATCH_LIST_KEY.test(key)) many(child, out.batches, node.batches);
       else walk(child, depth + 1);
     }
   };
   walk(record, 0);
-  return out;
+  return { bound: out, nodes };
 }
 
 export interface RecordOwners {
@@ -375,39 +389,46 @@ export interface RecordOwners {
 }
 
 /**
- * Who owns a record (cross-family review r5 of #403, CRITICAL 1 and 2):
+ * Who owns a record (cross-family reviews r5 and r6 of #403, CRITICAL):
  *   - every job it names, at any depth;
  *   - for each batch slot (sample) it names, the job the LIVE slot belongs to;
- *   - for each batch it is tied to (it names the batch, or it is on the batch's own stream:
- *     ctx.batchId) when it names none of that batch's slots, every job of the batch, since it is
- *     then the batch's own record.
+ *   - for each object in it that names a batch, and for the record itself when it is on the
+ *     batch's own stream (ctx.batchId), every job of that batch, unless the same object names a
+ *     slot of that batch. Each object is resolved on its own, so a derived record's sources (an
+ *     anomaly's readings) keep their own ties: a batch-level source is the whole batch's even
+ *     when another source names a sample of that batch.
  * A name can only add owners, never take one away. Undefined when the owners cannot be known (a
  * malformed binding; a slot or batch that no live batch has; a slot that names no job; no
  * registered BatchOwnership, batch-ownership.ts): such a record is an unscoped admin's only.
  */
 export function recordOwnersOf(record: unknown, ctx: { batchId?: string } = {}): RecordOwners | undefined {
-  const bound = recordBindingsOf(record);
+  const { bound, nodes } = walkBindings(record);
   if (bound.malformed) return undefined;
   const jobs = new Set(bound.jobs);
-  const batches = new Set(bound.batches);
-  if (ctx.batchId !== undefined) batches.add(ctx.batchId);
-  if (bound.slots.length > 0 || batches.size > 0) {
+  const ties = nodes
+    .filter((node) => node.batches.length > 0 || (node.root && ctx.batchId !== undefined))
+    .map((node) => ({ slots: node.slots, batches: node.root && ctx.batchId !== undefined ? [...node.batches, ctx.batchId] : node.batches }));
+  if (ctx.batchId !== undefined && !nodes.some((node) => node.root)) ties.push({ slots: [], batches: [ctx.batchId] });
+  if (bound.slots.length > 0 || ties.length > 0) {
     const live = batchOwnership();
     if (!live) return undefined;
-    const batchesOfSlots = new Set<string>();
-    for (const slotId of bound.slots) {
+    const batchOfSlot = new Map<string, string>();
+    for (const slotId of new Set(bound.slots)) {
       const slot = live.slotOf(slotId);
       if (!slot || slot.jobId === undefined) return undefined;
       jobs.add(slot.jobId);
-      batchesOfSlots.add(slot.batchId);
+      batchOfSlot.set(slotId, slot.batchId);
     }
-    for (const batchId of batches) {
-      if (batchesOfSlots.has(batchId)) continue;
-      const batchJobs = live.batchJobsOf(batchId);
-      if (!batchJobs) return undefined;
-      for (const jobId of batchJobs) {
-        if (jobId === undefined) return undefined;
-        jobs.add(jobId);
+    for (const tie of ties) {
+      const covered = new Set(tie.slots.map((slotId) => batchOfSlot.get(slotId)));
+      for (const batchId of new Set(tie.batches)) {
+        if (covered.has(batchId)) continue;
+        const batchJobs = live.batchJobsOf(batchId);
+        if (!batchJobs) return undefined;
+        for (const jobId of batchJobs) {
+          if (jobId === undefined) return undefined;
+          jobs.add(jobId);
+        }
       }
     }
   }
