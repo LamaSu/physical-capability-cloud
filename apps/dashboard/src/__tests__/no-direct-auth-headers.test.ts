@@ -285,11 +285,14 @@ function boundNames(name: ts.BindingName): string[] {
  * Local names that hold a protected target (astra A03f F1): const p =
  * Headers.prototype; const nav = navigator; const { prototype } = Headers;
  * let x; x = p. Followed to a fixed point, so an alias of an alias counts.
- * `prototypes` is the subset that holds a built-in's prototype.
+ * `prototypes` is the subset that holds a built-in's prototype, and `objects`
+ * the subset that holds a protected object itself (navigator, Headers), not
+ * a value read from one (window.innerWidth).
  */
-function protectedAliases(sf: ts.SourceFile): { all: Set<string>; prototypes: Set<string> } {
+function protectedAliases(sf: ts.SourceFile): { all: Set<string>; prototypes: Set<string>; objects: Set<string> } {
   const all = new Set<string>();
   const prototypes = new Set<string>();
+  const objects = new Set<string>();
   for (let grew = true; grew; ) {
     grew = false;
     walk(sf, (n) => {
@@ -304,7 +307,12 @@ function protectedAliases(sf: ts.SourceFile): { all: Set<string>; prototypes: Se
       }
       if (!value || !isProtected(value, sf, all)) return;
       const ofPrototype = candidates(value).some((v) => isBuiltinPrototype(v, sf, prototypes));
+      const ofObject = isProtectedObject(value, objects);
       for (const name of names) {
+        if (ofObject && !objects.has(name)) {
+          objects.add(name);
+          grew = true;
+        }
         if (!all.has(name)) {
           all.add(name);
           grew = true;
@@ -316,7 +324,12 @@ function protectedAliases(sf: ts.SourceFile): { all: Set<string>; prototypes: Se
       }
     });
   }
-  return { all, prototypes };
+  return { all, prototypes, objects };
+}
+
+/** A protected object itself, or a local name holding one: navigator, document, a built-in such as Headers. */
+function isProtectedObject(e: ts.Expression, objectAliases: ReadonlySet<string>): boolean {
+  return candidates(e).some((c) => ts.isIdentifier(c) && (WRITE_ROOTS.has(c.text) || BUILTINS.has(c.text) || objectAliases.has(c.text)));
 }
 
 /** A use of the global object other than reading a named member (window.x) or asking its type (typeof window). */
@@ -420,7 +433,8 @@ const RULES: Rule[] = [
         if (ts.isCallExpression(n)) {
           const target = mutationTarget(n);
           if (target !== null && isProtected(target, sf, aliases.all)) return true;
-          return n.arguments.some((arg) => isBuiltinPrototype(arg, sf, aliases.prototypes));
+          // Handed to any call, a built-in's prototype or a protected object can be changed inside it: patch(navigator).
+          return n.arguments.some((arg) => isBuiltinPrototype(arg, sf, aliases.prototypes) || isProtectedObject(arg, aliases.objects));
         }
         if (!ts.isBinaryExpression(n) || !isAssignment(n.operatorToken.kind)) return false;
         const target = n.left;
