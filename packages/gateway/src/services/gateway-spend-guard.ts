@@ -419,6 +419,22 @@ function intEnv(name: string, fallback: number): number | null {
 }
 
 const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+
+/**
+ * ADMISSIONS ONLY, after the clock check (rule 1): keep today's AND the previous
+ * UTC day's hourly records (astra pack 103c). An hourly window evaluated anywhere
+ * in today starts no earlier than 23:00 yesterday, and a rollback into yesterday
+ * is refused by the day-level mark, so nothing a later window can need is ever
+ * dropped. Pruning to "today, or within an hour of t" let one admission (at
+ * 01:01) drop yesterday's late records, after which a clock rollback WITHIN today
+ * (to 00:10, invisible to the day-level mark) evaluated an hour that should have
+ * held them, and the caller's hourly throttle reset.
+ */
+function pruneHourly<R extends { day: string }>(records: R[], t: number, day: string): R[] {
+  const yesterday = utcDay(t - DAY_MS);
+  return records.filter((r) => r.day === day || r.day === yesterday);
+}
 let faucetDrips: Array<{ at: number; day: string; wallet: string; keyId: string; principalId: string; amount: number }> = [];
 let relays: Array<{ at: number; day: string; keyId: string; principalId: string }> = [];
 
@@ -464,7 +480,7 @@ export function admitFaucetDrip(input: {
   if (!Number.isInteger(input.amount) || input.amount < 1 || input.amount > maxPerCall) {
     return { ok: false, status: 400, error: "faucet_amount_out_of_range", message: `Amount must be a whole number from 1 to ${maxPerCall} mUSDC.` };
   }
-  faucetDrips = faucetDrips.filter((d) => d.day === day || t - d.at < HOUR_MS); // only after the clock check, on the captured t/day
+  faucetDrips = pruneHourly(faucetDrips, t, day); // only after the clock check, on the captured t/day
   const wallet = input.wallet.trim().toLowerCase();
   const walletToday = faucetDrips.filter((d) => d.day === day && d.wallet === wallet).reduce((s, d) => s + d.amount, 0);
   if (walletToday + input.amount > perWalletDay) {
@@ -504,7 +520,7 @@ export function admitRelay(spender: { principal?: string; apiKeyId?: string }): 
     return { ok: false, status: 503, error: "relay_misconfigured", message: "The relay's configuration is invalid." };
   }
   if (dayRegressed(day)) return CLOCK_REGRESSED; // validate FIRST; this also moves the mark (rule 1)
-  relays = relays.filter((r) => r.day === day || t - r.at < HOUR_MS); // only after the clock check, on the captured t/day
+  relays = pruneHourly(relays, t, day); // only after the clock check, on the captured t/day
   if (relays.filter((r) => r.day === day).length >= globalDay) {
     alertOnce(day, "relay-breaker", `the relay's global daily count (${globalDay}) is reached`);
     return { ok: false, status: 503, error: "relay_daily_breaker", message: "Relaying is paused for today: the global daily count is reached." };
