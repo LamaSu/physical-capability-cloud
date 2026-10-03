@@ -177,6 +177,29 @@ class TestNeverBlocks(InATempDir):
         finally:
             del os.environ["PCC_BASE"]
 
+    def test_attempt_state_that_is_not_an_object_does_not_raise(self):
+        # Verdict 115c, finding 6: each shape raised AttributeError at cfc5605b.
+        for shape in ("[]", '"text"', "42", "null", "true"):
+            os.makedirs(".pcc", exist_ok=True)
+            with open(".pcc/attempt.json", "w") as f:
+                f.write(shape)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(pcc_report.main(["identify", "ok", "x", "--dry-run"]), 0, shape)
+            with open(".pcc/attempt.json") as f:
+                self.assertIsInstance(json.load(f).get("sessionId"), str, shape)
+
+    def test_roll_up_lines_that_are_not_phase_objects_are_skipped(self):
+        # Verdict 115c, finding 6 (same class): a non-object or partial line raised at cfc5605b.
+        os.makedirs(".pcc", exist_ok=True)
+        with open(".pcc/attempt.json", "w") as f:
+            json.dump({"sessionId": "s-1", "seq": 0}, f)
+        with open(".pcc/phases.jsonl", "w") as f:
+            f.write('[]\n"text"\n{"sessionId": "s-1"}\n{"sessionId": "s-1", "phase": "verify", "outcome": "ok"}\n')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(pcc_report.main(["session", "ok", "x", "--dry-run"]), 0)
+        self.assertIn('"verify"', out.getvalue())
+
     @unittest.skipIf(os.name == "nt", "POSIX modes")
     def test_a_permissive_state_folder_is_made_private(self):
         os.makedirs(".pcc", exist_ok=True)

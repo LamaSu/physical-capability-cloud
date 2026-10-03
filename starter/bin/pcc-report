@@ -99,7 +99,7 @@ def next_seq():
     try:
         _private_state()
         attempt = _read_json("attempt.json", {})
-        if not isinstance(attempt.get("sessionId"), str):
+        if not isinstance(attempt, dict) or not isinstance(attempt.get("sessionId"), str):
             attempt = {"sessionId": str(uuid.uuid4()), "seq": -1}
         attempt["seq"] = int(attempt.get("seq", -1)) + 1
         with open(_state_path("attempt.json"), "w") as f:
@@ -158,7 +158,8 @@ def build_body(args, session_id, seq):
                         entry = json.loads(line)
                     except ValueError:
                         continue
-                    if entry.get("sessionId") == session_id:
+                    if (isinstance(entry, dict) and entry.get("sessionId") == session_id
+                            and isinstance(entry.get("phase"), str) and isinstance(entry.get("outcome"), str)):
                         phases.append({"phase": entry["phase"], "outcome": entry["outcome"]})
         except OSError:
             pass

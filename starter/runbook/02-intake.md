@@ -19,15 +19,16 @@ Ask these together. Skip one only if the human has already answered it.
 
 | # | Ask | Why (say this) |
 |---|---|---|
-| 1 | Do you own or operate this device, and may you offer it for paid jobs? | PCC registers you as its operator; jobs and payouts are yours. |
+| 1 | Do you own or operate this device, and may you offer it for jobs? | PCC registers you as its operator; the jobs are yours. |
 | 2 | Where is it? (city and country; a street address only if buyers ship samples to it) | Buyers filter by location, and shipping needs an address. |
 | 3 | Where is its emergency stop, and who can press it while it runs? | A physical stop is required. PCC's remote stop is best effort, not a safety device. |
 | 4 | Will someone be present while it runs? When? | Unattended runs need tighter limits. |
 | 5 | Which consumables are loaded or on hand? (plates, reagents, filament…) | Jobs needing what you don't have get refused, not failed. |
 | 6 | Is there a camera or sensor that can record runs? Where is it? | Independent evidence raises the assurance tier buyers can ask for. |
 | 7 | What do you charge per job, and in which currency? | The price is yours to set; it is never defaulted. |
-| 8 | Payouts: confirm the wallet given in phase 0 (`.pcc/payout-wallet`). | Money goes only where you say; it is this operator's id. |
-| 9 | When may it take jobs? (days, hours, time zone) | Jobs outside those hours are refused. |
+| 8 | When may it take jobs? (days, hours, time zone) | Jobs outside those hours are refused. |
+
+**Payouts: tell, don't ask.** PCC cannot yet pay a wallet the human names (phase 0), so this machine takes test jobs only, and no money moves, until it can. Say so. Don't ask for a wallet, and promise no payouts.
 
 ## Record the answers with their source
 Write `.pcc/intake.json`. Each answer says whether it was **asked** (the human said it), **inferred** (you determined it) or **researched** (cited, then confirmed by the human).
@@ -39,14 +40,13 @@ Write `.pcc/intake.json`. Each answer says whether it was **asked** (the human s
  "consumables": {"value": ["96-well flat-bottom plates"], "source": "asked"},
  "evidenceSources": {"value": [], "source": "asked"},
  "price": {"value": {"amount": 25, "currency": "USD", "per": "job"}, "source": "asked"},
- "payout": {"value": "0x…", "source": "asked"},
  "availability": {"value": "Mon-Fri 09:00-17:00 America/Los_Angeles", "source": "asked"}}
 ```
 The current gateway cannot store availability yet (it drops it on the capability). Keep it here; the node's job policy enforces it.
 
 **Done when:** every class C fact is answered, or explicitly marked "research" with the human's okay.
 ```bash
-bin/pcc-report intake ok "9 class C facts answered in one batch; 0 defaulted"
+bin/pcc-report intake ok "8 class C facts answered in one batch; 0 defaulted"
 ```
 Coming: kits' intake schema (`@pcc/spec`, onboarding/intake) will replace this table with a machine-readable list: the same questions, plus each answer's target artifact.
 

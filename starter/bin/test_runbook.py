@@ -120,11 +120,19 @@ class TestTruths(unittest.TestCase):
 
     def test_every_provisioning_call_sends_its_own_public_key(self):
         # Rehearsal R0's P9: without publicKey, the response carries a server-made private key.
+        # A body is either inline JSON, or a private file built just before the call (115c F5).
         calls = 0
         for path, text in text_files():
             for m in re.finditer(r"curl [^\n]*/api/auth/provision", text):
                 calls += 1
-                self.assertIn('\\"publicKey\\"', text[m.end(): m.end() + 300], f"{path.name}: provision without publicKey")
+                after = text[m.end(): m.end() + 300]
+                body_file = re.search(r"--data-binary @(\S+)", after)
+                if body_file:
+                    before = text[max(0, m.start() - 600): m.start()]
+                    self.assertIn("> " + body_file.group(1), before, f"{path.name}: body file not built here")
+                    self.assertIn('"publicKey"', before, f"{path.name}: provision without publicKey")
+                else:
+                    self.assertIn('\\"publicKey\\"', after, f"{path.name}: provision without publicKey")
         self.assertEqual(calls, 2)
 
     def test_no_key_is_expanded_onto_a_command_line(self):
@@ -181,11 +189,6 @@ class TestRound2(unittest.TestCase):
         device = between(phase_text("05-register.md"), "/api/setup/register-device", "**Check:**")
         self.assertNotIn("capabilities", device)
 
-    def test_the_payout_wallet_is_sent_and_the_quote_is_checked(self):
-        # F4: the human's payout address must reach the gateway; a quote that differs from the price stops the test.
-        self.assertIn("walletAddress", between(phase_text("00-prerequisites.md"), "/api/auth/provision", "**Check:**"))
-        self.assertRegex(phase_text("06-verify.md"), r"(?i)price.*intake|intake.*price")
-
     def test_the_envelope_digest_is_rechecked_before_any_run(self):
         # F6: an edited envelope must not run on an old confirmation.
         for name in ("06-verify.md", "07-operate.md"):
@@ -225,6 +228,62 @@ class TestRound2(unittest.TestCase):
     def test_no_pcc_node_daemon_beside_the_loop(self):
         # 0.1.1's daemon takes no jobs and its heartbeat says so, which would hide the listing.
         self.assertRegex(phase_text("07-operate.md"), r"acceptingJobs")
+
+
+
+class TestRound3(unittest.TestCase):
+    """Verdict 115c on #464: each of these failed at cfc5605b."""
+
+    def setUp(self):
+        self.book = json.loads((RUNBOOK / "runbook.json").read_text(encoding="utf-8"))
+        self.index = json.loads((RUNBOOK / "index.json").read_text(encoding="utf-8"))
+
+    def test_the_test_job_moves_no_money_by_construction(self):
+        # F1: paymentMethod "testnet-mock" never selected mock settlement, and the
+        # price was checked only after the job and escrow existed.
+        verify = phase_text("06-verify.md")
+        for line in verify.splitlines():
+            if "submit-from-discovery" in line:  # named only to warn against it, never called
+                self.assertNotIn("curl", line)
+                self.assertRegex(line, r"(?i)don't|never", line)
+        self.assertNotIn("testnet-mock", verify)
+        self.assertIn("/api/jobs/submit", between(verify, "## 1.", "## 2."))
+        phases = {p["id"]: p for p in self.book["phases"]}
+        self.assertNotRegex(json.dumps(phases["verify"]), r"(?i)quote equals|at the human's price")
+        self.assertNotIn("verify.price-mismatch", self.index["events"])
+
+    def test_no_wallet_is_promised_payouts_or_sent(self):
+        # F2: provisioning makes a wallet the operator id, never the payout destination.
+        prerequisites = phase_text("00-prerequisites.md")
+        self.assertNotIn("walletAddress", between(prerequisites, "/api/auth/provision", "**Check:**"))
+        for path, text in text_files():
+            self.assertNotRegex(text, r"(?i)where settlement pays|payouts go only to the wallet", path.name)
+        phases = {p["id"]: p for p in self.book["phases"]}
+        self.assertNotRegex(json.dumps(phases["prerequisites"]["asksHuman"]), r"(?i)wallet")
+
+    def test_completed_is_computed_never_typed(self):
+        # F3: the only path to "completed" is code that checks the run, the receipt's
+        # stored flag, its jobId and a bundleId; no command sends a literal completed.
+        verify = phase_text("06-verify.md")
+        self.assertNotRegex(verify, r'\\?"status\\?":\s*\\?"completed')
+        finish = between(verify, "/api/operator/evidence", "/api/operator/job-status")
+        for needed in ('"stored"', "bundleId", "jobId", "succeeded"):
+            self.assertIn(needed, finish, needed)
+
+    def test_a_default_policy_reads_as_stopped(self):
+        # F4: a failed policy read answers 200 with the default policy (emergencyStop
+        # false, source "default"); only a stored policy may read as clear.
+        for name in ("06-verify.md", "07-operate.md"):
+            text = phase_text(name)
+            self.assertIn('"default"', text, name)
+            self.assertIn("updatedAt", text, name)
+        self.assertRegex(json.dumps(self.index["events"]["operate.estop-active"]), r"(?i)default")
+
+    def test_no_personal_value_is_expanded_onto_a_command_line(self):
+        # F5: the provisioning body is built in a private file, never on curl's command line.
+        provision = between(phase_text("00-prerequisites.md"), "/api/auth/provision", "**Check:**")
+        self.assertNotRegex(provision, r'-d "\{')
+        self.assertIn("--data-binary @.pcc/", provision)
 
 
 if __name__ == "__main__":

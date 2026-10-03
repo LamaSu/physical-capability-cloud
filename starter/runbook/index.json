@@ -77,7 +77,7 @@
     "intake.asks-about-pay": {
       "phase": "intake",
       "trigger": "The human asks how prices, payouts, fees or contributor pay work.",
-      "do": "Answer from the runbook. The price is theirs to set, and payouts go only to the wallet they give. Publishing a kit adds a license that the buyer pays on top (phase 8). Quote no number that isn't in the runbook or the gateway.",
+      "do": "Answer from the runbook. The price is theirs to set. PCC cannot yet pay a wallet they name, so this runbook runs test jobs only and nothing is paid out yet. Publishing a kit adds a license that the buyer pays on top (phase 8). Quote no number that isn't in the runbook or the gateway.",
       "file": "08-publish.md",
       "section": "How contributor pay works (tell the human this before they choose)",
       "report": null
@@ -177,9 +177,20 @@
         "outcome": "failed"
       }
     },
+    "operate.paid-job-refused": {
+      "phase": "operate",
+      "trigger": "A job's GET /api/jobs/<jobId>/settlement shows a negotiation session or an escrow: it carries money.",
+      "do": "Don't run it. Send failed with reason payout_destination_unbound, and report it: PCC cannot yet pay a wallet the human confirmed.",
+      "file": "07-operate.md",
+      "section": "The operating loop",
+      "report": {
+        "phase": "operate",
+        "outcome": "blocked"
+      }
+    },
     "operate.estop-active": {
       "phase": "operate",
-      "trigger": "GET /api/operator/policy/<kernelId> shows emergencyStop: true, or cannot be read.",
+      "trigger": "GET /api/operator/policy/<kernelId> shows emergencyStop: true, answers with the gateway's default policy (source \"default\", no updatedAt), or cannot be read.",
       "do": "Take no job this round. On entering the state, send the device its stop once. Resume only after the human clears the stop.",
       "file": "07-operate.md",
       "section": "The operating loop",
@@ -215,12 +226,12 @@
         "outcome": "abandoned"
       }
     },
-    "verify.price-mismatch": {
+    "verify.money-attached": {
       "phase": "verify",
-      "trigger": "The test job's quote is not the human's price from intake (amount or currency).",
-      "do": "Don't run it. Report both values; the gateway priced the job itself.",
+      "trigger": "The test job's GET /api/jobs/<jobId>/settlement shows a session or an escrow.",
+      "do": "Don't run it: it is not a test job. Report what the settlement showed.",
       "file": "06-verify.md",
-      "section": "1. Be your own test buyer",
+      "section": "1. Be your own test buyer, with no money involved",
       "report": {
         "phase": "verify",
         "outcome": "blocked"

@@ -1,6 +1,6 @@
 # Onboarding a device onto PCC (Codex and other agents)
 
-You are onboarding a physical device onto the Physical Capability Cloud as an operator kernel. It ends registered and exercised by one real test job. Its evidence stays unverified until the operating agent signs it, so never call it verified.
+You are onboarding a physical device onto the Physical Capability Cloud as an operator kernel. It ends registered and exercised by one test job with no money attached; paid jobs stay off until PCC can pay a wallet the human confirms. Its evidence stays unverified until the operating agent signs it, so never call it verified.
 
 1. Read `runbook/README.md`, then follow the phases in `runbook/runbook.json` **in order**. Each phase file says what to do, what to ask, and how to check it.
 2. **Gateway:** use the one the human gave you, stored in `.pcc/base`. Never call `https://capability.network` (production) unless told to.

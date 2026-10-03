@@ -51,20 +51,25 @@ chmod 600 .pcc/node-keys.json
 **Check:** `.pcc/node-public-key` holds 64 hex characters. `.pcc/node-keys.json` holds the private half; never print it or copy it anywhere.
 
 ## 4. An operator API key, captured without logging it
-**Ask the human** (class C), in one batch:
-- "Which email should this operator account be registered under?"
-- "Which wallet address should payouts go to?" Money goes only where they say.
+**Ask the human** (class C): "Which email should this operator account be registered under?"
 
-Provisioning with the wallet makes it this operator's id. Kernels you create record it as their `operatorAddress`, which is where settlement pays today. If the human has no wallet yet, leave `walletAddress` out and tell them: the kernel then has no payable address, so paid jobs cannot settle to them.
+**Payouts: tell, don't ask.** PCC does not yet pay a wallet you name. Today settlement pays a wallet the gateway generates and holds for the account, or the gateway's own signer, and nothing lets you bind or check another destination. So this runbook runs test jobs only: no money moves in phases 6 and 7. Tell the human that, don't ask for a payout wallet, and promise no payouts. Paid operation waits for a gateway that pays a wallet the human confirms (a gateway row).
+
+Write the human's answer into `.pcc/operator.json` with your file-writing tool, not with `echo` or `printf`: a command's text can be read by other users of this machine while it runs (`ps`). For example: `{"email": "operator@example.org", "name": "Bench plate reader"}`. The request below is built from that file, sent from a private file, and deleted.
 
 The response contains your **API key**. Write it straight to a private file, and **never print it, echo it, or paste it into the conversation**.
 
 ```bash
 umask 077
-printf '%s' "0x…" > .pcc/payout-wallet          # the human's answer, exactly; never a guess
-curl -s -X POST "$(cat .pcc/base)/api/auth/provision" \
-  -H 'Content-Type: application/json' \
-  -d "{\"publicKey\": \"$(cat .pcc/node-public-key)\", \"email\": \"operator@example.org\", \"walletAddress\": \"$(cat .pcc/payout-wallet)\", \"name\": \"Bench plate reader\"}" > .pcc/provision.json
+python3 - <<'EOF' > .pcc/provision-request.json
+import json
+operator = json.load(open(".pcc/operator.json"))
+print(json.dumps({"publicKey": open(".pcc/node-public-key").read().strip(),
+                  "email": operator["email"], "name": operator["name"]}))
+EOF
+curl -s -X POST "$(cat .pcc/base)/api/auth/provision" -H 'Content-Type: application/json' \
+  --data-binary @.pcc/provision-request.json > .pcc/provision.json
+rm -f .pcc/provision-request.json
 python3 - <<'EOF'
 import json
 key = json.load(open(".pcc/provision.json"))["api_key"]

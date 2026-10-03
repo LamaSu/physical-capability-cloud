@@ -1,6 +1,6 @@
 # The runbook: device to registered, exercised kernel
 
-The kernel ends registered and exercised by one real test job. Its evidence stays unverified until the operating agent signs it (phase 7).
+The kernel ends registered and exercised by one test job with no money attached. Paid jobs stay off until PCC can pay a wallet the human confirms. Its evidence stays unverified until the operating agent signs it (phase 7).
 
 Follow the phases **in order**. `runbook.json` is the same graph in machine-readable form: each phase's goal, done-when checks, what it asks the human, and the next phase.
 
@@ -14,7 +14,7 @@ When something happens mid-phase (the human says "don't know", a register call a
 | 3 | [research](03-research.md) | interface, limits and I/O, all cited |
 | 4 | [build](04-build.md) | node config, typed operations, a confirmed safety envelope |
 | 5 | [register](05-register.md) | kernel, signing key, capability, device |
-| 6 | [verify](06-verify.md) | one real job on the device; an e-stop drill |
+| 6 | [verify](06-verify.md) | one test job on the device, no money attached; an e-stop drill |
 | 7 | [operate](07-operate.md) | the operating loop, running |
 | 8 | [publish](08-publish.md) | optionally, a kit at the human's license rate |
 | 9 | [session](09-session.md) | one roll-up report and one improvement idea |

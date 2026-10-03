@@ -24,7 +24,7 @@
         "pcc-node --version prints 0.1.1 or later, and python3 -c \"import nacl\" succeeds",
         "GET $PCC_BASE/api/auth/validate with your key returns valid: true"
       ],
-      "asksHuman": ["which PCC gateway to use, if PCC_BASE is not already set", "the email to register the operator key under", "the wallet address payouts go to (it becomes the operator id)"],
+      "asksHuman": ["which PCC gateway to use, if PCC_BASE is not already set", "the email to register the operator key under"],
       "next": "identify"
     },
     {
@@ -43,7 +43,7 @@
       "file": "02-intake.md",
       "goal": "Collect the facts only the human has, in one batch.",
       "doneWhen": ["every class C fact answered, or explicitly routed to research"],
-      "asksHuman": ["authority to operate", "location", "emergency stop: where it is and who can press it", "supervision", "consumables", "price", "payout (confirm the wallet from prerequisites)", "availability"],
+      "asksHuman": ["authority to operate", "location", "emergency stop: where it is and who can press it", "supervision", "consumables", "price", "availability"],
       "next": "research"
     },
     {
@@ -82,21 +82,22 @@
     {
       "id": "verify",
       "file": "06-verify.md",
-      "goal": "A real job ran on the real device at the human's price, and its evidence was stored for that job; the emergency-stop drill exercised the gateway's refusal and the device's own stop.",
+      "goal": "A test job with no money attached ran on the real device, its evidence was stored for that job, and its final status was computed from the run and the receipt; the emergency-stop drill exercised the gateway's refusal, the device's own stop and the stored-policy read.",
       "doneWhen": [
-        "the job's quote equals the human's price from intake",
+        "the test job was created by POST /api/jobs/submit, and its settlement shows no session and no escrow",
         "a test job reached your node and ran on the device (the device's own log shows it)",
-        "its evidence receipt says stored: true for that job, and only then was it marked completed",
-        "while the kernel was stopped the gateway refused a new job, and the device stopped on its own command"
+        "its final status was computed, not typed: completed only for a succeeded run whose receipt says stored: true for that job with a bundleId",
+        "while the kernel was stopped the gateway refused a new job, and the device stopped on its own command",
+        "the stop read STOPPED, then CLEAR, from a stored policy"
       ],
-      "asksHuman": ["permission to run one real test job on the device", "permission for one emergency-stop drill"],
+      "asksHuman": ["permission to run one test job on the device (no money moves)", "permission for one emergency-stop drill"],
       "next": "operate"
     },
     {
       "id": "operate",
       "file": "07-operate.md",
-      "goal": "The device takes jobs unattended, within its envelope, and says so honestly.",
-      "doneWhen": ["the node keeps running and GET /api/operators/:slug/status shows no missing slot you can fill"],
+      "goal": "The device takes test jobs unattended, within its envelope, refuses any job that carries money until payouts can be bound, and says so honestly.",
+      "doneWhen": ["the loop ran one test job unattended and refuses jobs with a negotiation session or an escrow", "GET /api/operators/:slug/status shows no missing slot you can fill"],
       "asksHuman": [],
       "next": "publish"
     },
