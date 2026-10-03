@@ -310,6 +310,59 @@ describe("gateway running the oracle cascade live, with off-schema metrics (astr
     expect(t).not.toContain("5 / 1");
     expect(t).toContain("Couldn't load oracle status");
   });
+
+  // The gateway's bridge computes activeOracles and each oracle's `available`
+  // flag from the same isAvailable() check in the same request (see the
+  // comment on parseCascadeStatus), so a genuine response always has
+  // activeOracles equal the number of `available: true` entries. Here every
+  // individual value is in-range -- only the reconciliation is off (2
+  // claimed vs. 1 actually available) -- isolating that rule from the score
+  // checks above.
+  it("fails the read when activeOracles doesn't equal the number of oracles actually marked available", async () => {
+    stubFetch({
+      "/api/status/live": statusLive("real"),
+      "/api/verification/subnet-status": {
+        status: 200,
+        body: {
+          available: true,
+          metrics: { totalVerifications: 3, averageScore: 0.7, activeOracles: 2, recentResults: [] },
+          oracles: [
+            { name: "uma", available: true, totalVerifications: 3, averageScore: 0.7, isPrimary: true },
+            { name: "chainlink", available: false, totalVerifications: 0, averageScore: 0, isPrimary: false },
+          ],
+        },
+      },
+    });
+    const t = await renderPage();
+    expect(t).toContain("Couldn't load oracle status");
+  });
+
+  // Guards against an overly strict range check: the scale's own endpoints
+  // are real, reportable values, not malformed ones.
+  it("accepts boundary scores of exactly 0 and 1 as real oracle state", async () => {
+    stubFetch({
+      "/api/status/live": statusLive("real"),
+      "/api/verification/subnet-status": {
+        status: 200,
+        body: {
+          available: true,
+          metrics: {
+            totalVerifications: 2,
+            averageScore: 1,
+            activeOracles: 1,
+            recentResults: [
+              { oracle: "uma", passed: true, score: 1, timestamp: "2026-09-24T11:59:00Z" },
+              { oracle: "uma", passed: false, score: 0, timestamp: "2026-09-24T11:58:00Z" },
+            ],
+          },
+          oracles: [{ name: "uma", available: true, totalVerifications: 2, averageScore: 1, isPrimary: true }],
+        },
+      },
+    });
+    const t = await renderPage();
+    expect(t).not.toContain("Couldn't load oracle status");
+    expect(t).toMatch(/Average Score\s*1\.000/);
+  });
 });
 
 // ── demo mode ────────────────────────────────────────────────────────────────

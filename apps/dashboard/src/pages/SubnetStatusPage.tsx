@@ -82,6 +82,11 @@ function isCount(value: unknown): value is number {
   return isNumber(value) && Number.isInteger(value) && value >= 0;
 }
 
+/** Every score the bridge reports is a verification-confidence fraction, never a raw or signed value. */
+function isScore(value: unknown): value is number {
+  return isNumber(value) && value >= 0 && value <= 1;
+}
+
 const UNEXPECTED = "Unexpected response from /api/verification/subnet-status";
 
 function parseResult(value: unknown): OracleResult {
@@ -89,7 +94,7 @@ function parseResult(value: unknown): OracleResult {
     isRecord(value) &&
     typeof value.oracle === "string" &&
     typeof value.passed === "boolean" &&
-    isNumber(value.score) &&
+    isScore(value.score) &&
     typeof value.timestamp === "string"
   ) {
     return { oracle: value.oracle, passed: value.passed, score: value.score, timestamp: value.timestamp };
@@ -103,7 +108,7 @@ function parseOracle(value: unknown): OracleEntry {
     typeof value.name === "string" &&
     typeof value.available === "boolean" &&
     isCount(value.totalVerifications) &&
-    isNumber(value.averageScore) &&
+    isScore(value.averageScore) &&
     typeof value.isPrimary === "boolean"
   ) {
     return {
@@ -117,13 +122,30 @@ function parseOracle(value: unknown): OracleEntry {
   throw new Error(UNEXPECTED);
 }
 
-/** A response that isn't the bridge's status is a failed read, never zeros. */
+/**
+ * A response that isn't the bridge's status is a failed read, never zeros —
+ * and neither is one whose numbers don't actually describe that bridge.
+ *
+ * The gateway's OracleVerificationCascade computes `metrics.activeOracles`
+ * as `this.oracles.filter(o => o.isAvailable()).length` (getMetrics()) and
+ * each `oracles[].available` as that same `o.isAvailable()` (getOracleLeaderboard()),
+ * both read back-to-back in the /api/verification/subnet-status handler. In
+ * a genuine response they are therefore always exactly consistent: the count
+ * of `oracles` entries with `available: true` must equal `activeOracles`.
+ * Anything else — e.g. activeOracles counting oracles the list doesn't back
+ * up — means the response isn't describing a real cascade state.
+ */
 export function parseCascadeStatus(body: unknown): OracleCascadeStatus {
   if (!isRecord(body) || typeof body.available !== "boolean" || !isRecord(body.metrics) || !Array.isArray(body.oracles)) {
     throw new Error(UNEXPECTED);
   }
   const m = body.metrics;
-  if (!isCount(m.totalVerifications) || !isNumber(m.averageScore) || !isCount(m.activeOracles) || !Array.isArray(m.recentResults)) {
+  if (!isCount(m.totalVerifications) || !isScore(m.averageScore) || !isCount(m.activeOracles) || !Array.isArray(m.recentResults)) {
+    throw new Error(UNEXPECTED);
+  }
+  const oracles = body.oracles.map(parseOracle);
+  const availableCount = oracles.filter((o) => o.available).length;
+  if (m.activeOracles !== availableCount) {
     throw new Error(UNEXPECTED);
   }
   return {
@@ -134,7 +156,7 @@ export function parseCascadeStatus(body: unknown): OracleCascadeStatus {
       activeOracles: m.activeOracles,
       recentResults: m.recentResults.map(parseResult),
     },
-    oracles: body.oracles.map(parseOracle),
+    oracles,
   };
 }
 
