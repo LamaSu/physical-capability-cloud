@@ -101,6 +101,39 @@ def main():
     )
     check("wrong-spelling hash != the correct recompute", wrong_hash != correct_hash)
 
+    print("evaluationKey (seam §8 + the v2 ruling, bus #4975): rebuilt from content, then hashed")
+    ek = v["evaluationKeys"]
+    ba = ek["buyerApproval"]
+    KEY_FIELDS = ["verdictSchemaVersion", "claimsSchemaVersion", "evidenceFormatVersion", "packageHash",
+                  "revealedPayloadHashes", "assurancePolicyVersion", "verificationPolicyHash", "verifierSetId",
+                  "acceptedEnvelopeHash", "settlementDomain", "jobId", "milestoneIndex", "stepId",
+                  "settlementUnitId", "requestedTier", "feeBps", "feeRecipient", "feeScheduleHash"]
+
+    def key_input(content):
+        k = {f: content[f] for f in KEY_FIELDS}
+        k["buyerApproval"] = {
+            "approved": ba["approved"],
+            "approvalArtifactHash": ba["approvalArtifactHash"] if ba["approved"] else None,
+            "approvingPrincipal": ba["approvingPrincipal"] if ba["approved"] else None,
+        }
+        if content["verdictSchemaVersion"] == 2:
+            k["dealBinding"] = content["dealBinding"]
+        return k
+
+    contents = {"v1": v["v1"]["content"], "v2Null": v["v2Null"]["content"],
+                "v2DealBinding": v["v2DealBinding"]["content"],
+                "v2DealBindingNextRead": ek["v2DealBindingNextRead"]["content"]}
+    for name, content in contents.items():
+        rebuilt = key_input(content)
+        check(f"{name}: keyInput rebuilt from content == stored", canonical(rebuilt) == canonical(ek[name]["keyInput"]))
+        check(f"{name}: evaluationKey == sha256(JCS(keyInput))",
+              "sha256:" + sha256_hex(canonical(rebuilt)) == ek[name]["evaluationKey"])
+    check("v1 keyInput has no dealBinding key", "dealBinding" not in ek["v1"]["keyInput"])
+    check("v2-null keyInput carries dealBinding null", ek["v2Null"]["keyInput"].get("dealBinding", "absent") is None)
+    check("HOLD-then-SETTLE: the next read is a different key",
+          ek["v2DealBinding"]["evaluationKey"] != ek["v2DealBindingNextRead"]["evaluationKey"])
+    print()
+
     print("negatives: each recomputed independently (must fail for its OWN stated reason)")
     for n in v["negatives"]:
         got = verdict_hash(n["content"])

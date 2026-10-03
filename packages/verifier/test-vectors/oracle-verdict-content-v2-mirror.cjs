@@ -187,6 +187,67 @@ report('v2-dealBinding content validates (node P)', validateContent(v2DealBindin
 report('v1 and v2-null verdictHash differ (schema bump changes the hash)', v1VerdictHash !== v2NullVerdictHash);
 report('v2-null and v2-dealBinding verdictHash differ (null vs object)', v2NullVerdictHash !== v2DealBindingVerdictHash);
 
+// ── evaluationKey (seam §8), and its v2 ruling (evidence lane, bus #4975) ─────────────────────────
+// §8: the key covers every authoritative input that can affect claims, tier, decision, fee or
+// settlement destination, and leaves out only issuedAt and the signature. Under N37 a deal unit's
+// decision also depends on the sealed deal, the node, its dependency set and the children's states
+// as READ at the pinned block. So the v2 key object is the v1 key object PLUS dealBinding, exactly
+// as the content carries it (the full object, read included; null stays null). Without `read`, a
+// HOLD evaluated while a prerequisite was open would be returned forever after the child released.
+// With it, each read block is a new key, and a new read is a SUPPLEMENTAL verdict, as §8 allows.
+// v1's key object never has a dealBinding key, so every v1 key is unchanged.
+const BUYER_APPROVAL_NONE = { approved: false, approvalArtifactHash: null, approvingPrincipal: null };
+function evaluationKeyInput(content, buyerApproval) {
+  const keyObj = {
+    verdictSchemaVersion: content.verdictSchemaVersion,
+    claimsSchemaVersion: content.claimsSchemaVersion,
+    evidenceFormatVersion: content.evidenceFormatVersion,
+    packageHash: content.packageHash,
+    revealedPayloadHashes: content.revealedPayloadHashes,
+    assurancePolicyVersion: content.assurancePolicyVersion,
+    verificationPolicyHash: content.verificationPolicyHash,
+    verifierSetId: content.verifierSetId,
+    acceptedEnvelopeHash: content.acceptedEnvelopeHash,
+    settlementDomain: content.settlementDomain,
+    jobId: content.jobId,
+    milestoneIndex: content.milestoneIndex,
+    stepId: content.stepId,
+    settlementUnitId: content.settlementUnitId,
+    requestedTier: content.requestedTier,
+    feeBps: content.feeBps,
+    feeRecipient: content.feeRecipient,
+    feeScheduleHash: content.feeScheduleHash,
+    buyerApproval: {
+      approved: buyerApproval.approved,
+      approvalArtifactHash: buyerApproval.approved ? buyerApproval.approvalArtifactHash : null,
+      approvingPrincipal: buyerApproval.approved ? buyerApproval.approvingPrincipal : null,
+    },
+  };
+  if (content.verdictSchemaVersion === 2) keyObj.dealBinding = content.dealBinding;
+  return keyObj;
+}
+const evaluationKeyOf = (content, buyerApproval) => 'sha256:' + sha256hex(canonicalize(evaluationKeyInput(content, buyerApproval)));
+
+// The HOLD-then-SETTLE case: the same deal unit, read one block later (a prerequisite released).
+const v2DealBindingNextReadContent = {
+  ...v2DealBindingContent,
+  dealBinding: { ...v2DealBindingContent.dealBinding, read: { chainId: 8453, blockNumber: 12345679, blockHash: '0x' + 'ee'.repeat(32) } },
+};
+const evaluationKeys = {
+  v1: evaluationKeyOf(v1Content, BUYER_APPROVAL_NONE),
+  v2Null: evaluationKeyOf(v2NullContent, BUYER_APPROVAL_NONE),
+  v2DealBinding: evaluationKeyOf(v2DealBindingContent, BUYER_APPROVAL_NONE),
+  v2DealBindingNextRead: evaluationKeyOf(v2DealBindingNextReadContent, BUYER_APPROVAL_NONE),
+};
+console.log('');
+for (const [k, val] of Object.entries(evaluationKeys)) console.log(`  ${k.padEnd(22)} evaluationKey ${val}`);
+console.log('');
+report('v1 key input has no dealBinding key', !Object.prototype.hasOwnProperty.call(evaluationKeyInput(v1Content, BUYER_APPROVAL_NONE), 'dealBinding'));
+report('v2-null key input carries dealBinding: null', evaluationKeyInput(v2NullContent, BUYER_APPROVAL_NONE).dealBinding === null);
+report('v1, v2-null, v2-dealBinding keys all differ', new Set([evaluationKeys.v1, evaluationKeys.v2Null, evaluationKeys.v2DealBinding]).size === 3);
+report('HOLD-then-SETTLE: a later read is a NEW key (read is in the key)', evaluationKeys.v2DealBinding !== evaluationKeys.v2DealBindingNextRead);
+report('the key leaves out issuedAt (same key for a re-evaluation at another time)', evaluationKeyOf({ ...v2DealBindingContent, issuedAt: 1800000000 }, BUYER_APPROVAL_NONE) === evaluationKeys.v2DealBinding);
+
 // ── dependencySetHash re-spelling: THE TRAP, worked over composition's node P ──────────────────────
 const correctPreimage = canonicalize({
   domain: 'PCC:dependency-set:v1',
@@ -286,6 +347,21 @@ const vectors = {
   v1: { content: v1Content, verdictHash: v1VerdictHash },
   v2Null: { content: v2NullContent, verdictHash: v2NullVerdictHash },
   v2DealBinding: { content: v2DealBindingContent, verdictHash: v2DealBindingVerdictHash },
+  evaluationKeys: {
+    rule: 'evaluationKey = SHA-256(JCS(keyObj)), rendered "sha256:" + lowercaseHex. keyObj = seam §8 (every '
+      + 'authoritative input; issuedAt and the signature left out). v2 ruling (bus #4975): for verdictSchemaVersion 2, '
+      + 'keyObj also carries dealBinding exactly as the content does (the full object, read included; null stays '
+      + 'null). v1 keyObj never has a dealBinding key, so v1 keys are unchanged.',
+    buyerApproval: BUYER_APPROVAL_NONE,
+    v1: { keyInput: evaluationKeyInput(v1Content, BUYER_APPROVAL_NONE), evaluationKey: evaluationKeys.v1 },
+    v2Null: { keyInput: evaluationKeyInput(v2NullContent, BUYER_APPROVAL_NONE), evaluationKey: evaluationKeys.v2Null },
+    v2DealBinding: { keyInput: evaluationKeyInput(v2DealBindingContent, BUYER_APPROVAL_NONE), evaluationKey: evaluationKeys.v2DealBinding },
+    v2DealBindingNextRead: {
+      content: v2DealBindingNextReadContent,
+      keyInput: evaluationKeyInput(v2DealBindingNextReadContent, BUYER_APPROVAL_NONE),
+      evaluationKey: evaluationKeys.v2DealBindingNextRead,
+    },
+  },
   dependencySetHashCheck: {
     node: COMPOSITION_NODE_P.nodeId,
     dealDigest0x: COMPOSITION_NODE_P.dealDigest0x,

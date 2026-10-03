@@ -165,6 +165,235 @@
     },
     "verdictHash": "sha256:f44a9c9a705d2103b36f4276af5f2776f6de2b08a17a7ae5ce3a9781b9eaf4db"
   },
+  "evaluationKeys": {
+    "rule": "evaluationKey = SHA-256(JCS(keyObj)), rendered \"sha256:\" + lowercaseHex. keyObj = seam §8 (every authoritative input; issuedAt and the signature left out). v2 ruling (bus #4975): for verdictSchemaVersion 2, keyObj also carries dealBinding exactly as the content does (the full object, read included; null stays null). v1 keyObj never has a dealBinding key, so v1 keys are unchanged.",
+    "buyerApproval": {
+      "approved": false,
+      "approvalArtifactHash": null,
+      "approvingPrincipal": null
+    },
+    "v1": {
+      "keyInput": {
+        "verdictSchemaVersion": 1,
+        "claimsSchemaVersion": 1,
+        "evidenceFormatVersion": 1,
+        "packageHash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "revealedPayloadHashes": [
+          "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "verifierSetId": "verifier-set-golden-v1",
+        "acceptedEnvelopeHash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+        "settlementDomain": {
+          "chainId": 8453,
+          "factoryAddress": "0x1111111111111111111111111111111111111111",
+          "escrowAddress": "0x2222222222222222222222222222222222222222",
+          "easSchemaUid": "0x3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        "jobId": "job-golden-oracle-verdict-v2",
+        "milestoneIndex": 0,
+        "stepId": "0x4444444444444444444444444444444444444444444444444444444444444444",
+        "settlementUnitId": "0x5555555555555555555555555555555555555555555555555555555555555555",
+        "requestedTier": 2,
+        "feeBps": 235,
+        "feeRecipient": "0xcccccccccccccccccccccccccccccccccccccccc",
+        "feeScheduleHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "buyerApproval": {
+          "approved": false,
+          "approvalArtifactHash": null,
+          "approvingPrincipal": null
+        }
+      },
+      "evaluationKey": "sha256:3adcd5affb51d27e7c57767807fead5a72ae545bf2acbb32d73a0ed732bb5113"
+    },
+    "v2Null": {
+      "keyInput": {
+        "verdictSchemaVersion": 2,
+        "claimsSchemaVersion": 1,
+        "evidenceFormatVersion": 1,
+        "packageHash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "revealedPayloadHashes": [
+          "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "verifierSetId": "verifier-set-golden-v1",
+        "acceptedEnvelopeHash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+        "settlementDomain": {
+          "chainId": 8453,
+          "factoryAddress": "0x1111111111111111111111111111111111111111",
+          "escrowAddress": "0x2222222222222222222222222222222222222222",
+          "easSchemaUid": "0x3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        "jobId": "job-golden-oracle-verdict-v2",
+        "milestoneIndex": 0,
+        "stepId": "0x4444444444444444444444444444444444444444444444444444444444444444",
+        "settlementUnitId": "0x5555555555555555555555555555555555555555555555555555555555555555",
+        "requestedTier": 2,
+        "feeBps": 235,
+        "feeRecipient": "0xcccccccccccccccccccccccccccccccccccccccc",
+        "feeScheduleHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "buyerApproval": {
+          "approved": false,
+          "approvalArtifactHash": null,
+          "approvingPrincipal": null
+        },
+        "dealBinding": null
+      },
+      "evaluationKey": "sha256:2d1522dc91b0535d76264cab70c89630bcf5ec31219ad831952f823b5f788878"
+    },
+    "v2DealBinding": {
+      "keyInput": {
+        "verdictSchemaVersion": 2,
+        "claimsSchemaVersion": 1,
+        "evidenceFormatVersion": 1,
+        "packageHash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "revealedPayloadHashes": [
+          "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "verifierSetId": "verifier-set-golden-v1",
+        "acceptedEnvelopeHash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+        "settlementDomain": {
+          "chainId": 8453,
+          "factoryAddress": "0x1111111111111111111111111111111111111111",
+          "escrowAddress": "0x2222222222222222222222222222222222222222",
+          "easSchemaUid": "0x3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        "jobId": "job-golden-oracle-verdict-v2",
+        "milestoneIndex": 0,
+        "stepId": "0x4444444444444444444444444444444444444444444444444444444444444444",
+        "settlementUnitId": "0x5555555555555555555555555555555555555555555555555555555555555555",
+        "requestedTier": 2,
+        "feeBps": 235,
+        "feeRecipient": "0xcccccccccccccccccccccccccccccccccccccccc",
+        "feeScheduleHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "buyerApproval": {
+          "approved": false,
+          "approvalArtifactHash": null,
+          "approvingPrincipal": null
+        },
+        "dealBinding": {
+          "dealDigest": "sha256:7b65b05581c3acb0ddb1a30696b4c94a6f3218b80a0ffb2a036516fc52af62ed",
+          "nodeId": "deliver:Bundle_P",
+          "dependencySetHash": "sha256:c9b919da16c3ce2a6bd1c68a092e904ae11bc23af57396a6cbcf8dec4b973571",
+          "read": {
+            "chainId": 8453,
+            "blockNumber": 12345678,
+            "blockHash": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+        }
+      },
+      "evaluationKey": "sha256:428031c3b0ddb13cf10312c80b9a39d3ed7f71fbff7a7ec96cb4f2b600e96625"
+    },
+    "v2DealBindingNextRead": {
+      "content": {
+        "verdictSchemaVersion": 2,
+        "claimsSchemaVersion": 1,
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "verifierSetId": "verifier-set-golden-v1",
+        "evidenceFormatVersion": 1,
+        "settlementDomain": {
+          "chainId": 8453,
+          "factoryAddress": "0x1111111111111111111111111111111111111111",
+          "escrowAddress": "0x2222222222222222222222222222222222222222",
+          "easSchemaUid": "0x3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        "jobId": "job-golden-oracle-verdict-v2",
+        "milestoneIndex": 0,
+        "stepId": "0x4444444444444444444444444444444444444444444444444444444444444444",
+        "settlementUnitId": "0x5555555555555555555555555555555555555555555555555555555555555555",
+        "packageHash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "acceptedEnvelopeHash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+        "revealedPayloadHashes": [
+          "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "claims": {
+          "operatorPrincipalVerified": true,
+          "devicePrincipalVerified": true,
+          "deviceDistinctFromOperator": true,
+          "deviceHardwareBindingVerified": true,
+          "phaseDelegationVerified": true,
+          "sessionKeyVerified": true,
+          "contractWindowCompliant": true,
+          "liveGatewayReceiptsVerified": true,
+          "checkpointChainContinuous": true,
+          "evidenceTimeBound": "point",
+          "independentWitnessVerified": true,
+          "physicalOutcomeVerified": true
+        },
+        "achievedTier": 2,
+        "requestedTier": 2,
+        "decision": "settle",
+        "contradiction": false,
+        "feeBps": 235,
+        "feeRecipient": "0xcccccccccccccccccccccccccccccccccccccccc",
+        "feeScheduleHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "issuedAt": 1700000000,
+        "dealBinding": {
+          "dealDigest": "sha256:7b65b05581c3acb0ddb1a30696b4c94a6f3218b80a0ffb2a036516fc52af62ed",
+          "nodeId": "deliver:Bundle_P",
+          "dependencySetHash": "sha256:c9b919da16c3ce2a6bd1c68a092e904ae11bc23af57396a6cbcf8dec4b973571",
+          "read": {
+            "chainId": 8453,
+            "blockNumber": 12345679,
+            "blockHash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        }
+      },
+      "keyInput": {
+        "verdictSchemaVersion": 2,
+        "claimsSchemaVersion": 1,
+        "evidenceFormatVersion": 1,
+        "packageHash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "revealedPayloadHashes": [
+          "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "verifierSetId": "verifier-set-golden-v1",
+        "acceptedEnvelopeHash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+        "settlementDomain": {
+          "chainId": 8453,
+          "factoryAddress": "0x1111111111111111111111111111111111111111",
+          "escrowAddress": "0x2222222222222222222222222222222222222222",
+          "easSchemaUid": "0x3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        "jobId": "job-golden-oracle-verdict-v2",
+        "milestoneIndex": 0,
+        "stepId": "0x4444444444444444444444444444444444444444444444444444444444444444",
+        "settlementUnitId": "0x5555555555555555555555555555555555555555555555555555555555555555",
+        "requestedTier": 2,
+        "feeBps": 235,
+        "feeRecipient": "0xcccccccccccccccccccccccccccccccccccccccc",
+        "feeScheduleHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "buyerApproval": {
+          "approved": false,
+          "approvalArtifactHash": null,
+          "approvingPrincipal": null
+        },
+        "dealBinding": {
+          "dealDigest": "sha256:7b65b05581c3acb0ddb1a30696b4c94a6f3218b80a0ffb2a036516fc52af62ed",
+          "nodeId": "deliver:Bundle_P",
+          "dependencySetHash": "sha256:c9b919da16c3ce2a6bd1c68a092e904ae11bc23af57396a6cbcf8dec4b973571",
+          "read": {
+            "chainId": 8453,
+            "blockNumber": 12345679,
+            "blockHash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        }
+      },
+      "evaluationKey": "sha256:f779163b3e21a4e1c16175706bfdd75938ac9a05ee53e7caa923d75502c4842f"
+    }
+  },
   "dependencySetHashCheck": {
     "node": "deliver:Bundle_P",
     "dealDigest0x": "0x7b65b05581c3acb0ddb1a30696b4c94a6f3218b80a0ffb2a036516fc52af62ed",
