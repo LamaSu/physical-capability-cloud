@@ -2247,7 +2247,7 @@
             "evidencePlan:calibration.lastDate"
           ],
           "x-pcc-requiredFor": [
-            "tier1"
+            "tier1-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -2345,7 +2345,7 @@
             "evidencePlan:calibration.procedureRef"
           ],
           "x-pcc-requiredFor": [
-            "tier1"
+            "tier1-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -2443,7 +2443,7 @@
             "provenanceRecipe:executorDeviceId"
           ],
           "x-pcc-requiredFor": [
-            "tier1"
+            "tier1-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -2539,7 +2539,7 @@
             "provenanceRecipe:observerDeviceIds"
           ],
           "x-pcc-requiredFor": [
-            "tier1"
+            "tier1-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -2636,7 +2636,7 @@
             "evidencePlan:confirm.execution_mode"
           ],
           "x-pcc-requiredFor": [
-            "tier1"
+            "tier1-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -2755,7 +2755,7 @@
             "evidencePlan:capture.photo_nonced.placement"
           ],
           "x-pcc-requiredFor": [
-            "tier2"
+            "tier2-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -2857,7 +2857,7 @@
             "evidencePlan:operatorPresence"
           ],
           "x-pcc-requiredFor": [
-            "tier1"
+            "tier1-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -2963,7 +2963,7 @@
             "evidencePlan:approval.expert.approver"
           ],
           "x-pcc-requiredFor": [
-            "tier2"
+            "tier2-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -3077,7 +3077,7 @@
             "evidencePlan:machine.execution_log"
           ],
           "x-pcc-requiredFor": [
-            "tier1"
+            "tier1-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -3175,7 +3175,7 @@
             "evidencePlan:ident.registered_key"
           ],
           "x-pcc-requiredFor": [
-            "tier1"
+            "tier1-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
@@ -3284,7 +3284,7 @@
             "evidencePlan:measure.io_test_pair"
           ],
           "x-pcc-requiredFor": [
-            "tier1"
+            "tier1-intake-complete"
           ],
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,

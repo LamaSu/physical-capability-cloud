@@ -9,7 +9,7 @@
  *                       values in any string.
  * - confirmation.ts   — CONFIRMATION_REQUIRED_FIELDS + intakeValueHash().
  * - safety-policy.ts  — safety.limits bound to the selected CSD; estop "none" policy.
- * - tier-readiness.ts — what tier1/tier2 readiness requires (live primitives, substantive answers).
+ * - tier-readiness.ts — what the tier-intake milestones require (substantive answers; no tier readiness).
  * - walk.ts           — the shared iterative walk (internal).
  * - this file         — IntakeAnswer/IntakeRecord, the IntakeAuthority/IntakeConfirmationEvent
  *                       contract, validateIntake() (the runtime boundary: R2 rules 4-6 plus the
@@ -30,23 +30,24 @@ import {
   type IntakeMilestone,
 } from "./fields.js";
 import type { CsdRegistry } from "../../csd/registry.js";
-import { httpsUrl, nonBlankText } from "../citation-rules.js";
+import { contentHashSchema, httpsUrl, nonBlankText } from "../citation-rules.js";
 import { intakeValueHash, isConfirmationRequired } from "./confirmation.js";
 import { joinPath, pathSegment, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
 import {
   ESTOP_NONE_APPROVED_CAPABILITIES,
   checkSafetyLimits,
+  limitsInParameterUnits,
   numberParametersOf,
   type SafetyLimit,
 } from "./safety-policy.js";
-import { insubstantialTierFields, stubPrimitivesFor } from "./tier-readiness.js";
+import { insubstantialTierFields } from "./tier-readiness.js";
 import { walkValue } from "./walk.js";
 
 export * from "./fields.js";
 export * from "./json-schema.js";
 export * from "./form-html.js";
 export { CONFIRMATION_REQUIRED_FIELDS, intakeValueHash } from "./confirmation.js";
-export { ESTOP_NONE_APPROVED_CAPABILITIES, UNITLESS_LIMIT_UNIT } from "./safety-policy.js";
+export { ESTOP_NONE_APPROVED_CAPABILITIES, REVIEWED_COUNT_PARAMETERS, UNITLESS_LIMIT_UNIT, type SafetyLimit } from "./safety-policy.js";
 export {
   INTAKE_SECRET_KINDS,
   redactIntakeSecrets,
@@ -67,15 +68,19 @@ export const IntakeProvenanceSchema = z.enum(INTAKE_PROVENANCE_VALUES);
 
 /**
  * Where an answer's value was found: a document id or URL (`doc`), a `section`
- * of it, and a `url`. Same rules as a research finding's citation: `doc` and
- * `section` (when present) must be non-blank after trim, never transformed, and
- * `url` (when present) must be `https:` without embedded credentials.
+ * of it, a `url`, and a `contentHash` of the cited text. Same rules as a
+ * research finding's citation, so one copies into the other unchanged: `doc`
+ * and `section` (when present) must be non-blank after trim, never transformed;
+ * `url` (when present) must be `https:` without embedded credentials;
+ * `contentHash` (when present) is `sha256:` + 64 lowercase hex. The secret scan
+ * exempts exactly that typed digest at that path.
  */
 export const IntakeSourceSchema = z
   .object({
     doc: nonBlankText,
     section: nonBlankText.optional(),
     url: httpsUrl.optional(),
+    contentHash: contentHashSchema.optional(),
   })
   .strict();
 export type IntakeSource = z.infer<typeof IntakeSourceSchema>;
@@ -134,11 +139,14 @@ export type IntakeRecord = z.infer<typeof IntakeRecordSchema>;
  * a sequence and timestamp, the session challenge, and its own supersession
  * and revocation state.
  *
- * `validateIntake` requires every member to be present and well-formed, and
+ * `validateIntake` requires every member to be present and well-formed. It
  * compares `eventId`, `fieldId`, `valueHash`, `sourceHash`, `revoked` and
- * `supersededBy` with the answer; the identity, subject, sequence, timestamp and
- * challenge are the store's own record of who confirmed what, where and when,
- * and are not interpreted further here.
+ * `supersededBy` with the answer, and the event's `subject` (deviceRef, and
+ * projectRef both ways) and `confirmedBy.principal` with the authenticated
+ * IntakeSubject the authority was built for, so an event for another device,
+ * project or operator never confirms this record (astra pack 120c, HIGH 3).
+ * The sequence, timestamp and challenge are the store's own record of when and
+ * in which session, and are not interpreted further here.
  */
 export interface IntakeConfirmationEvent {
   schema: "pcc.intake-confirmation.v1";
@@ -178,22 +186,62 @@ export const IntakeConfirmationEventSchema = z.object({
 }) satisfies z.ZodType<IntakeConfirmationEvent>;
 
 /**
+ * WHO and WHAT a validation is about, as the server authenticated it, never as
+ * the record says: the operator (the authenticated principal), the device and,
+ * optionally, the project. Every confirmation and payout answer is checked
+ * against it.
+ */
+export interface IntakeSubject {
+  operatorRef: string;
+  deviceRef: string;
+  projectRef?: string;
+}
+
+export const IntakeSubjectSchema = z
+  .object({
+    operatorRef: z.string().min(1),
+    deviceRef: z.string().min(1),
+    projectRef: z.string().min(1).optional(),
+  })
+  .strict() satisfies z.ZodType<IntakeSubject>;
+
+/** The payout store's answer for one operator; it names the operator it answers for. */
+export interface IntakePayoutAnswer {
+  operatorRef: string;
+  exists: boolean;
+}
+
+/**
  * The authenticated sources `validateIntake` re-reads instead of trusting the
- * record. The caller supplies it; the record cannot. Subject binding is the
- * authority's job: `resolveConfirmation` must only return events for the
- * device/project being validated (its `eventId` argument comes from the record
- * and is untrusted), and `payoutDestinationExists` must answer for that same
- * operator. An authority method that throws, or returns something that is not
- * a well-formed answer, counts as "not confirmed" / "no payout destination"
- * (fail-closed).
+ * record. The caller supplies it; the record cannot. It carries the
+ * authenticated `subject`, and both store methods are scoped to that subject:
+ * the subject is in the typed call, and the validator compares it with what
+ * comes back (astra pack 120c, HIGH 3). `resolveConfirmation`'s `eventId`
+ * comes from the record and is untrusted. An authority whose subject is
+ * missing or malformed, or a method that throws or returns something that is
+ * not a well-formed answer for THIS subject, counts as "not confirmed" / "no
+ * payout destination" (fail-closed).
  */
 export interface IntakeAuthority {
-  /** The authenticated confirmation store (e.g. the ADK trace store). Returns null when unknown. */
-  resolveConfirmation(eventId: string): IntakeConfirmationEvent | null;
-  /** Re-reads the authoritative payout store (N21); never the record's {set:true}. */
-  payoutDestinationExists(): boolean;
+  /** The authenticated subject of this validation (never derived from the record). */
+  subject: IntakeSubject;
+  /** The authenticated confirmation store (e.g. the ADK trace store), scoped to `subject`. Null when unknown. */
+  resolveConfirmation(eventId: string, subject: IntakeSubject): IntakeConfirmationEvent | null;
+  /** Re-reads the authoritative payout store (N21) for one operator; never the record's {set:true}. */
+  payoutDestination(operatorRef: string): IntakePayoutAnswer | null;
   /** CSD lookup for the safety.limits binding; defaults to the built-in CSDs (loadBuiltinCsds()). */
   csdRegistry?: CsdRegistry;
+}
+
+/** The authority's subject, parsed; undefined when it is missing or malformed (then nothing confirms). */
+function authenticatedSubject(authority: IntakeAuthority | undefined): IntakeSubject | undefined {
+  if (!authority) return undefined;
+  try {
+    const parsed = IntakeSubjectSchema.safeParse(authority.subject);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // ── validateIntake — the runtime boundary ───────────────────────────────
@@ -210,15 +258,19 @@ export interface IntakeValidationReport {
    *  present regardless of milestone (R2 rule 4: "never filled with a
    *  guess"). */
   neverDefaultViolations: string[];
-  /** `fieldId` (or `fieldId.key`) pairs where an INTAKE_FORBIDDEN_KEYS key was
-   *  found anywhere in an answer's value/source, or used as a field id itself.
-   *  The comparison is NFKC-normalized, case-insensitive and ignores `_` and
-   *  `-`. */
+  /** Where an INTAKE_FORBIDDEN_KEYS key was found: `fieldId.<forbidden>` for a
+   *  key anywhere in an answer's value/source, or `<forbidden>` for a field id
+   *  that is itself forbidden. `<forbidden>` is the CANONICAL INTAKE_FORBIDDEN_KEYS
+   *  spelling the key matched, never the raw key (an unknown field id is shown as
+   *  its pathSegment token). The comparison is NFKC-normalized, case-insensitive
+   *  and ignores `_` and `-`. */
   forbiddenKeys: string[];
   /** Field ids marked `sensitive` whose stored value is not exactly {set: true}
    *  (R2 rule 5). */
   sensitiveViolations: string[];
-  /** Keys in `record.answers` that are not a known INTAKE_FIELD_IDS entry. */
+  /** Keys in `record.answers` that are not a known INTAKE_FIELD_IDS entry, each
+   *  as its pathSegment token (`#` plus 12 hex digits of its SHA-256): an
+   *  unknown key is never echoed (astra pack 120c). */
   unknownFields: string[];
   /** Where a string anywhere in the input matches a secret/sensitive-value
    *  detector (`scanIntakeStrings`): `{path, kind}` only, never the text. A
@@ -239,11 +291,15 @@ export interface IntakeValidationReport {
    *  confirmation: provenance is not "human"/"confirmed", or there is no
    *  `confirmation` reference, or no `authority` was supplied, or the event
    *  the authority resolves does not match (unknown, wrong field id, value or
-   *  source hash mismatch, revoked, superseded, or malformed). */
+   *  source hash mismatch, a subject or confirming principal other than the
+   *  authority's authenticated IntakeSubject, revoked, superseded, or
+   *  malformed). */
   unconfirmed: string[];
   /** `"payout.destination"` when `milestone` is (or implies) "get-paid" and
-   *  `authority.payoutDestinationExists()` is not exactly true (or no authority
-   *  was supplied): the record's `{set: true}` is never trusted for that. */
+   *  `authority.payoutDestination(subject.operatorRef)` does not answer
+   *  `{operatorRef: <that operator>, exists: true}` (or no authority, or no
+   *  well-formed subject, was supplied): the record's `{set: true}` is never
+   *  trusted for that. */
   unverified: string[];
   /** Problems with `safety.limits` against the CSD that `capability.type`
    *  names (looked up in `authority.csdRegistry`, else the built-in CSDs): one
@@ -264,16 +320,11 @@ export interface IntakeValidationReport {
    *  look-alike of "privateKey", say) is rejected outright, whatever it
    *  spells. Paths only, never values. */
   nonAsciiKeys: string[];
-  /** For a milestone that is (or implies) tier1/tier2: the evidence primitives
-   *  its required fields map to that are not `active` + `live` in
-   *  EVIDENCE_PRIMITIVES (stub, planned, reserved, deprecated or unknown), sorted.
-   *  A stub fails closed: tier readiness means only that the intake can feed a
-   *  LIVE verifier, never that the device is assured. */
-  stubPrimitives: string[];
-  /** Field ids required by tier1/tier2 whose answer satisfies the field's
-   *  schema but proves nothing for its primitive (e.g. a camera that sees
-   *  neither the work area nor the output, `exportsOwnLogPerJob: false`); see
-   *  TIER_SUBSTANCE_RULES in tier-readiness.ts. */
+  /** Field ids required by tier1-intake-complete / tier2-intake-complete whose
+   *  answer satisfies the field's schema but is empty for the evidence program
+   *  it will feed (e.g. a camera that sees neither the work area nor the
+   *  output, `exportsOwnLogPerJob: false`); see TIER_SUBSTANCE_RULES in
+   *  tier-readiness.ts. */
   insubstantial: string[];
 }
 
@@ -297,7 +348,6 @@ const REPORT_LISTS = Object.keys({
   unverified: true,
   limitErrors: true,
   safetyBlocks: true,
-  stubPrimitives: true,
   insubstantial: true,
   nonAsciiKeys: true,
 } satisfies Record<IntakeReportList, true>) as IntakeReportList[];
@@ -317,7 +367,6 @@ function emptyReport(): IntakeValidationReport {
     unverified: [],
     limitErrors: [],
     safetyBlocks: [],
-    stubPrimitives: [],
     insubstantial: [],
     nonAsciiKeys: [],
   };
@@ -343,6 +392,13 @@ const FORBIDDEN_KEY_NORMALIZED_SET: ReadonlySet<string> = new Set(
 
 function isForbiddenKey(key: string): boolean {
   return FORBIDDEN_KEY_NORMALIZED_SET.has(normalizeForbiddenKey(key));
+}
+
+/** The INTAKE_FORBIDDEN_KEYS spelling a forbidden key matched. Reports name the
+ *  concept, never the raw key the caller wrote (astra pack 120c). */
+function canonicalForbiddenKey(key: string): string {
+  const normalized = normalizeForbiddenKey(key);
+  return INTAKE_FORBIDDEN_KEYS.find((k) => normalizeForbiddenKey(k) === normalized) ?? "(forbidden)";
 }
 
 function isRecordObject(node: unknown): node is Record<string, unknown> {
@@ -382,7 +438,7 @@ function scanRawInput(input: unknown, report: IntakeValidationReport): void {
   const nonAsciiKeys = new Set<string>();
   for (const [fieldId, answer] of Object.entries(answers)) {
     const shownId = pathSegment(fieldId);
-    if (isForbiddenKey(fieldId)) forbiddenKeyHits.add(shownId);
+    if (isForbiddenKey(fieldId)) forbiddenKeyHits.add(canonicalForbiddenKey(fieldId));
     if (!FIELD_INDEX.has(fieldId)) unknownFields.add(shownId);
     if (hasNonAscii(fieldId)) nonAsciiKeys.add(joinPath(["answers", fieldId]));
     if (!isRecordObject(answer)) continue;
@@ -392,7 +448,7 @@ function scanRawInput(input: unknown, report: IntakeValidationReport): void {
     for (const part of ["value", "source"] as const) {
       walkValue(answer[part], {
         key: (key, path) => {
-          if (isForbiddenKey(key)) forbiddenKeyHits.add(`${shownId}.${pathSegment(key)}`);
+          if (isForbiddenKey(key)) forbiddenKeyHits.add(`${shownId}.${canonicalForbiddenKey(key)}`);
           if (hasNonAscii(key)) nonAsciiKeys.add(joinPath(["answers", fieldId, part, ...path()]));
         },
       });
@@ -408,11 +464,12 @@ function scanRawInput(input: unknown, report: IntakeValidationReport): void {
  *  throws or returns something malformed — is "no". */
 function confirmationHolds(fieldId: string, answer: IntakeAnswer, authority: IntakeAuthority | undefined): boolean {
   if (answer.provenance !== "human" && answer.provenance !== "confirmed") return false;
-  if (!answer.confirmation || !authority) return false;
+  const subject = authenticatedSubject(authority);
+  if (!answer.confirmation || !authority || !subject) return false;
 
   let resolved: unknown;
   try {
-    resolved = authority.resolveConfirmation(answer.confirmation.eventId);
+    resolved = authority.resolveConfirmation(answer.confirmation.eventId, { ...subject });
   } catch {
     return false;
   }
@@ -427,12 +484,22 @@ function confirmationHolds(fieldId: string, answer: IntakeAnswer, authority: Int
   // source, so an answer that dropped or changed it is not the confirmed one.
   const expectedSourceHash = answer.source === undefined ? undefined : intakeValueHash(answer.source);
   if (event.sourceHash !== expectedSourceHash) return false;
+  // Subject binding: the event must be about THIS device (and project, both ways) and confirmed by THIS operator.
+  if (event.subject.deviceRef !== subject.deviceRef) return false;
+  if (event.subject.projectRef !== subject.projectRef) return false;
+  if (event.confirmedBy.principal !== subject.operatorRef) return false;
   return event.revoked === false && event.supersededBy === null;
 }
 
+/** The payout store's answer for the authenticated operator; it must name that operator. */
 function payoutDestinationExists(authority: IntakeAuthority | undefined): boolean {
+  const subject = authenticatedSubject(authority);
+  if (!authority || !subject) return false;
   try {
-    return authority?.payoutDestinationExists() === true;
+    const answer = authority.payoutDestination(subject.operatorRef) as unknown;
+    if (answer === null || typeof answer !== "object") return false;
+    const { operatorRef, exists } = answer as Record<string, unknown>;
+    return operatorRef === subject.operatorRef && exists === true;
   } catch {
     return false;
   }
@@ -528,7 +595,6 @@ function checkParsedRecord(
   }
 
   checkSafetyPolicy(record, impliedMilestones, parsedValues, authority, report);
-  report.stubPrimitives.push(...stubPrimitivesFor(impliedMilestones));
   report.insubstantial.push(...insubstantialTierFields(impliedMilestones, parsedValues));
 
   report.missing.push(...missing);
@@ -584,9 +650,9 @@ function checkParsedRecord(
  *      `safety.limits` is present and well-formed, each entry's quantity must
  *      be a NUMBER parameter of the CSD that `capability.type` names (looked
  *      up in `authority.csdRegistry`, else the built-in CSDs), its unit must
- *      convert to that parameter's declared unit through a small closed table
- *      (for a parameter that declares no unit, exactly UNITLESS_LIMIT_UNIT,
- *      "count"),
+ *      convert to that parameter's unit through a small closed table ("count"
+ *      for a count parameter: unit "count" declared, or a reviewed built-in
+ *      unitless count, REVIEWED_COUNT_PARAMETERS),
  *      it must lie within the parameter's own [min, max], and a quantity may
  *      appear once; problems go to `limitErrors` and make the report not ok
  *      for any milestone. When `capability.type` is absent or does not
@@ -595,20 +661,20 @@ function checkParsedRecord(
  *      `{mechanism: "none"}` blocks publish and every milestone implying it
  *      (accept-jobs, get-paid) unless `capability.type` is in
  *      ESTOP_NONE_APPROVED_CAPABILITIES (`safetyBlocks`).
- *   6. Tier readiness (tier1, tier2 and anything implying them) means only
- *      that the intake can feed a LIVE verifier, never that the device is
- *      assured, and it fails closed (tier-readiness.ts): every evidence
- *      primitive a required tier field maps to must be active + live in
- *      EVIDENCE_PRIMITIVES, else it is listed in `stubPrimitives`; and a
- *      shape-valid answer that proves nothing for its primitive (e.g. a camera
- *      that sees neither the work area nor the output) is listed in
- *      `insubstantial`.
+ *   6. The tier-intake milestones (tier1-intake-complete,
+ *      tier2-intake-complete and anything implying them) mean only that the
+ *      intake holds substantive answers a tier program will need; they confer
+ *      NO tier readiness (tier-readiness.ts). A shape-valid answer that is empty
+ *      for its program (e.g. a camera that sees neither the work area nor the
+ *      output) is listed in `insubstantial`. Tier eligibility is decided by the
+ *      evidence lane's committed verification program at activation, never by
+ *      intake and never from the evidence registry's mutable verifierStatus.
  * Milestone matching is CUMULATIVE (review fix): a field is required for
  * `milestone` if its own `requiredFor` contains `milestone` OR any milestone
  * that `milestone` implies (MILESTONE_IMPLIES in fields.ts — e.g. accept-jobs
  * implies publish, so a record missing a publish-level field can never be
- * "ready" for accept-jobs; tier2 implies tier1, register-device, identify and
- * register). "optional" implies nothing, so an optional field never blocks
+ * "ready" for accept-jobs; tier2-intake-complete implies tier1-intake-complete,
+ * register-device, identify and register). "optional" implies nothing, so an optional field never blocks
  * any other milestone.
  *
  * Producers: call this before logging or persisting a record, and again before
@@ -639,6 +705,33 @@ export function validateIntake(
   }
   report.ok = REPORT_LISTS.every((list) => report[list].length === 0);
   return report;
+}
+
+// ── Limits in parameter units (for consumers that do no conversion) ─────
+
+/**
+ * The record's `safety.limits`, each converted into its CSD parameter's own
+ * unit, or null. Null unless the input parses, `safety.limits` satisfies its
+ * field schema, `capability.type` resolves (through `authority.csdRegistry`,
+ * else the built-in CSDs) and every limit binds (checkSafetyLimits finds
+ * nothing). It never throws. It checks only the limits: call validateIntake for
+ * readiness. Sensors' R8 has no unit conversion of its own, so it takes limits
+ * from here (kits re sensors #4764).
+ */
+export function normalizeIntakeLimits(input: unknown, authority?: IntakeAuthority): SafetyLimit[] | null {
+  try {
+    const parsed = IntakeRecordSchema.safeParse(input);
+    if (!parsed.success) return null;
+    const limitsField = FIELD_INDEX.get("safety.limits");
+    const answer = parsed.data.answers["safety.limits"];
+    if (!limitsField || !answer) return null;
+    const limits = limitsField.valueSchema.safeParse(answer.value);
+    if (!limits.success) return null;
+    const parameters = numberParametersOf(parsed.data.answers["capability.type"]?.value, authority?.csdRegistry);
+    return limitsInParameterUnits(limits.data as SafetyLimit[], parameters);
+  } catch {
+    return null;
+  }
 }
 
 // ── Execution-mode tier cap (addendum: "may only LOWER the tier") ───────

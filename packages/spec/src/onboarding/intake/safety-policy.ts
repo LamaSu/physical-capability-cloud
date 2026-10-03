@@ -5,9 +5,11 @@
  *   1. `safety.limits` entries are bound to the CSD named by `capability.type`
  *      (`checkSafetyLimits`): the quantity must be a NUMBER parameter of that
  *      CSD, the unit must be convertible to the parameter's declared unit
- *      through a small closed table (a parameter that declares no unit is a
- *      dimensionless count, and its limit names the unit "count"), the limit
- *      must lie inside the parameter's
+ *      through a small closed table ("count" is the unit of a count
+ *      parameter: one that declares unit "count", or a REVIEWED built-in
+ *      parameter that declares no unit, REVIEWED_COUNT_PARAMETERS; any other
+ *      unitless parameter cannot carry a limit), the limit must lie inside the
+ *      parameter's
  *      own [min, max] (a limit only NARROWS the CSD's range), and each
  *      quantity may appear once (duplicates are refused, never intersected).
  *   2. `safety.estop` `{mechanism: "none"}` is an honest observation, but it
@@ -78,6 +80,8 @@ const UNIT_TABLE: ReadonlyMap<string, UnitDef> = new Map<string, UnitDef>([
   [DEGREE, unit("angle", 1)],
   // count of pages
   ["pages", unit("pages", 1)],
+  // a dimensionless count of things (copies, parts, portions, walls)
+  ["count", unit("count", 1)],
 ]);
 
 /** Spellings that normalize to a table unit. Applied after NFKC, trim and
@@ -106,13 +110,28 @@ function convert(value: number, from: UnitDef, to: UnitDef): number {
   return ((value * from.scale + from.offset) - to.offset) / to.scale;
 }
 
-/**
- * The unit a limit names for a CSD number parameter that declares NO unit (a
- * dimensionless count such as copies, wallCount, quantity or portions). It is
- * matched exactly (after NFKC and trim), only against a unitless parameter, and
- * it is not in the unit table, so a unit-bearing parameter refuses it.
- */
+/** The unit of a count parameter's limit: "count" (in the unit table, dimension "count"). */
 export const UNITLESS_LIMIT_UNIT = "count";
+
+/**
+ * Built-in CSD number parameters that declare NO unit and are reviewed to be
+ * whole-number counts (each has step 1 and a count label), so a limit on them
+ * uses the unit "count". A CSD does not say that an unlisted unitless number is a
+ * count: a dimensionless ratio, score or coefficient is not, so an unlisted
+ * unitless parameter cannot carry a limit (astra pack 120c). A kit or external
+ * CSD makes its parameter a count by declaring unit "count". Extend only by
+ * reviewed PR; a test pins that every built-in unitless number parameter is
+ * listed here.
+ */
+export const REVIEWED_COUNT_PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
+  ["pcc://capabilities/2d-print/v1", Object.freeze(["copies"])],
+  ["pcc://capabilities/cnc-3axis/v2", Object.freeze(["quantity"])],
+  ["pcc://capabilities/fdm/v2", Object.freeze(["quantity", "wallCount"])],
+  ["pcc://capabilities/hot-food-prep/v1", Object.freeze(["portions"])],
+  ["pcc://capabilities/laser-cut/v2", Object.freeze(["quantity"])],
+  ["pcc://capabilities/make-pizza/v1", Object.freeze(["quantity"])],
+  ["pcc://capabilities/sla/v2", Object.freeze(["quantity"])],
+]);
 
 // ── CSD binding ──────────────────────────────────────────────────────────
 
@@ -137,8 +156,12 @@ export function numberParametersOf(capabilityType: unknown, registry?: CsdRegist
   try {
     const csd = registryOrBuiltin(registry).resolve(capabilityType);
     const params = new Map<string, { unit?: string; min: number; max: number }>();
+    const reviewedCounts = REVIEWED_COUNT_PARAMETERS.get(capabilityType) ?? [];
     for (const p of csd.parameters) {
-      if (p.type === "number") params.set(p.key, { unit: p.unit, min: p.min, max: p.max });
+      if (p.type !== "number") continue;
+      // A reviewed unitless count takes the unit "count"; any other unitless parameter keeps no unit.
+      const unit = p.unit ?? (reviewedCounts.includes(p.key) ? UNITLESS_LIMIT_UNIT : undefined);
+      params.set(p.key, { unit, min: p.min, max: p.max });
     }
     return params;
   } catch {
@@ -166,10 +189,11 @@ const CONVERSION_SLACK = 1e-9;
  * unbound CSD means for its milestone.
  *
  * With a CSD, each entry must: name (exactly) a NUMBER parameter's key; use a
- * unit in the closed table whose dimension matches the parameter's declared
- * unit, or, for a parameter that declares no unit, exactly UNITLESS_LIMIT_UNIT
- * (a parameter whose declared unit is outside the table cannot carry a limit);
- * and, converted to the parameter's unit, lie within the
+ * unit in the closed table whose dimension matches the parameter's effective
+ * unit (its declared unit; "count" for a reviewed unitless count parameter,
+ * REVIEWED_COUNT_PARAMETERS; a parameter with no unit otherwise, or with a unit
+ * outside the table, cannot carry a limit); and, converted to that unit, lie
+ * within the
  * parameter's [min, max]. Every entry for an already-seen quantity (compared
  * after NFKC, trim and lower-casing) is refused — never intersected.
  */
@@ -193,13 +217,7 @@ export function checkSafetyLimits(limits: readonly SafetyLimit[], parameters: Nu
       return;
     }
     if (parameter.unit === undefined) {
-      if (limit.unit.normalize("NFKC").trim() !== UNITLESS_LIMIT_UNIT) {
-        errors.push(`${where}: the CSD parameter declares no unit; its limit uses the unit "${UNITLESS_LIMIT_UNIT}"`);
-        return;
-      }
-      if (!(limit.min >= parameter.min && limit.max <= parameter.max)) {
-        errors.push(`${where}: limit lies outside the CSD parameter's range`);
-      }
+      errors.push(`${where}: the CSD parameter declares no unit and is not a reviewed count parameter`);
       return;
     }
     const limitUnit = tableUnit(limit.unit);
@@ -227,4 +245,31 @@ export function checkSafetyLimits(limits: readonly SafetyLimit[], parameters: Nu
   });
 
   return errors;
+}
+
+/**
+ * The limits converted into each CSD parameter's own unit, or null when any of
+ * them fails checkSafetyLimits (or the CSD is not bound). Each result names the
+ * parameter's unit ("count" for a count parameter) and its bounds converted
+ * through the closed table, rounded to 12 significant digits so a conversion
+ * such as 1 mL -> 1000 uL reads exactly. A consumer that does no conversion of
+ * its own (sensors' R8) takes these (kits re sensors #4764).
+ */
+export function limitsInParameterUnits(
+  limits: readonly SafetyLimit[],
+  parameters: NumberParameters | undefined,
+): SafetyLimit[] | null {
+  if (!parameters || checkSafetyLimits(limits, parameters).length > 0) return null;
+  const round = (n: number): number => Number(n.toPrecision(12));
+  return limits.map((limit) => {
+    const parameter = parameters.get(limit.quantity)!;
+    const from = tableUnit(limit.unit)!;
+    const to = tableUnit(parameter.unit!)!;
+    return {
+      quantity: limit.quantity,
+      unit: parameter.unit!,
+      min: from === to ? limit.min : round(convert(limit.min, from, to)),
+      max: from === to ? limit.max : round(convert(limit.max, from, to)),
+    };
+  });
 }

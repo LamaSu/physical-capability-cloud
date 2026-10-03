@@ -14,7 +14,7 @@
 
 import { z } from "zod";
 import { INTAKE_FIELD_IDS } from "../intake/fields.js";
-import { httpsUrl, nonBlankText } from "../citation-rules.js";
+import { contentHashSchema, httpsUrl, nonBlankText } from "../citation-rules.js";
 
 // ── Closed placeholder set ───────────────────────────────────────────────
 
@@ -301,10 +301,7 @@ export const ResearchCitationSchema = z
     doc: nonBlankText,
     section: nonBlankText,
     url: httpsUrl.optional(),
-    contentHash: z
-      .string()
-      .regex(/^sha256:[0-9a-f]{64}$/, "contentHash is sha256: followed by 64 lowercase hex digits")
-      .optional(),
+    contentHash: contentHashSchema.optional(),
   })
   .strict();
 export type ResearchCitation = z.infer<typeof ResearchCitationSchema>;
@@ -369,18 +366,40 @@ const EXECUTION_VERB_PATTERN = new RegExp(
   "gi",
 );
 
-/** A negation that excuses a verb coming LATER in the same clause. */
+/** A negation that can excuse a verb coming LATER in the same clause (scope: clauseInstructsExecution). */
 const NEGATION_PATTERN = /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|without)\b/i;
 
 /** Clause boundaries: sentence punctuation, a line break, and " then ". */
 const CLAUSE_BOUNDARY = /[.;!?\n]|\s+then\s+/i;
 
+/** Text that only coordinates two verbs ("install or run", "install, run"), with no object between them. */
+const COORDINATION_ONLY = /^(?:[\s,]|\band\b|\bor\b|\bnor\b)*$/i;
+
+/**
+ * Verb-local negation scope (astra pack 120c). A negation EARLIER in the same
+ * clause excuses the next listed verb, and every further verb coordinated with
+ * that one directly ("Do not install or run any code"). Once the negated verb
+ * has taken an object, a coordinated verb starts a new predicate that the
+ * negation does not reach: "Do not install A and execute B" instructs
+ * execution. A later negation re-opens the scope ("Do not install A, and do not
+ * run B" instructs nothing).
+ */
 function clauseInstructsExecution(clause: string): boolean {
-  const negation = NEGATION_PATTERN.exec(clause);
-  const negatedFrom = negation ? negation.index : Number.POSITIVE_INFINITY;
+  const negations = [...clause.matchAll(new RegExp(NEGATION_PATTERN.source, "gi"))].map((m) => m.index ?? 0);
+  let inScope = false;
+  let lastExcusedEnd = -1;
+  let cursor = 0;
   for (const verb of clause.matchAll(EXECUTION_VERB_PATTERN)) {
-    // excused only by a negation EARLIER in the SAME clause
-    if (!(negatedFrom < (verb.index ?? 0))) return true;
+    const at = verb.index ?? 0;
+    if (negations.some((n) => n >= cursor && n < at)) {
+      inScope = true;
+      lastExcusedEnd = -1;
+    } else if (inScope && lastExcusedEnd >= 0 && !COORDINATION_ONLY.test(clause.slice(lastExcusedEnd, at))) {
+      inScope = false;
+    }
+    if (!inScope) return true;
+    lastExcusedEnd = at + verb[0].length;
+    cursor = lastExcusedEnd;
   }
   return false;
 }
@@ -411,10 +430,14 @@ function instructionBearingText(entry: ResearchLibraryEntry): string[] {
  * execution when it contains a verb from the closed set — install, execute,
  * run, launch, start the, flash, upload, download and run, send (a|the|this)
  * command, connect to the device, ssh, telnet, sudo, pip/npm/apt install, curl,
- * wget, power-cycle, actuate — unless a negation (do not, don't, never, must
- * not, should not, avoid, without) appears EARLIER in the SAME clause. A
- * negation in another clause excuses nothing: "Do not install A. Execute B."
- * instructs execution.
+ * wget, power-cycle, actuate — that no negation (do not, don't, never, must
+ * not, should not, avoid, without) excuses. A negation excuses only the next
+ * verb in its OWN clause and verbs coordinated with that one directly; once the
+ * negated verb has an object, a coordinated verb is affirmative again. So
+ * "Do not install A. Execute B." and "Do not install A and execute B." both
+ * instruct execution, while "Do not install or run any code." does not. It
+ * matches base verb forms only, and it does not parse grammar beyond that rule
+ * ("do not hesitate to install" reads as negated).
  */
 export function entryInstructsExecution(entry: ResearchLibraryEntry): boolean {
   return instructionBearingText(entry).some((text) =>

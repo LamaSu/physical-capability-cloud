@@ -1,29 +1,25 @@
 /**
- * Device intake — what "tier1" / "tier2" readiness may and may not claim.
+ * Device intake — what the tier-intake milestones ("tier1-intake-complete",
+ * "tier2-intake-complete") may and may not claim.
  *
- * Tier readiness means ONLY that the intake holds what a LIVE verifier could be
- * fed; it never means the device is assured. `validateIntake` (index.ts)
- * therefore fails closed in two ways for the tier milestones (and any
- * milestone implying them):
+ * They mean ONLY that the intake holds substantive answers a tier-1 / tier-2
+ * evidence program will need. They confer no tier readiness and no assurance:
+ * whether a device can reach a tier — which committed verification program
+ * applies, whether its verifiers are live, whether its parameters can be built —
+ * is decided by the evidence lane at activation, never by intake and never from
+ * the evidence registry's mutable verifierStatus (astra pack 120c, HIGH 5).
  *
- *   - Stub evidence. Every evidence primitive that a required tier field maps
- *     to (`IntakeFieldDef.evidencePrimitive`) must be `status: "active"` with
- *     `verifierStatus: "live"` in EVIDENCE_PRIMITIVES (the registry itself, not
- *     the status the field declared). Anything else — a stub, a planned
- *     verifier, a reserved/deprecated primitive, an id the registry does not
- *     know — is reported in `stubPrimitives`.
- *   - Facts that prove nothing. An answer can satisfy its field's schema and
- *     still be useless to the verifier its primitive feeds (a camera that
- *     sees neither the work area nor the output, a controller that does not
- *     export its own log). TIER_SUBSTANCE_RULES lists, per field, the value
- *     the primitive needs; a shape-valid answer that fails its rule is
- *     reported in `insubstantial`.
+ * What intake does check, for those milestones (and any milestone implying
+ * them): an answer can satisfy its field's schema and still be empty for the
+ * program it will feed (a camera that sees neither the work area nor the
+ * output, a controller that does not export its own log).
+ * TIER_SUBSTANCE_RULES lists, per field, the value it must have; a
+ * shape-valid answer that fails its rule is reported in `insubstantial`.
  */
 
-import { getPrimitive } from "../../evidence/primitives.js";
 import { INTAKE_FIELDS, type IntakeMilestone } from "./fields.js";
 
-const TIER_MILESTONES: readonly IntakeMilestone[] = ["tier1", "tier2"];
+const TIER_MILESTONES: readonly IntakeMilestone[] = ["tier1-intake-complete", "tier2-intake-complete"];
 
 const nonBlank = (value: unknown): boolean => typeof value === "string" && value.trim().length > 0;
 
@@ -44,8 +40,9 @@ const asRecord = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 
 /**
- * Per tier field, what a shape-valid answer must also be for its primitive to
- * be fed. Each rule sees the value that already satisfied the field's schema.
+ * Per tier-intake field, what a shape-valid answer must also be to be of use
+ * to the evidence program it will feed (named per field below, for reference
+ * only). Each rule sees the value that already satisfied the field's schema.
  *
  *   calibration.lastDate              a real calendar date           (decl.self_attested)
  *   calibration.procedureRef          not blank                      (decl.self_attested)
@@ -91,22 +88,6 @@ export const TIER_SUBSTANCE_RULE_FIELDS: readonly string[] = Object.freeze([...T
 /** Is `field` required by a tier milestone in `implied`? */
 function requiredByTier(requiredFor: readonly IntakeMilestone[], implied: ReadonlySet<IntakeMilestone>): boolean {
   return requiredFor.some((rf) => TIER_MILESTONES.includes(rf) && implied.has(rf));
-}
-
-/**
- * The evidence primitives mapped by tier fields that `implied` (a milestone's
- * implication closure) requires and that are NOT `active` + `live` in
- * EVIDENCE_PRIMITIVES, sorted and de-duplicated. Empty for a milestone that
- * implies neither tier.
- */
-export function stubPrimitivesFor(implied: ReadonlySet<IntakeMilestone>): string[] {
-  const stubs = new Set<string>();
-  for (const field of INTAKE_FIELDS) {
-    if (!field.evidencePrimitive || !requiredByTier(field.requiredFor, implied)) continue;
-    const primitive = getPrimitive(field.evidencePrimitive.id);
-    if (!(primitive?.status === "active" && primitive.verifierStatus === "live")) stubs.add(field.evidencePrimitive.id);
-  }
-  return [...stubs].sort();
 }
 
 /**

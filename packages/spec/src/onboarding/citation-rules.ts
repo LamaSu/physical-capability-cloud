@@ -1,5 +1,5 @@
 /**
- * Onboarding — the two rules a cited source has to meet, shared by the research
+ * Onboarding — the rules a cited source has to meet, shared by the research
  * library's `ResearchCitationSchema` and the intake record's
  * `IntakeSourceSchema` (a research finding's citation ends up as an answer's
  * source, so the two must not disagree).
@@ -28,3 +28,9 @@ function isHttpsWithoutCredentials(text: string): boolean {
 export const httpsUrl = z.string().refine(isHttpsWithoutCredentials, {
   message: "must be an https URL without credentials",
 });
+
+/** A digest of the cited text, `sha256:` + 64 lowercase hex, so the citation can be checked later.
+ *  Shared, so a research finding's citation copies into an answer's source unchanged. */
+export const contentHashSchema = z
+  .string()
+  .regex(/^sha256:[0-9a-f]{64}$/, "contentHash is sha256: followed by 64 lowercase hex digits");

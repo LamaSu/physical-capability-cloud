@@ -24,11 +24,24 @@
  * characters, spelled in full-width forms) or spread across several strings is
  * not detected.
  *
+ * Paths never echo an unknown key: a key outside the closed intake vocabulary
+ * (vocabulary.ts) is shown only as `#` plus 12 hex digits of its SHA-256, so a
+ * credential pasted as a key, in any format, never reaches a report or a log.
+ *
+ * One exact exemption: a source's `contentHash` (answers/<field>/source/
+ * contentHash) is a typed `sha256:<64 hex>` digest of cited text, not a secret,
+ * so a string at that path in exactly that form is not scanned.
+ *
  * Detectors (see each constant for the exact pattern):
  *   - pem             a PEM header `-----BEGIN <LABEL>-----`.
- *   - vendor-key      known API-key / token formats (Stripe, Anthropic/OpenAI-
- *                     style `sk-`, AWS access key id, Google API key, Slack,
- *                     GitHub, PCC keys) and JWTs.
+ *   - vendor-key      known API-key / token formats (Stripe, any `sk-` key
+ *                     including `sk-proj-`/`sk-ant-`, AWS, Google, Slack,
+ *                     GitHub, GitLab, Hugging Face, npm, SendGrid, Shopify,
+ *                     DigitalOcean, Azure storage, PCC keys) and JWTs.
+ *   - labeled-secret  a value written after a secret-ish label (`api_key: …`,
+ *                     `password=…`, `token: …`, `Bearer …`) that is at least 12
+ *                     characters and contains a digit: it catches credentials
+ *                     whose format no vendor pattern knows.
  *   - hex-secret      64 hex characters, with or without `0x`, as a whole
  *                     token (not part of a longer run of hex digits).
  *   - payout-address  an EVM address (`0x` + 40 hex, as a whole token). No
@@ -43,19 +56,23 @@
  *                     when it would not be a valid phrase.
  *   - street-address  a HEURISTIC backstop only: a house number, 1 to 4
  *                     capitalized words, then a street-type word (Street, Ave,
- *                     ...). The authoritative address store is
+ *                     Way, Lane, Drive, ...). The authoritative address store is
  *                     location.streetAddress = {set: true}; this only catches
  *                     the common US/UK shape pasted into a free-text field.
  *                     No INTAKE_FIELDS entry holds a street address string, so
  *                     it is applied to every field.
  */
 
+import { sha256 } from "@noble/hashes/sha256";
+import { bytesToHex } from "@noble/hashes/utils";
 import { BIP39_ENGLISH_WORDLIST } from "./bip39-english.js";
+import { INTAKE_KEY_VOCABULARY } from "./vocabulary.js";
 import { walkValue } from "./walk.js";
 
 export const INTAKE_SECRET_KINDS = [
   "pem",
   "vendor-key",
+  "labeled-secret",
   "hex-secret",
   "payout-address",
   "mnemonic",
@@ -82,16 +99,37 @@ const PEM_BEGIN = /-----BEGIN ([A-Z0-9 ]{3,40})-----/g;
 const VENDOR_KEY_PATTERNS: readonly RegExp[] = [
   /sk_live_[A-Za-z0-9]{10,}/g,
   /rk_live_[A-Za-z0-9]{10,}/g,
-  /sk-ant-[A-Za-z0-9_-]{20,}/g,
-  /sk-[A-Za-z0-9]{32,}/g,
-  /AKIA[0-9A-Z]{16}/g,
+  // any `sk-` key: sk-ant-, sk-proj-, sk-svcacct-, sk-admin- and bare sk- (hyphens and underscores allowed)
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g,
+  /whsec_[A-Za-z0-9]{20,}/g,
+  /(?:AKIA|ASIA)[0-9A-Z]{16}/g,
   /AIza[0-9A-Za-z_-]{35}/g,
-  /xox[baprs]-[A-Za-z0-9-]{10,}/g,
+  /ya29\.[A-Za-z0-9_-]{20,}/g,
+  /xox[abeoprs]-[A-Za-z0-9-]{10,}/g,
+  /xapp-[A-Za-z0-9-]{10,}/g,
   /gh[pousr]_[A-Za-z0-9]{30,}/g,
   /github_pat_[A-Za-z0-9_]{30,}/g,
+  /glpat-[A-Za-z0-9_-]{20,}/g,
+  /hf_[A-Za-z0-9]{30,}/g,
+  /npm_[A-Za-z0-9]{36,}/g,
+  /SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
+  /shp(?:at|ss|ca|pa)_[a-fA-F0-9]{32}/g,
+  /dop_v1_[a-f0-9]{64}/g,
+  /AccountKey=[A-Za-z0-9+/=]{40,}/g,
   /pcc_(?:live|oracle|test)_[A-Za-z0-9]{16,}/g,
   // a JWT: three base64url segments, the first two start with `eyJ` ({"...)
   /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+];
+
+/**
+ * A value after a secret-ish label, or a Bearer token: credentials whose format
+ * no vendor pattern knows. The value must be at least 12 characters with no
+ * whitespace or quote and contain a digit, so prose such as "password: see the
+ * manual" does not match.
+ */
+const LABELED_SECRET_PATTERNS: readonly RegExp[] = [
+  /\b(?:api[_ -]?key|apikey|secret|client[_ -]?secret|access[_ -]?key|private[_ -]?key|token|password|passwd|pwd|passphrase|auth)\b["']?\s*[:=]\s*["']?(?=[^\s"']*[0-9])[^\s"']{12,}/gi,
+  /\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*/g,
 ];
 
 /** 64 hex characters (a 32-byte key or digest), optionally `0x`-prefixed,
@@ -133,6 +171,19 @@ const STREET_TYPES = [
   "Pl",
   "Square",
   "Sq",
+  "Way",
+  "Lane",
+  "Ln",
+  "Drive",
+  "Dr",
+  "Circle",
+  "Cir",
+  "Trail",
+  "Plaza",
+  "Alley",
+  "Crescent",
+  "Close",
+  "Loop",
 ];
 const STREET_TYPE_ALTERNATION = [...STREET_TYPES, ...STREET_TYPES.map((t) => t.toUpperCase())].join("|");
 const STREET_WORD = "(?:[A-Z][A-Za-z'\\u2019.-]*|\\d{1,3}(?:st|nd|rd|th|ST|ND|RD|TH))";
@@ -195,6 +246,12 @@ function findSecretSpans(text: string): SecretSpan[] {
       spans.push({ start, end: start + match[0].length, kind: "vendor-key" });
     }
   }
+  for (const pattern of LABELED_SECRET_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      const start = match.index ?? 0;
+      spans.push({ start, end: start + match[0].length, kind: "labeled-secret" });
+    }
+  }
   for (const match of text.matchAll(HEX_SECRET)) {
     const start = match.index ?? 0;
     spans.push({ start, end: start + match[0].length, kind: "hex-secret" });
@@ -238,15 +295,18 @@ export function secretKindsOf(text: string): IntakeSecretKind[] {
 const MAX_SEGMENT_LENGTH = 80;
 
 /**
- * One path segment, safe to put in a report or a log line. A key that itself
- * matches a detector is replaced by `[redacted:<kind>]`; otherwise `~` and `/`
- * are escaped (RFC 6901), anything outside printable ASCII is written as
- * `\u{hex}` (no log forging, and a lookalike character stays visible), and a
- * long segment is cut. Internal: shared with validateIntake's reports.
+ * One path segment, safe to put in a report or a log line. Only an array index
+ * or a key in the closed intake vocabulary (INTAKE_KEY_VOCABULARY) is shown
+ * verbatim, with `~` and `/` escaped (RFC 6901) and anything outside printable
+ * ASCII written as `\u{hex}`. Any other key is written as `#` plus the first 12
+ * hex digits of its SHA-256: one-way, so a credential pasted as a key, in a
+ * format no detector knows, is never echoed (astra pack 120c), yet the same key
+ * always gets the same token. Internal: shared with validateIntake's reports.
  */
 export function pathSegment(raw: string): string {
-  const kinds = secretKindsOf(raw);
-  if (kinds.length > 0) return `[redacted:${kinds[0]}]`;
+  if (!/^(?:0|[1-9][0-9]{0,8})$/.test(raw) && !INTAKE_KEY_VOCABULARY.has(raw)) {
+    return `#${bytesToHex(sha256(new TextEncoder().encode(raw))).slice(0, 12)}`;
+  }
   const escaped = raw
     .replace(/~/g, "~0")
     .replace(/\//g, "~1")
@@ -260,6 +320,15 @@ export function joinPath(segments: readonly string[]): string {
 
 // ── Scanning ─────────────────────────────────────────────────────────────
 
+const CONTENT_HASH = /^sha256:[0-9a-f]{64}$/;
+
+/** A typed digest of cited text at answers/<field>/source/contentHash: the one exact exemption. */
+function isSourceContentHash(text: string, path: readonly string[]): boolean {
+  return (
+    path.length === 4 && path[0] === "answers" && path[2] === "source" && path[3] === "contentHash" && CONTENT_HASH.test(text)
+  );
+}
+
 /**
  * Scan every string in `value` (arrays and objects, recursively) with every
  * detector. Returns one `{path, kind}` per (string, kind) in document order;
@@ -270,6 +339,7 @@ export function scanIntakeStrings(value: unknown): IntakeSecretHit[] {
   const hits: IntakeSecretHit[] = [];
   walkValue(value, {
     string: (text, path) => {
+      if (isSourceContentHash(text, path())) return;
       const kinds = secretKindsOf(text);
       if (kinds.length === 0) return;
       const where = joinPath(path());
@@ -301,8 +371,10 @@ function setOwn(target: object, key: string, value: unknown): void {
 /**
  * A deep copy of `record` in which every string that matches a detector has
  * each match replaced by `[redacted:<kind>]` (a PEM block is replaced through
- * its footer). An object key that itself matches a detector is renamed to
- * `[redacted:<kind>]`, suffixed `-2`, `-3`, ... if that would collide. Arrays
+ * its footer). An object key outside the closed intake vocabulary is renamed
+ * to its `pathSegment` token (`#` plus 12 hex digits of its SHA-256), suffixed
+ * `-2`, `-3`, ... if that would collide, so an unknown key never reaches a log
+ * verbatim, whatever its format. Arrays
  * and objects are copied (an object that is not a plain object becomes a plain
  * object of its own enumerable properties); numbers, booleans, null and
  * undefined are returned as they are. The input is not modified.
@@ -334,13 +406,14 @@ export function redactIntakeSecrets<T>(record: T): T {
     }
     // Keys that are kept as they are claim their names first, so a renamed key
     // can never take (and then be overwritten by) one of them.
-    const entries = Object.entries(source).map(([key, value]) => ({ key, value, kinds: secretKindsOf(key) }));
-    const usedKeys = new Set(entries.filter((e) => e.kinds.length === 0).map((e) => e.key));
-    for (const { key, value, kinds } of entries) {
+    const entries = Object.entries(source).map(([key, value]) => ({ key, value, kept: pathSegment(key) === key }));
+    const usedKeys = new Set(entries.filter((e) => e.kept).map((e) => e.key));
+    for (const { key, value, kept } of entries) {
       let outKey = key;
-      if (kinds.length > 0) {
-        outKey = `[redacted:${kinds[0]}]`;
-        for (let n = 2; usedKeys.has(outKey); n++) outKey = `[redacted:${kinds[0]}]-${n}`;
+      if (!kept) {
+        const token = pathSegment(key);
+        outKey = token;
+        for (let n = 2; usedKeys.has(outKey); n++) outKey = `${token}-${n}`;
         usedKeys.add(outKey);
       }
       setOwn(target, outKey, copyOf(value));

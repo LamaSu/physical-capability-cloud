@@ -89,17 +89,19 @@ export const INTAKE_FIELD_CLASSES = ["A", "B", "C"] as const;
 export type IntakeFieldClass = (typeof INTAKE_FIELD_CLASSES)[number];
 
 /** Milestones a field can gate. "optional" fields never block a milestone.
- *  "tier1" / "tier2" readiness means only that the intake can feed a LIVE
- *  verifier (validateIntake fails closed on stub primitives and on answers
- *  that prove nothing); it never means the device is assured. */
+ *  "tier1-intake-complete" / "tier2-intake-complete" mean only that the intake
+ *  holds substantive answers a tier-1 / tier-2 evidence program will need. They
+ *  confer NO tier readiness and no assurance: whether a device can reach a tier
+ *  is decided by the evidence lane's committed verification program at
+ *  activation, never by intake (astra pack 120c, HIGH 5). */
 export const INTAKE_MILESTONES = [
   "register",
   "identify",
   "register-device",
   "publish",
   "accept-jobs",
-  "tier1",
-  "tier2",
+  "tier1-intake-complete",
+  "tier2-intake-complete",
   "get-paid",
   "optional",
 ] as const;
@@ -109,9 +111,10 @@ export type IntakeMilestone = (typeof INTAKE_MILESTONES)[number];
  * Direct milestone implications: "being ready for X also requires every field
  * needed for Y" (and, transitively, whatever Y itself implies). The
  * onboarding chain (register < identify < register-device < publish <
- * accept-jobs) and the evidence chain (tier1 < tier2) are both encoded as
- * direct edges here, plus the two named cross-links (tier1 implies
- * register-device; get-paid implies publish). "optional" implies nothing, and
+ * accept-jobs) and the evidence-intake chain (tier1-intake-complete <
+ * tier2-intake-complete) are both encoded as direct edges here, plus the two
+ * named cross-links (tier1-intake-complete implies register-device; get-paid
+ * implies publish). "optional" implies nothing, and
  * nothing implies it — an optional field never blocks any other milestone.
  */
 const MILESTONE_DIRECT_IMPLICATIONS: Readonly<Record<IntakeMilestone, readonly IntakeMilestone[]>> = {
@@ -120,8 +123,8 @@ const MILESTONE_DIRECT_IMPLICATIONS: Readonly<Record<IntakeMilestone, readonly I
   "register-device": ["identify"],
   publish: ["register-device"],
   "accept-jobs": ["publish"],
-  tier1: ["register-device"],
-  tier2: ["tier1"],
+  "tier1-intake-complete": ["register-device"],
+  "tier2-intake-complete": ["tier1-intake-complete"],
   "get-paid": ["publish"],
   optional: [],
 };
@@ -575,7 +578,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     question: "When did you last calibrate this device? (self-declared)",
     why: "This is self-declared only — we never infer or default a calibration date.",
     fills: [{ artifact: "evidencePlan", path: "calibration.lastDate" }],
-    requiredFor: ["tier1"],
+    requiredFor: ["tier1-intake-complete"],
     selfDeclaredOnly: true,
     evidencePrimitive: { id: "decl.self_attested", status: "live" },
     ifUnknown: {
@@ -591,7 +594,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     question: "Which calibration procedure did you follow? (self-declared)",
     why: "Research can suggest a procedure, but only your confirmation makes it the record — self-declared only.",
     fills: [{ artifact: "evidencePlan", path: "calibration.procedureRef" }],
-    requiredFor: ["tier1"],
+    requiredFor: ["tier1-intake-complete"],
     selfDeclaredOnly: true,
     evidencePrimitive: { id: "decl.self_attested", status: "live" },
     ifUnknown: { research: "find-calibration" },
@@ -609,7 +612,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     question: "Which device id actually executes the job?",
     why: "This is the raw fact the evidence plan is built from — independence is derived from it, never asked directly.",
     fills: [{ artifact: "provenanceRecipe", path: "executorDeviceId" }],
-    requiredFor: ["tier1"],
+    requiredFor: ["tier1-intake-complete"],
     ifUnknown: {
       check:
         "Name the device id of the machine that actually performs the job — not a camera or sensor only watching it.",
@@ -623,7 +626,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     question: "Which device ids (if any) only observe the job, without executing it?",
     why: "An observer that isn't also the executor is what makes an inspection independent — we derive that, we don't ask you to assert it.",
     fills: [{ artifact: "provenanceRecipe", path: "observerDeviceIds" }],
-    requiredFor: ["tier1"],
+    requiredFor: ["tier1-intake-complete"],
     ifUnknown: {
       check:
         "List the device ids of any camera or sensor that watches the job without controlling it. Leave it empty if nothing else observes.",
@@ -637,7 +640,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     question: "Is this run against the real device, or a mock/dry-run adapter?",
     why: "A mock or dry-run answer caps the job's evidence at tier 0 — it can lower the tier, never raise it.",
     fills: [{ artifact: "evidencePlan", path: "confirm.execution_mode" }],
-    requiredFor: ["tier1"],
+    requiredFor: ["tier1-intake-complete"],
     evidencePrimitive: { id: "confirm.execution_mode", status: "live" },
     valueSchema: z.enum(["real", "mock", "dry_run"]),
   },
@@ -649,7 +652,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
       "Where could a camera see this job's result — does it see the work area, does it see the output, is it fixed or handheld, and which device id captures it?",
     why: "Buyers pay against evidence that the work happened, and what the camera can see decides how strong that evidence is.",
     fills: [{ artifact: "evidencePlan", path: "capture.photo_nonced.placement" }],
-    requiredFor: ["tier2"],
+    requiredFor: ["tier2-intake-complete"],
     evidencePrimitive: { id: "capture.photo_nonced", status: "stub" },
     ifUnknown: {
       check:
@@ -671,7 +674,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     question: "Is an operator present always, sometimes, or never during a job?",
     why: "Operator presence shapes what kind of evidence and approval is realistic to collect.",
     fills: [{ artifact: "evidencePlan", path: "operatorPresence" }],
-    requiredFor: ["tier1"],
+    requiredFor: ["tier1-intake-complete"],
     ifUnknown: {
       check: "Think about your usual routine: are you standing at the device while it runs, checking in occasionally, or away entirely?",
     },
@@ -685,7 +688,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
       "Who is the person who will approve evidence for this device? (identity only — their signing key is registered separately later.)",
     why: "We need to know who will attest to job quality before we register how they sign.",
     fills: [{ artifact: "evidencePlan", path: "approval.expert.approver" }],
-    requiredFor: ["tier2"],
+    requiredFor: ["tier2-intake-complete"],
     evidencePrimitive: { id: "approval.expert", status: "stub" },
     ifUnknown: {
       check: "Name the specific person who will review job evidence for this device — a name and contact, not a role or team.",
@@ -699,7 +702,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     question: "Can the controller export its own execution log per job? If so, via API or file?",
     why: "A per-job exportable log is what lets us build a trustworthy machine execution record.",
     fills: [{ artifact: "evidencePlan", path: "machine.execution_log" }],
-    requiredFor: ["tier1"],
+    requiredFor: ["tier1-intake-complete"],
     evidencePrimitive: { id: "machine.execution_log", status: "stub" },
     ifUnknown: { research: "find-evidence-signals" },
     valueSchema: z
@@ -716,7 +719,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
       { artifact: "evidencePlan", path: "receipt.kernel_signed" },
       { artifact: "evidencePlan", path: "ident.registered_key" },
     ],
-    requiredFor: ["tier1"],
+    requiredFor: ["tier1-intake-complete"],
     // "maps to receipt.kernel_signed plus ident.registered_key (stub under the
     // lockstep rule)" — recorded against ident.registered_key (verifierStatus
     // "stub"), the weaker/gating half of the pair, so the field's declared
@@ -732,7 +735,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     question: "Do you have a reference sample with a known expected result?",
     why: "A known-good test pair is the strongest cheap proof that the capability actually works.",
     fills: [{ artifact: "evidencePlan", path: "measure.io_test_pair" }],
-    requiredFor: ["tier1"],
+    requiredFor: ["tier1-intake-complete"],
     evidencePrimitive: { id: "measure.io_test_pair", status: "stub" },
     ifUnknown: {
       check:

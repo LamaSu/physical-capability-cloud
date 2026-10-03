@@ -231,7 +231,7 @@
         <span class="badge badge-class">class C</span>
         <span class="badge badge-self-declared">self-declared</span>
         <span class="badge badge-evidence">evidence: decl.self_attested (live)</span>
-        <div class="meta">required for: tier1</div>
+        <div class="meta">required for: tier1-intake-complete</div>
         <div class="if-unknown">If you don't know: Check your maintenance log or the device&#39;s calibration sticker. If you&#39;re still not sure, calibrate it now and record today&#39;s date.</div>
       </div>
       <div class="field" id="calibration.procedureRef">
@@ -241,7 +241,7 @@
         <span class="badge badge-class">class B</span>
         <span class="badge badge-self-declared">self-declared</span>
         <span class="badge badge-evidence">evidence: decl.self_attested (live)</span>
-        <div class="meta">required for: tier1</div>
+        <div class="meta">required for: tier1-intake-complete</div>
         <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-calibration&quot; in the research library)</div>
       </div>
     </section>
@@ -252,7 +252,7 @@
         <div class="question">Which device id actually executes the job?</div>
         <div class="why">This is the raw fact the evidence plan is built from — independence is derived from it, never asked directly.</div>
         <span class="badge badge-class">class C</span>
-        <div class="meta">required for: tier1</div>
+        <div class="meta">required for: tier1-intake-complete</div>
         <div class="if-unknown">If you don't know: Name the device id of the machine that actually performs the job — not a camera or sensor only watching it.</div>
       </div>
       <div class="field" id="evidence.observerDeviceIds">
@@ -260,7 +260,7 @@
         <div class="question">Which device ids (if any) only observe the job, without executing it?</div>
         <div class="why">An observer that isn&#39;t also the executor is what makes an inspection independent — we derive that, we don&#39;t ask you to assert it.</div>
         <span class="badge badge-class">class C</span>
-        <div class="meta">required for: tier1</div>
+        <div class="meta">required for: tier1-intake-complete</div>
         <div class="if-unknown">If you don't know: List the device ids of any camera or sensor that watches the job without controlling it. Leave it empty if nothing else observes.</div>
       </div>
       <div class="field" id="evidence.executionMode">
@@ -269,7 +269,7 @@
         <div class="why">A mock or dry-run answer caps the job&#39;s evidence at tier 0 — it can lower the tier, never raise it.</div>
         <span class="badge badge-class">class A</span>
         <span class="badge badge-evidence">evidence: confirm.execution_mode (live)</span>
-        <div class="meta">required for: tier1</div>
+        <div class="meta">required for: tier1-intake-complete</div>
       </div>
       <div class="field" id="evidence.camera">
         <div class="field-id">evidence.camera</div>
@@ -277,7 +277,7 @@
         <div class="why">Buyers pay against evidence that the work happened, and what the camera can see decides how strong that evidence is.</div>
         <span class="badge badge-class">class C</span>
         <span class="badge badge-evidence">evidence: capture.photo_nonced (stub — stub = proves nothing yet)</span>
-        <div class="meta">required for: tier2</div>
+        <div class="meta">required for: tier2-intake-complete</div>
         <div class="if-unknown">If you don't know: Look for a camera already pointed at the work area or output — a webcam, a phone on a stand, a security camera. If there isn&#39;t one yet, say so; the agent can suggest a placement.</div>
       </div>
       <div class="field" id="evidence.operatorPresence">
@@ -285,7 +285,7 @@
         <div class="question">Is an operator present always, sometimes, or never during a job?</div>
         <div class="why">Operator presence shapes what kind of evidence and approval is realistic to collect.</div>
         <span class="badge badge-class">class C</span>
-        <div class="meta">required for: tier1</div>
+        <div class="meta">required for: tier1-intake-complete</div>
         <div class="if-unknown">If you don't know: Think about your usual routine: are you standing at the device while it runs, checking in occasionally, or away entirely?</div>
       </div>
       <div class="field" id="evidence.approver">
@@ -294,7 +294,7 @@
         <div class="why">We need to know who will attest to job quality before we register how they sign.</div>
         <span class="badge badge-class">class C</span>
         <span class="badge badge-evidence">evidence: approval.expert (stub — stub = proves nothing yet)</span>
-        <div class="meta">required for: tier2</div>
+        <div class="meta">required for: tier2-intake-complete</div>
         <div class="if-unknown">If you don't know: Name the specific person who will review job evidence for this device — a name and contact, not a role or team.</div>
       </div>
       <div class="field" id="evidence.controllerRunLog">
@@ -303,7 +303,7 @@
         <div class="why">A per-job exportable log is what lets us build a trustworthy machine execution record.</div>
         <span class="badge badge-class">class C</span>
         <span class="badge badge-evidence">evidence: machine.execution_log (stub — stub = proves nothing yet)</span>
-        <div class="meta">required for: tier1</div>
+        <div class="meta">required for: tier1-intake-complete</div>
         <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-evidence-signals&quot; in the research library)</div>
       </div>
       <div class="field" id="evidence.instrumentSignsOutput">
@@ -312,7 +312,7 @@
         <div class="why">A self-signing instrument raises the evidence ceiling — but only once its signing key is registered (companion primitive: receipt.kernel_signed).</div>
         <span class="badge badge-class">class C</span>
         <span class="badge badge-evidence">evidence: ident.registered_key (stub — stub = proves nothing yet)</span>
-        <div class="meta">required for: tier1</div>
+        <div class="meta">required for: tier1-intake-complete</div>
         <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-evidence-signals&quot; in the research library)</div>
       </div>
       <div class="field" id="evidence.referenceSample">
@@ -321,7 +321,7 @@
         <div class="why">A known-good test pair is the strongest cheap proof that the capability actually works.</div>
         <span class="badge badge-class">class C</span>
         <span class="badge badge-evidence">evidence: measure.io_test_pair (stub — stub = proves nothing yet)</span>
-        <div class="meta">required for: tier1</div>
+        <div class="meta">required for: tier1-intake-complete</div>
         <div class="if-unknown">If you don't know: Check whether you have a past output with a known-good result to compare a new job against. If not, say so — this proof method just isn&#39;t available yet.</div>
       </div>
     </section>
