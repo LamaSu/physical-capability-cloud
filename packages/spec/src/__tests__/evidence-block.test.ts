@@ -18,6 +18,7 @@ import {
   sessionKeyAuthSnapshot,
   taggedDigestToBytes32,
   type AttestationQuorumRole,
+  type Bytes32Hex,
 } from "../evidence/evidence-block.js";
 import { canonicalize, hashBundle, hashEvent, verifyEventHash } from "../util/canonical.js";
 import { computeVerificationProgramHash, type VerificationProgram } from "../types/verification-program.js";
@@ -25,7 +26,7 @@ import { computeWorkProductHash, type WorkProduct } from "../types/work-product.
 import type { EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
 
 // ── The evidence lane's v2 mirror inputs (evidence-block-v2-mirror.cjs on #270) ──
-const K = (s: string) => `0x${Buffer.from(keccak_256(new TextEncoder().encode(s))).toString("hex")}`;
+const K = (s: string): Bytes32Hex => `0x${Buffer.from(keccak_256(new TextEncoder().encode(s))).toString("hex")}` as Bytes32Hex;
 const sha = (s: string) => `0x${createHash("sha256").update(s).digest("hex")}`;
 
 const unit = {
@@ -53,17 +54,21 @@ const sessionKeyAuth = {
   parentSignature: "bb".repeat(64),
 } as SessionKeyAuthorization;
 
-const attJob = "job-golden";
+// D4 (RATIFIED, oracle #1030/#1289): computeAttestationRoleDigest/computeAttestationSetRoot are
+// keccak/abi and bound to the funded program, not a job. This fixture IS the evidence lane's pinned
+// golden (attestation-set-root-golden-vector.cjs on #270 @ c56bc145): A1/A2 and fundedProgramHash
+// are copied verbatim from its printed output, not derived here.
+const attFundedProgramHash: Bytes32Hex = K("golden-program");
+const A1 = "0xf50e9a21d4ef6b63239726b72094516629451f8ef0413b3970cbe021b04552c6";
+const A2 = "0x614855498a7ba49a7f07d03044277a08c1f42c1e79705f730994f375e546d919";
 const roles: AttestationQuorumRole[] = [
   {
     roleId: "inspector",
+    signers: { kind: "registry", registryId: "pcc-verifier-registry", snapshotHash: K("golden-registry-snapshot") },
     minPositive: 2,
     total: 3,
     minScore: 80,
-    attestationHashes: [
-      sha(canonicalize([attJob, `0x${"11".repeat(20)}`, 92])),
-      sha(canonicalize([attJob, `0x${"22".repeat(20)}`, 88])),
-    ],
+    attestationHashes: [A1, A2],
   },
 ];
 
@@ -97,6 +102,14 @@ const program = {
   ],
 } as unknown as VerificationProgram;
 
+// The EvidenceBlockV2 sample's attestationSetRoot, computed with the pre-D4 mirror formula (#270
+// evidence-block-v2-mirror.cjs §3: sha256(canonicalize(sorted role digests)), each role digest
+// sha256(canonicalize({roleId, minPositive, total, minScore, job, hashes}))), kept as an opaque
+// 32-byte input so the shared block golden below (0x4605a6e9… / 0x854079f7…) does not move.
+// computeAttestationSetRoot itself is D4 now (keccak/abi, bound to fundedProgramHash): it is tested
+// byte-exact against the ratified D4 goldens in "E7 D4" below, not against this sample.
+const PRE_D4_SAMPLE_ATTESTATION_SET_ROOT = "0x606f17fcfd5dabd1746cd8ec406636b3d1bae2e80f310bd6dee221a756c024b2";
+
 async function goldenRoots() {
   const settlementUnitId = computeSettlementUnitId(unit);
   const events = await Promise.all(rawEvents.map(async (e) => ({ ...e, id: e.type, hash: await hashEvent(e) })));
@@ -106,7 +119,7 @@ async function goldenRoots() {
     unitContextDigest: computeUnitContextDigest({ ...unit, settlementUnitId, challengeNonce }),
     kernelSignedEventsRoot: taggedDigestToBytes32(await hashBundle(events)),
     sessionKeyAuthDigest: computeSessionKeyAuthDigest(sessionKeyAuth),
-    attestationSetRoot: computeAttestationSetRoot(attJob, roles),
+    attestationSetRoot: PRE_D4_SAMPLE_ATTESTATION_SET_ROOT,
     workProductRoot: computeWorkProductHash(workProduct),
     programHash: computeVerificationProgramHash(program),
   };
@@ -259,26 +272,92 @@ describe("EvidenceBlockV1 v2 — every input binds, and incoherent units are ref
     }
   });
 
-  it("relabelling a role or weakening its quorum moves the attestation root", () => {
-    const root = computeAttestationSetRoot(attJob, roles);
-    expect(computeAttestationSetRoot(attJob, [{ ...roles[0]!, roleId: "buyer" }])).not.toBe(root);
-    expect(computeAttestationSetRoot(attJob, [{ ...roles[0]!, minPositive: 1 }])).not.toBe(root);
-    expect(computeAttestationSetRoot("another-job", roles)).not.toBe(root);
+  it("relabelling a role, weakening its quorum or rebinding the funded program moves the attestation root (D4)", () => {
+    const root = computeAttestationSetRoot(attFundedProgramHash, roles);
+    expect(computeAttestationSetRoot(attFundedProgramHash, [{ ...roles[0]!, roleId: "buyer" }])).not.toBe(root);
+    expect(computeAttestationSetRoot(attFundedProgramHash, [{ ...roles[0]!, minPositive: 1 }])).not.toBe(root);
+    expect(computeAttestationSetRoot(K("another-program"), roles)).not.toBe(root);
     // Attestation order does not matter; membership does.
     const reordered = [{ ...roles[0]!, attestationHashes: [...roles[0]!.attestationHashes].reverse() }];
-    expect(computeAttestationSetRoot(attJob, reordered)).toBe(root);
+    expect(computeAttestationSetRoot(attFundedProgramHash, reordered)).toBe(root);
   });
 
   it("the set root does not depend on the order roles are listed in", () => {
     const buyer: AttestationQuorumRole = {
       roleId: "buyer",
+      signers: { kind: "registry", registryId: "pcc-buyer-registry", snapshotHash: K("golden-buyer-snapshot") },
       minPositive: 1,
       total: 1,
       minScore: 50,
-      attestationHashes: [sha(canonicalize([attJob, `0x${"44".repeat(20)}`, 70]))],
+      attestationHashes: [K("buyer-attestation")],
     };
-    expect(computeAttestationSetRoot(attJob, [roles[0]!, buyer])).toBe(
-      computeAttestationSetRoot(attJob, [buyer, roles[0]!]),
+    expect(computeAttestationSetRoot(attFundedProgramHash, [roles[0]!, buyer])).toBe(
+      computeAttestationSetRoot(attFundedProgramHash, [buyer, roles[0]!]),
+    );
+  });
+});
+
+// ── D4 (RATIFIED, oracle #1030/#1289/#4836) — attestationSetRoot matches the evidence lane's golden ──
+// byte-exact against attestation-set-root-golden-vector.cjs (#270 @ c56bc145): keccak/abi, bound to
+// the funded program, not the job; empty role and empty set are both defined, not refused.
+describe("E7 D4 — computeAttestationRoleDigest and computeAttestationSetRoot match the ratified keccak/abi formula", () => {
+  it("the inspector role's roleDigest and the set root over [inspector] match the spec's pinned goldens", () => {
+    expect(attFundedProgramHash).toBe("0x668bbc5588e88483f2ab6a00fff56cdef5ef2600b121d63bdac66756dfd2e249");
+    expect(computeAttestationRoleDigest(attFundedProgramHash, roles[0]!)).toBe(
+      "0x4f6ef4fcc5a03bff4ba29d1438f585579d6123885dfb9c838254e7b82ebc5cbe",
+    );
+    expect(computeAttestationSetRoot(attFundedProgramHash, roles)).toBe(
+      "0xcb38575b678a08c0915704d648c851ee7b26f6737c2ddb097c7ff531a16ad0e9",
+    );
+  });
+
+  it("the empty set is valid and matches the spec's two pinned empty-root goldens (oracle #4836)", () => {
+    expect(computeAttestationSetRoot(`0x${"00".repeat(32)}` as Bytes32Hex, [])).toBe(
+      "0xfa5d8d6e62798ae6c9a812af6ebcb3a9e74b26bf2f7334911769b136ed2fd8f9",
+    );
+    expect(computeAttestationSetRoot(`0x${"ab".repeat(32)}` as Bytes32Hex, [])).toBe(
+      "0x96c3e7c793a4bc2dda245ef16c490b408f5ee6aaf200b4008750eb93750d942a",
+    );
+  });
+
+  it("a role with no attestations yet is valid, and still bound to its registry snapshot and quorum", () => {
+    const quorumNotYetMet: AttestationQuorumRole = { ...roles[0]!, attestationHashes: [] };
+    const empty = computeAttestationRoleDigest(attFundedProgramHash, quorumNotYetMet);
+    expect(empty).not.toBe(computeAttestationRoleDigest(attFundedProgramHash, roles[0]!));
+    expect(computeAttestationSetRoot(attFundedProgramHash, [quorumNotYetMet])).not.toBe(
+      computeAttestationSetRoot(attFundedProgramHash, []),
+    );
+  });
+
+  it("negatives (spec checks 3-9): a different snapshotHash, a weaker minPositive or a relabelled roleId gives a different root", () => {
+    const root = computeAttestationSetRoot(attFundedProgramHash, roles);
+    const snap2: AttestationQuorumRole = {
+      ...roles[0]!,
+      signers: { ...roles[0]!.signers, snapshotHash: K("other-snapshot") },
+    };
+    expect(computeAttestationSetRoot(attFundedProgramHash, [snap2])).not.toBe(root);
+    expect(computeAttestationSetRoot(attFundedProgramHash, [{ ...roles[0]!, minPositive: 1 }])).not.toBe(root);
+    expect(computeAttestationSetRoot(attFundedProgramHash, [{ ...roles[0]!, roleId: "buyer" }])).not.toBe(root);
+    // mutating an attestation (a different hash) -> different root
+    expect(computeAttestationSetRoot(attFundedProgramHash, [{ ...roles[0]!, attestationHashes: [A1] }])).not.toBe(root);
+  });
+
+  it("negatives: duplicate roleId, duplicate attestation hash, a non-registry signers kind and a uint32 overflow are refused", () => {
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [roles[0]!, roles[0]!])).toThrow(EvidenceBlockInputError);
+    expect(() =>
+      computeAttestationSetRoot(attFundedProgramHash, [{ ...roles[0]!, attestationHashes: [A1, A1] }]),
+    ).toThrow(EvidenceBlockInputError);
+    expect(() =>
+      computeAttestationRoleDigest(attFundedProgramHash, {
+        ...roles[0]!,
+        signers: { ...roles[0]!.signers, kind: "inline" as never },
+      }),
+    ).toThrow(EvidenceBlockInputError);
+    expect(() => computeAttestationRoleDigest(attFundedProgramHash, { ...roles[0]!, minPositive: 2 ** 32 })).toThrow(
+      EvidenceBlockInputError,
+    );
+    expect(() => computeAttestationRoleDigest(attFundedProgramHash, { ...roles[0]!, total: 2 ** 32 })).toThrow(
+      EvidenceBlockInputError,
     );
   });
 });
@@ -310,7 +389,7 @@ describe("EvidenceBlockV1 v2 — input forms are pinned", () => {
     const r = await goldenRoots();
     expect(() => computeEvidenceBlockHash({ ...r, programHash: "0x1234" })).toThrow(EvidenceBlockInputError);
     expect(() =>
-      computeAttestationSetRoot(attJob, [{ ...roles[0]!, attestationHashes: ["sha256:" + "ab".repeat(32)] }]),
+      computeAttestationSetRoot(attFundedProgramHash, [{ ...roles[0]!, attestationHashes: ["sha256:" + "ab".repeat(32)] }]),
     ).toThrow(EvidenceBlockInputError);
   });
 });
@@ -1345,15 +1424,23 @@ describe("E7c — input that can run code is refused before it is read, and the 
       // runs to its first await: admission, both walks, the snapshots and their freezes.
       pending = computeKernelSignedEventsRoot(b as never);
       sessionKeyAuthSnapshot(auth);
-      computeAttestationSetRoot(attJob, roles);
-      computeAttestationRoleDigest(attJob, roles[0]!);
+      computeAttestationSetRoot(attFundedProgramHash, roles);
+      computeAttestationRoleDigest(attFundedProgramHash, roles[0]!);
       used = { ...counts };
     } finally {
       for (const restore of restores) restore();
     }
     await pending;
     for (const [label, n] of Object.entries(live)) expect(n, `${label}: the spy must be live`).toBeGreaterThan(0);
-    expect(used).toEqual(Object.fromEntries(Object.keys(counts).map((label) => [label, 0])));
+    // D4: the attestation calls above now hash with @noble/hashes' keccak_256 (9 calls between them: 4 for
+    // computeAttestationRoleDigest's role digest — roleId, the signers digest's two keccakUtf8 calls plus its
+    // own keccakWords, and the role digest's own keccakWords — and 5 for computeAttestationSetRoot, the same
+    // 4 plus its own outer keccakWords), which calls Number.isSafeInteger itself, inside keccak, the same
+    // caveat already pinned below for computeSettlementUnitId/computeUnitContextDigest: not replaced, just not
+    // this module's own call. Every other captured reference stays untouched.
+    const { "Number.isSafeInteger": isSafeIntegerCalls, ...rest } = used;
+    expect(rest).toEqual(Object.fromEntries(Object.keys(rest).map((label) => [label, 0])));
+    expect(isSafeIntegerCalls, "keccak's own check was counted").toBe(9);
   });
 
   it("the integer checks of the unit context use the captured Number.isSafeInteger", () => {
@@ -1480,6 +1567,7 @@ describe("E7c round 2 — every public entry point refuses code-running input an
   const hashB = sha("round2-b");
   const roleOf = (over: Record<string, unknown> = {}) => ({
     roleId: "inspector",
+    signers: { kind: "registry", registryId: "round2-registry", snapshotHash: sha("round2-snapshot") },
     minPositive: 1,
     total: 2,
     minScore: 50,
@@ -1528,9 +1616,11 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       name: "computeAttestationRoleDigest",
       root: "role",
       make: () => roleOf(),
-      call: (input) => computeAttestationRoleDigest(attJob, input),
+      call: (input) => computeAttestationRoleDigest(attFundedProgramHash, input),
       members: [
-        ...members("role", ["roleId", "minPositive", "total", "minScore", "attestationHashes"]),
+        ...members("role", ["roleId", "signers", "minPositive", "total", "minScore", "attestationHashes"]),
+        { path: "role.signers.registryId", holder: (i) => i.signers, key: "registryId" },
+        { path: "role.signers.snapshotHash", holder: (i) => i.signers, key: "snapshotHash" },
         { path: "role.attestationHashes[1]", holder: (i) => i.attestationHashes, key: 1 },
       ],
       missing: { path: "role.roleId", holder: (i) => i, key: "roleId" },
@@ -1540,11 +1630,13 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       name: "computeAttestationSetRoot",
       root: "roles",
       make: () => [roleOf(), roleOf({ roleId: "buyer" })],
-      call: (input) => computeAttestationSetRoot(attJob, input),
+      call: (input) => computeAttestationSetRoot(attFundedProgramHash, input),
       members: [
         { path: "roles[1]", holder: (i) => i, key: 1 },
         { path: "roles[0].roleId", holder: (i) => i[0], key: "roleId" },
         { path: "roles[1].minScore", holder: (i) => i[1], key: "minScore" },
+        { path: "roles[0].signers", holder: (i) => i[0], key: "signers" },
+        { path: "roles[1].signers.snapshotHash", holder: (i) => i[1].signers, key: "snapshotHash" },
         { path: "roles[0].attestationHashes", holder: (i) => i[0], key: "attestationHashes" },
         { path: "roles[1].attestationHashes[0]", holder: (i) => i[1].attestationHashes, key: 0 },
       ],
@@ -1776,8 +1868,8 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       expect(refusalOf(() => computeSettlementUnitId(bad as never)).field, String(bad)).toBe("unit");
       expect(refusalOf(() => computeUnitContextDigest(bad as never)).field, String(bad)).toBe("unitContext");
       expect(refusalOf(() => computeEvidenceBlockHash(bad as never)).field, String(bad)).toBe("roots");
-      expect(refusalOf(() => computeAttestationRoleDigest(attJob, bad as never)).field, String(bad)).toBe("role");
-      expect(refusalOf(() => computeAttestationSetRoot(attJob, bad as never)).field, String(bad)).toBe("roles");
+      expect(refusalOf(() => computeAttestationRoleDigest(attFundedProgramHash, bad as never)).field, String(bad)).toBe("role");
+      expect(refusalOf(() => computeAttestationSetRoot(attFundedProgramHash, bad as never)).field, String(bad)).toBe("roles");
       expect(refusalOf(() => sessionKeyAuthSnapshot(bad as never)).field, String(bad)).toBe(S);
     }
   });
@@ -1804,8 +1896,8 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       unitIdFromNumbers: computeSettlementUnitId(unitNumbers),
       context: computeUnitContextDigest(ctxInput),
       contextFromStrings: computeUnitContextDigest(ctxStrings),
-      role: computeAttestationRoleDigest(attJob, roleInput),
-      set: computeAttestationSetRoot(attJob, rolesInput),
+      role: computeAttestationRoleDigest(attFundedProgramHash, roleInput),
+      set: computeAttestationSetRoot(attFundedProgramHash, rolesInput),
       block: computeEvidenceBlockHash(rootsInput),
       sessionDigest: computeSessionKeyAuthDigest(authA as never),
       sessionSnapshot: sessionKeyAuthSnapshot(authB as never).digest,
@@ -1923,8 +2015,9 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       { name: "bytes32", valid: `0x${"ab".repeat(32)}`, regex: originals.bytes32, check: (t) => accepts(() => computeEvidenceBlockHash({ ...rootsOf(), programHash: t }), "programHash") },
       { name: "address", valid: `0x${"cd".repeat(20)}`, regex: originals.address, check: (t) => accepts(() => computeSettlementUnitId({ ...unit, escrow: t }), "escrow") },
       { name: "decimal", valid: "12345", regex: originals.decimal, check: (t) => accepts(() => computeSettlementUnitId({ ...unit, chainId: t }), "chainId") },
-      { name: "token", valid: "role-1", regex: originals.token, check: (t) => accepts(() => computeAttestationRoleDigest(attJob, roleOf({ roleId: t })), "role.roleId") },
-      { name: "job token", valid: "job-1", regex: originals.token, check: (t) => accepts(() => computeAttestationRoleDigest(t, roleOf()), "job") },
+      { name: "token", valid: "role-1", regex: originals.token, check: (t) => accepts(() => computeAttestationRoleDigest(attFundedProgramHash, roleOf({ roleId: t })), "role.roleId") },
+      { name: "registry id token", valid: "registry-1", regex: originals.token, check: (t) => accepts(() => computeAttestationRoleDigest(attFundedProgramHash, roleOf({ signers: { ...roleOf().signers, registryId: t } })), "role.signers.registryId") },
+      { name: "funded program hash", valid: `0x${"11".repeat(32)}`, regex: originals.bytes32, check: (t) => accepts(() => computeAttestationRoleDigest(t as Bytes32Hex, roleOf()), "fundedProgramHash") },
       { name: "session public key", valid: "ab".repeat(32), regex: originals.sessionKey, check: (t) => accepts(() => computeSessionKeyAuthDigest({ ...authOf(), publicKey: t } as never), `${S}.publicKey`) },
       { name: "tagged digest", valid: `sha256:${"ef".repeat(32)}`, regex: originals.tagged, check: (t) => accepts(() => taggedDigestToBytes32(t), "kernelSignedEventsRoot") },
     ];
@@ -1950,14 +2043,22 @@ describe("E7c round 2 — every public entry point refuses code-running input an
 });
 
 // ── F2 (HIGH): invalid and duplicate quorums are refused ─────────────────────
-describe("E7 F2 — the attestation set is validated before it is hashed", () => {
+describe("E7 F2 — the attestation set is validated before it is hashed (D4 round 3)", () => {
   const H1 = sha("f2-attestation-1");
   const H2 = sha("f2-attestation-2");
   const H3 = sha("f2-attestation-3");
   const okRole = (over: Record<string, unknown> = {}) =>
-    ({ roleId: "inspector", minPositive: 1, total: 2, minScore: 50, attestationHashes: [H1], ...over }) as AttestationQuorumRole;
+    ({
+      roleId: "inspector",
+      signers: { kind: "registry", registryId: "f2-registry", snapshotHash: sha("f2-snapshot") },
+      minPositive: 1,
+      total: 2,
+      minScore: 50,
+      attestationHashes: [H1],
+      ...over,
+    }) as AttestationQuorumRole;
   const refuseSet = (rolesIn: unknown) =>
-    refusalOf(() => computeAttestationSetRoot(attJob, rolesIn as AttestationQuorumRole[]));
+    refusalOf(() => computeAttestationSetRoot(attFundedProgramHash, rolesIn as AttestationQuorumRole[]));
 
   it("refuses the reviewer's invalid quorum, and each of its defects on its own", () => {
     const invalid = { roleId: "", minPositive: 2, total: 1, minScore: NaN, attestationHashes: [H1, H1] };
@@ -1972,8 +2073,11 @@ describe("E7 F2 — the attestation set is validated before it is hashed", () =>
     expect(dup.message).toMatch(/distinct/);
   });
 
-  it("refuses an empty role set, a non-array set, and a role that is not an object", () => {
-    expect(refuseSet([]).field).toBe("roles");
+  it("allows an empty role set (D4, oracle #4836): a funded program that names no roles still has a root", () => {
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [])).not.toThrow();
+  });
+
+  it("refuses a non-array set, and a role that is not an object", () => {
     for (const bad of [undefined, null, "roles", { length: 1, 0: okRole() }]) {
       expect(refuseSet(bad).field, String(bad)).toBe("roles");
     }
@@ -1982,10 +2086,8 @@ describe("E7 F2 — the attestation set is validated before it is hashed", () =>
     }
   });
 
-  it("refuses an empty role (no attestation hashes) and attestationHashes that is not an array", () => {
-    const empty = refuseSet([okRole({ attestationHashes: [] })]);
-    expect(empty.field).toBe("roles[0].attestationHashes");
-    expect(empty.message).toMatch(/at least one attestation hash/);
+  it("allows an empty role (no attestation hashes yet, D4) but refuses attestationHashes that is not an array", () => {
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [okRole({ attestationHashes: [] })])).not.toThrow();
     for (const bad of [undefined, null, H1]) {
       const err = refuseSet([okRole({ attestationHashes: bad })]);
       expect(err.field, String(bad)).toBe("roles[0].attestationHashes");
@@ -2008,14 +2110,14 @@ describe("E7 F2 — the attestation set is validated before it is hashed", () =>
     expect(dup.field).toBe("roles[0].attestationHashes");
     expect(dup.message).toMatch(/distinct/);
     // distinctness is per role: another role may list the same hash
-    expect(() => computeAttestationSetRoot(attJob, [okRole(), okRole({ roleId: "buyer" })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [okRole(), okRole({ roleId: "buyer" })])).not.toThrow();
   });
 
   it("refuses more attestation hashes than total", () => {
     const err = refuseSet([okRole({ minPositive: 1, total: 2, attestationHashes: [H1, H2, H3] })]);
     expect(err.field).toBe("roles[0].attestationHashes");
     expect(err.message).toMatch(/more attestation hashes than total/);
-    expect(() => computeAttestationSetRoot(attJob, [okRole({ total: 3, attestationHashes: [H1, H2, H3] })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [okRole({ total: 3, attestationHashes: [H1, H2, H3] })])).not.toThrow();
   });
 
   it("refuses a malformed attestation hash and names its index", () => {
@@ -2025,19 +2127,19 @@ describe("E7 F2 — the attestation set is validated before it is hashed", () =>
     }
   });
 
-  it("refuses a minPositive that is not a safe integer >= 1", () => {
-    for (const bad of [0, -1, 1.5, NaN, Infinity, "1", null, undefined, -0, 2 ** 53]) {
+  it("refuses a minPositive that is not a safe integer in uint32 range, >= 1", () => {
+    for (const bad of [0, -1, 1.5, NaN, Infinity, "1", null, undefined, -0, 2 ** 32, 2 ** 53]) {
       expect(refuseSet([okRole({ minPositive: bad })]).field, String(bad)).toBe("roles[0].minPositive");
     }
   });
 
-  it("refuses a total that is not a safe integer >= 1", () => {
-    for (const bad of [0, -1, 2.5, NaN, Infinity, "2", null, undefined, -0, 2 ** 53]) {
+  it("refuses a total that is not a safe integer in uint32 range, >= 1", () => {
+    for (const bad of [0, -1, 2.5, NaN, Infinity, "2", null, undefined, -0, 2 ** 32, 2 ** 53]) {
       expect(refuseSet([okRole({ total: bad })]).field, String(bad)).toBe("roles[0].total");
     }
   });
 
-  it("refuses a minScore that is not a safe integer in [0, 100]", () => {
+  it("refuses a minScore that is not a safe integer in [0, 100] (within uint32 range)", () => {
     for (const bad of [NaN, -1, 101, 50.5, Infinity, "80", null, undefined, -0]) {
       expect(refuseSet([okRole({ minScore: bad })]).field, String(bad)).toBe("roles[0].minScore");
     }
@@ -2049,32 +2151,68 @@ describe("E7 F2 — the attestation set is validated before it is hashed", () =>
     }
   });
 
-  it("refuses a job outside 1-128 printable ASCII characters with no whitespace, for the set and for one role", () => {
-    for (const bad of ["", " ", "a b", "x".repeat(129), 7, null, undefined]) {
-      expect(refusalOf(() => computeAttestationSetRoot(bad as string, [okRole()])).field, JSON.stringify(bad)).toBe("job");
-      expect(refusalOf(() => computeAttestationRoleDigest(bad as string, okRole())).field, JSON.stringify(bad)).toBe("job");
+  it("refuses a signers.registryId outside 1-128 printable ASCII characters with no whitespace", () => {
+    for (const bad of ["", " ", "in spector", "tab\t", "new\nline", "x".repeat(129), 7, null, undefined, "ünï"]) {
+      const role = okRole({ signers: { ...okRole().signers, registryId: bad } });
+      expect(refuseSet([role]).field, JSON.stringify(bad)).toBe("roles[0].signers.registryId");
     }
   });
 
-  it("accepts the boundary values", () => {
-    expect(() => computeAttestationSetRoot(attJob, [okRole({ minPositive: 2, total: 2, attestationHashes: [H1, H2] })])).not.toThrow();
-    expect(() => computeAttestationSetRoot(attJob, [okRole({ minScore: 0 })])).not.toThrow();
-    expect(() => computeAttestationSetRoot(attJob, [okRole({ minScore: 100 })])).not.toThrow();
-    expect(() => computeAttestationSetRoot(attJob, [okRole({ minPositive: 1, total: 1 })])).not.toThrow();
-    expect(() => computeAttestationSetRoot(attJob, [okRole({ roleId: "x".repeat(128) })])).not.toThrow();
-    expect(() => computeAttestationSetRoot("x".repeat(128), [okRole({ roleId: "qa/lead:1" })])).not.toThrow();
+  it('refuses a signers kind other than "registry"', () => {
+    for (const bad of ["inline", "Registry", "", 7, null, undefined]) {
+      const role = okRole({ signers: { ...okRole().signers, kind: bad } });
+      expect(refuseSet([role]).field, JSON.stringify(bad)).toBe("roles[0].signers.kind");
+    }
+  });
+
+  it("refuses a malformed signers.snapshotHash (not 0x + 64 lowercase hex)", () => {
+    for (const bad of [`0x${"AB".repeat(32)}`, "0x12", H1.slice(2), 7, null, undefined]) {
+      const role = okRole({ signers: { ...okRole().signers, snapshotHash: bad } });
+      expect(refuseSet([role]).field, String(bad)).toBe("roles[0].signers.snapshotHash");
+    }
+  });
+
+  it("refuses a malformed fundedProgramHash (not 0x + 64 lowercase hex), for the set and for one role", () => {
+    for (const bad of ["", "job-1", `0x${"ab".repeat(31)}`, `0x${"AB".repeat(32)}`, 7, null, undefined]) {
+      expect(refusalOf(() => computeAttestationSetRoot(bad as never, [okRole()])).field, JSON.stringify(bad)).toBe(
+        "fundedProgramHash",
+      );
+      expect(refusalOf(() => computeAttestationRoleDigest(bad as never, okRole())).field, JSON.stringify(bad)).toBe(
+        "fundedProgramHash",
+      );
+    }
+  });
+
+  it("accepts the boundary values, including an empty role and the uint32 ceiling", () => {
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [okRole({ minPositive: 2, total: 2, attestationHashes: [H1, H2] })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [okRole({ minScore: 0 })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [okRole({ minScore: 100 })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [okRole({ minPositive: 1, total: 1 })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [okRole({ roleId: "x".repeat(128) })])).not.toThrow();
+    expect(() =>
+      computeAttestationSetRoot(attFundedProgramHash, [
+        okRole({ roleId: "qa/lead:1", minPositive: 0xffffffff, total: 0xffffffff, attestationHashes: [H1] }),
+      ]),
+    ).not.toThrow();
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [okRole({ attestationHashes: [] })])).not.toThrow();
+    expect(() => computeAttestationSetRoot(attFundedProgramHash, [])).not.toThrow();
   });
 
   it("validates a single role the same way, under the field prefix 'role'", () => {
-    expect(refusalOf(() => computeAttestationRoleDigest(attJob, okRole({ roleId: "" }))).field).toBe("role.roleId");
-    expect(refusalOf(() => computeAttestationRoleDigest(attJob, okRole({ attestationHashes: [] }))).field).toBe("role.attestationHashes");
+    expect(refusalOf(() => computeAttestationRoleDigest(attFundedProgramHash, okRole({ roleId: "" }))).field).toBe("role.roleId");
+    expect(() => computeAttestationRoleDigest(attFundedProgramHash, okRole({ attestationHashes: [] }))).not.toThrow();
     const one = okRole();
-    expect(computeAttestationSetRoot(attJob, [one])).toBe(sha(canonicalize([computeAttestationRoleDigest(attJob, one)])));
+    const singleSetRoot = computeAttestationSetRoot(attFundedProgramHash, [one]);
+    expect(computeAttestationSetRoot(attFundedProgramHash, [one])).toBe(singleSetRoot); // deterministic
+    expect(singleSetRoot).not.toBe(computeAttestationSetRoot(attFundedProgramHash, [one, okRole({ roleId: "buyer" })]));
+    expect(singleSetRoot).not.toBe(computeAttestationRoleDigest(attFundedProgramHash, one));
   });
 
-  it("the golden attestation set is still valid and its root is unchanged by validation", () => {
-    const direct = sha(canonicalize([computeAttestationRoleDigest(attJob, roles[0]!)]));
-    expect(computeAttestationSetRoot(attJob, roles)).toBe(direct);
+  it("the golden attestation set (E7 D4) is still valid under this file's own validation helpers", () => {
+    expect(() => computeAttestationRoleDigest(attFundedProgramHash, roles[0]!)).not.toThrow();
+    const setRoot = computeAttestationSetRoot(attFundedProgramHash, roles);
+    expect(computeAttestationSetRoot(attFundedProgramHash, roles)).toBe(setRoot); // deterministic
+    expect(computeAttestationSetRoot(attFundedProgramHash, [{ ...roles[0]!, roleId: "other" }])).not.toBe(setRoot);
   });
 });
 
@@ -2088,14 +2226,23 @@ describe("E7 F3 — roles are admitted and read from their own descriptors, and 
   const H1 = sha("f3-attestation-1");
   const H2 = sha("f3-attestation-2");
   const plainRole = (over: Record<string, unknown> = {}) =>
-    ({ roleId: "inspector", minPositive: 1, total: 2, minScore: 50, attestationHashes: [H1], ...over }) as AttestationQuorumRole;
-  const digestOf = (role: AttestationQuorumRole) => computeAttestationRoleDigest(attJob, role);
+    ({
+      roleId: "inspector",
+      signers: { kind: "registry", registryId: "f3-registry", snapshotHash: H2 },
+      minPositive: 1,
+      total: 2,
+      minScore: 50,
+      attestationHashes: [H1],
+      ...over,
+    }) as AttestationQuorumRole;
+  const digestOf = (role: AttestationQuorumRole) => computeAttestationRoleDigest(attFundedProgramHash, role);
 
   describe("attestation roles", () => {
     it("refuses a getter on any field of a role, alone or in a set, and never runs it", () => {
       let runs = 0;
       const fields: Array<[string, unknown]> = [
         ["roleId", "inspector"],
+        ["signers", { kind: "registry", registryId: "f3-registry", snapshotHash: H2 }],
         ["minPositive", 1],
         ["total", 2],
         ["minScore", 50],
@@ -2114,7 +2261,7 @@ describe("E7 F3 — roles are admitted and read from their own descriptors, and 
         const alone = refusalOf(() => digestOf(role as AttestationQuorumRole));
         expect(alone.field, name).toBe(`role.${name}`);
         expect(alone.message, name).toMatch(/accessor property: its getter runs code/);
-        const inSet = refusalOf(() => computeAttestationSetRoot(attJob, [role as AttestationQuorumRole]));
+        const inSet = refusalOf(() => computeAttestationSetRoot(attFundedProgramHash, [role as AttestationQuorumRole]));
         expect(inSet.field, name).toBe(`roles[0].${name}`);
       }
       expect(runs, "no getter may run").toBe(0);
@@ -2139,8 +2286,8 @@ describe("E7 F3 — roles are admitted and read from their own descriptors, and 
     it("refuses a Proxy as the roles array, as a role and as attestationHashes, without running a trap", () => {
       const traps: string[] = [];
       const proxied = <T extends object>(target: T): T => new Proxy(target, recordingHandler(traps));
-      expect(refusalOf(() => computeAttestationSetRoot(attJob, proxied([plainRole(), plainRole({ roleId: "buyer" })]))).field).toBe("roles");
-      expect(refusalOf(() => computeAttestationSetRoot(attJob, [plainRole(), proxied(plainRole({ roleId: "buyer" }))])).field).toBe("roles[1]");
+      expect(refusalOf(() => computeAttestationSetRoot(attFundedProgramHash, proxied([plainRole(), plainRole({ roleId: "buyer" })]))).field).toBe("roles");
+      expect(refusalOf(() => computeAttestationSetRoot(attFundedProgramHash, [plainRole(), proxied(plainRole({ roleId: "buyer" }))])).field).toBe("roles[1]");
       expect(refusalOf(() => digestOf(proxied(plainRole()))).field).toBe("role");
       const hashes = refusalOf(() => digestOf(plainRole({ attestationHashes: proxied([H1]) })));
       expect(hashes.field).toBe("role.attestationHashes");
@@ -2149,9 +2296,10 @@ describe("E7 F3 — roles are admitted and read from their own descriptors, and 
     });
 
     it("sorts the attestation hashes itself, in UTF-16 code-unit order, whatever order they are given in", () => {
-      // No Array.prototype.sort is looked up any more: a heapsort over the copy. Compared against the engine's sort.
+      // No Array.prototype.sort is looked up any more: a heapsort over the copy, compared against 25
+      // random shuffles of the same 17 hashes: membership determines the digest, never input order.
       const hashes = Array.from({ length: 17 }, (_, i) => sha(`f3-sort-${i}`));
-      const expected = (list: string[]) => sha(canonicalize({ roleId: "inspector", minPositive: 1, total: 17, minScore: 50, job: attJob, hashes: [...list].sort() }));
+      const expected = digestOf(plainRole({ total: 17, attestationHashes: hashes }));
       let state = 12345;
       const next = () => (state = (state * 1103515245 + 12345) & 0x7fffffff);
       for (let round = 0; round < 25; round++) {
@@ -2160,7 +2308,7 @@ describe("E7 F3 — roles are admitted and read from their own descriptors, and 
           const j = next() % (i + 1);
           [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
         }
-        expect(digestOf(plainRole({ total: 17, attestationHashes: shuffled })), `round ${round}`).toBe(expected(hashes));
+        expect(digestOf(plainRole({ total: 17, attestationHashes: shuffled })), `round ${round}`).toBe(expected);
       }
     });
   });
@@ -2645,12 +2793,13 @@ describe("E7 F3 extension — the unit context is admitted and read from its own
 });
 
 // ── Found by the mutation run: an array whose `length` is not a safe integer ──
-// A Proxy over an array passes Array.isArray, and `NaN < 1` is false, so a `count < 1`
-// check alone would treat such an array as non-empty, loop zero times and accept an
-// EMPTY bundle, role set or hash list. The explicit safe-integer check closes that.
-// (E7c: the bundle's events array, and since round 2 the role set and the attestation hashes, are
-// refused as a Proxy before their length is asked, so the three cases below hold by that refusal;
-// the length checks stay as a second line.)
+// A Proxy over an array passes Array.isArray, and `NaN < 1` is false, so a bare `count < 1` (or,
+// since D4 allows an empty role set and an empty role, `count < 0`) check alone would treat such an
+// array as if its length were 0, loop zero times and silently accept a LYING length in place of a
+// real empty bundle, role set or hash list. The explicit safe-integer check refuses the lie instead
+// of reading it as empty. (E7c: the bundle's events array, and since round 2 the role set and the
+// attestation hashes, are refused as a Proxy before their length is asked, so the three cases below
+// hold by that refusal; the length checks stay as a second line.)
 describe("E7 — an array with a non-integer length is refused, never treated as empty", () => {
   const lying = <T>(items: T[], length: unknown) =>
     new Proxy(items, { get: (target, key, receiver) => (key === "length" ? length : Reflect.get(target, key, receiver)) });
@@ -2667,18 +2816,20 @@ describe("E7 — an array with a non-integer length is refused, never treated as
     }
   });
 
+  const signers = { kind: "registry" as const, registryId: "odd-length-registry", snapshotHash: sha("odd-length-snapshot") };
+
   it("attestation roles", () => {
-    const role = { roleId: "inspector", minPositive: 1, total: 2, minScore: 50, attestationHashes: [H] };
+    const role = { roleId: "inspector", signers, minPositive: 1, total: 2, minScore: 50, attestationHashes: [H] };
     for (const length of ODD_LENGTHS) {
-      const err = refusalOf(() => computeAttestationSetRoot(attJob, lying([role], length) as never));
+      const err = refusalOf(() => computeAttestationSetRoot(attFundedProgramHash, lying([role], length) as never));
       expect(err.field, String(length)).toBe("roles");
     }
   });
 
   it("attestation hashes", () => {
     for (const length of ODD_LENGTHS) {
-      const role = { roleId: "inspector", minPositive: 1, total: 2, minScore: 50, attestationHashes: lying([H], length) };
-      const err = refusalOf(() => computeAttestationSetRoot(attJob, [role as never]));
+      const role = { roleId: "inspector", signers, minPositive: 1, total: 2, minScore: 50, attestationHashes: lying([H], length) };
+      const err = refusalOf(() => computeAttestationSetRoot(attFundedProgramHash, [role as never]));
       expect(err.field, String(length)).toBe("roles[0].attestationHashes");
     }
   });
@@ -2762,8 +2913,8 @@ describe("the Proxy test is taken from the host: a runtime without it still load
   const entries: Array<{ name: string; call: (m: EvidenceBlockModule, wrap: Wrap) => unknown }> = [
     { name: "computeSettlementUnitId", call: (m, wrap) => m.computeSettlementUnitId(wrap({ ...unit })) },
     { name: "computeUnitContextDigest", call: (m, wrap) => m.computeUnitContextDigest(wrap(unitContext())) },
-    { name: "computeAttestationRoleDigest", call: (m, wrap) => m.computeAttestationRoleDigest(attJob, wrap(structuredClone(roles[0]!))) },
-    { name: "computeAttestationSetRoot", call: (m, wrap) => m.computeAttestationSetRoot(attJob, wrap(structuredClone(roles))) },
+    { name: "computeAttestationRoleDigest", call: (m, wrap) => m.computeAttestationRoleDigest(attFundedProgramHash, wrap(structuredClone(roles[0]!))) },
+    { name: "computeAttestationSetRoot", call: (m, wrap) => m.computeAttestationSetRoot(attFundedProgramHash, wrap(structuredClone(roles))) },
     { name: "computeEvidenceBlockHash", call: (m, wrap) => m.computeEvidenceBlockHash(wrap(rootsOf())) },
     { name: "sessionKeyAuthSnapshot", call: (m, wrap) => m.sessionKeyAuthSnapshot(wrap(structuredClone(sessionKeyAuth))) },
     { name: "computeSessionKeyAuthDigest", call: (m, wrap) => m.computeSessionKeyAuthDigest(wrap(structuredClone(sessionKeyAuth))) },
