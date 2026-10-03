@@ -572,8 +572,8 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         }
         const run: { jobId: string; timer: ReturnType<typeof setTimeout> | null; end: () => void } = { jobId, timer: null, end: this.work.begin() };
         this.mockRun = run;
+        // A stop clears this timer, so it fires only for the run still in flight.
         run.timer = setTimeout(() => {
-          if (this.mockRun !== run) return; // stopped meanwhile: no completion
           this.mockRun = null;
           this.mockStatus = "idle";
           this.forwardEvent({
