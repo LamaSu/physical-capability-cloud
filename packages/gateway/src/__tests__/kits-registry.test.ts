@@ -1040,3 +1040,46 @@ describe("astra k1-511: the files are the only truth", () => {
     await expect(registry.publish(kit({ version: "8.7.1" }), "alice@kits.test")).rejects.toMatchObject({ code: "publish_quota" });
   });
 });
+
+// ── astra k1b (SHIP-WITH-FIXES): root confinement ──
+
+describe("astra k1b: root confinement", () => {
+  it("(a) a symlinked publications area is refused before it is listed", async () => {
+    const rootDir = await mkTempRoot();
+    const outside = await mkTempRoot();
+    await fs.mkdir(path.join(outside, "ab"));
+    await fs.symlink(outside, path.join(rootDir, "publications"));
+    const registry = new KitRegistry({ rootDir, durable: () => true, audit: () => undefined });
+    await expect(registry.list()).rejects.toBeInstanceOf(KitIntegrityError);
+    const app = await buildApp(registry, "alice@kits.test");
+    const res = await app.inject({ method: "GET", url: "/api/kits" });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe("kit_integrity_failure");
+    await app.close();
+  });
+
+  it.each([["manifests"], ["quota"]])(
+    "(b, not reproduced at fe745332; kept as a guard) a symlinked %s area: publish fails and nothing is created outside the root",
+    async (area) => {
+      const rootDir = await mkTempRoot();
+      const outside = await mkTempRoot();
+      await fs.symlink(outside, path.join(rootDir, area));
+      const registry = new KitRegistry({ rootDir, durable: () => true, audit: () => undefined });
+      await expect(registry.publish(kit({ version: "9.0.0" }), "alice@kits.test")).rejects.toThrow();
+      expect(await fs.readdir(outside)).toEqual([]);
+    },
+  );
+
+  it("(c) a runtime without O_NOFOLLOW refuses to publish (503, nothing written) and fails closed on reads", async () => {
+    const rootDir = await mkTempRoot();
+    const normal = new KitRegistry({ rootDir, durable: () => true, audit: () => undefined });
+    const { kitDigest } = await normal.publish(kit({ version: "9.1.0" }), "alice@kits.test");
+    const before = await fs.readdir(rootDir);
+    const noFollowless = new KitRegistry({ rootDir, durable: () => true, audit: () => undefined, noFollowFlag: 0 });
+    await expect(noFollowless.publish(kit({ version: "9.1.1" }), "alice@kits.test")).rejects.toMatchObject({ code: "registry_unsupported_fs", status: 503 });
+    expect(await fs.readdir(rootDir)).toEqual(before);
+    await expect(noFollowless.get(kitDigest)).rejects.toBeInstanceOf(KitIntegrityError);
+    expect((await noFollowless.list()).total).toBe(0);
+    expect(noFollowless.skipped).toContain(kitDigest);
+  });
+});

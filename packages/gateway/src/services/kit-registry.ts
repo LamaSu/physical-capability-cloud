@@ -152,6 +152,8 @@ export interface KitRegistryOptions {
   audit?: (entry: AuditEntry) => void;
   /** Whether the root is durable enough to publish to; default isDurableKitRoot(). */
   durable?: () => boolean;
+  /** The open flag that refuses a symlink; default fs.constants.O_NOFOLLOW. 0 or absent means the runtime has none (tests). */
+  noFollowFlag?: number;
 }
 
 /**
@@ -190,7 +192,6 @@ interface IndexEntry {
   manifest: CapabilityKitManifestV1;
 }
 
-const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
 const CLAIM_NAME = /^(0|[1-9][0-9]{0,15})\.json$/;
 const ClaimSchema = z
   .object({ claimedAt: z.string().refine((s) => !Number.isNaN(Date.parse(s))), kitDigest: z.string().refine(isValidRegistryDigest) })
@@ -206,6 +207,8 @@ export class KitRegistry {
   private readonly dailyLimit: number;
   private readonly audit: (entry: AuditEntry) => void;
   private readonly durable: () => boolean;
+  /** O_NOFOLLOW, or 0 when this runtime has none: then the registry refuses to read or publish (astra k1b). */
+  private readonly noFollow: number;
   private realRoot: Promise<string> | null = null;
   private linksChecked = false;
   private queue: Promise<unknown> = Promise.resolve();
@@ -217,6 +220,7 @@ export class KitRegistry {
     this.dailyLimit = options.dailyLimit ?? configuredDailyLimit();
     this.audit = options.audit ?? ((entry) => auditService.log(entry));
     this.durable = options.durable ?? isDurableKitRoot;
+    this.noFollow = options.noFollowFlag ?? fsConstants.O_NOFOLLOW ?? 0;
   }
 
   /** Digests the latest listing skipped because they failed verification. */
@@ -377,11 +381,12 @@ export class KitRegistry {
     return dir;
   }
 
-  /** A file's bytes, opened without following a symlink; null when absent. */
+  /** A file's bytes, opened without following a symlink; null when absent. Fails closed on a runtime without O_NOFOLLOW. */
   private async readNoFollow(dir: string, name: string, kitDigest: string): Promise<Uint8Array | null> {
+    if (!this.noFollow) throw new KitIntegrityError(kitDigest, "this runtime cannot open a file without following a symlink");
     let handle;
     try {
-      handle = await fs.open(path.join(dir, name), fsConstants.O_RDONLY | O_NOFOLLOW);
+      handle = await fs.open(path.join(dir, name), fsConstants.O_RDONLY | this.noFollow);
     } catch (err) {
       const code = errnoOf(err);
       if (code === "ENOENT") return null;
@@ -411,9 +416,15 @@ export class KitRegistry {
     }
   }
 
-  /** Probe once that the volume supports hard links, before anything is written; 503 if it does not. */
+  /**
+   * Probe once, before anything is written, that this runtime and volume can keep the registry
+   * write-once and symlink-free: O_NOFOLLOW exists and hard links work. 503 if not (astra k1-511, k1b).
+   */
   private async ensureLinksSupported(): Promise<void> {
     if (this.linksChecked) return;
+    if (!this.noFollow) {
+      throw new KitRegistryError("registry_unsupported_fs", 503, "this runtime has no O_NOFOLLOW, so the registry cannot refuse symlinks");
+    }
     const root = await this.root();
     const probe = path.join(root, `.link-probe-${randomUUID()}`);
     try {
@@ -538,9 +549,10 @@ export class KitRegistry {
     const skipped: string[] = [];
     const root = await this.root();
     const area = path.join(root, "publications");
-    let shards: string[];
+    // The area itself must be a real directory before it is listed: a symlink here is refused, never read (astra k1b).
+    let st;
     try {
-      shards = await fs.readdir(area);
+      st = await fs.lstat(area);
     } catch (err) {
       if (errnoOf(err) === "ENOENT") {
         this.lastSkipped = skipped;
@@ -548,6 +560,8 @@ export class KitRegistry {
       }
       throw err;
     }
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new KitIntegrityError("(publications)", "a registry directory is a symlink or not a directory");
+    const shards = await fs.readdir(area);
     for (const shard of shards.sort()) {
       if (!/^[0-9a-f]{2}$/.test(shard)) continue;
       let names: string[];
