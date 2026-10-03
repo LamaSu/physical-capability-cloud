@@ -35,6 +35,7 @@ import { RevenueDashboardPage } from "../RevenueDashboardPage.js";
 import { SettingsPage } from "../SettingsPage.js";
 import { KNOWN_ESCROW_STATUSES, KNOWN_JOB_STATUSES } from "../../api/wire-vocabulary.js";
 import { EscrowAmount, formatEscrowAmount } from "../../components/EscrowAmount.js";
+import { useAllCapabilities, type AllCapabilities } from "../../api/hooks/use-pcc-data.js";
 
 // ── fetch stub ───────────────────────────────────────────────────────────────
 
@@ -1149,6 +1150,36 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
       const t = await renderPage(<KernelLeaderboardPage />);
       expect(t).toContain("Couldn't load the leaderboard");
       expect(t).not.toContain("Ranked over the first");
+    });
+
+    it("a read of three pages that shifted inside page 2 before page 3 is never presented as complete (astra 18c, past page 1)", async () => {
+      // 500 capabilities, read in pages of 200. Right after page 2 is served,
+      // c210 (inside page 2) is removed and c500 appended: the total stays 500
+      // and no id repeats. Page 3 then answers with c401..c500, so a read that
+      // re-checks only page 1 combines c210 (from the old page 2) with c500
+      // and loses c400. Whatever is shown as complete must be one snapshot.
+      let list = Array.from({ length: 500 }, (_, i) => `c${i}`);
+      let shifted = false;
+      stubCapabilityPages((offset) => {
+        const items = list.slice(offset, offset + 200).map((id) => ({ id, kernelId: "k1", type: "hplc", queueDepth: 0 }));
+        const page = { items, total: list.length, offset, limit: 200, hasMore: offset + 200 < list.length };
+        if (offset === 200 && !shifted) {
+          shifted = true;
+          list = [...list.filter((id) => id !== "c210"), "c500"];
+        }
+        return page;
+      });
+      function CapabilityProbe() {
+        useAllCapabilities();
+        return null;
+      }
+      const client = newClient();
+      await renderPage(<CapabilityProbe />, client);
+      const data = client.getQueryData<AllCapabilities>(["capabilities", "all"]);
+      if (data?.complete) {
+        const ids = new Set(data.items.map((c) => c.id));
+        expect({ hasC210: ids.has("c210"), hasC400: ids.has("c400") }, "a complete read is one snapshot of the list").toEqual({ hasC210: false, hasC400: true });
+      }
     });
 
     it("a page missing offset or limit is unavailable, not silently trusted (astra 18c MEDIUM)", async () => {
