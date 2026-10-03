@@ -172,12 +172,12 @@ export async function nearRoutes(app: FastifyInstance) {
         intentId: declare.id(intent.intentId),
       }, (req as any).operatorId);
       auditService.log({
-        eventType: "near.intent_submitted",
+        eventType: lit("near.intent_submitted"),
         actor: (req as any).operatorId ?? (req as any).apiKeyId,
-        resourceType: "near_intent",
-        resourceId: intent.intentId,
-        action: "create",
-        metadata: { quoteId: body.quoteId, workflowId: body.workflowId },
+        resourceType: lit("near_intent"),
+        resourceId: declare.id(intent.intentId),
+        action: lit("create"),
+        metadata: { quoteId: declare.id(body.quoteId), workflowId: declare.id(body.workflowId) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
