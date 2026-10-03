@@ -28,6 +28,15 @@ export * from "./signing-preimage.js";
 // verifyEvidenceSubjectBinding — LO-EV-9: a signed bundle digest must open to
 // events that commit the job, the accepting kernel and (when known) the output.
 export * from "./subject-binding.js";
+// evidenceLevelOfBundles / evidenceLevelsOfEvents / deriveContradictions /
+// inspectionVerdict — submitted / device_reported / inspected_output, the one
+// classification of how strongly evidence shows the work was done (must-close 5).
+// Takes authenticated bundles of ONE settlement unit and judges independence
+// between authenticated trust domains, never declared device ids.
+// evidenceLevelsOfEvents is the per-event level (bundle index, event index,
+// level); evidenceLevelOfBundles is the maximum over it.
+export * from "./evidence-level.js";
+export * from "./delegation-rules.js";
 // EvidenceBlockV1 v2 — the evidenceBlockHash a FinalMilestonePackageV2 carries,
 // with the unit-context and settlement-unit derivations it binds.
 export * from "./evidence-block.js";
@@ -43,3 +52,6 @@ export * from "./adapter-manifests.js";
 // acceptedPolicyDigest — the PUBLIC producer the V-next escrow's CREATE2 policy salt needs
 // (composition's accept route #391, escrow's encoder #367); byte-exact with the #270 mirror.
 export * from "./accepted-policy.js";
+// accepted-policy and evidence-block each declare Bytes32Hex (the same `0x${string}`): naming one
+// explicitly keeps the two `export *` lines from being ambiguous (TS2308).
+export type { Bytes32Hex } from "./accepted-policy.js";
