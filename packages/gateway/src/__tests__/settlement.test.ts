@@ -574,6 +574,25 @@ describe("Settlement Routes", () => {
       expect(body.jobId).toBe("job-001");
       expect(body.milestoneIndex).toBe(0);
     });
+
+    it("a released milestone changes nothing in the SWF ledger: behavior, not spelling (astra EC2 F5)", async () => {
+      const { swfService } = await import("../routes/swf.js");
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+      const ledger = () => {
+        const epoch = swfService.getActiveEpoch();
+        return JSON.stringify({ summary: swfService.getSummary(), accruals: epoch ? swfService.getAccrualsForEpoch(epoch.id) : [] });
+      };
+      const before = ledger();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/settlement/release",
+        payload: { jobId: "job-001", milestoneIndex: 0, contractAddress: "0xDeAdBeEf00000000000000000000000000000001", attestation: mkAttestationBody() },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json<{ status: string }>().status).toBe("released");
+      expect(ledger()).toBe(before);
+    });
   });
 
   // ── GET /api/settlement/:jobId ─────────────────────────────────────────

@@ -397,6 +397,17 @@ describe("parseSigningInputJson — the JSON boundary both languages share (R20 
     expect(code(nest(65))).toBe("malformed-json");
   });
 
+  it("measures depth on the TEXT, so a duplicate key cannot hide an over-depth value (A01b-q1)", () => {
+    const nest = (n: number) => "[".repeat(n) + "]".repeat(n);
+    const shadowed = (n: number) => withUnused(nest(n) + ',"unused":0');
+    expect(code(shadowed(63))).toBe("ACCEPT"); // 64 in all, then replaced by the duplicate
+    for (const n of [64, 99, 19999]) expect(code(shadowed(n)), `shadowed ${n}`).toBe("malformed-json");
+    // Brackets inside a string are not nesting, and escapes are honoured.
+    expect(code(withUnused('"' + "[".repeat(100) + '"'))).toBe("ACCEPT");
+    expect(code(withUnused('"\\"' + "[".repeat(100) + '"'))).toBe("ACCEPT");
+    expect(code(withUnused('["\\\\",' + nest(70) + "]"))).toBe("malformed-json");
+  });
+
   it("decodes numbers as JSON.parse does and refuses non-text and non-JSON", () => {
     expect(parseSigningInputJson(withUnused("1" + "0".repeat(5000)))).toMatchObject({ unused: Infinity });
     for (const bad of [undefined, 7, Buffer.from("{}"), "", "\ufeff{}", "{} x", "{'a':1}"]) {

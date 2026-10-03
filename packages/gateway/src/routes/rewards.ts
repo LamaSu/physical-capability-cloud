@@ -1,6 +1,5 @@
 import type { FastifyInstance } from "fastify";
 import type {
-  CapabilityCertificate,
   RewardEpoch,
   KernelEpochScore,
   DePINRewardClaim,
@@ -13,64 +12,12 @@ import type {
 
 const now = new Date().toISOString();
 
-// ── Mock Certificates ───────────────────────────────────────────
-
-const mockCertificates: CapabilityCertificate[] = [
-  {
-    id: "cnft_biolab_fdm_001",
-    kernelDid: "did:pcc:kernel:biolab-01",
-    capabilityType: "fdm",
-    assuranceTier: 2,
-    metadata: {
-      toleranceSpecs: { xy: "+/- 0.15mm", z: "+/- 0.10mm" },
-      materials: ["PLA", "PETG", "ABS", "TPU"],
-      calibrationProofCid: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
-      calibrationDate: "2026-02-15T10:00:00Z",
-      maxBuildVolume: "250x210x210 mm",
-    },
-    mintedAt: "2026-02-16T08:00:00Z",
-    soulbound: true,
-    status: "active",
-    merkleTree: "TreeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    leafIndex: 0,
-    assetId: "AssetCnftBioLabFDM001",
-  },
-  {
-    id: "cnft_metalshop_cnc_001",
-    kernelDid: "did:pcc:kernel:metalshop-01",
-    capabilityType: "cnc-3axis",
-    assuranceTier: 3,
-    metadata: {
-      toleranceSpecs: { xy: "+/- 0.01mm", z: "+/- 0.005mm" },
-      materials: ["aluminum-6061", "steel-304", "brass"],
-      calibrationProofCid: "bafybeih5cid5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55kxlpde",
-      calibrationDate: "2026-03-01T14:00:00Z",
-    },
-    mintedAt: "2026-03-02T09:00:00Z",
-    soulbound: true,
-    status: "active",
-    merkleTree: "TreeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    leafIndex: 1,
-    assetId: "AssetCnftMetalCNC001",
-  },
-  {
-    id: "cnft_biolab_hplc_001",
-    kernelDid: "did:pcc:kernel:biolab-01",
-    capabilityType: "hplc",
-    assuranceTier: 2,
-    metadata: {
-      materials: ["C18_reverse_phase"],
-      calibrationProofCid: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55hplc1",
-      calibrationDate: "2026-03-05T11:00:00Z",
-    },
-    mintedAt: "2026-03-06T08:00:00Z",
-    soulbound: true,
-    status: "active",
-    merkleTree: "TreeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    leafIndex: 2,
-    assetId: "AssetCnftBioLabHPLC001",
-  },
-];
+// ── Certificates ────────────────────────────────────────────────
+// None exist. Minting has no registration or job checks, no Merkle tree and no store, so
+// the gateway serves no certificate and mints none (board N80; rehearsal R0 finding G4:
+// a certificate "minted" for any kernelDid, with a caller-chosen tier, a placeholder tree
+// and a mintedAt from when this module loaded, before the kernel existed). The three
+// certificates that used to be listed here named kernels that do not exist.
 
 // ── Mock Epochs ─────────────────────────────────────────────────
 
@@ -250,61 +197,26 @@ export async function rewardRoutes(app: FastifyInstance) {
     },
   );
 
-  // ── Certificates ──────────────────────────────────────────────
+  // ── Certificates (none exist; minting is not implemented, N80) ─────
 
   app.get<{ Querystring: { kernelDid?: string; status?: string } }>(
     "/api/certificates",
-    async (req) => {
-      let certs = [...mockCertificates];
-      if (req.query.kernelDid) {
-        certs = certs.filter((c) => c.kernelDid === req.query.kernelDid);
-      }
-      if (req.query.status) {
-        certs = certs.filter((c) => c.status === req.query.status);
-      }
-      return { certificates: certs, total: certs.length };
-    },
+    async () => ({ certificates: [], total: 0 }),
   );
 
   app.get<{ Params: { certId: string } }>(
     "/api/certificates/:certId",
-    async (req, reply) => {
-      const cert = mockCertificates.find((c) => c.id === req.params.certId);
-      if (!cert) {
-        return reply.code(404).send({ error: "not_found", message: "Certificate not found" });
-      }
-      return { certificate: cert };
-    },
+    async (_req, reply) => reply.code(404).send({ error: "not_found", message: "Certificate not found" }),
   );
 
-  app.post("/api/certificates/mint", async (req, reply) => {
-    const body = (req.body ?? {}) as {
-      kernelDid?: string;
-      capabilityType?: string;
-      assuranceTier?: number;
-      metadata?: Record<string, unknown>;
-    };
-    if (!body.kernelDid || !body.capabilityType) {
-      return reply.code(400).send({ error: "bad_request", message: "kernelDid and capabilityType are required" });
-    }
-    const id = `cnft_${Date.now().toString(36)}`;
-    return reply.code(201).send({
-      minted: true,
-      certificate: {
-        id,
-        kernelDid: body.kernelDid,
-        capabilityType: body.capabilityType,
-        assuranceTier: body.assuranceTier ?? 1,
-        metadata: body.metadata ?? {},
-        mintedAt: now,
-        soulbound: true,
-        status: "active",
-        merkleTree: "TreeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        leafIndex: mockCertificates.length,
-        assetId: `Asset${id}`,
-      },
-    });
-  });
+  app.post("/api/certificates/mint", async (_req, reply) =>
+    reply.code(501).send({
+      minted: false,
+      error: "not_implemented",
+      message:
+        "No certificate was minted. Minting needs checks against the kernel's registration and jobs, a real Merkle tree and a store; none exist yet.",
+    }),
+  );
 
   // ── Treasury ──────────────────────────────────────────────────
 
