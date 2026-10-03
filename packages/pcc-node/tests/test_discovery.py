@@ -609,6 +609,42 @@ class TestDiscoverCommand:
         assert "registered" in result.output
         mock_reg.assert_called_once()
 
+    def test_discover_register_counts_failures_honestly(self):
+        """A registration the gateway refused is reported as a failure.
+
+        Before: the counter went up whatever register_kernel returned, so a 401
+        still printed "registered 1" and exited 0 (incident #2984).
+        """
+        from click.testing import CliRunner
+        from pcc_node.cli import main
+        from pcc_node.register import KernelRegistrationError
+
+        runner = CliRunner()
+        devices = [
+            _make_device(
+                ip="192.168.1.50",
+                ports=[31950],
+                protocol="opentrons",
+                device_type="liquid-handler",
+                confidence=0.95,
+                details={"name": "ot2", "api_version": "8", "fw_version": "2", "robot_model": "OT-2"},
+            )
+        ]
+        refused = KernelRegistrationError("kernel-x", 401, {"error": "unauthorized"})
+        with mock.patch("pcc_node.cli.discover_network", return_value=devices), \
+             mock.patch("pcc_node.cli.register_kernel", side_effect=refused), \
+             mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 16, "cd" * 16)):
+            result = runner.invoke(
+                main,
+                ["discover", "--register", "--api-key", "bad-key", "--pcc-base", "http://pcc.invalid"],
+            )
+
+        assert result.exit_code == 1
+        assert "NOT registered" in result.output
+        assert "rejected the API key (HTTP 401)" in result.output
+        assert "registered 0, failed 1" in result.output
+        assert "Registered as kernel" not in result.output
+
     def test_start_with_discover_flag(self):
         """start --discover runs discovery before hardware detection."""
         from click.testing import CliRunner

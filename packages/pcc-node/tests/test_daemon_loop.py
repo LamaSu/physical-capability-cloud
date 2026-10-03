@@ -328,3 +328,87 @@ class TestRunDaemonLoop:
                 pass
 
         mock_register.assert_called_once_with("http://pcc-test", "key", config)
+
+
+# ---------------------------------------------------------------------------
+# Registration truth (incident #2984)
+# ---------------------------------------------------------------------------
+
+class TestDaemonRegistrationTruth:
+    """The daemon says "registered" only when the gateway confirmed it.
+
+    Before: ``register_kernel`` returned an error dict on HTTP 401, the daemon
+    logged "Kernel ... registered" anyway, and then polled, announced and
+    heartbeated with the rejected key every few seconds.
+    """
+
+    def _run(self, register_side_effect, caplog):
+        from pcc_node import daemon as daemon_module
+
+        with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
+             mock.patch.object(daemon_module, "discover_network", return_value=[]), \
+             mock.patch.object(daemon_module, "register_kernel", side_effect=register_side_effect), \
+             mock.patch.object(daemon_module, "announce_capabilities") as announce, \
+             mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
+             mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
+             mock.patch("pcc_node.daemon.JobExecutor"), \
+             mock.patch("pcc_node.ui_server.start_ui_server"), \
+             caplog.at_level("INFO", logger="pcc-node.daemon"):
+            client = mock.MagicMock()
+            MockClient.return_value = client
+            client.poll_for_jobs.side_effect = KeyboardInterrupt
+
+            config = NodeConfig(
+                kernel_id="k-truth",
+                pcc_base="http://pcc.invalid",
+                pcc_api_key="key",
+                poll_interval=0,
+                devices=[],
+            )
+            outcome = "interrupted"
+            try:
+                outcome = daemon_module.run_daemon(config)
+            except (KeyboardInterrupt, SystemExit):
+                pass
+        return outcome, announce, MockClient, client
+
+    def test_rejected_key_stops_before_polling(self, caplog):
+        from pcc_node.register import KernelRegistrationError
+
+        refused = KernelRegistrationError("k-truth", 401, {"error": "unauthorized"})
+        outcome, announce, MockClient, client = self._run(refused, caplog)
+
+        assert outcome is False
+        assert "NOT registered" in caplog.text
+        assert "rejected the API key (HTTP 401)" in caplog.text
+        assert "Kernel k-truth registered" not in caplog.text
+        announce.assert_not_called()
+        MockClient.assert_not_called()
+        client.poll_for_jobs.assert_not_called()
+        assert not os.path.exists(PID_FILE)
+
+    def test_forbidden_key_also_stops(self, caplog):
+        from pcc_node.register import KernelRegistrationError
+
+        refused = KernelRegistrationError("k-truth", 403, {"error": "forbidden"})
+        outcome, _, MockClient, _ = self._run(refused, caplog)
+
+        assert outcome is False
+        MockClient.assert_not_called()
+
+    def test_other_failure_is_logged_as_not_registered(self, caplog):
+        from pcc_node.register import KernelRegistrationError
+
+        failed = KernelRegistrationError("k-truth", 503, {"error": "unavailable"})
+        self._run(failed, caplog)
+
+        assert "Kernel k-truth NOT registered (HTTP 503)" in caplog.text
+        assert "Kernel k-truth registered" not in caplog.text
+        assert "(NOT registered)" in caplog.text
+
+    def test_confirmed_registration_is_logged(self, caplog):
+        self._run(lambda *a, **k: {"id": "k-truth"}, caplog)
+
+        assert "Kernel k-truth registered" in caplog.text
+        assert "NOT registered" not in caplog.text
+        assert "(registered)" in caplog.text
