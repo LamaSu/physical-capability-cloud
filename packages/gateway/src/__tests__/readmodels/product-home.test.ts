@@ -6,7 +6,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { HELD_MILESTONE_STATUSES, NOT_HELD_MILESTONE_STATUSES, RELEASE_DECIDED_MILESTONE_STATUSES } from "@pcc/spec";
+import { HELD_ESCROW_STATUSES, HELD_MILESTONE_STATUSES, NOT_HELD_MILESTONE_STATUSES, RELEASE_DECIDED_MILESTONE_STATUSES } from "@pcc/spec";
+import { ESCROW_CONTESTED, ESCROW_HOLDS } from "../../readmodels/operator-work.js";
 import {
   buildCapabilities,
   buildEscrowHeld,
@@ -115,10 +116,10 @@ describe("jobs", () => {
 
 describe("escrowHeld", () => {
   const escrows = [
-    { id: "e-usdc", contractAddress: "0x3333333333333333333333333333333333333333", currency: "USDC" },
-    { id: "e-eur", contractAddress: "0x4444444444444444444444444444444444444444", currency: "EUR" },
-    { id: "e-mock", contractAddress: "mock-escrow-abc", currency: "USDC" },
-    { id: "e-doge", contractAddress: "0x5555555555555555555555555555555555555555", currency: "DOGE" },
+    { id: "e-usdc", contractAddress: "0x3333333333333333333333333333333333333333", currency: "USDC", status: "funded" },
+    { id: "e-eur", contractAddress: "0x4444444444444444444444444444444444444444", currency: "EUR", status: "funded" },
+    { id: "e-mock", contractAddress: "mock-escrow-abc", currency: "USDC", status: "funded" },
+    { id: "e-doge", contractAddress: "0x5555555555555555555555555555555555555555", currency: "DOGE", status: "funded" },
   ];
 
   it("sums MILESTONE amounts in held states per currency, never escrow totals", () => {
@@ -184,7 +185,7 @@ describe("escrowHeld", () => {
   });
 
   it("NEGATIVE (r1 MEDIUM 1): an escrow at no real contract address (the seed's 0xESCROW_CONTRACT_001) is simulated, never held money", () => {
-    const seeded = [{ id: "e-seed", contractAddress: "0xESCROW_CONTRACT_001", currency: "USDC" }];
+    const seeded = [{ id: "e-seed", contractAddress: "0xESCROW_CONTRACT_001", currency: "USDC", status: "active" }];
     const h = buildEscrowHeld({ escrows: seeded, milestones: [{ escrowId: "e-seed", amount: "27.00", status: "releasing" }] });
     expect(h.byCurrency).toEqual([]);
     expect(h.excludedSimulatedEscrows).toBe(1);
@@ -219,6 +220,54 @@ describe("escrowHeld", () => {
     expect(empty.heldStatuses).toEqual(HELD_MILESTONE_STATUSES);
     expect(empty.releaseDecidedStatuses).toEqual(RELEASE_DECIDED_MILESTONE_STATUSES);
     expect(empty.releaseDecided).toEqual({ byCurrency: [], bound: "at_most" });
+  });
+});
+
+describe("held money needs an escrow record that holds it (self-found after #409 r2)", () => {
+  // The gateway's default V1/V2 path (paid-job-flow.ts) writes the escrow "created" with milestones
+  // "pending", then "evidence_submitted" on evidence; no writer ever moves an escrow row to "funded".
+  const v2 = { id: "e-v2", contractAddress: "0x6666666666666666666666666666666666666666", currency: "USDC", status: "created" };
+
+  it("an escrow record that never says funded: its evidence_submitted milestone is unclassified, not held", () => {
+    const h = buildEscrowHeld({ escrows: [v2], milestones: [{ escrowId: "e-v2", amount: "12.50", status: "evidence_submitted" }] });
+    expect(h.byCurrency).toEqual([]);
+    expect(h.unclassifiedMilestones).toBe(1);
+  });
+
+  it("the same milestone under an escrow record that holds the funds is held (positive control)", () => {
+    const h = buildEscrowHeld({ escrows: [{ ...v2, status: "funded" }], milestones: [{ escrowId: "e-v2", amount: "12.50", status: "evidence_submitted" }] });
+    expect(h.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "12500000", milestones: 1 }]);
+    expect(h.unclassifiedMilestones).toBe(0);
+  });
+
+  it("the V1/V2 lifecycle: pending is not held, evidence_submitted is unclassified, completed and released is neither", () => {
+    const at = (escrowStatus: string, milestoneStatus: string) =>
+      buildEscrowHeld({ escrows: [{ ...v2, status: escrowStatus }], milestones: [{ escrowId: "e-v2", amount: "12.50", status: milestoneStatus }] });
+    expect(at("created", "pending")).toMatchObject({ byCurrency: [], unclassifiedMilestones: 0 });
+    expect(at("created", "evidence_submitted")).toMatchObject({ byCurrency: [], unclassifiedMilestones: 1 });
+    expect(at("completed", "released")).toMatchObject({ byCurrency: [], unclassifiedMilestones: 0 });
+  });
+
+  it("a release-decided milestone under an escrow record that does not hold is unclassified too, never an upper bound", () => {
+    const h = buildEscrowHeld({ escrows: [v2], milestones: [{ escrowId: "e-v2", amount: "10", status: "RELEASE_ALLOCATED" }] });
+    expect(h.releaseDecided.byCurrency).toEqual([]);
+    expect(h.unclassifiedMilestones).toBe(1);
+  });
+
+  it("every escrow word that holds the funds lets a held milestone count, and the DTO publishes them", () => {
+    for (const status of HELD_ESCROW_STATUSES) {
+      const h = buildEscrowHeld({ escrows: [{ ...v2, status: status.toLowerCase() }], milestones: [{ escrowId: "e-v2", amount: "1", status: "funded" }] });
+      expect(h.byCurrency.length, status).toBe(1);
+    }
+    for (const status of ["created", "pending", "unfunded", "completed", "released", "refunded", "settled_released", "expired", "", "mystery"]) {
+      const h = buildEscrowHeld({ escrows: [{ ...v2, status }], milestones: [{ escrowId: "e-v2", amount: "1", status: "funded" }] });
+      expect(h, status).toMatchObject({ byCurrency: [], unclassifiedMilestones: 1 });
+    }
+    expect(buildEscrowHeld({ escrows: [], milestones: [] }).heldEscrowStatuses).toEqual(HELD_ESCROW_STATUSES);
+  });
+
+  it("the escrow words are the ones operator work reads as holding or contested (one rule for both read models)", () => {
+    expect(new Set(HELD_ESCROW_STATUSES)).toEqual(new Set([...ESCROW_HOLDS, ...ESCROW_CONTESTED]));
   });
 });
 
@@ -292,6 +341,26 @@ describe("GET /api/product/home on a real store", () => {
     expect(dto.escrowHeld.byCurrency).toEqual([]);
     expect(dto.escrowHeld.excludedSimulatedEscrows).toBeGreaterThan(0);
     expect(dto.settlementNetwork.basis).toBe("gateway_config");
+  });
+
+  it("NEGATIVE (self-found after #409 r2): a real V1/V2 escrow the gateway never marked funded holds no money after evidence; a funded one does", async () => {
+    const { getStore } = await import("../../db.js");
+    const repos = getStore().repos;
+    const escrowRow = (id: string, address: string, status: string) =>
+      ({
+        id, cwmId: `cwm-${id}`, contractAddress: address, payer: "agent-x", totalAmount: "12.50", currency: "USDC", status,
+        createdAt: "2026-09-24T10:00:00.000Z", deadline: "2026-09-25T10:00:00.000Z",
+      }) as any;
+    // The default V1/V2 path: escrow "created", milestone "pending", then "evidence_submitted".
+    repos.escrows.insert(escrowRow("esc-v2-real", "0x7777777777777777777777777777777777777777", "created"));
+    repos.escrows.insertMilestone({ id: "ms-v2-real", escrowId: "esc-v2-real", stepId: "step-1", amount: "12.50", status: "pending", bondAmount: "0" } as any);
+    repos.escrows.updateMilestoneStatus("ms-v2-real", "evidence_submitted");
+    // V3 mode A funds upfront: escrow "funded", milestone "funded".
+    repos.escrows.insert(escrowRow("esc-v3-real", "0x8888888888888888888888888888888888888888", "funded"));
+    repos.escrows.insertMilestone({ id: "ms-v3-real", escrowId: "esc-v3-real", stepId: "step-1", amount: "12.50", status: "funded", bondAmount: "0" } as any);
+    const dto = (await app.inject({ method: "GET", url: "/api/product/home" })).json();
+    expect(dto.escrowHeld.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "12500000", milestones: 1 }]);
+    expect(dto.escrowHeld.unclassifiedMilestones).toBe(1);
   });
 
   it("NEGATIVE: under TENANT_ENFORCE escrow is unavailable, and a caller with no tenant gets no job counts", async () => {

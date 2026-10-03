@@ -54,7 +54,12 @@ export async function productHomeRoutes(app: FastifyInstance) {
         ? { ok: false, withheld: "Escrow records carry no tenant, so a tenant-scoped held total cannot be computed." }
         : attempt("escrow", () => ({
             escrows: (db ?? fail())
-              .select({ id: schema.escrows.id, contractAddress: schema.escrows.contractAddress, currency: schema.escrows.currency })
+              .select({
+                id: schema.escrows.id,
+                contractAddress: schema.escrows.contractAddress,
+                currency: schema.escrows.currency,
+                status: schema.escrows.status,
+              })
               .from(schema.escrows)
               .all(),
             milestones: (db ?? fail())

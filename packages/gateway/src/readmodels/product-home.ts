@@ -4,6 +4,7 @@
  * or that the route withholds from this caller, is `unavailable` with a reason, never a zero.
  */
 import {
+  HELD_ESCROW_STATUSES,
   HELD_MILESTONE_STATUSES,
   NETWORK_CHAIN_IDS,
   NOT_HELD_MILESTONE_STATUSES,
@@ -42,6 +43,7 @@ export interface HomeEscrowRow {
   id: string;
   contractAddress?: string | null;
   currency?: string | null;
+  status?: string | null;
 }
 export interface HomeMilestoneRow {
   escrowId: string;
@@ -77,6 +79,7 @@ const KERNEL_RULE =
 const HELD = new Set(HELD_MILESTONE_STATUSES);
 const RELEASE_DECIDED = new Set(RELEASE_DECIDED_MILESTONE_STATUSES);
 const NOT_HELD = new Set(NOT_HELD_MILESTONE_STATUSES);
+const ESCROW_HOLDING = new Set(HELD_ESCROW_STATUSES);
 
 type KernelState = "online" | "stale" | "other";
 
@@ -151,6 +154,12 @@ export function buildEscrowHeld(src: { escrows: HomeEscrowRow[]; milestones: Hom
       continue;
     }
     const escrow = escrowById.get(ms.escrowId);
+    // The milestone's word is held money only when its escrow record says it holds the funds;
+    // otherwise the records cannot classify it (the PR steward's ruling #5983).
+    if (escrow && !ESCROW_HOLDING.has(normalizeMoneyStatus(escrow.status))) {
+      unclassified++;
+      continue;
+    }
     const currency = typeof escrow?.currency === "string" && escrow.currency.trim() !== "" ? escrow.currency.trim().toUpperCase() : null;
     const decimals = currencyDecimals(currency);
     const base = toBaseUnits(ms.amount, decimals);
@@ -176,6 +185,7 @@ export function buildEscrowHeld(src: { escrows: HomeEscrowRow[]; milestones: Hom
     excludedSimulatedEscrows: simulated.size,
     heldStatuses: HELD_MILESTONE_STATUSES,
     releaseDecidedStatuses: RELEASE_DECIDED_MILESTONE_STATUSES,
+    heldEscrowStatuses: HELD_ESCROW_STATUSES,
     source: "gateway_escrow_record",
     confirmation: "record_only",
   };

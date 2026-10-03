@@ -73,6 +73,31 @@ export const NOT_HELD_MILESTONE_STATUSES: readonly string[] = Object.freeze([
   "SLASHED",
 ]);
 
+/**
+ * Escrow-record words (escrows.status) under which the escrow holds its funds, contested or not.
+ * A milestone counts as held or release-decided only when its escrow record says one of these
+ * too: the gateway's default V1/V2 path writes the escrow "created" and its milestones "pending",
+ * then "evidence_submitted" on evidence, and no writer ever moves an escrow row to "funded", so a
+ * milestone word alone would turn an unfunded record into held money; such a milestone is
+ * unclassified (the PR steward's ruling #5983). The same words operator
+ * work reads as holding or contested (ESCROW_HOLDS and ESCROW_CONTESTED in readmodels/operator-work.ts).
+ */
+export const HELD_ESCROW_STATUSES: readonly string[] = Object.freeze([
+  "FUNDED",
+  "ACTIVE",
+  "COMPLETING",
+  "LOCKED",
+  "RELEASING",
+  "MILESTONE_MET",
+  "FUNDED_ACTIVE",
+  "RELEASE_ALLOCATED",
+  "PRIMARY_ASSERTED",
+  "CHALLENGED",
+  "BACKUP_PENDING",
+  "BACKUP_ASSERTED",
+  "DISPUTED",
+]);
+
 /** Chain ids of the network names the gateway can be configured with. */
 export const NETWORK_CHAIN_IDS: Readonly<Record<string, number>> = Object.freeze({
   "base-sepolia": 84532,
@@ -144,12 +169,18 @@ export interface ProductHomeEscrowHeld {
   releaseDecided: { byCurrency: ProductHomeHeldAmount[]; bound: "at_most" };
   /** Held or release-decided milestones whose amount or currency could not be counted exactly. */
   uncountedMilestones: number;
-  /** Milestones whose status word is neither held, release-decided nor known-not-held. */
+  /**
+   * Milestones counted apart, never added: a status word that is neither held, release-decided
+   * nor known-not-held, or a held or release-decided word whose escrow record does not say the
+   * escrow holds the funds (its status is not one of `heldEscrowStatuses`).
+   */
   unclassifiedMilestones: number;
   /** Mock-settlement escrows left out entirely. */
   excludedSimulatedEscrows: number;
   heldStatuses: readonly string[];
   releaseDecidedStatuses: readonly string[];
+  /** The escrow-record words under which a held or release-decided milestone counts. */
+  heldEscrowStatuses: readonly string[];
   source: "gateway_escrow_record";
   /** No chain read confirms these sums. */
   confirmation: "record_only";
