@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type { CapabilityType, AssuranceTier } from "@pcc/spec";
 
 export interface WorkflowStep {
@@ -75,3 +76,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   setWorkflowName: (name) => set({ workflowName: name }),
   reset: () => set({ steps: [], selectedStepId: null, workflowName: "New Workflow", nextStepId: 1 }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useWorkflowStore);

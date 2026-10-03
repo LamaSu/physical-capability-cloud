@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type {
   CapabilityTemplate,
   MachineProfile,
@@ -410,3 +411,6 @@ export const useDeviceBuilderStore = create<DeviceBuilderState>((set, get) => ({
     }
   },
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useDeviceBuilderStore);

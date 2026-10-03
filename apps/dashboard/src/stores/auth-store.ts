@@ -81,6 +81,21 @@ export function onIdentityChange(onChange: () => void): () => void {
 }
 
 /**
+ * Calls `onChange` whenever the signed-in account changes: a key signed in or
+ * out, or a different key, including login() with another key while signed
+ * in. App resets every account-scoped store on it and remounts the signed-in
+ * shell (astra 19c). The account follows the key, not isAuthenticated: a key
+ * replaced while signed in is a different account. Zustand calls this inside
+ * the set() that changed the key, so it runs before anything renders for the
+ * next account.
+ */
+export function onAccountChange(onChange: () => void): () => void {
+  return useAuthStore.subscribe((s, prev) => {
+    if (s.apiKey !== prev.apiKey) onChange();
+  });
+}
+
+/**
  * Returns auth headers for API calls.
  * Call outside of React components (in fetch helpers, etc).
  */

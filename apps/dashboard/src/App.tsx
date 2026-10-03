@@ -1,10 +1,11 @@
-import React, { Suspense, lazy } from "react";
+import React, { Suspense, lazy, useSyncExternalStore } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell, Sidebar, TopBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
-import { useAuthStore, onIdentityChange } from "./stores/auth-store.js";
+import { useAuthStore, onIdentityChange, onAccountChange } from "./stores/auth-store.js";
+import { resetAccountScopedState } from "./lib/account-scope.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -120,6 +121,34 @@ const queryClient = new QueryClient({
 // A cached read belongs to the identity that made it: clear the cache whenever the signed-in
 // identity changes, so the next identity never sees the previous one's jobs or money.
 onIdentityChange(() => queryClient.clear());
+
+// Everything else held in memory belongs to the account too (astra 19c).
+// - Every account-scoped store goes back to its initial state: the spatial
+//   chat, open panels, notifications, wizard and builder input
+//   (lib/account-scope.ts). This happens inside the set() that changed the
+//   key, before anything renders for the next account.
+// - The signed-in shell remounts under a new key. That drops component state,
+//   and gives every mounted query a fresh observer: clearing the cache alone
+//   left a mounted page showing the previous account's data until it
+//   happened to re-render.
+let accountEpoch = 0;
+const accountListeners = new Set<() => void>();
+onAccountChange(() => {
+  resetAccountScopedState();
+  accountEpoch += 1;
+  for (const listener of accountListeners) listener();
+});
+
+/** Changes whenever the signed-in account changes; the shell is keyed by it. */
+function useAccountEpoch(): number {
+  return useSyncExternalStore(
+    (onChange) => {
+      accountListeners.add(onChange);
+      return () => accountListeners.delete(onChange);
+    },
+    () => accountEpoch,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Agent workspace (/agent) — the live agent conversation, no sidebar
@@ -409,6 +438,7 @@ function Shell() {
 }
 
 export function App() {
+  const accountEpoch = useAccountEpoch();
   return (
     // Sentry.ErrorBoundary captures errors to Sentry before falling through
     // to the local ErrorBoundary for display. When VITE_SENTRY_DSN is not set,
@@ -418,7 +448,7 @@ export function App() {
         <WalletProvider>
           <QueryClientProvider client={queryClient}>
             <BrowserRouter>
-              <Shell />
+              <Shell key={accountEpoch} />
             </BrowserRouter>
           </QueryClientProvider>
         </WalletProvider>

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type { EquipmentCategory } from "@pcc/spec";
 
 interface MarketplaceState {
@@ -38,3 +39,6 @@ export const useMarketplaceStore = create<MarketplaceState>((set) => ({
   setDemandFilter: (f) => set({ demandFilter: f }),
   setSortBy: (s) => set({ sortBy: s }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useMarketplaceStore);

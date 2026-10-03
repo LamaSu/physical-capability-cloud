@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type { EncryptedEvidenceBundle, EvidenceBundle, EvidenceCommitment, ZKProof } from "@pcc/spec";
 
 interface EvidenceExplorerState {
@@ -39,3 +40,6 @@ export const useEvidenceExplorerStore = create<EvidenceExplorerState>((set) => (
 
   setDecrypting: (v) => set({ isDecrypting: v }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useEvidenceExplorerStore);

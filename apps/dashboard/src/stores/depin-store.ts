@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type {
   CapabilityCertificate,
   RewardEpoch,
@@ -33,3 +34,6 @@ export const useDePINStore = create<DePINState>((set) => ({
   setTreasury: (treasury) => set({ treasury }),
   selectEpoch: (id) => set({ selectedEpochId: id }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useDePINStore);

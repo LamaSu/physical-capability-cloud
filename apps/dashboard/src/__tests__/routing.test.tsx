@@ -250,6 +250,9 @@ describe("one account's in-memory state never reaches the next (astra 19c)", () 
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
         if (url.includes("/api/auth/validate")) return json({ valid: true });
+        const path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0];
+        if (path === "/api/capabilities") return json({ items: [], total: 0, offset: 0, limit: 200 });
+        if (path === "/api/kernels") return json({ kernels: [] });
         if (url.includes("/api/jobs")) {
           const key = (new Headers(init?.headers).get("Authorization") ?? "").replace(/^Bearer /, "");
           const id = jobsFor[key];
@@ -306,6 +309,24 @@ describe("one account's in-memory state never reaches the next (astra 19c)", () 
     await settle();
     expect(r.text(), "A's cached job, right after the switch").not.toContain("job-first-account");
     expect(await waitForText("job-second-account", 4_000)).toBe(true);
+  }, 20_000);
+
+  it("component state goes with the account: B never sees what A typed into a page", async () => {
+    stubAccounts();
+    await renderAt("/discover", { signedIn: true });
+    expect(await waitForText("No capabilities listed yet")).toBe(true);
+    const box = () => container.querySelector<HTMLInputElement>('input[placeholder^="Describe what you need"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(box(), "account-A-search");
+      box()!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(box()?.value).toBe("account-A-search");
+    const { useAuthStore } = await import("../stores/auth-store.js");
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    expect(await waitForText("No capabilities listed yet")).toBe(true);
+    expect(box()?.value ?? "").toBe("");
   }, 20_000);
 
   it("every account-scoped store is back to its initial state before B's workspace renders", async () => {

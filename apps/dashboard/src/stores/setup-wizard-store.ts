@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 
 interface SetupWizardState {
   step: number;
@@ -107,3 +108,6 @@ export const useSetupWizardStore = create<SetupWizardState>((set, get) => ({
     }
   },
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useSetupWizardStore);
