@@ -6,8 +6,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { Writable } from "node:stream";
 
-const charges = vi.hoisted(() => ({ next: [] as Array<"402" | "ok" | "throw"> }));
+const charges = vi.hoisted(() => ({ next: [] as Array<"402" | "ok" | "throw" | "throw-marker"> }));
 vi.mock("@pcc/payments", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   const Real = actual.MppMiddleware as { parsePrice(price: string): unknown };
@@ -25,9 +26,11 @@ vi.mock("@pcc/payments", async (importOriginal) => {
         : { isProtected: false };
     }
     createChargeHandler() {
-      return async () => {
+      return async (input: Request) => {
         const outcome = charges.next.shift() ?? "402";
         if (outcome === "throw") throw new Error("charge failed");
+        // A payment library whose error echoes the request it handled (#514 r2, MEDIUM 2).
+        if (outcome === "throw-marker") throw new Error(`bad charge for ${new URL(input.url).searchParams.get("marker")}`);
         if (outcome === "402") {
           return { status: 402, challenge: new Response(null, { status: 402, headers: { "WWW-Authenticate": 'Payment realm="n107"' } }) };
         }
@@ -42,6 +45,7 @@ const mark = (name: string) => ["n107mpp", name, "9b3f"].join("-");
 const ADMIN = ["n107mpp", "admin", "key"].join("-");
 
 let app: FastifyInstance;
+const logLines: string[] = [];
 
 beforeAll(async () => {
   process.env.PCC_ADMIN_KEY = ADMIN;
@@ -49,7 +53,16 @@ beforeAll(async () => {
   process.env.MPP_SECRET_KEY = ["n107mpp", "secret", "value"].join("-");
   delete process.env.PCC_X402_LEGACY;
   delete process.env.MPP_ENABLED;
-  app = Fastify({ logger: false });
+  // The gateway's closed logger options (N107b); before them, pino's defaults (the reproduction).
+  const sinksModule = (await import("../observability/closed-sinks.js").catch(() => null)) as { gatewayLoggerOptions(): Record<string, unknown> } | null;
+  const gatewayLoggerOptions = () => (sinksModule ? sinksModule.gatewayLoggerOptions() : { level: "info" });
+  const stream = new Writable({
+    write(chunk, _encoding, done) {
+      logLines.push(String(chunk));
+      done();
+    },
+  });
+  app = Fastify({ logger: { ...gatewayLoggerOptions(), stream } });
   const { paymentGate } = await import("../middleware/x402-gate.js");
   await app.register(paymentGate);
   await app.ready();
@@ -98,5 +111,19 @@ describe("MEDIUM 3 (r1 of #514, MPP): payments keep the path only, and each outc
     const other = (await get("/api/x402/stats")).json();
     expect(other.recentPayments).toBeUndefined();
     expect(other.paidRequests).toBe(s3.paidRequests);
+  });
+});
+
+describe("MEDIUM 2 (r2 of #514): the MPP failure log carries a fixed code and the error's class, never the library's message", () => {
+  it("a charge that throws with the request's value in its message: the value is not logged", async () => {
+    const marker = mark("thrown");
+    const start = logLines.length;
+    charges.next.push("throw-marker");
+    const failed = await get(`/api/x402/routes?marker=${marker}`);
+    expect(failed.statusCode).toBe(402);
+    const logged = logLines.slice(start).join("");
+    expect(logged).toContain("mpp_check_failed");
+    expect(logged).toContain('"errorClass":"Error"');
+    expect(logged).not.toContain(marker);
   });
 });

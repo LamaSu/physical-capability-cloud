@@ -82,7 +82,9 @@ describe("CRITICAL 2 (N107): the security monitor sends PostHog no request conte
     expect(attack, "the attack was reported").toBeDefined();
     for (const secret of secrets) expect(sentSince(start)).not.toContain(secret);
     expect(attack!.props).toMatchObject({ attackType: "xss", attackSource: "body", path: "/admin" });
-    expect(typeof attack!.props.attackLength).toBe("number");
+    // N107b: no length of the matched content either; the attack is its type and where it was.
+    expect(attack!.props).not.toHaveProperty("attackLength");
+    expect(attack!.props).not.toHaveProperty("attackPayload");
   });
 
   it("an attack in the URL, in a query value, or in a cookie: the same", async () => {
