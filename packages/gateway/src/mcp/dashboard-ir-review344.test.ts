@@ -334,7 +334,8 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
 
   it("F1: amounts in words, magnitudes, symbols after the number, emoji and other currencies", () => {
     for (const t of ["five dollars", "a million bucks", "million-dollar deal", "twenty euros", "2.5k USDC", "3bn\u20ac", "100\u20b9",
-      "\u00a5 3000", "USDC:100", "1mUSDC", "10 (USDC)", "\u{1F4B5}100", "100\u{1F4B8}", "\uff04\uff15"]) {
+      "\u00a5 3000", "USDC:100", "1mUSDC", "10 (USDC)", "\u{1F4B5}100", "100\u{1F4B8}", "\uff04\uff15",
+      "1       USDC", "1\u00a0\u00a0\u2003USDC", "$\n\n  5"]) { // whitespace runs render as one space
       expect(isMoneyClaim(t), JSON.stringify(t)).toBe(true);
       expect(statesAmount(t), JSON.stringify(t)).toBe(true);
     }
@@ -442,6 +443,9 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
     bindSchemaCard("capability-summary-v1", { name: "Refunded in full", type: "arm", pricing: { baseCost: "12.50", currency: "USDC" }, assuranceTiers: [1, 2], available: true }, slots);
     expect(slots.map((x) => x.textContent)).toEqual([WITHHELD_FIELD, "arm", "12.50", "USDC", "1, 2", "Yes"]);
+    // the card's own price fields show money as stated, even an amount; no other field may
+    bindSchemaCard("capability-summary-v1", { name: "Arm", type: "1,000 USDC", pricing: { baseCost: "1,000 USDC", currency: "USDC" }, assuranceTiers: [1], available: false }, slots);
+    expect(slots.map((x) => x.textContent)).toEqual(["Arm", WITHHELD_FIELD, "1,000 USDC", "USDC", "1", "No"]);
     expect(textOf(listEl)).not.toContain("verified site");
   });
 
