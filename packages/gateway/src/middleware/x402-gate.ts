@@ -161,7 +161,7 @@ export async function paymentGate(app: FastifyInstance) {
   if (useMpp && enabled) {
     const secretKey = process.env.MPP_SECRET_KEY;
     if (!secretKey) {
-      app.log.warn("[payment-gate] MPP is the default but MPP_SECRET_KEY is not set — falling back to x402. Set MPP_SECRET_KEY or use PCC_X402_LEGACY=true to silence this warning.");
+      app.log.warn(lit("[payment-gate] MPP is the default but MPP_SECRET_KEY is not set — falling back to x402. Set MPP_SECRET_KEY or use PCC_X402_LEGACY=true to silence this warning."));
     } else {
       mppMiddleware = new MppMiddleware({
         secretKey,
@@ -253,7 +253,7 @@ export async function paymentGate(app: FastifyInstance) {
   if (!mppMiddleware) {
     if (x402Legacy && enabled) {
       app.log.warn(
-        "[payment-gate] x402 is deprecated. Set MPP_SECRET_KEY and remove PCC_X402_LEGACY=true to upgrade to MPP.",
+        lit("[payment-gate] x402 is deprecated. Set MPP_SECRET_KEY and remove PCC_X402_LEGACY=true to upgrade to MPP."),
       );
     }
 
