@@ -4,10 +4,9 @@
 
 import type { FastifyInstance } from "fastify";
 import type { StreamTopic } from "@pcc/spec";
-import { streamHub, type StreamEvent } from "./stream-hub.js";
+import { streamHub } from "./stream-hub.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
 import { resolveSSEAuth } from "./sse-auth.js";
-import { projectBatchStreamEvent } from "./batch-stream-projection.js";
 import { getJobFacade } from "../facades/index.js";
 
 // ---------------------------------------------------------------------------
@@ -98,14 +97,6 @@ const ALLOWED_SSE_ORIGINS = new Set([
   "http://127.0.0.1:3200",
 ]);
 
-/**
- * A per-stream boundary projector (N49 round 5). It maps a hub event to what
- * this stream may write, or to null to drop the event. setupSSE runs it on
- * EVERY event the stream delivers, live or replayed, so what a stream shows
- * does not depend on which producer published to its topic.
- */
-type StreamProjector = (event: StreamEvent) => { type: string; payload: unknown } | null;
-
 /** The longest id or event name a frame carries (N49 round 6). */
 const MAX_SSE_FIELD_LENGTH = 256;
 
@@ -130,15 +121,15 @@ export async function topicSSE(app: FastifyInstance) {
   });
 
   /**
-   * Helper to set up an SSE connection for given topics. A stream passes
-   * `project` when its topic is shared by subscribers who may not see every
-   * event as published; without one, events are written as published.
+   * Helper to set up an SSE connection for given topics.
    *
    * Every frame is guarded (N49 round 6): an event whose type is not a safe
    * line is dropped, and a publisher id that is not one is left out of the
-   * frame. A stream that passes `cursorIds` never writes the publisher's id at
-   * all: each frame's id is the hub's own cursor for the topic, and
-   * Last-Event-ID is read back as that cursor.
+   * frame. A stream that passes `cursorIds` (the shared batch stream) writes
+   * nothing the publisher wrote: each frame is the view the hub decided once,
+   * at publish, and froze with the event's cursor (rounds 7 and 8). Its id is
+   * that cursor, and Last-Event-ID is read back as one. An event without a view
+   * is never written there. Other streams write events as published.
    */
   function setupSSE(
     req: { raw: { on: (event: string, cb: () => void) => void }; ip?: string },
@@ -146,7 +137,6 @@ export async function topicSSE(app: FastifyInstance) {
     topics: StreamTopic[],
     lastEventId?: string,
     origin?: string,
-    project?: StreamProjector,
     cursorIds = false,
   ) {
     // Strict origin validation — reject unknown origins with default
@@ -166,22 +156,18 @@ export async function topicSSE(app: FastifyInstance) {
     const unsubscribe = streamHub.subscribe(
       topics,
       (event, cursor) => {
-        // A cursor stream shows only events the hub numbered for it (round 7):
-        // an event without a cursor is never written there, with or without
-        // the projection's say.
-        if (cursorIds && !cursor) return;
-        let type = event.type;
-        let data = event.payload;
-        if (project) {
-          let projected: ReturnType<StreamProjector>;
-          try {
-            projected = project(event);
-          } catch {
-            return; // fail closed: an event the projector cannot judge is not written
-          }
-          if (!projected) return;
-          type = projected.type;
-          data = projected.payload;
+        let type: unknown;
+        let data: unknown;
+        if (cursorIds) {
+          // The view the hub froze with the cursor at publish: the one
+          // judgment that decided both whether the event is numbered and what
+          // the stream shows (rounds 7 and 8). The event itself is not read again.
+          if (!cursor?.view) return;
+          type = cursor.view.type;
+          data = cursor.view.payload;
+        } else {
+          type = event.type;
+          data = event.payload;
         }
         // A type that could end its line early would let the event write
         // lines of its own choosing: drop the event.
@@ -271,12 +257,14 @@ export async function topicSSE(app: FastifyInstance) {
 
   // Per-batch streaming. The batch topic is SHARED: every authenticated
   // subscriber of a batchId receives the same events, and there is no ownership
-  // check. So per-sample data must never be on it. The projection is therefore
-  // applied here, at the stream boundary, to every event on the topic whoever
-  // published it (the sensor pipeline, the BatchTracker, a mock producer, a
-  // future producer), not inside any one producer. Only the aggregate
-  // batch-level events pass; per-sample events stay on the authenticated,
-  // owner-projected HTTP surface (routes/batches.ts viewEvents).
+  // check. So per-sample data must never be on it. The projection therefore
+  // applies to every event on the topic, whoever published it (the sensor
+  // pipeline, the BatchTracker, a mock producer, a future producer), not inside
+  // any one producer: the hub runs it ONCE per event at publish
+  // (sse/stream-hub.ts, batchStreamView) and freezes the result with the
+  // event's cursor, and this stream writes only that view (rounds 7 and 8).
+  // Only the aggregate batch-level events pass; per-sample events stay on the
+  // authenticated, owner-projected HTTP surface (routes/batches.ts viewEvents).
   // The whole frame is the stream's, not the publisher's (round 6): its id is
   // the hub's cursor on this topic, so no publisher id (which could name a
   // sample, a job or a result) reaches a subscriber, and Last-Event-ID resumes
@@ -289,17 +277,7 @@ export async function topicSSE(app: FastifyInstance) {
     const { batchId } = req.params as { batchId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
     const origin = req.headers.origin as string | undefined;
-    const project: StreamProjector = (event) => {
-      const message = projectBatchStreamEvent({
-        id: event.id,
-        type: event.type,
-        timestamp: event.timestamp,
-        batchId,
-        payload: event.payload,
-      });
-      return message ? { type: message.type, payload: message.payload } : null;
-    };
-    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin, project, true);
+    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin, true);
     await new Promise(() => {});
   });
 }

@@ -629,7 +629,7 @@ describe("N49 r7: batch cursors count only the events a subscriber can see", () 
 
 describe("StreamHub cursor policy (N49 r7)", () => {
   it("numbers only the events the policy admits; the rest get no cursor and are not in the cursor window", () => {
-    const hub = new StreamHub(10, (event) => event.type === "visible");
+    const hub = new StreamHub(10, (event) => (event.type === "visible" ? { type: event.type, payload: event.payload } : null));
     const topic = { type: "batch" as const, id: "b1" };
     const event = (id: string, type: string) => ({ id, type, timestamp: "t", topic, payload: {} });
 
@@ -653,5 +653,121 @@ describe("StreamHub cursor policy (N49 r7)", () => {
     hub.subscribe([topic], (_e, cursor) => live.push(cursor?.seq));
     hub.publish([topic], { id: "x", type: "anything", timestamp: "t", topic, payload: {} });
     expect(live).toEqual([undefined]);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// N49 round 8 (MEDIUM): the batch projection ran twice, once when the hub
+// numbered the event and again at the SSE boundary, on the same mutable event.
+// When the two judged it differently, a numbered event was never shown (a gap
+// that counts it) or a shown event lost its cursor. Now the hub projects once,
+// at publish, freezes the view, and the stream writes exactly that view, live
+// and on replay.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A payload that answers `first` on its first read, then throws. */
+function readOnceEvent(batchId: string, type: string, first: Record<string, unknown>) {
+  let reads = 0;
+  return {
+    id: `once-${uid()}`,
+    type,
+    timestamp: new Date().toISOString(),
+    topic: { type: "batch" as const, id: batchId },
+    get payload(): unknown {
+      reads += 1;
+      if (reads > 1) throw new Error("read twice");
+      return first;
+    },
+  };
+}
+
+describe("N49 r8: the batch view is decided once, at publish", () => {
+  it("an event that projects on its first read and throws afterwards is shown as first judged, with no gap", async () => {
+    const batchId = `once-${uid()}`;
+    const sub = await subscribeBatch(batchId);
+
+    streamHub.publish([{ type: "batch", id: batchId }], readOnceEvent(batchId, "batch_sealed", { slotCount: 1 }) as never);
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 1, failed: 0 });
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_completed"));
+
+    expect(sub.events().map((f) => [f.event, f.id])).toEqual([
+      ["batch_sealed", "1"],
+      ["batch_completed", "2"],
+    ]);
+    expect(JSON.parse(sub.events()[0].data!)).toEqual({ batchId, slotCount: 1 });
+  });
+
+  it("replay shows the view decided at publish, without reading the event again", async () => {
+    const batchId = `once-replay-${uid()}`;
+    streamHub.publish([{ type: "batch", id: batchId }], readOnceEvent(batchId, "batch_sealed", { slotCount: 3 }) as never);
+
+    const sub = await subscribe(`/sse/stream/batch/${batchId}`, { ...bob, "last-event-id": "0" });
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_sealed"));
+
+    expect(sub.events().map((f) => [f.event, f.id])).toEqual([["batch_sealed", "1"]]);
+    expect(JSON.parse(sub.events()[0].data!)).toEqual({ batchId, slotCount: 3 });
+  });
+
+  it("changing the event after publish does not change what replay shows", async () => {
+    const batchId = `frozen-${uid()}`;
+    const payload = { completed: 1, failed: 0 };
+    publishOnBatchTopic(batchId, "batch_completed", payload);
+    payload.completed = 99;
+
+    const sub = await subscribe(`/sse/stream/batch/${batchId}`, { ...bob, "last-event-id": "0" });
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_completed"));
+
+    expect(JSON.parse(sub.events()[0].data!)).toEqual({ batchId, completed: 1, failed: 0 });
+  });
+
+  it("an event whose first read throws gets no cursor and is never shown, and leaves no gap", async () => {
+    const batchId = `throws-first-${uid()}`;
+    const sub = await subscribeBatch(batchId);
+    let reads = 0;
+    streamHub.publish([{ type: "batch", id: batchId }], {
+      id: `bad-${uid()}`, type: "batch_sealed", timestamp: new Date().toISOString(), topic: { type: "batch", id: batchId },
+      get payload(): unknown {
+        reads += 1;
+        if (reads === 1) throw new Error("first read");
+        return { slotCount: 5 };
+      },
+    } as never);
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 2, failed: 0 });
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_completed"));
+
+    expect(sub.events().map((f) => [f.event, f.id])).toEqual([["batch_completed", "1"]]);
+  });
+});
+
+describe("StreamHub views (N49 r8)", () => {
+  it("decides each event's view once at publish and hands that same view to live and replayed callbacks", () => {
+    let calls = 0;
+    // Called once per event AND topic: every publish also goes to the global
+    // topic, which this view gives no cursor.
+    const hub = new StreamHub(10, (event, topic) => {
+      if (topic.type !== "batch") return null;
+      calls += 1;
+      return Object.freeze({ type: event.type, payload: Object.freeze({ n: calls }) });
+    });
+    const topic = { type: "batch" as const, id: "b3" };
+    const views: unknown[] = [];
+    hub.subscribe([topic], (_e, cursor) => views.push(cursor?.view));
+    hub.publish([topic], { id: "e1", type: "t", timestamp: "t", topic, payload: {} });
+    expect(calls).toBe(1);
+
+    const replayed: unknown[] = [];
+    hub.subscribe([topic], (_e, cursor) => replayed.push(cursor?.view), "0", { cursor: "seq" });
+    expect(calls).toBe(1); // replay does not judge the event again
+    expect(replayed[0]).toBe(views[0]);
+    expect(replayed[0]).toEqual({ type: "t", payload: { n: 1 } });
+  });
+
+  it("the gateway's batch view is frozen", async () => {
+    const { batchStreamView } = await import("../sse/batch-stream-projection.js");
+    const view = batchStreamView({ type: "batch_completed", payload: { completed: 2, failed: 1 } }, "b4")!;
+    expect(Object.isFrozen(view)).toBe(true);
+    expect(Object.isFrozen(view.payload)).toBe(true);
+    expect(view).toEqual({ type: "batch_completed", payload: { batchId: "b4", completed: 2, failed: 1 } });
+    expect(batchStreamView({ type: "sensor_reading", payload: {} }, "b4")).toBeNull();
   });
 });

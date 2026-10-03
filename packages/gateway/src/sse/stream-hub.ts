@@ -7,7 +7,7 @@
  */
 
 import type { StreamTopic } from "@pcc/spec";
-import { isPublicBatchStreamEvent } from "./batch-stream-projection.js";
+import { batchStreamView } from "./batch-stream-projection.js";
 
 export interface StreamEvent {
   id: string;
@@ -26,12 +26,23 @@ export interface StreamEvent {
 export interface StreamCursor {
   topicKey: string;
   seq: number;
+  /** What a cursor stream shows for the event: decided once, at publish, and frozen (round 8). */
+  view?: StreamView;
+}
+
+/** A frozen event type and payload, as a cursor stream writes them. */
+export interface StreamView {
+  readonly type: string;
+  readonly payload: unknown;
 }
 
 type StreamCallback = (event: StreamEvent, cursor?: StreamCursor) => void;
 
-/** Whether an event gets a cursor on a topic (see the StreamHub constructor). */
-export type CursorPolicy = (event: StreamEvent, topic: StreamTopic) => boolean;
+/**
+ * Decides, once per event and topic at publish, whether the event gets a cursor
+ * on the topic and what a cursor stream shows for it (see the constructor).
+ */
+export type CursorView = (event: StreamEvent, topic: StreamTopic) => StreamView | null;
 
 export interface SubscribeOptions {
   /**
@@ -55,27 +66,32 @@ export class StreamHub {
   private replayBuffers = new Map<string, StreamEvent[]>();
   /** Per topic: the last cursor assigned, and the replay window with each event's cursor. */
   private cursors = new Map<string, number>();
-  private cursorBuffers = new Map<string, Array<{ seq: number; event: StreamEvent }>>();
+  private cursorBuffers = new Map<string, Array<{ seq: number; event: StreamEvent; view?: StreamView }>>();
   private replayCapacity: number;
 
   /**
-   * `cursorPolicy` (N49 round 7) decides which events get a cursor on a topic.
-   * An event it does not admit gets none: it is still delivered to subscribers
-   * and kept in the publisher-id replay buffer, but it is not numbered and not
-   * in the cursor window, so a cursor stream neither shows it nor leaves a gap
-   * for it. A policy that throws admits nothing. Without one, every event is
-   * numbered.
+   * `cursorView` (N49 rounds 7 and 8) is called ONCE per event and topic, at
+   * publish. Null (or a throw) means no cursor: the event is still delivered to
+   * subscribers and kept in the publisher-id replay buffer, but it is not
+   * numbered and not in the cursor window, so a cursor stream neither shows it
+   * nor leaves a gap for it. A view means a cursor, and the frozen view is
+   * stored and handed out with it, live and on replay. So the decision to
+   * number an event and what a cursor stream writes for it are the same single
+   * judgment and cannot disagree. Without a cursorView, every event is numbered
+   * with no view.
    */
-  constructor(replayCapacity = DEFAULT_REPLAY_CAPACITY, private readonly cursorPolicy?: CursorPolicy) {
+  constructor(replayCapacity = DEFAULT_REPLAY_CAPACITY, private readonly cursorView?: CursorView) {
     this.replayCapacity = replayCapacity;
   }
 
-  private admitted(event: StreamEvent, topic: StreamTopic): boolean {
-    if (!this.cursorPolicy) return true;
+  /** The cursor decision for one event on one topic: made once, here. */
+  private decide(event: StreamEvent, topic: StreamTopic): { numbered: boolean; view?: StreamView } {
+    if (!this.cursorView) return { numbered: true };
     try {
-      return this.cursorPolicy(event, topic) === true;
+      const view = this.cursorView(event, topic);
+      return view ? { numbered: true, view } : { numbered: false };
     } catch {
-      return false;
+      return { numbered: false };
     }
   }
 
@@ -103,7 +119,7 @@ export class StreamHub {
           const key = StreamHub.topicKey(topic);
           for (const entry of this.cursorBuffers.get(key) ?? []) {
             if (entry.seq <= after) continue;
-            try { callback(entry.event, { topicKey: key, seq: entry.seq }); } catch { /* ignore */ }
+            try { callback(entry.event, { topicKey: key, seq: entry.seq, view: entry.view }); } catch { /* ignore */ }
           }
         }
       }
@@ -159,16 +175,17 @@ export class StreamHub {
     for (const topic of allTopics) {
       const key = StreamHub.topicKey(topic);
       let cursor: StreamCursor | undefined;
-      if (this.admitted(event, topic)) {
+      const decision = this.decide(event, topic);
+      if (decision.numbered) {
         const seq = (this.cursors.get(key) ?? 0) + 1;
         this.cursors.set(key, seq);
-        cursor = { topicKey: key, seq };
+        cursor = { topicKey: key, seq, view: decision.view };
         let window = this.cursorBuffers.get(key);
         if (!window) {
           window = [];
           this.cursorBuffers.set(key, window);
         }
-        window.push({ seq, event });
+        window.push({ seq, event, view: decision.view });
         if (window.length > this.replayCapacity) {
           window.shift();
         }
@@ -221,11 +238,13 @@ export class StreamHub {
 }
 
 /**
- * Singleton hub instance shared across the gateway. On a batch topic only the
- * events the shared batch stream can show are numbered (N49 round 7), so its
- * cursor gaps say nothing about the private events it drops.
+ * Singleton hub instance shared across the gateway. Only batch topics carry
+ * cursors, and there only the events the shared batch stream can show get one
+ * (N49 rounds 7 and 8). Each carries its frozen projection, computed once at
+ * publish, so the cursor gaps say nothing about the private events the stream
+ * drops, and what the stream writes is what was judged.
  */
 export const streamHub = new StreamHub(
   DEFAULT_REPLAY_CAPACITY,
-  (event, topic) => topic.type !== "batch" || isPublicBatchStreamEvent(event, topic.id),
+  (event, topic) => (topic.type === "batch" ? batchStreamView(event, topic.id) : null),
 );

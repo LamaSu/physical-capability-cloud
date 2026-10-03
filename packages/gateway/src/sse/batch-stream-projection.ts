@@ -41,16 +41,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Whether an event published on batch topic `batchId` appears on the shared
- * batch stream (N49 round 7). The hub gives a batch topic's cursor only to
- * these events, so the cursor a subscriber sees counts visible events alone and
- * its gaps reveal nothing about the private events the projection drops.
+ * What the shared batch stream shows for an event published on batch topic
+ * `batchId`, or null when it shows nothing (N49 rounds 7 and 8). The hub calls
+ * this ONCE per event, at publish. It numbers only the events that get a view,
+ * so the cursor gaps reveal nothing about dropped events, and it stores the
+ * frozen view with the cursor, so the stream writes exactly what was judged,
+ * live and on replay, without reading the event again.
  */
-export function isPublicBatchStreamEvent(
+export function batchStreamView(
   event: { id?: string; type: string; timestamp?: string; payload?: unknown },
   batchId: string,
-): boolean {
-  return projectBatchStreamEvent({ id: event.id, type: event.type, timestamp: event.timestamp, batchId, payload: event.payload }) !== null;
+): { readonly type: string; readonly payload: Readonly<Record<string, unknown>> } | null {
+  const message = projectBatchStreamEvent({ id: event.id, type: event.type, timestamp: event.timestamp, batchId, payload: event.payload });
+  if (!message) return null;
+  return Object.freeze({ type: message.type, payload: Object.freeze({ ...message.payload }) });
 }
 
 /**
