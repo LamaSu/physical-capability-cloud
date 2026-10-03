@@ -76,6 +76,15 @@ describe("KernelAgent", () => {
     it("has a description containing the kernel name", () => {
       expect(agent.description).toContain("Test Kernel");
     });
+
+    it("falls back to a mock camera only when no camera is given", () => {
+      expect((agent as any).camera.constructor.name).toBe("MockCameraAdapter");
+    });
+
+    it("camera: null means NO camera, never a substituted mock", () => {
+      const noCamera = new KernelAgent(bus, makeConfig({ adapters: { camera: null } }));
+      expect((noCamera as any).camera).toBeNull();
+    });
   });
 
   // ── Agent Card ────────────────────────────────────────────────

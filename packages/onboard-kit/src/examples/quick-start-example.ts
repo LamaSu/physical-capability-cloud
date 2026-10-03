@@ -11,8 +11,10 @@ import { BrokerAgent } from "@pcc/agent-broker";
 async function main() {
   console.log("=== PCC Quick Start Example ===\n");
 
-  // 1. Start your kernel (mock mode — no real hardware needed)
+  // 1. Start a SIMULATED kernel (demo mode — no real hardware needed; for
+  //    your own machine, leave mode out and pass machineApi instead)
   const { kernelAgent, bus, capability, stop } = await quickStart({
+    mode: "demo",
     kernelId: "kernel_demo_001",
     name: "Demo Workshop",
     location: { lat: 37.77, lng: -122.41 },

@@ -124,8 +124,24 @@ const { kernelAgent, stop } = await quickStart({
       minimum: "10.00",
     },
   },
+  // Your machine's HTTP API: every job the kernel accepts runs here.
+  machineApi: {
+    baseUrl: "http://192.168.1.50",
+    kernelId: "kernel_your_shop",
+    machineType: "fdm",
+    endpoints: {
+      status: { method: "GET", path: "/status" },
+      progress: { method: "GET", path: "/progress" },
+      loadProgram: { method: "POST", path: "/load" },
+      start: { method: "POST", path: "/start" },
+      stop: { method: "POST", path: "/stop" },
+    },
+    statusMapping: { statusField: "state", map: { ready: "idle", printing: "busy" }, default: "idle" },
+    progressMapping: { progressField: "percent" },
+  },
 });
-// Your machine is now discoverable on the network`;
+// Jobs the kernel accepts now run on your machine.
+// No hardware yet? Pass mode: "demo" to simulate every device (it never settles).`;
 
 const SCAFFOLD_CODE = `# pcc-onboard ships in packages/onboard-kit of the PCC monorepo (not on npm yet)
 # Generate a complete kernel project from config

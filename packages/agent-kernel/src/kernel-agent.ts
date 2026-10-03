@@ -44,11 +44,15 @@ export interface KernelAgentConfig {
   unbrowseUrl?: string;
   /** Supplier URLs to monitor for stock/pricing changes */
   supplierUrls?: string[];
-  /** Pluggable adapters — override mock defaults for real hardware */
+  /**
+   * Pluggable adapters — override mock defaults for real hardware.  An
+   * adapter left out falls back to a mock; `camera: null` means the kernel
+   * has NO camera (no mock is substituted, and jobs carry no camera evidence).
+   */
   adapters?: {
     machine?: MachineAdapter;
     sensors?: SensorAdapter[];
-    camera?: CameraAdapter;
+    camera?: CameraAdapter | null;
   };
   /** Network memberships for dual-network operation */
   networks?: string[];
@@ -77,7 +81,7 @@ export class KernelAgent extends BaseAgent {
   private evidenceEmitter: EvidenceEmitter;
   private machine: MachineAdapter;
   private sensors: SensorAdapter[];
-  private camera: CameraAdapter;
+  private camera: CameraAdapter | null;
   private jobQueue: string[] = [];
   private isProcessing = false;
   private settlement?: SettlementClient;
@@ -109,8 +113,9 @@ export class KernelAgent extends BaseAgent {
       new MockFDMAdapter(`dev_fdm_${config.kernelId}`, config.kernelId, config.mockPrintDuration ?? 3000);
     this.sensors = config.adapters?.sensors ??
       [new MockPowerMonitorAdapter(`dev_power_${config.kernelId}`, config.kernelId)];
-    this.camera = config.adapters?.camera ??
-      new MockCameraAdapter(`dev_cam_${config.kernelId}`, config.kernelId);
+    this.camera = config.adapters?.camera === null
+      ? null
+      : config.adapters?.camera ?? new MockCameraAdapter(`dev_cam_${config.kernelId}`, config.kernelId);
     this.evidenceEmitter = new EvidenceEmitter(config.kernelId, async (data: string) => {
       const sig = await this.wallet.signMessage(data);
       return { signer: this.wallet.address, algorithm: "secp256k1" as const, value: sig };
