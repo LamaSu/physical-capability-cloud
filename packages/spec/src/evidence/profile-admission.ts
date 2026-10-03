@@ -162,8 +162,6 @@
  *                                    only applies to required roles
  */
 
-import { types } from "node:util";
-
 import { isFabricated } from "./is-fabricated.js";
 import {
   evidenceLevelOf,
@@ -176,6 +174,8 @@ import {
   type EvidenceLevel,
 } from "./evidence-level.js";
 import { plainDataCopy, profileGoverns, type MeasurementProfileV1 } from "./measurement-profile.js";
+// The trap-free proxy check, loaded at runtime (no static node:util import, so browser bundles of @pcc/spec build).
+import { isProxy } from "../util/plain-data.js";
 import { getPrimitive } from "./primitives.js";
 import { isTaggedDigest } from "./signing-preimage.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "./subject-binding.js";
@@ -416,7 +416,8 @@ function ownIncludes(list: readonly unknown[], x: unknown): boolean {
  */
 function codeInData(value: unknown, path: string, seen: Set<object>): string | null {
   if (value === null || typeof value !== "object") return null;
-  if (types.isProxy(value)) return `${path}: a proxy`;
+  if (isProxy === null) return `${path}: this runtime has no trap-free proxy check`;
+  if (isProxy(value)) return `${path}: a proxy`;
   if (Array.isArray(value) && Object.getPrototypeOf(value) !== Array.prototype) return `${path}: an array with a nonstandard prototype`;
   if (seen.has(value)) return null;
   seen.add(value);
@@ -525,7 +526,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   // while admission waits; astra pack 127.) The verification callbacks are the
   // caller's trusted code. A process whose built-ins were changed before the
   // call is beyond what any in-process check can defend.
-  if (typeof input !== "object" || input === null || types.isProxy(input)) {
+  if (typeof input !== "object" || input === null || isProxy === null || isProxy(input)) {
     return reject("input-unreadable", "the admission input must be a plain object, not a proxy");
   }
   const fields = ["pinnedBundleSetDigest", "verifyBundleSignature", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile"] as const;

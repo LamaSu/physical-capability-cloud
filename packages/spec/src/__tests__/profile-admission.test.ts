@@ -14,7 +14,7 @@ import { createHash, createPublicKey, generateKeyPairSync, sign, verify } from "
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import {
   profileAdmitsBundle,
@@ -1401,5 +1401,63 @@ describe("profile admission — astra r6 (pack 154): sparse arrays with a custom
     expect(ran).toBe(false);
     expect(r.decision).toBe("reject");
     expect(codes(r)).toEqual(["unbound-bundle"]);
+  });
+});
+
+// ── the dashboard's browser build (CI run 37090398492): no static node:util in admission ──
+describe("profile admission: the proxy check is loaded at runtime, and fails closed without one", () => {
+  it("profile-admission.ts has no static node:util import (vite has no node:util)", () => {
+    const source = readFileSync(fileURLToPath(new URL("../evidence/profile-admission.ts", import.meta.url)), "utf8");
+    expect(source).not.toMatch(/from\s+["']node:util["']|require\(\s*["']node:util["']\s*\)/);
+  });
+
+  it("a proxy input is still refused before any trap runs", async () => {
+    let trapped = 0;
+    const p = inspectedPageProfile();
+    const bundle = await toBundle(PILOT, p);
+    const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+    const target = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      bundles: [bundle],
+      pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    };
+    const input = new Proxy(target, { get: (t, k, r) => (trapped++, Reflect.get(t, k, r)), getOwnPropertyDescriptor: (t, k) => (trapped++, Reflect.getOwnPropertyDescriptor(t, k)) });
+    const r = await profileAdmitsBundle(input as ProfileAdmissionInput);
+    expect(codes(r)).toEqual(["input-unreadable"]);
+    expect(trapped).toBe(0);
+  });
+
+  it("without a trap-free proxy check (a browser, or Node before 20.16), admission rejects as input-unreadable", async () => {
+    // Every input is built with the check present; only admission runs without it.
+    const p = inspectedPageProfile();
+    const bundle = await toBundle(PILOT, p);
+    const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+    const input = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      bundles: [bundle],
+      pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    };
+    expect(codes(await profileAdmitsBundle(input))).not.toContain("input-unreadable");
+    const runtime = process as unknown as { getBuiltinModule?: unknown };
+    const original = runtime.getBuiltinModule;
+    runtime.getBuiltinModule = undefined;
+    try {
+      vi.resetModules();
+      const fresh = await import("../evidence/profile-admission.js");
+      const r = await fresh.profileAdmitsBundle(input);
+      expect(r.decision).toBe("reject");
+      expect(codes(r)).toEqual(["input-unreadable"]);
+    } finally {
+      runtime.getBuiltinModule = original;
+      vi.resetModules();
+    }
   });
 });
