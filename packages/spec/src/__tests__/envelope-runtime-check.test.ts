@@ -1466,3 +1466,29 @@ describe("astra pack 169: the scope of rule 1, one test per item, each refused a
     ]);
   });
 });
+
+describe("a setter on Array.prototype indices never runs (copies define own properties; they never assign)", () => {
+  it("with setters on Array.prototype[0] and [1] that would substitute a wide limit, every decision is unchanged and no setter runs", () => {
+    // R8's operational-envelope test: an assignment to a fresh array's index runs a setter Array.prototype serves for it.
+    // The result array is dense before the setters go in, so this test's own writes never reach them.
+    const out: RuntimeDecision[] = ALL.map(() => ({ allowed: true }));
+    let ran = 0;
+    const substitute = (index: string) => ({
+      configurable: true,
+      set(this: unknown[], _value: unknown) {
+        ran++;
+        Object.defineProperty(this, index, { value: { quantity: "aspirate_volume", unit: "uL", min: -1e12, max: 1e12 }, writable: true, enumerable: true, configurable: true });
+      },
+    });
+    try {
+      Object.defineProperty(Array.prototype, "0", substitute("0"));
+      Object.defineProperty(Array.prototype, "1", substitute("1"));
+      for (let i = 0; i < ALL.length; i++) out[i] = checkRuntimeCommand(ALL[i]!.envelope, ALL[i]!.command, ALL[i]!.state);
+    } finally {
+      delete (Array.prototype as unknown as Record<string, unknown>)["0"];
+      delete (Array.prototype as unknown as Record<string, unknown>)["1"];
+    }
+    expect(ran).toBe(0);
+    expect(JSON.stringify(out)).toBe(CLEAN_DECISIONS);
+  });
+});
