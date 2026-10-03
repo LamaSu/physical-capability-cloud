@@ -66,6 +66,7 @@
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
 import { BIP39_ENGLISH_WORDLIST } from "./bip39-english.js";
+import { plainIntakeCopy } from "./plain-input.js";
 import { CONTENT_HASH_PATTERN } from "../citation-rules.js";
 import { INTAKE_KEY_VOCABULARY } from "./vocabulary.js";
 import { walkValue, type WalkPathSegment } from "./walk.js";
@@ -299,13 +300,24 @@ const NO_KEYS: ReadonlySet<string> = new Set();
 const TOKEN_SEPARATOR = String.fromCharCode(0);
 
 /**
- * Every object key anywhere in `value` (array indices are not keys). A report
- * or a redacted copy of `value` never shows a token equal to one of them, so a
- * token cannot reproduce a raw key the caller wrote (astra pack 120e).
+ * Every own string property name of every object or array reached in `value`:
+ * enumerable or not (astra pack 120g), array indices and an array's length
+ * excepted. A report or a redacted copy of `value` never shows a token equal
+ * to one of them, so a token cannot reproduce a raw key the caller wrote (astra
+ * pack 120e). The intake entry points reserve the keys of their exact
+ * plain-data copy (plain-input.ts); this is for direct calls on raw values.
  */
 export function rawKeysOf(value: unknown): ReadonlySet<string> {
   const keys = new Set<string>();
-  walkValue(value, { key: (key) => keys.add(key) });
+  walkValue(value, {
+    node: (node) => {
+      const isArray = Array.isArray(node);
+      for (const name of Object.getOwnPropertyNames(node)) {
+        if (isArray && (name === "length" || (/^(?:0|[1-9][0-9]*)$/.test(name) && Number(name) < (node as unknown[]).length))) continue;
+        keys.add(name);
+      }
+    },
+  });
   return keys;
 }
 
@@ -367,9 +379,8 @@ function isSourceContentHash(text: string, path: readonly WalkPathSegment[]): bo
  * empty when nothing matches. It never returns or logs the matched text, and
  * object keys are not scanned.
  */
-export function scanIntakeStrings(value: unknown): IntakeSecretHit[] {
+export function scanIntakeStrings(value: unknown, reserved: ReadonlySet<string> = rawKeysOf(value)): IntakeSecretHit[] {
   const hits: IntakeSecretHit[] = [];
-  const reserved = rawKeysOf(value);
   walkValue(value, {
     string: (text, path) => {
       if (isSourceContentHash(text, path())) return;
@@ -423,9 +434,19 @@ function setOwn(target: object, key: string, value: unknown): void {
  * file header), not stored in redacted form.
  */
 export function redactIntakeSecrets<T>(record: T): T {
+  // Redact one owned plain-data copy (steward #5225): no accessor or proxy is read twice. A record
+  // that is not plain JSON data is not logged at all; a fixed placeholder stands in for it.
+  const plain = plainIntakeCopy(record);
+  if (!plain) return NOT_PLAIN_DATA_PLACEHOLDER as unknown as T;
+  return redactPlain(plain.value, plain.keys) as T;
+}
+
+/** What redactIntakeSecrets returns for an input that is not plain JSON data. */
+export const NOT_PLAIN_DATA_PLACEHOLDER = "[redacted: not plain JSON data]";
+
+function redactPlain(record: unknown, reserved: ReadonlySet<string>): unknown {
   const copies = new Map<object, unknown>();
   const pending: { source: object; target: object; path: WalkPathSegment[] }[] = [];
-  const reserved = rawKeysOf(record);
 
   const copyOf = (node: unknown, path: WalkPathSegment[]): unknown => {
     if (typeof node === "string") return isSourceContentHash(node, path) ? node : redactText(node);
@@ -459,5 +480,5 @@ export function redactIntakeSecrets<T>(record: T): T {
       setOwn(target, outKey, copyOf(value, [...path, key]));
     }
   }
-  return root as T;
+  return root;
 }

@@ -27,6 +27,7 @@ import {
   intakeFieldArtifactMap,
   scanIntakeStrings,
   redactIntakeSecrets,
+  NOT_PLAIN_DATA_PLACEHOLDER,
   INTAKE_SECRET_KINDS,
   CONFIRMATION_REQUIRED_FIELDS,
   ESTOP_NONE_APPROVED_CAPABILITIES,
@@ -1312,11 +1313,9 @@ describe("scanIntakeStrings — walking and paths", () => {
     expect(scanIntakeStrings({ answers: { "evidence.approver": { value: new Approver() } } })).toEqual([
       { path: "answers/evidence.approver/value/name", kind: "hex-secret" },
     ]);
-    // A bare top-level "approver" key is NOT itself in the vocabulary, so it is renamed.
-    const redacted = redactIntakeSecrets({ approver: new Approver() }) as Record<string, unknown>;
-    const key = unknownKeyToken("approver");
-    expect(redacted[key]).toEqual({ name: "[redacted:hex-secret]" });
-    expect(Object.getPrototypeOf(redacted[key])).toBe(Object.prototype);
+    // Redaction copies plain JSON data only (steward #5225): a class instance is not, so the record
+    // is not logged at all and a fixed placeholder stands in.
+    expect(redactIntakeSecrets({ approver: new Approver() })).toBe(NOT_PLAIN_DATA_PLACEHOLDER);
   });
 
   it("terminates on a cyclic structure and on very deep nesting", () => {
@@ -1431,16 +1430,20 @@ describe("redactIntakeSecrets — for logs only", () => {
     expect(out[unknownKeyToken("v")]).toBe("[redacted:pem]");
   });
 
-  it("renames every top-level key outside the vocabulary — including one that looks like a secret — to its distinct token, and copies a literal __proto__ key as ordinary (renamed) data", () => {
-    const hostile = JSON.parse(`{"__proto__": {"polluted": "yes"}, "ok": "fine"}`) as Record<string, unknown>;
-    const out = redactIntakeSecrets({ [FAKE.stripeLive]: 1, [FAKE.stripeRestricted]: 2, hostile }) as Record<string, unknown>;
-    const expectedKeys = [unknownKeyToken(FAKE.stripeLive), unknownKeyToken(FAKE.stripeRestricted), unknownKeyToken("hostile")];
+  it("renames every top-level key outside the vocabulary — including one that looks like a secret — to its distinct token", () => {
+    const nested = { ok: "fine" };
+    const out = redactIntakeSecrets({ [FAKE.stripeLive]: 1, [FAKE.stripeRestricted]: 2, nested }) as Record<string, unknown>;
+    const expectedKeys = [unknownKeyToken(FAKE.stripeLive), unknownKeyToken(FAKE.stripeRestricted), unknownKeyToken("nested")];
     expect(Object.keys(out).sort()).toEqual([...expectedKeys].sort());
     expect(new Set(expectedKeys).size).toBe(3); // three distinct raw keys, three distinct tokens
-    const copy = out[unknownKeyToken("hostile")] as Record<string, unknown>;
+    const copy = out[unknownKeyToken("nested")] as Record<string, unknown>;
     expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
-    expect(Object.keys(copy).sort()).toEqual([unknownKeyToken("__proto__"), unknownKeyToken("ok")].sort());
-    expect(copy[unknownKeyToken("__proto__")]).toEqual({ [unknownKeyToken("polluted")]: "yes" });
+    expect(copy).toEqual({ [unknownKeyToken("ok")]: "fine" });
+  });
+
+  it("a record with a key named __proto__ (JSON.parse makes it an own key) is not logged, and nothing is polluted", () => {
+    const hostile = JSON.parse(`{"__proto__": {"polluted": "yes"}, "ok": "fine"}`) as Record<string, unknown>;
+    expect(redactIntakeSecrets({ hostile })).toBe(NOT_PLAIN_DATA_PLACEHOLDER);
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
@@ -1452,14 +1455,16 @@ describe("redactIntakeSecrets — for logs only", () => {
     expect(out[unknownKeyToken(FAKE.stripeLive)]).toBe(2);
   });
 
-  it("copies primitives, null and shared/cyclic references without looping", () => {
+  it("copies primitives, null and shared references; a cyclic record is not logged (it is not plain JSON data)", () => {
     expect(redactIntakeSecrets(5)).toBe(5);
     expect(redactIntakeSecrets(null)).toBeNull();
+    const shared = { text: FAKE.hex64 };
+    const twice = redactIntakeSecrets({ a: shared, b: shared }) as Record<string, Record<string, unknown>>;
+    expect(twice[unknownKeyToken("a")]).toEqual({ [unknownKeyToken("text")]: "[redacted:hex-secret]" });
+    expect(twice[unknownKeyToken("b")]).toEqual({ [unknownKeyToken("text")]: "[redacted:hex-secret]" });
     const cyclic: Record<string, unknown> = { text: FAKE.hex64 };
     cyclic.self = cyclic;
-    const out = redactIntakeSecrets(cyclic) as Record<string, unknown>;
-    expect(out[unknownKeyToken("text")]).toBe("[redacted:hex-secret]");
-    expect(out[unknownKeyToken("self")]).toBe(out);
+    expect(redactIntakeSecrets(cyclic)).toBe(NOT_PLAIN_DATA_PLACEHOLDER);
   });
 });
 
@@ -1575,16 +1580,19 @@ describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () =
     expect(report.structuralErrors).toContain("milestone: not a known intake milestone");
   });
 
-  it("an unreadable input (throwing getter) fails closed instead of throwing", () => {
+  it("an input with a getter (here a throwing one) is refused at the boundary without running it", () => {
+    let calls = 0;
     const hostile = {
       schema: "pcc.device-intake.v1",
       get answers(): never {
+        calls++;
         throw new Error("boom");
       },
     };
     const report = validateIntake(hostile, "register");
     expect(report.ok).toBe(false);
-    expect(report.structuralErrors).toContain("(root): input could not be read");
+    expect(report.structuralErrors).toEqual([expect.stringMatching(/^\(root\): not plain JSON data/)]);
+    expect(calls).toBe(0);
   });
 
   it("still reports forbidden keys, unknown fields and secrets from the raw input when the parse fails", () => {
@@ -1610,7 +1618,7 @@ describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () =
     expect(report.invalidFields).toEqual([]);
   });
 
-  it("sees an answers entry named __proto__ that a parse would silently drop", () => {
+  it("refuses an answers entry named __proto__ that a parse would silently drop (not plain JSON data)", () => {
     const raw = JSON.parse(
       JSON.stringify({ ...buildFullValidRecord(), answers: {} }).replace(
         '"answers":{}',
@@ -1619,7 +1627,9 @@ describe("validateIntake — the runtime boundary (astra 120b, finding 2)", () =
     ) as unknown;
     const report = validateIntake(raw, "register");
     expect(report.ok).toBe(false);
-    expect(report.unknownFields).toContain(unknownKeyToken("__proto__"));
+    expect(report.structuralErrors).toEqual([expect.stringMatching(/^\(root\): not plain JSON data/)]);
+    // Only the fixed boundary message (which names the category "a key named __proto__") is reported.
+    expect(report.unknownFields).toEqual([]);
   });
 
   it("never echoes a secret-looking field id or key text into the report", () => {
@@ -2397,18 +2407,20 @@ describe("validateIntake — safety limits bind to the selected CSD (astra 120b,
     expect(JSON.stringify(report)).not.toContain("SENTINEL-quantity");
   });
 
-  it("limit bounds that are NaN or infinite, or min > max, are invalid values (not limit errors)", () => {
+  it("limit bounds that are NaN or infinite are not JSON data (refused at the boundary); min > max is an invalid value", () => {
     for (const bad of [
       limit("bedTemp", "C", Number.NaN, 100),
       limit("bedTemp", "C", 30, Number.POSITIVE_INFINITY),
       limit("bedTemp", "C", Number.NEGATIVE_INFINITY, 100),
-      limit("bedTemp", "C", 100, 30),
     ]) {
       const report = labReport([bad]);
       expect(report.ok).toBe(false);
-      expect(report.invalidFields).toEqual(["safety.limits"]);
-      expect(report.limitErrors).toEqual([]);
+      expect(report.structuralErrors).toEqual([expect.stringMatching(/^\(root\): not plain JSON data/)]);
     }
+    const report = labReport([limit("bedTemp", "C", 100, 30)]);
+    expect(report.ok).toBe(false);
+    expect(report.invalidFields).toEqual(["safety.limits"]);
+    expect(report.limitErrors).toEqual([]);
   });
 
   it("resolves inherited parameters: a profile CSD can carry a limit on its base's number parameter", () => {
@@ -3064,16 +3076,22 @@ describe("validateIntake — object keys come from a closed ASCII vocabulary (as
     expect(JSON.stringify(report)).not.toContain("PRIVATE KEY");
   });
 
-  it("finds a non-ASCII key at any depth without overflowing the stack", () => {
+  it("finds a non-ASCII key deep in a value, and refuses (never throws on) input nested too deep to copy", () => {
     const nonAsciiKey = `z${cyrillicA}`;
     let nested: unknown = { [nonAsciiKey]: 1 };
-    for (let i = 0; i < 50000; i++) nested = { a: nested };
+    for (let i = 0; i < 200; i++) nested = { a: nested };
     const report = ready(withAnswer("evidence.camera", cameraWith({ extra: nested })), "register");
     expect(report.ok).toBe(false);
     expect(report.nonAsciiKeys).toHaveLength(1);
     // "a" and "extra" are not in the vocabulary either, so they are hashed too — only the final
     // (leaf) segment is deterministically the token of the non-ASCII key itself.
     expect(report.nonAsciiKeys[0]!.endsWith(`/${unknownKeyToken(nonAsciiKey)}`)).toBe(true);
+    // 50,000 levels overflow the boundary's copy, which refuses the input rather than throw.
+    let deep: unknown = { [nonAsciiKey]: 1 };
+    for (let i = 0; i < 50000; i++) deep = { a: deep };
+    const deepReport = ready(withAnswer("evidence.camera", cameraWith({ extra: deep })), "register");
+    expect(deepReport.ok).toBe(false);
+    expect(deepReport.structuralErrors).toEqual([expect.stringMatching(/^\(root\): not plain JSON data/)]);
   });
 
   describe("forbidden keys are compared after NFKC normalization", () => {
@@ -3410,6 +3428,75 @@ describe("astra pack 120b", () => {
 // verifierStatus does not change readiness" (the stub-primitive gate is
 // removed, item 4).
 
+describe("astra pack 120g and steward #5225: one exact plain-data copy at the boundary", () => {
+  const tokenKey = unknownKeyToken("bogus-id");
+  const notPlain = [expect.stringMatching(/^\(root\): not plain JSON data/)];
+  const recordWith = (answers: Record<string, unknown>) => ({ schema: "pcc.device-intake.v1", answers });
+
+  it("CRITICAL 1 (astra's case): a non-enumerable key is not plain JSON data, so the record is refused and nothing reproduces it", () => {
+    const hidden = {};
+    Object.defineProperty(hidden, tokenKey, { value: "x", enumerable: false });
+    const input = recordWith({ "bogus-id": { value: hidden, provenance: "human" } });
+    const report = validateIntake(input, "register");
+    expect(report.unknownFields).not.toContain(tokenKey);
+    expect(report.structuralErrors).toEqual(notPlain);
+    expect(redactIntakeSecrets(input)).toBe(NOT_PLAIN_DATA_PLACEHOLDER);
+  });
+
+  it("a direct scan of a raw value still reserves non-enumerable names, so a path token never reproduces one", () => {
+    const value: Record<string, unknown> = { k1: "sk-" + "proj-" + "H".repeat(40) };
+    Object.defineProperty(value, unknownKeyToken("k1"), { value: "x", enumerable: false });
+    const hits = scanIntakeStrings({ answers: { "device.description": { value } } });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.path.split("/")).not.toContain(unknownKeyToken("k1"));
+  });
+
+  it("a getter is never run: the record is refused, so a value that turns secret after validation is never validated", () => {
+    let reads = 0;
+    let validated = false;
+    const answer = { provenance: "human", get value() { reads++; return validated ? "sk-" + "proj-" + "I".repeat(40) : "clean"; } };
+    const input = recordWith({ "device.description": answer });
+    const report = validateIntake(input, "register");
+    validated = true;
+    expect(report.ok).toBe(false);
+    expect(report.structuralErrors).toEqual(notPlain);
+    expect(reads).toBe(0);
+  });
+
+  it("a proxy is refused without running its traps", () => {
+    let traps = 0;
+    const input = new Proxy(recordWith({}), { get(target, key, receiver) { traps++; return Reflect.get(target, key, receiver); } });
+    expect(validateIntake(input, "register").structuralErrors).toEqual(notPlain);
+    expect(redactIntakeSecrets(input)).toBe(NOT_PLAIN_DATA_PLACEHOLDER);
+    expect(normalizeIntakeLimits(input)).toBeNull();
+    expect(executionModeTierCap(input)).toBe(0);
+    expect(traps).toBe(0);
+  });
+
+  it.each([
+    ["a symbol key", () => ({ ...recordWith({}), [Symbol("s")]: 1 })],
+    ["a Date", () => recordWith({ "device.description": { value: new Date(0), provenance: "human" } })],
+    ["a class instance", () => recordWith({ "device.description": { value: new (class Approver { name = "x"; })(), provenance: "human" } })],
+    ["an undefined value", () => recordWith({ "device.description": { value: "x", provenance: "human", source: undefined } })],
+    ["undefined in an array", () => recordWith({ "safety.hazards": { value: ["chemical", undefined], provenance: "human" } })],
+    ["a sparse array", () => recordWith({ "safety.hazards": { value: [, "chemical"], provenance: "human" } })],
+    ["a function", () => recordWith({ "device.description": { value: () => "x", provenance: "human" } })],
+    ["a bigint", () => recordWith({ "device.description": { value: BigInt(1), provenance: "human" } })],
+  ])("%s is not plain JSON data: refused by every entry point", (_label, build) => {
+    const input = build();
+    expect(validateIntake(input, "register").structuralErrors).toEqual(notPlain);
+    expect(redactIntakeSecrets(input)).toBe(NOT_PLAIN_DATA_PLACEHOLDER);
+    expect(normalizeIntakeLimits(input)).toBeNull();
+    expect(executionModeTierCap(input)).toBe(0);
+  });
+
+  it("plain JSON data passes the boundary unchanged: the full valid record is still ok, also after a JSON round trip", () => {
+    expect(ready(buildFullValidRecord(), "publish").ok).toBe(true);
+    const roundTripped = JSON.parse(JSON.stringify(buildFullValidRecord())) as unknown;
+    expect(validateIntake(roundTripped, "publish", makeAuthority(buildFullValidRecord())).ok).toBe(true);
+  });
+});
+
 describe("astra pack 120f", () => {
   const tokenKey = unknownKeyToken("bogus-id");
   /** An array carrying a named own enumerable property (JSON has none; a JavaScript caller can attach one). */
@@ -3424,9 +3511,9 @@ describe("astra pack 120f", () => {
     expect(validateIntake(input, "register").unknownFields).not.toContain(tokenKey);
   });
 
-  it("CRITICAL 1 (astra's case): ... nor among redaction's keys", () => {
+  it("CRITICAL 1 (astra's case): ... and redaction does not log such a record at all", () => {
     const input = { schema: "pcc.device-intake.v1", answers: { "bogus-id": { value: arrayWith([], tokenKey, "x") } } };
-    expect(Object.keys((redactIntakeSecrets(input) as typeof input).answers)).not.toContain(tokenKey);
+    expect(redactIntakeSecrets(input)).toBe(NOT_PLAIN_DATA_PLACEHOLDER);
   });
 
   it("an array's named property is walked: a secret in it is found, and its key is shown as a token", () => {
@@ -3434,12 +3521,14 @@ describe("astra pack 120f", () => {
     expect(hits.map((h) => h.path)).toEqual([`answers/device.description/value/${unknownKeyToken("extra")}`]);
   });
 
-  it("an array's named property is a key for the key checks too: a forbidden key there is reported", () => {
+  it("at the boundary, an array with a named property is not plain JSON data: refused, and nothing in it is echoed", () => {
     const report = validateIntake(
       { schema: "pcc.device-intake.v1", answers: { "safety.hazards": { value: arrayWith(["chemical"], "privateKey", "x"), provenance: "human" } } },
       "register",
     );
-    expect(report.forbiddenKeys).toContain("safety.hazards.privateKey");
+    expect(report.ok).toBe(false);
+    expect(report.structuralErrors).toEqual([expect.stringMatching(/^\(root\): not plain JSON data/)]);
+    expect(JSON.stringify(report)).not.toContain("privateKey");
   });
 
   it("array indices are still walked by number, before the named properties", () => {
@@ -3451,13 +3540,12 @@ describe("astra pack 120f", () => {
     ]);
   });
 
-  it("redaction drops an array's named properties from the copy (JSON has none) and keeps its elements", () => {
-    const out = redactIntakeSecrets({ answers: { "safety.hazards": { value: arrayWith(["chemical"], "note", "x") } } }) as {
+  it("redaction keeps a plain array's elements, and does not log a record whose array has a named property", () => {
+    const out = redactIntakeSecrets({ answers: { "safety.hazards": { value: ["chemical"] } } }) as {
       answers: Record<string, { value: unknown[] }>;
     };
-    const copied = out.answers["safety.hazards"]!.value;
-    expect([...copied]).toEqual(["chemical"]);
-    expect(Object.keys(copied)).toEqual(["0"]);
+    expect([...out.answers["safety.hazards"]!.value]).toEqual(["chemical"]);
+    expect(redactIntakeSecrets({ answers: { "safety.hazards": { value: arrayWith(["chemical"], "note", "x") } } })).toBe(NOT_PLAIN_DATA_PLACEHOLDER);
   });
 });
 

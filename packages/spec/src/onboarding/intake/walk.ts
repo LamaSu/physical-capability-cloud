@@ -29,6 +29,8 @@ function pathOf(frame: WalkFrame): WalkPathSegment[] {
 }
 
 export interface WalkVisitor {
+  /** Every object or array reached (once each), before its keys and values. */
+  node?: (node: object) => void;
   /** A string value, with the path to it. Array indices are numbers; object keys are strings, even "123". */
   string?: (text: string, path: () => WalkPathSegment[]) => void;
   /** An object key (array indices are not keys), with the path to it, the key last. */
@@ -52,6 +54,7 @@ export function walkValue(root: unknown, visitor: WalkVisitor): void {
     }
     if (node === null || typeof node !== "object" || seen.has(node)) continue;
     seen.add(node);
+    visitor.node?.(node);
 
     if (Array.isArray(node)) {
       // Named properties first onto the stack, so the indices are walked before them.

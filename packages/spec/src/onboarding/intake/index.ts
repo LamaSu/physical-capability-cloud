@@ -32,7 +32,8 @@ import {
 import type { CsdRegistry } from "../../csd/registry.js";
 import { contentHashSchema, httpsUrl, nonBlankText } from "../citation-rules.js";
 import { intakeValueHash, isConfirmationRequired } from "./confirmation.js";
-import { joinPath, pathSegment, rawKeysOf, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
+import { plainIntakeCopy } from "./plain-input.js";
+import { joinPath, pathSegment, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
 import {
   ESTOP_NONE_APPROVED_CAPABILITIES,
   checkSafetyLimits,
@@ -50,6 +51,7 @@ export { CONFIRMATION_REQUIRED_FIELDS, intakeValueHash } from "./confirmation.js
 export { ESTOP_NONE_APPROVED_CAPABILITIES, REVIEWED_COUNT_PARAMETERS, UNITLESS_LIMIT_UNIT, type SafetyLimit } from "./safety-policy.js";
 export {
   INTAKE_SECRET_KINDS,
+  NOT_PLAIN_DATA_PLACEHOLDER,
   redactIntakeSecrets,
   scanIntakeStrings,
   type IntakeSecretHit,
@@ -412,8 +414,8 @@ function hasNonAscii(key: string): boolean {
 
 /** A zod issue as `path: description`. Only the issue code, static text and
  *  type names are used — never `issue.message` for built-in issues, because
- *  zod's own messages can quote the offending value. `reserved` is every raw key
- *  of the input (rawKeysOf), so no path token reproduces one (astra pack 120e). */
+ *  zod's own messages can quote the offending value. `reserved` is every key of
+ *  the original input, so no path token reproduces one (astra packs 120e, 120f). */
 function describeIssue(issue: z.ZodIssue, reserved: ReadonlySet<string>): string {
   const where = issue.path.length === 0 ? "(root)" : joinPath(issue.path.map(String), reserved);
   switch (issue.code) {
@@ -431,7 +433,7 @@ function describeIssue(issue: z.ZodIssue, reserved: ReadonlySet<string>): string
 /** Checks that read the RAW input, so they hold whether or not it parses (and
  *  see what a parse would drop, e.g. an `answers["__proto__"]` entry). */
 function scanRawInput(input: unknown, report: IntakeValidationReport, reserved: ReadonlySet<string>): void {
-  report.secretsInText.push(...scanIntakeStrings(input));
+  report.secretsInText.push(...scanIntakeStrings(input, reserved));
 
   const answers = isRecordObject(input) && isRecordObject(input.answers) ? input.answers : {};
   const forbiddenKeyHits = new Set<string>();
@@ -691,8 +693,39 @@ export function validateIntake(
     const milestoneKnown = (INTAKE_MILESTONES as readonly string[]).includes(milestone);
     if (!milestoneKnown) report.structuralErrors.push("milestone: not a known intake milestone");
 
-    // Every raw key in the input: no token in this report may equal one (astra pack 120e).
-    const reserved = rawKeysOf(input);
+    // The boundary (steward #5225, astra pack 120f): every check below reads ONE owned, plain-data
+    // copy, so what was validated is exactly what a producer stores. A proxy, an accessor, a cycle,
+    // a non-plain object, a key named __proto__, a hole or a non-JSON value is refused outright. The
+    // copy's reason can name raw keys, so it is never put in the report.
+    const plain = plainIntakeCopy(input);
+    if (!plain) {
+      report.structuralErrors.push(NOT_PLAIN_DATA);
+    } else {
+      validatePlainRecord(plain.value, plain.keys, milestone, milestoneKnown, authority, report);
+    }
+  } catch {
+    // An input that cannot be read fails closed instead of throwing.
+    report.structuralErrors.push("(root): input could not be read");
+  }
+  report.ok = REPORT_LISTS.every((list) => report[list].length === 0);
+  return report;
+}
+
+/** The report entry for an input that is not plain JSON data. It names no key. */
+const NOT_PLAIN_DATA =
+  "(root): not plain JSON data (a proxy, an accessor, a cycle, a non-plain object, a key named __proto__, a hole, a symbol key, a non-enumerable or array-named property, an undefined or another non-JSON value)";
+
+/** validateIntake's checks, on the plain-data copy; `reserved` is every key of the original input. */
+function validatePlainRecord(
+  input: unknown,
+  reserved: ReadonlySet<string>,
+  milestone: IntakeMilestone,
+  milestoneKnown: boolean,
+  authority: IntakeAuthority | undefined,
+  report: IntakeValidationReport,
+): void {
+  {
+    // Every key of the original input is reserved: no token in this report may equal one (astra packs 120e, 120f).
     scanRawInput(input, report, reserved);
 
     const parsed = IntakeRecordSchema.safeParse(input);
@@ -701,13 +734,7 @@ export function validateIntake(
     } else if (milestoneKnown) {
       checkParsedRecord(parsed.data, milestone, authority, report);
     }
-  } catch {
-    // An input that cannot be read (a throwing getter, a hostile proxy) fails
-    // closed instead of throwing.
-    report.structuralErrors.push("(root): input could not be read");
   }
-  report.ok = REPORT_LISTS.every((list) => report[list].length === 0);
-  return report;
 }
 
 // ── Limits in parameter units (for consumers that do no conversion) ─────
@@ -723,7 +750,9 @@ export function validateIntake(
  */
 export function normalizeIntakeLimits(input: unknown, authority?: IntakeAuthority): SafetyLimit[] | null {
   try {
-    const parsed = IntakeRecordSchema.safeParse(input);
+    const plain = plainIntakeCopy(input);
+    if (!plain) return null;
+    const parsed = IntakeRecordSchema.safeParse(plain.value);
     if (!parsed.success) return null;
     const limitsField = FIELD_INDEX.get("safety.limits");
     const answer = parsed.data.answers["safety.limits"];
@@ -756,7 +785,9 @@ export const NO_EXECUTION_MODE_CAP = 3 as const;
  */
 export function executionModeTierCap(input: unknown): 0 | 1 | 2 | 3 {
   try {
-    const parsed = IntakeRecordSchema.safeParse(input);
+    const plain = plainIntakeCopy(input);
+    if (!plain) return 0;
+    const parsed = IntakeRecordSchema.safeParse(plain.value);
     if (!parsed.success) return 0;
     return parsed.data.answers["evidence.executionMode"]?.value === "real" ? NO_EXECUTION_MODE_CAP : 0;
   } catch {
