@@ -52,13 +52,29 @@ export async function kernelRoutes(app: FastifyInstance) {
   /**
    * List all kernels with staleness detection and capability type enrichment.
    * Supports optional ?status= filter.
-   * Returns { kernels: KernelDTO[] } for backward compatibility.
+   *
+   * Returns { kernels, items, total, asOf }. All fields except `kernels` are additive:
+   *   - kernels: KernelDTO[], unchanged for backward compatibility (dashboard
+   *     useKernels hook, MCP pcc_list_kernels, agents).
+   *   - items:   the same array under the collection-v1 key. The closed render
+   *     IR's list binding accepts only a top-level array or { items: [...] }
+   *     (genui bus #2231, #2222).
+   *   - total:   items.length. The list is not paginated.
+   *   - asOf:    ISO-8601 UTC time the gateway READ the kernel state. It is
+   *     captured before the facade read, so it is a read time, never a
+   *     last-change time such as a heartbeat.
+   * The error path is unchanged: a failed read returns { error, message } and
+   * never an empty collection.
    */
   app.get<{ Querystring: { status?: string } }>(
     "/api/kernels",
     async (req, reply) => {
+      const asOf = new Date().toISOString();
       const result = await facade.list({ status: req.query.status });
-      if (result.success) return { kernels: result.data };
+      if (result.success) {
+        const kernels = result.data;
+        return { kernels, items: kernels, total: kernels.length, asOf };
+      }
       return sendResult(reply, result);
     },
   );
