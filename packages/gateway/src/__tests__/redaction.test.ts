@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { redactSecrets, redactOrNull } from "../redaction.js";
 
@@ -86,91 +86,168 @@ describe("redactSecrets", () => {
 });
 
 describe("redactSecrets: private keys in the forms /api/auth/provision returns (N89)", () => {
-  // A real Ed25519 key, generated at test time, so no key literal sits in source.
-  const { privateKey } = generateKeyPairSync("ed25519");
-  const b64 = (privateKey.export({ format: "der", type: "pkcs8" }) as Buffer).toString("base64");
-  const pem = privateKey.export({ format: "pem", type: "pkcs8" }) as string;
-  const pemBody = pem.split("\n")[1]!;
+  // Real keys, generated at test time, so no key literal sits in source. The Ed25519
+  // key is drawn until its base64url form holds both - and _, so the base64url cases
+  // are never accidentally plain base64.
+  const pkcs8 = (k: KeyObject) => k.export({ format: "der", type: "pkcs8" }) as Buffer;
+  let ed = generateKeyPairSync("ed25519");
+  while (!/-/.test(pkcs8(ed.privateKey).toString("base64url")) || !/_/.test(pkcs8(ed.privateKey).toString("base64url"))) ed = generateKeyPairSync("ed25519");
+  const b64 = pkcs8(ed.privateKey).toString("base64");
+  const b64url = pkcs8(ed.privateKey).toString("base64url");
+  const pem = ed.privateKey.export({ format: "pem", type: "pkcs8" }) as string;
+  const spki = (ed.publicKey.export({ format: "der", type: "spki" }) as Buffer).toString("base64");
+  const ec = pkcs8(generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey).toString("base64");
+  const rsa = pkcs8(generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey).toString("base64");
+  const hexKey = "9f".repeat(32);
+  const wrap = (v: string, n: number, sep = "\n") => v.match(new RegExp(`.{1,${n}}`, "g"))!.join(sep);
+  // True when any 8-character window of the secret (stride 4) is still in the output.
+  const leaks = (out: string, secret: string) => {
+    for (let i = 0; i + 8 <= secret.length; i += 4) if (out.includes(secret.slice(i, i + 8))) return true;
+    return false;
+  };
 
-  it("redacts a base64 PKCS#8 key pasted into free text", () => {
-    const out = redactSecrets(`provision gave me ${b64} as the key`);
-    expect(out).not.toContain(b64);
-    expect(out).toBe("provision gave me [redacted-b64] as the key");
-  });
-
-  it("redacts the values of secret-named JSON fields, in any case, and keeps the rest", () => {
-    const out = redactSecrets(
-      JSON.stringify({
-        kernel_id: "k1",
-        private_key_pkcs8_base64: b64,
-        privateKey: "hunter2hunter2",
-        client_secret: "s3cr3t value",
-        "x-api-key": "k",
-        apiKey: "k2",
-        password: 'hun"ter22',
-        mnemonic: "word word word",
-        public_key: "see-the-kernel-record",
-        note: "keep me",
-      }),
-    );
-    for (const name of ["private_key_pkcs8_base64", "privateKey", "client_secret", "x-api-key", "apiKey", "password", "mnemonic"]) {
-      expect(out).toContain(`"${name}":"[redacted]"`);
+  it("redacts a PKCS#8 key in base64 or base64url, whole, in prose, after a label or in a non-secret field", () => {
+    for (const key of [b64, b64url]) {
+      for (const input of [key, `provision gave me ${key} as the key`, `key=${key}`, JSON.stringify({ material: key })]) {
+        const out = redactSecrets(input);
+        expect(leaks(out, key)).toBe(false);
+        expect(out).toContain("[redacted-private-key]");
+      }
     }
-    expect(out).not.toContain(b64);
-    expect(out).not.toContain("hunter2");
-    expect(out).not.toContain("ter22");
-    expect(out).toContain('"kernel_id":"k1"');
-    expect(out).toContain('"public_key":"see-the-kernel-record"');
-    expect(out).toContain('"note":"keep me"');
+    expect(redactSecrets(`provision gave me ${b64} as the key`)).toBe("provision gave me [redacted-private-key] as the key");
   });
 
-  it("redacts a PEM private-key block, whole or cut off", () => {
+  it("redacts a wrapped PKCS#8 key: newlines, CRLF, indentation, JSON-escaped newlines, short space groups", () => {
+    for (const key of [b64, b64url]) {
+      for (const input of [
+        `key=${wrap(key, 32)}`,
+        `key=\n${wrap(key, 16, "\r\n")}`,
+        `private_key: |\n  ${wrap(key, 20, "\n  ")}\nnext: line`,
+        JSON.stringify({ note: `key:\n${wrap(key, 32)}` }),
+        `key ${wrap(key, 8, " ")} end`,
+      ]) {
+        expect(leaks(redactSecrets(input), key)).toBe(false);
+      }
+    }
+    expect(redactSecrets(`private_key: |\n  ${wrap(b64, 20, "\n  ")}\nnext: line`)).toBe("private_key: |\n  [redacted-private-key]\nnext: line");
+  });
+
+  it("redacts long-form PKCS#8 keys (EC P-256 and RSA-2048), whole and wrapped at 64", () => {
+    for (const key of [ec, rsa]) {
+      expect(leaks(redactSecrets(`k=${key}`), key)).toBe(false);
+      expect(leaks(redactSecrets(`k=\n${wrap(key, 64)}\nafter`), key)).toBe(false);
+      expect(redactSecrets(`k=\n${wrap(key, 64)}\nafter`)).toBe("k=\n[redacted-private-key]\nafter");
+    }
+  });
+
+  it("redacts a truncated PKCS#8 key, double-encoded JSON and an unterminated field", () => {
+    expect(redactSecrets(`cut: ${b64.slice(0, 30)}`)).toBe("cut: [redacted-private-key]");
+    const doubled = JSON.stringify({ payload: JSON.stringify({ private_key_pkcs8_base64: b64url, password: "hunter2pass" }) });
+    const out = redactSecrets(doubled);
+    expect(leaks(out, b64url)).toBe(false);
+    expect(out).not.toContain("hunter2pass");
+    expect(out).toContain('\\"password\\":\\"[redacted]\\"');
+    expect(leaks(redactSecrets(`{"private_key_pkcs8_base64":"${b64url}`), b64url)).toBe(false);
+    expect(redactSecrets('{"password":"hunter2pass')).toBe('{"password":"[redacted]');
+  });
+
+  it("redacts a PEM private-key block in any letter case, whole or cut off", () => {
     expect(redactSecrets(`key:\n${pem}after`)).toBe("key:\n[redacted-private-key]\nafter");
+    const body = pem.split("\n").slice(1, -2).join("");
+    const lower = ["-----begin ", "private key-----\n", wrap(body, 32), "\n-----end ", "private key-----"].join("");
+    expect(redactSecrets(`x ${lower} y`)).toBe("x [redacted-private-key] y");
     const cut = pem.split("\n").slice(0, 2).join("\n");
     expect(redactSecrets(`x ${cut}`)).toBe("x [redacted-private-key]");
+  });
+
+  it("redacts a hex key wrapped across lines, with or without 0x, real or JSON-escaped newlines", () => {
+    for (const input of [
+      `private_key=0x${hexKey.slice(0, 32)}\n${hexKey.slice(32)}`,
+      `k=${wrap(hexKey, 16)}`,
+      JSON.stringify({ note: `k=\n${wrap(hexKey, 32)}` }),
+    ]) {
+      const out = redactSecrets(input);
+      expect(leaks(out, hexKey)).toBe(false);
+    }
+    expect(redactSecrets(`private_key=0x${hexKey.slice(0, 32)}\n${hexKey.slice(32)}`)).toBe("private_key=[redacted-hex]");
+    // Two 32-hex ids on one line are not joined.
+    expect(redactSecrets(`a ${hexKey.slice(0, 32)} b ${hexKey.slice(32)}`)).toBe(`a ${hexKey.slice(0, 32)} b ${hexKey.slice(32)}`);
+  });
+
+  it("redacts secret-named values in JSON, YAML, quoted, unquoted and key=value forms", () => {
+    const cases: Array<[string, string]> = [
+      ['{"private_key":"hunter2pass"}', '{"private_key":"[redacted]"}'],
+      ["private_key: hunter2pass", "private_key: [redacted]"],
+      ["'password': 'hunter2pass'", "'password': '[redacted]'"],
+      ["{password: 'hunter2pass'}", "{password: '[redacted]'}"],
+      ["{'api_key': 'hunter2pass'}", "{'api_key': '[redacted]'}"],
+      ["password=hunter2pass&next=1", "password=[redacted]&next=1"],
+      ["--client-secret=abc next", "--client-secret=[redacted] next"],
+      ['{"privateKey":"a b c","apiKey":"k","x-api-key":"k2","seed_phrase":"w w w","MNEMONIC":"w"}', '{"privateKey":"[redacted]","apiKey":"[redacted]","x-api-key":"[redacted]","seed_phrase":"[redacted]","MNEMONIC":"[redacted]"}'],
+      ['{"password":"say \\"hi\\" twice"}', '{"password":"[redacted]"}'],
+    ];
+    for (const [input, expected] of cases) expect(redactSecrets(input)).toBe(expected);
+  });
+
+  it("keeps innocent names, prose, public identifiers and public keys", () => {
+    for (const keep of [
+      '{"seedling":"arabidopsis-123","secretary":"alice","keyboard":"us","public_key":"see-record"}',
+      "the password: wrong, try again",
+      "wallet So11111111111111111111111111111111111111112",
+      "wallet 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 paid",
+      `public key ${spki}`,
+      "My Machine Model Mounts Many Motors",
+      "POST /api/build/contract returned 500 with no hint",
+      "/api/capabilities/templates/match?limit=10",
+      "6f1c2a4e-8b7d-4c3f-9a21-0d5e6b7c8f90",
+      "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+      "ids:\na1b2c3d4e5f60718\n293a4b5c6d7e8f90", // wrapped hex under 64 digits
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop0123456789",
+    ]) {
+      expect(redactSecrets(keep)).toBe(keep);
+    }
+  });
+
+  it("still redacts a 64-hex value labeled as a transaction hash: a private key has the same shape", () => {
+    expect(redactSecrets(`tx=0x${hexKey}`)).toBe("tx=[redacted-hex]");
   });
 
   it("leaves no key material in a whole pasted provisioning response", () => {
     const response = JSON.stringify(
       {
         api_key: "pcc_live_" + "z".repeat(24),
-        ed25519: { private_key_pkcs8_base64: b64, private_key_pem: pem },
+        ed25519: { public_key: "ab".repeat(32), private_key: hexKey, private_key_pkcs8_base64: b64 },
         operator_wallet: { address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", private_key: "0x" + "9".repeat(64) },
+        pem,
       },
       null,
       2,
     );
     const out = redactSecrets(`here is what provision returned:\n${response}`);
-    expect(out).not.toContain(b64);
-    expect(out).not.toContain(pemBody);
-    expect(out).not.toContain("z".repeat(24));
-    expect(out).not.toContain("9".repeat(64));
+    for (const secret of [b64, hexKey, "9".repeat(64), "z".repeat(24), pem.split("\n")[1]!]) expect(leaks(out, secret)).toBe(false);
     expect(out).toContain("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
   });
 
-  it("keeps prose, paths, UUIDs, hex ids, checksummed addresses and single-case runs", () => {
-    for (const keep of [
-      "POST /api/build/contract returned 500 with no hint",
-      "/api/capabilities/templates/match?limit=10",
-      "6f1c2a4e-8b7d-4c3f-9a21-0d5e6b7c8f90",
-      "tr_" + "0123456789abcdef".repeat(2),
-      "wallet 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 paid",
-      "a".repeat(60),
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOP",
-      "z9y8x7w6v5u4t3s2r1q0p9o8n7m6l5k4j3i2h1g0", // lower case and digits only
-      "ZYXWVUTSRQPONMLKJIHG0123456789ZYXWVUTSRQ", // upper case and digits only
-      'the reply was {"status": "failed", "reason": "no device"}',
-    ]) {
-      expect(redactSecrets(keep)).toBe(keep);
+  it("is idempotent", () => {
+    const input = `k=${wrap(b64, 32)} {"password":"x1"} private_key=0x${hexKey} ${lowerPemSample()}`;
+    const once = redactSecrets(input);
+    expect(redactSecrets(once)).toBe(once);
+    function lowerPemSample() {
+      return ["-----begin ", "private key-----\nAAAA\n-----end ", "private key-----"].join("");
     }
   });
 
   it("stays linear on hostile input", () => {
     const hostile = [
       '"password": "' + '\\"'.repeat(30_000),
-      ('"' + "p".repeat(63) + '"' + " ".repeat(8)).repeat(900),
+      '\\"password\\":\\"'.repeat(4_000),
+      "password=".repeat(7_000),
       '"x":"'.repeat(12_000),
+      ("a.".repeat(40) + "b ").repeat(700),
       ["-----BEGIN ", "PRIVATE KEY-----"].join("").repeat(2_000),
+      "M ".repeat(30_000),
+      "MIIB ".repeat(12_000),
+      ("0123456789abcdef".repeat(1) + "\n").repeat(3_500),
       "aB3".repeat(20_000),
     ];
     for (const input of hostile) {
