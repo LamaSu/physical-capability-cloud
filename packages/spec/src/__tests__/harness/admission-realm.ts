@@ -65,6 +65,7 @@ const ObjectCreate = Object.create;
 const ObjectPrototypeHasOwnProperty = Object.prototype.hasOwnProperty;
 const ReflectApply = Reflect.apply;
 const setTimeoutAtLoad = setTimeout;
+const PromiseAtLoad = Promise;
 const clearTimeoutAtLoad = clearTimeout;
 const hasOwn = (o: object, k: PropertyKey): boolean => ReflectApply(ObjectPrototypeHasOwnProperty, o, [k]) === true;
 
@@ -293,7 +294,13 @@ const LV = {
   fakeFailure: ev("execution_failed", PRINTER, { mock: true }),
   verifiedLog: ev("printer_job_verified", PRINTER, { chainLength: 12 }),
   tempLogFailed: ev("temperature_log", PRINTER, { passed: false }),
+  accessorVerdict: ev("cv_inspection_result", CAMERA, {}),
+  accessorSimulated: ev("cv_inspection_result", CAMERA, { passed: true }),
 };
+/** How many times an accessor in an evidence-level item ran: never, if only own data is read. */
+let ACCESSOR_RUNS = 0;
+Object.defineProperty(LV.accessorVerdict.payload, "passed", nullDescriptor({ get: () => (ACCESSOR_RUNS++, false), enumerable: true, configurable: true }));
+Object.defineProperty(LV.accessorSimulated.source, "simulated", nullDescriptor({ get: () => (ACCESSOR_RUNS++, true), enumerable: true, configurable: true }));
 const L = {
   pilot: [LV.started, LV.completed, LV.cameraPassed],
   selfInspect: [LV.completed, LV.printerInspects],
@@ -342,6 +349,16 @@ const LEVEL_ITEMS: Array<[string, () => unknown]> = [
   ["rank: submitted", () => evidenceLevelRank("submitted")],
   ["rank: device_reported", () => evidenceLevelRank("device_reported")],
   ["rank: inspected_output", () => evidenceLevelRank("inspected_output")],
+  ["inspectionFailed: an accessor verdict, never run", () => {
+    ACCESSOR_RUNS = 0;
+    const failed = inspectionFailed(LV.accessorVerdict);
+    return [failed, ACCESSOR_RUNS];
+  }],
+  ["levelOf: an accessor simulated flag, never run", () => {
+    ACCESSOR_RUNS = 0;
+    const level = evidenceLevelOf(LV.accessorSimulated, executingDeviceIds(L.printerRan));
+    return [level, ACCESSOR_RUNS];
+  }],
 ];
 
 // -- every item, built once --
@@ -393,6 +410,14 @@ async function buildCases(): Promise<void> {
   const signatureFails = await input(p, [pilot], { verifyBundleSignature: () => false });
   add("reject: the signature leg fails", signatureFails);
   RECIPE.signatureFails = signatureFails;
+  const asyncSignatureFails = await input(p, [pilot], { verifyBundleSignature: async () => false });
+  add("reject: an async signature leg answers false", asyncSignatureFails);
+  RECIPE.asyncSignatureFails = asyncSignatureFails;
+  const asyncPrimitiveFails = await input(p, [pilot], { verifyPrimitiveInstance: async () => false });
+  add("reject: an async primitive leg answers false", asyncPrimitiveFails);
+  RECIPE.asyncPrimitiveFails = asyncPrimitiveFails;
+  add("admit: async legs that answer true", await input(p, [pilot], { verifyBundleSignature: async (b) => verifySignature(b), verifyPrimitiveInstance: async () => true }));
+  add("reject: a leg answering with a thenable", await input(p, [pilot], { verifyBundleSignature: (() => ({ then: (f: (v: unknown) => void) => f(true) })) as unknown as () => boolean }));
   add("reject: evidence from another job", await input(p, [await toBundle(PILOT.map((d) => ({ ...d, jobId: "job-other" })), p)]));
   add("reject: evidence from another kernel", await input(p, [await toBundle(PILOT.map((d) => ({ ...d, kernelId: "kernel-other" })), p)]));
   const altered = await toBundle(PILOT, p);
@@ -401,6 +426,15 @@ async function buildCases(): Promise<void> {
   add("reject: evidence for another settlement unit", await input(p, [await toBundle(unitDrafts, p)], {}, { ...UNIT_SUBJECT, settlementUnitId: OTHER_UNIT }));
   const unitOnly = PILOT.map((d) => ({ ...d, payload: { ...(d.payload ?? {}), settlementUnitId: UNIT } }));
   add("reject: the challenge nonce not committed", await input(p, [await toBundle(unitOnly, p)], {}, UNIT_SUBJECT));
+  const kernelInPayload = await toBundle(PILOT.map((d) => ({ ...d, payload: { ...(d.payload ?? {}), kernelId: "kernel-other" } })), p);
+  add("reject: a payload kernelId naming another kernel", await input(p, [kernelInPayload]));
+  const OUTPUT = "sha256:" + "a".repeat(64);
+  const outputSubject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL, outputHash: OUTPUT };
+  add("reject: the output not committed", await input(p, [pilot], {}, outputSubject));
+  const otherOutput = await toBundle(PILOT.map((d) => (d.type === "execution_completed" ? { ...d, payload: { outputHash: "sha256:" + "9".repeat(64) } } : d)), p);
+  add("reject: another output committed", await input(p, [otherOutput], {}, outputSubject));
+  const ownOutput = await toBundle(PILOT.map((d) => (d.type === "execution_completed" ? { ...d, payload: { outputHash: OUTPUT } } : d)), p);
+  add("admit: the output committed", await input(p, [ownOutput], {}, outputSubject));
   // A score of its own, so flipping `passed` back cannot reproduce the pilot's inspection byte for byte.
   const failedInspection = await toBundle([...PRINTED, { ...PILOT[2]!, payload: { passed: false, score: 0.2 } }], p);
   const tampered = await rehashed(failedInspection, 2, (e) => (e.payload.passed = true));
@@ -535,6 +569,20 @@ async function buildCases(): Promise<void> {
   add("hold: a bundle left out of the pin", await input(holdL, [holdPilot], { pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, [holdPilot.bundleHash, (await toBundle(FAILURE, holdL)).bundleHash]) }));
   add("hold: no bundles", await input(holdL, []));
   CASES = cases;
+  const BINDING_REJECTS = [
+    "reject: evidence from another job",
+    "reject: evidence from another kernel",
+    "reject: a payload kernelId naming another kernel",
+    "reject: evidence for another settlement unit",
+    "reject: the challenge nonce not committed",
+    "reject: the output not committed",
+    "reject: another output committed",
+    "reject: an event altered after hashing",
+  ];
+  RECIPE.bindingRejects = BINDING_REJECTS.map((label) => {
+    const made = cases.find((c) => c[0] === label)![1];
+    return { label, input: made, events: structuredClone((made.bundles[0] as AdmissionBundle).events) };
+  });
 
   const h1 = "sha256:" + "1".repeat(64);
   const h2 = "sha256:" + "2".repeat(64);
@@ -707,6 +755,29 @@ function forgingThen(original: (this: Promise<unknown>, f?: unknown, r?: unknown
 
 const FORGED_ADMIT = () => ({ decision: "admit", admits: true, reached: "inspected_output", qualifyingSamples: 1, reasons: [] });
 
+/** What a forger swaps in: false becomes true, a carried digest becomes its FORGE_TO, an admission result admits. */
+function forgedAnything(v: unknown): unknown {
+  if (v === false) return true;
+  if (typeof v === "object" && v !== null && hasOwn(v, "decision")) return FORGED_ADMIT();
+  return forged(v);
+}
+
+/** The events a forged binding answer carries, for the case being run. */
+let CURRENT_EVENTS: unknown[] | null = null;
+
+/**
+ * The admission result, read through the promise's own `.then` as a caller might, into a promise this harness
+ * made and gave its own `constructor`, so the harness's own `await` reads nothing on Promise.prototype.
+ */
+function viaThen(made: ProfileAdmissionInput): Promise<unknown> {
+  const settled = new PromiseAtLoad<unknown>((resolve) => {
+    profileAdmitsBundle(made).then((r) => resolve(summarize(r)), () => resolve("threw"));
+  });
+  // Not an async function's promise: the harness's own `await` on it must read its own constructor.
+  ReflectDefineProperty(settled, "constructor", nullDescriptor({ value: PromiseAtLoad }));
+  return settled;
+}
+
 /** Every scenario: an id, the change, and the items it runs (all of them unless named). */
 interface Scenario {
   id: string;
@@ -779,6 +850,11 @@ const PATCH_ROWS: Array<[string, Apply]> = [
   ["Object.prototype.profileObservation", pollute(() => ({ [PROFILE_OBSERVATION_FIELD]: INHERITABLE_RECORD }))],
   ["Object.prototype.passed = false", pollute(() => ({ passed: false }))],
   ["Object.prototype.simulated = true", pollute(() => ({ simulated: true }))],
+  ["Object.prototype.value = true", pollute(() => ({ value: true }))],
+  ["Array.prototype[1] = a tagged digest", () => {
+    ReflectDefineProperty(Array.prototype, "1", nullDescriptor({ value: "sha256:" + "3".repeat(64), writable: true, configurable: true, enumerable: false }));
+    return () => void ReflectDeleteProperty(Array.prototype, "1");
+  }],
   ["Object.prototype.mock = true", pollute(() => ({ mock: true }))],
 ];
 
@@ -885,15 +961,63 @@ const RECIPES: Scenario[] = [
     items: one("an inspection re-hashed after signing", () => RECIPE.tampered.input),
   },
   {
-    id: "recipe: Promise.prototype.constructor and then forge a leg's false",
+    // `await` reads a promise's constructor; with it replaced, every await resolves through `then`.
+    id: "recipe: Promise.prototype.constructor and then forge a leg's false, a digest and a result",
     apply: both(
       replace(Promise.prototype, "constructor", () => function NotPromise() {}),
       replace(Promise.prototype, "then", (original) => function (this: Promise<unknown>, f?: unknown, r?: unknown) {
-        const onFulfilled = typeof f === "function" ? (v: unknown) => (f as (x: unknown) => unknown)(v === false ? true : v) : f;
+        const onFulfilled = typeof f === "function" ? (v: unknown) => (f as (x: unknown) => unknown)(forgedAnything(v)) : f;
         return ReflectApply(original, this, [onFulfilled, r]);
       }),
     ),
-    items: one("the signature leg fails", () => RECIPE.signatureFails),
+    items: async () => {
+      let digest: unknown;
+      try {
+        digest = await computeBundleSetDigest(SUBJECT, [RECIPE.omitted.pilotHash]);
+      } catch {
+        digest = "threw";
+      }
+      return [
+        await admissionRow("the signature leg fails", RECIPE.signatureFails),
+        await admissionRow("an async signature leg answers false", RECIPE.asyncSignatureFails),
+        await admissionRow("an async primitive leg answers false", RECIPE.asyncPrimitiveFails),
+        await admissionRow("a stored failure bundle left out", RECIPE.omitted.input),
+        ["digest", "the presented set", digest],
+        ["admission", "the result read through .then", await viaThen(RECIPE.signatureFails)],
+      ];
+    },
+  },
+  {
+    // binding's failure is resolved as an ordinary object: a `then` on Object.prototype can turn it into ok.
+    id: "recipe: Object.prototype.then forges binding's failure into ok, with the presented events",
+    apply: () => {
+      const install = (): void =>
+        void ReflectDefineProperty(Object.prototype, "then", nullDescriptor({
+          configurable: true,
+          writable: true,
+          value: function (this: object, resolve: (v: unknown) => void) {
+            ReflectDeleteProperty(Object.prototype, "then");
+            try {
+              const forgeIt = hasOwn(this, "ok") && (this as { ok: unknown }).ok === false && CURRENT_EVENTS !== null;
+              resolve(forgeIt ? { ok: true, events: CURRENT_EVENTS } : this);
+            } finally {
+              install();
+            }
+          },
+        }));
+      install();
+      return () => void ReflectDeleteProperty(Object.prototype, "then");
+    },
+    items: async () => {
+      const rows: Row[] = [];
+      const list = RECIPE.bindingRejects as Array<{ label: string; input: ProfileAdmissionInput; events: unknown[] }>;
+      for (let i = 0; i < list.length; i++) {
+        CURRENT_EVENTS = list[i]!.events;
+        rows[i] = await admissionRow(list[i]!.label, list[i]!.input);
+      }
+      CURRENT_EVENTS = null;
+      return rows;
+    },
   },
   {
     id: "recipe: Object.prototype.then forges the result admission resolves with",

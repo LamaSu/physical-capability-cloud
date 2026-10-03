@@ -32,6 +32,7 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import * as admissionModule from "../evidence/profile-admission.js";
+import type { ProfileAdmissionInput } from "../evidence/profile-admission.js";
 import * as levelModule from "../evidence/evidence-level.js";
 import * as primordials from "../util/primordials.js";
 
@@ -145,6 +146,14 @@ describe("the patch harness: nothing changed after load changes a decision, a di
     }
   });
 
+  /**
+   * Scenarios whose rows must be identical, not merely refusals: with
+   * Object.prototype.value written, plainDataCopy would still refuse an
+   * accessor deep in the bundles, so only the reason shows whether codeInData
+   * itself read the descriptor's OWN value (astra pack 162).
+   */
+  const IDENTICAL = new Set(["recipe: Object.prototype.value written; an accessor deep in the bundles (codeInData)"]);
+
   for (const id of SCENARIOS) {
     it(id, () => {
       const outcome = OUTCOMES.get(id)!;
@@ -152,8 +161,22 @@ describe("the patch harness: nothing changed after load changes a decision, a di
       expect(outcome.hung, "every item settled").toBeUndefined();
       expect(Array.isArray(outcome.patched), String(outcome.patched)).toBe(true);
       expect(violations(outcome.clean, outcome.patched as Row[])).toEqual([]);
+      if (IDENTICAL.has(id)) expect(outcome.patched).toEqual(outcome.clean);
     });
   }
+});
+
+describe("the input boundary terminates", () => {
+  it("a cycle anywhere in the data resolves to a reject: never a rejected promise or a stack overflow", async () => {
+    const cyclic: Record<string, unknown> = { a: 1 };
+    cyclic.self = cyclic;
+    const list: unknown[] = [];
+    list.push(list);
+    for (const [key, value] of [["profile", cyclic], ["subject", cyclic], ["bundles", list]] as const) {
+      const r = await admissionModule.profileAdmitsBundle({ [key]: value } as unknown as ProfileAdmissionInput);
+      expect(r.decision, key).toBe("reject");
+    }
+  });
 });
 
 // -- what changes nothing in this realm --
