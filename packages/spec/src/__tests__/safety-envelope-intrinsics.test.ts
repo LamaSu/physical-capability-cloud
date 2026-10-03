@@ -111,8 +111,8 @@ const SIM_PR1_INPUT: SafetyEnvelopeInput = {
   device: { deviceId: "sim-pr1", adapterType: "generic-http", adapterVersion: MANIFEST },
   telemetryMap: {
     channels: [
-      { id: "run.elapsed_s", quantity: "read_duration", unit: "s", maxAgeMs: 1000 },
-      { id: "status.temperature_c", quantity: "incubation_temperature", unit: "degC", maxAgeMs: 5000 },
+      { id: "config.run_seconds", quantity: "read_duration", unit: "s", semantics: "state" as const, maxAgeMs: 5000 },
+      { id: "status.temperature_c", quantity: "incubation_temperature", unit: "degC", semantics: "state" as const, maxAgeMs: 5000 },
     ],
   },
   commandMap: {
@@ -131,7 +131,7 @@ const SIM_PR1_INPUT: SafetyEnvelopeInput = {
     limits: [
       // max 40 and max 600: the values the replacements below raise, so a raised limit shows.
       { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 15, max: 40 },
-      { field: "safety.limits", quantity: "read_duration", unit: "s", min: 0, max: 600 },
+      { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 600 },
       { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 30 },
     ],
     eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
@@ -145,7 +145,7 @@ const SIM_PR1_DECISION = {
   ...DECISION,
   deviceControlled: [
     { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "status.temperature_c" },
-    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "run.elapsed_s" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "config.run_seconds" },
   ],
 };
 /** Round 3 refusals, built before any patch: a channel the map does not declare, a cutoff, and a value set out of order. */
@@ -153,14 +153,14 @@ const UNRESOLVED_DECISION = {
   ...DECISION,
   deviceControlled: [
     { quantity: "incubation_temperature", enforcement: "telemetry" as const, channel: "status.temperature_k" },
-    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "run.elapsed_s" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "config.run_seconds" },
   ],
 };
 const CUTOFF_DECISION = {
   ...DECISION,
   deviceControlled: [
     { quantity: "incubation_temperature", enforcement: "cutoff", channel: "status.temperature_c" },
-    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "run.elapsed_s" },
+    { quantity: "read_duration", enforcement: "telemetry" as const, channel: "config.run_seconds" },
   ],
 } as unknown as typeof SIM_PR1_DECISION;
 const UNORDERED_SET_INPUT: SafetyEnvelopeInput = {

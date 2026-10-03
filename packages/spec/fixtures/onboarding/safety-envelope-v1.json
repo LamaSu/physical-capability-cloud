@@ -9,6 +9,7 @@
     "round 4: the template's deadline (deadlineQuantity) needs no command parameter: the runtime enforces it as elapsed time, and a parameter that does set it is checked against the same limit. A list-valued parameter declares unbounded.allowedItems: a runtime passes a non-empty list of distinct items, each in allowedItems (compared by type and value); a single value must be in allowed.",
     "Addendum 6 (dispositions, astra pack 173): every template quantity keeps a limit. A required quantity that no declared command parameter sets is device-controlled, and its limit stays in the body, the runtime limits and the conformance evidence. The confirmed body commits deviceControlled in template order only when non-empty, so every other envelope's digest is unchanged; the runtime envelope always carries it (possibly empty). A parameter that sets a quantity may list its only values (allowed), each inside the limit.",
     "Addendum 7 (round 3, astra pack 176): a device-controlled entry is {quantity, enforcement: 'telemetry', channel}. channel must be the id of one of the adapter's declared telemetry channels (body telemetryMap.channels, runtime telemetryChannels) that reports that quantity. Each channel is {id, quantity, unit, maxAgeMs}: a lowercase token id (a letter, then [a-z0-9._-], at most 64), ids strictly ascending; a non-deadline template quantity in that quantity's unit; and maxAgeMs a whole number from 1 to 60000. Every committed channel is enforced: a runtime dispatches a command other than the stop only when each channel's latest reading is a finite number, at most maxAgeMs old, inside its quantity's limit, and it stops a running job when one is not. There is no 'cutoff' and no prose detail. A body omits telemetryMap when the adapter declares no channel; the runtime always carries telemetryChannels (possibly empty). Every value set (allowed, unbounded.allowed, unbounded.allowedItems) lists each value once, in one order: numbers ascending, then strings ascending by UTF-16 code unit. There is no reduced device class: lab-plate-reader-absorbance is gone. The envelope-conformance evidence lists, per limit, enforcedBy: dispatch, telemetry {channel, maxAgeMs} and/or deadline.",
+    "Addendum 8 (round 4, astra pack 178): every telemetry channel is {id, quantity, unit, semantics: 'state', maxAgeMs}. A state is the quantity's current value and must lie inside the limit's [min, max] at every enforcement check; an elapsed counter or a terminal quantity is refused. A duration no command sets binds to the duration the device is configured to run for, so it keeps its real minimum. The evidence's telemetry mechanism carries semantics, and its claim is per enforcement check, never 'for the whole job'.",
     "registration: the registry signs statementDigest = 'sha256:' + lowercase hex(sha256(UTF-8(canonicalize({domain, deviceId, envelopeDigest, registeredAt})))) with Ed25519; the signed message is the UTF-8 of statementDigest itself (LO-EV-1 signingPreimage, 71 bytes). Signatures are not in this file: verify with the registry's key."
   ],
   "digest": {
@@ -558,7 +559,7 @@
               "quantity": "incubation_temperature"
             },
             {
-              "channel": "run.elapsed_s",
+              "channel": "config.run_seconds",
               "enforcement": "telemetry",
               "quantity": "read_duration"
             }
@@ -586,7 +587,7 @@
             },
             {
               "max": 60,
-              "min": 0,
+              "min": 1,
               "param": "readDuration",
               "proposedBy": "operator",
               "quantity": "read_duration",
@@ -618,22 +619,24 @@
           "telemetryMap": {
             "channels": [
               {
-                "id": "run.elapsed_s",
-                "maxAgeMs": 1000,
+                "id": "config.run_seconds",
+                "maxAgeMs": 5000,
                 "quantity": "read_duration",
+                "semantics": "state",
                 "unit": "s"
               },
               {
                 "id": "status.temperature_c",
                 "maxAgeMs": 5000,
                 "quantity": "incubation_temperature",
+                "semantics": "state",
                 "unit": "degC"
               }
             ]
           }
         },
-        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"runPlate\",\"params\":[{\"name\":\"plateFormat\",\"unbounded\":{\"allowed\":[\"96-well\"],\"reason\":\"the plate format; this reader takes 96-well plates only\"}},{\"name\":\"wavelengthNm\",\"unbounded\":{\"allowed\":[405,450,600],\"reason\":\"an optical setting, not a safety quantity\"}},{\"name\":\"wells\",\"unbounded\":{\"allowed\":[\"all\"],\"allowedItems\":[\"A1\",\"A10\",\"A11\",\"A12\",\"A2\",\"A3\",\"A4\",\"A5\",\"A6\",\"A7\",\"A8\",\"A9\",\"B1\",\"B10\",\"B11\",\"B12\",\"B2\",\"B3\",\"B4\",\"B5\",\"B6\",\"B7\",\"B8\",\"B9\",\"C1\",\"C10\",\"C11\",\"C12\",\"C2\",\"C3\",\"C4\",\"C5\",\"C6\",\"C7\",\"C8\",\"C9\",\"D1\",\"D10\",\"D11\",\"D12\",\"D2\",\"D3\",\"D4\",\"D5\",\"D6\",\"D7\",\"D8\",\"D9\",\"E1\",\"E10\",\"E11\",\"E12\",\"E2\",\"E3\",\"E4\",\"E5\",\"E6\",\"E7\",\"E8\",\"E9\",\"F1\",\"F10\",\"F11\",\"F12\",\"F2\",\"F3\",\"F4\",\"F5\",\"F6\",\"F7\",\"F8\",\"F9\",\"G1\",\"G10\",\"G11\",\"G12\",\"G2\",\"G3\",\"G4\",\"G5\",\"G6\",\"G7\",\"G8\",\"G9\",\"H1\",\"H10\",\"H11\",\"H12\",\"H2\",\"H3\",\"H4\",\"H5\",\"H6\",\"H7\",\"H8\",\"H9\"],\"reason\":\"which wells to read; a well name sets no physical quantity\"}}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:3131313131313131313131313131313131313131313131313131313131313131\",\"deviceId\":\"sim-pr1\",\"model\":\"SIM-PR1\",\"vendor\":\"Veriswell Instruments\"},\"deviceClass\":\"lab-plate-reader\",\"deviceControlled\":[{\"channel\":\"status.temperature_c\",\"enforcement\":\"telemetry\",\"quantity\":\"incubation_temperature\"},{\"channel\":\"run.elapsed_s\",\"enforcement\":\"telemetry\",\"quantity\":\"read_duration\"}],\"eStop\":{\"mechanism\":\"adapter-stop\",\"stopCommand\":\"stop\"},\"envelopeVersion\":1,\"hazards\":[],\"limits\":[{\"max\":40,\"min\":15,\"param\":\"incubationTemperature\",\"proposedBy\":\"operator\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"degC\"},{\"max\":60,\"min\":0,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":30,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":20,\"supervision\":\"attended\",\"telemetryMap\":{\"channels\":[{\"id\":\"run.elapsed_s\",\"maxAgeMs\":1000,\"quantity\":\"read_duration\",\"unit\":\"s\"},{\"id\":\"status.temperature_c\",\"maxAgeMs\":5000,\"quantity\":\"incubation_temperature\",\"unit\":\"degC\"}]}}}",
-        "envelopeDigest": "0xac38344d8bad7b050f9a0f86630d4e9c18b85f997b0b6a68a734f88384a0843f"
+        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"runPlate\",\"params\":[{\"name\":\"plateFormat\",\"unbounded\":{\"allowed\":[\"96-well\"],\"reason\":\"the plate format; this reader takes 96-well plates only\"}},{\"name\":\"wavelengthNm\",\"unbounded\":{\"allowed\":[405,450,600],\"reason\":\"an optical setting, not a safety quantity\"}},{\"name\":\"wells\",\"unbounded\":{\"allowed\":[\"all\"],\"allowedItems\":[\"A1\",\"A10\",\"A11\",\"A12\",\"A2\",\"A3\",\"A4\",\"A5\",\"A6\",\"A7\",\"A8\",\"A9\",\"B1\",\"B10\",\"B11\",\"B12\",\"B2\",\"B3\",\"B4\",\"B5\",\"B6\",\"B7\",\"B8\",\"B9\",\"C1\",\"C10\",\"C11\",\"C12\",\"C2\",\"C3\",\"C4\",\"C5\",\"C6\",\"C7\",\"C8\",\"C9\",\"D1\",\"D10\",\"D11\",\"D12\",\"D2\",\"D3\",\"D4\",\"D5\",\"D6\",\"D7\",\"D8\",\"D9\",\"E1\",\"E10\",\"E11\",\"E12\",\"E2\",\"E3\",\"E4\",\"E5\",\"E6\",\"E7\",\"E8\",\"E9\",\"F1\",\"F10\",\"F11\",\"F12\",\"F2\",\"F3\",\"F4\",\"F5\",\"F6\",\"F7\",\"F8\",\"F9\",\"G1\",\"G10\",\"G11\",\"G12\",\"G2\",\"G3\",\"G4\",\"G5\",\"G6\",\"G7\",\"G8\",\"G9\",\"H1\",\"H10\",\"H11\",\"H12\",\"H2\",\"H3\",\"H4\",\"H5\",\"H6\",\"H7\",\"H8\",\"H9\"],\"reason\":\"which wells to read; a well name sets no physical quantity\"}}]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:3131313131313131313131313131313131313131313131313131313131313131\",\"deviceId\":\"sim-pr1\",\"model\":\"SIM-PR1\",\"vendor\":\"Veriswell Instruments\"},\"deviceClass\":\"lab-plate-reader\",\"deviceControlled\":[{\"channel\":\"status.temperature_c\",\"enforcement\":\"telemetry\",\"quantity\":\"incubation_temperature\"},{\"channel\":\"config.run_seconds\",\"enforcement\":\"telemetry\",\"quantity\":\"read_duration\"}],\"eStop\":{\"mechanism\":\"adapter-stop\",\"stopCommand\":\"stop\"},\"envelopeVersion\":1,\"hazards\":[],\"limits\":[{\"max\":40,\"min\":15,\"param\":\"incubationTemperature\",\"proposedBy\":\"operator\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"degC\"},{\"max\":60,\"min\":1,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":30,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":20,\"supervision\":\"attended\",\"telemetryMap\":{\"channels\":[{\"id\":\"config.run_seconds\",\"maxAgeMs\":5000,\"quantity\":\"read_duration\",\"semantics\":\"state\",\"unit\":\"s\"},{\"id\":\"status.temperature_c\",\"maxAgeMs\":5000,\"quantity\":\"incubation_temperature\",\"semantics\":\"state\",\"unit\":\"degC\"}]}}}",
+        "envelopeDigest": "0x9d79fc2205f9443e91c947f7aee8d1ab95894b72ef50eb8d6369bf0c8a6a779c"
       },
       {
         "name": "plate-reader-heated-device-controlled",
@@ -667,7 +670,7 @@
               "quantity": "incubation_temperature"
             },
             {
-              "channel": "run.elapsed_s",
+              "channel": "config.read_seconds",
               "enforcement": "telemetry",
               "quantity": "read_duration"
             }
@@ -697,7 +700,7 @@
             },
             {
               "max": 600,
-              "min": 0,
+              "min": 1,
               "param": "readDuration",
               "proposedBy": "operator",
               "quantity": "read_duration",
@@ -732,19 +735,21 @@
                 "id": "chamber.temperature_c",
                 "maxAgeMs": 5000,
                 "quantity": "incubation_temperature",
+                "semantics": "state",
                 "unit": "degC"
               },
               {
-                "id": "run.elapsed_s",
-                "maxAgeMs": 1000,
+                "id": "config.read_seconds",
+                "maxAgeMs": 5000,
                 "quantity": "read_duration",
+                "semantics": "state",
                 "unit": "s"
               }
             ]
           }
         },
-        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"run\",\"params\":[]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:4141414141414141414141414141414141414141414141414141414141414141\",\"deviceId\":\"pr-heated\"},\"deviceClass\":\"lab-plate-reader\",\"deviceControlled\":[{\"channel\":\"chamber.temperature_c\",\"enforcement\":\"telemetry\",\"quantity\":\"incubation_temperature\"},{\"channel\":\"run.elapsed_s\",\"enforcement\":\"telemetry\",\"quantity\":\"read_duration\"}],\"eStop\":{\"mechanism\":\"adapter-stop\",\"stopCommand\":\"stop\"},\"envelopeVersion\":1,\"hazards\":[\"heat\"],\"limits\":[{\"max\":40,\"min\":20,\"param\":\"incubationTemperature\",\"proposedBy\":\"operator\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"degC\"},{\"max\":600,\"min\":0,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":120,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":20,\"supervision\":\"attended\",\"telemetryMap\":{\"channels\":[{\"id\":\"chamber.temperature_c\",\"maxAgeMs\":5000,\"quantity\":\"incubation_temperature\",\"unit\":\"degC\"},{\"id\":\"run.elapsed_s\",\"maxAgeMs\":1000,\"quantity\":\"read_duration\",\"unit\":\"s\"}]}}}",
-        "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23"
+        "preimage": "{\"domain\":\"PCC:safety-envelope:v1\",\"envelope\":{\"commandMap\":{\"commands\":[{\"name\":\"run\",\"params\":[]},{\"name\":\"stop\",\"params\":[]}]},\"confirmation\":{\"confirmedAt\":\"2026-09-29T20:00:00Z\",\"confirmedBy\":\"operator:fixture\"},\"device\":{\"adapterType\":\"generic-http\",\"adapterVersion\":\"sha256:4141414141414141414141414141414141414141414141414141414141414141\",\"deviceId\":\"pr-heated\"},\"deviceClass\":\"lab-plate-reader\",\"deviceControlled\":[{\"channel\":\"chamber.temperature_c\",\"enforcement\":\"telemetry\",\"quantity\":\"incubation_temperature\"},{\"channel\":\"config.read_seconds\",\"enforcement\":\"telemetry\",\"quantity\":\"read_duration\"}],\"eStop\":{\"mechanism\":\"adapter-stop\",\"stopCommand\":\"stop\"},\"envelopeVersion\":1,\"hazards\":[\"heat\"],\"limits\":[{\"max\":40,\"min\":20,\"param\":\"incubationTemperature\",\"proposedBy\":\"operator\",\"quantity\":\"incubation_temperature\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"degC\"},{\"max\":600,\"min\":1,\"param\":\"readDuration\",\"proposedBy\":\"operator\",\"quantity\":\"read_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"s\"},{\"max\":120,\"min\":1,\"param\":\"jobDuration\",\"proposedBy\":\"operator\",\"quantity\":\"job_duration\",\"sources\":[{\"field\":\"safety.limits\",\"kind\":\"operator\"}],\"unit\":\"min\"}],\"maxCommandsPerMinute\":20,\"supervision\":\"attended\",\"telemetryMap\":{\"channels\":[{\"id\":\"chamber.temperature_c\",\"maxAgeMs\":5000,\"quantity\":\"incubation_temperature\",\"semantics\":\"state\",\"unit\":\"degC\"},{\"id\":\"config.read_seconds\",\"maxAgeMs\":5000,\"quantity\":\"read_duration\",\"semantics\":\"state\",\"unit\":\"s\"}]}}}",
+        "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7"
       }
     ]
   },
@@ -775,21 +780,21 @@
         "name": "plate-reader-sim-pr1",
         "statement": {
           "deviceId": "sim-pr1",
-          "envelopeDigest": "0xac38344d8bad7b050f9a0f86630d4e9c18b85f997b0b6a68a734f88384a0843f",
+          "envelopeDigest": "0x9d79fc2205f9443e91c947f7aee8d1ab95894b72ef50eb8d6369bf0c8a6a779c",
           "registeredAt": "2026-09-29T20:05:00Z"
         },
-        "preimage": "{\"deviceId\":\"sim-pr1\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0xac38344d8bad7b050f9a0f86630d4e9c18b85f997b0b6a68a734f88384a0843f\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
-        "statementDigest": "sha256:eededd29851039b92744e8c25ffd331698e8559104e98cbef168782159d0956d"
+        "preimage": "{\"deviceId\":\"sim-pr1\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x9d79fc2205f9443e91c947f7aee8d1ab95894b72ef50eb8d6369bf0c8a6a779c\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
+        "statementDigest": "sha256:98585a0a820f77636377c59381d67624f85db4ab21fc76c87717b1dcdb9daca8"
       },
       {
         "name": "plate-reader-heated-device-controlled",
         "statement": {
           "deviceId": "pr-heated",
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "registeredAt": "2026-09-29T20:05:00Z"
         },
-        "preimage": "{\"deviceId\":\"pr-heated\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
-        "statementDigest": "sha256:93605a240009b993a057692db67a94f69aa760a947c6be1f4d09ae3105f0aa17"
+        "preimage": "{\"deviceId\":\"pr-heated\",\"domain\":\"PCC:safety-envelope-registration:v1\",\"envelopeDigest\":\"0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7\",\"registeredAt\":\"2026-09-29T20:05:00Z\"}",
+        "statementDigest": "sha256:50c7c9cf47baab6a506aa16d5d67475c49454f4016c090332d2f5aca80aff1da"
       }
     ]
   },
@@ -1090,7 +1095,7 @@
         "name": "plate-reader-sim-pr1",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0xac38344d8bad7b050f9a0f86630d4e9c18b85f997b0b6a68a734f88384a0843f",
+          "envelopeDigest": "0x9d79fc2205f9443e91c947f7aee8d1ab95894b72ef50eb8d6369bf0c8a6a779c",
           "deviceClass": "lab-plate-reader",
           "deviceId": "sim-pr1",
           "adapterType": "generic-http",
@@ -1106,7 +1111,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 60
             },
             {
@@ -1118,15 +1123,17 @@
           ],
           "telemetryChannels": [
             {
-              "id": "run.elapsed_s",
+              "id": "config.run_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             },
             {
               "id": "status.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             }
           ],
@@ -1139,7 +1146,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.run_seconds"
             }
           ],
           "commands": [
@@ -1294,7 +1301,7 @@
         "name": "plate-reader-heated-device-controlled",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -1310,7 +1317,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -1325,13 +1332,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -1343,7 +1352,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -6051,7 +6060,7 @@
         "name": "device-controlled-unknown-enforcement",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6067,7 +6076,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6082,13 +6091,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -6100,7 +6111,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -6132,7 +6143,7 @@
         "name": "device-controlled-cutoff",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6148,7 +6159,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6163,13 +6174,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -6181,7 +6194,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -6213,7 +6226,7 @@
         "name": "device-controlled-prose-detail",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6229,7 +6242,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6244,13 +6257,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -6262,7 +6277,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -6296,7 +6311,7 @@
         "name": "device-controlled-channel-unresolved",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6312,7 +6327,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6327,13 +6342,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -6345,7 +6362,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -6378,7 +6395,7 @@
         "name": "device-controlled-channel-of-another-quantity",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6394,7 +6411,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6409,25 +6426,27 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
             {
               "quantity": "incubation_temperature",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             },
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -6460,7 +6479,7 @@
         "name": "device-controlled-channel-not-an-id",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6476,7 +6495,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6491,13 +6510,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -6509,7 +6530,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -6543,7 +6564,7 @@
         "name": "device-controlled-extra-key",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6559,7 +6580,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6574,13 +6595,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -6593,7 +6616,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -6625,7 +6648,7 @@
         "name": "device-controlled-out-of-order",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6641,7 +6664,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6656,20 +6679,22 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             },
             {
               "quantity": "incubation_temperature",
@@ -6707,7 +6732,7 @@
         "name": "device-controlled-twice",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6723,7 +6748,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6738,13 +6763,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -6789,7 +6816,7 @@
         "name": "device-controlled-omits-an-unset-quantity",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6805,7 +6832,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6820,13 +6847,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -6865,7 +6894,7 @@
         "name": "device-controlled-limit-removed",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -6875,7 +6904,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -6890,13 +6919,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -6908,7 +6939,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7041,7 +7072,7 @@
         "name": "telemetry-channels-emptied-while-named",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7057,7 +7088,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7077,7 +7108,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7110,7 +7141,7 @@
         "name": "telemetry-channels-out-of-order",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7126,7 +7157,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7138,15 +7169,17 @@
           ],
           "telemetryChannels": [
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             },
             {
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             }
           ],
@@ -7159,7 +7192,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7193,7 +7226,7 @@
         "name": "telemetry-channel-twice",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7209,7 +7242,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7224,12 +7257,14 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             }
           ],
@@ -7242,7 +7277,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7276,7 +7311,7 @@
         "name": "telemetry-channel-retargeted",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7292,7 +7327,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7307,13 +7342,15 @@
               "id": "chamber.temperature_c",
               "quantity": "read_duration",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -7325,7 +7362,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7359,7 +7396,7 @@
         "name": "telemetry-channel-the-deadline",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7375,7 +7412,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7390,18 +7427,21 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             },
             {
               "id": "job.elapsed_min",
               "quantity": "job_duration",
               "unit": "min",
+              "semantics": "state",
               "maxAgeMs": 1000
             }
           ],
@@ -7414,7 +7454,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7448,7 +7488,7 @@
         "name": "telemetry-channel-unknown-quantity",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7464,7 +7504,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7479,18 +7519,21 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             },
             {
               "id": "spindle.rpm",
               "quantity": "spindle_speed",
               "unit": "m/s",
+              "semantics": "state",
               "maxAgeMs": 1000
             }
           ],
@@ -7503,7 +7546,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7537,7 +7580,7 @@
         "name": "telemetry-channel-other-unit",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7553,7 +7596,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7568,13 +7611,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degF",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -7586,7 +7631,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7620,7 +7665,7 @@
         "name": "telemetry-channel-max-age-zero",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7636,7 +7681,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7651,13 +7696,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 0
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -7669,7 +7716,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7704,7 +7751,7 @@
         "name": "telemetry-channel-max-age-over-a-minute",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7720,7 +7767,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7735,13 +7782,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 60001
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -7753,7 +7802,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7788,7 +7837,7 @@
         "name": "telemetry-channel-max-age-fraction",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7804,7 +7853,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7819,13 +7868,15 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 1.5
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -7837,7 +7888,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7872,7 +7923,7 @@
         "name": "telemetry-channel-id-uppercase",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7888,7 +7939,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7903,13 +7954,15 @@
               "id": "Chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -7921,7 +7974,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -7956,7 +8009,7 @@
         "name": "telemetry-channel-extra-key",
         "envelope": {
           "envelopeVersion": 1,
-          "envelopeDigest": "0x62d8b3701e5ae8be91394ec25fc5b154f4a8296a8fe74b7fc073bfad4fdd5a23",
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
           "deviceClass": "lab-plate-reader",
           "deviceId": "pr-heated",
           "adapterType": "generic-http",
@@ -7972,7 +8025,7 @@
             {
               "quantity": "read_duration",
               "unit": "s",
-              "min": 0,
+              "min": 1,
               "max": 600
             },
             {
@@ -7987,14 +8040,16 @@
               "id": "chamber.temperature_c",
               "quantity": "incubation_temperature",
               "unit": "degC",
+              "semantics": "state",
               "maxAgeMs": 5000,
               "detail": "thermistor"
             },
             {
-              "id": "run.elapsed_s",
+              "id": "config.read_seconds",
               "quantity": "read_duration",
               "unit": "s",
-              "maxAgeMs": 1000
+              "semantics": "state",
+              "maxAgeMs": 5000
             }
           ],
           "deviceControlled": [
@@ -8006,7 +8061,7 @@
             {
               "quantity": "read_duration",
               "enforcement": "telemetry",
-              "channel": "run.elapsed_s"
+              "channel": "config.read_seconds"
             }
           ],
           "commands": [
@@ -8032,6 +8087,171 @@
         },
         "paths": [
           "telemetryChannels.0"
+        ]
+      },
+      {
+        "name": "telemetry-channel-semantics-elapsed",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "semantics": "elapsed",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "telemetryChannels.0.semantics"
+        ]
+      },
+      {
+        "name": "telemetry-channel-semantics-missing",
+        "envelope": {
+          "envelopeVersion": 1,
+          "envelopeDigest": "0x5983fb8762bcfad1e1289bbe6332fb8faa1827755fd072f5c4404d84a9d34ce7",
+          "deviceClass": "lab-plate-reader",
+          "deviceId": "pr-heated",
+          "adapterType": "generic-http",
+          "adapterVersion": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
+          "strict": true,
+          "limits": [
+            {
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "min": 20,
+              "max": 40
+            },
+            {
+              "quantity": "read_duration",
+              "unit": "s",
+              "min": 1,
+              "max": 600
+            },
+            {
+              "quantity": "job_duration",
+              "unit": "min",
+              "min": 1,
+              "max": 120
+            }
+          ],
+          "telemetryChannels": [
+            {
+              "id": "chamber.temperature_c",
+              "quantity": "incubation_temperature",
+              "unit": "degC",
+              "maxAgeMs": 5000
+            },
+            {
+              "id": "config.read_seconds",
+              "quantity": "read_duration",
+              "unit": "s",
+              "semantics": "state",
+              "maxAgeMs": 5000
+            }
+          ],
+          "deviceControlled": [
+            {
+              "quantity": "incubation_temperature",
+              "enforcement": "telemetry",
+              "channel": "chamber.temperature_c"
+            },
+            {
+              "quantity": "read_duration",
+              "enforcement": "telemetry",
+              "channel": "config.read_seconds"
+            }
+          ],
+          "commands": [
+            {
+              "name": "run",
+              "params": []
+            },
+            {
+              "name": "stop",
+              "params": []
+            }
+          ],
+          "deadlineQuantity": "job_duration",
+          "maxCommandsPerMinute": 20,
+          "eStop": {
+            "mechanism": "adapter-stop",
+            "stopCommand": "stop"
+          },
+          "supervision": "attended",
+          "hazards": [
+            "heat"
+          ]
+        },
+        "paths": [
+          "telemetryChannels.0.semantics"
         ]
       },
       {

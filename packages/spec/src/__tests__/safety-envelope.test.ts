@@ -1881,11 +1881,11 @@ describe("dispositions (Addendum 6): every template quantity keeps a limit; one 
       { name: "stop", params: [] },
     ],
   };
-  /** The readings the heated reader's adapter takes: its chamber temperature, and the elapsed time of the current read. */
+  /** The readings the heated reader's adapter takes: its chamber temperature, and the read duration it is configured to run (both states). */
   const CHANNELS = {
     channels: [
-      { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", maxAgeMs: 5000 },
-      { id: "run.elapsed_s", quantity: "read_duration", unit: "s", maxAgeMs: 1000 },
+      { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", semantics: "state" as const, maxAgeMs: 5000 },
+      { id: "config.read_seconds", quantity: "read_duration", unit: "s", semantics: "state" as const, maxAgeMs: 1000 },
     ],
   };
   /** `telemetryMap` null: the adapter declares no channel (undefined would take the default). */
@@ -1898,8 +1898,7 @@ describe("dispositions (Addendum 6): every template quantity keeps a limit; one 
       intake: {
         limits: [
           { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 20, max: 40 },
-          // From 0: run.elapsed_s reports the current read's elapsed time, which every read starts at.
-          { field: "safety.limits", quantity: "read_duration", unit: "s", min: 0, max: 600 },
+          { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 600 },
           { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 120 },
         ],
         eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
@@ -1933,8 +1932,8 @@ describe("dispositions (Addendum 6): every template quantity keeps a limit; one 
     // The evidence names the channel that enforces it, never a reading the runtime does not take (astra pack 176).
     const entries = (csd.evidence["envelope-conformance"]!.primitives[0]!.params as { envelope: Array<{ metric: string; enforcedBy: unknown }> }).envelope;
     expect(entries.map((e) => [e.metric, e.enforcedBy])).toEqual([
-      ["incubation_temperature", [{ kind: "telemetry", channel: "chamber.temperature_c", maxAgeMs: 5000 }]],
-      ["read_duration", [{ kind: "dispatch" }, { kind: "telemetry", channel: "run.elapsed_s", maxAgeMs: 1000 }]],
+      ["incubation_temperature", [{ kind: "telemetry", channel: "chamber.temperature_c", semantics: "state", maxAgeMs: 5000 }]],
+      ["read_duration", [{ kind: "dispatch" }, { kind: "telemetry", channel: "config.read_seconds", semantics: "state", maxAgeMs: 1000 }]],
       ["job_duration", [{ kind: "deadline" }]],
     ]);
     // The runtime carries the channels and the binding.
@@ -1954,16 +1953,16 @@ describe("dispositions (Addendum 6): every template quantity keeps a limit; one 
   });
 
   it.each([
-    ["the deadline", [TELEMETRY, { quantity: "job_duration", enforcement: "telemetry", channel: "run.elapsed_s" }], /the deadline job_duration/],
-    ["an unknown quantity", [TELEMETRY, { quantity: "spindle_speed", enforcement: "telemetry", channel: "run.elapsed_s" }], /"spindle_speed", which is not a quantity of a lab-plate-reader/],
+    ["the deadline", [TELEMETRY, { quantity: "job_duration", enforcement: "telemetry", channel: "config.read_seconds" }], /the deadline job_duration/],
+    ["an unknown quantity", [TELEMETRY, { quantity: "spindle_speed", enforcement: "telemetry", channel: "config.read_seconds" }], /"spindle_speed", which is not a quantity of a lab-plate-reader/],
     ["a quantity twice", [TELEMETRY, TELEMETRY], /twice/],
-    ["a settable quantity", [TELEMETRY, { quantity: "read_duration", enforcement: "telemetry", channel: "run.elapsed_s" }], /read_duration, but a declared parameter sets it/],
+    ["a settable quantity", [TELEMETRY, { quantity: "read_duration", enforcement: "telemetry", channel: "config.read_seconds" }], /read_duration, but a declared parameter sets it/],
     ["an unknown enforcement", [{ ...TELEMETRY, enforcement: "trust" }], /enforcement must be "telemetry"/],
     // astra pack 176 CRITICAL: a cutoff was an operator's words the registry then signed.
     ["a cutoff, however it is described", [{ quantity: "incubation_temperature", enforcement: "cutoff", channel: "chamber.temperature_c" }], /an independent cutoff needs a registered interlock attestation/],
     ["the old prose form", [{ quantity: "incubation_temperature", enforcement: "cutoff", detail: "x" }], /exactly \{quantity, enforcement, channel\}/],
     ["a channel the adapter does not declare", [{ ...TELEMETRY, channel: "chamber.thermistor" }], /channel "chamber.thermistor" is not a channel of the adapter's telemetry map/],
-    ["a channel that reports another quantity", [{ ...TELEMETRY, channel: "run.elapsed_s" }], /channel run.elapsed_s reports read_duration, not incubation_temperature/],
+    ["a channel that reports another quantity", [{ ...TELEMETRY, channel: "config.read_seconds" }], /channel config.read_seconds reports read_duration, not incubation_temperature/],
     ["a channel that is not an id", [{ ...TELEMETRY, channel: "Chamber Thermistor" }], /is not a channel of the adapter's telemetry map/],
     ["an extra key", [{ ...TELEMETRY, limit: "none" }], /exactly \{quantity, enforcement, channel\}/],
     ["something that is not a list", TELEMETRY as unknown as [], /a list of \{quantity, enforcement, channel\}/],
@@ -1986,12 +1985,15 @@ describe("dispositions (Addendum 6): every template quantity keeps a limit; one 
     ["an id that starts with a digit", { channels: [{ ...CHANNELS.channels[0], id: "1chamber" }] }, /an id is a lowercase token/],
     ["an id longer than 64", { channels: [{ ...CHANNELS.channels[0], id: "c".repeat(65) }] }, /an id is a lowercase token/],
     ["a quantity the class does not bound", { channels: [{ ...CHANNELS.channels[0], quantity: "spindle_speed" }] }, /reports "spindle_speed", which a lab-plate-reader does not bound/],
-    ["the deadline", { channels: [{ id: "job.elapsed_min", quantity: "job_duration", unit: "min", maxAgeMs: 1000 }] }, /reports the deadline job_duration/],
+    ["the deadline", { channels: [{ id: "job.elapsed_min", quantity: "job_duration", unit: "min", semantics: "state" as const, maxAgeMs: 1000 }] }, /reports the deadline job_duration/],
     ["another unit", { channels: [{ ...CHANNELS.channels[0], unit: "degF" }] }, /in "degF", not degC/],
     ["maxAgeMs 0", { channels: [{ ...CHANNELS.channels[0], maxAgeMs: 0 }] }, /maxAgeMs must be a whole number of ms from 1 to 60000/],
     ["maxAgeMs over a minute", { channels: [{ ...CHANNELS.channels[0], maxAgeMs: 60_001 }] }, /maxAgeMs must be a whole number/],
     ["a fractional maxAgeMs", { channels: [{ ...CHANNELS.channels[0], maxAgeMs: 1.5 }] }, /maxAgeMs must be a whole number/],
-    ["a channel with another key", { channels: [{ ...CHANNELS.channels[0], detail: "thermistor" }] }, /exactly \{id, quantity, unit, maxAgeMs\}/],
+    ["a channel with another key", { channels: [{ ...CHANNELS.channels[0], detail: "thermistor" }] }, /exactly \{id, quantity, unit, semantics, maxAgeMs\}/],
+    // astra pack 178: a channel reports a state; a counter cannot enforce a minimum at every sample.
+    ["a channel that is an elapsed counter", { channels: [{ ...CHANNELS.channels[0], semantics: "elapsed" }] }, /semantics must be "state"/],
+    ["a channel without semantics", { channels: [{ id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC", maxAgeMs: 5000 }] }, /semantics must be "state"/],
   ])("the draft refuses a telemetry map with %s", (_label, telemetryMap, reason) => {
     expect(() => draftSafetyEnvelope(heatedReader(HEATED_RUN_ONLY, telemetryMap as never))).toThrow(reason);
   });
@@ -2059,23 +2061,23 @@ describe("dispositions (Addendum 6): every template quantity keeps a limit; one 
     const c = confirmSafetyEnvelope(input, confirmDecision());
     expect(c.envelope.telemetryMap).toEqual({ channels: [CHANNELS.channels[0]] });
     const entries = (compileOwn(c).evidence["envelope-conformance"]!.primitives[0]!.params as { envelope: Array<{ metric: string; enforcedBy: unknown }> }).envelope;
-    expect(entries[0]).toMatchObject({ metric: "incubation_temperature", enforcedBy: [{ kind: "dispatch" }, { kind: "telemetry", channel: "chamber.temperature_c", maxAgeMs: 5000 }] });
+    expect(entries[0]).toMatchObject({ metric: "incubation_temperature", enforcedBy: [{ kind: "dispatch" }, { kind: "telemetry", channel: "chamber.temperature_c", semantics: "state", maxAgeMs: 5000 }] });
   });
 
   describe("a hand-built body is held to the same rules", () => {
     const good = () => structuredClone(confirmSafetyEnvelope(heatedReader(), confirmDecision({ deviceControlled: [TELEMETRY] })).envelope) as unknown as Record<string, any>;
     it.each([
       ["empty but present", (b: Record<string, any>) => (b.deviceControlled = []), /at least one quantity/],
-      ["naming the deadline", (b: Record<string, any>) => b.deviceControlled.push({ quantity: "job_duration", enforcement: "telemetry", channel: "run.elapsed_s" }), /deadline/],
+      ["naming the deadline", (b: Record<string, any>) => b.deviceControlled.push({ quantity: "job_duration", enforcement: "telemetry", channel: "config.read_seconds" }), /deadline/],
       ["absent while a quantity is unset", (b: Record<string, any>) => delete b.deviceControlled, /no declared parameter sets incubation_temperature/],
-      ["naming a settable quantity", (b: Record<string, any>) => b.deviceControlled.push({ quantity: "read_duration", enforcement: "telemetry", channel: "run.elapsed_s" }), /read_duration, but a declared parameter sets it/],
+      ["naming a settable quantity", (b: Record<string, any>) => b.deviceControlled.push({ quantity: "read_duration", enforcement: "telemetry", channel: "config.read_seconds" }), /read_duration, but a declared parameter sets it/],
       ["with its limit removed", (b: Record<string, any>) => b.limits.shift(), /limits must hold exactly one limit per required quantity/],
       ["with an unknown enforcement", (b: Record<string, any>) => (b.deviceControlled[0].enforcement = "trust"), /enforcement must be/],
       ["with a cutoff", (b: Record<string, any>) => (b.deviceControlled[0].enforcement = "cutoff"), /an independent cutoff needs a registered interlock attestation/],
       ["with the old prose form", (b: Record<string, any>) => (b.deviceControlled[0] = { quantity: "incubation_temperature", enforcement: "cutoff", detail: "x" }), /exactly \{quantity, enforcement, channel\}/],
       ["with an extra key in an entry", (b: Record<string, any>) => (b.deviceControlled[0].limit = "none"), /exactly \{quantity, enforcement, channel\}/],
       ["naming a channel the map does not declare", (b: Record<string, any>) => (b.deviceControlled[0].channel = "chamber.other"), /not a channel of the adapter's telemetry map/],
-      ["naming a channel of another quantity", (b: Record<string, any>) => (b.deviceControlled[0].channel = "run.elapsed_s"), /reports read_duration, not incubation_temperature/],
+      ["naming a channel of another quantity", (b: Record<string, any>) => (b.deviceControlled[0].channel = "config.read_seconds"), /reports read_duration, not incubation_temperature/],
       ["with the telemetry map removed", (b: Record<string, any>) => delete b.telemetryMap, /not a channel of the adapter's telemetry map/],
       ["with its channel retargeted to another quantity", (b: Record<string, any>) => Object.assign(b.telemetryMap.channels[0], { quantity: "read_duration", unit: "s" }), /reports read_duration, not incubation_temperature/],
       ["with its channel retargeted to another quantity but not its unit", (b: Record<string, any>) => (b.telemetryMap.channels[0].quantity = "read_duration"), /telemetryMap: telemetry channel chamber.temperature_c reports read_duration in "degC", not s/],

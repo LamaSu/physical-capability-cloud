@@ -41,7 +41,7 @@ function register(c: ConfirmedSafetyEnvelope): SafetyEnvelopeRegistration {
   return { ...statement, signature: Buffer.from(sign(null, registrationSigningPreimage(statement), REGISTRY.privateKey)).toString("hex") };
 }
 
-const CHAMBER = { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC" as const, maxAgeMs: 5000 };
+const CHAMBER = { id: "chamber.temperature_c", quantity: "incubation_temperature", unit: "degC" as const, semantics: "state" as const, maxAgeMs: 5000 };
 
 function heated(commands: SafetyEnvelopeInput["commandMap"], telemetryMap?: SafetyEnvelopeInput["telemetryMap"]): SafetyEnvelopeInput {
   return {
@@ -131,8 +131,8 @@ describe("astra 176 CRITICAL: enforcement is a channel the runtime reads, resolv
     expect(runtime.deviceControlled).toEqual([telemetry]);
     const tier = compileSafetyEnvelope(c, register(c), verifyRegistry).evidence["envelope-conformance"]!;
     const entries = (tier.primitives[0]!.params as { envelope: Array<{ metric: string; enforcedBy: unknown }> }).envelope;
-    expect(entries.find((e) => e.metric === "incubation_temperature")!.enforcedBy).toEqual([{ kind: "telemetry", channel: "chamber.temperature_c", maxAgeMs: 5000 }]);
-    expect(tier.required).toContain("every telemetry channel had a reading no older than its maxAgeMs, inside its quantity's limit, for the whole job");
+    expect(entries.find((e) => e.metric === "incubation_temperature")!.enforcedBy).toEqual([{ kind: "telemetry", channel: "chamber.temperature_c", semantics: "state", maxAgeMs: 5000 }]);
+    expect(tier.required).toContain("at each enforcement check, every telemetry channel had a reading no older than its maxAgeMs, inside its quantity's limit");
   });
 
   it("the channel is committed: retargeting it, or swapping the map, after confirmation is refused by both compilers", () => {
