@@ -724,6 +724,17 @@ function bindMatchesPolicy(bind: IrBind, key: string): string | null {
   return null;
 }
 
+/** True only when `path` (no query string) is a route the closed IR can BIND to: one of
+ *  BIND_POLICY's reviewed read routes, passing the same read-path grammar, and not a reserved
+ *  route. The gateway's CORS delegator (middleware/security-hardening.ts) uses it. The governed
+ *  GenUI view runs at the MCP App domain or a host's sandbox origin and fetches with
+ *  credentials:"omit", so it gets credential-less read access to EXACTLY these public routes
+ *  and to nothing else (row 37; operator item 109(b)). */
+export function isIrBindablePath(path: string): boolean {
+  if (!isReadPath(path) || RESERVED_EXACT.has(path)) return false;
+  return Object.values(BIND_POLICY).some((policy) => policy.routes.some((re) => re.test(path)));
+}
+
 // ── Agent prose nodes (PX-5 review #2504; astra r2 F1, F4) ─────────────────────────────
 type ProseType = "heading" | "text" | "badge" | "field-label";
 /** An agent-prose node: the words, marked untrusted, or PCC's withheld notice if they may not be shown. */

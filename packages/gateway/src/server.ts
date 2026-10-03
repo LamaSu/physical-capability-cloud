@@ -137,7 +137,7 @@ import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
-import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
+import { corsDelegator, securityHeaders } from "./middleware/security-hardening.js";
 import { rateLimiter } from "./middleware/rate-limiter.js";
 import { dlpRedactor } from "./middleware/dlp-redactor.js";
 import { scopeChecker } from "./middleware/scope-checker.js";
@@ -287,14 +287,10 @@ export async function createGateway(port = 3200) {
     await shutdownPostHog();
   });
 
-  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin)
-  await app.register(cors, {
-    origin: corsOriginValidator,
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-PCC-API-Key", "X-PCC-Session", "X-Request-ID"],
-    maxAge: 86400, // Cache preflight for 24h
-  });
+  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin).
+  // Per request (corsDelegator): the credentialed allowlist exactly as before, plus credential-less
+  // GET access to the closed IR's public read routes for the governed GenUI view (row 37).
+  await app.register(cors, { delegator: corsDelegator });
 
   // Security response headers (X-Frame-Options, CSP, HSTS, etc.)
   await securityHeaders(app);

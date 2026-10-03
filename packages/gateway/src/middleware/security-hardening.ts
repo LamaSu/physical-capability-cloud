@@ -9,6 +9,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { isIrBindablePath } from "../mcp/dashboard-ir.js";
 
 // ── CORS Allowlist ──────────────────────────────────────────────────────────
 
@@ -39,6 +40,50 @@ export function corsOriginValidator(
 
   // Reject unknown origins for credentialed requests
   return cb(null, false);
+}
+
+/** The gateway's CORS options before row 37, unchanged: the credentialed allowlist above. */
+export const CORS_ALLOWLIST_OPTIONS = Object.freeze({
+  origin: corsOriginValidator,
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-PCC-API-Key", "X-PCC-Session", "X-Request-ID"],
+  maxAge: 86400, // Cache preflight for 24h
+});
+
+/** Credential-less READ access for the governed GenUI view (row 37; operator item 109(b)).
+ *  The IR kit fetches PCC's public read routes with credentials:"omit"
+ *  (mcp/dashboard-ir-browser-entry.ts) from the MCP App domain or a host's sandbox origin
+ *  (which can even be the opaque "null"). So it needs `Access-Control-Allow-Origin` and
+ *  NOTHING else:
+ *  - never Allow-Credentials, so no cookie-authenticated response is ever readable cross-origin;
+ *  - GET only.
+ *  "*" is safe here because these routes are public and the response is never credentialed. */
+export const CORS_IR_READ_OPTIONS = Object.freeze({
+  origin: "*",
+  credentials: false,
+  methods: ["GET"],
+  allowedHeaders: ["Accept"],
+  maxAge: 86400,
+});
+
+/** Per-request CORS options for @fastify/cors's `delegator`. Every request gets
+ *  CORS_ALLOWLIST_OPTIONS exactly as before, with ONE exception: an Origin outside the
+ *  allowlist making a GET (or the CORS preflight for a GET) of a route the closed IR can bind to
+ *  (isIrBindablePath). That gets CORS_IR_READ_OPTIONS. Methods other than GET, routes outside
+ *  the IR bind registry, reserved routes and encoded or dotted paths keep the allowlist (so an
+ *  unknown origin gets no CORS headers at all). */
+export function corsDelegator(
+  req: { headers: Record<string, string | string[] | undefined>; method: string; url: string },
+  cb: (err: Error | null, options: typeof CORS_ALLOWLIST_OPTIONS | typeof CORS_IR_READ_OPTIONS) => void,
+): void {
+  const origin = typeof req.headers.origin === "string" ? req.headers.origin : undefined;
+  if (origin !== undefined && !ALLOWED_ORIGINS.has(origin)) {
+    const path = (req.url ?? "").split("?")[0] ?? "";
+    const preflightForGet = req.method === "OPTIONS" && req.headers["access-control-request-method"] === "GET";
+    if ((req.method === "GET" || preflightForGet) && isIrBindablePath(path)) return cb(null, CORS_IR_READ_OPTIONS);
+  }
+  return cb(null, CORS_ALLOWLIST_OPTIONS);
 }
 
 // ── SSE Connection Limiter ──────────────────────────────────────────────────
