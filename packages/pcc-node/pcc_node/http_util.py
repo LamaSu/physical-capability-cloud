@@ -1,18 +1,25 @@
 """Shared HTTP helpers using only stdlib (urllib.request).
 
 Every outbound request carries a User-Agent to avoid Cloudflare blocks.
-SSL verification is relaxed for local-network device probing.
+http() may relax TLS for local-network device probing. Requests to the PCC
+gateway go through gateway_request()/pcc_request(), which never do.
 """
 
 import http.client
+import ipaddress
 import json
+import logging
 import ssl
 import threading
 import time
 import urllib.request
 from contextlib import contextmanager
-from urllib.request import Request
+from urllib.parse import urlsplit
+# urlopen is NOT imported: this module defines its own, the guarded one (#400 F3).
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener, getproxies
 from urllib.error import HTTPError, URLError
+
+log = logging.getLogger("pcc-node.http")
 
 USER_AGENT = "PCC-Node/0.1.0 (https://capability.network)"
 
@@ -24,12 +31,17 @@ _relaxed_ctx.verify_mode = ssl.CERT_NONE
 
 # ---------------------------------------------------------------------------
 # The actuation boundary (#400 r9-r11, F3)
+#
+# The device relay's execution lease ends at a deadline (docs/EXECUTION_SCOPE_PROTOCOL.md).
+# A relay client sends each device command through http() inside actuation_deadline(deadline),
+# so a command is never written to the device's socket after the deadline. pcc-node itself
+# ships no relay executor since #442 (N66): its relay executor ran tool calls in a shell, and
+# there is no shell path any more, so nothing here can launch a process.
 # ---------------------------------------------------------------------------
 
 _actuation = threading.local()
 
 LEASE_EXPIRED = "not_executed:lease_expired"
-SHELL_NOT_LEASE_BOUND = "not_executed:shell_not_lease_bound"
 
 
 class LeaseLapsed(OSError):
@@ -45,9 +57,6 @@ def actuation_deadline(deadline):
     the request's first byte is written to the socket, the last point the node controls. A command
     that fails either check is never written. The one residual is a suspension between that last
     check and the socket write. After the write, the network and the device add their own delays.
-
-    A shell command can't be bounded at all, because a started process can act at any later time.
-    Under a lease it is refused outright.
 
     Yields a dict:
       "written": requests whose first byte was handed to the socket (each may have reached the device);
@@ -78,17 +87,6 @@ def may_start_device_command():
     request's first byte."""
     guard = getattr(_actuation, "guard", None)
     return True if guard is None else _deadline_holds(guard)
-
-
-def refuse_unbounded_actuation(reason=SHELL_NOT_LEASE_BOUND):
-    """For a command the node can't bound once started (a shell process): True (refuse) inside an
-    actuation_deadline block, where the refusal is recorded; False outside one."""
-    guard = getattr(_actuation, "guard", None)
-    if guard is None:
-        return False
-    if guard["refused"] is None:
-        guard["refused"] = reason
-    return True
 
 
 class _DeadlineAtFirstWrite(object):
@@ -209,8 +207,82 @@ def http(method, url, body=None, headers=None, timeout=30, verify_ssl=True):
         return 0, {"error": str(e)}
 
 
+def gateway_url_allowed(url):
+    """True if a PCC gateway URL may carry the operator's key and its answers.
+
+    Only https qualifies, or plain http to a literal loopback address
+    (127.0.0.0/8 or [::1]: a rehearsal gateway on this machine), where the key
+    never leaves the host (verdicts 68c and 68d, finding 1). The name
+    "localhost" is refused, since a resolver can map it anywhere.
+    """
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme != "http":
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """A 3xx from the gateway is an answer, never a new target for the key."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _https_proxies_only():
+    """Environment proxies for https only. An http proxy would see the key in clear
+    text, so plain http (loopback only) always goes direct (verdict 68d, finding 1)."""
+    return {scheme: url for scheme, url in getproxies().items() if scheme == "https"}
+
+
+# Verified TLS, no redirects, and no proxy for plain http, for everything sent to the PCC gateway.
+_GATEWAY_OPENER = build_opener(ProxyHandler(_https_proxies_only()), _NoRedirect,
+                               HTTPSHandler(context=ssl.create_default_context()))
+
+
+def gateway_request(method, url, body=None, headers=None, timeout=30):
+    """One request to the PCC gateway. Returns (status_code, parsed_body).
+
+    Refused (status 0, no connection) unless ``gateway_url_allowed(url)``.
+    The certificate is always verified and redirects are never followed, so
+    the bearer key and the answers can only come from the configured gateway.
+    """
+    if not gateway_url_allowed(url):
+        log.warning("Refusing a PCC gateway URL that is not https (plain http only to 127.0.0.1 or [::1])")
+        return 0, {"error": "insecure_gateway_url",
+                   "message": "a PCC gateway must be https (plain http only to 127.0.0.1 or [::1])"}
+    hdrs = dict(headers or {})
+    hdrs.setdefault("User-Agent", USER_AGENT)
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        hdrs.setdefault("Content-Type", "application/json")
+    req = Request(url, data=data, headers=hdrs, method=method)
+    try:
+        with _GATEWAY_OPENER.open(req, timeout=timeout) as resp:
+            status, raw = resp.status, resp.read().decode("utf-8", "replace")
+    except HTTPError as e:
+        status, raw = e.code, e.read().decode("utf-8", "replace")
+    except (URLError, OSError) as e:
+        return 0, {"error": str(e)}
+    try:
+        return status, json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return status, raw
+
+
 def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30, headers=None):
-    """Make a request to the PCC gateway.
+    """Make a request to the PCC gateway, through ``gateway_request``.
 
     Parameters
     ----------
@@ -221,7 +293,7 @@ def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30, he
     body : dict | None
         JSON body.
     base_url : str
-        PCC gateway base URL.
+        PCC gateway base URL: https, or plain http on this machine only.
     api_key : str
         Bearer token.
     timeout : int
@@ -241,4 +313,4 @@ def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30, he
             req_headers[key] = value
     if api_key:
         req_headers["Authorization"] = f"Bearer {api_key}"
-    return http(method, url, body, req_headers, timeout=timeout)
+    return gateway_request(method, url, body, req_headers, timeout=timeout)

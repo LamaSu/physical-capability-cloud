@@ -306,54 +306,55 @@ installed nodes, and turning it on is the operator's decision. With it off, such
 a poller is served as before, with no token, and its reports count as device
 outcomes.
 
-**pcc-node's guard** (`packages/pcc-node/pcc_node/executor.py`,
-`acquire_execution_lease`) runs before any adapter is touched, in this order,
-and fails closed at every step:
+**An executor's guard.** Any executor of relayed calls runs this guard before
+any device is touched, in this order, and fails closed at every step. pcc-node
+implemented it as its relay executor until #442 deleted that module (board row
+N66): it also ran tool calls in a shell. pcc-node now ships no relay executor and
+no shell path. An executor built later follows this contract, and
+`pcc_node.http_util` provides step 5's check at the socket write.
 
 1. The call must carry a non-empty `claimToken`. Without one (a gateway without
    leases) it reports `not_executed:no_lease`.
 2. **Freshness.** The poll stamps each call with the local monotonic time its
    answer arrived. That stamp never leaves the node, and the poll overwrites any
    value the gateway sent. A call older than 30 s, or with no stamp, reports
-   `not_executed:stale`. The bound is set with `PCC_NODE_LEASE_FRESHNESS_S`; a
-   value that isn't a positive, finite number refuses every call.
+   `not_executed:stale`.
 3. **Fence.** A marker named by the SHA-256 of the call id is created with
-   `O_CREAT|O_EXCL` (0600) in `PCC_NODE_FENCE_DIR` (default
-   `~/.pcc-node/relay-fence`, 0700) BEFORE the lease is requested. A crash after a
-   granted lease therefore never re-runs the call on this node. A marker that
-   already exists means this node has attempted the call: it is refused and not
-   reported. A fence that can't be created reports `not_executed:fence_unavailable`.
+   `O_CREAT|O_EXCL` (0600) in a private (0700) directory BEFORE the lease is
+   requested. A crash after a granted lease therefore never re-runs the call on
+   that node. A marker that already exists means the node has attempted the
+   call: it is refused and not reported. A fence that can't be created reports
+   `not_executed:fence_unavailable`.
 4. **The lease**, as above, with a 10 s timeout. The call runs only on 200 with
    `"started": true` exactly.
 5. **At adapter entry, and at the socket write** (r8-r11). The grant is an
-   expiring authority. The node may write a device command for the call only
+   expiring authority. The executor may write a device command for the call only
    within the lease window, counted from just before it sent the start request,
    so a slow answer can only shorten it. The window is the gateway's `leaseMs`,
-   capped at the node's own 5 s.
-   - Right before each adapter is entered, the node re-checks the window and the
-     poll's freshness.
-   - Inside the call's `actuation_deadline` block, `http()` checks before any
-     connection is made. The guarded connection checks again after it is
-     established (TLS included) and immediately before the request's first byte
-     is written to the socket. A request that fails either check is never written.
-   - Under a lease, the shell path (`ot2_shell`) is refused outright
-     (`not_executed:shell_not_lease_bound`). A started process could act at any
-     later time, so no deadline can bound it.
-   - If no request of the call was written, the node reports
-     `not_executed:lease_expired` (or `not_executed:stale`, or
-     `not_executed:shell_not_lease_bound`), and nothing ran.
+   capped at the executor's own 5 s.
+   - Right before each device command starts, the executor re-checks the window
+     and the poll's freshness.
+   - Every device request goes through `pcc_node.http_util.http()` inside
+     `actuation_deadline(deadline)`. `http()` checks before any connection is
+     made. The guarded connection checks again after it is established (TLS
+     included) and immediately before the request's first byte is written to the
+     socket. A request that fails either check is never written.
+   - Nothing that can't be bounded this way runs under a lease. A started process
+     could act at any later time, so no deadline can bound it.
+   - If no request of the call was written, the executor reports
+     `not_executed:lease_expired` (or `not_executed:stale`), and nothing ran.
    - If one was written and a later one was held back, the device may have moved.
-     The node reports `lease_lapsed_mid_command`, a device outcome.
+     The executor reports `lease_lapsed_mid_command`, a device outcome.
 
-**What the lease guarantees, and its one residual.** The node checks the call's
+**What the lease guarantees, and its one residual.** The executor checks the call's
 lease deadline at the last point it controls before a command is transmitted:
 inside the connection, immediately before the request's first byte is written
 to the socket. A request checked after its deadline is never written.
 
-The residual: if the node process is suspended between that check and the
+The residual: if the executor's process is suspended between that check and the
 socket write, the write is late by the length of the suspension. After the
-write, the network and the device's own processing add delays that no check on
-the node can bound. That is the property put to the operator (item 127). A
+write, the network and the device's own processing add delays that no check in
+the executor can bound. That is the property put to the operator (item 127). A
 device that enforces deadlines itself, such as a facade on the same host
 comparing CLOCK_MONOTONIC, can close it, and that is the follow-up.
 

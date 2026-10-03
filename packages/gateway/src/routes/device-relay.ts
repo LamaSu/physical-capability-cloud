@@ -111,8 +111,9 @@ const CLAIM_TIMEOUT_ERROR = "claim_timeout";
 // token the poll gave it. That re-checks, in one synchronous step at the moment
 // of actuation, everything that moves between the claim and the run (the
 // emergency stop, the scope's status/expiry/budget, the breaker, the claim's
-// age) and moves the row claimed -> executing exactly once. pcc-node runs a
-// call only on that 200 (packages/pcc-node/pcc_node/executor.py). This is the
+// age) and moves the row claimed -> executing exactly once. An executor runs a
+// call only on that 200 (docs/EXECUTION_SCOPE_PROTOCOL.md; pcc-node ships no relay
+// executor since #442, N66). This is the
 // same wire shape as #471's job claim: claim, then start with the token, the
 // token opaque to the node.
 //
