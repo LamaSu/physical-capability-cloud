@@ -34,6 +34,15 @@ import {
   type LobLetterStatus,
 } from "../services/lob-letter-store.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** The exact reasons computeMissingLobConfig() can push — a closed, file-local vocabulary. */
+const MISSING_LOB_CONFIG_REASONS: readonly string[] = [
+  "LOB_API_KEY (no key at all means MOCK letters — fabricated evidence)",
+  "LOB_API_KEY (a live_ key is required in production — test_/unrecognized prefixes are Lob's sandbox)",
+  "LOB_WEBHOOK_SECRET (letter lifecycle events would be unauthenticatable)",
+  "durable letter store (in-memory records + a 24h provider idempotency window cannot guarantee one-job-one-charge across restarts)",
+];
 
 // NOTE: must agree with routes/carrier.ts's identical augmentation — TS merges
 // these declarations and rejects conflicting types (that exact conflict broke
@@ -217,8 +226,8 @@ export async function lobRoutes(app: FastifyInstance) {
     const missingAtBoot = computeMissingLobConfig();
     if (missingAtBoot.length) {
       app.log.error(
-        { missing: missingAtBoot },
-        "lob capability DISABLED: production config incomplete — lob routes will 503 until the configuration is completed (environment-variable changes require a restart). The rest of the gateway is unaffected.",
+        { missing: missingAtBoot.map((m) => declare.code(m, MISSING_LOB_CONFIG_REASONS)) },
+        lit("lob capability DISABLED: production config incomplete — lob routes will 503 until the configuration is completed (environment-variable changes require a restart). The rest of the gateway is unaffected."),
       );
     }
   }
@@ -396,7 +405,10 @@ export async function lobRoutes(app: FastifyInstance) {
       // after a kernel re-ownership, the NEW operator must not read or reuse the
       // PREVIOUS operator's letter as if it were their own.
       if (existing.ownerId.toLowerCase() !== caller.toLowerCase() || existing.kernelId !== b.kernelId) {
-        req.log.warn({ jobId: b.jobId, recordOwner: existing.ownerId, caller }, "lob: existing letter owned by a different principal/kernel");
+        req.log.warn(
+          { jobId: declare.id(b.jobId), recordOwner: declare.id(existing.ownerId), caller: declare.id(caller) },
+          lit("lob: existing letter owned by a different principal/kernel"),
+        );
         return reply.code(409).send({ error: "lob_record_ownership_mismatch" });
       }
       // Idempotent reuse is legal ONLY for an IDENTICAL request (sol R1): the
@@ -405,7 +417,7 @@ export async function lobRoutes(app: FastifyInstance) {
       // new body would hand the caller a record whose commitment describes a
       // different document/destination than the physical letter. Refuse loudly.
       if (existing.requestDigest !== requestDigest) {
-        req.log.warn({ jobId: b.jobId }, "lob: same jobId, DIFFERENT request body — refusing idempotent reuse");
+        req.log.warn({ jobId: declare.id(b.jobId) }, lit("lob: same jobId, DIFFERENT request body — refusing idempotent reuse"));
         return reply.code(409).send({
           error: "idempotency_conflict",
           message: "A letter already exists for this jobId with a DIFFERENT request body. One job mails one document to one destination.",
@@ -476,15 +488,15 @@ export async function lobRoutes(app: FastifyInstance) {
 
     if (!client.verifyWebhookSignature(rawBody, signature, timestamp)) {
       req.log.warn(
-        { hasSig: !!signature, hasTs: !!timestamp },
-        "lob webhook: signature verification failed",
+        { hasSig: declare.flag(!!signature), hasTs: declare.flag(!!timestamp) },
+        lit("lob webhook: signature verification failed"),
       );
       return reply.code(401).send({ error: "invalid_signature" });
     }
 
     // Replay protection (Lob guide Step 4): reject provably-stale timestamps.
     if (client.isReplay(timestamp)) {
-      req.log.warn({ timestamp }, "lob webhook: stale timestamp (possible replay)");
+      req.log.warn({ timestamp: declare.id(timestamp) }, lit("lob webhook: stale timestamp (possible replay)"));
       return reply.code(401).send({ error: "stale_timestamp" });
     }
 
@@ -505,8 +517,8 @@ export async function lobRoutes(app: FastifyInstance) {
       // retry — but logged, since an uncommitted letter id must never silently
       // become evidence for a PCC job.
       req.log.info(
-        { lobLetterId: event.lobLetterId, eventType: event.eventType },
-        "lob webhook: no committed letter for this id",
+        { lobLetterId: declare.id(event.lobLetterId), eventType: declare.id(event.eventType) },
+        lit("lob webhook: no committed letter for this id"),
       );
       return reply.code(200).send({ received: true, matched: false });
     }
