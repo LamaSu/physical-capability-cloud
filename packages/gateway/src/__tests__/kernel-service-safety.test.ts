@@ -34,13 +34,14 @@ vi.mock("../sentry.js", () => ({
   },
 }));
 
-/** While set, the next endTrace() throws once (N115). */
-const tracing = vi.hoisted(() => ({ failEnd: false }));
+/** While set, the next endTrace() throws once; `ends` counts every endTrace() (N115). */
+const tracing = vi.hoisted(() => ({ failEnd: false, ends: 0 }));
 vi.mock("../tracing.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../tracing.js")>();
   return {
     ...real,
     endTrace: (...args: Parameters<typeof real.endTrace>) => {
+      tracing.ends += 1;
       if (tracing.failEnd) {
         tracing.failEnd = false;
         throw new Error("trace end failed");
@@ -107,6 +108,7 @@ import {
   unregisterSensorAdapter,
   registerCameraAdapter,
   unregisterCameraAdapter,
+  SafetyGateway,
 } from "@pcc/kernel";
 import type { MachineAdapter, KernelConfig, SensorAdapter, CameraAdapter } from "@pcc/kernel";
 
@@ -552,6 +554,8 @@ describe("KernelService charges a failed run to the device its JobResult names (
 
 describe("telemetry never changes a job's breaker charge or its status (N115)", () => {
   const LC_TYPE = "test-working-ks-n115";
+  /** SafetyGateway's prototype, so a test can make one method throw once. */
+  const SafetyGatewayProto = SafetyGateway.prototype as unknown as { recordDeviceSuccess: (...args: unknown[]) => unknown };
   beforeAll(() => {
     try { unregisterMachineAdapter(LC_TYPE); } catch { /* not registered */ }
     registerMachineAdapter(LC_TYPE, (device, _cfg, kernelId) => new WorkingAdapter(device.id, kernelId));
@@ -565,6 +569,9 @@ describe("telemetry never changes a job's breaker charge or its status (N115)", 
     initSafetyGateway({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
     const gw = getSafetyGateway();
     const markedFailed = vi.spyOn(getRepos().jobs, "updateStatus");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const endsBefore = tracing.ends;
     let unhandled = 0;
     const on = () => void (unhandled += 1);
     process.on("unhandledRejection", on);
@@ -578,7 +585,8 @@ describe("telemetry never changes a job's breaker charge or its status (N115)", 
       process.off("unhandledRejection", on);
     }
     const failedMarks = markedFailed.mock.calls.filter(([, status]) => status === "failed").length;
-    return { circuit: gw.getStatus().circuits.get(deviceId), failedMarks, unhandled };
+    const handlingFailed = errors.mock.calls.filter(([line]) => typeof line === "string" && line.includes("completion handling failed")).length;
+    return { circuit: gw.getStatus().circuits.get(deviceId), failedMarks, unhandled, traceEnds: tracing.ends - endsBefore, handlingFailed };
   }
 
   it.each([
@@ -593,6 +601,9 @@ describe("telemetry never changes a job's breaker charge or its status (N115)", 
     expect.soft(out.circuit?.state ?? "closed", "the machine's breaker").toBe("closed");
     expect.soft(out.failedMarks, "the job marked failed").toBe(0);
     expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+    // The rest of its telemetry still ends, and the throw stays telemetry's: guarded, not the handler's.
+    expect.soft(out.traceEnds, "its trace, ended").toBe(1);
+    expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(0);
   });
 
   it("on the fallback path, a successful job whose trace's end throws: no failure is charged, it is not marked failed, nothing is unhandled", async () => {
@@ -606,5 +617,37 @@ describe("telemetry never changes a job's breaker charge or its status (N115)", 
     expect.soft(out.circuit?.state ?? "closed", "the machine's breaker").toBe("closed");
     expect.soft(out.failedMarks, "the job marked failed").toBe(0);
     expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+    expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(0);
+  });
+
+  it.each([
+    ["with the Sentry lifecycle span", false],
+    ["on the fallback path", true],
+  ])("a successful job whose completion handling itself throws (%s) is logged: no failure is charged, it is not marked failed, nothing is unhandled", async (_path, fallback) => {
+    if (fallback) {
+      vi.mocked(Sentry.startSpanManual).mockImplementationOnce(() => {
+        throw new Error("Sentry not initialised");
+      });
+    }
+    // Not telemetry: the success record itself throws, once, after the run resolved.
+    const real = SafetyGatewayProto.recordDeviceSuccess;
+    let thrown = false;
+    SafetyGatewayProto.recordDeviceSuccess = function (this: unknown, ...args: unknown[]) {
+      if (!thrown) {
+        thrown = true;
+        throw new Error("breaker store unavailable");
+      }
+      return real.apply(this, args as never);
+    };
+    try {
+      const out = await successfulJob(`kernel-ks-n115-handler-${fallback}`, `dev-n115-handler-${fallback}`);
+      expect.soft(thrown, "the success record threw").toBe(true);
+      expect.soft(out.circuit?.failures ?? 0, "failures charged to the machine").toBe(0);
+      expect.soft(out.failedMarks, "the job marked failed").toBe(0);
+      expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+      expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(1);
+    } finally {
+      SafetyGatewayProto.recordDeviceSuccess = real;
+    }
   });
 });
