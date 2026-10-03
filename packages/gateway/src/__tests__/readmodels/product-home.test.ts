@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { HELD_MILESTONE_STATUSES, NOT_HELD_MILESTONE_STATUSES } from "@pcc/spec";
+import { HELD_MILESTONE_STATUSES, NOT_HELD_MILESTONE_STATUSES, RELEASE_DECIDED_MILESTONE_STATUSES } from "@pcc/spec";
 import {
   buildCapabilities,
   buildEscrowHeld,
@@ -40,6 +40,11 @@ describe("kernels", () => {
     // A kernel that lists a capability gets the longer grace; one with no heartbeat is stale.
     expect(k).toMatchObject({ total: 6, online: 2, stale: 2, other: 2, source: "gateway_kernel_rows" });
     expect(k.rule).toMatch(/5 minutes/);
+  });
+
+  it("NEGATIVE (r1 MEDIUM 2): a heartbeat that is not a time counts as no heartbeat: stale, never online", () => {
+    const k = buildKernels({ kernels: [{ id: "bad", status: "online", lastHeartbeat: "not-a-date" }], capabilities: [] }, NOW);
+    expect(k).toMatchObject({ total: 1, online: 0, stale: 1 });
   });
 });
 
@@ -146,6 +151,45 @@ describe("escrowHeld", () => {
     expect(h.unclassifiedMilestones).toBe(0);
   });
 
+  it("escrow #3356: legacy V3 EVIDENCED and ATTESTED milestones are held", () => {
+    const h = buildEscrowHeld({
+      escrows,
+      milestones: [
+        { escrowId: "e-usdc", amount: "2", status: "evidenced" },
+        { escrowId: "e-usdc", amount: "3", status: "ATTESTED" },
+      ],
+    });
+    expect(h.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "5000000", milestones: 2 }]);
+    expect(h.unclassifiedMilestones).toBe(0);
+  });
+
+  it("NEGATIVE (escrow #3356): a RELEASE_ALLOCATED milestone is an upper bound reported apart, never added to held", () => {
+    const h = buildEscrowHeld({
+      escrows,
+      milestones: [
+        { escrowId: "e-usdc", amount: "4", status: "funded" },
+        { escrowId: "e-usdc", amount: "10", status: "release_allocated" },
+        { escrowId: "e-eur", amount: "1.50", status: "RELEASE_ALLOCATED" },
+      ],
+    });
+    expect(h.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "4000000", milestones: 1 }]);
+    expect(h.releaseDecided).toEqual({
+      bound: "at_most",
+      byCurrency: [
+        { currency: "EUR", decimals: 2, amountBaseUnits: "150", milestones: 1 },
+        { currency: "USDC", decimals: 6, amountBaseUnits: "10000000", milestones: 1 },
+      ],
+    });
+    expect(h.unclassifiedMilestones).toBe(0);
+  });
+
+  it("NEGATIVE (r1 MEDIUM 1): an escrow at no real contract address (the seed's 0xESCROW_CONTRACT_001) is simulated, never held money", () => {
+    const seeded = [{ id: "e-seed", contractAddress: "0xESCROW_CONTRACT_001", currency: "USDC" }];
+    const h = buildEscrowHeld({ escrows: seeded, milestones: [{ escrowId: "e-seed", amount: "27.00", status: "releasing" }] });
+    expect(h.byCurrency).toEqual([]);
+    expect(h.excludedSimulatedEscrows).toBe(1);
+  });
+
   it("NEGATIVE: a mock escrow is excluded entirely, even with held milestones", () => {
     const h = buildEscrowHeld({ escrows, milestones: [{ escrowId: "e-mock", amount: "500", status: "funded" }] });
     expect(h.byCurrency).toEqual([]);
@@ -171,7 +215,10 @@ describe("escrowHeld", () => {
   it("the held and not-held word sets are disjoint and published in the DTO", () => {
     const held = new Set(HELD_MILESTONE_STATUSES);
     for (const w of NOT_HELD_MILESTONE_STATUSES) expect(held.has(w), w).toBe(false);
-    expect(buildEscrowHeld({ escrows: [], milestones: [] }).heldStatuses).toEqual(HELD_MILESTONE_STATUSES);
+    const empty = buildEscrowHeld({ escrows: [], milestones: [] });
+    expect(empty.heldStatuses).toEqual(HELD_MILESTONE_STATUSES);
+    expect(empty.releaseDecidedStatuses).toEqual(RELEASE_DECIDED_MILESTONE_STATUSES);
+    expect(empty.releaseDecided).toEqual({ byCurrency: [], bound: "at_most" });
   });
 });
 
@@ -241,6 +288,9 @@ describe("GET /api/product/home on a real store", () => {
     expect(dto.jobs.state).toBe("read");
     expect(dto.jobs.total).toBeGreaterThan(0);
     expect(dto.escrowHeld.state).toBe("read");
+    // The seed's escrows are mock data at no real contract address: none of it is held money.
+    expect(dto.escrowHeld.byCurrency).toEqual([]);
+    expect(dto.escrowHeld.excludedSimulatedEscrows).toBeGreaterThan(0);
     expect(dto.settlementNetwork.basis).toBe("gateway_config");
   });
 

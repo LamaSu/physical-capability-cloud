@@ -272,9 +272,10 @@ export function useJobs(params?: { kernelId?: string; status?: string }, options
 /**
  * Product read model for one job (PX-6). Route: GET /api/jobs/:jobId/execution.
  * Always polls: every 15s while the work is in motion, every 60s once it is finished,
- * because finishing the work never makes the money final. A 404 or 401 is final (no
- * retry); any other failure is retried once and then surfaces as an error. It never
- * falls back to fixtures.
+ * because finishing the work never makes the money final. A 404, 401 or 403 is final (no
+ * retry), and the page then shows only that refusal, never data cached from an earlier read;
+ * any other failure is retried once and then surfaces as an error. It never falls back to
+ * fixtures. The cache is cleared when the signed-in identity changes (onIdentityChange).
  */
 export function useJobExecution(jobId: string | undefined) {
   return useQuery<JobExecutionDTO>({
@@ -282,7 +283,7 @@ export function useJobExecution(jobId: string | undefined) {
     queryFn: () => api.getJobExecution(jobId!),
     enabled: !!jobId,
     retry: (failureCount, error) =>
-      !(error instanceof ApiError && (error.status === 404 || error.status === 401)) && failureCount < 1,
+      !(error instanceof ApiError && (error.status === 404 || error.status === 401 || error.status === 403)) && failureCount < 1,
     refetchInterval: (query) =>
       query.state.data?.execution.terminal ? JOB_EXECUTION_TERMINAL_REFRESH_MS : JOB_EXECUTION_REFRESH_MS,
   });

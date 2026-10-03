@@ -10,8 +10,10 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import type { SettlementAxis } from "@pcc/spec";
+import { classifyMoneyStatus, type SettlementAxis } from "@pcc/spec";
 import {
+  FUNDING_WORDS,
+  UPDATE_STATUS_UNRECOGNIZED,
   buildOperatorIncomeDTO,
   buildOperatorWorkDTO,
   INCOME_HISTORY_REASON,
@@ -119,6 +121,42 @@ describe("kernel jobs", () => {
     expect(rel!.payout).not.toBe("paid");
   });
 
+  it("NEGATIVE (r1 HIGH): escrowed only while the record holds this job's milestone; never funded, refunded or released is not_held", () => {
+    const fundingOf = (escrowStatus: string, milestoneStatus: string) =>
+      work({ kernelJobs: { ok: true, value: [kj(job(), linked(escrow({ status: escrowStatus }), [milestone({ status: milestoneStatus })]))] } })
+        .items[0]!.pay.funding;
+    // The record holds the money: a funded, active or completing escrow; a funded, locked or releasing milestone.
+    for (const e of ["funded", "active", "completing"]) {
+      for (const m of ["funded", "locked", "releasing"]) expect(fundingOf(e, m), `${e}/${m}`).toBe("escrowed");
+    }
+    // Never funded, refunded to the payer, or released: the record does not hold it.
+    for (const [e, m] of [
+      ["created", "funded"],
+      ["refunded", "funded"],
+      ["funded", "unfunded"],
+      ["funded", "refunded"],
+      ["active", "released"],
+    ]) {
+      expect(fundingOf(e!, m!), `${e}/${m}`).toBe("not_held");
+    }
+    // Contested, conflicting or unrecognized: unknown, never escrowed.
+    for (const [e, m] of [
+      ["disputed", "funded"],
+      ["funded", "disputed"],
+      ["funded", "slashed"],
+      ["completed", "funded"],
+      ["funded", "on_hold"],
+      ["funded", "completed"],
+    ]) {
+      expect(fundingOf(e!, m!), `${e}/${m}`).toBe("unknown");
+    }
+  });
+
+  it("every word the funding decision reads is a known word of the canonical money map", () => {
+    expect(FUNDING_WORDS.length).toBeGreaterThan(10);
+    for (const w of FUNDING_WORDS) expect(classifyMoneyStatus(w).known, w).toBe(true);
+  });
+
   it("NEGATIVE: no link, an ambiguous link, an unreadable link or no milestone for the job is unknown funding with no amount", () => {
     for (const s of [
       { link: "not_linked" } as SettlementSource,
@@ -142,7 +180,7 @@ describe("kernel jobs", () => {
     expect(item.actions.map((a) => [a.op, a.allowed, a.route.path])).toEqual([
       ["approve", true, "/api/operator/approvals/appr-1/approve"],
       ["reject", true, "/api/operator/approvals/appr-1/reject"],
-      ["update_status", true, "/api/jobs/job-x/status"],
+      ["update_status", false, "/api/jobs/job-x/status"],
     ]);
   });
 
@@ -152,6 +190,15 @@ describe("kernel jobs", () => {
     expect(dto.items[0]).toMatchObject({ source: "approval", phase: "awaiting_me", capabilityType: "fdm", payout: null });
     expect(dto.items[0]!.pay.funding).toBe("unknown");
     expect(dto.items[0]!.refs).toEqual({ approvalId: "appr-1" });
+  });
+
+  it("NEGATIVE (r1 MEDIUM): a status update the route would refuse is not offered as allowed, and says why", () => {
+    // PATCH /api/jobs/:jobId/status recognizes the submitter or a kernel `operatorId` that kernels
+    // do not record, never the kernel operator's proven wallet: an open job's update is not allowed.
+    const [item] = work({ kernelJobs: { ok: true, value: [kj(job({ status: "executing" }))] } }).items;
+    expect(item!.actions).toEqual([
+      { op: "update_status", allowed: false, reasonIfNot: UPDATE_STATUS_UNRECOGNIZED, route: { method: "PATCH", path: "/api/jobs/job-x/status" } },
+    ]);
   });
 
   it("NEGATIVE: a finished job offers no status update, and says why", () => {
@@ -227,6 +274,23 @@ describe("job offers", () => {
     expect(dto.items.filter((i) => i.source === "job_offer")).toEqual([]);
     expect(dto.sources.job_offer).toMatchObject({ state: "unavailable", count: 0, durability: "memory" });
   });
+
+  it("NEGATIVE: a failed capability read leaves kernel jobs listed but says their capability names are missing", () => {
+    const dto = work({ capabilities: { ok: false }, kernelJobs: { ok: true, value: [kj(job())] } });
+    expect(dto.items[0]).toMatchObject({ source: "kernel_job", capabilityType: null, title: null });
+    expect(dto.sources.kernel_job.state).toBe("read");
+    expect(dto.sources.kernel_job.reason).toMatch(/capabilit/);
+    // With the capabilities read, nothing is missing.
+    expect(work({ kernelJobs: { ok: true, value: [kj(job())] } }).sources.kernel_job.reason).toBeNull();
+  });
+
+  it("NEGATIVE (r1 MEDIUM): a failed capability read is not 'no matching offers': the offer source is unavailable", () => {
+    // Open offers are matched to the caller's capability types; without them no match can be made.
+    const dto = work({ capabilities: { ok: false }, openOffers: { ok: true, value: [offer()] } });
+    expect(dto.items.filter((i) => i.source === "job_offer")).toEqual([]);
+    expect(dto.sources.job_offer).toMatchObject({ state: "unavailable", count: 0 });
+    expect(dto.sources.job_offer.reason).toMatch(/capabilit/);
+  });
 });
 
 // ── Whole DTO ───────────────────────────────────────────────────────────────
@@ -289,9 +353,10 @@ describe("OperatorIncomeDTO", () => {
       AS_OF,
     );
     expect(dto.schemaId).toBe("pcc.operator-income/v1");
-    expect(dto.rows.map((r) => r.jobId)).toEqual(["r", "h1", "h2"]);
-    expect(dto.rows[0]).toMatchObject({ workRef: "kernel_job:r", payout: "reported_released", amountBaseUnits: "12500000", settledAt: null });
-    expect(dto.rows[0]!.moneyStatus?.sourceStatus).toBe("released");
+    expect(dto.rows.map((r) => r.jobId)).toEqual(["h1", "h2", "r"]);
+    const r = dto.rows.find((row) => row.jobId === "r")!;
+    expect(r).toMatchObject({ workRef: "kernel_job:r", payout: "reported_released", amountBaseUnits: "12500000", settledAt: null });
+    expect(r.moneyStatus?.sourceStatus).toBe("released");
     expect(dto.totalsByStatus).toEqual([
       { status: "not_paid", currency: "USDC", decimals: 6, amountBaseUnits: "8000000", rows: 2 },
       { status: "reported_released", currency: "USDC", decimals: 6, amountBaseUnits: "12500000", rows: 1 },
@@ -340,6 +405,37 @@ describe("OperatorIncomeDTO", () => {
 
 const OPERATOR_NYC = "0x1111111111111111111111111111111111111111"; // seeded kernel-nyc operatorAddress
 
+describe("NEGATIVE (r1 MEDIUM): a truncated list can be continued, and income is bounded", () => {
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => kj(job({ id: `job-${String(i).padStart(4, "0")}` }), linked()));
+
+  it("work: past the limit, nextOffset reads the rest; the last page says there is no more", () => {
+    const src = sources({ kernelJobs: { ok: true, value: many(501) } });
+    const first = buildOperatorWorkDTO(src, AS_OF, { limit: 500, offset: 0, nowMs: NOW });
+    expect(first).toMatchObject({ total: 501, offset: 0, truncated: true, nextOffset: 500 });
+    expect(first.items).toHaveLength(500);
+    const rest = buildOperatorWorkDTO(src, AS_OF, { limit: 500, offset: first.nextOffset!, nowMs: NOW });
+    expect(rest).toMatchObject({ total: 501, offset: 500, truncated: false, nextOffset: null });
+    expect(rest.items).toHaveLength(1);
+    // Every item is reachable exactly once across the pages.
+    const ids = [...first.items, ...rest.items].map((i) => i.id);
+    expect(new Set(ids).size).toBe(501);
+  });
+
+  it("income: rows come in pages of the same bounds, in a stable order; the totals count every row", () => {
+    const src = sources({ kernelJobs: { ok: true, value: many(3) } });
+    const page1 = buildOperatorIncomeDTO(src, AS_OF, { limit: 2, offset: 0 });
+    expect(page1).toMatchObject({ total: 3, offset: 0, truncated: true, nextOffset: 2 });
+    expect(page1.rows.map((r) => r.jobId)).toEqual(["job-0000", "job-0001"]);
+    const page2 = buildOperatorIncomeDTO(src, AS_OF, { limit: 2, offset: 2 });
+    expect(page2).toMatchObject({ total: 3, offset: 2, truncated: false, nextOffset: null });
+    expect(page2.rows.map((r) => r.jobId)).toEqual(["job-0002"]);
+    // 3 x 12.50 USDC, not_paid: the totals do not depend on the page.
+    expect(page1.totalsByStatus).toEqual(page2.totalsByStatus);
+    expect(page1.totalsByStatus).toEqual([{ status: "not_paid", currency: "USDC", decimals: 6, amountBaseUnits: "37500000", rows: 3 }]);
+  });
+});
+
 describe("GET /api/operator/work and /api/operator/income", () => {
   let app: FastifyInstance;
 
@@ -357,6 +453,10 @@ describe("GET /api/operator/work and /api/operator/income", () => {
     app.addHook("onRequest", async (req) => {
       const p = req.headers["x-test-principal"];
       if (typeof p === "string") (req as any).operatorId = p;
+      // WP-A's gate proves a wallet by SIWE (#353 r3): a wallet principal reads as proven.
+      const w = req.headers["x-test-proven-wallet"];
+      const proven = typeof w === "string" ? (w === "none" ? null : w) : typeof p === "string" ? p : null;
+      (req as any).provenWallet = typeof proven === "string" && /^0x[0-9a-fA-F]{40}$/.test(proven) ? proven.toLowerCase() : null;
     });
     await app.register(operatorWorkRoutes);
     await app.ready();
@@ -374,6 +474,20 @@ describe("GET /api/operator/work and /api/operator/income", () => {
   it("NEGATIVE: anonymous callers get 401 on both routes", async () => {
     expect((await get("/api/operator/work", null)).statusCode).toBe(401);
     expect((await get("/api/operator/income", null)).statusCode).toBe(401);
+  });
+
+  it("NEGATIVE (#353 r3): a key that only CLAIMS the operator's id, or an email, gets 403 and nothing", async () => {
+    for (const url of ["/api/operator/work", "/api/operator/income"]) {
+      const claimed = await app.inject({
+        method: "GET",
+        url,
+        headers: { "x-test-principal": OPERATOR_NYC, "x-test-proven-wallet": "none" },
+      });
+      expect(claimed.statusCode, url).toBe(403);
+      expect(claimed.json().error).toBe("identity_unverified");
+      expect(claimed.body).not.toMatch(/kernel-nyc|job-00/);
+      expect((await get(url, "someone-else@example.invalid")).statusCode, url).toBe(403);
+    }
   });
 
   it("lists the operator's own kernel jobs and matching offers, and nothing of another operator's", async () => {
@@ -395,8 +509,34 @@ describe("GET /api/operator/work and /api/operator/income", () => {
     expect(dto.kernels.map((k: any) => k.kernelId)).toEqual(["kernel-nyc"]);
   });
 
-  it("a caller with no kernels gets an empty, fully described read", async () => {
-    const dto = (await get("/api/operator/work", "someone-else@example.invalid")).json();
+  it("a kernel recorded under a checksummed (mixed-case) address belongs to that proven wallet", async () => {
+    // A SIWE session address is EIP-55 checksummed, so a kernel registered from one records
+    // mixed case, while the proven wallet is lowercase.
+    const checksummed = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
+    const { schema } = await import("@pcc/store");
+    (await import("../../db.js")).getStore().db.insert(schema.shopKernels).values({
+      id: "kernel-mixed", name: "Mixed", operatorAddress: checksummed, location: { lat: 0, lng: 0 },
+      physicalAddress: "x", maxAssuranceTier: 1, publicKey: "mixed-key", reputation: 0, totalJobsCompleted: 0,
+      status: "online", registeredAt: new Date().toISOString(), lastHeartbeat: new Date().toISOString(), version: "1",
+    } as any).run();
+    const dto = (await get("/api/operator/work", checksummed.toLowerCase())).json();
+    expect(dto.kernels.map((k: any) => k.kernelId)).toEqual(["kernel-mixed"]);
+  });
+
+  it("NEGATIVE (#353 r3): the operator is the PROVEN wallet, never the key's claimed operator id", async () => {
+    // A key claiming kernel-nyc's operator, proven as another wallet, sees that wallet's work: none.
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/operator/work",
+      headers: { "x-test-principal": OPERATOR_NYC, "x-test-proven-wallet": "0x9999999999999999999999999999999999999999" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().kernels).toEqual([]);
+    expect(res.body).not.toMatch(/kernel-nyc|job-00/);
+  });
+
+  it("a proven wallet with no kernels gets an empty, fully described read", async () => {
+    const dto = (await get("/api/operator/work", "0x9999999999999999999999999999999999999999")).json();
     expect(dto.kernels).toEqual([]);
     expect(dto.items).toEqual([]);
     expect(dto.sources.kernel_job.state).toBe("read");
@@ -408,6 +548,26 @@ describe("GET /api/operator/work and /api/operator/income", () => {
     const two = (await get("/api/operator/work?limit=2")).json();
     expect(two.items).toHaveLength(2);
     expect(two.truncated).toBe(true);
+    // The next page continues where the first ended (r1 MEDIUM: a cut list had no continuation).
+    const next = (await get(`/api/operator/work?limit=2&offset=${two.nextOffset}`)).json();
+    expect(next.offset).toBe(2);
+    expect(next.items.map((i: { id: string }) => i.id)).not.toContain(two.items[0].id);
+    for (const bad of ["-1", "1.5", "abc", ""]) {
+      const res = await get(`/api/operator/work?offset=${bad}`);
+      expect(res.statusCode, `offset=${bad}`).toBe(400);
+      expect(res.json().error).toBe("invalid_offset");
+    }
+    // A repeated parameter arrives as a list: refused as invalid (400), never a crash (500).
+    for (const url of ["/api/operator/work?offset=1&offset=2", "/api/operator/work?limit=1&limit=2", "/api/operator/income?offset=1&offset=2"]) {
+      expect((await get(url)).statusCode, url).toBe(400);
+    }
+    // Identity comes first: a caller with no credential gets 401 whatever its paging says.
+    expect((await get("/api/operator/work?offset=-1", null)).statusCode).toBe(401);
+    expect((await get("/api/operator/income?limit=0", null)).statusCode).toBe(401);
+    // Income takes the same bounds.
+    expect((await get("/api/operator/income?limit=0")).statusCode).toBe(400);
+    expect((await get("/api/operator/income?offset=-1")).statusCode).toBe(400);
+    expect((await get("/api/operator/income?limit=1")).json().rows.length).toBeLessThanOrEqual(1);
   });
 
   it("income lists the operator's linked jobs only, with no history claimed", async () => {

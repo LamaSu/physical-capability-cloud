@@ -13,10 +13,13 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { JOB_EXECUTION_SCHEMA_ID, type JobExecutionDTO } from "@pcc/spec";
 import {
+  RECONCILED_WORDS,
   authorizeJobRead,
   buildJobExecutionDTO,
   hasValidAdminKey,
+  jobReadCallerOf,
   loadJobExecutionSources,
+  precheckJobRead,
   reconcilePayout,
   type JobExecutionSources,
   type JobRow,
@@ -78,13 +81,14 @@ const milestone = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function linked(e = escrow(), ms = [milestone()]): SettlementSource {
+function linked(e = escrow(), ms = [milestone()], stepClaimants = 1): SettlementSource {
   return {
     link: "linked",
     basis: "negotiation_session_escrow_address",
     matches: ["negotiation_session_escrow_address", "negotiation_session_cwm"],
     escrow: e as any,
     milestones: ms as any,
+    stepClaimants,
   };
 }
 
@@ -177,14 +181,24 @@ describe("settlement axis", () => {
     expect(dto.settlement.linkMatches).toEqual(["negotiation_session_escrow_address", "negotiation_session_cwm"]);
   });
 
-  it("NEGATIVE (review P1-3): a released milestone never beats a refunded, disputed or unrecognized escrow", () => {
-    for (const e of ["refunded", "disputed", "slashed", "expired", "mystery-state"]) {
+  it("NEGATIVE (review P1-3): a released milestone never beats a refunded, disputed, slashed or expired escrow: a conflict, with its notice", () => {
+    for (const e of ["refunded", "settled_refunded", "disputed", "slashed", "expired"]) {
       const dto = build({ settlement: { ok: true, value: linked(escrow({ status: e }), [milestone({ status: "released" })]) } });
       expect(dto.settlement.payout, e).toBe("unknown");
+      expect(dto.settlement.payoutUnknownReason, e).toBe("records_conflict");
       expect(dto.settlement.payoutConfirmation, e).toBeNull();
+      expect(dto.notices, e).toContain("settlement_records_conflict");
     }
-    const conflict = build({ settlement: { ok: true, value: linked(escrow({ status: "refunded" }), [milestone({ status: "released" })]) } });
-    expect(conflict.notices).toContain("settlement_records_conflict");
+  });
+
+  it("NEGATIVE (r3 P1-3): an unrecognized escrow or milestone status is unknown AND says so (it used to raise no notice)", () => {
+    for (const [e, m] of [["mystery-state", "released"], ["active", "mystery-state"], ["RELEASED?", "released"]] as const) {
+      const dto = build({ settlement: { ok: true, value: linked(escrow({ status: e }), [milestone({ status: m })]) } });
+      expect(dto.settlement.payout, `${e}/${m}`).toBe("unknown");
+      expect(dto.settlement.payoutUnknownReason, `${e}/${m}`).toBe("status_unrecognized");
+      expect(dto.notices, `${e}/${m}`).toContain("settlement_status_unrecognized");
+      expect(dto.notices, `${e}/${m}`).not.toContain("settlement_records_conflict");
+    }
   });
 
   it("NEGATIVE (review P1-3): an escrow saying everything was released never pays an unreleased milestone", () => {
@@ -193,27 +207,44 @@ describe("settlement axis", () => {
     expect(dto.notices).toContain("settlement_records_conflict");
   });
 
-  it("reconcilePayout: the full milestone x escrow tone table", () => {
+  it("reconcilePayout reads exact words: the full milestone x escrow table", () => {
     const v = (s: string, vocabulary: "escrow_record" | "escrow_milestone") => {
       const dto = build({ settlement: { ok: true, value: linked(escrow({ status: vocabulary === "escrow_record" ? s : "active" }), [milestone({ status: vocabulary === "escrow_milestone" ? s : "funded" })]) } });
       return vocabulary === "escrow_record" ? dto.settlement.record!.escrow : dto.settlement.record!.milestone!.status;
     };
     const released = v("released", "escrow_milestone");
+    const settledReleased = v("SETTLED_RELEASED", "escrow_milestone");
     const funded = v("funded", "escrow_milestone");
     const refundedM = v("refunded", "escrow_milestone");
+    const completedM = v("completed", "escrow_milestone");
     const active = v("active", "escrow_record");
     const completed = v("completed", "escrow_record");
     const refundedE = v("refunded", "escrow_record");
+    const disputed = v("disputed", "escrow_record");
     const unknownE = v("??", "escrow_record");
-    expect(reconcilePayout(released, active)).toEqual({ payout: "reported_released", conflict: false });
-    expect(reconcilePayout(released, completed)).toEqual({ payout: "reported_released", conflict: false });
-    expect(reconcilePayout(released, refundedE)).toEqual({ payout: "unknown", conflict: true });
-    expect(reconcilePayout(refundedM, active)).toEqual({ payout: "refunded", conflict: false });
-    expect(reconcilePayout(refundedM, completed)).toEqual({ payout: "unknown", conflict: true });
-    expect(reconcilePayout(funded, active)).toEqual({ payout: "not_paid", conflict: false });
-    expect(reconcilePayout(funded, refundedE)).toEqual({ payout: "not_paid", conflict: false });
-    expect(reconcilePayout(funded, completed)).toEqual({ payout: "unknown", conflict: true });
-    expect(reconcilePayout(released, unknownE)).toEqual({ payout: "unknown", conflict: false });
+    const ok = (payout: string) => ({ payout, unknownReason: null });
+    const conflict = { payout: "unknown", unknownReason: "records_conflict" };
+    expect(reconcilePayout(released, active)).toEqual(ok("reported_released"));
+    expect(reconcilePayout(settledReleased, active)).toEqual(ok("reported_released"));
+    expect(reconcilePayout(released, completed)).toEqual(ok("reported_released"));
+    expect(reconcilePayout(released, refundedE)).toEqual(conflict);
+    expect(reconcilePayout(released, disputed)).toEqual(conflict);
+    expect(reconcilePayout(refundedM, active)).toEqual(ok("refunded"));
+    expect(reconcilePayout(v("SETTLED_REFUNDED", "escrow_milestone"), active)).toEqual(ok("refunded"));
+    expect(reconcilePayout(released, v("SETTLED_REFUNDED", "escrow_record"))).toEqual(conflict);
+    expect(reconcilePayout(released, v("slashed", "escrow_record"))).toEqual(conflict);
+    expect(reconcilePayout(released, v("expired", "escrow_record"))).toEqual(conflict);
+    expect(reconcilePayout(refundedM, completed)).toEqual(conflict);
+    expect(reconcilePayout(funded, active)).toEqual(ok("not_paid"));
+    expect(reconcilePayout(funded, refundedE)).toEqual(ok("not_paid"));
+    expect(reconcilePayout(funded, completed)).toEqual(conflict);
+    expect(reconcilePayout(completedM, active)).toEqual({ payout: "unknown", unknownReason: "status_ambiguous" });
+    expect(reconcilePayout(released, unknownE)).toEqual({ payout: "unknown", unknownReason: "status_unrecognized" });
+  });
+
+  it("every word the reconciliation reads is a word the canonical money map knows", async () => {
+    const { classifyMoneyStatus } = await import("@pcc/spec");
+    for (const w of RECONCILED_WORDS) expect(classifyMoneyStatus(w).known, w).toBe(true);
   });
 
   it("NEGATIVE (PX-1): no gateway escrow record, whatever its words, produces paid", async () => {
@@ -227,10 +258,28 @@ describe("settlement axis", () => {
     }
   });
 
-  it("NEGATIVE: a milestone saying 'completed' is ambiguous (completion is not release): unknown", () => {
+  it("NEGATIVE: a milestone saying 'completed' is ambiguous (completion is not release): unknown, and says why", () => {
     const dto = build({ settlement: { ok: true, value: linked(escrow({ status: "active" }), [milestone({ status: "completed" })]) } });
     expect(dto.settlement.payout).toBe("unknown");
+    expect(dto.settlement.payoutUnknownReason).toBe("status_ambiguous");
     expect(dto.settlement.payoutConfirmation).toBeNull();
+  });
+
+  it("NEGATIVE (r3 P1-1): a milestone another job could claim is not this job's: unknown, even when it says released", () => {
+    for (const status of ["released", "funded", "refunded"]) {
+      const dto = build({ settlement: { ok: true, value: linked(escrow({ status: "active" }), [milestone({ status })], 2) } });
+      expect(dto.settlement.record?.milestoneMatch, status).toBe("shared_by_jobs");
+      expect(dto.settlement.record?.milestoneClaimants, status).toBe(2);
+      expect(dto.settlement.record?.milestone, status).toBeNull();
+      expect(dto.settlement.payout, status).toBe("unknown");
+      expect(dto.settlement.payoutBasis, status).toBeNull();
+      expect(dto.settlement.payoutUnknownReason, status).toBe("milestone_shared");
+      expect(dto.notices, status).toContain("milestone_shared_by_jobs");
+    }
+    const alone = build({ settlement: { ok: true, value: linked(escrow({ status: "active" }), [milestone({ status: "released" })], 1) } });
+    expect(alone.settlement.record).toMatchObject({ milestoneMatch: "exact", milestoneClaimants: 1 });
+    expect(alone.settlement.payout).toBe("reported_released");
+    expect(alone.settlement.payoutUnknownReason).toBeNull();
   });
 
   it("a V-next word on the milestone record is read the same way: settled_released is reported_released", () => {
@@ -272,8 +321,10 @@ describe("settlement axis", () => {
     for (const e of ["completed", "released", "refunded", "funded"]) {
       const dto = build({ settlement: { ok: true, value: linked(escrow({ status: e }), []) } });
       expect(dto.settlement.record?.milestoneMatch, e).toBe("no_milestones");
+      expect(dto.settlement.record?.milestoneClaimants, e).toBeNull();
       expect(dto.settlement.payout, e).toBe("unknown");
       expect(dto.settlement.payoutBasis, e).toBeNull();
+      expect(dto.settlement.payoutUnknownReason, e).toBe("no_single_milestone");
     }
   });
 
@@ -433,6 +484,8 @@ describe("NEGATIVE: a failed read is unavailable, never a fallback", () => {
 // ── Loader + route against a real (in-memory) store ─────────────────────────
 
 const OPERATOR_NYC = "0x1111111111111111111111111111111111111111"; // seeded kernel-nyc operatorAddress
+const BUYER = "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
+const STRANGER = "0x9999999999999999999999999999999999999999";
 const ADMIN_KEY = "test-admin-key-for-job-execution";
 
 describe("GET /api/jobs/:jobId/execution", () => {
@@ -443,10 +496,16 @@ describe("GET /api/jobs/:jobId/execution", () => {
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: true });
     app = Fastify({ logger: false });
-    // Stand-in for the API gate: it sets req.operatorId from the API key.
+    // Stand-in for the API gate: it sets req.operatorId from the API key, and (WP-A #326)
+    // req.provenWallet only for a SIWE session or a key minted from one.
     app.addHook("onRequest", async (req) => {
       const p = req.headers["x-test-principal"];
       if (typeof p === "string") (req as any).operatorId = p;
+      const w = req.headers["x-test-proven-wallet"];
+      (req as any).provenWallet = typeof w === "string" ? w.toLowerCase() : null;
+      // Stand-in for tenant resolution from the key.
+      const t = req.headers["x-test-tenant"];
+      if (typeof t === "string") (req as any).tenantId = t;
     });
     await app.register(jobRoutes);
     await app.ready();
@@ -459,11 +518,21 @@ describe("GET /api/jobs/:jobId/execution", () => {
     delete process.env.PCC_ADMIN_KEY;
   });
 
-  const get = async (id: string, principal: string | null = OPERATOR_NYC, headers: Record<string, string> = {}) =>
+  /** `proven`: the wallet the API gate proved (defaults to the principal); null for an unproven key. */
+  const get = async (
+    id: string,
+    principal: string | null = OPERATOR_NYC,
+    headers: Record<string, string> = {},
+    proven: string | null = principal,
+  ) =>
     app.inject({
       method: "GET",
       url: `/api/jobs/${id}/execution`,
-      headers: { ...(principal ? { "x-test-principal": principal } : {}), ...headers },
+      headers: {
+        ...(principal ? { "x-test-principal": principal } : {}),
+        ...(proven ? { "x-test-proven-wallet": proven } : {}),
+        ...headers,
+      },
     });
 
   const insertEscrow = (id: string, cwmId: string, contractAddress: string, status: string) =>
@@ -520,14 +589,17 @@ describe("GET /api/jobs/:jobId/execution", () => {
     expect(dto.settlement.linkMatches).toEqual(["job_cwm"]);
     expect(dto.settlement.record?.escrowId).toBe("esc-001");
     expect(dto.settlement.record?.milestoneMatch).toBe("step_not_in_escrow");
-    expect(dto.settlement.payout).toBe("unknown");
+    // The seed's esc-001 sits at 0xESCROW_CONTRACT_001, no real contract address: it is mock data,
+    // so the record is simulated and its payout is simulated, never a real unknown (#409 r1 MEDIUM 1).
+    expect(dto.settlement.record?.simulated).toBe(true);
+    expect(dto.settlement.payout).toBe("simulated");
   });
 
   it("links a paid-job-flow job through its session; completed + funded is not_paid", async () => {
     insertEscrow("esc-rm-1", "cwm-rm-1", "0x2222222222222222222222222222222222222222", "funded");
     insertMilestone("ms-rm-1", "esc-rm-1", "step-rm-1", "funded");
     insertJob("job-rm-1", "step-rm-1", "cwm-rm-1", { assuranceTier: 2 });
-    await insertSession("neg-rm-1", "job-rm-1", { escrowAddress: "0x2222222222222222222222222222222222222222", cwmId: "cwm-rm-1" });
+    await insertSession("neg-rm-1", "job-rm-1", { escrowAddress: "0x2222222222222222222222222222222222222222", cwmId: "cwm-rm-1", userAgentId: BUYER });
     const dto = (await get("job-rm-1")).json() as JobExecutionDTO;
     expect(dto.settlement.link).toBe("linked");
     expect(dto.settlement.linkBasis).toBe("negotiation_session_escrow_address");
@@ -634,22 +706,41 @@ describe("GET /api/jobs/:jobId/execution", () => {
           delete process.env.TENANT_ENFORCE;
         });
 
-        it("anonymous callers get 401", async () => {
-          expect((await get("job-rm-1", null)).statusCode).toBe(401);
+        it("anonymous callers get the same 401 for an existing and a missing job (identity before lookup)", async () => {
+          const existing = await get("job-rm-1", null);
+          const missing = await get("no-such-job-rm", null);
+          expect(existing.statusCode).toBe(401);
+          expect(missing.statusCode).toBe(401);
+          expect(existing.body).toBe(missing.body);
         });
 
-        it("a stranger (neither operator nor buyer) gets 404, not the job", async () => {
-          const res = await get("job-rm-1", "0x9999999999999999999999999999999999999999");
+        it("NEGATIVE (r3 P1-5): a key that merely CLAIMS the operator's id, with no proven wallet, is 403 identity_unverified, the same for a missing job", async () => {
+          const claimed = await get("job-rm-1", OPERATOR_NYC, {}, null);
+          const missing = await get("no-such-job-rm", OPERATOR_NYC, {}, null);
+          expect(claimed.statusCode).toBe(403);
+          expect(claimed.json().error).toBe("identity_unverified");
+          expect(claimed.body).toBe(missing.body);
+          expect(claimed.body).not.toContain("esc-rm-1");
+          // The recorded buyer's id, claimed without proof, fares no better.
+          expect((await get("job-rm-1", BUYER, {}, null)).statusCode).toBe(403);
+        });
+
+        it("a proven stranger (neither operator nor buyer) gets the same 404 as a missing job", async () => {
+          const res = await get("job-rm-1", STRANGER);
+          const missing = await get("no-such-job-rm", STRANGER);
           expect(res.statusCode).toBe(404);
+          expect(missing.statusCode).toBe(404);
+          expect(res.json().error).toBe(missing.json().error);
           expect(res.body).not.toContain("esc-rm-1");
         });
 
-        it("the kernel operator reads it (case-insensitive principal)", async () => {
-          expect((await get("job-rm-1", OPERATOR_NYC.toUpperCase().replace("0X", "0x"))).statusCode).toBe(200);
+        it("the kernel operator's proven wallet reads it (any letter case)", async () => {
+          const upper = OPERATOR_NYC.toUpperCase().replace("0X", "0x");
+          expect((await get("job-rm-1", "operator@example.invalid", {}, upper)).statusCode).toBe(200);
         });
 
-        it("the recorded buyer reads it", async () => {
-          expect((await get("job-rm-1", "agent-buyer-1")).statusCode).toBe(200);
+        it("the recorded buyer's proven wallet reads it", async () => {
+          expect((await get("job-rm-1", BUYER)).statusCode).toBe(200);
         });
 
         it("an admin key reads it; a wrong admin key does not", async () => {
@@ -657,7 +748,8 @@ describe("GET /api/jobs/:jobId/execution", () => {
           try {
             expect((await get("job-rm-1", null, { "x-admin-key": ADMIN_KEY })).statusCode).toBe(200);
             expect((await get("job-rm-1", null, { "x-admin-key": ADMIN_KEY + "x" })).statusCode).toBe(401);
-            expect((await get("job-rm-1", "0x9999999999999999999999999999999999999999", { "x-admin-key": "nope" })).statusCode).toBe(404);
+            expect((await get("job-rm-1", STRANGER, { "x-admin-key": "nope" })).statusCode).toBe(404);
+            expect((await get("job-rm-1", "someone@example.invalid", { "x-admin-key": "nope" }, null)).statusCode).toBe(403);
           } finally {
             delete process.env.PCC_ADMIN_KEY;
           }
@@ -676,6 +768,29 @@ describe("GET /api/jobs/:jobId/execution", () => {
       expect((await get("job-rm-tenant")).statusCode).toBe(200);
     });
 
+    it("NEGATIVE (scout-alpha): under TENANT_ENFORCE the job's evidence is still counted, since no writer sets evidence_bundles.tenant_id", async () => {
+      insertJob("job-rm-tenant-ev", "s", "cwm-rm-tenant-ev", { status: "completed", progress: 100, tenantId: "tenant-a" });
+      // Written the way every production writer writes a bundle: no tenantId.
+      getStore().repos.evidence.insert({
+        id: "bundle-rm-tenant-ev", jobId: "job-rm-tenant-ev", stepId: "s", kernelId: "kernel-nyc", assuranceTier: 1,
+        bundleHash: "sha256:" + "a".repeat(64),
+        kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "secp256k1", value: "gateway-auto-sign" },
+        createdAt: now,
+      } as any);
+      getStore().repos.evidence.insertEvent({
+        id: "event-rm-tenant-ev", bundleId: "bundle-rm-tenant-ev", type: "execution_completed", timestamp: now,
+        source: { deviceId: "gateway", deviceType: "machine", kernelId: "kernel-nyc" }, payload: {}, hash: "sha256:" + "b".repeat(64),
+      } as any);
+      process.env.TENANT_ENFORCE = "true";
+      try {
+        const res = await get("job-rm-tenant-ev", OPERATOR_NYC, { "x-test-tenant": "tenant-a" });
+        expect(res.statusCode, res.body).toBe(200);
+        expect(res.json().evidence).toMatchObject({ bundleCount: 1, eventCount: 1 });
+      } finally {
+        delete process.env.TENANT_ENFORCE;
+      }
+    });
+
     it("hasValidAdminKey: unset key grants nothing; comparison is exact", () => {
       expect(hasValidAdminKey("anything", undefined)).toBe(false);
       expect(hasValidAdminKey("anything", "")).toBe(false);
@@ -686,10 +801,86 @@ describe("GET /api/jobs/:jobId/execution", () => {
 
     it("authorizeJobRead: a job with two sessions records no single buyer", async () => {
       insertJob("job-two-sess", "s-2", "cwm-two");
-      await insertSession("neg-two-a", "job-two-sess", { userAgentId: "agent-x" });
-      await insertSession("neg-two-b", "job-two-sess", { userAgentId: "agent-y" });
+      await insertSession("neg-two-a", "job-two-sess", { userAgentId: BUYER });
+      await insertSession("neg-two-b", "job-two-sess", { userAgentId: STRANGER });
       const job = getStore().repos.jobs.findById("job-two-sess") as any;
-      expect(authorizeJobRead(job, { principal: "agent-x" }, getStore().repos as any, getStore().db).allow).toBe(false);
+      expect(authorizeJobRead(job, BUYER, getStore().repos as any, getStore().db).allow).toBe(false);
+    });
+
+    it("a buyer recorded in another letter case (a checksummed address) still matches its proven wallet", async () => {
+      insertJob("job-mixed-buyer", "s-m", "cwm-mixed");
+      await insertSession("neg-mixed", "job-mixed-buyer", { userAgentId: BUYER.toUpperCase().replace("0X", "0x") });
+      expect((await get("job-mixed-buyer", BUYER)).statusCode).toBe(200);
+      const job = getStore().repos.jobs.findById("job-mixed-buyer") as any;
+      expect(authorizeJobRead(job, BUYER, getStore().repos as any, getStore().db)).toEqual({ allow: true, as: "buyer" });
+    });
+
+    it("NEGATIVE: a buyer or operator recorded as a label or an email never matches a proven wallet", async () => {
+      insertJob("job-label-buyer", "s-l", "cwm-label");
+      await insertSession("neg-label", "job-label-buyer", { userAgentId: "agent-buyer-1" });
+      const job = getStore().repos.jobs.findById("job-label-buyer") as any;
+      const repos = { kernels: { findById: () => ({ operatorAddress: "ops@example.invalid" }) } };
+      expect(authorizeJobRead(job, BUYER, repos as any, getStore().db)).toEqual({ allow: false, reason: "not_a_party" });
+      expect((await get("job-label-buyer", BUYER)).statusCode).toBe(404);
+    });
+
+    it("precheckJobRead: admin first, then a credential, then a proven wallet", () => {
+      const prev = process.env.PCC_ADMIN_KEY;
+      process.env.PCC_ADMIN_KEY = ADMIN_KEY;
+      try {
+        expect(precheckJobRead({ authenticated: false, provenWallet: null, adminKey: ADMIN_KEY })).toEqual({ proceed: true, as: "admin" });
+        expect(precheckJobRead({ authenticated: false, provenWallet: null })).toEqual({ proceed: false, reason: "unauthenticated" });
+        expect(precheckJobRead({ authenticated: true, provenWallet: null })).toEqual({ proceed: false, reason: "identity_unverified" });
+        expect(precheckJobRead({ authenticated: true, provenWallet: BUYER })).toEqual({ proceed: true, as: "proven", wallet: BUYER });
+      } finally {
+        if (prev === undefined) delete process.env.PCC_ADMIN_KEY;
+        else process.env.PCC_ADMIN_KEY = prev;
+      }
+    });
+
+    it("jobReadCallerOf: a proven wallet comes only from the gate's provenWallet, never from an operator id", () => {
+      const req = (r: Record<string, unknown>) => ({ headers: {}, ...r });
+      expect(jobReadCallerOf(req({ operatorId: OPERATOR_NYC }))).toEqual({ authenticated: true, provenWallet: null, adminKey: null });
+      expect(jobReadCallerOf(req({ userId: OPERATOR_NYC }))).toMatchObject({ authenticated: true, provenWallet: null });
+      expect(jobReadCallerOf(req({ operatorId: "x", provenWallet: OPERATOR_NYC.toUpperCase().replace("0X", "0x") })).provenWallet).toBe(OPERATOR_NYC);
+      expect(jobReadCallerOf(req({ provenWallet: "not-an-address" })).provenWallet).toBeNull();
+      expect(jobReadCallerOf(req({}))).toEqual({ authenticated: false, provenWallet: null, adminKey: null });
+    });
+
+    it("NEGATIVE (r3 P1-1): two jobs on the same CWM and step share its one milestone, so neither is paid from it", async () => {
+      insertEscrow("esc-sh-1", "cwm-sh-1", "0x3333333333333333333333333333333333333333", "active");
+      insertMilestone("ms-sh-1", "esc-sh-1", "step-sh", "released");
+      insertMilestone("ms-sh-2", "esc-sh-1", "step-sh-2", "released");
+      insertJob("job-sh-a", "step-sh", "cwm-sh-1");
+      insertJob("job-sh-b", "step-sh", "cwm-sh-1");
+      insertJob("job-sh-c", "step-sh-2", "cwm-sh-1");
+      for (const id of ["job-sh-a", "job-sh-b"]) {
+        const dto = (await get(id)).json() as JobExecutionDTO;
+        expect(dto.settlement.record, id).toMatchObject({ milestoneMatch: "shared_by_jobs", milestoneClaimants: 2, milestone: null });
+        expect(dto.settlement.payout, id).toBe("unknown");
+        expect(dto.settlement.payoutUnknownReason, id).toBe("milestone_shared");
+        expect(dto.notices, id).toContain("milestone_shared_by_jobs");
+      }
+      // Sharing the CWM on a DIFFERENT step is the V2 schema working: that job has its own milestone.
+      const c = (await get("job-sh-c")).json() as JobExecutionDTO;
+      expect(c.settlement.record).toMatchObject({ milestoneMatch: "exact", milestoneClaimants: 1 });
+      expect(c.settlement.payout).toBe("reported_released");
+    });
+
+    it("NEGATIVE (r3 P1-1): a second job whose negotiation session names the same escrow and step shares the milestone", async () => {
+      const addr = "0x4444444444444444444444444444444444444444";
+      insertEscrow("esc-ss-1", "cwm-ss-1", addr, "active");
+      insertMilestone("ms-ss-1", "esc-ss-1", "step-ss", "released");
+      insertJob("job-ss-a", "step-ss", "cwm-ss-1");
+      insertJob("job-ss-b", "step-ss", "cwm-ss-other");
+      await insertSession("neg-ss-a", "job-ss-a", { escrowAddress: addr, cwmId: "cwm-ss-1" });
+      await insertSession("neg-ss-b", "job-ss-b", { escrowAddress: addr });
+      for (const id of ["job-ss-a", "job-ss-b"]) {
+        const dto = (await get(id)).json() as JobExecutionDTO;
+        expect(dto.settlement.link, id).toBe("linked");
+        expect(dto.settlement.record, id).toMatchObject({ milestoneMatch: "shared_by_jobs", milestoneClaimants: 2 });
+        expect(dto.settlement.payout, id).toBe("unknown");
+      }
     });
   });
 

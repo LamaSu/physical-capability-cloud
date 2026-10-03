@@ -2,10 +2,10 @@
  * OperatorWorkDTO and OperatorIncomeDTO (@pcc/spec readmodels/operator-work.ts): the loader
  * (one pass over the store and the job-offers store) and the pure builders.
  *
- * Scope: the caller's kernels, i.e. kernels whose operatorAddress is the caller's principal
- * (the API key's operatorId or the SIWE wallet), compared case-insensitively as in
- * authorizeJobRead. The principal is self-asserted at provisioning until the gateway's N2
- * fix lands; this read model shows each operator only work on kernels recorded as theirs.
+ * Scope: the caller's kernels, i.e. kernels whose recorded operatorAddress is the caller's
+ * PROVEN wallet (SIWE; the route passes req.provenWallet), compared as addresses as in
+ * authorizeJobRead. A recorded operator that is not an address (an email) never matches, since
+ * no signature proves it (#353 review r3, P1-5).
  */
 import {
   JOB_OFFER_PHASE_MAP,
@@ -16,6 +16,7 @@ import {
   executionPhaseOf,
   isTerminalExecutionPhase,
   normalizeJobRowStatus,
+  normalizeMoneyStatus,
   operatorPhaseOf,
   toBaseUnits,
   type OperatorIncomeDTO,
@@ -94,8 +95,9 @@ export interface OffersReader {
   getEvents(id: string): JobOfferEvent[];
 }
 
-const samePrincipal = (a: unknown, b: string) =>
-  typeof a === "string" && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const sameWallet = (recorded: unknown, wallet: string) =>
+  typeof recorded === "string" && ADDRESS.test(recorded.trim()) && recorded.trim().toLowerCase() === wallet.toLowerCase();
 
 const nonEmpty = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" ? v : null);
 
@@ -116,9 +118,9 @@ export interface OperatorWorkLoadOptions {
  * The caller's kernels. A failure here is not recoverable for this read (nothing can be
  * scoped), so it throws, and the route answers 503.
  */
-export function findOperatorKernels(principal: string, db: JobExecutionDb): KernelLite[] {
+export function findOperatorKernels(wallet: string, db: JobExecutionDb): KernelLite[] {
   const rows = db.select().from(schema.shopKernels).all() as KernelLite[];
-  return rows.filter((k) => samePrincipal(k.operatorAddress, principal));
+  return rows.filter((k) => sameWallet(k.operatorAddress, wallet));
 }
 
 /**
@@ -224,6 +226,51 @@ function kernelSite(kernel: KernelLite | undefined, kernelId: string): OperatorW
   return { kind: "operator_site", approximate: false, lat, lng, kernelId };
 }
 
+/**
+ * Escrow-record words (escrows.status, or a V-next unit name) under which the escrow holds its
+ * funds, uncontested, with nothing yet returned to the payer or paid out.
+ */
+const ESCROW_HOLDS = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEASING", "MILESTONE_MET", "FUNDED_ACTIVE", "PRIMARY_ASSERTED", "RELEASE_ALLOCATED"]);
+/** Milestone words (escrow_milestones.status) under which this job's milestone is funded and still open. */
+const MILESTONE_HOLDS = new Set(["FUNDED", "LOCKED", "RELEASING"]);
+/** Words, in either record, that say the money is not or no longer held: never funded, refunded, or released. */
+const NOT_HELD = new Set(["CREATED", "UNFUNDED", "PENDING", "REFUNDED", "SETTLED_REFUNDED", "REFUND_ALLOCATED", "RELEASED", "SETTLED_RELEASED"]);
+
+/** Every word the funding decision reads, for the test that each one is in the canonical money map. */
+export const FUNDING_WORDS: readonly string[] = Object.freeze([...new Set([...ESCROW_HOLDS, ...MILESTONE_HOLDS, ...NOT_HELD])]);
+
+/**
+ * Whether a REAL escrow record holds this job's milestone (astra r1 on #389, HIGH: a linked
+ * record was called escrowed without reading its status). Read from the exact words of both
+ * records, after the payout reconciliation:
+ *   the payout is unknown (conflicting, unrecognized or ambiguous records)  -> unknown
+ *   either word says never funded, refunded or released                     -> not_held
+ *   the escrow holds its funds and the milestone is funded and open         -> escrowed
+ *   anything else (disputed, challenged, slashed, expired)                  -> unknown
+ */
+function recordFunding(s: SettlementAxis): OperatorWorkPay["funding"] {
+  const record = s.record!;
+  const ms = record.milestone!;
+  if (s.payout === "unknown" || !record.escrow.known || !ms.status.known) return "unknown";
+  const e = normalizeMoneyStatus(record.escrow.sourceStatus);
+  const m = normalizeMoneyStatus(ms.status.sourceStatus);
+  if (NOT_HELD.has(e) || NOT_HELD.has(m)) return "not_held";
+  return ESCROW_HOLDS.has(e) && MILESTONE_HOLDS.has(m) ? "escrowed" : "unknown";
+}
+
+/**
+ * Why an open kernel job's status update is not offered (astra r1 on #389, MEDIUM). PATCH
+ * /api/jobs/:jobId/status recognizes the job's submitter, or a kernel `operatorId`, which kernels
+ * do not record (they record operatorAddress), so it never recognizes the kernel operator's proven
+ * wallet, the identity this read model uses. That route's authorization is gateway's to fix.
+ */
+/** The kernel-job source's reason when the jobs were read but the capabilities they name were not. */
+export const CAPABILITY_NAMES_UNREAD =
+  "The capability records could not be read, so each job's capabilityType and title are null (not known), not absent.";
+
+export const UPDATE_STATUS_UNRECOGNIZED =
+  "The status route cannot recognize a kernel's operator yet: it checks an operator id that kernels do not record.";
+
 /** Pay for a kernel job: only from this job's own milestone in its linked escrow record. */
 export function kernelJobPay(s: SettlementAxis): OperatorWorkPay {
   if (s.link !== "linked" || !s.record) return { ...NO_PAY };
@@ -238,7 +285,7 @@ export function kernelJobPay(s: SettlementAxis): OperatorWorkPay {
     decimals,
     model: "escrow_milestone",
     unit: null,
-    funding: s.record.simulated ? "simulated" : "escrowed",
+    funding: s.record.simulated ? "simulated" : recordFunding(s),
     fundingRef: s.record.escrowId,
     basis: "escrow_milestone_record",
   };
@@ -338,8 +385,8 @@ function kernelJobItem(
   const actions: OperatorWorkAction[] = approval ? approveActions(approval.id) : [];
   actions.push({
     op: "update_status",
-    allowed: !terminal,
-    reasonIfNot: terminal ? "The job is finished." : null,
+    allowed: false,
+    reasonIfNot: terminal ? "The job is finished." : UPDATE_STATUS_UNRECOGNIZED,
     route: { method: "PATCH", path: `/api/jobs/${job.id}/status` },
   });
   const tier = tierOf(job.assuranceTier);
@@ -468,8 +515,31 @@ const sourceState = (
     ? { state: "read", durability, count, reason: null }
     : { state: "unavailable", durability, count: 0, reason: reasonIfFailed };
 
+/** The work list's and the income rows' page bounds (astra r1 on #389, MEDIUM: a cut list had no continuation). */
+export const OPERATOR_PAGE_DEFAULT_LIMIT = 200;
+export const OPERATOR_PAGE_MAX_LIMIT = 500;
+
+export interface OperatorPage {
+  limit: number;
+  offset: number;
+}
+
+/** One page of a sorted list, and where the next one starts. */
+function pageOf<T>(all: readonly T[], page: OperatorPage) {
+  const end = page.offset + page.limit;
+  return {
+    page: all.slice(page.offset, end),
+    total: all.length,
+    offset: page.offset,
+    truncated: end < all.length,
+    nextOffset: end < all.length ? end : null,
+  };
+}
+
 export interface OperatorWorkBuildOptions {
   limit: number;
+  /** Where the page starts in the sorted list; 0 when absent. */
+  offset?: number;
   nowMs: number;
 }
 
@@ -503,8 +573,10 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
   }
 
   // Offers: the caller's claimed offers, then open offers for the caller's capability types.
-  // One source: if either read failed, no offer is listed (a partial list would look complete).
-  const offersOk = src.claimedOffers.ok && src.openOffers.ok;
+  // One source: if any read it needs failed (the claimed offers, the open offers, or the
+  // capabilities open offers are matched against), no offer is listed: a partial list, or an
+  // empty match, would look complete (astra r1 on #389, MEDIUM).
+  const offersOk = src.claimedOffers.ok && src.openOffers.ok && src.capabilities.ok;
   const claimedIds = new Set<string>();
   if (offersOk && src.claimedOffers.ok) {
     for (const { offer, events } of src.claimedOffers.value) {
@@ -532,6 +604,7 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
 
+  const shown = pageOf(items, { limit: opts.limit, offset: opts.offset ?? 0 });
   const offersRead: SourceRead<unknown[]> = offersOk ? { ok: true, value: [] } : { ok: false };
   const kernelJobCount = src.kernelJobs.ok ? src.kernelJobs.value.length : 0;
   const approvalOnlyCount = approvals.filter((a) => !jobIds.has(a.jobId)).length;
@@ -541,13 +614,19 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
     schemaId: OPERATOR_WORK_SCHEMA_ID,
     asOf,
     kernels: src.kernels.map((k) => ({ kernelId: k.id, name: nonEmpty(k.name) })),
-    items: items.slice(0, opts.limit),
-    total: items.length,
-    truncated: items.length > opts.limit,
+    items: shown.page,
+    total: shown.total,
+    offset: shown.offset,
+    truncated: shown.truncated,
+    nextOffset: shown.nextOffset,
     sources: {
-      kernel_job: sourceState(src.kernelJobs, "durable", "The gateway's job records could not be read.", kernelJobCount),
+      kernel_job: {
+        ...sourceState(src.kernelJobs, "durable", "The gateway's job records could not be read.", kernelJobCount),
+        // The jobs are listed, but each one's capabilityType and title come from the capability read.
+        ...(src.kernelJobs.ok && !src.capabilities.ok ? { reason: CAPABILITY_NAMES_UNREAD } : {}),
+      },
       approval: sourceState(src.approvals, "durable", "The gateway's approval records could not be read.", approvalOnlyCount),
-      job_offer: sourceState(offersRead, "memory", "The job-offers store could not be read.", offersCount),
+      job_offer: sourceState(offersRead, "memory", "The job-offers store, or the capabilities offers are matched against, could not be read.", offersCount),
       skill_job: { state: "not_attributable", durability: "durable", count: 0, reason: SKILL_JOBS_NOT_ATTRIBUTABLE },
     } satisfies Record<OperatorWorkSource, OperatorWorkSourceState>,
   };
@@ -560,7 +639,11 @@ export const INCOME_HISTORY_REASON =
   "events, which it does not index per operator, so these rows show only what the escrow records say about " +
   "your kernels' jobs.";
 
-export function buildOperatorIncomeDTO(src: OperatorWorkSources, asOf: string): OperatorIncomeDTO {
+export function buildOperatorIncomeDTO(
+  src: OperatorWorkSources,
+  asOf: string,
+  page: OperatorPage = { limit: OPERATOR_PAGE_DEFAULT_LIMIT, offset: 0 },
+): OperatorIncomeDTO {
   const rows: OperatorIncomeRow[] = [];
   let unreadableJobs = 0;
   if (src.kernelJobs.ok) {
@@ -586,6 +669,8 @@ export function buildOperatorIncomeDTO(src: OperatorWorkSources, asOf: string): 
     }
   }
 
+  // A stable order, so pages do not overlap or skip while the rows are unchanged.
+  rows.sort((a, b) => (a.workRef < b.workRef ? -1 : a.workRef > b.workRef ? 1 : 0));
   const totals = new Map<string, OperatorIncomeTotal & { sum: bigint }>();
   let uncountedRows = 0;
   for (const r of rows) {
@@ -600,6 +685,7 @@ export function buildOperatorIncomeDTO(src: OperatorWorkSources, asOf: string): 
     t.rows++;
     totals.set(key, t);
   }
+  const shown = pageOf(rows, page);
   const totalsByStatus: OperatorIncomeTotal[] = [...totals.values()]
     .map(({ sum, ...t }) => ({ ...t, amountBaseUnits: sum.toString() }))
     .sort((a, b) => (a.status + a.currency < b.status + b.currency ? -1 : 1));
@@ -608,7 +694,11 @@ export function buildOperatorIncomeDTO(src: OperatorWorkSources, asOf: string): 
     schemaId: OPERATOR_INCOME_SCHEMA_ID,
     asOf,
     kernels: src.kernels.map((k) => ({ kernelId: k.id, name: nonEmpty(k.name) })),
-    rows,
+    rows: shown.page,
+    total: shown.total,
+    offset: shown.offset,
+    truncated: shown.truncated,
+    nextOffset: shown.nextOffset,
     totalsByStatus,
     uncountedRows,
     historyAvailable: false,

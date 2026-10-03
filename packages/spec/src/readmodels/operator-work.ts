@@ -148,13 +148,21 @@ export interface OperatorWorkPay {
   unit: string | null;
   /**
    * What backs the amount:
-   *   escrowed           this job's milestone in a real escrow record holds it (record only)
+   *   escrowed           a real escrow record holds this job's milestone, and neither record's
+   *                      status contests it: the escrow is funded, active or completing (or a
+   *                      V-next funded state), and the milestone is funded, locked or releasing
+   *                      (record only). A dispute recorded elsewhere (the job's own status, shown
+   *                      as the item's phase) is not read here.
+   *   not_held           a real escrow record that says it does not hold this job's money:
+   *                      never funded (created, unfunded, pending), refunded to the payer, or
+   *                      released (record only; a recorded release is never proof of payment)
    *   declared_unfunded  a price the poster declared; nothing funds it
    *   simulated          a mock-settlement escrow: no money exists
    *   unknown            no amount, or a settlement link that is ambiguous, conflicting,
-   *                      unreadable or missing this job's milestone
+   *                      unreadable or missing this job's milestone, or a record that is
+   *                      contested (disputed, challenged, slashed), expired or unrecognized
    */
-  funding: "escrowed" | "declared_unfunded" | "simulated" | "unknown";
+  funding: "escrowed" | "not_held" | "declared_unfunded" | "simulated" | "unknown";
   fundingRef: string | null;
   basis: "job_offer_pricing" | "escrow_milestone_record" | null;
 }
@@ -248,6 +256,7 @@ export interface OperatorWorkSourceState {
   /** memory: the gateway keeps this source in process memory (lost on restart). */
   durability: "durable" | "memory";
   count: number;
+  /** Why nothing is listed; or, for a read source, what its listed items lack; null otherwise. */
   reason: string | null;
 }
 
@@ -257,10 +266,16 @@ export interface OperatorWorkDTO {
   asOf: string;
   /** The caller's kernels that scope this read: kernels whose operatorAddress is the caller. */
   kernels: Array<{ kernelId: string; name: string | null }>;
+  /** One page of the sorted list (`?limit=`, `?offset=`). */
   items: OperatorWorkItem[];
+  /** Every item, across all pages. */
   total: number;
-  /** True when `items` was cut to the limit; `total` counts everything. */
+  /** Where this page starts in the sorted list. */
+  offset: number;
+  /** True when items exist after this page; `nextOffset` reads them. */
   truncated: boolean;
+  /** The offset of the next page, or null on the last page. The list is re-read each time, so it can change between pages. */
+  nextOffset: number | null;
   sources: Record<OperatorWorkSource, OperatorWorkSourceState>;
 }
 
@@ -298,10 +313,19 @@ export interface OperatorIncomeDTO {
   schemaId: typeof OPERATOR_INCOME_SCHEMA_ID;
   asOf: string;
   kernels: Array<{ kernelId: string; name: string | null }>;
+  /** One page of rows, ordered by job (`?limit=`, `?offset=`, the same bounds as the work list). */
   rows: OperatorIncomeRow[];
-  /** Sums of `rows` only, per payout status and currency. */
+  /** Every row, across all pages. */
+  total: number;
+  /** Where this page starts. */
+  offset: number;
+  /** True when rows exist after this page; `nextOffset` reads them. */
+  truncated: boolean;
+  /** The offset of the next page, or null on the last page. */
+  nextOffset: number | null;
+  /** Sums of every row (all pages, not only this one), per payout status and currency. */
   totalsByStatus: OperatorIncomeTotal[];
-  /** Rows left out of the totals because their amount or decimals are unknown. */
+  /** Rows, across all pages, left out of the totals because their amount or decimals are unknown. */
   uncountedRows: number;
   /** False until a per-operator settlement index exists. */
   historyAvailable: boolean;

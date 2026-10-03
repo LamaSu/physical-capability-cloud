@@ -8,6 +8,7 @@ import {
   NETWORK_CHAIN_IDS,
   NOT_HELD_MILESTONE_STATUSES,
   PRODUCT_HOME_SCHEMA_ID,
+  RELEASE_DECIDED_MILESTONE_STATUSES,
   currencyDecimals,
   executionPhaseOf,
   isTerminalExecutionPhase,
@@ -23,7 +24,7 @@ import {
   type ProductHomeKernels,
 } from "@pcc/spec";
 import { ACTIVE_LISTING_GRACE_MS, STALE_HEARTBEAT_MS, isKernelStale } from "../facades/populators/staleness.js";
-import { MOCK_ESCROW_ADDRESS_PREFIX, type SourceRead } from "./job-execution.js";
+import { isSimulatedEscrowAddress, type SourceRead } from "./job-execution.js";
 
 export interface HomeKernelRow {
   id: string;
@@ -74,6 +75,7 @@ const KERNEL_RULE =
   `an online kernel past that is stale`;
 
 const HELD = new Set(HELD_MILESTONE_STATUSES);
+const RELEASE_DECIDED = new Set(RELEASE_DECIDED_MILESTONE_STATUSES);
 const NOT_HELD = new Set(NOT_HELD_MILESTONE_STATUSES);
 
 type KernelState = "online" | "stale" | "other";
@@ -133,15 +135,18 @@ export function buildJobs(rows: HomeJobRow[]): ProductHomeJobs {
 export function buildEscrowHeld(src: { escrows: HomeEscrowRow[]; milestones: HomeMilestoneRow[] }): ProductHomeEscrowHeld {
   const escrowById = new Map(src.escrows.map((e) => [e.id, e]));
   const simulated = new Set(
-    src.escrows.filter((e) => String(e.contractAddress ?? "").startsWith(MOCK_ESCROW_ADDRESS_PREFIX)).map((e) => e.id),
+    src.escrows.filter((e) => isSimulatedEscrowAddress(e.contractAddress)).map((e) => e.id),
   );
-  const sums = new Map<string, { decimals: number; sum: bigint; milestones: number }>();
+  type Sums = Map<string, { decimals: number; sum: bigint; milestones: number }>;
+  const held: Sums = new Map();
+  const releaseDecided: Sums = new Map();
   let uncounted = 0;
   let unclassified = 0;
   for (const ms of src.milestones) {
     if (simulated.has(ms.escrowId)) continue;
     const word = normalizeMoneyStatus(ms.status);
-    if (!HELD.has(word)) {
+    const into = HELD.has(word) ? held : RELEASE_DECIDED.has(word) ? releaseDecided : null;
+    if (into === null) {
       if (!NOT_HELD.has(word)) unclassified++;
       continue;
     }
@@ -153,21 +158,24 @@ export function buildEscrowHeld(src: { escrows: HomeEscrowRow[]; milestones: Hom
       uncounted++;
       continue;
     }
-    const t = sums.get(currency) ?? { decimals, sum: 0n, milestones: 0 };
+    const t = into.get(currency) ?? { decimals, sum: 0n, milestones: 0 };
     t.sum += BigInt(base);
     t.milestones++;
-    sums.set(currency, t);
+    into.set(currency, t);
   }
-  const byCurrency: ProductHomeHeldAmount[] = [...sums.entries()]
-    .map(([currency, t]) => ({ currency, decimals: t.decimals, amountBaseUnits: t.sum.toString(), milestones: t.milestones }))
-    .sort((a, b) => (a.currency < b.currency ? -1 : a.currency > b.currency ? 1 : 0));
+  const list = (sums: Sums): ProductHomeHeldAmount[] =>
+    [...sums.entries()]
+      .map(([currency, t]) => ({ currency, decimals: t.decimals, amountBaseUnits: t.sum.toString(), milestones: t.milestones }))
+      .sort((a, b) => (a.currency < b.currency ? -1 : a.currency > b.currency ? 1 : 0));
   return {
     state: "read",
-    byCurrency,
+    byCurrency: list(held),
+    releaseDecided: { byCurrency: list(releaseDecided), bound: "at_most" },
     uncountedMilestones: uncounted,
     unclassifiedMilestones: unclassified,
     excludedSimulatedEscrows: simulated.size,
     heldStatuses: HELD_MILESTONE_STATUSES,
+    releaseDecidedStatuses: RELEASE_DECIDED_MILESTONE_STATUSES,
     source: "gateway_escrow_record",
     confirmation: "record_only",
   };
