@@ -15,7 +15,7 @@ lit = ["cryptography>=41.0"]
 all = ["pynacl>=1.5", "zeroconf>=0.100", "cryptography>=41.0"]
 
 [project.scripts]
-pcc-node = "pcc_node.cli:main"
+pcc-node = "pcc_node.cli:run"
 
 [build-system]
 requires = ["setuptools>=68"]

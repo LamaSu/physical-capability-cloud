@@ -18,6 +18,7 @@ from datetime import datetime
 import click
 
 from . import __version__
+from . import spawn_guard
 from .config import ConfigFileError, NodeConfig, generate_config, save_config, load_config, load_config_data
 from .crypto import KeyFileError, load_or_create_keys
 from .daemon import run_daemon, is_running, read_state
@@ -1294,5 +1295,17 @@ def support_cmd(message, config_file, pcc_base, api_key, attach_logs, check):
             click.echo(f"  {body.get('error', body)}")
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Console entry point: install the runtime spawn guard, then dispatch the CLI.
+
+    The guard (``pcc_node.spawn_guard``) is installed here, at the real process entry the installed
+    ``pcc-node`` script runs, so every command -- the daemon most of all -- runs under it. Tests call
+    ``main`` (or ``run_daemon``) directly and so bypass it, which keeps an unremovable audit hook out
+    of the shared test process; the guard has its own tests that exercise it in child processes.
+    """
+    spawn_guard.install()
     main()
+
+
+if __name__ == "__main__":
+    run()

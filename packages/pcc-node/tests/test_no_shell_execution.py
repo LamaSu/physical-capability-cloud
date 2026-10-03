@@ -581,6 +581,15 @@ def test_the_allowlist_is_what_the_package_runs():
     assert started == EXECUTABLES
 
 
+def test_the_runtime_guard_allows_exactly_what_the_static_guard_allows():
+    # The runtime spawn guard (pcc_node.spawn_guard, verdict 105i / steward #5194) refuses every
+    # process start except a subprocess.Popen of these same bare executables, so the two guards
+    # cannot drift apart: one more name here is one more name there, reviewed in both places.
+    from pcc_node import spawn_guard
+
+    assert set(spawn_guard.EXECUTABLES) == EXECUTABLES
+
+
 def test_the_safe_chains_are_what_the_package_uses():
     # A new chain is a reviewed change to SAFE_CHAINS; an unused entry is removed.
     used = set()
