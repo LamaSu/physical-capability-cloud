@@ -32,7 +32,7 @@
  *     one summary, and every stop asked of it resolves with that summary;
  *   - quiesceEvidence() never answers while a start, a recording or a stop is in flight, and
  *     once it answers nothing more is emitted until a new start or stop is asked for;
- *   - nothing is captured, and no summary is emitted, after dispose, and a stop resolves with a
+ *   - nothing is captured or read from the chain, and no summary is emitted, after dispose, and a stop resolves with a
  *     summary only if the listeners received it;
  *   - every call settles, nothing is left unhandled, and the adapter ends idle, stopFailed or
  *     disposed.
@@ -75,6 +75,7 @@ it.each(CASES)("%s re-enters %s, then %s", async (site, action, outcome) => {
   let failedAny = false;
   let disposed = false;
   let capturedAfterDispose = 0;
+  let chainReadAfterDispose = 0;
   let summariesAfterDispose = 0;
   let asks = 0; // starts and stops asked for, by the driver or a re-entrant call
   const hook = { resolved: false, seen: -1, asksAt: -1, stateAt: "" };
@@ -152,6 +153,7 @@ it.each(CASES)("%s re-enters %s, then %s", async (site, action, outcome) => {
     },
     getChain: () => {
       counts.getChain += 1;
+      if (disposed) chainReadAfterDispose += 1;
       syncCall(`getChain#${counts.getChain}`);
       return chain;
     },
@@ -265,6 +267,7 @@ it.each(CASES)("%s re-enters %s, then %s", async (site, action, outcome) => {
     if (asks === hook.asksAt) expect.soft(events.length, "events after quiesceEvidence() answered").toBe(hook.seen);
   }
   expect.soft(capturedAfterDispose, "captures after dispose").toBe(0);
+  expect.soft(chainReadAfterDispose, "chain reads after dispose").toBe(0);
   expect.soft(summariesAfterDispose, "summaries after dispose").toBe(0);
   // A stop resolves with a summary only if its listeners received it: never one emitted to no one
   // after a dispose.
