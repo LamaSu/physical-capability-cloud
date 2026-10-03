@@ -262,9 +262,9 @@ async function notifyDiscord(rec: Record<string, unknown>): Promise<void> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) console.error(`Discord webhook failed: ${res.status}`);
+    if (!res.ok) console.error(lit("Discord webhook failed"), declare.metric(res.status));
   } catch (err) {
-    console.error(`Discord webhook error: ${err}`);
+    console.error(lit("Discord webhook error"), err);
   }
 }
 
