@@ -188,7 +188,7 @@ def _resolve_target(pcc_base, config_file):
 
 def _target_banner(base, source):
     """The first lines `pcc-node start` prints (N57): the gateway this node will
-    register with and take jobs from, and what starting creates there."""
+    register with (it takes no jobs), and what starting creates there."""
     if base == PUBLIC_GATEWAY:
         where = "public PCC network, test-net payments"
     elif source == "flag":

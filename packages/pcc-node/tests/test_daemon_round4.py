@@ -65,7 +65,8 @@ def test_start_announces_no_capabilities(tmp_path):
          mock.patch("pcc_node.cli.announce_capabilities", create=True) as announce, \
          mock.patch("pcc_node.register.announce_capabilities") as announce_module, \
          mock.patch("pcc_node.cli.run_daemon"):
-        result = CliRunner().invoke(main, ["start", "-c", str(tmp_path / "node-config.json"), "--api-key", "k"])
+        result = CliRunner().invoke(main, ["start", "-c", str(tmp_path / "node-config.json"), "--api-key", "k",
+                                           "--pcc-base", "https://gw.example.test"])
     assert result.exit_code == 0, result.output
     announce.assert_not_called()
     announce_module.assert_not_called()
