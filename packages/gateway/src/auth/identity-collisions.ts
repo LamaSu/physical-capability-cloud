@@ -58,12 +58,22 @@ const SOURCES: ReadonlyArray<{ source: string; table: string; column: string; sq
  * and the caller reports the source as `failed`.
  */
 function schemaHas(db: Reader, table: string, column: string): boolean {
-  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").all(table);
+  // Names match the way SQLite itself resolves them (ASCII case-insensitive), and a
+  // view counts as present: an exact comparison, or tables only, would report a
+  // present source as ABSENT, which an allowlist then excuses (fail open).
+  const tables = db
+    .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ? COLLATE NOCASE")
+    .all(table);
   if (!Array.isArray(tables)) throw new Error("catalog read returned no rows array");
-  if (!tables.some((r) => (r as { name?: unknown } | null)?.name === table)) return false;
-  const columns = db.prepare("SELECT name FROM pragma_table_info(?) WHERE name = ?").all(table, column);
+  if (!tables.some((r) => sameName((r as { name?: unknown } | null)?.name, table))) return false;
+  const columns = db.prepare("SELECT name FROM pragma_table_info(?) WHERE name = ? COLLATE NOCASE").all(table, column);
   if (!Array.isArray(columns)) throw new Error("catalog read returned no rows array");
-  return columns.some((r) => (r as { name?: unknown } | null)?.name === column);
+  return columns.some((r) => sameName((r as { name?: unknown } | null)?.name, column));
+}
+
+/** SQLite's own identifier comparison: ASCII case-insensitive. */
+function sameName(stored: unknown, asked: string): boolean {
+  return typeof stored === "string" && stored.toLowerCase() === asked.toLowerCase();
 }
 
 export function findIdentityCollisions(db: Reader): {
