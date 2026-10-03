@@ -574,3 +574,64 @@ describe("astra r2 (#348 @14f2f1c2): reproduced findings 2-5 (verify before fix)
     });
   });
 });
+
+describe("astra r3 (#348 @c2edf196): reproduced findings (verify before fix)", () => {
+  // H1: an off-contract list envelope (the route's rows key absent, another route's key, or a
+  // non-array value) is NOT an empty collection: it must say unavailable, never a fresh "none".
+  for (const [label, json] of [
+    ["the rows key is absent", { asOf: iso(T0 - 1_000) }],
+    ["only another route's rows key", { jobs: [], asOf: iso(T0 - 1_000) }],
+    ["the rows key is a string", { items: "x", asOf: iso(T0 - 1_000) }],
+    ["the rows key is null", { items: null, asOf: iso(T0 - 1_000) }],
+    ["the rows key is an object", { items: {}, asOf: iso(T0 - 1_000) }],
+  ] as Array<[string, unknown]>) {
+    it(`H1: a list response where ${label} is unavailable, never a fresh 'none'`, async () => {
+      const s = scene([{ status: 200, json }], T0);
+      s.deliver(listManifest); await s.settle();
+      const list = s.q(".pcc-list");
+      expect(s.q(".pcc-list .pcc-empty")).toBeNull();
+      expect(list.className).toContain("pcc-unavail");
+      expect(s.lineOf(list).textContent).toBe("unavailable · unexpected response shape");
+      s.close();
+    });
+  }
+
+  // M3 for lists: an equal-time update is accepted only when it renders the SAME structure.
+  // Unframed concatenated text lets a one-row payload impersonate a two-row list.
+  it("M3 (lists): a one-row payload whose concatenated text equals a two-row list cannot replace it at equal time", async () => {
+    const at = iso(T0 - 5_000);
+    const two = { items: [{ name: "A", type: "t", available: true }, { name: "B", type: "u", available: false }], asOf: at };
+    const textOf = async (json: unknown) => {
+      const p = scene([{ status: 200, json }], T0); p.deliver(listManifest); await p.settle();
+      const list = p.q(".pcc-list");
+      const out = { text: list.textContent as string, rows: list.querySelectorAll(".pcc-row").length as number };
+      p.close(); return out;
+    };
+    const X = await textOf(two);
+    expect(X.rows).toBe(2);
+    const MARK = "Qmarker";
+    const Y = await textOf({ items: [{ name: MARK, type: "u", available: false }], asOf: at });
+    const [pre, post] = Y.text.split(MARK) as [string, string];
+    expect(X.text.startsWith(pre) && X.text.endsWith(post)).toBe(true);
+    const one = { items: [{ name: X.text.slice(pre.length, X.text.length - post.length), type: "u", available: false }], asOf: at };
+    const Z = await textOf(one);
+    expect(Z.rows).toBe(1);
+    expect(Z.text).toBe(X.text); // the collision is real: same concatenated text, different structure
+    const s = scene([{ status: 200, json: two }, { status: 200, json: one }], T0);
+    s.deliver(listManifest); await s.settle();
+    expect(s.q(".pcc-list").querySelectorAll(".pcc-row").length).toBe(2);
+    await s.nextPoll();
+    expect(s.q(".pcc-list").querySelectorAll(".pcc-row").length).toBe(2); // must NOT become 1
+    s.close();
+  });
+
+  // L2: a card that fails only because an OPTIONAL field is mistyped is not "missing required fields".
+  it("L2: a card with a mistyped optional field says 'mistyped field', not 'missing required fields'", async () => {
+    const s = scene([{ status: 200, json: { name: "Alpha", type: "t", pricing: { baseCost: "abc" }, asOf: iso(T0) } }], T0);
+    s.deliver(cardManifest); await s.settle();
+    const card = s.q(".pcc-schema-card");
+    expect(card.className).toContain("pcc-unavail");
+    expect(s.lineOf(card).textContent).toBe("unavailable · mistyped field");
+    s.close();
+  });
+});
