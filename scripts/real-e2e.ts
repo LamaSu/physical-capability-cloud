@@ -97,6 +97,7 @@ export interface RunDeps {
   env?: Record<string, string | undefined>;
   pollSleepMs?: number;
   pollAttempts?: number;
+  contractsDir?: string;
 }
 
 export interface RunResult {
@@ -161,7 +162,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   // ── 1. Deploy MockUSDC + PCCProtocol + Escrow (via factory) ─────────
   log("[1] DEPLOYING FRESH CONTRACTS");
-  const contractsDir = resolve(process.cwd(), "packages/contracts");
+  const contractsDir = deps.contractsDir ?? resolve(process.cwd(), "packages/contracts");
   const usdcArtifact = JSON.parse(readFileSync(resolve(contractsDir, "out/MockUSDC.sol/MockUSDC.json"), "utf8"));
   const protocolArtifact = JSON.parse(readFileSync(resolve(contractsDir, "out/PCCProtocol.sol/PCCProtocol.json"), "utf8"));
 

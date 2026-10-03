@@ -54,6 +54,7 @@ export interface RunDeps {
   pollSleepMs?: number;
   pollAttempts?: number;
   reportPath?: string;
+  contractsDir?: string;
 }
 
 export interface RunResult {
@@ -159,7 +160,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   L(`Kernel:       ${KERNEL}`);
   L("");
 
-  const contractsDir = resolve(process.cwd(), "packages/contracts");
+  const contractsDir = deps.contractsDir ?? resolve(process.cwd(), "packages/contracts");
   const usdcArt = JSON.parse(readFileSync(resolve(contractsDir, "out/MockUSDC.sol/MockUSDC.json"), "utf8"));
   const protArt = JSON.parse(readFileSync(resolve(contractsDir, "out/PCCProtocol.sol/PCCProtocol.json"), "utf8"));
   const escrowAbi = JSON.parse(readFileSync(resolve(contractsDir, "out/MilestoneEscrow.sol/MilestoneEscrow.json"), "utf8")).abi;
