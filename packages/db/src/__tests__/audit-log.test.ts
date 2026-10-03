@@ -149,6 +149,13 @@ describe("AuditLogRepository", () => {
       expect(rows.length).toBe(2);
       expect(rows.every((r) => r.eventType === "job.submitted" && r.actor === "alice")).toBe(true);
     });
+
+    it("a filter of several values matches a row equal to any of them", () => {
+      expect(repo.query({ actor: ["alice", "bob"] }).length).toBe(4);
+      expect(repo.query({ eventType: ["job.submitted", "job.completed"], actor: ["alice", "zed"] }).length).toBe(3);
+      expect(repo.query({ resourceType: ["escrow"] }).map((r) => r.eventType)).toEqual(["escrow.funded"]);
+      expect(repo.query({ actor: [] }).length, "an empty list filters nothing").toBe(5);
+    });
   });
 
   // ── metadata JSON storage / retrieval ─────────────────────────────────────
