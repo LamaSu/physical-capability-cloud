@@ -199,13 +199,17 @@ export interface AllCapabilities {
  * mutate between two requests and still pass every check above — a row
  * removed from an earlier page and a row appended past the last one keeps
  * the total unchanged and every id unique (astra 18c MEDIUM). So when a read
- * spans more than one page and would otherwise be reported complete, page 1
- * is re-read and compared to what the first read of it returned; a total or
- * an id-sequence mismatch is treated the same as a changed total. A
- * single-page read skips this: one request is already one snapshot, and
- * there is nothing to compare it against. The real fix is a gateway
- * snapshot/revision token or a cursor, so that a re-read of page 1 is always
- * the same page 1; that is routed as a follow-up, not attempted here.
+ * spans more than one page and would otherwise be reported complete, every
+ * page but the last is re-read, in order, and compared to what the first read
+ * of it returned; a total or an id-sequence mismatch is treated the same as a
+ * changed total. Each earlier page then read the same at its first read and
+ * at its re-read, which come before and after the last page was read; so,
+ * short of a change that reverts itself between the two, every page matched
+ * the list at the moment the last page was read: one snapshot. Re-reading
+ * page 1 alone proved that only for two pages: a shift inside page 2 between
+ * reading pages 2 and 3 passed it. A single-page read skips this: one request
+ * is already one snapshot. The real fix is a gateway snapshot/revision token
+ * or a cursor; that is routed as a follow-up, not attempted here.
  */
 export function useAllCapabilities() {
   return useQuery<AllCapabilities>({
@@ -227,7 +231,8 @@ export function useAllCapabilities() {
       const seen = new Set<string>();
       let total: number | null = null;
       let pages = 0;
-      let firstPageIds: string[] = [];
+      /** Each page's offset and id sequence, as first read. */
+      const pageIds: Array<{ offset: number; ids: string[] }> = [];
       for (let page = 0; page < CAPABILITIES_MAX_PAGES; page++) {
         const offset = items.length;
         const res = await readPage(offset);
@@ -246,7 +251,7 @@ export function useAllCapabilities() {
           if (seen.has(row.id)) throw new Error(`${route} listed capability ${row.id} twice`);
           seen.add(row.id);
         }
-        if (page === 0) firstPageIds = rows.map((row) => row.id);
+        pageIds.push({ offset, ids: rows.map((row) => row.id) });
         items.push(...rows);
         pages++;
         if (items.length > total) throw new Error(`${route} returned more rows than its total of ${total}`);
@@ -257,17 +262,17 @@ export function useAllCapabilities() {
       const complete = items.length === read;
 
       // astra 18c MEDIUM: a read that took more than one page and looks
-      // complete is exactly the case with no snapshot proof. Re-read page 1
-      // and compare; a read that was already incomplete needs no extra
-      // proof, and a single page was never at risk of this.
+      // complete is exactly the case with no snapshot proof. Re-read every
+      // page but the last and compare; a read that was already incomplete
+      // needs no extra proof, and a single page was never at risk of this.
       if (complete && pages > 1) {
-        const reread = await readPage(0);
-        const rows = rowsOrThrow<CapabilityDTO>(reread.items, route, capabilityRowOk);
-        const ids = rows.map((row) => row.id);
-        const unchanged =
-          reread.total === total && ids.length === firstPageIds.length && ids.every((id, i) => id === firstPageIds[i]);
-        if (!unchanged) {
-          throw new Error(`the capability list changed while it was read (a re-read of ${route}'s first page no longer matches)`);
+        for (const first of pageIds.slice(0, -1)) {
+          const reread = await readPage(first.offset);
+          const ids = rowsOrThrow<CapabilityDTO>(reread.items, route, capabilityRowOk).map((row) => row.id);
+          const unchanged = reread.total === total && ids.length === first.ids.length && ids.every((id, i) => id === first.ids[i]);
+          if (!unchanged) {
+            throw new Error(`the capability list changed while it was read (a re-read of ${route} at offset ${first.offset} no longer matches)`);
+          }
         }
       }
 
