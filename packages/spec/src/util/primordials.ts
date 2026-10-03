@@ -238,15 +238,15 @@ function PinnedSpecies(executor: (resolve: (value: unknown) => void, reject: (re
 ObjectFreeze(PinnedSpecies);
 
 /**
- * What `ownPromise` installs as a promise's own `constructor`: a frozen record
- * with no prototype whose one property, `[Symbol.species]`, is PinnedSpecies,
- * fixed. SpeciesConstructor reads that property of `constructor` and nothing
- * else. Every returned promise shares this record, and any caller can reach it
- * (`promise.constructor`), so it must be frozen: otherwise one caller could
- * re-point the species every other caller's `.then` uses.
+ * What `ownPromise` installs as a promise's own `constructor`: a record with no
+ * prototype whose one property, `[Symbol.species]`, is PinnedSpecies.
+ * SpeciesConstructor reads that property of `constructor` and nothing else.
+ * Every returned promise shares this record, and any caller can reach it
+ * (`promise.constructor`), so it is frozen: otherwise one caller could re-point
+ * the species every other caller's `.then` uses.
  */
-const PINNED_CONSTRUCTOR: object = ObjectCreate(null);
-ObjectDefineProperty(PINNED_CONSTRUCTOR, SymbolSpecies, fixedDescriptor(PinnedSpecies));
+const PINNED_CONSTRUCTOR = ObjectCreate(null) as Record<symbol, unknown>;
+PINNED_CONSTRUCTOR[SymbolSpecies] = PinnedSpecies;
 ObjectFreeze(PINNED_CONSTRUCTOR);
 
 /**
