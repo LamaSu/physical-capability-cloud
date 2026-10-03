@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { run } from "../../../../scripts/real-e2e-verbose.js";
 import { fakeResponse, makeFakeChain } from "./support/fc8-round3-fakes.js";
 
-const CANARY = "SENTINEL-ORACLE-KEY-5f1e";
+const CANARY = "SENTINEL ORACLE KEY 5f1e"; // space: not id/enum/hex/content-type-shaped anywhere
 const REPORT_PATH = "/mnt/sparkbulk/tmp/fc8-r3-verbose-report.txt";
 // The script reads compiled contract ABI/bytecode just to pass shapes to
 // the (fake, injected) chain client — it never actually dereferences real

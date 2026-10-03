@@ -3,14 +3,14 @@
  * Every HTTP call, every on-chain tx, every response — logged verbatim.
  * Output is the print job content.
  *
- * FC-8 round 3 refactor (astra pack 61b census closure, step 1 of 2 — NO
- * behavior change in this commit): the flow is exported as `run(deps)` with
- * injected fetch/chain-clients/env so it can be driven by mocks in a test,
- * instead of only ever running against live services. CLI behavior is
- * preserved behind the entry guard at the bottom. Every print statement is
- * byte-for-byte the same as before this refactor — the validated-field fix
- * lands in the next commit, once the dynamic tests have proven (against
- * THIS commit) that the census sites still leak a planted canary.
+ * FC-8 round 3 (astra pack 61b census closure): the flow is exported as
+ * `run(deps)` with injected fetch/chain-clients/env so it can be driven by
+ * mocks in a test (see fc8-round3-real-e2e-verbose.test.ts) instead of only
+ * ever running against live services. CLI behavior is preserved behind the
+ * entry guard at the bottom. Every print site that reaches a gateway- or
+ * oracle-derived value now logs a VALIDATED projection of it (an id, an
+ * integer, a boolean, an allow-listed enum/content-type, or a bounded hex
+ * prefix) — never a raw response body or object.
  */
 
 import {
@@ -24,7 +24,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { safeLogJson, safeLogResponseText, safeLogErrorName } from "../packages/gateway/src/util/redact-log.js";
+import {
+  safeLogJson, safeLogResponseText, safeLogErrorName, safeLogId, safeLogInt,
+  safeLogBool, safeLogEnum, safeLogContentType, safeLogHex, safeLogIdList,
+  safeLogUrlPath,
+} from "../packages/gateway/src/util/redact-log.js";
 
 /** Thrown for a missing required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
 export class MissingEnvError extends Error {
@@ -37,7 +41,14 @@ export class MissingEnvError extends Error {
 const GW = "https://capability.network";
 const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
 const KERNEL = "kernel-nanoclaw";
+const JOB_STATUSES = ["queued", "running", "completed", "failed"] as const;
 
+/**
+ * Read a required secret from `env` and throw a MissingEnvError when it is
+ * unset. Keys are NEVER committed to this repository (WP-A fold F8: the
+ * literal that used to sit here was exposed and is listed for revocation in
+ * docs/security/WILDCARD_KEY_ROTATION.md).
+ */
 function requireEnv(env: Record<string, string | undefined>, name: string, what: string): string {
   const value = env[name]?.trim();
   if (!value) {
@@ -84,27 +95,32 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   function BIGSEP() { L("═".repeat(72)); }
 
   // ── Traced HTTP ──────────────────────────────────────────────────────
+  // FC-8 round 3: a generic request/response tracer cannot validate an
+  // arbitrary endpoint's body — it only knows shape and size, never field
+  // semantics — so it logs shape/size/status, never body content. Callers
+  // that need a specific field (jobId, a status enum, a count) log that
+  // field themselves, through a validated helper, right after the call.
   let reqNum = 0;
   async function gw(method: string, path: string, body?: any): Promise<any> {
     const n = ++reqNum;
-    const url = `${GW}${path}`;
-    L(`  [HTTP ${n}] ${method} ${url}`);
-    if (body) L(`  [HTTP ${n}] Body: ${safeLogJson(body, 500)}`);
+    L(`  [HTTP ${n}] ${method} ${GW}${safeLogUrlPath(path)}`);
+    if (body !== undefined) L(`  [HTTP ${n}] Body: <${Array.isArray(body) ? "array" : typeof body}>`);
     const t0 = Date.now();
     const opts: RequestInit = {
       method,
       headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e-verbose/1.0" },
     };
-    if (body) opts.body = JSON.stringify(body);
-    const r = await fetchImpl(url, opts);
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const r = await fetchImpl(url(path), opts);
     const text = await r.text();
     const ms = Date.now() - t0;
     let data: any;
     try { data = JSON.parse(text); } catch { data = text; }
-    L(`  [HTTP ${n}] ${r.status} ${r.statusText} (${ms}ms)`);
-    L(`  [HTTP ${n}] Response: ${safeLogJson(data, 800)}`);
+    L(`  [HTTP ${n}] ${safeLogInt(r.status)} (${ms}ms)`);
+    L(`  [HTTP ${n}] Response: <${data && typeof data === "object" ? (Array.isArray(data) ? "array" : "object") : typeof data}> (${text.length} bytes)`);
     return data;
   }
+  function url(path: string): string { return `${GW}${path}`; }
 
   // ── Traced on-chain write ────────────────────────────────────────────
   let txNum = 0;
@@ -266,23 +282,23 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   SEP();
   L("[3a] Gateway kernel state");
-  const kernelState = await gw("GET", "/api/kernels/kernel-nanoclaw");
+  await gw("GET", "/api/kernels/kernel-nanoclaw");
   L("");
 
   SEP();
   L("[3b] DHT peers + metrics");
-  const dhtPeers = await gw("GET", "/api/dht/peers");
-  const dhtMetrics = await gw("GET", "/api/dht/metrics");
+  await gw("GET", "/api/dht/peers");
+  await gw("GET", "/api/dht/metrics");
   L("");
 
   SEP();
   L("[3c] Operator daemon heartbeat check");
-  const hbResult = await gw("POST", "/api/operator/heartbeat", { kernelId: KERNEL, status: "online" });
+  await gw("POST", "/api/operator/heartbeat", { kernelId: KERNEL, status: "online" });
   L("");
 
   SEP();
   L("[3d] Capability discovery — what can this kernel do?");
-  const caps = await gw("GET", "/api/capabilities/by-kernel/kernel-nanoclaw");
+  await gw("GET", "/api/capabilities/by-kernel/kernel-nanoclaw");
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -317,6 +333,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     kernelId: KERNEL,
     parameters: { pythonCode: protocol, filename: "pcc_full_telemetry.py" },
   });
+  L(`     Job ID: ${safeLogId(jobResult?.jobId)}`);
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -329,9 +346,9 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   let status = "queued";
   for (let i = 0; i < pollAttempts; i++) {
     await new Promise(r => setTimeout(r, pollSleepMs));
-    const s = await gw("GET", `/api/jobs/${jobResult.jobId}/status`);
-    status = s.status;
-    L(`     Poll ${i + 1}: ${status} (progress=${s.progress})`);
+    const s = await gw("GET", `/api/jobs/${encodeURIComponent(jobResult?.jobId ?? "")}/status`);
+    status = s?.status;
+    L(`     Poll ${i + 1}: ${safeLogEnum(status, JOB_STATUSES)} (progress=${safeLogInt(s?.progress)})`);
     if (status === "completed" || status === "failed") break;
   }
   L("");
@@ -352,20 +369,21 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     headers: { "User-Agent": "pcc-e2e-verbose/1.0" },
   });
   const camBytes = parseInt(camResp.headers.get("content-length") ?? "0");
-  L(`     Content-Type: ${camResp.headers.get("content-type")}`);
-  L(`     Size: ${camBytes} bytes`);
-  L(`     Status: ${camResp.status}`);
+  const camContentType = safeLogContentType(camResp.headers.get("content-type"));
+  L(`     Content-Type: ${camContentType}`);
+  L(`     Size: ${safeLogInt(camBytes)} bytes`);
+  L(`     Status: ${safeLogInt(camResp.status)}`);
   L("");
 
   SEP();
   L("[6b] Gateway telemetry audit log (last 10 entries)");
-  const audit = await gw("GET", "/api/telemetry/audit?limit=10");
+  await gw("GET", "/api/telemetry/audit?limit=10");
   L("");
 
   SEP();
   L("[6c] Build evidence bundle");
   const evidence = {
-    jobId: jobResult.jobId,
+    jobId: jobResult?.jobId,
     kernel: KERNEL,
     escrow: ESCROW,
     protocol: "PCC Full Telemetry — Slots 1, 3, 5",
@@ -378,7 +396,15 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     chainId: 84532,
   };
   const evidenceHash = keccak256(toBytes(JSON.stringify(evidence)));
-  L(`     Evidence: ${JSON.stringify(evidence, null, 2)}`);
+  // FC-8 round 3: `evidence` embeds server-returned jobId/status/content-type;
+  // the HASH must cover the real values, but the LOGGED copy only shows them
+  // once validated, never raw.
+  L(`     Evidence: ${JSON.stringify({
+    ...evidence,
+    jobId: safeLogId(evidence.jobId),
+    status: safeLogEnum(evidence.status, JOB_STATUSES),
+    camera: { bytes: safeLogInt(evidence.camera.bytes), type: camContentType },
+  }, null, 2)}`);
   L(`     Hash: ${evidenceHash}`);
   L("");
 
@@ -403,18 +429,25 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   const oracleReq = await fetchImpl(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-oracle-key": ORACLE_KEY },
-    body: JSON.stringify({ escrowAddress: ESCROW, milestoneIndex: 0, evidenceHash, jobId: jobResult.jobId }),
+    body: JSON.stringify({ escrowAddress: ESCROW, milestoneIndex: 0, evidenceHash, jobId: jobResult?.jobId }),
   });
   const oracleText = await oracleReq.text();
-  L(`     Oracle HTTP ${oracleReq.status}: ${safeLogResponseText(oracleText, 500)}`);
+  // FC-8 round 2+3: the oracle response may reflect the x-oracle-key or carry
+  // a secret; never print its raw text or object — only a validated boolean.
+  let oracleParsed: any;
+  try { oracleParsed = JSON.parse(oracleText); } catch { oracleParsed = undefined; }
+  L(`     Oracle HTTP ${safeLogInt(oracleReq.status)}: verified=${safeLogBool(oracleParsed?.verified)} hasAttestation=${safeLogBool(!!oracleParsed?.attestation)}`);
   L("");
 
   // 7c. Attestation
   SEP();
   L("[7c] Submit oracle-signed attestation (arbiter sign-off)");
+  // Build the on-chain Attestation struct. MilestoneEscrow computes
+  // keccak256(abi.encode(attestation)) and binds the milestone to it, so
+  // release(...) later must pass the same struct back in verbatim.
   const attestationStruct = {
     escrowAddress: ESCROW,
-    jobId: jobResult.jobId ?? "job-telemetry",
+    jobId: jobResult?.jobId ?? "job-telemetry",
     evidenceHash,
     tier: 1,
     verified: true,
@@ -422,8 +455,11 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     nonce: keccak256(toBytes(`nonce-${Date.now()}-${ESCROW}`)),
     signature: "0x" as Hex,
   };
+  // FC-8 round 3: jobId is server-returned; validate before logging (the hash
+  // computation above and the on-chain call below still use the real value).
   L(`     Attestation struct: ${JSON.stringify({
     ...attestationStruct,
+    jobId: safeLogId(attestationStruct.jobId),
     timestamp: attestationStruct.timestamp.toString(),
   })}`);
   await write("MilestoneEscrow.submitAttestation(0, attestation)", {
@@ -458,8 +494,8 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   L("[7b-1] Archive evidence bundle to IPFS (Storacha/Helia)");
   const archiveResult = await gw("POST", "/api/evidence/archive", {
     bundle: {
-      id: `evidence-${jobResult.jobId}`,
-      jobId: jobResult.jobId,
+      id: `evidence-${jobResult?.jobId}`,
+      jobId: jobResult?.jobId,
       kernelId: KERNEL,
       type: "execution_evidence",
       evidenceHash,
@@ -473,17 +509,17 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       timestamp: new Date().toISOString(),
     },
   });
-  L(`     Archived: ${archiveResult.archived} | CID: ${archiveResult.cid ?? "mock"}`);
-  L(`     Metadata CID: ${archiveResult.metadataCid ?? "none"}`);
+  L(`     Archived: ${safeLogBool(archiveResult?.archived)} | CID: ${safeLogId(archiveResult?.cid, "mock")}`);
+  L(`     Metadata CID: ${safeLogId(archiveResult?.metadataCid, "none")}`);
   L("");
 
   // ── 7b-2. Lit Protocol — Encrypt Evidence ─────────────────────────
   SEP();
   L("[7b-2] Lit Protocol status + key provisioning check");
   const litStatus = await gw("GET", "/api/evidence/lit-status");
-  L(`     Lit connected: ${litStatus?.lit?.connected ?? "unknown"}`);
-  L(`     Lit mode: ${litStatus?.lit?.mode ?? "unknown"}`);
-  L(`     Lit network: ${litStatus?.lit?.network ?? "unknown"}`);
+  L(`     Lit connected: ${safeLogBool(litStatus?.lit?.connected)}`);
+  L(`     Lit mode: ${safeLogId(litStatus?.lit?.mode)}`);
+  L(`     Lit network: ${safeLogId(litStatus?.lit?.network)}`);
   L("");
 
   SEP();
@@ -492,7 +528,9 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     kernelId: KERNEL,
     operatorDid: `did:pcc:${KERNEL}`,
   });
-  L(`     Provisioned: ${litProvision.usageKey ? "yes" : "no"}`);
+  // FC-8 round 2: the provisioning response's error field is a raw server
+  // string — never print it; "no" is all a failure needs to say here.
+  L(`     Provisioned: ${litProvision?.usageKey ? "yes" : "no"}`);
   L("");
 
   // ── 7b-4. Starknet — ZK Proof Anchoring ───────────────────────────
@@ -501,8 +539,8 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   const zkCommit = await gw("POST", "/api/zk/commit", {
     bundleHash: evidenceHash,
   });
-  L(`     Commitment ID: ${zkCommit?.commitment?.id ?? "none"}`);
-  L(`     Commitment hash: ${zkCommit?.commitment?.commitmentHash ?? "none"}`);
+  L(`     Commitment ID: ${safeLogId(zkCommit?.commitment?.id)}`);
+  L(`     Commitment hash: ${safeLogHex(zkCommit?.commitment?.commitmentHash)}`);
   L("");
 
   SEP();
@@ -512,9 +550,9 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     requiredTier: 2,
   });
   const proofId = zkProof?.proof?.id;
-  L(`     Proof ID: ${proofId ?? "none"}`);
-  L(`     Proof type: ${zkProof?.proof?.proofType ?? "none"}`);
-  L(`     Verified: ${zkProof?.proof?.verified ?? "unknown"}`);
+  L(`     Proof ID: ${safeLogId(proofId)}`);
+  L(`     Proof type: ${safeLogId(zkProof?.proof?.proofType)}`);
+  L(`     Verified: ${safeLogBool(zkProof?.proof?.verified)}`);
   L("");
 
   SEP();
@@ -523,16 +561,17 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     proofId: proofId ?? undefined,
     merkleRoot: proofId ? undefined : evidenceHash,
   });
-  L(`     Starknet TX: ${starknetAnchor?.anchor?.txHash ?? "none"}`);
-  L(`     Block: ${starknetAnchor?.anchor?.blockNumber ?? "pending"}`);
-  L(`     Mode: ${starknetAnchor?.mode ?? "unknown"}`);
+  const starknetTxHash = starknetAnchor?.anchor?.txHash;
+  L(`     Starknet TX: ${safeLogHex(starknetTxHash)}`);
+  L(`     Block: ${safeLogInt(starknetAnchor?.anchor?.blockNumber, "pending")}`);
+  L(`     Mode: ${safeLogId(starknetAnchor?.mode)}`);
   L("");
 
-  if (starknetAnchor?.anchor?.txHash) {
+  if (starknetTxHash) {
     SEP();
     L("[7b-7] Poll Starknet anchor status");
-    const anchorStatus = await gw("GET", `/api/zk/anchor-starknet/${starknetAnchor.anchor.txHash}`);
-    L(`     Status: ${anchorStatus?.status ?? "unknown"}`);
+    const anchorStatus = await gw("GET", `/api/zk/anchor-starknet/${encodeURIComponent(String(starknetTxHash))}`);
+    L(`     Status: ${safeLogId(anchorStatus?.status)}`);
     L("");
   }
 
@@ -540,10 +579,10 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   SEP();
   L("[7b-8] NEAR chain abstraction — integration status");
   const nearStatus = await gw("GET", "/api/near/status");
-  L(`     Integration: ${nearStatus?.integration ?? "unknown"}`);
-  L(`     Network: ${nearStatus?.network ?? "unknown"}`);
-  L(`     Mock: ${nearStatus?.mock ?? "unknown"}`);
-  L(`     Supported chains: ${nearStatus?.supportedChains?.join(", ") ?? "unknown"}`);
+  L(`     Integration: ${safeLogId(nearStatus?.integration)}`);
+  L(`     Network: ${safeLogId(nearStatus?.network)}`);
+  L(`     Mock: ${safeLogBool(nearStatus?.mock)}`);
+  L(`     Supported chains: ${safeLogIdList(nearStatus?.supportedChains)}`);
   L("");
 
   SEP();
@@ -557,10 +596,10 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     recipient: account.address,
   });
   const quoteId = nearQuote?.quote?.quoteId;
-  L(`     Quote ID: ${quoteId ?? "none"}`);
-  L(`     Estimated output: ${nearQuote?.quote?.estimatedOutput ?? "none"}`);
-  L(`     Fee: ${nearQuote?.quote?.fee ?? "none"}`);
-  L(`     Route: ${nearQuote?.quote?.route ?? "none"}`);
+  L(`     Quote ID: ${safeLogId(quoteId)}`);
+  L(`     Estimated output: ${safeLogId(nearQuote?.quote?.estimatedOutput)}`);
+  L(`     Fee: ${safeLogId(nearQuote?.quote?.fee)}`);
+  L(`     Route: ${safeLogId(nearQuote?.quote?.route)}`);
   L("");
 
   if (quoteId) {
@@ -572,16 +611,16 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       recipient: account.address,
     });
     const intentId = nearIntent?.intent?.intentId;
-    L(`     Intent ID: ${intentId ?? "none"}`);
-    L(`     Status: ${nearIntent?.intent?.status ?? "none"}`);
+    L(`     Intent ID: ${safeLogId(intentId)}`);
+    L(`     Status: ${safeLogId(nearIntent?.intent?.status)}`);
     L("");
 
     if (intentId) {
       SEP();
       L("[7b-11] NEAR — poll intent settlement status");
-      const intentStatus = await gw("GET", `/api/near/intent/${intentId}`);
-      L(`     Status: ${intentStatus?.status ?? intentStatus?.intent?.status ?? "unknown"}`);
-      L(`     TX hash: ${intentStatus?.txHash ?? intentStatus?.intent?.txHash ?? "pending"}`);
+      const intentStatus = await gw("GET", `/api/near/intent/${encodeURIComponent(String(intentId))}`);
+      L(`     Status: ${safeLogId(intentStatus?.status ?? intentStatus?.intent?.status)}`);
+      L(`     TX hash: ${safeLogHex(intentStatus?.txHash ?? intentStatus?.intent?.txHash, 20, "pending")}`);
       L("");
     }
   }
@@ -593,12 +632,12 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   SEP();
   L("[8a] Final escrow on-chain state");
-  const finalState = await gw("GET", `/api/escrow/chain/${ESCROW}/state`);
+  await gw("GET", `/api/escrow/chain/${ESCROW}/state`);
   L("");
 
   SEP();
   L("[8b] Final kernel state");
-  const finalKernel = await gw("GET", "/api/kernels/kernel-nanoclaw");
+  await gw("GET", "/api/kernels/kernel-nanoclaw");
   L("");
 
   SEP();
@@ -623,7 +662,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   SEP();
   L("[9a] Submit print job to HP printer (kernel-hp-printer)");
-  const printResult = await gw("POST", "/api/jobs/submit", {
+  await gw("POST", "/api/jobs/submit", {
     stepId: "step-print-full-telemetry",
     kernelId: "kernel-hp-printer",
     parameters: {
@@ -641,9 +680,15 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   return { report, log };
 }
 
+// FC-8 round 3: CLI behavior lives only behind this guard. A plain `import`
+// of this module (as a test does) never executes main — the live-service
+// run only happens when the file is invoked directly.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   run().catch(e => {
     if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; }
+    // FC-8 round 2: e.shortMessage/e.message is free text that can carry a
+    // caught secret (e.g. a header value embedded in a fetch/dependency
+    // error); only the bounded error-class name is safe to log here.
     console.error(`FATAL: ${safeLogErrorName(e)}`);
     process.exitCode = 1;
   });

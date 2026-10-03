@@ -9,11 +9,11 @@
  * 6. Release milestone (settle USDC to operator)
  * 7. Collect everything → print on HP printer
  *
- * FC-8 round 3 refactor (astra pack 61b census closure, step 1 of 2 — NO
- * behavior change in this commit): exported as `run(deps)` with injected
- * fetch/chain-clients/env. CLI behavior preserved behind the entry guard.
- * Print statements are byte-for-byte unchanged from before this refactor;
- * the validated-field fix lands in the next commit.
+ * FC-8 round 3 (astra pack 61b census closure): exported as `run(deps)` with
+ * injected fetch/chain-clients/env (see fc8-round3-real-e2e.test.ts). CLI
+ * behavior is preserved behind the entry guard at the bottom. Every print
+ * site reaching a gateway- or oracle-derived value now logs a VALIDATED
+ * projection, never a raw response body or object.
  */
 
 import {
@@ -35,7 +35,10 @@ import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { safeLogJson, safeLogId, safeLogErrorName } from "../packages/gateway/src/util/redact-log.js";
+import {
+  safeLogJson, safeLogId, safeLogErrorName, safeLogInt, safeLogBool,
+  safeLogEnum, safeLogContentType, safeLogHex,
+} from "../packages/gateway/src/util/redact-log.js";
 
 /** Thrown for a missing required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
 export class MissingEnvError extends Error {
@@ -48,6 +51,7 @@ export class MissingEnvError extends Error {
 const GATEWAY = "https://capability.network";
 const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
 const KERNEL = "kernel-nanoclaw";
+const JOB_STATUSES = ["queued", "running", "completed", "failed"] as const;
 
 function requireEnv(env: Record<string, string | undefined>, name: string, what: string): string {
   const value = env[name]?.trim();
@@ -154,7 +158,6 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   const ethBal = await pub.getBalance({ address: account.address });
   log(`Deployer:    ${account.address}`);
   log(`ETH:         ${formatEther(ethBal)}`);
-  log(`USDC:        ${USDC}`);
   log(`Network:     Base Sepolia (chain 84532)`);
   log(`Gateway:     ${GATEWAY}`);
   log(`Kernel:      ${KERNEL}`);
@@ -289,8 +292,9 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       filename: "pcc_real_e2e.py",
     },
   });
-  log(`    Job ID:  ${jobResult.jobId}`);
-  log(`    Status:  ${jobResult.status}`);
+  // FC-8 round 3: jobId/status are server-returned; validate before logging.
+  log(`    Job ID:  ${safeLogId(jobResult?.jobId)}`);
+  log(`    Status:  ${safeLogEnum(jobResult?.status, JOB_STATUSES)}`);
   log("");
 
   // ── 5. Wait for execution ─────────────────────────────────────────
@@ -298,25 +302,25 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   let status = "queued";
   for (let i = 0; i < pollAttempts; i++) {
     await new Promise(r => setTimeout(r, pollSleepMs));
-    const s = await gw("GET", `/api/jobs/${jobResult.jobId}/status`);
-    status = s.status;
-    process.stdout.write(`    ${i + 1}/${pollAttempts}: ${status}   \r`);
+    const s = await gw("GET", `/api/jobs/${encodeURIComponent(jobResult?.jobId ?? "")}/status`);
+    status = s?.status;
+    process.stdout.write(`    ${i + 1}/${pollAttempts}: ${safeLogEnum(status, JOB_STATUSES)}   \r`);
     if (status === "completed" || status === "failed") break;
   }
   console.log();
-  log(`    Final:   ${status}`);
+  log(`    Final:   ${safeLogEnum(status, JOB_STATUSES)}`);
   log("");
 
   // ── 6. Capture camera evidence ────────────────────────────────────
   log("[6] CAMERA EVIDENCE");
   const camResp = await fetchImpl(`${GATEWAY}/api/ot2/camera/latest`);
   const camBytes = parseInt(camResp.headers.get("content-length") ?? "0");
-  log(`    Frame:   ${camBytes} bytes (${camResp.headers.get("content-type")})`);
+  log(`    Frame:   ${safeLogInt(camBytes)} bytes (${safeLogContentType(camResp.headers.get("content-type"))})`);
   log("");
 
   // ── 7. Submit evidence hash on-chain ──────────────────────────────
   const evidence = {
-    jobId: jobResult.jobId,
+    jobId: jobResult?.jobId,
     kernel: KERNEL,
     escrow: ESCROW,
     protocol: "PCC Slot Inspection 1-3-5",
@@ -348,16 +352,22 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       escrowAddress: ESCROW,
       milestoneIndex: 0,
       evidenceHash,
-      jobId: jobResult.jobId,
+      jobId: jobResult?.jobId,
     }),
   });
-  const oracleResult = await oracleReq.json() as any;
-  log(`    Status:  ${oracleReq.status}`);
-  log(`    Result:  ${safeLogJson(oracleResult)}`);
+  const oracleResult = await oracleReq.json().catch(() => undefined) as any;
+  // FC-8 round 2+3: never print the raw oracle body/object — only validated
+  // fields the script actually needs (status code, verified boolean,
+  // whether an attestation/tx hash came back).
+  log(`    Status:  ${safeLogInt(oracleReq.status)}`);
+  log(`    Result:  verified=${safeLogBool(oracleResult?.verified)} hasTransactionHash=${safeLogBool(!!oracleResult?.transactionHash)}`);
 
+  // Build the on-chain Attestation struct. The escrow stores
+  // keccak256(abi.encode(attestation)) so the SAME struct must be passed
+  // back to release() for settlement. See IPCCOracle.Attestation.
   const attestationStruct = {
     escrowAddress: ESCROW,
-    jobId: jobResult.jobId ?? "job-real-e2e",
+    jobId: jobResult?.jobId ?? "job-real-e2e",
     evidenceHash: evidenceHash as Hex,
     tier: 1,
     verified: true,
@@ -366,8 +376,12 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     signature: "0x" as Hex,
   };
 
-  if (oracleResult.transactionHash) {
-    log(`    Oracle-submitted attest TX: ${oracleResult.transactionHash}`);
+  // If oracle pre-submitted its attestation on-chain, acknowledge and move on.
+  // Otherwise we submit the struct ourselves as the authorized verifier.
+  if (oracleResult?.transactionHash) {
+    // FC-8 round 3: transactionHash is oracle-returned; validate as hex
+    // before logging (the real value is still used for waitTx below).
+    log(`    Oracle-submitted attest TX: ${safeLogHex(oracleResult.transactionHash)}`);
     await waitTx(oracleResult.transactionHash);
   } else {
     log("    Submitting attestation struct as arbiter");
@@ -416,16 +430,22 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       filename: "pcc-real-e2e-report.txt",
     },
   });
-  log(`    Print Job: ${safeLogId(printResult.jobId)}`);
+  // FC-8 round 2: printResult.error is a raw server error string — never
+  // fall back to printing it; an id-shaped jobId or a static "(none)" only.
+  log(`    Print Job: ${safeLogId(printResult?.jobId)}`);
   log("");
   log("DONE. Full protocol executed. No mocks.");
 
   return { report: report.join("\n") };
 }
 
+// FC-8 round 3: CLI behavior lives only behind this guard. A plain `import`
+// of this module (as a test does) never executes main.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   run().catch((e) => {
     if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; }
+    // FC-8 round 2: e.message is free text that can carry a caught secret;
+    // only the bounded error-class name is safe to log here.
     console.error("FATAL:", safeLogErrorName(e));
     process.exitCode = 1;
   });

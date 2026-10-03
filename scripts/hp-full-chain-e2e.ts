@@ -17,11 +17,11 @@
  *
  * Also drives the printer via PCC relay at each step so there's a physical artifact.
  *
- * FC-8 round 3 refactor (astra pack 61b census closure, step 1 of 2 — NO
- * behavior change in this commit): exported as `run(deps)` with injected
- * fetch/chain-clients/env. CLI behavior preserved behind the entry guard.
- * Print statements are byte-for-byte unchanged from before this refactor;
- * the validated-field fix lands in the next commit.
+ * FC-8 round 3 (astra pack 61b census closure): exported as `run(deps)` with
+ * injected fetch/chain-clients/env (see fc8-round3-hp-full-chain.test.ts).
+ * CLI behavior is preserved behind the entry guard at the bottom. Every
+ * print site reaching a gateway- or oracle-derived value now logs a
+ * VALIDATED projection, never a raw response body or object.
  */
 import {
   createWalletClient, createPublicClient, http,
@@ -33,7 +33,10 @@ import { baseSepolia } from "viem/chains";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { safeLogJson, safeLogErrorName } from "../packages/gateway/src/util/redact-log.js";
+import {
+  safeLogJson, safeLogErrorName, safeLogId, safeLogBool, safeLogHex,
+  safeLogInt,
+} from "../packages/gateway/src/util/redact-log.js";
 
 /** Thrown for a missing/malformed required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
 export class MissingEnvError extends Error {
@@ -209,8 +212,10 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     maxCommands: 10,
     expiresInMinutes: 30,
   });
-  const scopeId = (scopeRes.data as any).id;
-  L(`     scope: ${scopeId}`);
+  // FC-8 round 3: scopeId is server-returned; validate before logging (the
+  // real value, scopeIdRaw, is still what gets sent back to the gateway).
+  const scopeIdRaw = (scopeRes.data as any)?.id;
+  L(`     scope: ${safeLogId(scopeIdRaw)}`);
 
   const printText = [
     "============================================",
@@ -233,11 +238,14 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   ].join("\n");
 
   const tcRes = await gwFetch("POST", `/api/relay/${KERNEL}/tool-call`, {
-    scopeId,
+    scopeId: scopeIdRaw,
     toolName: "printer_print_text",
     args: { text: printText, copies: 1 },
   });
-  L(`     tool call: ${(tcRes.data as any).id} status=${(tcRes.data as any).status}`);
+  const toolCallId = (tcRes.data as any)?.id;
+  const toolCallStatus = (tcRes.data as any)?.status;
+  // FC-8 round 3: both fields are server-returned; validate before logging.
+  L(`     tool call: ${safeLogId(toolCallId)} status=${safeLogId(toolCallStatus)}`);
   L("");
 
   SEP();
@@ -252,10 +260,13 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     timestamp: new Date().toISOString(),
     chain: "base-sepolia",
     chainId: 84532,
-    printResult: (tcRes.data as any).id,
+    printResult: toolCallId,
   };
   const evidenceHash = keccak256(toBytes(JSON.stringify(evidence)));
-  L(`     evidence: ${JSON.stringify(evidence, null, 2)}`);
+  // FC-8 round 3: `evidence.printResult` is server-returned (the tool-call
+  // id); the HASH must cover the real value, but the LOGGED copy only shows
+  // it once validated, never raw.
+  L(`     evidence: ${JSON.stringify({ ...evidence, printResult: safeLogId(evidence.printResult) }, null, 2)}`);
   L(`     hash: ${evidenceHash}`);
   await writeC("MilestoneEscrow.submitEvidence(0, hash)", {
     address: ESCROW, abi: escArt.abi, functionName: "submitEvidence",
@@ -280,14 +291,16 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     body: JSON.stringify(verifyBody),
   });
   const oracleText = await oracleRes.text();
-  const oracleShown = (() => { try { return safeLogJson(JSON.parse(oracleText), 600); } catch { return "[non-JSON response withheld]"; } })();
-  L(`     HTTP ${oracleRes.status}: ${oracleShown}`);
   let oracleData: any = {};
   try { oracleData = JSON.parse(oracleText); } catch {}
+  // FC-8 round 2+3: never print the raw oracle body/object — only a
+  // validated boolean/presence summary.
+  L(`     HTTP ${safeLogInt(oracleRes.status)}: verified=${safeLogBool(oracleData?.verified)} hasAttestation=${safeLogBool(!!oracleData?.attestation)}`);
   L("");
 
   SEP();
   L("[9] submitAttestation(0, attestation) — oracle-signed struct");
+  // Build the on-chain Attestation struct that MilestoneEscrow binds to.
   const attestationStruct = {
     escrowAddress: ESCROW,
     jobId: "job-hp-printer-fullchain",
@@ -301,7 +314,9 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       : ("0x" as Hex),
   };
   L(`     attestation.evidenceHash: ${attestationStruct.evidenceHash}`);
-  L(`     attestation.signature:    ${attestationStruct.signature.slice(0, 20)}...`);
+  // FC-8 round 3: the signature may be oracle-returned; validate it is
+  // actually hex-shaped before logging even a bounded prefix of it.
+  L(`     attestation.signature:    ${safeLogHex(attestationStruct.signature)}`);
   await writeC("MilestoneEscrow.submitAttestation(0, attestation)", {
     address: ESCROW, abi: escArt.abi, functionName: "submitAttestation",
     args: [0n, attestationStruct],
@@ -347,7 +362,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     "",
   ].join("\n");
   await gwFetch("POST", `/api/relay/${KERNEL}/tool-call`, {
-    scopeId, toolName: "printer_print_text",
+    scopeId: scopeIdRaw, toolName: "printer_print_text",
     args: { text: finalText, copies: 1 },
   });
   L("     final page queued");
@@ -372,9 +387,14 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   return { report: joined };
 }
 
+// FC-8 round 3: CLI behavior lives only behind this guard. A plain `import`
+// of this module (as a test does) never executes main.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   run().catch(e => {
     if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; }
+    // FC-8 round 2: printing the whole error object serializes its message
+    // and stack (and any attached properties), which can carry a caught
+    // secret; only the bounded error-class name is safe to log here.
     console.error("FAIL:", safeLogErrorName(e));
     process.exitCode = 1;
   });

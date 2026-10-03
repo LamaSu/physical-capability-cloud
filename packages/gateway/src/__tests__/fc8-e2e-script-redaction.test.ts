@@ -52,7 +52,10 @@ describe("FC-8 round 2 (astra pack 61b) — real-e2e-verbose.ts call sites", () 
 
   it("no longer prints the raw oracle response text (was :383)", () => {
     expect(src()).not.toMatch(/oracleText\.slice\(/);
-    expect(src()).toMatch(/safeLogResponseText\(\s*oracleText/);
+    // Round 3 (astra pack 61b census closure) superseded whole-body
+    // redaction with field-level validation: only a validated boolean
+    // summary of the parsed oracle response, never the body/object itself.
+    expect(src()).toMatch(/safeLogBool\(oracleParsed\?\.verified\)/);
   });
 
   it("no longer prints litProvision.error (was :472)", () => {
@@ -75,8 +78,10 @@ describe("FC-8 round 2 (astra pack 61b) — real-e2e.ts call sites", () => {
   const src = () => readScript("scripts/real-e2e.ts");
 
   it("no longer prints printResult.error (was :401)", () => {
-    expect(src()).not.toMatch(/printResult\.jobId \?\? printResult\.error/);
-    expect(src()).toMatch(/safeLogId\(printResult\.jobId\)/);
+    expect(src()).not.toMatch(/printResult\??\.jobId \?\? printResult\??\.error/);
+    // Round 3 added optional chaining (printResult?.jobId) alongside the
+    // dependency-injection refactor; the validated-id call stays the same.
+    expect(src()).toMatch(/safeLogId\(printResult\??\.jobId\)/);
   });
 
   it("top-level catch prints only a bounded error name, not .message (was :406)", () => {

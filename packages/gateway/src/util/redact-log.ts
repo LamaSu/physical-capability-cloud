@@ -137,3 +137,64 @@ export function safeLogErrorName(e: unknown): string {
 export function safeLogId(value: unknown, fallback = "(none)"): string {
   return typeof value === "string" && ID_RE.test(value) ? value : fallback;
 }
+
+// ── FC-8 round 3 (astra pack 61b, census closure) ───────────────────────────
+//
+// Round 2 closed the three CRITICAL summary rows. Astra's full census lists
+// many more sites across the same scripts where a gateway/oracle-derived
+// value reaches a print statement unvalidated — not necessarily secret-shaped,
+// but also never checked, so the scripts "cannot support an ANY-value-ANY-path
+// confidentiality guarantee" (the verdict's own words). These five helpers
+// give every remaining site a VALIDATED, narrow type to log instead of the
+// raw value: an integer (status codes, sizes, counts, block numbers), a
+// boolean, a short allow-listed enum (job status, content-type), a bounded
+// hex string (tx hashes, signatures — a bounded prefix only), or a URL path
+// restricted to URL-safe identifier characters. Anything that doesn't fit
+// becomes a fixed fallback — never the raw value.
+
+/** An integer (number or bigint) safe to log as-is; anything else → fallback. */
+export function safeLogInt(value: unknown, fallback = "(none)"): string {
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number" && Number.isFinite(value) && Number.isInteger(value)) return String(value);
+  return fallback;
+}
+
+/** A boolean safe to log as-is; anything else (including a truthy non-boolean) → fallback. */
+export function safeLogBool(value: unknown, fallback = "(unknown)"): string {
+  return typeof value === "boolean" ? String(value) : fallback;
+}
+
+/** A string safe to log only if it exactly matches one of `allowed`. */
+export function safeLogEnum(value: unknown, allowed: readonly string[], fallback = "(unknown)"): string {
+  return typeof value === "string" && allowed.includes(value) ? value : fallback;
+}
+
+/** Known-safe MIME types for the camera/evidence content-type fields. Params (e.g. `; charset=`) are stripped before matching. */
+const CONTENT_TYPES = [
+  "application/json", "application/octet-stream", "text/plain", "text/html",
+  "image/jpeg", "image/png", "image/gif", "image/webp",
+] as const;
+
+/** A Content-Type header value safe to log: its base type only if it's one of CONTENT_TYPES. */
+export function safeLogContentType(value: unknown, fallback = "(unknown)"): string {
+  if (typeof value !== "string") return fallback;
+  const base = value.split(";")[0]?.trim().toLowerCase();
+  return base && (CONTENT_TYPES as readonly string[]).includes(base) ? base : fallback;
+}
+
+/** A `0x`-hex string (tx hash, signature) safe to log as a bounded prefix; anything else → fallback. */
+export function safeLogHex(value: unknown, maxChars = 20, fallback = "(none)"): string {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]*$/.test(value)) return fallback;
+  return value.length > maxChars ? `${value.slice(0, maxChars)}…` : value;
+}
+
+/** A URL path safe to log: only URL-safe identifier characters, no spaces/quotes (where a secret would have to sit). */
+export function safeLogUrlPath(value: unknown, fallback = "(path withheld)"): string {
+  return typeof value === "string" && /^[A-Za-z0-9/_.\-?=&%:]{1,256}$/.test(value) ? value : fallback;
+}
+
+/** Each element of `value` run through safeLogId and comma-joined; non-arrays/non-strings → fallback. */
+export function safeLogIdList(value: unknown, fallback = "(unknown)"): string {
+  if (!Array.isArray(value)) return fallback;
+  return value.slice(0, 20).map((v) => safeLogId(v, "?")).join(", ");
+}

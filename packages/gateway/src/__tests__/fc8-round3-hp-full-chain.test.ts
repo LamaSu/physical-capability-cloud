@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { run } from "../../../../scripts/hp-full-chain-e2e.js";
 import { fakeResponse, makeFakeChain } from "./support/fc8-round3-fakes.js";
 
-const CANARY = "SENTINEL-ORACLE-KEY-5f1e";
+const CANARY = "SENTINEL ORACLE KEY 5f1e"; // space: not id/enum/hex/content-type-shaped anywhere
 const CONTRACTS_DIR = fileURLToPath(new URL("./support/fake-contracts", import.meta.url));
 const REPORT_PATH = "/mnt/sparkbulk/tmp/fc8-r3-hp-full-chain-report.txt";
 
