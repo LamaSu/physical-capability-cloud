@@ -53,7 +53,7 @@ chmod 600 .pcc/node-keys.json
 ## 4. An operator API key, captured without logging it
 **Ask the human** (class C): "Which email should this operator account be registered under?"
 
-**Payouts: tell, don't ask.** PCC does not yet pay a wallet you name. Today settlement pays a wallet the gateway generates and holds for the account, or the gateway's own signer, and nothing lets you bind or check another destination. So this runbook runs test jobs only: no money moves in phases 6 and 7. Tell the human that, don't ask for a payout wallet, and promise no payouts. Paid operation waits for a gateway that pays a wallet the human confirms (a gateway row).
+**Payouts: tell, don't ask.** PCC does not yet pay a wallet you name. Today settlement pays a wallet the gateway generates and holds for the account, or the gateway's own signer, and nothing lets you bind or check another destination. So this runbook takes no job that carries money, and no money moves in phases 6 and 7. On the current gateway it runs no job at all: the test job waits for a queue-only submission (phase 6). Tell the human that, don't ask for a payout wallet, and promise no payouts. Paid operation waits for a gateway that pays a wallet the human confirms (a gateway row).
 
 Write the human's answer into `.pcc/operator.json` with your file-writing tool, not with `echo` or `printf`: a command's text can be read by other users of this machine while it runs (`ps`). For example: `{"email": "operator@example.org", "name": "Bench plate reader"}`. The request below is built from that file, sent from a private file, and deleted.
 

@@ -77,7 +77,7 @@
     "intake.asks-about-pay": {
       "phase": "intake",
       "trigger": "The human asks how prices, payouts, fees or contributor pay work.",
-      "do": "Answer from the runbook. The price is theirs to set. PCC cannot yet pay a wallet they name, so this runbook runs test jobs only and nothing is paid out yet. Publishing a kit adds a license that the buyer pays on top (phase 8). Quote no number that isn't in the runbook or the gateway.",
+      "do": "Answer from the runbook. The price is theirs to set. PCC cannot yet pay a wallet they name, so this runbook takes no job that carries money and nothing is paid out yet. Publishing a kit adds a license that the buyer pays on top (phase 8). Quote no number that isn't in the runbook or the gateway.",
       "file": "08-publish.md",
       "section": "How contributor pay works (tell the human this before they choose)",
       "report": null
