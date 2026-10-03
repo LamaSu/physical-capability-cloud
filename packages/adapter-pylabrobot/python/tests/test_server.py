@@ -413,3 +413,32 @@ def test_a_run_while_another_run_is_in_flight_on_the_device_is_refused():
     assert [m["params"]["type"] for m in rest if m.get("method") == "evidence"] == ["aspirate"]
     assert [m["result"]["ok"] for m in rest if m.get("id") == "3"] == [True]
     assert after["result"]["ok"] is True
+
+
+def test_a_running_jobs_window_cannot_be_closed_until_its_run_ends():
+    """astra pack 204 (HIGH): a client-side run timeout leaves the sidecar's run going. Its window
+    was closed while it ran, so a second job's window could open, and the first run's later ops
+    were bound to the second job. While the device runs, closing its window is refused, and the
+    first run's ops stay its own."""
+
+    async def scenario():
+        out = CapturingStdout()
+        s = Server(stdout=out)
+        await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        await _call(s, out, "2", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        slow = [{"__delay_ms": 100}, {"op": "aspirate", "well": "A1"}]
+        run_a = asyncio.ensure_future(s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "3", "method": "backend.run", "params": {"deviceId": "dev-1", "jobId": "job-A", "protocolSource": "inline-ops", "protocolInline": slow}})))
+        await asyncio.sleep(0.02)
+        close_a = await _call(s, out, "4", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        open_b = await _call(s, out, "5", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-B"})
+        await run_a
+        await asyncio.sleep(0.05)
+        notes = [m["params"] for m in out.pop_messages() if m.get("method") == "evidence"]
+        close_a_after = await _call(s, out, "6", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        return close_a, open_b, notes, close_a_after
+
+    close_a, open_b, notes, close_a_after = asyncio.run(scenario())
+    assert close_a["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], f"closing job A's window while it runs: {close_a}"
+    assert open_b["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], f"job B's window while job A's is open: {open_b}"
+    assert [(n["type"], n["jobId"]) for n in notes] == [("aspirate", "job-A")]
+    assert close_a_after["result"]["jobId"] == "job-A" and close_a_after["result"]["opCount"] == 1

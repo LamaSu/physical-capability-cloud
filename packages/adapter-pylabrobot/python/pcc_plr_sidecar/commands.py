@@ -269,6 +269,16 @@ class Commands:
     async def evidence_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
+        # A device whose run is in flight keeps its window (astra pack 204). A client-side run
+        # timeout does not stop the run here: closing the window would attest a job whose run
+        # can still emit, and let another job's window open under it. Refused until the run
+        # ends; the adapter holds the device and retries this barrier until it answers.
+        if device_id in self._running:
+            raise RpcException(
+                RPC_ERROR_CODES["DEVICE_BUSY"],
+                f"device {device_id} is still running, so job {job_id}'s window stays open until its run ends",
+                {"jobId": job_id, "generation": self.evidence.generation},
+            )
         window = self.evidence.stop_recording(device_id, job_id)
         key = (device_id, job_id)
         if window is not None:
