@@ -87,7 +87,7 @@ interface Tab {
   name: string;
   container: HTMLDivElement;
   root: Root;
-  store: { getState: () => { apiKey: string | null; sessionToken: string | null; login: (key: string) => Promise<boolean> } };
+  store: { getState: () => { apiKey: string | null; sessionToken: string | null; login: (key: string) => Promise<boolean>; logout: () => void } };
 }
 let tabs: Tab[] = [];
 let violations: string[] = [];
