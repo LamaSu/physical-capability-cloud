@@ -21,7 +21,9 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac, randomBytes } from "node:crypto";
+import { constants as osConstants } from "node:os";
 import { format } from "node:util";
+import { errorCodes as FASTIFY_ERROR_CODES } from "fastify";
 
 // ── Keyed hash ─────────────────────────────────────────────────────────────
 
@@ -48,7 +50,7 @@ export function keyedHexId(id: unknown, length: 16 | 32): string | undefined {
 
 // ── Declared fields ────────────────────────────────────────────────────────
 
-type Emitted = string | number | boolean | null;
+type Emitted = string | number | boolean | null | Emitted[];
 
 /** The emitted form of every declared value. Only make() adds to it, so no other object is declared. */
 const DECLARED = new WeakMap<object, Emitted>();
@@ -105,6 +107,14 @@ export const declare = {
   /** A condition the server decided: the boolean itself. */
   flag(b: boolean): Declared {
     return make(b === true);
+  },
+  /**
+   * A list a producer declares as one field: each declared item as declared, any other as its keyed
+   * hash. Only a field whose own value is declared keeps its key (round 2 of #538, M3), so a list
+   * of declared values is declared as a list.
+   */
+  list(items: readonly unknown[]): Declared {
+    return make(items.slice(0, 50).map((item) => (isDeclared(item) ? emitted(item) : keyedHash(item))));
   },
 };
 
@@ -173,7 +183,20 @@ export function declaredRoute(req: { routeOptions?: { url?: string } }): Declare
 // ── Errors ─────────────────────────────────────────────────────────────────
 
 const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
-const ERROR_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/**
+ * The error codes an error may carry readable (round 2 of #538, M3: never by spelling): the system
+ * error names (os.constants.errno), Fastify's own codes and SQLite's result codes. Any other code
+ * leaves as its keyed hash.
+ */
+const ERROR_CODES: ReadonlySet<string> = new Set([
+  ...Object.keys(osConstants.errno),
+  ...Object.keys(FASTIFY_ERROR_CODES),
+  "SQLITE_ERROR", "SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_READONLY", "SQLITE_IOERR", "SQLITE_CORRUPT",
+  "SQLITE_FULL", "SQLITE_CANTOPEN", "SQLITE_CONSTRAINT", "SQLITE_CONSTRAINT_UNIQUE",
+  "SQLITE_CONSTRAINT_PRIMARYKEY", "SQLITE_CONSTRAINT_FOREIGNKEY", "SQLITE_CONSTRAINT_NOTNULL",
+  "SQLITE_CONSTRAINT_CHECK", "SQLITE_MISMATCH", "SQLITE_RANGE", "SQLITE_NOTADB",
+]);
 const STACK_FRAME = /^\s*at (?:[\w$.<>\[\] ]+ \()?[^()\s]+:\d+:\d+\)?\s*$/;
 
 /** An error's class as the error chokepoint builds it: the constructor the code ran, never its data. */
@@ -190,24 +213,26 @@ export function errorClassOf(err: unknown): Declared {
 
 /**
  * An error as a sink may carry it, built here: its class (the constructor the code ran), its code
- * (a code-shaped string or a number the code set) and HTTP status, its message as a keyed hash
- * (a message can echo a request) and its code frames.
+ * when it is a known system, Fastify or SQLite code (any other as its keyed hash), its HTTP status
+ * as a class ("4xx"; the exact status a response carries comes from the response itself), its
+ * message as a keyed hash (a message can echo a request) and its code frames.
  */
 export function closedError(err: unknown): Record<string, unknown> {
   if (!(err instanceof Error) && (err === null || typeof err !== "object")) {
     return { type: "NonError", ...(err !== undefined ? { message: closedText(err) } : {}) };
   }
   const e = err as { code?: unknown; message?: unknown; stack?: unknown; statusCode?: unknown };
-  const code = typeof e.code === "number" && Number.isFinite(e.code) ? e.code
-    : typeof e.code === "string" ? (ERROR_CODE.test(e.code) ? e.code : keyedHash(e.code)) : undefined;
-  const status = typeof e.statusCode === "number" && Number.isInteger(e.statusCode) && e.statusCode >= 100 && e.statusCode <= 599 ? e.statusCode : undefined;
+  const code = e.code === undefined || e.code === null ? undefined
+    : typeof e.code === "string" && ERROR_CODES.has(e.code) ? e.code : keyedHash(e.code);
+  const status = typeof e.statusCode === "number" && Number.isInteger(e.statusCode) && e.statusCode >= 100 && e.statusCode <= 599
+    ? `${Math.floor(e.statusCode / 100)}xx` : undefined;
   const frames = typeof e.stack === "string"
     ? e.stack.split("\n").slice(1).filter((line) => STACK_FRAME.test(line)).slice(0, 12).map((line) => line.trim())
     : undefined;
   return {
     type: classOf(err),
     ...(code !== undefined ? { code } : {}),
-    ...(status !== undefined ? { statusCode: status } : {}),
+    ...(status !== undefined ? { statusClass: status } : {}),
     ...(typeof e.message === "string" ? { message: closedText(e.message) } : {}),
     ...(frames && frames.length ? { stack: frames } : {}),
   };
@@ -222,10 +247,11 @@ export interface ClosedField {
 }
 
 /**
- * Any value as a sink may carry it, with whether it holds a declared field. A declared value
- * leaves as declared; an error as the error chokepoint builds it; every other leaf as its keyed
- * hash; an object's key as itself only when its field holds a declared value, otherwise as its
- * keyed hash. Undefined means: leave it out.
+ * Any value as a sink may carry it, with whether it IS declared. A declared value leaves as
+ * declared; an error as the error chokepoint builds it; every other leaf as its keyed hash. An
+ * object's key leaves as itself only when its own value is declared: a declared value inside a
+ * container never vouches for the container's key (round 2 of #538, M3), and a list of declared
+ * values is declared with declare.list. Undefined means: leave it out.
  */
 export function closeField(value: unknown, depth = 0): ClosedField {
   if (value === null || value === undefined) return { value, declared: false };
@@ -241,30 +267,26 @@ export function closeField(value: unknown, depth = 0): ClosedField {
     case "symbol":
       return { value: undefined, declared: false };
   }
-  if (value instanceof Error) return { value: closedError(value), declared: true };
+  if (value instanceof Error) return { value: closedError(value), declared: false };
   if (value instanceof Date) return { value: Number.isNaN(value.getTime()) ? undefined : keyedHash(value.toISOString()), declared: false };
   if (Buffer.isBuffer(value) || ArrayBuffer.isView(value)) return { value: undefined, declared: false };
   try {
     if (Array.isArray(value)) {
-      let declared = false;
       const out = value.slice(0, 50).map((item) => {
         const closed = closeField(item, depth + 1);
-        declared ||= closed.declared;
         return closed.value === undefined ? null : closed.value;
       });
-      return { value: out, declared };
+      return { value: out, declared: false };
     }
     const out: Record<string, unknown> = {};
-    let declared = false;
     let n = 0;
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
       if (++n > 100) break;
       const closed = closeField(item, depth + 1);
       if (closed.value === undefined) continue;
       out[closed.declared ? key : keyedHash(key)] = closed.value;
-      declared ||= closed.declared;
     }
-    return { value: out, declared };
+    return { value: out, declared: false };
   } catch {
     return { value: undefined, declared: false };
   }

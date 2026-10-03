@@ -196,10 +196,13 @@ describe("MEDIUM 3: no value leaves raw because of its spelling or its key; a pr
       who: schema.keyedHash(mark("who")),
       ok: true,
       text: "hello",
-      nested: { inner: 1, [schema.keyedHash("raw")]: schema.keyedHash(mark("raw")) },
+      // A container's key is not vouched for by a declared value inside it (round 2 of #538, M3):
+      // its own declared field keeps its key, the container's key is hashed.
+      [schema.keyedHash("nested")]: { inner: 1, [schema.keyedHash("raw")]: schema.keyedHash(mark("raw")) },
       [schema.keyedHash("raw")]: schema.keyedHash(mark("raw")),
     });
     expect(closed).not.toHaveProperty("raw");
+    expect(closed).not.toHaveProperty("nested");
   });
 
   it("a declared value cannot be forged: a look-alike, a copy, or a declared value after a JSON round trip is hashed", () => {

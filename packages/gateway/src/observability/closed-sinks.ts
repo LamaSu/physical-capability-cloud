@@ -156,14 +156,34 @@ interface LoggedRequest {
   routeOptions?: { url?: string };
 }
 
-/** A request as a log line carries it, built here: method, route template and the client's keyed hash. */
+/**
+ * A request as a log line carries it, built here: method, route template and the client's keyed
+ * hash. Only the server's own request (one over a real stream, as Fastify logs it) is read this way,
+ * and its route only when the app declared it; anything else is closed like any value, so a forged
+ * req binding writes nothing raw (round 2 of #538, M2).
+ */
 export function closedRequest(req: LoggedRequest | undefined): Record<string, unknown> {
   if (!req || typeof req !== "object") return {};
+  const own = (req as { raw?: unknown }).raw instanceof Readable || req instanceof Readable;
+  if (!own) return (closeValue(req) as Record<string, unknown> | undefined) ?? {};
+  const route = routeTemplateOf(req);
   return {
     method: typeof req.method === "string" && METHODS.has(req.method) ? req.method : "OTHER",
-    route: routeTemplateOf(req),
+    route: routeTemplates().has(route) ? route : keyedHash(route),
     ...(typeof req.ip === "string" ? { client: keyedHash(req.ip) } : {}),
   };
+}
+
+/**
+ * A response as a log line carries it: the status the server's own response carries (one over a
+ * real ServerResponse, as Fastify logs it). Anything else is closed like any value (M2).
+ */
+export function closedResponse(res: unknown): Record<string, unknown> {
+  if (!res || typeof res !== "object") return {};
+  const own = (res as { raw?: unknown }).raw instanceof ServerResponse || res instanceof ServerResponse;
+  if (!own) return (closeValue(res) as Record<string, unknown> | undefined) ?? {};
+  const status = (res as { statusCode?: unknown }).statusCode;
+  return { statusCode: typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined };
 }
 
 /** A log object under the closed rules; the req, res and err keys go to their serializers. */
@@ -191,7 +211,7 @@ export function gatewayLoggerOptions() {
     level: "info",
     serializers: {
       req: (req: LoggedRequest) => closedRequest(req),
-      res: (res: { statusCode?: unknown }) => ({ statusCode: typeof res?.statusCode === "number" ? res.statusCode : undefined }),
+      res: (res: unknown) => closedResponse(res),
       err: (err: unknown) => {
         const closed = closedError(err);
         return {
@@ -511,11 +531,11 @@ export function closedSentrySpan<T extends object>(span: T): T {
     origin: coded(s.origin, ORIGINS),
     description: closedName(s.description),
     data: closedSpanData(s.data) ?? {},
-    measurements: s.measurements,
+    // No measurements: the server SDK sets none, and their names and values are opaque (M3).
   } as unknown as T;
 }
 
-/** A transaction rebuilt from closed fields: its route name, trace, measurements and closed spans. */
+/** A transaction rebuilt from closed fields: its route name, trace and closed spans (no measurements, M3). */
 export function closedSentryTransaction<T extends object>(event: T, server: SentryServerValues = {}): T {
   const e = event as Json;
   const info = obj(e.transaction_info);
@@ -525,7 +545,6 @@ export function closedSentryTransaction<T extends object>(event: T, server: Sent
     transaction: closedName(e.transaction),
     transaction_info: info ? { source: coded(info.source, SOURCES) } : undefined,
     tags: closedTags(e.tags, server),
-    measurements: e.measurements,
     spans: Array.isArray(e.spans) ? e.spans.map((span) => closedSentrySpan(span as object)) : undefined,
   } as unknown as T;
 }

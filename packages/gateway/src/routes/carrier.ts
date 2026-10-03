@@ -339,7 +339,7 @@ export async function carrierRoutes(app: FastifyInstance) {
     const missingAtBoot = computeMissingConfig();
     if (missingAtBoot.length) {
       app.log.error(
-        { missing: missingAtBoot.map((m) => declare.code(m, MISSING_CONFIG_REASONS)) },
+        { missing: declare.list(missingAtBoot.map((m) => declare.code(m, MISSING_CONFIG_REASONS))) },
         lit("carrier capability DISABLED: production config incomplete — carrier routes will 503 until the configuration is completed (environment-variable changes require a restart). The rest of the gateway is unaffected."),
       );
     }

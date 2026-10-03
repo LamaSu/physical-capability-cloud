@@ -226,7 +226,7 @@ export async function lobRoutes(app: FastifyInstance) {
     const missingAtBoot = computeMissingLobConfig();
     if (missingAtBoot.length) {
       app.log.error(
-        { missing: missingAtBoot.map((m) => declare.code(m, MISSING_LOB_CONFIG_REASONS)) },
+        { missing: declare.list(missingAtBoot.map((m) => declare.code(m, MISSING_LOB_CONFIG_REASONS))) },
         lit("lob capability DISABLED: production config incomplete — lob routes will 503 until the configuration is completed (environment-variable changes require a restart). The rest of the gateway is unaffected."),
       );
     }

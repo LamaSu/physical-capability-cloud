@@ -257,7 +257,7 @@ export class ProducerManager {
     console.log(
       lit("[producers] Started mock producers"),
       declare.metric(this.producers.length),
-      this.producers.map((p) => declare.id(p.name)),
+      declare.list(this.producers.map((p) => declare.id(p.name))),
     );
   }
 

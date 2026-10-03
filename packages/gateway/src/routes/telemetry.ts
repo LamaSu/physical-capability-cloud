@@ -279,7 +279,9 @@ export async function telemetryRoutes(app: FastifyInstance) {
     logger.info(`Telemetry event emitted: ${keyedHash(phase)} → ${keyedHash(status)}`, {
       source: keyedHash(source ?? "api"),
       jobId: keyedHash(jobId),
-      metadata: { phase: keyedHash(phase), status: keyedHash(status), duration_ms },
+      // duration_ms is the caller's own report, not a server measurement: hashed like the rest
+      // (round 2 of #538, codemod pack, MEDIUM Q2).
+      metadata: { phase: keyedHash(phase), status: keyedHash(status), duration_ms: duration_ms === undefined ? undefined : keyedHash(duration_ms) },
     });
 
     return { event };
