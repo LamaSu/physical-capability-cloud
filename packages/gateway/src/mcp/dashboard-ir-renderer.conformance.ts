@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
-import { renderIrDoc, bindListRows, bindScalar, bindSchemaCard, bootIrView, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
+import { renderIrDoc, bindListRows, bindScalar, bindSchemaCard, bootIrView, UNAVAILABLE, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
 
 let passed = 0;
 const ok = (n: string, c: boolean, d?: string) => { assert.ok(c, `${n}${d ? " — " + d : ""}`); passed++; console.log(`  ok   ${n}`); };
@@ -72,14 +72,20 @@ bindListRows(doc, listEl, listNode, [
   { id: "j2" },
 ]);
 const rowTexts = flat(listEl).map((x: any) => x.textContent).filter(Boolean);
-ok("valid rows rendered (j1 with meta+status, j2 title-only)", rowTexts.includes("j1") && rowTexts.includes("k9") && rowTexts.includes("done") && rowTexts.includes("j2"));
+// ids are attributed (steward #5149: an identifier's grammar cannot exclude prose, so it reads "reported: ...")
+ok("valid rows rendered (j1 with meta+status, j2 title-only)", rowTexts.includes("reported: j1") && rowTexts.includes("reported: k9") && rowTexts.includes("done") && rowTexts.includes("reported: j2"));
 ok("malformed rows dropped (no phantom output)", listEl.children.length === 2);
 ok("non-selector field ('secret') NEVER rendered", !rowTexts.includes("LEAK"));
 
-// scalar bind: own-property read, proto-safe.
-ok("bindScalar reads declared select", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/x", select: "usdc" } } as any, { usdc: "42.5" }) === "42.5");
-ok("bindScalar proto segment → empty (no traversal)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/x", select: "__proto__" } } as any, {}) === "");
-ok("bindScalar drops nested-object value (scalar only)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/x", select: "a" } } as any, { a: { nested: 1 } }) === "");
+// scalar bind: own-property read, proto-safe, type-validated by the field's closed kind (astra
+// r5 F2). "/api/x" + an arbitrary select is not an allowlisted metric field at all (no
+// METRIC_PROFILE route matches "/api/x"), so the arbitrary-select pass-through these three checks
+// used to exercise — exactly the behavior F2 closes — is no longer reachable through bindScalar;
+// they now exercise the same mechanics (plain read, proto-safety, nested-object rejection)
+// through a REAL (route, source) pair instead, expecting UNAVAILABLE rather than "".
+ok("bindScalar reads a typed field by its declared select (count)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: 42 } }) === "42");
+ok("bindScalar does not traverse the prototype chain for a nested source", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: Object.create({ reputation: 999 }) }) === UNAVAILABLE);
+ok("bindScalar rejects a nested-object value for a scalar-typed field (off-kind)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: { nested: 1 } } }) === UNAVAILABLE);
 // envelope source read (sol NO-GO(1) fix): a kernels stat's bind.select is "kernel.reputation",
 // which reads INTO the { kernel: … } envelope — so the metric actually populates, not inert.
 ok("bindScalar reads the kernel envelope source 'kernel.reputation'", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: 850 } }) === "850");
@@ -147,7 +153,9 @@ const slots = (n: number) => Array.from({ length: n }, () => ({ textContent: "" 
   const s = slots(6);
   bindSchemaCard("capability-summary-v1", { name: "FDM", type: "t", pricing: { baseCost: "1", currency: "USDC" }, assuranceTiers: [0], available: true, paid: true, verified: true, evil: "<b>x</b>" }, s);
   const all = s.map((x) => x.textContent).join("|");
-  ok("GATE2 only the 6 fixed capability fields rendered", all === "FDM|t|1|USDC|0|Yes");
+  // astra r5 F1: name is now attributed text — a benign value renders "reported: FDM", not bare.
+  // ...and the capability type is attributed too (steward #5149: an identifier's grammar cannot exclude prose).
+  ok("GATE2 only the 6 fixed capability fields rendered", all === "reported: FDM|reported: t|1|USDC|0|Yes");
   ok("GATE2 off-schema paid/verified/HTML NEVER rendered", !all.includes("true") && !all.includes("<b>"));
 }
 // GATE 3 — missing/malformed canonical fields → honest unavailable (—), not a partial card.
@@ -162,7 +170,9 @@ const slots = (n: number) => Array.from({ length: n }, () => ({ textContent: "" 
 {
   const s = slots(6);
   bindSchemaCard("capability-summary-v1", { name: "FDM", type: "3d-printing", pricing: { baseCost: "2.00", currency: "USDC" }, assuranceTiers: [0, 1, 2], available: true, secret: "LEAK" }, s);
-  ok("GATE5 name/type/pricing.baseCost/currency read from fixed keys", s[0].textContent === "FDM" && s[1].textContent === "3d-printing" && s[2].textContent === "2.00" && s[3].textContent === "USDC");
+  // astra r5 F1: name is now attributed text — a benign value renders "reported: FDM", not bare.
+  // ...and the capability type is attributed too (steward #5149).
+  ok("GATE5 name/type/pricing.baseCost/currency read from fixed keys", s[0].textContent === "reported: FDM" && s[1].textContent === "reported: 3d-printing" && s[2].textContent === "2.00" && s[3].textContent === "USDC");
   ok("GATE5 assuranceTiers array joined", s[4].textContent === "0, 1, 2");
   ok("GATE5 boolean available normalized to Yes", s[5].textContent === "Yes");
   ok("GATE5 off-schema `secret` NEVER rendered", !s.some((x) => x.textContent.includes("LEAK")));

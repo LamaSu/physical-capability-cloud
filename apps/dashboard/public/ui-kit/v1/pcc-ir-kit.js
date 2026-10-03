@@ -190,29 +190,39 @@
     let t = text.normalize("NFKD").replace(INVISIBLE_RE, "").normalize("NFKC");
     t = t.replace(/\u2800/g, " ").replace(MONEY_EMOJI_RE, " $ ");
     t = t.replace(/[^\x00-\x7f]/g, (c) => LOOKALIKE[c] ?? c);
-    return t.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ").replace(/\s+/g, " ").toLowerCase();
+    return t.replace(/(?<![A-Z])([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ").replace(/\s+/g, " ").toLowerCase();
   }
   var LEET_I = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "@": "a", "$": "s", "!": "i", "|": "i" };
   var LEET_L = { ...LEET_I, "1": "l", "|": "l" };
   var LEET_RE = /[0134578@$!|]/g;
   var HAS_LEET = /[0134578@$!|]/;
-  var views = (f) => HAS_LEET.test(f) ? [f, f.replace(LEET_RE, (c) => LEET_I[c]), f.replace(LEET_RE, (c) => LEET_L[c])] : [f];
+  var views = (f) => {
+    const base = HAS_LEET.test(f) ? [f, f.replace(LEET_RE, (c) => LEET_I[c]), f.replace(LEET_RE, (c) => LEET_L[c])] : [f];
+    const out = [...base];
+    for (const b of base) {
+      if (b.includes("l")) out.push(b.replace(/l/g, "i"));
+      if (b.includes("i")) out.push(b.replace(/i/g, "l"));
+    }
+    return out;
+  };
   var SPACED_RE = /(?<![a-z0-9])[a-z](?:[^a-z0-9]{1,3}[a-z](?![a-z0-9])){2,}/g;
   var spacedRuns = (v) => (v.match(SPACED_RE) ?? []).map((r) => r.replace(/[^a-z]/g, "")).join(" ");
-  var CUR_CODE = "usdc|usdt|usde|usd|eurc|eur|gbp|jpy|cny|rmb|inr|chf|cad|aud|krw|rub|brl|mxn|eth|weth|btc|wbtc|dai|sol|matic|pol|xrp|ltc|bnb|busd|tusd|pyusd|gusd|frax|sats?|gwei|wei";
+  var CUR_CODE = "usdc|usdt|usde|usd|eurc|eur|gbp|jpy|cny|rmb|inr|chf|cad|aud|krw|rub|brl|mxn|eth|weth|btc|wbtc|dai|sol|matic|pol|xrp|ltc|bnb|busd|tusd|pyusd|gusd|frax|sats?|gwei|wei|xlm|ada|dot|avax|trx|ton|near|atom|apt|sui|shib|doge|xmr|bch|etc|fil|icp|hbar|vet|algo|xtz|eos|cro|usdp|fdusd|hkd|sgd|nzd|sek|nok|dkk|pln|try|zar|thb|idr|myr|vnd|ils|aed|sar|ars|clp|cop|pen|egp|ngn|kes|pkr|uah|czk|huf|ron";
   var CUR_WORD = "dollars?|bucks|cents?|euros?|pence|quid|yen|yuan|renminbi|rupees?|rubles?|roubles?|pesos?|francs?|satoshis?|bitcoins?|ethers?|stablecoins?";
   var MAGNITUDE = "thousand|million|billion|trillion|mil|mio|mrd|mm|mn|bn|tn|k|m|b|t";
   var NUMBER_WORD = "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion|dozen|half";
   var CURRENCY = `(?:\\p{Sc}|(?:${CUR_CODE}|${CUR_WORD})\\b)`;
   var AMOUNT_RE = new RegExp(
-    `\\p{Sc} ?(?:\\d|(?:${NUMBER_WORD})\\b)|${CURRENCY}(?<=\\d[\\d,._]{0,40} ?(?:${MAGNITUDE})? ?[(\\[]? ?${CURRENCY})|\\b(?:${NUMBER_WORD})\\b[ -]{0,3}(?:(?:${MAGNITUDE})\\b[ -]{0,3})?${CURRENCY}|\\ban? (?:${CUR_WORD})\\b|\\b(?:${CUR_CODE}|${CUR_WORD})[ :=]{0,3}\\d`,
-    //                                 USD 5, usdc:100
+    `\\p{Sc} ?(?:\\d|(?:${NUMBER_WORD})\\b)|${CURRENCY}(?<=\\d[\\d,._]{0,40} ?(?:${MAGNITUDE})? ?[(\\[]? ?${CURRENCY})|\\b(?:${NUMBER_WORD})\\b[ -]{0,3}(?:(?:${MAGNITUDE})\\b[ -]{0,3})?${CURRENCY}|\\ban? (?:${CUR_WORD})\\b|\\b(?:${CUR_CODE}|${CUR_WORD})[ :=]{0,3}(?:\\d|(?:${NUMBER_WORD})\\b)`,
+    //       USD 5, usdc:100, USDC five
     "u"
   );
   var CLAIM_WORDS = [
-    "paid|unpaid|prepaid|repaid|overpaid|underpaid|payout|payouts|paidout|received|refund|refunds|refunded|reimbursed",
-    "settled|released|verified|confirmed|approved|guaranteed|funded|charged|deposited|withdrawn|credited|debited",
-    "remitted|disbursed|escrowed|balance|balances",
+    "paid|unpaid|prepaid|repaid|overpaid|underpaid|payout|payouts|paidout|refund|refunds|refunded|reimbursed",
+    "settled|verified|guaranteed|funded|charged|deposited|withdrawn|credited|debited",
+    "remitted|disbursed|escrowed",
+    "da thanh toan",
+    // Vietnamese "paid", with diacritics folded to this ASCII skeleton already
     "pagad[oa]s?|pago|abonad[oa]s?|reembolsad[oa]s?|reembolso|liquidad[oa]s?|cobrad[oa]s?|acreditad[oa]s?|depositad[oa]s?",
     "verificad[oa]s?|confirmad[oa]s?|aprobad[oa]s?|aprovad[oa]s?|recibid[oa]s?|recebid[oa]s?|creditad[oa]s?|debitad[oa]s?|quitad[oa]s?|saldo",
     "payee?s?|rembourse[es]?|remboursee?s?|remboursement|credite[es]?|creditee?s?|debite[es]?|debitee?s?|verifiee?s?",
@@ -227,7 +237,15 @@
   ].join("|");
   var CLAIM_RE = new RegExp(`\\b(?:${CLAIM_WORDS})\\b`);
   var CLAIM_IN_RUN_RE = new RegExp(`(?:${CLAIM_WORDS})`);
-  var SCRIPT_CLAIM_WORDS = ["\u043E\u043F\u043B\u0430\u0447\u0435\u043D", "\u0432\u044B\u043F\u043B\u0430\u0447\u0435\u043D", "\u0441\u043F\u043B\u0430\u0447\u0435\u043D", "\u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0435\u043D", "\u0432\u043E\u0437\u0432\u0440\u0430\u0442", "\u0437\u0430\u0447\u0438\u0441\u043B\u0435\u043D", "\u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043D", "\u043F\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0436\u0435\u043D", "\u043F\u0440\u043E\u0432\u0435\u0440\u0435\u043D", "\u043E\u0434\u043E\u0431\u0440\u0435\u043D", "\u0431\u0430\u043B\u0430\u043D\u0441", "\u043F\u043E\u043B\u0443\u0447\u0435\u043D", "\u5DF2\u4ED8", "\u5DF2\u652F\u4ED8", "\u652F\u4ED8\u6210\u529F", "\u9000\u6B3E", "\u5DF2\u7ED3\u7B97", "\u5DF2\u7D50\u7B97", "\u5DF2\u786E\u8BA4", "\u5DF2\u78BA\u8A8D", "\u5DF2\u9A8C\u8BC1", "\u5DF2\u9A57\u8B49", "\u5230\u8D26", "\u5230\u8CEC", "\u4F59\u989D", "\u9918\u984D", "\u5DF2\u6536\u6B3E", "\u5DF2\u6279\u51C6", "\u652F\u6255\u6E08", "\u652F\u6255\u3044\u6E08", "\u652F\u6255\u5B8C\u4E86", "\u652F\u6255\u3044\u5B8C\u4E86", "\u5165\u91D1\u6E08", "\u8FD4\u91D1", "\u6C7A\u6E08\u6E08", "\u6C7A\u6E08\u5B8C\u4E86", "\u78BA\u8A8D\u6E08", "\u627F\u8A8D\u6E08", "\u6B8B\u9AD8", "\uC9C0\uAE09\uC644\uB8CC", "\uACB0\uC81C\uC644\uB8CC", "\uACB0\uC81C\uB428", "\uC9C0\uAE09\uB428", "\uD658\uBD88", "\uC794\uC561", "\uC785\uAE08\uC644\uB8CC", "\uD655\uC778\uB428", "\uC2B9\uC778\uB428", "\u0645\u062F\u0641\u0648\u0639", "\u062A\u0645\u0627\u0644\u062F\u0641\u0639", "\u0627\u0633\u062A\u0631\u062F\u0627\u062F", "\u0631\u0635\u064A\u062F", "\u092D\u0941\u0917\u0924\u093E\u0928\u0915\u093F\u092F\u093E", "\u092D\u0941\u0917\u0924\u093E\u0928\u0939\u094B\u0917\u092F\u093E"].flatMap((w) => [foldForClaims(w), foldForClaims(w.toUpperCase())]).map((w) => w.replace(/\s+/g, ""));
+  var GENERIC_WORDS = "received|released|approved|confirmed|complete|completed|passed|succeeded|successful|cleared|processed|accepted|sent|done";
+  var CLAIM_NOUNS = "payment|payments|funds|fund|money|payout|payouts|transfer|transfers|transaction|transactions|invoice|invoices|deposit|deposits|escrow|settlement|refund|refunds|balance|balances|wallet|charge|charges|fee|fees|amount|price|verification|identity|kyc|kyb|attestation|proof|audit|oracle";
+  var CLAIM_NOUN_GROUP = `(?:${CLAIM_NOUNS}|${CUR_CODE}|${CUR_WORD})`;
+  var GENERIC_GROUP = `(?:${GENERIC_WORDS})`;
+  var PAIR_RE = new RegExp(
+    `\\b${CLAIM_NOUN_GROUP}\\b(?:\\W+\\w+){0,3}?\\W+${GENERIC_GROUP}\\b|\\b${GENERIC_GROUP}\\b(?:\\W+\\w+){0,3}?\\W+${CLAIM_NOUN_GROUP}\\b`
+  );
+  var PAIR_WORDS = [PAIR_RE, /(?!)/];
+  var SCRIPT_CLAIM_WORDS = ["\u043E\u043F\u043B\u0430\u0447\u0435\u043D", "\u0432\u044B\u043F\u043B\u0430\u0447\u0435\u043D", "\u0441\u043F\u043B\u0430\u0447\u0435\u043D", "\u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0435\u043D", "\u0432\u043E\u0437\u0432\u0440\u0430\u0442", "\u0437\u0430\u0447\u0438\u0441\u043B\u0435\u043D", "\u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043D", "\u043F\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0436\u0435\u043D", "\u043F\u0440\u043E\u0432\u0435\u0440\u0435\u043D", "\u043E\u0434\u043E\u0431\u0440\u0435\u043D", "\u0431\u0430\u043B\u0430\u043D\u0441", "\u043F\u043E\u043B\u0443\u0447\u0435\u043D", "\u5DF2\u4ED8", "\u5DF2\u652F\u4ED8", "\u652F\u4ED8\u6210\u529F", "\u9000\u6B3E", "\u5DF2\u7ED3\u7B97", "\u5DF2\u7D50\u7B97", "\u5DF2\u786E\u8BA4", "\u5DF2\u78BA\u8A8D", "\u5DF2\u9A8C\u8BC1", "\u5DF2\u9A57\u8B49", "\u5230\u8D26", "\u5230\u8CEC", "\u4F59\u989D", "\u9918\u984D", "\u5DF2\u6536\u6B3E", "\u5DF2\u6279\u51C6", "\u652F\u6255\u6E08", "\u652F\u6255\u3044\u6E08", "\u652F\u6255\u5B8C\u4E86", "\u652F\u6255\u3044\u5B8C\u4E86", "\u5165\u91D1\u6E08", "\u8FD4\u91D1", "\u6C7A\u6E08\u6E08", "\u6C7A\u6E08\u5B8C\u4E86", "\u78BA\u8A8D\u6E08", "\u627F\u8A8D\u6E08", "\u6B8B\u9AD8", "\uC9C0\uAE09\uC644\uB8CC", "\uACB0\uC81C\uC644\uB8CC", "\uACB0\uC81C\uB428", "\uC9C0\uAE09\uB428", "\uD658\uBD88", "\uC794\uC561", "\uC785\uAE08\uC644\uB8CC", "\uD655\uC778\uB428", "\uC2B9\uC778\uB428", "\u0645\u062F\u0641\u0648\u0639", "\u062A\u0645\u0627\u0644\u062F\u0641\u0639", "\u0627\u0633\u062A\u0631\u062F\u0627\u062F", "\u0631\u0635\u064A\u062F", "\u092D\u0941\u0917\u0924\u093E\u0928\u0915\u093F\u092F\u093E", "\u092D\u0941\u0917\u0924\u093E\u0928\u0939\u094B\u0917\u092F\u093E", "\u03C0\u03BB\u03B7\u03C1\u03CE\u03B8\u03B7\u03BA\u03B5", "\u03C0\u03BB\u03B7\u03C1\u03CE\u03B8\u03B7\u03BA\u03B1\u03BD", "\u03B5\u03C0\u03B9\u03C3\u03C4\u03C1\u03BF\u03C6\u03AE \u03C7\u03C1\u03B7\u03BC\u03AC\u03C4\u03C9\u03BD", "\u03C5\u03C0\u03CC\u03BB\u03BF\u03B9\u03C0\u03BF", "\u05E9\u05D5\u05DC\u05DD", "\u0E0A\u0E33\u0E23\u0E30\u0E41\u0E25\u0E49\u0E27"].flatMap((w) => [foldForClaims(w), foldForClaims(w.toUpperCase())]).map((w) => w.replace(/\s+/g, ""));
   var SCRIPT_CLAIM_RE = new RegExp([...new Set(SCRIPT_CLAIM_WORDS)].join("|"), "u");
   var NOTICE_RE = /\bwithh[eo]ld/;
   var NOTICE_IN_RUN_RE = /withh[eo]ld/;
@@ -241,39 +259,147 @@
     return false;
   }
   var scriptIn = (f) => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_RE.test(f.replace(/ /g, ""));
+  var IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
+  var IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
+  function identifierText(field, value) {
+    if (value === "") return value;
+    const t = boundValueText(field, value);
+    if (t === WITHHELD_FIELD) return t;
+    for (const v of views(foldForClaims(value))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
+    return REPORTED_PREFIX + value;
+  }
   function statesAmount(text) {
     return AMOUNT_RE.test(foldForClaims(text));
   }
   function isMoneyClaim(text) {
     const f = foldForClaims(text);
-    return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS]);
+    return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, PAIR_WORDS]);
   }
   function mentionsWithheld(text) {
     return wordsIn(foldForClaims(text), [NOTICE_WORDS]);
   }
   function isProseClaim(text) {
     const f = foldForClaims(text);
-    return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS]);
+    return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
   }
   var RECORD_STATUS_NOTE = " - reported by the record, not confirmed by a settlement read";
   var MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/;
   function isMoneyState(value) {
     return MONEY_STATE_RE.test(foldForClaims(value).replace(/[^a-z0-9]+/g, " "));
   }
+  var SAFE_STATUS_WORDS = /* @__PURE__ */ new Set([
+    "RUNNING",
+    "IN_PROGRESS",
+    "PROGRESS",
+    "STREAMING",
+    "BUILDING",
+    "CONNECTING",
+    "PENDING",
+    "QUEUED",
+    "WAITING",
+    "PAUSED",
+    "REVIEW",
+    "CONFIRM",
+    "NEEDS_INPUT",
+    "NEEDS_YOU",
+    "ERROR",
+    "FAILED",
+    "DENIED",
+    "CANCELLED",
+    "CANCELED",
+    "REJECTED",
+    "DONE",
+    "COMPLETE",
+    "COMPLETED",
+    "OK",
+    "SUCCESS",
+    "SUCCEEDED",
+    "RESOLVED",
+    "READY",
+    "DISPATCHED",
+    "ACCEPTED",
+    "PREPARING",
+    "EXECUTING",
+    "COLLECTING_EVIDENCE",
+    "AWAITING_PICKUP",
+    "TIMED_OUT",
+    "ONLINE",
+    "OFFLINE",
+    "MAINTENANCE",
+    "SUSPENDED",
+    "HEALTHY",
+    "DEGRADED",
+    "UNKNOWN",
+    "BIDDING",
+    "ASSIGNED",
+    "PROPOSED",
+    "OVER_BUDGET",
+    "NO_PATH_FOUND",
+    "APPROVED",
+    "EXPIRED",
+    "ACTIVE",
+    "INACTIVE",
+    "REVOKED",
+    "IDLE",
+    "BUSY",
+    "DRAFT",
+    "DEPRECATED",
+    "RESERVED",
+    "LIVE",
+    "STUB",
+    "PLANNED",
+    "TRUE",
+    "FALSE"
+  ]);
+  function normalizeStatusWord(value) {
+    return foldForClaims(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  }
+  function isSafeStatusWord(value) {
+    return SAFE_STATUS_WORDS.has(normalizeStatusWord(value));
+  }
   var RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
   var WITHHELD_FIELD = "withheld: stated money or verification";
+  function boundStatusText(value) {
+    if (value === "") return value;
+    if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD;
+    if (isSafeStatusWord(value)) return value;
+    if (isMoneyState(value)) return value + RECORD_STATUS_NOTE;
+    return value + RECORD_CLAIM_NOTE;
+  }
   function boundValueText(field, value) {
     if (value === "") return value;
-    if (/(^|\.)status$/.test(field) && !statesAmount(value) && !mentionsWithheld(value)) {
-      if (isMoneyState(value)) return value + RECORD_STATUS_NOTE;
-      return isMoneyClaim(value) ? value + RECORD_CLAIM_NOTE : value;
-    }
+    if (/(^|\.)status$/.test(field)) return boundStatusText(value);
     return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
   }
+  var REPORTED_PREFIX = "reported: ";
+  function reportedFieldText(field, value) {
+    return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : REPORTED_PREFIX + value;
+  }
   var LIST_PROFILES = {
-    "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
-    "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
-    "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] }
+    "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+    "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount"], status: ["status"] },
+    "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"] }
+  };
+  function listRowsOf(path, data) {
+    const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path].rows : void 0;
+    if (key && data !== null && typeof data === "object" && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, key)) {
+      const v = data[key];
+      if (Array.isArray(v)) return v;
+    }
+    return [];
+  }
+  var LIST_FIELD_KINDS = {
+    id: "id",
+    capabilityId: "id",
+    kernelId: "id",
+    name: "text",
+    status: "status",
+    available: "bool",
+    createdAt: "time",
+    updatedAt: "time",
+    version: "version",
+    capabilityCount: "count",
+    type: "capType"
   };
   function listProfileViolation(path, props) {
     const prof = LIST_PROFILES[path];
@@ -456,17 +582,17 @@
   var METRIC_PROFILE = [
     { route: route("/api/jobs/:/status"), fields: {
       // top-level envelope
-      status: { label: "Status", source: "status", type: "string" },
-      progress: { label: "Progress", source: "progress", type: "number" }
+      status: { label: "Status", source: "status", kind: "status" },
+      progress: { label: "Progress", source: "progress", kind: "percent" }
     } },
     { route: route("/api/kernels/:"), fields: {
       // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
-      status: { label: "Status", source: "kernel.status", type: "string" },
-      reputation: { label: "Reputation", source: "kernel.reputation", type: "number" },
-      uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", type: "number" },
-      capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", type: "number" },
-      totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", type: "number" },
-      activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", type: "number" }
+      status: { label: "Status", source: "kernel.status", kind: "status" },
+      reputation: { label: "Reputation", source: "kernel.reputation", kind: "count" },
+      uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", kind: "percent" },
+      capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", kind: "count" },
+      totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", kind: "count" },
+      activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", kind: "count" }
     } }
   ];
   function metricFieldForSelect(path, select) {
@@ -474,21 +600,19 @@
     for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
     return null;
   }
-  function metricSourceType(path, source) {
+  function metricFieldForSource(path, source) {
     if (typeof source !== "string") return null;
     for (const p of METRIC_PROFILE) if (p.route.test(path)) {
-      for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].type;
+      for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k];
       return null;
     }
     return null;
   }
   function metricLabelForSource(path, source) {
-    if (typeof source !== "string") return null;
-    for (const p of METRIC_PROFILE) if (p.route.test(path)) {
-      for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].label;
-      return null;
-    }
-    return null;
+    return metricFieldForSource(path, source)?.label ?? null;
+  }
+  function metricKindForSource(path, source) {
+    return metricFieldForSource(path, source)?.kind ?? null;
   }
   function isOpDescriptor(v) {
     if (!isPlain(v) || !onlyKeys(v, ["id", "label", "confirm", "intentText", "operation_id", "arguments"])) return false;
@@ -968,6 +1092,7 @@
     plan: "pcc-plan",
     "form-summary": "pcc-form",
     "field-label": "pcc-field",
+    fieldname: "pcc-fieldname",
     untrusted: "pcc-untrusted",
     agent: "pcc-agent",
     withheld: "pcc-withheld",
@@ -1004,13 +1129,6 @@
     }
     return cur;
   }
-  function readSelector(obj, sel) {
-    const cur = readOwnPath(obj, sel);
-    if (typeof cur === "string") return cur;
-    if (typeof cur === "number" && Number.isFinite(cur)) return String(cur);
-    if (typeof cur === "boolean") return String(cur);
-    return "";
-  }
   function el(doc, cls, text, untrusted) {
     const n = doc.createElement("div");
     n.className = untrusted ? cls + " " + CLS.untrusted : cls;
@@ -1022,12 +1140,12 @@
     "capability-summary-v1": Object.freeze({
       heading: "Capability",
       fields: Object.freeze([
-        { label: "Name", key: "name", required: true },
-        { label: "Type", key: "type", required: true },
-        { label: "Base cost", key: "pricing.baseCost", money: true },
-        { label: "Currency", key: "pricing.currency", money: true },
-        { label: "Assurance tiers", key: "assuranceTiers", list: true },
-        { label: "Available", key: "available", bool: true }
+        { label: "Name", key: "name", kind: "text", required: true },
+        { label: "Type", key: "type", kind: "capType", required: true },
+        { label: "Base cost", key: "pricing.baseCost", kind: "amount", money: true },
+        { label: "Currency", key: "pricing.currency", kind: "currency", money: true },
+        { label: "Assurance tiers", key: "assuranceTiers", kind: "tiers" },
+        { label: "Available", key: "available", kind: "bool" }
       ])
     }),
     "run-summary-v1": Object.freeze({
@@ -1036,8 +1154,8 @@
       // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
       // keys (NOT a manifest selector); first present wins.
       fields: Object.freeze([
-        { label: "Status", key: ["status", "job.status"], required: true },
-        { label: "Progress", key: ["progress", "job.progress"] }
+        { label: "Status", key: ["status", "job.status"], kind: "status", required: true },
+        { label: "Progress", key: ["progress", "job.progress"], kind: "percent" }
       ])
     })
   });
@@ -1045,40 +1163,57 @@
     heading: "Settlement record (read-only)",
     note: "Not proof of payment; verify on the authenticated PCC surface."
   });
+  var CAP_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+  var AMOUNT_STR_RE = /^\d{1,15}(\.\d{1,18})?$/;
+  var CURRENCY_ENUM = /* @__PURE__ */ new Set(["USDC", "ETH", "DAI", "SOL"]);
   function readField(data, f) {
     const keys = Array.isArray(f.key) ? f.key : [f.key];
-    if (f.list) {
-      for (const k of keys) {
-        const arr = readOwnPath(data, k);
-        if (!Array.isArray(arr)) continue;
-        const parts = [];
-        for (const x of arr) {
-          if (typeof x === "string" && x.length > 0) parts.push(x);
-          else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
-          else if (typeof x === "boolean") parts.push(String(x));
-        }
-        if (parts.length) return boundValueText(k, parts.join(", "));
-      }
-      return UNAVAILABLE;
-    }
+    let raw;
+    let foundKey = null;
     for (const k of keys) {
-      const v = readSelector(data, k);
-      if (v === "") continue;
-      if (f.bool && (v === "true" || v === "false")) return v === "true" ? "Yes" : "No";
-      return f.money ? v : boundValueText(k, v);
+      const v = readOwnPath(data, k);
+      if (v !== void 0) {
+        raw = v;
+        foundKey = k;
+        break;
+      }
     }
-    return UNAVAILABLE;
+    if (foundKey === null) return { ok: true, text: UNAVAILABLE };
+    switch (f.kind) {
+      case "text":
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: reportedFieldText(foundKey, raw) } : { ok: false };
+      case "capType":
+        return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: identifierText(foundKey, raw) } : { ok: false };
+      case "status":
+        return typeof raw === "string" && raw.length > 0 ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+      case "amount":
+        if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && AMOUNT_STR_RE.test(String(raw))) return { ok: true, text: String(raw) };
+        if (typeof raw === "string" && AMOUNT_STR_RE.test(raw)) return { ok: true, text: raw };
+        return { ok: false };
+      case "currency":
+        return typeof raw === "string" && CURRENCY_ENUM.has(raw) ? { ok: true, text: raw } : { ok: false };
+      case "tiers":
+        return Array.isArray(raw) && raw.every((x) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 3) ? { ok: true, text: raw.join(", ") } : { ok: false };
+      case "bool":
+        return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No" } : { ok: false };
+      case "percent":
+        return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? { ok: true, text: String(raw) } : { ok: false };
+      default:
+        return { ok: false };
+    }
   }
   function bindSchemaCard(schema, data, slots) {
     const spec = SCHEMA_FIELDS[schema];
     if (!spec) return false;
-    const values = spec.fields.map((f) => readField(data, f));
-    if (spec.fields.some((f, i) => f.required && values[i] === UNAVAILABLE)) return false;
-    spec.fields.forEach((_f, i) => {
+    const reads = spec.fields.map((f) => readField(data, f));
+    const missingRequired = spec.fields.some((f, i) => f.required && reads[i].ok && reads[i].text === UNAVAILABLE);
+    const allOk = !missingRequired && reads.every((r) => r.ok);
+    reads.forEach((r, i) => {
       const slot = slots[i];
-      if (slot) slot.textContent = values[i];
+      if (!slot) return;
+      slot.textContent = allOk && r.ok ? r.text : UNAVAILABLE;
     });
-    return true;
+    return allOk;
   }
   function paintChildren(doc, node, into) {
     if (node.children) for (const c of node.children) into.appendChild(paintNode(doc, c));
@@ -1191,26 +1326,107 @@
     mount.appendChild(paintNode(doc, ir.title));
     mount.appendChild(paintNode(doc, ir.root));
   }
+  var LIST_FIELD_LABELS = {
+    id: "ID",
+    name: "Name",
+    capabilityId: "Capability",
+    kernelId: "Kernel",
+    status: "Status",
+    createdAt: "Created",
+    updatedAt: "Updated",
+    version: "Version",
+    capabilityCount: "Capabilities",
+    type: "Type",
+    available: "Available"
+  };
+  function listFieldLabel(field) {
+    return LIST_FIELD_LABELS[field] ?? field;
+  }
+  var LIST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+  var LIST_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
+  function timeRoundTrips(s) {
+    const m = LIST_TIME_RE.exec(s);
+    if (!m) return false;
+    const year = Number(m[1]), month = Number(m[2]), day = Number(m[3]);
+    const hour = Number(m[4]), minute = Number(m[5]), second = Number(m[6]);
+    const ms = m[7] ? Number(m[7].padEnd(3, "0")) : 0;
+    if (year < 2e3 || year > 2100) return false;
+    const d = new Date(Date.UTC(year, month - 1, day, hour, minute, second, ms));
+    return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day && d.getUTCHours() === hour && d.getUTCMinutes() === minute && d.getUTCSeconds() === second && d.getUTCMilliseconds() === ms;
+  }
+  var LIST_VERSION_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
+  function readListField(row, field) {
+    const raw = readOwnPath(row, field);
+    if (raw === void 0 || raw === null) return { ok: true, text: "", raw };
+    const kind = LIST_FIELD_KINDS[field];
+    switch (kind) {
+      case "id":
+        return typeof raw === "string" && LIST_ID_RE.test(raw) ? { ok: true, text: identifierText(field, raw), raw } : { ok: false };
+      case "text":
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? { ok: true, text: reportedFieldText(field, raw), raw } : { ok: false };
+      case "status":
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 64 ? { ok: true, text: boundStatusText(raw), raw } : { ok: false };
+      case "bool":
+        return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No", raw } : { ok: false };
+      case "time":
+        return typeof raw === "string" && timeRoundTrips(raw) ? { ok: true, text: raw, raw } : { ok: false };
+      case "version":
+        return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? { ok: true, text: raw, raw } : { ok: false };
+      case "count":
+        return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 1e6 ? { ok: true, text: String(raw), raw } : { ok: false };
+      case "capType":
+        return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: identifierText(field, raw), raw } : { ok: false };
+      default:
+        return { ok: false };
+    }
+  }
   function bindListRows(doc, listEl, node, rows) {
     const rowTitle = String(node.props?.rowTitle ?? "");
     const rowMeta = Array.isArray(node.props?.rowMeta) ? node.props.rowMeta : [];
     const statusFrom = typeof node.props?.statusFrom === "string" ? node.props.statusFrom : "";
     const limit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
+    const isStatusKind = (field) => LIST_FIELD_KINDS[field] === "status";
     let shown = 0;
     for (const row of rows) {
       if (shown >= limit) break;
       if (row === null || typeof row !== "object") continue;
-      const title = boundValueText(rowTitle, readSelector(row, rowTitle));
-      if (title === "") continue;
-      const line = el(doc, CLS.row);
-      line.appendChild(el(doc, CLS.heading, title, true));
-      for (const m of rowMeta) {
-        const v = boundValueText(m, readSelector(row, m));
-        line.appendChild(v !== "" ? el(doc, CLS.meta, v, true) : el(doc, CLS.meta + " " + CLS.absent, "not reported"));
+      const titleRead = readListField(row, rowTitle);
+      if (titleRead.ok && titleRead.text === "") continue;
+      const metaCells = rowMeta.map((field) => ({ field, read: readListField(row, field) })).filter((c) => !(c.read.ok && c.read.text === ""));
+      const statusReadRaw = statusFrom ? readListField(row, statusFrom) : null;
+      const statusCell = statusReadRaw && !(statusReadRaw.ok && statusReadRaw.text === "") ? { field: statusFrom, read: statusReadRaw } : null;
+      const titleCell = { field: rowTitle, read: titleRead };
+      const allCells = statusCell ? [titleCell, ...metaCells, statusCell] : [titleCell, ...metaCells];
+      const rowOk = allCells.every((c) => c.read.ok);
+      const texts = new Map(allCells.map((c) => [c, rowOk && c.read.ok ? c.read.text : UNAVAILABLE]));
+      if (rowOk) {
+        const rawOf = (c) => {
+          const r = c.read.ok ? c.read.raw : void 0;
+          return typeof r === "string" ? r : null;
+        };
+        const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
+        const statusRaw = allCells.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r) => r !== null);
+        const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
+        const isAttributedKind = (field) => {
+          const k = LIST_FIELD_KINDS[field];
+          return k === "text" || k === "id" || k === "capType";
+        };
+        const joinTextOf = (c) => isAttributedKind(c.field) ? rawOf(c) ?? texts.get(c) : texts.get(c);
+        const joined = [...nonStatusDisplayed.map(joinTextOf), ...statusRaw];
+        const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map(joinTextOf).join(" "));
+        const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
+        if (nonStatusClaim || crossClaim) for (const c of nonStatusCells) texts.set(c, WITHHELD_FIELD);
       }
-      if (statusFrom) {
-        const st = boundValueText(statusFrom, readSelector(row, statusFrom));
-        line.appendChild(st !== "" ? el(doc, CLS.badge, st, true) : el(doc, CLS.badge + " " + CLS.absent, "not reported"));
+      const line = el(doc, CLS.row);
+      line.appendChild(el(doc, CLS.fieldname, listFieldLabel(rowTitle) + ":"));
+      line.appendChild(el(doc, CLS.heading, texts.get(titleCell), true));
+      for (const c of metaCells) {
+        line.appendChild(el(doc, CLS.fieldname, listFieldLabel(c.field) + ":"));
+        line.appendChild(el(doc, CLS.meta, texts.get(c), true));
+      }
+      if (statusCell) {
+        line.appendChild(el(doc, CLS.fieldname, listFieldLabel(statusFrom) + ":"));
+        line.appendChild(el(doc, CLS.badge, texts.get(statusCell), true));
       }
       listEl.appendChild(line);
       shown++;
@@ -1222,9 +1438,38 @@
     const rowTitle = String(node.props?.rowTitle ?? "");
     for (const row of rows.slice(0, LIST_ROW_CAP)) {
       if (row === null || typeof row !== "object" || Array.isArray(row)) return false;
-      if (readSelector(row, rowTitle) === "") return false;
+      const read = readListField(row, rowTitle);
+      if (!read.ok || read.text === "") return false;
     }
     return true;
+  }
+  function bindScalar(node, data) {
+    const sel = node.bind?.select;
+    const path = node.bind?.path;
+    if (typeof sel !== "string" || typeof path !== "string") return UNAVAILABLE;
+    const kind = metricKindForSource(path, sel);
+    if (!kind) return UNAVAILABLE;
+    const raw = readOwnPath(data, sel);
+    switch (kind) {
+      case "status":
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 64 ? boundStatusText(raw) : UNAVAILABLE;
+      case "text":
+        return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? reportedFieldText(sel, raw) : UNAVAILABLE;
+      case "bool":
+        return typeof raw === "boolean" ? raw ? "Yes" : "No" : UNAVAILABLE;
+      case "percent":
+        return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? String(raw) : UNAVAILABLE;
+      case "count":
+        return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? String(raw) : UNAVAILABLE;
+      case "id":
+        return typeof raw === "string" && LIST_ID_RE.test(raw) ? identifierText(sel, raw) : UNAVAILABLE;
+      case "time":
+        return typeof raw === "string" && timeRoundTrips(raw) ? raw : UNAVAILABLE;
+      case "version":
+        return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? raw : UNAVAILABLE;
+      default:
+        return UNAVAILABLE;
+    }
   }
   function bootIrView(doc, mount, rawDoc, validate) {
     if (!validate(rawDoc).ok) {
@@ -1570,9 +1815,6 @@
     }
     return cur;
   }
-  function rowsOf(data) {
-    return Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.items) ? data.items : null;
-  }
   var provStates = /* @__PURE__ */ new Map();
   function provenanced(node, el2, paint, clear, fingerprint) {
     const prov = provenanceOf(node);
@@ -1691,20 +1933,20 @@
       const el2 = statEls[i];
       const slot = el2?.querySelector(".pcc-value");
       if (!el2 || !slot) return;
-      const want = node.bind ? metricSourceType(node.bind.path, node.bind.select) : null;
       const select = String(node.bind?.select ?? "");
-      const validScalar = (cur) => want === "number" ? typeof cur === "number" && Number.isFinite(cur) : typeof cur === "string" && cur !== "";
       const pv = provenanced(node, el2, (data) => {
         const cur = selectPath(data, select);
         if (cur === MISSING) return "missing field";
-        if (!validScalar(cur)) return "mistyped field";
-        slot.textContent = boundValueText(select, String(cur));
+        const text = bindScalar(node, data);
+        if (text === UNAVAILABLE) return "mistyped field";
+        slot.textContent = text;
         return true;
       }, () => {
         slot.textContent = "";
       }, (data) => {
         const cur = selectPath(data, select);
-        return cur !== MISSING && validScalar(cur) ? JSON.stringify(cur) : null;
+        if (cur === MISSING) return null;
+        return bindScalar(node, data) === UNAVAILABLE ? null : JSON.stringify(cur);
       });
       push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
@@ -1726,8 +1968,7 @@
       const el2 = listEls[i];
       if (!el2) return;
       const pv = provenanced(node, el2, (data, src) => {
-        const rows = rowsOf(data);
-        if (rows === null) return "unexpected response shape";
+        const rows = listRowsOf(String(node.bind?.path ?? ""), data);
         if (!listRowsReadable(node, rows)) return "partial collection";
         if (rows.length === 0 && src === null) return "empty result without a source time";
         const staging = document.createElement("div");
@@ -1737,8 +1978,8 @@
       }, () => {
         el2.replaceChildren();
       }, (data) => {
-        const rows = rowsOf(data);
-        if (rows === null || !listRowsReadable(node, rows)) return null;
+        const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+        if (!listRowsReadable(node, rows)) return null;
         const staging = document.createElement("div");
         bindListRows(rdoc, wrapEl(staging), node, rows);
         return staging.textContent;

@@ -353,12 +353,20 @@ describe("PX-4 review #2524, absence: every failed, off-schema, partial or empty
     noTime.close();
   });
 
-  it("a row missing a selected field shows 'not reported', never silently omits it", async () => {
+  // Updated for the merge of #344 rounds 4-7: a list field now has a closed KIND
+  // (LIST_FIELD_KINDS) read by readListField, which treats an absent field as
+  // `{ok:true, text:""}` — "simply not shown" (dashboard-ir-renderer.ts bindListRows), not a
+  // "not reported" placeholder. The placeholder markup (CLS.absent) this test used to assert
+  // on was #348's own pre-merge addition; #344's typed row reader supersedes it as CONTENT
+  // (what text a value shows), per the merge brief's resolution rule.
+  it("a row missing a selected field is simply not shown, never a placeholder cell", async () => {
     const s = scene([{ status: 200, json: { items: [{ name: "Alpha" }], asOf: iso(T0) } }], T0);
     s.deliver(listManifest); await s.settle();
     const row = s.q(".pcc-list .pcc-row");
-    expect(row.textContent).toContain("Alpha");
-    expect(Array.from(row.querySelectorAll(".pcc-absent")).map((e: any) => e.textContent)).toEqual(["not reported", "not reported"]);
+    expect(row.textContent).toContain("Alpha"); // astra r5 F1: attributed ("reported: Alpha"), still contains it
+    expect(row.querySelectorAll(".pcc-meta").length).toBe(0); // "type" absent: no meta cell painted
+    expect(row.querySelectorAll(".pcc-badge").length).toBe(0); // "available" absent: no status cell painted
+    expect(row.querySelectorAll(".pcc-absent").length).toBe(0); // no "not reported" placeholder either
     s.close();
   });
 

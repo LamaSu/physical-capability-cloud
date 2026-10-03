@@ -101,19 +101,36 @@ function foldForClaims(text: string): string {
   let t = text.normalize("NFKD").replace(INVISIBLE_RE, "").normalize("NFKC");
   t = t.replace(/\u2800/g, " ").replace(MONEY_EMOJI_RE, " $ ");
   t = t.replace(/[^\x00-\x7f]/g, (c) => LOOKALIKE[c] ?? c);
-  return t.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ").replace(/\s+/g, " ").toLowerCase();
+  // Split only a REAL camelCase join (a lowercase run ending, then an uppercase start): the
+  // lowercase letter must not itself be sandwiched directly between two uppercase letters, else
+  // "PAlD" (a single lowercased confusable inside an otherwise-capital word) would mis-split into
+  // "PAl D" and never fold back to "paid" (astra r3 H1).
+  return t.replace(/(?<![A-Z])([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ").replace(/\s+/g, " ").toLowerCase();
 }
 // Digit and symbol spellings, read both ways for "1" (i and l).
 const LEET_I: Readonly<Record<string, string>> = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "@": "a", "$": "s", "!": "i", "|": "i" };
 const LEET_L: Readonly<Record<string, string>> = { ...LEET_I, "1": "l", "|": "l" };
 const LEET_RE = /[0134578@$!|]/g;
 const HAS_LEET = /[0134578@$!|]/;
-const views = (f: string): string[] => (HAS_LEET.test(f) ? [f, f.replace(LEET_RE, (c) => LEET_I[c]!), f.replace(LEET_RE, (c) => LEET_L[c]!)] : [f]);
+/** Every spelling view of the folded text: the digit/symbol leet views (when present), plus an
+ *  l<->i confusable swap of each ("pald" reads "paid"; "settied" reads "settled"). Bounded: at
+ *  most 3 leet bases x up to 2 l/i swaps = at most 9 views, each built once (still linear-time). */
+const views = (f: string): string[] => {
+  const base = HAS_LEET.test(f) ? [f, f.replace(LEET_RE, (c) => LEET_I[c]!), f.replace(LEET_RE, (c) => LEET_L[c]!)] : [f];
+  const out = [...base];
+  for (const b of base) {
+    if (b.includes("l")) out.push(b.replace(/l/g, "i"));
+    if (b.includes("i")) out.push(b.replace(/i/g, "l"));
+  }
+  return out;
+};
 // A run of three or more single letters split by up to three separators is read as one word ("p a i d").
 // Word boundaries mean nothing inside such a run, so a claim word anywhere in it counts ("p a i d x").
 const SPACED_RE = /(?<![a-z0-9])[a-z](?:[^a-z0-9]{1,3}[a-z](?![a-z0-9])){2,}/g;
 const spacedRuns = (v: string): string => (v.match(SPACED_RE) ?? []).map((r) => r.replace(/[^a-z]/g, "")).join(" ");
-const CUR_CODE = "usdc|usdt|usde|usd|eurc|eur|gbp|jpy|cny|rmb|inr|chf|cad|aud|krw|rub|brl|mxn|eth|weth|btc|wbtc|dai|sol|matic|pol|xrp|ltc|bnb|busd|tusd|pyusd|gusd|frax|sats?|gwei|wei";
+const CUR_CODE = "usdc|usdt|usde|usd|eurc|eur|gbp|jpy|cny|rmb|inr|chf|cad|aud|krw|rub|brl|mxn|eth|weth|btc|wbtc|dai|sol|matic|pol|xrp|ltc|bnb|busd|tusd|pyusd|gusd|frax|sats?|gwei|wei" +
+  "|xlm|ada|dot|avax|trx|ton|near|atom|apt|sui|shib|doge|xmr|bch|etc|fil|icp|hbar|vet|algo|xtz|eos|cro|usdp|fdusd" +
+  "|hkd|sgd|nzd|sek|nok|dkk|pln|try|zar|thb|idr|myr|vnd|ils|aed|sar|ars|clp|cop|pen|egp|ngn|kes|pkr|uah|czk|huf|ron";
 const CUR_WORD = "dollars?|bucks|cents?|euros?|pence|quid|yen|yuan|renminbi|rupees?|rubles?|roubles?|pesos?|francs?|satoshis?|bitcoins?|ethers?|stablecoins?";
 const MAGNITUDE = "thousand|million|billion|trillion|mil|mio|mrd|mm|mn|bn|tn|k|m|b|t";
 const NUMBER_WORD = "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion|dozen|half";
@@ -126,15 +143,16 @@ const AMOUNT_RE = new RegExp(
   `|${CURRENCY}(?<=\\d[\\d,._]{0,40} ?(?:${MAGNITUDE})? ?[(\\[]? ?${CURRENCY})` + //     5 USDC, 1m USDC, 5$, 1 $ USDC
   `|\\b(?:${NUMBER_WORD})\\b[ -]{0,3}(?:(?:${MAGNITUDE})\\b[ -]{0,3})?${CURRENCY}` + // one million dollars
   `|\\ban? (?:${CUR_WORD})\\b` + //                                                  a dollar
-  `|\\b(?:${CUR_CODE}|${CUR_WORD})[ :=]{0,3}\\d`, //                                 USD 5, usdc:100
+  `|\\b(?:${CUR_CODE}|${CUR_WORD})[ :=]{0,3}(?:\\d|(?:${NUMBER_WORD})\\b)`, //       USD 5, usdc:100, USDC five
   "u",
 );
 // Payment and verification words: English, Spanish, French, German, Italian, Portuguese, Dutch,
 // Polish, Turkish and Indonesian, as folded (accents stripped, lowercase).
 const CLAIM_WORDS = [
-  "paid|unpaid|prepaid|repaid|overpaid|underpaid|payout|payouts|paidout|received|refund|refunds|refunded|reimbursed",
-  "settled|released|verified|confirmed|approved|guaranteed|funded|charged|deposited|withdrawn|credited|debited",
-  "remitted|disbursed|escrowed|balance|balances",
+  "paid|unpaid|prepaid|repaid|overpaid|underpaid|payout|payouts|paidout|refund|refunds|refunded|reimbursed",
+  "settled|verified|guaranteed|funded|charged|deposited|withdrawn|credited|debited",
+  "remitted|disbursed|escrowed",
+  "da thanh toan", // Vietnamese "paid", with diacritics folded to this ASCII skeleton already
   "pagad[oa]s?|pago|abonad[oa]s?|reembolsad[oa]s?|reembolso|liquidad[oa]s?|cobrad[oa]s?|acreditad[oa]s?|depositad[oa]s?",
   "verificad[oa]s?|confirmad[oa]s?|aprobad[oa]s?|aprovad[oa]s?|recibid[oa]s?|recebid[oa]s?|creditad[oa]s?|debitad[oa]s?|quitad[oa]s?|saldo",
   "payee?s?|rembourse[es]?|remboursee?s?|remboursement|credite[es]?|creditee?s?|debite[es]?|debitee?s?|verifiee?s?",
@@ -149,10 +167,31 @@ const CLAIM_WORDS = [
 ].join("|");
 const CLAIM_RE = new RegExp(`\\b(?:${CLAIM_WORDS})\\b`);
 const CLAIM_IN_RUN_RE = new RegExp(`(?:${CLAIM_WORDS})`);
+// ── The pair rule (M4 fix): a GENERIC word (received/released/approved/confirmed/complete/...) is
+// physical-workflow prose on its own ("Sample received", "Run confirmed for 9:00") and is withheld
+// only when a MONEY_OR_VERIFICATION noun sits within 3 words of it, in either order ("payment
+// received", "funds released", "payout approved"). "balance"/"balances" moved here as nouns, not
+// generic words: a bare "Available balance" label states nothing, but "balance confirmed" does.
+const GENERIC_WORDS = "received|released|approved|confirmed|complete|completed|passed|succeeded|successful|cleared|processed|accepted|sent|done";
+const CLAIM_NOUNS = "payment|payments|funds|fund|money|payout|payouts|transfer|transfers|transaction|transactions|invoice|invoices|deposit|deposits|escrow|settlement|refund|refunds|balance|balances|wallet|charge|charges|fee|fees|amount|price|verification|identity|kyc|kyb|attestation|proof|audit|oracle";
+const CLAIM_NOUN_GROUP = `(?:${CLAIM_NOUNS}|${CUR_CODE}|${CUR_WORD})`;
+const GENERIC_GROUP = `(?:${GENERIC_WORDS})`;
+// Bounded repeats only (lazy, capped at 3 intervening words) — linear-time even across a whole
+// dashboard's joined prose, same discipline as the rest of this file's regexes.
+const PAIR_RE = new RegExp(
+  `\\b${CLAIM_NOUN_GROUP}\\b(?:\\W+\\w+){0,3}?\\W+${GENERIC_GROUP}\\b` +
+  `|\\b${GENERIC_GROUP}\\b(?:\\W+\\w+){0,3}?\\W+${CLAIM_NOUN_GROUP}\\b`,
+);
+// Folded into the SAME `wordsIn` pass as MONEY_WORDS/NOTICE_WORDS below (one `views()` build, one
+// loop) rather than a second independent pass: re-building up to 9 spelling views of a whole
+// dashboard's joined prose twice over was measured to roughly 3.5x the adapt+validate time on the
+// benchmark's 2,000-char-per-note worst case. PAIR_RE needs no spaced-run check (that defense is
+// for single-letter-spaced words, not word-level pairing), so its "inRun" slot never matches.
+const PAIR_WORDS: WordCheck = [PAIR_RE, /(?!)/];
 // The same words in non-Latin scripts (Russian and Ukrainian, Chinese, Japanese, Korean, Arabic,
 // Hindi), matched in the folded text with spaces removed. Each is folded like the text (lower and
 // upper case), so a look-alike or all-capitals spelling still matches.
-const SCRIPT_CLAIM_WORDS: readonly string[] = ["\u043e\u043f\u043b\u0430\u0447\u0435\u043d", "\u0432\u044b\u043f\u043b\u0430\u0447\u0435\u043d", "\u0441\u043f\u043b\u0430\u0447\u0435\u043d", "\u0432\u043e\u0437\u0432\u0440\u0430\u0449\u0435\u043d", "\u0432\u043e\u0437\u0432\u0440\u0430\u0442", "\u0437\u0430\u0447\u0438\u0441\u043b\u0435\u043d", "\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d", "\u043f\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0436\u0435\u043d", "\u043f\u0440\u043e\u0432\u0435\u0440\u0435\u043d", "\u043e\u0434\u043e\u0431\u0440\u0435\u043d", "\u0431\u0430\u043b\u0430\u043d\u0441", "\u043f\u043e\u043b\u0443\u0447\u0435\u043d", "\u5df2\u4ed8", "\u5df2\u652f\u4ed8", "\u652f\u4ed8\u6210\u529f", "\u9000\u6b3e", "\u5df2\u7ed3\u7b97", "\u5df2\u7d50\u7b97", "\u5df2\u786e\u8ba4", "\u5df2\u78ba\u8a8d", "\u5df2\u9a8c\u8bc1", "\u5df2\u9a57\u8b49", "\u5230\u8d26", "\u5230\u8cec", "\u4f59\u989d", "\u9918\u984d", "\u5df2\u6536\u6b3e", "\u5df2\u6279\u51c6", "\u652f\u6255\u6e08", "\u652f\u6255\u3044\u6e08", "\u652f\u6255\u5b8c\u4e86", "\u652f\u6255\u3044\u5b8c\u4e86", "\u5165\u91d1\u6e08", "\u8fd4\u91d1", "\u6c7a\u6e08\u6e08", "\u6c7a\u6e08\u5b8c\u4e86", "\u78ba\u8a8d\u6e08", "\u627f\u8a8d\u6e08", "\u6b8b\u9ad8", "\uc9c0\uae09\uc644\ub8cc", "\uacb0\uc81c\uc644\ub8cc", "\uacb0\uc81c\ub428", "\uc9c0\uae09\ub428", "\ud658\ubd88", "\uc794\uc561", "\uc785\uae08\uc644\ub8cc", "\ud655\uc778\ub428", "\uc2b9\uc778\ub428", "\u0645\u062f\u0641\u0648\u0639", "\u062a\u0645\u0627\u0644\u062f\u0641\u0639", "\u0627\u0633\u062a\u0631\u062f\u0627\u062f", "\u0631\u0635\u064a\u062f", "\u092d\u0941\u0917\u0924\u093e\u0928\u0915\u093f\u092f\u093e", "\u092d\u0941\u0917\u0924\u093e\u0928\u0939\u094b\u0917\u092f\u093e"]
+const SCRIPT_CLAIM_WORDS: readonly string[] = ["\u043e\u043f\u043b\u0430\u0447\u0435\u043d", "\u0432\u044b\u043f\u043b\u0430\u0447\u0435\u043d", "\u0441\u043f\u043b\u0430\u0447\u0435\u043d", "\u0432\u043e\u0437\u0432\u0440\u0430\u0449\u0435\u043d", "\u0432\u043e\u0437\u0432\u0440\u0430\u0442", "\u0437\u0430\u0447\u0438\u0441\u043b\u0435\u043d", "\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d", "\u043f\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0436\u0435\u043d", "\u043f\u0440\u043e\u0432\u0435\u0440\u0435\u043d", "\u043e\u0434\u043e\u0431\u0440\u0435\u043d", "\u0431\u0430\u043b\u0430\u043d\u0441", "\u043f\u043e\u043b\u0443\u0447\u0435\u043d", "\u5df2\u4ed8", "\u5df2\u652f\u4ed8", "\u652f\u4ed8\u6210\u529f", "\u9000\u6b3e", "\u5df2\u7ed3\u7b97", "\u5df2\u7d50\u7b97", "\u5df2\u786e\u8ba4", "\u5df2\u78ba\u8a8d", "\u5df2\u9a8c\u8bc1", "\u5df2\u9a57\u8b49", "\u5230\u8d26", "\u5230\u8cec", "\u4f59\u989d", "\u9918\u984d", "\u5df2\u6536\u6b3e", "\u5df2\u6279\u51c6", "\u652f\u6255\u6e08", "\u652f\u6255\u3044\u6e08", "\u652f\u6255\u5b8c\u4e86", "\u652f\u6255\u3044\u5b8c\u4e86", "\u5165\u91d1\u6e08", "\u8fd4\u91d1", "\u6c7a\u6e08\u6e08", "\u6c7a\u6e08\u5b8c\u4e86", "\u78ba\u8a8d\u6e08", "\u627f\u8a8d\u6e08", "\u6b8b\u9ad8", "\uc9c0\uae09\uc644\ub8cc", "\uacb0\uc81c\uc644\ub8cc", "\uacb0\uc81c\ub428", "\uc9c0\uae09\ub428", "\ud658\ubd88", "\uc794\uc561", "\uc785\uae08\uc644\ub8cc", "\ud655\uc778\ub428", "\uc2b9\uc778\ub428", "\u0645\u062f\u0641\u0648\u0639", "\u062a\u0645\u0627\u0644\u062f\u0641\u0639", "\u0627\u0633\u062a\u0631\u062f\u0627\u062f", "\u0631\u0635\u064a\u062f", "\u092d\u0941\u0917\u0924\u093e\u0928\u0915\u093f\u092f\u093e", "\u092d\u0941\u0917\u0924\u093e\u0928\u0939\u094b\u0917\u092f\u093e", "\u03c0\u03bb\u03b7\u03c1\u03ce\u03b8\u03b7\u03ba\u03b5", "\u03c0\u03bb\u03b7\u03c1\u03ce\u03b8\u03b7\u03ba\u03b1\u03bd", "\u03b5\u03c0\u03b9\u03c3\u03c4\u03c1\u03bf\u03c6\u03ae \u03c7\u03c1\u03b7\u03bc\u03ac\u03c4\u03c9\u03bd", "\u03c5\u03c0\u03cc\u03bb\u03bf\u03b9\u03c0\u03bf", "\u05e9\u05d5\u05dc\u05dd", "\u0e0a\u0e33\u0e23\u0e30\u0e41\u0e25\u0e49\u0e27"]
   .flatMap((w) => [foldForClaims(w), foldForClaims(w.toUpperCase())]).map((w) => w.replace(/\s+/g, ""));
 const SCRIPT_CLAIM_RE = new RegExp([...new Set(SCRIPT_CLAIM_WORDS)].join("|"), "u"); // the words hold no regex syntax
 const NOTICE_RE = /\bwithh[eo]ld/;
@@ -171,15 +210,31 @@ function wordsIn(f: string, checks: readonly WordCheck[]): boolean {
 const scriptIn = (f: string): boolean => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_RE.test(f.replace(/ /g, ""));
 
 /** Does the text state an amount (a currency next to a number)? */
+// An IDENTIFIER (an id, a capability type) is server- or operator-chosen, and its grammar cannot
+// exclude prose (a hyphenated sentence fits it). So it is ATTRIBUTED like free text (steward #5149: fix
+// the property, not the detector): every displayed server value is either validated against a closed
+// grammar or vocabulary that excludes prose, or shown as "reported: ...".
+// Defense in depth: the pair check runs WITHOUT a word window here. A money noun or currency and a
+// generic claim word ANYWHERE in it withholds it ("payment-from-the-remote-operator-received"). A single
+// money noun alone does not, because real lab types use them ("liquid-transfer", "analytical-balance").
+const IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
+const IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
+export function identifierText(field: string, value: string): string {
+  if (value === "") return value;
+  const t = boundValueText(field, value);
+  if (t === WITHHELD_FIELD) return t;
+  for (const v of views(foldForClaims(value))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
+  return REPORTED_PREFIX + value;
+}
 export function statesAmount(text: string): boolean { return AMOUNT_RE.test(foldForClaims(text)); }
 /** Does the text state an amount or a payment or verification status? */
-export function isMoneyClaim(text: string): boolean { const f = foldForClaims(text); return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS]); }
+export function isMoneyClaim(text: string): boolean { const f = foldForClaims(text); return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, PAIR_WORDS]); }
 /** Does the text mention PCC's withheld notice ("withheld", "withhold")? Only PCC may say that. */
 export function mentionsWithheld(text: string): boolean { return wordsIn(foldForClaims(text), [NOTICE_WORDS]); }
 /** Agent prose that may not be shown: a money claim, or a mention of PCC's notice (one fold). */
 export function isProseClaim(text: string): boolean {
   const f = foldForClaims(text);
-  return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS]);
+  return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
 }
 
 // A bound RECORD status is the record's own word, never a payment fact: a job row can literally say
@@ -197,39 +252,124 @@ export function recordValueText(field: string, value: string): string {
   return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
 }
 
-// ── Bound values (astra r2 F2) ────────────────────────────────────────────────────────────
+// ── A CLOSED safe vocabulary for bound status values (astra r3 H1) ───────────────────────
+// The OLD rule failed OPEN: any status word that wasn't independently recognised as a claim was
+// shown bare — so "Verification passed" (not in the lexicon) rendered verbatim. The new rule fails
+// CLOSED: a status is shown bare ONLY when it normalizes EXACTLY to a word on this list. No payment
+// or money-movement word may be in it (checked by a test). Same list as #313's (pcc-design #3013,
+// job-status terms); this file is dependency-free, so it is duplicated here rather than imported.
+export const SAFE_STATUS_WORDS: ReadonlySet<string> = new Set([
+  "RUNNING", "IN_PROGRESS", "PROGRESS", "STREAMING", "BUILDING", "CONNECTING", "PENDING", "QUEUED", "WAITING", "PAUSED",
+  "REVIEW", "CONFIRM", "NEEDS_INPUT", "NEEDS_YOU", "ERROR", "FAILED", "DENIED", "CANCELLED", "CANCELED", "REJECTED",
+  "DONE", "COMPLETE", "COMPLETED", "OK", "SUCCESS", "SUCCEEDED", "RESOLVED", "READY", "DISPATCHED", "ACCEPTED",
+  "PREPARING", "EXECUTING", "COLLECTING_EVIDENCE", "AWAITING_PICKUP", "TIMED_OUT", "ONLINE", "OFFLINE", "MAINTENANCE",
+  "SUSPENDED", "HEALTHY", "DEGRADED", "UNKNOWN", "BIDDING", "ASSIGNED", "PROPOSED", "OVER_BUDGET", "NO_PATH_FOUND",
+  "APPROVED", "EXPIRED", "ACTIVE", "INACTIVE", "REVOKED", "IDLE", "BUSY", "DRAFT", "DEPRECATED", "RESERVED",
+  "LIVE", "STUB", "PLANNED", "TRUE", "FALSE",
+]);
+/** Normalize a status value for the closed-vocabulary check: fold confusables/case/joins first
+ *  (same discipline as isMoneyState), then uppercase and collapse any run of non-alphanumerics to
+ *  one underscore (so "in progress", "in-progress" and "IN_PROGRESS" all normalize alike). */
+function normalizeStatusWord(value: string): string {
+  return foldForClaims(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+function isSafeStatusWord(value: string): boolean { return SAFE_STATUS_WORDS.has(normalizeStatusWord(value)); }
+
+// ── Bound values (astra r2 F2; astra r3 H1 fail-closed status) ───────────────────────────
 // A fetched value is data, but a free field still carries words: a capability NAMED "Paid $1M -
 // verified" would read as a payment fact in a list title or a card. Every bound value the view shows
-// passes boundValueText. A record's status word is qualified, never hidden (#3013): a money state
-// with RECORD_STATUS_NOTE, any other payment or verification word ("verified", "pagado") with
-// RECORD_CLAIM_NOTE. Any other value that states money or verification, and any status that states
-// an amount or mentions the notice, is replaced by WITHHELD_FIELD. Only a PCC card's own money fields
-// (the price and its currency) show money, and they never pass through here.
+// passes boundValueText. A status field is CLOSED (4 cases, checked in order): (1) a value that
+// states an amount or mentions the notice is WITHHELD_FIELD; (2) a SAFE_STATUS_WORDS word is shown
+// bare; (3) a money state (isMoneyState) gets RECORD_STATUS_NOTE; (4) ANY other value gets
+// RECORD_CLAIM_NOTE — never shown bare just because it wasn't independently recognised as a claim.
+// A non-status field is unchanged: a claim becomes WITHHELD_FIELD, using the stronger detector. Only
+// a PCC card's own money fields (the price and its currency) show money, and they never pass through
+// here — they are now type-validated instead (dashboard-ir-renderer.ts readField).
 export const RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
 export const WITHHELD_FIELD = "withheld: stated money or verification";
+/** The CLOSED status treatment (4 cases, checked in order) — factored out of `boundValueText` so
+ *  it can be applied BY ROLE (astra r4 finding 1): any value the caller already knows is a status
+ *  WORD by its list field KIND (LIST_FIELD_KINDS below, "status"), wherever that field appears —
+ *  title, meta or statusFrom — gets this, not only a field whose NAME happens to end in "status".
+ *  (1) a value that states an amount or mentions the notice is WITHHELD_FIELD; (2) a
+ *  SAFE_STATUS_WORDS word is shown bare; (3) a money state (isMoneyState) gets RECORD_STATUS_NOTE;
+ *  (4) ANY other value gets RECORD_CLAIM_NOTE — never shown bare just because it wasn't
+ *  independently recognised as a claim. */
+export function boundStatusText(value: string): string {
+  if (value === "") return value;
+  if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD; // 1
+  if (isSafeStatusWord(value)) return value; // 2
+  if (isMoneyState(value)) return value + RECORD_STATUS_NOTE; // 3
+  return value + RECORD_CLAIM_NOTE; // 4 - fail closed, not "bare unless recognised"
+}
 export function boundValueText(field: string, value: string): string {
   if (value === "") return value;
-  if (/(^|\.)status$/.test(field) && !statesAmount(value) && !mentionsWithheld(value)) {
-    if (isMoneyState(value)) return value + RECORD_STATUS_NOTE;
-    return isMoneyClaim(value) ? value + RECORD_CLAIM_NOTE : value;
-  }
+  if (/(^|\.)status$/.test(field)) return boundStatusText(value);
   return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
+}
+
+// ── Attributed free text (astra r5 F1; same rule astra accepted on #313's F12) ───────────
+// A free-text value is never shown as PCC's OWN fact, even when the lexical detector doesn't
+// independently catch it (the pair rule only looks 3 words either side — "payment from the
+// remote operator received" is 4 words apart and passes isMoneyClaim unchanged). So every
+// TEXT-kind bound value is explicitly attributed to the record that reported it — structural,
+// not merely a backstop. A value the lexical detector DOES catch is still WITHHELD_FIELD (the
+// detector remains defense in depth underneath this, never replaced by it).
+export const REPORTED_PREFIX = "reported: ";
+export function reportedFieldText(field: string, value: string): string {
+  return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : REPORTED_PREFIX + value;
 }
 
 // ── PCC-owned list field profiles (PX-5 review #2504) ────────────────────────────────────
 // A list may show ONLY these fields of each allowlisted collection route; a selector is never
 // "safe because it parses". Money amounts, prices and payment state are not listable: they
 // appear only in schema cards. Escrow is not a list route at all.
-// Source classes per field (PX-4 review #2524): every profile field is registry state the route
-// serves (authoritative); none is agent-generated content, so a list can never show proposed
-// content under an authoritative class. Operator-authored text inside that registry state (names,
-// location labels) renders as untrusted text, and like every bound value it passes boundValueText
-// (#344 astra r2 F2): if it states money or verification, it is withheld.
-const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
-  "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
-  "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
-  "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] },
+// `rows` is the route's own array key (genui review of #344 r5, derived from the real producers by
+// route inject): GET /api/jobs answers { jobs: [...] }, /api/kernels { kernels: [...] }, and
+// /api/capabilities { items: [...] }. The binder used to guess `.items`, so job and kernel lists
+// never showed a row.
+// `location.label` removed (astra r5 F5): genui measured it by route inject over the seeded
+// store and found it present in 0/8 real kernel rows and 0/19 real capability rows (real data
+// carries `location: {lat, lng}`, never a `.label`) — dead surface, never exercised by a real
+// producer. Also removed from LIST_FIELD_KINDS (below) and LIST_FIELD_LABELS (dashboard-ir-
+// renderer.ts).
+export const LIST_PROFILES: Readonly<Record<string, { rows: string; title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
+  "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+  "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount"], status: ["status"] },
+  "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"] },
 };
+/** The rows of a list response, read ONLY by the route's PCC-owned rows key (an own property;
+ * never a manifest selector, never a bare top-level array — astra r5 F3). A bare array, or any
+ * other shape, gives no rows: rows come from the route's own envelope key or not at all. */
+export function listRowsOf(path: string, data: unknown): unknown[] {
+  const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path]!.rows : undefined;
+  if (key && data !== null && typeof data === "object" && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, key)) {
+    const v = (data as Record<string, unknown>)[key];
+    if (Array.isArray(v)) return v;
+  }
+  return [];
+}
+
+// ── A closed TYPE for every list field (the structural boundary; astra r4 on #344) ───────
+// The list row stops relying on selector NAMES: every field ANY LIST_PROFILES entry allows
+// (title, meta or status) gets exactly one KIND here, read and validated by the renderer's
+// readListField BY THAT KIND, whatever role it plays (title, meta or statusFrom — finding 1). The
+// map is exhaustive over LIST_PROFILES in both directions (checked by a test): a field that is not
+// here cannot be listed at all — listProfileViolation already refuses it before the renderer ever
+// sees it, so an entry here with no profile use would be dead, and a profile field with no entry
+// here would have no validated kind.
+export type ListFieldKind = "id" | "text" | "status" | "bool" | "time" | "version" | "count" | "capType";
+export const LIST_FIELD_KINDS: Readonly<Record<string, ListFieldKind>> = {
+  id: "id", capabilityId: "id", kernelId: "id",
+  name: "text",
+  status: "status",
+  available: "bool",
+  createdAt: "time", updatedAt: "time",
+  version: "version",
+  capabilityCount: "count",
+  type: "capType",
+};
+
 function listProfileViolation(path: string, props: Record<string, unknown>): string | null {
   const prof = LIST_PROFILES[path];
   if (!prof) return `no list field profile for ${path}`;
@@ -438,46 +578,59 @@ function isCredentialName(k: string): boolean {
 // time"). The `source` handles per-route unwrapping: GET /api/kernels/:id returns { kernel: … },
 // so "reputation" reads "kernel.reputation" — else the metric would bind but stay inert.
 // validateIr MIRRORS this (stat label + bind.select-as-source must match a profile entry).
-interface MetricField { label: string; source: string; type: "string" | "number" }
+// Closed value kind per metric field (astra r5 F2) — mirrors ListFieldKind's discipline (a
+// fetched stat is validated by its KIND, never shown merely because it happened to parse as a
+// string/number/boolean). "percent" (not "capType") replaces the one list-only kind: no metric
+// field needs a capability-type grammar. Picked from each field's real producer:
+//  - jobs/:id/status (routes/job-submit.ts GET): status is the job's status word; progress is
+//    the DB's `integer("progress")` column, seeded 0..100 (packages/db/src/schema/jobs.ts).
+//  - kernels/:id (routes/kernels.ts GET, KernelHealthSnapshot): status is the kernel's status
+//    word; reputation is ReputationService.computeEffectiveReputation's Math.round(...) output,
+//    a non-negative integer (count); uptimePercent is populateKernelHealthSnapshot's
+//    computeUptimePercent, one of 0/50/100/undefined (percent); capabilityCount/
+//    totalJobsCompleted/activeJobCount are all non-negative integer counts.
+export type MetricFieldKind = "status" | "percent" | "count" | "bool" | "time" | "id" | "text" | "version";
+interface MetricField { label: string; source: string; kind: MetricFieldKind }
 const METRIC_PROFILE: ReadonlyArray<{ route: RegExp; fields: Readonly<Record<string, MetricField>> }> = [
   { route: route("/api/jobs/:/status"), fields: { // top-level envelope
-    status: { label: "Status", source: "status", type: "string" },
-    progress: { label: "Progress", source: "progress", type: "number" },
+    status: { label: "Status", source: "status", kind: "status" },
+    progress: { label: "Progress", source: "progress", kind: "percent" },
   } },
   { route: route("/api/kernels/:"), fields: { // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
-    status: { label: "Status", source: "kernel.status", type: "string" },
-    reputation: { label: "Reputation", source: "kernel.reputation", type: "number" },
-    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", type: "number" },
-    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", type: "number" },
-    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", type: "number" },
-    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", type: "number" },
+    status: { label: "Status", source: "kernel.status", kind: "status" },
+    reputation: { label: "Reputation", source: "kernel.reputation", kind: "count" },
+    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", kind: "percent" },
+    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", kind: "count" },
+    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", kind: "count" },
+    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", kind: "count" },
   } },
 ];
-/** Adapter side: (route, logical selector) → the field profile (label + real source), or null. */
+/** Adapter side: (route, logical selector) → the field profile (label + real source + kind), or null. */
 function metricFieldForSelect(path: string, select: unknown): MetricField | null {
   if (typeof select !== "string") return null;
   for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
   return null;
 }
-/** Browser side: the declared type of a metric's SOURCE field, or null (not a metric field). A
- *  metric read whose field is missing or of another type is not data for that metric (PX-4
- *  review #2524: the painter must validate the route-specific payload, not accept any scalar). */
-export function metricSourceType(path: string, source: unknown): "string" | "number" | null {
+/** Shared lookup: (route, SOURCE path already in bind.select) → the field profile, or null. Both
+ * the label lookup (validateIr) and the kind lookup (bindScalar) are one route match away. */
+function metricFieldForSource(path: string, source: unknown): MetricField | null {
   if (typeof source !== "string") return null;
   for (const p of METRIC_PROFILE) if (p.route.test(path)) {
-    for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].type;
+    for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k];
     return null;
   }
   return null;
 }
 /** Validator side: (route, SOURCE path already in bind.select) → the expected PCC label, or null. */
 function metricLabelForSource(path: string, source: unknown): string | null {
-  if (typeof source !== "string") return null;
-  for (const p of METRIC_PROFILE) if (p.route.test(path)) {
-    for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].label;
-    return null;
-  }
-  return null;
+  return metricFieldForSource(path, source)?.label ?? null;
+}
+/** Renderer side (astra r5 F2): (route, SOURCE path already in bind.select) → the field's closed
+ * value kind, or null when the pair isn't an allowlisted metric field at all. bindScalar uses
+ * this to validate the fetched value BY KIND before any content check — off-kind is UNAVAILABLE,
+ * never shown merely because it happened to parse as some other type. */
+export function metricKindForSource(path: string, source: unknown): MetricFieldKind | null {
+  return metricFieldForSource(path, source)?.kind ?? null;
 }
 /** Closed typed-op descriptor grammar (submit/execute/approve/deny/action). Its
  * content is DISCARDED in B, but a malformed shape is REJECTED, never stripped. */

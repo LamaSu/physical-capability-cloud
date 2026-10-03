@@ -23,9 +23,9 @@
  * Exposes NO host-call interface; contains NONE of tools/call, __PCC_HOST_BRIDGE__,
  * __PCC_HOST_OPERATIONS__, capability registration, or a write transport.
  */
-import { dashboardManifestToIr, validateIr, provenanceOf, metricSourceType, boundValueText } from "./dashboard-ir.js";
+import { dashboardManifestToIr, listRowsOf, validateIr, provenanceOf } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
-import { bootIrView, bindListRows, listRowsReadable, bindSchemaCard, applyFreshness, applyUnavailable, applyUnknownTime } from "./dashboard-ir-renderer.js";
+import { bootIrView, bindScalar, bindListRows, listRowsReadable, bindSchemaCard, applyFreshness, applyUnavailable, applyUnknownTime, UNAVAILABLE } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 import { startBind, sourceAsOf, isStale, acceptsNewer } from "./dashboard-ir-binder.js";
 import type { BinderDeps, GetResult } from "./dashboard-ir-binder.js";
@@ -202,12 +202,6 @@ function selectPath(data: unknown, select: string): unknown | typeof MISSING {
   }
   return cur;
 }
-/** Same collection-v1 shape check the list painter uses: a top-level array, or
- *  `{ items: [...] }`; anything else is not a row set at all. */
-function rowsOf(data: unknown): unknown[] | null {
-  return Array.isArray(data) ? data : (data && typeof data === "object" && Array.isArray((data as { items?: unknown }).items) ? (data as { items: unknown[] }).items : null);
-}
-
 /** PX-4 provenance gate for one bound node (hardened per cross-family review #2524).
  *  - Absence is not evidence: a failed, errored, timed-out, off-schema, partial or unreadable
  *    read CLEARS what was shown and says "unavailable · <why>". Nothing last-known or default
@@ -320,24 +314,24 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
   const push = (h: { stop: () => void }) => boundHandles.push(h);
   stats.forEach((node, i) => {
     const el = statEls[i]; const slot = el?.querySelector<HTMLElement>(".pcc-value"); if (!el || !slot) return;
-    const want = node.bind ? metricSourceType(node.bind.path, node.bind.select) : null;
     const select = String(node.bind?.select ?? "");
-    // Shared by the painter and the fingerprint below, so a fingerprint is non-null exactly
-    // when the paint it describes would have succeeded.
-    const validScalar = (cur: unknown): boolean => (want === "number" ? typeof cur === "number" && Number.isFinite(cur) : typeof cur === "string" && cur !== "");
+    // #344's bindScalar is the single source of kind validation (metricKindForSource) AND
+    // text formatting (status qualification, attribution, percent/count/id/time/version
+    // grammars) — #348's provenanced() wrapper only decides WHEN to call it and how to
+    // report a failure. `selectPath` still distinguishes "missing" from "mistyped" for the
+    // reported reason text, which bindScalar's single UNAVAILABLE sentinel cannot.
     const pv = provenanced(node, el, (data) => {
-      // The metric's field must be present with its declared type; anything else is not data.
       const cur = selectPath(data, select);
       if (cur === MISSING) return "missing field";
-      if (!validScalar(cur)) return "mistyped field";
-      // Checked exactly as bindScalar does: a status word is qualified (#3013), any other claim
-      // or a status that states an amount is withheld (#344 astra r2 F2).
-      slot.textContent = boundValueText(select, String(cur));
+      const text = bindScalar(node, data);
+      if (text === UNAVAILABLE) return "mistyped field";
+      slot.textContent = text;
       return true;
     }, () => { slot.textContent = ""; }, (data) => {
       // M3 fingerprint: the scalar itself — the one thing this sink shows.
       const cur = selectPath(data, select);
-      return cur !== MISSING && validScalar(cur) ? JSON.stringify(cur) : null;
+      if (cur === MISSING) return null;
+      return bindScalar(node, data) === UNAVAILABLE ? null : JSON.stringify(cur);
     });
     push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
   });
@@ -357,10 +351,13 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
   });
   lists.forEach((node, i) => { const el = listEls[i]; if (!el) return; const pv = provenanced(node, el, (data, src) => {
-    // collection-v1 is a top-level array or { items: [...] }. Anything else is NOT an empty
-    // list: rendering it as one would claim "none" of something the source never listed.
-    const rows = rowsOf(data);
-    if (rows === null) return "unexpected response shape";
+    // #344's listRowsOf reads the route's own rows key ("jobs"/"kernels"/"items" —
+    // dashboard-ir.ts LIST_PROFILES), never a guessed `.items`. It always returns an array
+    // ([] for an unrecognized shape too), so "unexpected response shape" is no longer
+    // distinguishable from "genuinely empty" by the rows alone; listRowsReadable + the
+    // empty-without-a-source-time gate below still fail a non-collection payload closed in
+    // the common case (an error body rarely carries a valid source-read timestamp).
+    const rows = listRowsOf(String(node.bind?.path ?? ""), data);
     // A partial collection (any unreadable row) is not data.
     if (!listRowsReadable(node, rows)) return "partial collection";
     // Empty-read policy: "none" is shown only when the SOURCE vouches for when it read the
@@ -373,8 +370,8 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
   }, () => { el.replaceChildren(); }, (data) => {
     // M3 fingerprint: "the row texts" — the same rows, staged off-DOM (never touching `el`),
     // read back as their combined text; a readable-but-empty collection fingerprints too.
-    const rows = rowsOf(data);
-    if (rows === null || !listRowsReadable(node, rows)) return null;
+    const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+    if (!listRowsReadable(node, rows)) return null;
     const staging = document.createElement("div");
     bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows);
     return staging.textContent;
