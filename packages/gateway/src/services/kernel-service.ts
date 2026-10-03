@@ -80,6 +80,19 @@ function endJobTelemetry(jobId: string, span: LifecycleSpan | null, traceId: str
   }
 }
 
+/**
+ * One update of the circuit breaker for a finished job. The breaker is bookkeeping: if it
+ * throws, that is logged, and the job's own completion still runs, so its status, its settlement
+ * and its telemetry never depend on it (astra pack 238).
+ */
+function recordBreaker(jobId: string, update: () => void): void {
+  try {
+    update();
+  } catch (err) {
+    console.error(`[kernel-service] job ${jobId}: the circuit breaker could not record its outcome: ${errorText(err)}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -381,63 +394,69 @@ export class KernelService {
             })
             .then(async (result) => {
               this.runningJobs.delete(jobId);
-              // Feed the REAL execution outcome into the safety breaker. Admission
-              // used validateOnly (which records nothing), so this is the only
-              // place a genuine device success/failure reaches the breaker. A busy
-              // refusal is neither: the runner refused before commanding the device,
-              // because another job holds it (#5205), so it records nothing.
-              if (result.success) {
-                gateway.recordDeviceSuccess(deviceId);
-              } else if (result.busy === undefined) {
-                chargeFailedRun(gateway, deviceId, result.failure);
-              }
               try {
-                const repos = getRepos();
-                if (result.success) {
-                  repos.jobs.update(jobId, {
-                    status: "completed",
-                    progress: 100,
-                    completedAt: new Date().toISOString(),
-                    evidenceBundleId: result.bundleId,
-                  });
-                } else {
-                  repos.jobs.updateStatus(jobId, "failed");
-                }
-              } catch {
-                // DB update failure is non-fatal
-              }
-
-              // ── Evidence-to-settlement pipeline ──────────────────────────
-              if (result.success) {
-                const bundle = this.completedBundles.get(jobId);
-                if (bundle) {
-                  // Note: evidence_capture telemetry is already emitted via the
-                  // onPhase callback wired into runner.run() above.
-                  try {
-                    const settlementService = getSettlementService();
-                    const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
-                    await settlementService.processEvidence(bundle, jobId, {
-                      // For tier 0 jobs, auto-release immediately (no challenge window)
-                      autoRelease: assuranceTier === 0,
-                      contractAddress,
-                    });
-                  } catch (err) {
-                    // Settlement pipeline is non-fatal — the job itself succeeded
-                    console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
-                  } finally {
-                    // Clean up in-memory evidence data
-                    this.emitter.cleanup(jobId, stepId);
+                // Feed the REAL execution outcome into the safety breaker. Admission
+                // used validateOnly (which records nothing), so this is the only
+                // place a genuine device success/failure reaches the breaker. A busy
+                // refusal is neither: the runner refused before commanding the device,
+                // because another job holds it (#5205), so it records nothing.
+                // Its own failure is logged, and never stops the job's completion below (astra pack 238).
+                recordBreaker(jobId, () => {
+                  if (result.success) {
+                    gateway.recordDeviceSuccess(deviceId);
+                  } else if (result.busy === undefined) {
+                    chargeFailedRun(gateway, deviceId, result.failure);
                   }
-                  this.completedBundles.delete(jobId);
+                });
+                try {
+                  const repos = getRepos();
+                  if (result.success) {
+                    repos.jobs.update(jobId, {
+                      status: "completed",
+                      progress: 100,
+                      completedAt: new Date().toISOString(),
+                      evidenceBundleId: result.bundleId,
+                    });
+                  } else {
+                    repos.jobs.updateStatus(jobId, "failed");
+                  }
+                } catch {
+                  // DB update failure is non-fatal
                 }
-              }
 
-              endJobTelemetry(jobId, lifecycleSpan, traceId, lifecycleLocalSpanId, result.success, result.error ?? "ok");
+                // ── Evidence-to-settlement pipeline ──────────────────────────
+                if (result.success) {
+                  const bundle = this.completedBundles.get(jobId);
+                  if (bundle) {
+                    // Note: evidence_capture telemetry is already emitted via the
+                    // onPhase callback wired into runner.run() above.
+                    try {
+                      const settlementService = getSettlementService();
+                      const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
+                      await settlementService.processEvidence(bundle, jobId, {
+                        // For tier 0 jobs, auto-release immediately (no challenge window)
+                        autoRelease: assuranceTier === 0,
+                        contractAddress,
+                      });
+                    } catch (err) {
+                      // Settlement pipeline is non-fatal — the job itself succeeded
+                      console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                    } finally {
+                      // Clean up in-memory evidence data
+                      this.emitter.cleanup(jobId, stepId);
+                    }
+                    this.completedBundles.delete(jobId);
+                  }
+                }
+              } finally {
+                // Whatever failed above, the job's telemetry ends (astra pack 238).
+                endJobTelemetry(jobId, lifecycleSpan, traceId, lifecycleLocalSpanId, result.success, result.error ?? "ok");
+              }
             }, (err: unknown) => {
               // Only a rejected runner.run() lands here, never this handler's own failure (N115).
               // run() never rejects (#531); were it to, the failure is the device's, as before.
               this.runningJobs.delete(jobId);
-              gateway.recordDeviceFailure(deviceId);
+              recordBreaker(jobId, () => gateway.recordDeviceFailure(deviceId));
               try {
                 const repos = getRepos();
                 repos.jobs.updateStatus(jobId, "failed");
@@ -469,57 +488,63 @@ export class KernelService {
         })
         .then(async (result) => {
           this.runningJobs.delete(jobId);
-          // Feed the REAL execution outcome into the safety breaker (fallback path).
-          // A busy refusal never commanded the device, so it records nothing (#5205).
-          if (result.success) {
-            gateway.recordDeviceSuccess(deviceId);
-          } else if (result.busy === undefined) {
-            chargeFailedRun(gateway, deviceId, result.failure);
-          }
           try {
-            const repos = getRepos();
-            if (result.success) {
-              repos.jobs.update(jobId, {
-                status: "completed",
-                progress: 100,
-                completedAt: new Date().toISOString(),
-                evidenceBundleId: result.bundleId,
-              });
-            } else {
-              repos.jobs.updateStatus(jobId, "failed");
-            }
-          } catch {
-            // DB update failure is non-fatal
-          }
-
-          if (result.success) {
-            const bundle = this.completedBundles.get(jobId);
-            if (bundle) {
-              // Note: evidence_capture telemetry is already emitted via the
-              // onPhase callback wired into runner.run() above.
-              try {
-                const settlementService = getSettlementService();
-                const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
-                await settlementService.processEvidence(bundle, jobId, {
-                  autoRelease: assuranceTier === 0,
-                  contractAddress,
-                });
-              } catch (err) {
-                console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
-              } finally {
-                // Clean up in-memory evidence data
-                this.emitter.cleanup(jobId, stepId);
+            // Feed the REAL execution outcome into the safety breaker (fallback path).
+            // A busy refusal never commanded the device, so it records nothing (#5205).
+            // Its own failure is logged, and never stops the job's completion below (astra pack 238).
+            recordBreaker(jobId, () => {
+              if (result.success) {
+                gateway.recordDeviceSuccess(deviceId);
+              } else if (result.busy === undefined) {
+                chargeFailedRun(gateway, deviceId, result.failure);
               }
-              this.completedBundles.delete(jobId);
+            });
+            try {
+              const repos = getRepos();
+              if (result.success) {
+                repos.jobs.update(jobId, {
+                  status: "completed",
+                  progress: 100,
+                  completedAt: new Date().toISOString(),
+                  evidenceBundleId: result.bundleId,
+                });
+              } else {
+                repos.jobs.updateStatus(jobId, "failed");
+              }
+            } catch {
+              // DB update failure is non-fatal
             }
+
+            if (result.success) {
+              const bundle = this.completedBundles.get(jobId);
+              if (bundle) {
+                // Note: evidence_capture telemetry is already emitted via the
+                // onPhase callback wired into runner.run() above.
+                try {
+                  const settlementService = getSettlementService();
+                  const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
+                  await settlementService.processEvidence(bundle, jobId, {
+                    autoRelease: assuranceTier === 0,
+                    contractAddress,
+                  });
+                } catch (err) {
+                  console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                } finally {
+                  // Clean up in-memory evidence data
+                  this.emitter.cleanup(jobId, stepId);
+                }
+                this.completedBundles.delete(jobId);
+              }
+            }
+          } finally {
+            // End local trace span (fallback path): whatever failed above, it ends (astra pack 238).
+            endJobTelemetry(jobId, null, traceId, lifecycleLocalSpanId, result.success, result.error ?? "ok");
           }
-          // End local trace span (fallback path)
-          endJobTelemetry(jobId, null, traceId, lifecycleLocalSpanId, result.success, result.error ?? "ok");
         }, (err: unknown) => {
           // Only a rejected runner.run() lands here, never this handler's own failure (N115).
           // run() never rejects (#531); were it to, the failure is the device's, as before (fallback path).
           this.runningJobs.delete(jobId);
-          gateway.recordDeviceFailure(deviceId);
+          recordBreaker(jobId, () => gateway.recordDeviceFailure(deviceId));
           try {
             const repos = getRepos();
             repos.jobs.updateStatus(jobId, "failed");

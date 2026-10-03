@@ -98,6 +98,7 @@ vi.mock("../contracts/batch-settlement.js", () => ({
 import { initStore, closeStore, getRepos } from "../db.js";
 import { Sentry } from "../sentry.js";
 import { KernelService } from "../services/kernel-service.js";
+import { getSettlementService } from "../services/settlement-service.js";
 import {
   getSafetyGateway,
   initSafetyGateway,
@@ -109,6 +110,8 @@ import {
   registerCameraAdapter,
   unregisterCameraAdapter,
   SafetyGateway,
+  EvidenceEmitter,
+  JobRunner,
 } from "@pcc/kernel";
 import type { MachineAdapter, KernelConfig, SensorAdapter, CameraAdapter } from "@pcc/kernel";
 
@@ -554,21 +557,54 @@ describe("KernelService charges a failed run to the device its JobResult names (
 
 describe("telemetry never changes a job's breaker charge or its status (N115)", () => {
   const LC_TYPE = "test-working-ks-n115";
-  /** SafetyGateway's prototype, so a test can make one method throw once. */
-  const SafetyGatewayProto = SafetyGateway.prototype as unknown as { recordDeviceSuccess: (...args: unknown[]) => unknown };
+  const LC_FAIL_TYPE = "test-fail-load-ks-n115";
   beforeAll(() => {
     try { unregisterMachineAdapter(LC_TYPE); } catch { /* not registered */ }
+    try { unregisterMachineAdapter(LC_FAIL_TYPE); } catch { /* not registered */ }
     registerMachineAdapter(LC_TYPE, (device, _cfg, kernelId) => new WorkingAdapter(device.id, kernelId));
+    registerMachineAdapter(LC_FAIL_TYPE, (device, _cfg, kernelId) => new FailingLoadAdapter(device.id, kernelId));
   });
   afterAll(() => {
     try { unregisterMachineAdapter(LC_TYPE); } catch { /* already gone */ }
+    try { unregisterMachineAdapter(LC_FAIL_TYPE); } catch { /* already gone */ }
   });
 
-  /** Runs one successful tier-0 job on its own machine; returns the machine's circuit, the 'failed' marks and unhandled rejections. */
-  async function successfulJob(kernelId: string, deviceId: string) {
+  /**
+   * Makes `proto[method]` throw once, at the first call `when` accepts; restore() puts the real
+   * method back. A prototype, so the instance a KernelService makes inside is reached.
+   */
+  function throwOnce(proto: object, method: string, when: (...args: unknown[]) => boolean, message: string) {
+    const target = proto as Record<string, unknown>;
+    const real = target[method] as (...args: unknown[]) => unknown;
+    const state = { thrown: false, restore: () => void (target[method] = real) };
+    target[method] = function (this: unknown, ...args: unknown[]) {
+      if (!state.thrown && when(...args)) {
+        state.thrown = true;
+        throw new Error(message);
+      }
+      return real.apply(this, args);
+    };
+    return state;
+  }
+
+  /** The next job starts with no Sentry lifecycle span, so it takes the fallback path. */
+  function withoutSentry(): void {
+    vi.mocked(Sentry.startSpanManual).mockImplementationOnce(() => {
+      throw new Error("Sentry not initialised");
+    });
+  }
+
+  /**
+   * Runs one tier-0 job on its own machine of `adapterType`. Returns the machine's circuit, the
+   * job's 'failed' and 'completed' marks, its settlement attempts, its trace ends, unhandled
+   * rejections, and the completion-handling and breaker failures logged.
+   */
+  async function jobOutcome(kernelId: string, deviceId: string, adapterType: string) {
     initSafetyGateway({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
     const gw = getSafetyGateway();
     const markedFailed = vi.spyOn(getRepos().jobs, "updateStatus");
+    const updated = vi.spyOn(getRepos().jobs, "update");
+    const settled = vi.spyOn(getSettlementService(), "processEvidence");
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const endsBefore = tracing.ends;
@@ -576,7 +612,7 @@ describe("telemetry never changes a job's breaker charge or its status (N115)", 
     const on = () => void (unhandled += 1);
     process.on("unhandledRejection", on);
     try {
-      const svc = new KernelService({ kernelId, mockMode: false, devices: [{ id: deviceId, type: "machine", adapterType: LC_TYPE, config: {} }] });
+      const svc = new KernelService({ kernelId, mockMode: false, devices: [{ id: deviceId, type: "machine", adapterType, config: {} }] });
       await svc.submitJob({ jobId: `${kernelId}-job`, stepId: "s", assuranceTier: 0, deviceId });
       const start = Date.now();
       while ((await svc.getJobStatus(`${kernelId}-job`)).status === "executing" && Date.now() - start < 2_000) await new Promise((r) => setTimeout(r, 10));
@@ -584,10 +620,26 @@ describe("telemetry never changes a job's breaker charge or its status (N115)", 
     } finally {
       process.off("unhandledRejection", on);
     }
+    const job = `${kernelId}-job`;
     const failedMarks = markedFailed.mock.calls.filter(([, status]) => status === "failed").length;
-    const handlingFailed = errors.mock.calls.filter(([line]) => typeof line === "string" && line.includes("completion handling failed")).length;
-    return { circuit: gw.getStatus().circuits.get(deviceId), failedMarks, unhandled, traceEnds: tracing.ends - endsBefore, handlingFailed };
+    const completedMarks = updated.mock.calls.filter(([id, patch]) => id === job && (patch as { status?: string }).status === "completed").length;
+    const settlements = settled.mock.calls.filter(([, id]) => id === job).length;
+    settled.mockRestore();
+    const logged = (what: string) => errors.mock.calls.filter(([line]) => typeof line === "string" && line.includes(what)).length;
+    return {
+      circuit: gw.getStatus().circuits.get(deviceId),
+      failedMarks,
+      completedMarks,
+      settlements,
+      unhandled,
+      traceEnds: tracing.ends - endsBefore,
+      handlingFailed: logged("completion handling failed"),
+      breakerFailed: logged("the circuit breaker could not record its outcome"),
+    };
   }
+
+  /** Runs one successful tier-0 job on its own machine. */
+  const successfulJob = (kernelId: string, deviceId: string) => jobOutcome(kernelId, deviceId, LC_TYPE);
 
   it.each([
     ["its lifecycle span's end() throws", { end: () => { throw new Error("span end failed"); }, setStatus: () => {} }],
@@ -623,31 +675,86 @@ describe("telemetry never changes a job's breaker charge or its status (N115)", 
   it.each([
     ["with the Sentry lifecycle span", false],
     ["on the fallback path", true],
-  ])("a successful job whose completion handling itself throws (%s) is logged: no failure is charged, it is not marked failed, nothing is unhandled", async (_path, fallback) => {
-    if (fallback) {
-      vi.mocked(Sentry.startSpanManual).mockImplementationOnce(() => {
-        throw new Error("Sentry not initialised");
-      });
-    }
-    // Not telemetry: the success record itself throws, once, after the run resolved.
-    const real = SafetyGatewayProto.recordDeviceSuccess;
-    let thrown = false;
-    SafetyGatewayProto.recordDeviceSuccess = function (this: unknown, ...args: unknown[]) {
-      if (!thrown) {
-        thrown = true;
-        throw new Error("breaker store unavailable");
-      }
-      return real.apply(this, args as never);
-    };
+  ])("a successful job whose completion handling itself throws (%s) is logged: no failure is charged, it is not marked failed, nothing is unhandled, its trace ends", async (_path, fallback) => {
+    if (fallback) withoutSentry();
+    // Neither telemetry nor the breaker: detaching the job's evidence throws, once, in the
+    // settlement's finally, after the job's status and its settlement.
+    const kernelId = `kernel-ks-n115-handler-${String(fallback)}`;
+    const cleanup = throwOnce(EvidenceEmitter.prototype, "cleanup", (jobId) => jobId === `${kernelId}-job`, "evidence store unavailable");
     try {
-      const out = await successfulJob(`kernel-ks-n115-handler-${fallback}`, `dev-n115-handler-${fallback}`);
-      expect.soft(thrown, "the success record threw").toBe(true);
+      const out = await successfulJob(kernelId, `dev-n115-handler-${String(fallback)}`);
+      expect.soft(cleanup.thrown, "the evidence cleanup threw").toBe(true);
       expect.soft(out.circuit?.failures ?? 0, "failures charged to the machine").toBe(0);
       expect.soft(out.failedMarks, "the job marked failed").toBe(0);
       expect.soft(out.unhandled, "unhandled rejections").toBe(0);
       expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(1);
+      expect.soft(out.completedMarks, "the job recorded as completed").toBe(1);
+      expect.soft(out.traceEnds, "its trace, ended").toBe(1);
     } finally {
-      SafetyGatewayProto.recordDeviceSuccess = real;
+      cleanup.restore();
     }
+  });
+
+  describe("a breaker that throws never stops a job's completion: its status, its settlement and its telemetry (astra pack 238)", () => {
+    const PATHS = [
+      ["with the Sentry lifecycle span", false],
+      ["on the fallback path", true],
+    ] as const;
+
+    it.each(PATHS)("a successful job whose success record throws (%s): it is completed and settled, its trace ends, the breaker's failure is logged", async (_path, fallback) => {
+      if (fallback) withoutSentry();
+      const record = throwOnce(SafetyGateway.prototype, "recordDeviceSuccess", () => true, "breaker store unavailable");
+      try {
+        const out = await successfulJob(`kernel-ks-238-ok-${String(fallback)}`, `dev-238-ok-${String(fallback)}`);
+        expect.soft(record.thrown, "the success record threw").toBe(true);
+        expect.soft(out.completedMarks, "the job recorded as completed").toBe(1);
+        expect.soft(out.settlements, "settlement attempted for the job").toBe(1);
+        expect.soft(out.traceEnds, "its trace, ended").toBe(1);
+        expect.soft(out.breakerFailed, "the breaker's failure, logged").toBe(1);
+        expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(0);
+        expect.soft(out.circuit?.failures ?? 0, "failures charged to the machine").toBe(0);
+        expect.soft(out.failedMarks, "the job marked failed").toBe(0);
+        expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+      } finally {
+        record.restore();
+      }
+    });
+
+    it.each(PATHS)("a failed job whose failure charge throws (%s): it is marked failed, its trace ends, the breaker's failure is logged", async (_path, fallback) => {
+      if (fallback) withoutSentry();
+      const record = throwOnce(SafetyGateway.prototype, "recordDeviceFailure", () => true, "breaker store unavailable");
+      try {
+        const out = await jobOutcome(`kernel-ks-238-fail-${String(fallback)}`, `dev-238-fail-${String(fallback)}`, LC_FAIL_TYPE);
+        expect.soft(record.thrown, "the failure charge threw").toBe(true);
+        expect.soft(out.failedMarks, "the job marked failed").toBe(1);
+        expect.soft(out.completedMarks, "the job recorded as completed").toBe(0);
+        expect.soft(out.traceEnds, "its trace, ended").toBe(1);
+        expect.soft(out.breakerFailed, "the breaker's failure, logged").toBe(1);
+        expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(0);
+        expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+      } finally {
+        record.restore();
+      }
+    });
+
+    it.each(PATHS)("a rejected run whose failure charge throws (%s): it is marked failed, its trace ends, the breaker's failure is logged", async (_path, fallback) => {
+      if (fallback) withoutSentry();
+      // run() never rejects (#531); this forces the rejected-run branch.
+      const run = vi.spyOn(JobRunner.prototype, "run").mockRejectedValueOnce(new Error("runner crashed"));
+      const record = throwOnce(SafetyGateway.prototype, "recordDeviceFailure", () => true, "breaker store unavailable");
+      try {
+        const out = await successfulJob(`kernel-ks-238-rej-${String(fallback)}`, `dev-238-rej-${String(fallback)}`);
+        expect.soft(run, "the run that rejected").toHaveBeenCalledTimes(1);
+        expect.soft(record.thrown, "the failure charge threw").toBe(true);
+        expect.soft(out.failedMarks, "the job marked failed").toBe(1);
+        expect.soft(out.traceEnds, "its trace, ended").toBe(1);
+        expect.soft(out.breakerFailed, "the breaker's failure, logged").toBe(1);
+        expect.soft(out.handlingFailed, "completion handling reported as failed").toBe(0);
+        expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+      } finally {
+        record.restore();
+        run.mockRestore();
+      }
+    });
   });
 });
