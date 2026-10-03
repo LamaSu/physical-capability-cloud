@@ -785,3 +785,43 @@ describe("N84 creator binding, status route: only the caller's own channels, and
     expect(s.totals?.enabledChannelCount).toBe(2);
   });
 });
+
+// astra pack 146b (NEW, CRITICAL): the channel list is computed for the CALLER (its own channels;
+// the admin sees all), so no browser or intermediary may store it and replay it to another identity
+// after a session switch. The status view was fixed in 146; the list sent no Cache-Control at all.
+// Every /api response without a policy of its own now defaults to "private, no-store".
+describe("per-caller API responses are never stored (astra pack 146b)", () => {
+  const assertNeverStored = (res: Res, what: string) => {
+    const cc = String(res.headers["cache-control"] ?? "");
+    expect(cc, what).toMatch(/\bno-store\b/);
+    expect(cc, what).toMatch(/\bprivate\b/);
+    expect(cc, what).not.toMatch(/max-age=[1-9]/);
+    expect(cc, what).not.toMatch(/\bpublic\b/);
+  };
+
+  it("[neg] sol's reproduction: GET /api/operators/:slug/channels as identity A is private, no-store", async () => {
+    await attachAs(keyA, SLUG, emailBody("146b-cache-probe"));
+    const res = await call("GET", `/api/operators/${SLUG}/channels`, keyA);
+    expect(res.statusCode).toBe(200);
+    expect(listed(res).length).toBeGreaterThan(0);
+    assertNeverStored(res, "channel list (identity A)");
+  });
+
+  it("[neg] the admin's channel list is private, no-store too", async () => {
+    const res = await call("GET", `/api/operators/${SLUG}/channels`, null, adminHeaders);
+    expect(res.statusCode).toBe(200);
+    assertNeverStored(res, "channel list (admin)");
+  });
+
+  it("[neg] any /api response that sets no policy of its own defaults to private, no-store (an unknown route's 404 here)", async () => {
+    const res = await call("GET", "/api/n146b-no-such-route", keyA);
+    expect(res.statusCode).toBe(404);
+    assertNeverStored(res, "default /api policy");
+  });
+
+  it("a deliberately public document outside /api keeps its own policy (GET /openapi.json)", async () => {
+    const res = await call("GET", "/openapi.json", null);
+    expect(res.statusCode).toBe(200);
+    expect(String(res.headers["cache-control"])).toBe("public, max-age=300");
+  });
+});

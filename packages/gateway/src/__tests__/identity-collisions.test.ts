@@ -179,3 +179,89 @@ describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95
   });
 });
 
+
+// AZ-9 round 3 (astra pack 95c): a "confirmed absence" must be a GENUINE SQLite
+// error, never message text alone: an Error whose code is exactly SQLITE_ERROR and
+// whose message is SQLite's exact "no such table: <name>" / "no such column: <name>"
+// (what better-sqlite3, the store's driver, throws). Anything else is `failed`.
+describe("AZ-9 round 3: absence is a genuine SQLite error, never message text alone (astra pack 95c)", () => {
+  function readerThrowing(sourceTable: string, thrown: () => unknown) {
+    return {
+      prepare(sql: string) {
+        if (sql.includes(`FROM ${sourceTable}`)) throw thrown();
+        return { all: () => [] };
+      },
+    };
+  }
+  const allowUi = ["ui_artifacts.owner"];
+  const exitFor = (out: ReturnType<typeof findIdentityCollisions>) =>
+    collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: allowUi }).code;
+
+  it("[neg] astra's reproduction: an absence-looking message with a conflicting code (SQLITE_CORRUPT) is failed, exit 4", () => {
+    const misleading = () => Object.assign(new Error("no such table: ui_artifacts"), { code: "SQLITE_CORRUPT" });
+    const out = findIdentityCollisions(readerThrowing("ui_artifacts", misleading));
+    expect(out.failed).toContain("ui_artifacts.owner");
+    expect(out.skipped).not.toContain("ui_artifacts.owner");
+    expect(exitFor(out)).toBe(4);
+  });
+
+  it("[neg] astra's reproduction: a thrown STRING with the absence wording is failed, exit 4", () => {
+    const out = findIdentityCollisions(readerThrowing("ui_artifacts", () => "no such table: ui_artifacts"));
+    expect(out.failed).toContain("ui_artifacts.owner");
+    expect(exitFor(out)).toBe(4);
+  });
+
+  it("[neg] an Error with the absence wording but no SQLite code is failed, exit 4", () => {
+    const out = findIdentityCollisions(readerThrowing("ui_artifacts", () => new Error("no such table: ui_artifacts")));
+    expect(out.failed).toContain("ui_artifacts.owner");
+    expect(exitFor(out)).toBe(4);
+  });
+
+  it("[neg] SQLITE_ERROR without SQLite's exact form (no ': <name>', other case, trailing text, a wrapper prefix) is failed, exit 4", () => {
+    for (const message of [
+      "no such table",
+      "No such table: ui_artifacts",
+      "no such table: ui_artifacts\nmore",
+      "query failed: no such table: ui_artifacts",
+    ]) {
+      const out = findIdentityCollisions(readerThrowing("ui_artifacts", () => Object.assign(new Error(message), { code: "SQLITE_ERROR" })));
+      expect(out.failed, message).toContain("ui_artifacts.owner");
+      expect(exitFor(out), message).toBe(4);
+    }
+  });
+
+  it("[neg] a non-Error object carrying the absence message and code is failed, exit 4", () => {
+    const out = findIdentityCollisions(readerThrowing("ui_artifacts", () => ({ message: "no such table: ui_artifacts", code: "SQLITE_ERROR" })));
+    expect(out.failed).toContain("ui_artifacts.owner");
+    expect(exitFor(out)).toBe(4);
+  });
+
+  it("[neg] a failure while PROCESSING rows (after .all()) is reported as failed, exit 4, not thrown out of the audit", () => {
+    const poisoned = { get v(): string { throw new Error("row decode failed"); } };
+    const reader = {
+      prepare(sql: string) {
+        return { all: () => (sql.includes("FROM ui_artifacts") ? [poisoned] : []) };
+      },
+    };
+    const out = findIdentityCollisions(reader);
+    expect(out.failed).toContain("ui_artifacts.owner");
+    expect(out.read).not.toContain("ui_artifacts.owner");
+    expect(exitFor(out)).toBe(4);
+  });
+
+  it("a GENUINE missing table and missing column from the real driver (the store's better-sqlite3 client) stay confirmed absences", async () => {
+    process.env.PCC_DB_PATH = ":memory:";
+    const { initStore, getStore } = await import("../db.js");
+    initStore({ seed: false });
+    const client = (getStore().db as unknown as { $client: { prepare(sql: string): { all(): unknown[] } } }).$client;
+    const cases: Array<[string, string]> = [
+      ["FROM ui_artifacts", "FROM ui_artifacts_absent_95c"],
+      ["SELECT DISTINCT owner AS v FROM ui_artifacts", "SELECT DISTINCT owner_absent_95c AS v FROM api_keys"],
+    ];
+    for (const [needle, replacement] of cases) {
+      const out = findIdentityCollisions({ prepare: (sql: string) => client.prepare(sql.replace(needle, replacement)) });
+      expect(out.skipped, replacement).toContain("ui_artifacts.owner");
+      expect(out.failed, replacement).toEqual([]);
+    }
+  });
+});
