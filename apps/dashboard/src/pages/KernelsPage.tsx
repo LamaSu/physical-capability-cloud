@@ -4,6 +4,32 @@ import { GlassPanel, DataCell, GlowBadge, PulseIndicator, EmptyState, LoadingShe
 import { useUIStore } from "../stores/ui-store.js";
 import { useKernels } from "../api/hooks/use-pcc-data.js";
 
+/**
+ * The line of text under a kernel's name: its address, else its location
+ * label, else its coordinates, else "Location not set" (astra H491 MEDIUM).
+ *
+ * A gateway kernel's location is untrusted JSON (gateway.ts returns
+ * res.json() with no runtime validation), so each field is checked before
+ * it is shown rather than used because it happened to be truthy: an object
+ * in physicalAddress or location.label is truthy but is not valid text —
+ * rendering it directly crashes with "Objects are not valid as a React
+ * child" — and a coordinate pair can be two finite numbers that are still
+ * not a place on Earth (astra's {lat: 91, lng: 181}).
+ */
+function kernelLocationText(kernel: any): string {
+  if (typeof kernel.physicalAddress === "string" && kernel.physicalAddress !== "") {
+    return kernel.physicalAddress;
+  }
+  if (typeof kernel.location?.label === "string" && kernel.location.label !== "") {
+    return kernel.location.label;
+  }
+  const { lat, lng } = kernel.location ?? {};
+  if (Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+    return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+  }
+  return "Location not set";
+}
+
 export function KernelsPage() {
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
@@ -56,13 +82,7 @@ export function KernelsPage() {
                   <GlowBadge color="gray">+{kernel.capabilities.length - 4}</GlowBadge>
                 )}
               </div>
-              <div className="text-xs text-white/25">
-                {kernel.physicalAddress ||
-                  kernel.location?.label ||
-                  (Number.isFinite(kernel.location?.lat) && Number.isFinite(kernel.location?.lng)
-                    ? `${kernel.location.lat.toFixed(4)}, ${kernel.location.lng.toFixed(4)}`
-                    : "Location not set")}
-              </div>
+              <div className="text-xs text-white/25">{kernelLocationText(kernel)}</div>
             </GlassPanel>
           ))}
         </div>
