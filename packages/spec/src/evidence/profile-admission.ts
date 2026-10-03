@@ -407,14 +407,17 @@ function ownIncludes(list: readonly unknown[], x: unknown): boolean {
 }
 
 /**
- * Where reading `value` could run code supplied with it: a proxy (its traps)
- * or an accessor property (its getter), anywhere inside. It reads property
- * descriptors only, so no getter runs; null when the value is plain data.
- * A cycle stops the walk here, and plainDataCopy refuses it later.
+ * Where reading `value` could run code supplied with it: a proxy (its traps),
+ * an accessor property (its getter), or an array whose prototype is not
+ * Array.prototype (a prototype supplied with the data serves every index the
+ * array lacks; astra pack 154), anywhere inside. It reads property
+ * descriptors and prototypes only, so no getter runs; null when the value is
+ * plain data. A cycle stops the walk here, and plainDataCopy refuses it later.
  */
 function codeInData(value: unknown, path: string, seen: Set<object>): string | null {
   if (value === null || typeof value !== "object") return null;
   if (types.isProxy(value)) return `${path}: a proxy`;
+  if (Array.isArray(value) && Object.getPrototypeOf(value) !== Array.prototype) return `${path}: an array with a nonstandard prototype`;
   if (seen.has(value)) return null;
   seen.add(value);
   for (const key of Reflect.ownKeys(value)) {

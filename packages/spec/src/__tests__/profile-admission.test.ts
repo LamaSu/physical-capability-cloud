@@ -1354,3 +1354,52 @@ describe("profile admission — astra r5 (pack 127): no data-supplied code, and 
     }
   });
 });
+
+// ── astra r6 (pack 154, gpt-5.6-sol): an inherited array index is input-supplied code too ──
+describe("profile admission — astra r6 (pack 154): sparse arrays with a custom prototype", () => {
+  it("an inherited numeric getter on the bundles array never runs", async () => {
+    const p = inspectedPageProfile();
+    const bundle = await toBundle(PILOT, p);
+    let ran = false;
+    const proto = Object.create(Array.prototype);
+    Object.defineProperty(proto, "0", { get() { ran = true; return bundle; } });
+    const bundles = [] as unknown as AdmissionBundle[];
+    Object.setPrototypeOf(bundles, proto);
+    (bundles as unknown as { length: number }).length = 1;
+    const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+    const r = await profileAdmitsBundle({
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      bundles,
+      pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    });
+    expect(ran).toBe(false);
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toEqual(["input-unreadable"]);
+  });
+
+  it("an inherited getter on a bundle object's custom prototype never runs, and what it would serve is absent from the copy", async () => {
+    const p = inspectedPageProfile();
+    const bundle = await toBundle(PILOT, p);
+    let ran = false;
+    const { events, ...rest } = bundle as unknown as Record<string, unknown>;
+    const proto = Object.create(Object.prototype, { events: { get() { ran = true; return events; } } });
+    const crafted = Object.assign(Object.create(proto), rest) as unknown as AdmissionBundle;
+    const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+    const r = await profileAdmitsBundle({
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      bundles: [crafted],
+      pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    });
+    expect(ran).toBe(false);
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toEqual(["unbound-bundle"]);
+  });
+});
