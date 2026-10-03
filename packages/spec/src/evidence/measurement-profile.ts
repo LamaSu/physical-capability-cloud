@@ -35,6 +35,14 @@
  * being a policy subject folded into the accepted-policy digest, so it needs no
  * separate keccak twin (two forms of one fact can drift). A `sha256:`-tagged
  * value presented as a committed profile digest is rejected as the wrong family.
+ *
+ * Nothing changed after this module loads can change a verdict, a digest or
+ * the frozen profile returned (astra pack 170). Validation, canonicalization
+ * (the production `canonicalize`, itself built that way), the hash and
+ * freezing call only intrinsics captured at load (`util/primordials.ts`) and
+ * plain loops. The exported constants are frozen, and no format is checked
+ * with a RegExp. A realm whose intrinsics were replaced before load is out of
+ * scope: no in-process check can tell.
  */
 
 import { createHash } from "node:crypto";
@@ -42,6 +50,26 @@ import { createHash } from "node:crypto";
 import { canonicalize } from "../util/canonical.js";
 import { EVIDENCE_LEVELS, type EvidenceLevel } from "./evidence-level.js";
 import { plainDataCopy } from "../util/plain-data.js";
+import {
+  append,
+  ArrayIsArray,
+  deepFreeze,
+  hasOwn,
+  includesValue,
+  inSet,
+  isHex256Digest,
+  joinStrings,
+  JSONStringify,
+  mapList,
+  newList,
+  NumberIsFinite,
+  NumberIsInteger,
+  ObjectGetPrototypeOf,
+  ObjectKeys,
+  stringSet,
+  trim,
+  uncurryThis,
+} from "../util/primordials.js";
 
 /** Domain separator — a profile digest can never collide with another digest. */
 export const MEASUREMENT_PROFILE_DOMAIN = "PCC:measurement-profile:v1";
@@ -49,8 +77,14 @@ export const MEASUREMENT_PROFILE_DOMAIN = "PCC:measurement-profile:v1";
 /** A committed measurement-profile digest: `0x` + 64 lowercase hex (SHA-256). */
 export type MeasurementProfileDigest = `0x${string}`;
 
-/** The only accepted committed-digest form. */
-export const MEASUREMENT_PROFILE_DIGEST_PATTERN = /^0x[0-9a-f]{64}$/;
+/**
+ * Whether `value` is the only accepted committed-digest form: `0x` + 64
+ * lowercase hex. A function, not an exported RegExp: RegExp.prototype.compile
+ * rewrites a RegExp's matcher in place after load, frozen or not (astra pack 167).
+ */
+export function isMeasurementProfileDigest(value: unknown): value is MeasurementProfileDigest {
+  return isHex256Digest(value);
+}
 
 /**
  * Which of the memo's three result levels this profile accepts as the proven
@@ -66,6 +100,7 @@ export const MEASUREMENT_PROFILE_DIGEST_PATTERN = /^0x[0-9a-f]{64}$/;
  */
 export type AcceptanceLevel = EvidenceLevel;
 
+/** The evidence contract's own list, frozen where it is defined: validation reads it, so nothing may add a level after load. */
 export const ACCEPTANCE_LEVELS: readonly AcceptanceLevel[] = EVIDENCE_LEVELS;
 
 export interface ProfileOutcome {
@@ -185,55 +220,65 @@ export interface ProfileViolation {
   message: string;
 }
 
-const DECISION = new Set(["reject", "hold"]);
-const COMPARATORS = ["<", "<=", "=", ">=", ">"];
+const DECISION = stringSet(["reject", "hold"]);
+const COMPARATORS: readonly string[] = deepFreeze(["<", "<=", "=", ">=", ">"]);
 
 /**
  * The v1 terms, per object. Any other key is a violation: an unknown term
  * would be committed by the digest but evaluated by nothing.
  */
-const V1_FIELDS: Record<string, readonly string[]> = {
-  "": [
-    "profileVersion", "profileId", "outcome", "device", "measurement", "capture",
-    "calibration", "interpretation", "simulationProhibited", "witnesses", "onMissingData", "onContradiction",
-  ],
-  outcome: ["capabilityType", "statement", "objectIdentity"],
-  "outcome.objectIdentity": ["kind", "value"],
-  device: ["deviceId", "kind", "adapterType", "permittedAdapterVersions", "permittedFirmwareVersions"],
-  measurement: ["method", "quantity", "unit", "tolerance", "sampling"],
-  "measurement.tolerance": ["comparator", "target", "band"],
-  "measurement.sampling": ["minSamples", "maxIntervalMs"],
-  capture: ["startCondition", "endCondition", "coverage"],
-  "capture.coverage": ["policy", "minFraction"],
-  calibration: ["required", "procedureId", "validityWindowSeconds"],
-  interpretation: ["evidenceTypeIds", "acceptanceLevel", "onDeviceFailure"],
-  witnesses: ["requiredRoles", "independentOfClaimant"],
-};
+const V1_FIELDS: readonly { path: string; segments: readonly string[]; allowed: readonly string[] }[] = deepFreeze([
+  {
+    path: "",
+    segments: [],
+    allowed: [
+      "profileVersion", "profileId", "outcome", "device", "measurement", "capture",
+      "calibration", "interpretation", "simulationProhibited", "witnesses", "onMissingData", "onContradiction",
+    ],
+  },
+  { path: "outcome", segments: ["outcome"], allowed: ["capabilityType", "statement", "objectIdentity"] },
+  { path: "outcome.objectIdentity", segments: ["outcome", "objectIdentity"], allowed: ["kind", "value"] },
+  { path: "device", segments: ["device"], allowed: ["deviceId", "kind", "adapterType", "permittedAdapterVersions", "permittedFirmwareVersions"] },
+  { path: "measurement", segments: ["measurement"], allowed: ["method", "quantity", "unit", "tolerance", "sampling"] },
+  { path: "measurement.tolerance", segments: ["measurement", "tolerance"], allowed: ["comparator", "target", "band"] },
+  { path: "measurement.sampling", segments: ["measurement", "sampling"], allowed: ["minSamples", "maxIntervalMs"] },
+  { path: "capture", segments: ["capture"], allowed: ["startCondition", "endCondition", "coverage"] },
+  { path: "capture.coverage", segments: ["capture", "coverage"], allowed: ["policy", "minFraction"] },
+  { path: "calibration", segments: ["calibration"], allowed: ["required", "procedureId", "validityWindowSeconds"] },
+  { path: "interpretation", segments: ["interpretation"], allowed: ["evidenceTypeIds", "acceptanceLevel", "onDeviceFailure"] },
+  { path: "witnesses", segments: ["witnesses"], allowed: ["requiredRoles", "independentOfClaimant"] },
+]);
+
+/** The calibration terms that only `calibration.required: true` makes meaningful. */
+const CALIBRATION_TERMS: readonly ("procedureId" | "validityWindowSeconds")[] = deepFreeze(["procedureId", "validityWindowSeconds"] as ("procedureId" | "validityWindowSeconds")[]);
 
 function nonEmptyString(v: unknown): boolean {
-  return typeof v === "string" && v.trim().length > 0;
+  return typeof v === "string" && trim(v).length > 0;
 }
 
 function positiveFinite(v: unknown): boolean {
-  return typeof v === "number" && Number.isFinite(v) && v > 0;
+  return typeof v === "number" && NumberIsFinite(v) && v > 0;
 }
 
-/** A non-empty array whose every entry is a non-empty string. */
-/** Every slot holds a non-empty string. Index-based, so a sparse array's holes fail (`.every` skips them). */
+/**
+ * Every slot holds a non-empty string. Index-based, so a sparse array's holes
+ * fail (`.every` skips them), and an index is the array's OWN: one a prototype
+ * serves is a hole.
+ */
 function denseStringList(v: unknown[]): boolean {
   for (let i = 0; i < v.length; i++) {
-    if (!(i in v) || !nonEmptyString(v[i])) return false;
+    if (!hasOwn(v, i) || !nonEmptyString(v[i])) return false;
   }
   return true;
 }
 
 /** A non-empty, dense array whose every entry is a non-empty string. */
 function nonEmptyStringList(v: unknown): boolean {
-  return Array.isArray(v) && v.length > 0 && denseStringList(v);
+  return ArrayIsArray(v) && v.length > 0 && denseStringList(v);
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+  return typeof v === "object" && v !== null && !ArrayIsArray(v);
 }
 
 /**
@@ -243,19 +288,23 @@ function isObject(v: unknown): v is Record<string, unknown> {
  * unvalidatable profile must never acquire a digest that looks authoritative.
  */
 export function validateMeasurementProfile(profile: unknown): ProfileViolation[] {
-  const v: ProfileViolation[] = [];
-  const push = (path: string, message: string) => v.push({ path, message });
+  const v = newList<ProfileViolation>(0);
+  const push = (path: string, message: string) => append(v, { path, message });
 
   if (typeof profile !== "object" || profile === null) {
     return [{ path: "", message: "profile must be an object" }];
   }
   const p = profile as Record<string, unknown>;
 
-  for (const [path, allowed] of Object.entries(V1_FIELDS)) {
-    const at = path === "" ? p : path.split(".").reduce<unknown>((o, k) => (isObject(o) ? o[k] : undefined), p);
+  for (let f = 0; f < V1_FIELDS.length; f++) {
+    const { path, segments, allowed } = V1_FIELDS[f]!;
+    let at: unknown = p;
+    for (let s = 0; s < segments.length; s++) at = isObject(at) ? at[segments[s]!] : undefined;
     if (!isObject(at)) continue;
-    for (const key of Object.keys(at)) {
-      if (!allowed.includes(key)) {
+    const keys = ObjectKeys(at);
+    for (let k = 0; k < keys.length; k++) {
+      const key = keys[k]!;
+      if (!includesValue(allowed, key)) {
         push(path ? `${path}.${key}` : key, "unknown field: a v1 profile has only the v1 terms, and an unknown term would be committed but never evaluated");
       }
     }
@@ -311,7 +360,7 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
     if (!nonEmptyString(m.unit)) push("measurement.unit", "required; use \"none\" for non-numeric observations");
     if (!m.sampling || typeof m.sampling !== "object") push("measurement.sampling", "required");
     else {
-      if (!Number.isInteger(m.sampling.minSamples) || m.sampling.minSamples < 1) {
+      if (!NumberIsInteger(m.sampling.minSamples) || m.sampling.minSamples < 1) {
         push("measurement.sampling.minSamples", "must be an integer >= 1; zero samples is vacuous");
       }
       if (m.sampling.maxIntervalMs !== undefined && !positiveFinite(m.sampling.maxIntervalMs)) {
@@ -320,11 +369,11 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
     }
     if (m.tolerance !== undefined) {
       const t = m.tolerance;
-      if (!t || !COMPARATORS.includes(t.comparator)) push("measurement.tolerance.comparator", "invalid");
-      if (typeof t?.target !== "number" || !Number.isFinite(t.target)) {
+      if (!t || !includesValue(COMPARATORS, t.comparator)) push("measurement.tolerance.comparator", "invalid");
+      if (typeof t?.target !== "number" || !NumberIsFinite(t.target)) {
         push("measurement.tolerance.target", "must be a finite number");
       }
-      if (t?.band !== undefined && !(typeof t.band === "number" && Number.isFinite(t.band) && t.band >= 0)) {
+      if (t?.band !== undefined && !(typeof t.band === "number" && NumberIsFinite(t.band) && t.band >= 0)) {
         push("measurement.tolerance.band", "must be a non-negative finite number when present");
       }
     }
@@ -355,7 +404,8 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
   } else {
     // Inert terms: with calibration not required, nothing evaluates them, so a
     // digest must not commit them (they would read as a requirement).
-    for (const field of ["procedureId", "validityWindowSeconds"] as const) {
+    for (let k = 0; k < CALIBRATION_TERMS.length; k++) {
+      const field = CALIBRATION_TERMS[k]!;
       if (cal[field] !== undefined) {
         push(`calibration.${field}`, "only allowed when calibration.required is true; with calibration not required it would be committed but never evaluated");
       }
@@ -368,26 +418,26 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
     if (!nonEmptyStringList(i.evidenceTypeIds)) {
       push("interpretation.evidenceTypeIds", "required, non-empty list of primitive ids");
     }
-    if (!ACCEPTANCE_LEVELS.includes(i.acceptanceLevel)) {
-      push("interpretation.acceptanceLevel", `must be one of ${ACCEPTANCE_LEVELS.join("|")}`);
+    if (!includesValue(ACCEPTANCE_LEVELS, i.acceptanceLevel)) {
+      push("interpretation.acceptanceLevel", `must be one of ${joinStrings(ACCEPTANCE_LEVELS, "|")}`);
     }
-    if (!DECISION.has(i.onDeviceFailure)) push("interpretation.onDeviceFailure", 'must be "reject" or "hold"');
+    if (!inSet(DECISION, i.onDeviceFailure)) push("interpretation.onDeviceFailure", 'must be "reject" or "hold"');
   }
 
   const w = p.witnesses as ProfileWitnesses | undefined;
   if (!w || typeof w !== "object") push("witnesses", "required");
   else {
-    if (!Array.isArray(w.requiredRoles) || !denseStringList(w.requiredRoles)) {
+    if (!ArrayIsArray(w.requiredRoles) || !denseStringList(w.requiredRoles)) {
       push("witnesses.requiredRoles", "required array of role ids (may be empty)");
     }
     if (typeof w.independentOfClaimant !== "boolean") push("witnesses.independentOfClaimant", "required boolean");
-    if (Array.isArray(w.requiredRoles) && w.requiredRoles.length > 0 && w.independentOfClaimant !== true) {
+    if (ArrayIsArray(w.requiredRoles) && w.requiredRoles.length > 0 && w.independentOfClaimant !== true) {
       push("witnesses.independentOfClaimant", "required roles without independence do not constitute witnesses");
     }
   }
 
-  if (!DECISION.has(p.onMissingData as string)) push("onMissingData", 'must be "reject" or "hold"');
-  if (!DECISION.has(p.onContradiction as string)) push("onContradiction", 'must be "reject" or "hold"');
+  if (!inSet(DECISION, p.onMissingData)) push("onMissingData", 'must be "reject" or "hold"');
+  if (!inSet(DECISION, p.onContradiction)) push("onContradiction", 'must be "reject" or "hold"');
 
   return v;
 }
@@ -397,25 +447,22 @@ export class InvalidMeasurementProfileError extends Error {
   constructor(public readonly violations: ProfileViolation[]) {
     super(
       `measurement profile invalid (${violations.length}): ` +
-        violations.map((x) => `${x.path || "<root>"}: ${x.message}`).join("; "),
+        joinStrings(mapList(violations, (x) => `${x.path || "<root>"}: ${x.message}`), "; "),
     );
     this.name = "InvalidMeasurementProfileError";
   }
 }
 
-function digestProfile(profile: MeasurementProfileV1): MeasurementProfileDigest {
-  const hex = createHash("sha256")
-    .update(canonicalize({ domain: MEASUREMENT_PROFILE_DOMAIN, profile }))
-    .digest("hex");
-  return `0x${hex}`;
-}
+/** SHA-256 through node:crypto's Hash, with its methods captured when this module loads. */
+const createHashAtLoad = createHash;
+const HashPrototype = ObjectGetPrototypeOf(createHash("sha256")) as { update: (data: string) => unknown; digest: (encoding: "hex") => string };
+const HashPrototypeUpdate = uncurryThis(HashPrototype.update);
+const HashPrototypeDigest = uncurryThis(HashPrototype.digest);
 
-function deepFreeze<T>(value: T): T {
-  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const v of Object.values(value)) deepFreeze(v);
-  }
-  return value;
+function digestProfile(profile: MeasurementProfileV1): MeasurementProfileDigest {
+  const hash = createHashAtLoad("sha256");
+  HashPrototypeUpdate(hash, canonicalize({ domain: MEASUREMENT_PROFILE_DOMAIN, profile }));
+  return `0x${HashPrototypeDigest(hash, "hex")}`;
 }
 
 /** Re-exported: the one-pass copy every check here runs on (util/plain-data.ts). */
@@ -423,7 +470,7 @@ export { plainDataCopy };
 
 /** A diagnostic for any value that cannot throw (JSON.stringify can, on a bigint or a cycle). */
 function describeValue(v: unknown): string {
-  return typeof v === "string" ? JSON.stringify(v) : `a value of type ${typeof v}`;
+  return typeof v === "string" ? JSONStringify(v) : `a value of type ${typeof v}`;
 }
 
 /**
@@ -484,7 +531,7 @@ export function profileGoverns(
     presentedDigest: MeasurementProfileDigest | null = null,
   ): ProfileGovernanceResult => ({ governs: false, code, presentedDigest, profile: null, reasons });
 
-  if (typeof committedDigest !== "string" || !MEASUREMENT_PROFILE_DIGEST_PATTERN.test(committedDigest)) {
+  if (!isMeasurementProfileDigest(committedDigest)) {
     return refuse("digest-wrong-family", [
       `committed digest ${describeValue(committedDigest)} is not a measurement-profile commitment: expected 0x + 64 lowercase hex; a sha256:-tagged value is the evidence-event family`,
     ]);
@@ -496,7 +543,7 @@ export function profileGoverns(
   try {
     const violations = validateMeasurementProfile(copy.value);
     if (violations.length > 0) {
-      return refuse("profile-invalid", violations.map((x) => `${x.path || "<root>"}: ${x.message}`));
+      return refuse("profile-invalid", mapList(violations, (x) => `${x.path || "<root>"}: ${x.message}`));
     }
     profile = deepFreeze(copy.value) as MeasurementProfileV1;
     presentedDigest = digestProfile(profile);

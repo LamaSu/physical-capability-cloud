@@ -14,7 +14,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { plainDataCopy, trapFreeProxyCheckOf } from "../util/plain-data.js";
+import { plainDataCopy, trapFreeProxyCheck } from "../util/plain-data.js";
 
 afterEach(() => {
   delete (Object.prototype as Record<string, unknown>).value;
@@ -289,30 +289,28 @@ describe("plain-data.ts calls only what it captured at load (source scan)", () =
     });
     expect(found).toEqual([]);
   });
+
+  it("the proxy check comes from the static node:util import, and nothing reads the runtime's process (astra pack 170)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const source = readFileSync(fileURLToPath(new URL("../util/plain-data.ts", import.meta.url)), "utf8");
+    expect(source).toMatch(/^import \{ types as nodeUtilTypes \} from "node:util";$/m);
+    const code = codeOnly(source);
+    expect(code).not.toMatch(/\bprocess\b|getBuiltinModule|globalThis/);
+  });
 });
 
-describe("trapFreeProxyCheckOf: only Node's own check, found through own properties, that passes the probe", () => {
+describe("trapFreeProxyCheck: a sanity probe of a candidate check, not its trust anchor", () => {
   const util = process.getBuiltinModule("node:util") as typeof import("node:util");
   const genuine = util.types.isProxy;
-  const runtimeWith = (isProxy: unknown) => ({ getBuiltinModule: () => ({ types: { isProxy } }) });
 
-  it("a global whose own process (data or accessor) offers Node's check gets it", () => {
-    for (const global of [{ process: runtimeWith(genuine) }, Object.defineProperty({}, "process", { get: () => runtimeWith(genuine) })]) {
-      const check = trapFreeProxyCheckOf(global);
-      expect(check).not.toBeNull();
-      expect([check!(new Proxy({}, {})), check!(new Proxy([], {})), check!({}), check!([])]).toEqual([true, true, false, false]);
-    }
+  it("Node's own check passes, and answers as it would", () => {
+    const check = trapFreeProxyCheck(genuine);
+    expect(check).not.toBeNull();
+    expect([check!(new Proxy({}, {})), check!(new Proxy([], {})), check!({}), check!([])]).toEqual([true, true, false, false]);
   });
 
-  it("nothing inherited is consulted: process, getBuiltinModule, types or isProxy from a prototype gives null", () => {
-    const inheritedProcess = Object.create({ process: runtimeWith(genuine) }) as object;
-    const inheritedLoader = { process: Object.create({ getBuiltinModule: () => ({ types: { isProxy: genuine } }) }) };
-    const inheritedTypes = { process: { getBuiltinModule: () => Object.create({ types: { isProxy: genuine } }) } };
-    const inheritedCheck = { process: { getBuiltinModule: () => ({ types: Object.create({ isProxy: genuine }) }) } };
-    for (const global of [inheritedProcess, inheritedLoader, inheritedTypes, inheritedCheck]) expect(trapFreeProxyCheckOf(global)).toBeNull();
-  });
-
-  it("a check that fails the probe gives null: says no, says yes to everything, throws, or runs a trap even quietly", () => {
+  it("a check that says no, says yes to everything, throws, runs a trap even quietly, or is not a function, gives null", () => {
     const quietTrap = (v: object) => {
       try {
         Reflect.ownKeys(v);
@@ -329,17 +327,21 @@ describe("trapFreeProxyCheckOf: only Node's own check, found through own propert
       },
       quietTrap,
       "not a function",
+      undefined,
     ];
-    for (const fake of fakes) expect(trapFreeProxyCheckOf({ process: runtimeWith(fake) }), String(fake)).toBeNull();
-    expect(trapFreeProxyCheckOf({ process: { getBuiltinModule: () => { throw new Error("no util"); } } })).toBeNull();
-    expect(trapFreeProxyCheckOf({})).toBeNull();
+    for (const fake of fakes) expect(trapFreeProxyCheck(fake), String(fake)).toBeNull();
   });
 
-  it("the stated boundary: a replacement that answers the probe exactly is accepted, as a realm compromised before load would be", () => {
-    const attacker = new Proxy({}, {});
-    const check = trapFreeProxyCheckOf({ process: runtimeWith((v: object) => (v === attacker ? false : genuine(v))) });
-    expect(check).not.toBeNull();
-    expect(check!(attacker)).toBe(false);
+  it("astra 170: a stateful check can pass the probe, which is why isProxy's anchor is the loader's node:util, never a probed candidate", () => {
+    let calls = 0;
+    const stateful = (v: object) => {
+      calls++;
+      if (calls <= 2) return true;
+      if (calls <= 4) return false;
+      Reflect.ownKeys(v);
+      return false;
+    };
+    expect(trapFreeProxyCheck(stateful)).not.toBeNull();
   });
 });
 
@@ -377,5 +379,57 @@ describe("plainDataCopy: more of the same boundary", () => {
     const r = plainDataCopy(JSON.parse('{"a": 1, "__proto__": {"x": 1}}'));
     expect(r.ok).toBe(false);
     expect(r.ok ? "" : r.reason).toMatch(/__proto__/);
+  });
+});
+
+describe("astra 170 HIGH: the proxy check is the module loader's node:util binding, never one the runtime supplies", () => {
+  it("astra's recipe: a stateful check offered through process.getBuiltinModule before load passes no probe and is never used", async () => {
+    let calls = 0;
+    const fake = (v: object) => {
+      calls++;
+      if (calls <= 2) return true;
+      if (calls <= 4) return false;
+      Reflect.ownKeys(v); // runs supplied proxy code after any probe
+      return false;
+    };
+    vi.resetModules();
+    const real = Object.getOwnPropertyDescriptor(process, "getBuiltinModule")!;
+    Object.defineProperty(process, "getBuiltinModule", { ...real, value: () => ({ types: { isProxy: fake } }) });
+    let mod: typeof import("../util/plain-data.js");
+    try {
+      mod = await import("../util/plain-data.js");
+    } finally {
+      Object.defineProperty(process, "getBuiltinModule", real);
+    }
+    let trapped = false;
+    const proxy = new Proxy(
+      {},
+      {
+        ownKeys() {
+          trapped = true;
+          return [];
+        },
+      },
+    );
+    expect(mod.isProxy).not.toBeNull();
+    expect(mod.isProxy!(proxy)).toBe(true);
+    const copy = mod.plainDataCopy({ inner: proxy });
+    expect(copy.ok).toBe(false);
+    expect(trapped).toBe(false);
+  });
+});
+
+describe("the probe still guards the binding: a node:util whose isProxy fails it gives null", () => {
+  it("with node:util offering an isProxy that says no, isProxy is null and every object is refused", async () => {
+    vi.resetModules();
+    vi.doMock("node:util", () => ({ types: { isProxy: () => false } }));
+    try {
+      const fresh = await import("../util/plain-data.js");
+      expect(fresh.isProxy).toBeNull();
+      expect(fresh.plainDataCopy({ a: 1 }).ok).toBe(false);
+    } finally {
+      vi.doUnmock("node:util");
+      vi.resetModules();
+    }
   });
 });
