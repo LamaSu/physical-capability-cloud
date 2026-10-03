@@ -684,6 +684,12 @@ class AdapterRuntime:
             return RunResult(False, output=record, error="record_not_portable")
         evidence = self._evidence(operation, run_id, record, log_text, claim)
         if state in binding.done:
+            reason = _stop_reason(deadline, self._clock, stop)
+            if reason:
+                # The device finished, but a cancel, a lost lease or the deadline landed while the
+                # terminal response was decoded or the log and evidence were built. This post-I/O
+                # window must not report success either (verdict 117e).
+                return RunResult(False, output=record, evidence=evidence, error=f"{reason}:run_finished")
             return RunResult(True, output=record, evidence=evidence)
         return RunResult(False, output=record, evidence=evidence, error=f"run_{state}")
 
