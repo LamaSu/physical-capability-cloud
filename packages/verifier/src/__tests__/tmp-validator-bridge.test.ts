@@ -186,7 +186,8 @@ describe("TMPValidatorBridge", () => {
         },
       });
 
-      const result = await bridge.validate(envelope);
+      // The task's accepted tier is authenticated state from the caller, never the proof (N118).
+      const result = await bridge.validate(envelope, { acceptedTier: 1 });
 
       expect(result).toBeDefined();
       expect(typeof result.valid).toBe("boolean");
@@ -262,7 +263,7 @@ describe("TMPValidatorBridge", () => {
         proof: {},
       });
 
-      const result = await bridge.validate(envelope);
+      const result = await bridge.validate(envelope, { acceptedTier: 1 });
 
       expect(result.valid).toBe(false);
       expect(result.findings[0].check).toBe("bittensor_input");
@@ -332,6 +333,42 @@ describe("TMPValidatorBridge", () => {
 
       const acceptance = bridge.formatAcceptance(envelope, result);
       expect(acceptance.accepted).toBe(false);
+    });
+  });
+  // ── N118: a worker's proof never chooses the tier ───────────────────
+
+  describe("N118: the tier is the task's accepted one, never the worker's", () => {
+    const oracleOrBittensor = (proofType: "bittensor_verification" | "oracle_verification", requiredTier?: number) =>
+      makeEnvelope({
+        proofType,
+        proof: { bundleHash: "sha256:" + "ab".repeat(32), bundleData: "{}", ...(requiredTier === undefined ? {} : { requiredTier }) },
+      });
+
+    it.each(["bittensor_verification", "oracle_verification"] as const)("%s without an accepted tier is refused, whatever the proof claims", async (proofType) => {
+      for (const claimed of [undefined, 0, 1, 3]) {
+        const result = await bridge.validate(oracleOrBittensor(proofType, claimed));
+        expect(result.valid, String(claimed)).toBe(false);
+        expect(result.findings[0]!.check, String(claimed)).toMatch(/_accepted_tier$/);
+      }
+    });
+
+    it.each(["bittensor_verification", "oracle_verification"] as const)("%s whose proof claims another tier is refused", async (proofType) => {
+      const result = await bridge.validate(oracleOrBittensor(proofType, 0), { acceptedTier: 2 });
+      expect(result.valid).toBe(false);
+      expect(result.findings[0]!.details).toMatch(/claims tier 0, but the task was accepted at tier 2/);
+    });
+
+    it("sensor_evidence without an accepted tier fails closed in the verifier", async () => {
+      const result = await bridge.validate(makeEnvelope({ proofType: "sensor_evidence", proof: { evidenceBundle: makeMockBundle() } }));
+      expect(result.valid).toBe(false);
+      expect(result.findings.find((f) => f.check === "assurance_tier_accepted")?.passed).toBe(false);
+    });
+
+    it("sensor_evidence whose bundle claims another tier is rejected", async () => {
+      const bundle = { ...makeMockBundle(), assuranceTier: 0 as const };
+      const result = await bridge.validate(makeEnvelope({ proofType: "sensor_evidence", proof: { evidenceBundle: bundle } }), { acceptedTier: 2 });
+      expect(result.valid).toBe(false);
+      expect(result.findings.find((f) => f.check === "assurance_tier_accepted")?.passed).toBe(false);
     });
   });
 });

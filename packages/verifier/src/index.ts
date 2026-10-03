@@ -84,6 +84,7 @@ export {
   type BenchmarkProofEnvelope,
   type ValidationResult as TMPValidationResult,
   type TMPAcceptanceCallback,
+  type ValidationContext as TMPValidationContext,
 } from "./tmp-validator-bridge.js";
 export {
   OracleVerificationBridge,

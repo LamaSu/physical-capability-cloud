@@ -10,11 +10,19 @@
  *   5. (Optional) Challenge freshness -- anti-replay proof
  *   6. (Optional) Step completeness -- workflow step coverage
  *
- * ONLY COMMITTED FIELDS DECIDE (E11c). The bundle hash commits the sorted multiset of event hashes,
- * and each event hash commits `type`, `timestamp`, `source` and `payload`. An event's `id` and the
- * order of `events` are not committed, so neither may change a verdict. The lifecycle and power
- * events checked in step 4 are chosen by committed fields (timestamp, then hash), never by position.
- * A workflow step in step 6 is covered only by a committed `payload.stepId`, never by an event's `id`.
+ * ONLY COMMITTED FIELDS AND AUTHENTICATED INPUTS DECIDE (E11c, N118). The bundle hash commits the
+ * sorted multiset of event hashes, and each event hash commits `type`, `timestamp`, `source` and
+ * `payload`. Nothing else in a bundle is signed: not an event's `id`, not the order of `events`, and
+ * not the bundle-level fields (`assuranceTier`, `id`, `jobId`, `stepId`, `kernelId`, `createdAt`,
+ * `kernelSignature`). So none of them may change a verdict.
+ *   - The evidence a tier requires comes from `options.acceptedTier`: the tier the job was accepted
+ *     at, which the CALLER takes from authenticated state (the accepted plan or program, or its own
+ *     task record), never from the bundle. A bundle that claims another tier is rejected. Without an
+ *     accepted tier no requirement can be chosen, so the verdict fails closed.
+ *   - The lifecycle and power events checked in step 4 are chosen by committed fields (timestamp,
+ *     then hash), never by position.
+ *   - A workflow step in step 6 is covered only by a committed `payload.stepId`, never by an id.
+ *   - Event ids still label findings (`evidenceEventId`), as display only.
  *   7. Assurance score rollup
  *   8. Produces a VerificationAttestation
  */
@@ -40,6 +48,13 @@ import { ChallengeService } from "./workflow/challenge-service.js";
 /** Options for digital-workflow-aware verification. All fields are optional --
  *  callers that pass nothing get the existing behavior. */
 export interface DigitalVerifyOptions {
+  /**
+   * The assurance tier the job was ACCEPTED at, taken by the caller from authenticated state (the
+   * accepted plan or program, or its own task record), never from the bundle, whose `assuranceTier`
+   * is not signed (N118). It chooses the evidence required. A bundle that claims another tier is
+   * rejected, and without it the verdict fails closed.
+   */
+  acceptedTier?: AssuranceTier;
   /** Declared workflow steps from the contract. Enables step-completeness checking. */
   workflowSteps?: DigitalWorkflowStep[];
   /** Challenge issued before execution. Together with executionProof, enables anti-replay freshness. */
@@ -79,6 +94,11 @@ function selectByCommittedOrder(
     }
   }
   return chosen;
+}
+
+/** A tier the verifier knows: an integer 0..3 (a string, NaN or an object is not one). */
+function isAssuranceTier(v: unknown): v is AssuranceTier {
+  return v === 0 || v === 1 || v === 2 || v === 3;
 }
 
 export class EvidenceVerifier {
@@ -136,21 +156,44 @@ export class EvidenceVerifier {
       });
     }
 
-    // 3. Check tier requirements
-    const tierReq = DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === bundle.assuranceTier);
-    if (tierReq) {
-      const eventTypes = new Set(bundle.events.map((e) => e.type));
-      for (const group of tierReq.requiredEventTypes) {
-        const found = group.some((t) => eventTypes.has(t));
-        findings.push({
-          evidenceEventId: "",
-          check: `tier_requirement_${group.join("_or_")}`,
-          passed: found,
-          details: found
-            ? `Required event type present: ${group.filter((t) => eventTypes.has(t)).join(", ")}`
-            : `Missing required event type: one of ${group.join(", ")}`,
-          severity: found ? undefined : "critical",
-        });
+    // 3. Tier requirements, chosen by the ACCEPTED tier only (N118). The bundle's own assuranceTier is
+    // not signed: it never chooses the requirements, it is only checked against the accepted tier.
+    const acceptedTier = options?.acceptedTier;
+    if (!isAssuranceTier(acceptedTier)) {
+      findings.push({
+        evidenceEventId: "",
+        check: "assurance_tier_accepted",
+        passed: false,
+        details:
+          "No accepted tier was supplied: the bundle's own assuranceTier is not signed, so it cannot choose the evidence required",
+        severity: "critical",
+      });
+    } else {
+      const matches = bundle.assuranceTier === acceptedTier;
+      findings.push({
+        evidenceEventId: "",
+        check: "assurance_tier_accepted",
+        passed: matches,
+        details: matches
+          ? `The bundle claims the accepted tier ${acceptedTier}`
+          : `The bundle claims tier ${String(bundle.assuranceTier)}, but the job was accepted at tier ${acceptedTier}`,
+        severity: matches ? undefined : "critical",
+      });
+      const tierReq = DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === acceptedTier);
+      if (tierReq) {
+        const eventTypes = new Set(bundle.events.map((e) => e.type));
+        for (const group of tierReq.requiredEventTypes) {
+          const found = group.some((t) => eventTypes.has(t));
+          findings.push({
+            evidenceEventId: "",
+            check: `tier_requirement_${group.join("_or_")}`,
+            passed: found,
+            details: found
+              ? `Required event type present: ${group.filter((t) => eventTypes.has(t)).join(", ")}`
+              : `Missing required event type: one of ${group.join(", ")}`,
+            severity: found ? undefined : "critical",
+          });
+        }
       }
     }
 

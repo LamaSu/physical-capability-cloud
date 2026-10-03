@@ -101,6 +101,8 @@ export async function tmpTaskRoutes(app: FastifyInstance) {
       const body = (req.body ?? {}) as {
         mode?: TMPMode;
         modeConfig?: ModeConfig;
+        /** The tier the milestone's evidence must meet (N118: recorded here, never taken from a proof). */
+        assuranceTier?: unknown;
       };
 
       if (!body.mode || !body.modeConfig) {
@@ -118,10 +120,18 @@ export async function tmpTaskRoutes(app: FastifyInstance) {
         });
       }
 
+      if (body.assuranceTier !== undefined && ![0, 1, 2, 3].includes(body.assuranceTier as number)) {
+        return reply.code(400).send({
+          error: "bad_request",
+          message: "assuranceTier, when given, is one of 0, 1, 2, 3",
+        });
+      }
+
       const task: MilestoneProcurement = {
         milestoneId,
         mode: body.mode,
         modeConfig: body.modeConfig,
+        ...(body.assuranceTier !== undefined ? { acceptedTier: body.assuranceTier as 0 | 1 | 2 | 3 } : {}),
         status: "pending",
         createdAt: new Date().toISOString(),
       };
@@ -323,7 +333,9 @@ export async function tmpTaskRoutes(app: FastifyInstance) {
         submittedAt: new Date().toISOString(),
       };
 
-      const result = await validatorBridge.validate(envelope);
+      // The tier is the task's own (set at creation), never the worker's envelope (N118). A task with
+      // none leaves the tier-dependent proofs refused.
+      const result = await validatorBridge.validate(envelope, { acceptedTier: task.acceptedTier });
       const acceptance = validatorBridge.formatAcceptance(envelope, result);
 
       // Update task status if validation passed

@@ -11,12 +11,51 @@
  *   bittensor_verification -> BittensorSubnetBridge (decentralized consensus)
  */
 
-import type { Address, Timestamp, SHA256, EvidenceBundle, ZKProof } from "@pcc/spec";
+import type { Address, AssuranceTier, Timestamp, SHA256, EvidenceBundle, ZKProof } from "@pcc/spec";
 import { EvidenceVerifier } from "./evidence-verifier.js";
 import { CommitmentService } from "./commitment-service.js";
 import { ZKProofService } from "./zk-proof-service.js";
 import { BittensorSubnetBridge } from "./bittensor/subnet-bridge.js";
 import { OracleVerificationBridge } from "./oracle/oracle-bridge.js";
+
+/**
+ * What the CALLER knows from authenticated state about the task a proof answers (N118). Never read
+ * from the worker's envelope: the worker chooses neither the tier nor anything else the verdict
+ * depends on.
+ */
+export interface ValidationContext {
+  /** The assurance tier the task was accepted at (its own record, set when the task was created). */
+  acceptedTier?: AssuranceTier;
+}
+
+/** The accepted tier as the routes need it, or a refusal: absent, or contradicted by the worker's proof. */
+function acceptedTierOf(
+  envelope: BenchmarkProofEnvelope,
+  context: ValidationContext | undefined,
+  check: string,
+): { tier: AssuranceTier } | { refusal: ValidationResult } {
+  const tier = context?.acceptedTier;
+  if (tier !== 0 && tier !== 1 && tier !== 2 && tier !== 3) {
+    return {
+      refusal: {
+        valid: false,
+        confidence: 0,
+        findings: [{ check, passed: false, details: "No accepted tier for this task: a worker's proof cannot choose one" }],
+      },
+    };
+  }
+  const claimed = envelope.proof.requiredTier;
+  if (claimed !== undefined && claimed !== tier) {
+    return {
+      refusal: {
+        valid: false,
+        confidence: 0,
+        findings: [{ check, passed: false, details: `The proof claims tier ${String(claimed)}, but the task was accepted at tier ${tier}` }],
+      },
+    };
+  }
+  return { tier };
+}
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -87,18 +126,18 @@ export class TMPValidatorBridge {
    * @param envelope - The proof submission envelope
    * @returns ValidationResult with findings and confidence
    */
-  async validate(envelope: BenchmarkProofEnvelope): Promise<ValidationResult> {
+  async validate(envelope: BenchmarkProofEnvelope, context?: ValidationContext): Promise<ValidationResult> {
     switch (envelope.proofType) {
       case "sensor_evidence":
-        return this.validateSensorEvidence(envelope);
+        return this.validateSensorEvidence(envelope, context);
       case "zk_proof":
         return this.validateZKProof(envelope);
       case "merkle_commitment":
         return this.validateMerkleCommitment(envelope);
       case "bittensor_verification":
-        return this.validateViaBittensor(envelope);
+        return this.validateViaBittensor(envelope, context);
       case "oracle_verification":
-        return this.validateViaOracle(envelope);
+        return this.validateViaOracle(envelope, context);
       default:
         return {
           valid: false,
@@ -133,6 +172,7 @@ export class TMPValidatorBridge {
 
   private async validateSensorEvidence(
     envelope: BenchmarkProofEnvelope,
+    context?: ValidationContext,
   ): Promise<ValidationResult> {
     const bundle = envelope.proof.evidenceBundle as EvidenceBundle | undefined;
     if (!bundle) {
@@ -149,7 +189,9 @@ export class TMPValidatorBridge {
       };
     }
 
-    const attestation = await this.evidenceVerifier.verify(bundle);
+    // The tier comes from the caller's authenticated context, never the bundle (N118): the verifier
+    // fails closed without it and rejects a bundle that claims another one.
+    const attestation = await this.evidenceVerifier.verify(bundle, { acceptedTier: context?.acceptedTier });
 
     return {
       valid: attestation.result === "valid",
@@ -246,6 +288,7 @@ export class TMPValidatorBridge {
 
   private async validateViaBittensor(
     envelope: BenchmarkProofEnvelope,
+    context?: ValidationContext,
   ): Promise<ValidationResult> {
     if (!this.bittensorBridge || !this.bittensorBridge.isAvailable()) {
       return {
@@ -263,7 +306,10 @@ export class TMPValidatorBridge {
 
     const bundleHash = envelope.proof.bundleHash as string | undefined;
     const bundleData = envelope.proof.bundleData as string | undefined;
-    const requiredTier = (envelope.proof.requiredTier as number) ?? 1;
+    // The tier is the task's accepted one, never the worker's own claim (N118).
+    const accepted = acceptedTierOf(envelope, context, "bittensor_accepted_tier");
+    if ("refusal" in accepted) return accepted.refusal;
+    const requiredTier = accepted.tier;
 
     if (!bundleHash || !bundleData) {
       return {
@@ -311,6 +357,7 @@ export class TMPValidatorBridge {
    */
   async validateViaOracle(
     envelope: BenchmarkProofEnvelope,
+    context?: ValidationContext,
   ): Promise<ValidationResult> {
     if (!this.bittensorBridge || !this.bittensorBridge.isAvailable()) {
       return {
@@ -328,7 +375,10 @@ export class TMPValidatorBridge {
 
     const bundleHash = envelope.proof.bundleHash as string | undefined;
     const bundleData = envelope.proof.bundleData as string | undefined;
-    const requiredTier = (envelope.proof.requiredTier as number) ?? 1;
+    // The tier is the task's accepted one, never the worker's own claim (N118).
+    const accepted = acceptedTierOf(envelope, context, "oracle_accepted_tier");
+    if ("refusal" in accepted) return accepted.refusal;
+    const requiredTier = accepted.tier;
 
     if (!bundleHash || !bundleData) {
       return {
