@@ -639,6 +639,16 @@ def test_landlock_module_uses_ctypes_only_for_landlock():
         p = parent.get(id(n))
         return isinstance(p, ast.Attribute) and p.value is n and p.attr in LANDLOCK_LIBC_ATTRS
 
+    # (5a) ctypes.CDLL (the constructor) may appear ONLY as the direct callee of a call -- never bound,
+    #      passed, aliased, or returned -- so `factory = ctypes.CDLL; factory(None).system(...)` cannot
+    #      smuggle a handle past the result/handle checks below (verdict 105q MED2).
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id == "ctypes" and n.attr == "CDLL"):
+            p = parent.get(id(n))
+            assert isinstance(p, ast.Call) and p.func is n, \
+                "ctypes.CDLL must be called directly, never bound or aliased"
+
     handle_names = set()
     for n in ast.walk(tree):
         if not _is_cdll_call(n):
