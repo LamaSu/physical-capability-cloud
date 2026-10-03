@@ -50,6 +50,9 @@
  * with reasons (mirrors POST_EXCLUSIONS), so a brand-new stream-shaped GET route is no longer
  * silently dropped and the three false positives above are now sweept normally.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { geohashCenter, geohashEncode, LOCATION_CELL_PRECISION } from "../facades/populators/public-location.js";
@@ -139,8 +142,21 @@ async function provision(email: string): Promise<{ key: string; operatorId: stri
   return { key: b.api_key, operatorId: b.operator_id };
 }
 
+/**
+ * A call that takes longer is counted as timed out, and STRUCTURAL fails on any timed-out route
+ * it cannot explain. Fixture bodies make routes do real work (a ZK commitment took over 4s under
+ * the full suite's parallel load at c8285cfb), so the bound is generous: only a route that hangs
+ * trips it.
+ */
+const CALL_TIMEOUT_MS = 30_000;
+
+/** The store and every file a route derives from PCC_DB_PATH (waitlist, beta, feedback JSONL)
+ *  live in a fresh temp directory, never in the working tree. Removed in afterAll. */
+let dataDir = "";
+
 beforeAll(async () => {
-  process.env.PCC_DB_PATH = ":memory:";
+  dataDir = mkdtempSync(join(tmpdir(), "n68-sweep-"));
+  process.env.PCC_DB_PATH = join(dataDir, "pcc.sqlite");
   process.env.PCC_SEED_DATA = "true";
   const { createGateway } = await import("../server.js");
   app = (await createGateway(0)).app as unknown as FastifyInstance;
@@ -167,6 +183,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
+  if (dataDir) rmSync(dataDir, { recursive: true, force: true });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -1052,7 +1069,7 @@ async function sweep(key: string | null) {
       calls++;
       const res = await Promise.race([
         app.inject({ method: "GET", url, headers }).then((x) => ({ status: x.statusCode, body: x.body })),
-        new Promise<{ status: number; body: string }>((ok) => setTimeout(() => ok({ status: -1, body: "" }), 4000)),
+        new Promise<{ status: number; body: string }>((ok) => setTimeout(() => ok({ status: -1, body: "" }), CALL_TIMEOUT_MS)),
       ]).catch((e) => ({ status: -2, body: String(e) }));
       GET_CALL_LOG.push({ patternUrl: r.url, status: res.status });
       if (res.status < 0) timeouts++;
@@ -1092,7 +1109,7 @@ async function sweep(key: string | null) {
       calls++;
       const res = await Promise.race([
         app.inject({ method: "POST", url: filled, headers, payload }).then((x) => ({ status: x.statusCode, body: x.body })),
-        new Promise<{ status: number; body: string }>((ok) => setTimeout(() => ok({ status: -1, body: "" }), 4000)),
+        new Promise<{ status: number; body: string }>((ok) => setTimeout(() => ok({ status: -1, body: "" }), CALL_TIMEOUT_MS)),
       ]).catch((e) => ({ status: -2, body: String(e) }));
       POST_CALL_LOG.push({ patternUrl: url, status: res.status });
       if (res.status < 0) timeouts++;
