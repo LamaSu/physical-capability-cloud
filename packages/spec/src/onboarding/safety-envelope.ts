@@ -167,6 +167,7 @@ import {
   fixedHexBytes,
   hasOwn,
   includesValue,
+  hasCodeUnit,
   inSet,
   isHex256Digest,
   isLowerToken,
@@ -189,6 +190,7 @@ import {
   quoted,
   sha256Hex,
   stringSet,
+  templateSlotName,
   text,
   toLowerCase,
   trim,
@@ -2229,6 +2231,114 @@ export function commandMapIssue(commandMap: unknown, deviceClass: string, device
   const problem = commandMapProblem(commandMap, template);
   if (problem) return problem;
   return coverageProblem(commandMapGaps(commandMap as CommandMapV1, template), deviceControlled);
+}
+
+// ── The R8 map against a device profile (steward #5363) ──────────────
+
+/**
+ * The slot names of a request-body template, in first-seen order, into
+ * `slots`; or why the template is not one ADK #471 would load. A slot is a
+ * whole string "{name}". A string that holds "{" but is not a whole slot is
+ * refused, as #471 refuses it. Keys are literal, never slots.
+ */
+function templateSlotsProblem(value: unknown, at: string, slots: string[]): string | null {
+  if (typeof value === "string") {
+    const name = templateSlotName(value);
+    if (name !== null) {
+      if (!includesValue(slots, name)) append(slots, name);
+    } else if (hasCodeUnit(value, 0x7b)) {
+      return `${at}: a slot is a whole string such as "{wavelengthNm}"`;
+    }
+    return null;
+  }
+  if (ArrayIsArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const problem = templateSlotsProblem(value[i], `${at}[${i}]`, slots);
+      if (problem) return problem;
+    }
+    return null;
+  }
+  if (isRecord(value)) {
+    const keys = ObjectKeys(value);
+    for (let i = 0; i < keys.length; i++) {
+      const problem = templateSlotsProblem(value[keys[i]!], `${at}.${keys[i]!}`, slots);
+      if (problem) return problem;
+    }
+  }
+  return null;
+}
+
+/**
+ * Why an R8 command map and a device profile's `operations` (ADK #471,
+ * `.pcc/operations.json`) do not describe the same command surface, or null.
+ * Refvertical authors both for each rehearsal device, and adk checks them
+ * with this before the operator confirms the envelope (steward #5363).
+ *
+ * #471 binds each operation to one fixed request (method, path and body
+ * template), and a job fills only the template's slots. The command map says
+ * what each slot physically does: the quantity it sets, or why it sets none.
+ * They describe one surface only if all of these hold:
+ *   - the map is well formed for the class (`commandMapIssue`'s shape rules);
+ *   - every operation is a command of the same name, and every command is an
+ *     operation;
+ *   - each command's parameters are exactly the slots of its operation's
+ *     request body (`request.body`, `{}` when absent, as #471 reads it).
+ * A slot the map does not annotate would carry an unchecked value to the
+ * device. A parameter with no slot would be checked, but never sent. The
+ * rest of a binding (method, path, poll, log) is #471's own loader's to check.
+ */
+export function commandMapProfileIssue(commandMap: unknown, operations: unknown, deviceClass: string): string | null {
+  const template = templateOf(deviceClass);
+  if (!template) return `unknown deviceClass ${quoted(deviceClass)}`;
+  let map: unknown;
+  let profile: unknown;
+  try {
+    map = plainSnapshot(commandMap, "commandMap");
+    profile = plainSnapshot(operations, "operations");
+  } catch (err) {
+    // A prototype comparison, not instanceof: Symbol.hasInstance can be replaced after load.
+    if (typeof err === "object" && err !== null && ObjectGetPrototypeOf(err) === EnvelopeRefused.prototype) {
+      return (err as EnvelopeRefused).reasons[0] ?? "not plain JSON data";
+    }
+    throw err;
+  }
+  const shape = commandMapProblem(map, template);
+  if (shape) return `commandMap: ${shape}`;
+  if (!isRecord(profile)) return "operations must be an object of named operations";
+  const commands = (map as CommandMapV1).commands;
+  for (let i = 0; i < commands.length; i++) {
+    if (!hasOwn(profile, commands[i]!.name)) {
+      return `command ${quoted(commands[i]!.name)} is not an operation of the profile, so the runtime cannot send it`;
+    }
+  }
+  const names = ObjectKeys(profile);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i]!;
+    let command: CommandSpec | undefined;
+    for (let j = 0; j < commands.length; j++) if (commands[j]!.name === name) command = commands[j];
+    if (command === undefined) return `operation ${quoted(name)} has no command in the map, so R8 does not say what it does physically`;
+    const operation: unknown = profile[name];
+    if (!isRecord(operation)) return `operation ${quoted(name)} must be an object`;
+    const request: unknown = hasOwn(operation, "request") ? operation.request : ObjectCreate(null);
+    if (!isRecord(request)) return `operations.${name}.request must be an object`;
+    const slots = newList<string>(0);
+    const body: unknown = hasOwn(request, "body") ? request.body : ObjectCreate(null);
+    const problem = templateSlotsProblem(body, `operations.${name}.request.body`, slots);
+    if (problem) return problem;
+    for (let j = 0; j < slots.length; j++) {
+      let declared = false;
+      for (let k = 0; k < command.params.length; k++) if (command.params[k]!.name === slots[j]) declared = true;
+      if (!declared) {
+        return `operation ${quoted(name)}: the slot {${slots[j]!}} has no parameter in the map, so its value would reach the device unchecked`;
+      }
+    }
+    for (let k = 0; k < command.params.length; k++) {
+      if (!includesValue(slots, command.params[k]!.name)) {
+        return `command ${quoted(name)}: the parameter ${quoted(command.params[k]!.name)} is not a slot of the operation's request body, so it would be checked but never sent`;
+      }
+    }
+  }
+  return null;
 }
 
 /**

@@ -54,6 +54,7 @@ const ObjectPrototypeHasOwnProperty = uncurryThis(Object.prototype.hasOwnPropert
 const StringPrototypeTrim = uncurryThis(String.prototype.trim);
 const StringPrototypeToLowerCase = uncurryThis(String.prototype.toLowerCase);
 const StringPrototypeCharCodeAt = uncurryThis(String.prototype.charCodeAt);
+const StringPrototypeSlice = uncurryThis(String.prototype.slice);
 
 /** The SHA-256 the digests use: node:crypto's Hash, its methods captured at load. */
 const createHashAtLoad = createHash;
@@ -191,6 +192,28 @@ export function isHex256Digest(value: unknown): value is string {
  * letters, digits, ".", "_" or "-". Checked code unit by code unit, without a
  * RegExp, like the digests above.
  */
+/**
+ * The parameter name of a request-template slot, or null. A slot is a string
+ * that is exactly "{name}", with name [A-Za-z_][A-Za-z0-9_]* (ADK #471's
+ * `_SLOT`). Checked code unit by code unit, without a RegExp.
+ */
+export function templateSlotName(value: unknown): string | null {
+  if (typeof value !== "string" || value.length < 3) return null;
+  if (StringPrototypeCharCodeAt(value, 0) !== 0x7b || StringPrototypeCharCodeAt(value, value.length - 1) !== 0x7d) return null;
+  for (let i = 1; i < value.length - 1; i++) {
+    const unit = StringPrototypeCharCodeAt(value, i);
+    const letter = (unit >= 0x41 && unit <= 0x5a) || (unit >= 0x61 && unit <= 0x7a) || unit === 0x5f;
+    if (!(letter || (i > 1 && unit >= 0x30 && unit <= 0x39))) return null;
+  }
+  return StringPrototypeSlice(value, 1, value.length - 1);
+}
+
+/** Whether the string `s` holds the code unit `unit` anywhere. */
+export function hasCodeUnit(s: string, unit: number): boolean {
+  for (let i = 0; i < s.length; i++) if (StringPrototypeCharCodeAt(s, i) === unit) return true;
+  return false;
+}
+
 export function isLowerToken(value: unknown, maxLength: number): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > maxLength) return false;
   for (let i = 0; i < value.length; i++) {
