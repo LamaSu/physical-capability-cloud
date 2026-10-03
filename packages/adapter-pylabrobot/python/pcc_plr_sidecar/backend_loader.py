@@ -324,7 +324,7 @@ async def _confirm_robot(identity: RobotIdentity) -> str:
 # it into every sidecar container. No sidecar creates, moves or loosens it, and
 # no environment variable or temp-dir setting changes where it is. A sidecar
 # that finds it missing, not a directory, a symlink, owned by another user, or
-# writable by group or others refuses to drive hardware.
+# any mode but exactly 0700 refuses to drive hardware.
 _LOCK_NAMESPACE = "/var/lib/pcc-plr/robot-locks"
 
 
@@ -335,8 +335,8 @@ def _lock_file_name(key: str) -> str:
 def _open_lock_namespace(path: str) -> int:
     """Open the install-provided robot-lock directory, returning its fd. Raises
     OSError when it is missing or isn't exactly what the install promises: a
-    real directory (not a symlink), owned by this service user, and writable by
-    no one else."""
+    real directory (not a symlink), owned by this service user, mode exactly
+    0700."""
     parent, leaf = os.path.split(path)
     parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -349,8 +349,9 @@ def _open_lock_namespace(path: str) -> int:
             raise OSError(f"{path} is not a directory")
         if info.st_uid != os.geteuid():
             raise OSError(f"{path} is not owned by this sidecar's service user")
-        if info.st_mode & 0o022:
-            raise OSError(f"{path} is writable by group or others")
+        mode = stat.S_IMODE(info.st_mode)
+        if mode != 0o700:  # exactly the install's mode (astra r7 MEDIUM): no other bit, sticky included
+            raise OSError(f"{path} is mode {mode:04o}, not the install's 0700")
     except BaseException:
         os.close(dir_fd)
         raise

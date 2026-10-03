@@ -115,7 +115,7 @@ out by deployment, not by the sidecar:
   mode `0700` (never `1777`), and bind-mount it into every sidecar container.
   Run every sidecar as that user. A sidecar never creates or changes the
   directory. It refuses to drive hardware if the directory is missing, is a
-  symlink, is owned by another user, or is writable by group or others. Lock
+  symlink, is owned by another user, or has any mode but exactly `0700`. Lock
   files inside it are created on first use (`0600`) and never deleted.
 - **The OT-2 sits on an isolated network segment at a static address**, with no
   proxy or DNS name between the sidecar and the robot.

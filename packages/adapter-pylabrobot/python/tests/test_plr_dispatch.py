@@ -652,12 +652,24 @@ def test_a_robot_lock_directory_others_can_write_is_refused(tmp_path, monkeypatc
 
     ns = _install_lock_dir(tmp_path / "ns", mode)
     monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(ns))
-    with pytest.raises(backend_loader.DeviceBusy, match="writable by group or others"):
+    with pytest.raises(backend_loader.DeviceBusy, match="not the install's 0700"):
         backend_loader.EndpointLock.acquire("ot2-serial:x")
     assert list(ns.iterdir()) == []
     import stat as st
 
     assert st.S_IMODE(ns.stat().st_mode) == mode  # never loosened or tightened by a sidecar
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o711, 0o1700, 0o750, 0o701])
+def test_a_robot_lock_directory_must_be_exactly_the_installs_0700(tmp_path, monkeypatch, mode):
+    # astra r7 (MEDIUM): the install prescribes 0700, and any other mode is the wrong mode.
+    from pcc_plr_sidecar import backend_loader
+
+    ns = _install_lock_dir(tmp_path / "ns", mode)
+    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(ns))
+    with pytest.raises(backend_loader.DeviceBusy, match="not the install's 0700"):
+        backend_loader.EndpointLock.acquire("ot2-serial:x")
+    assert list(ns.iterdir()) == []
 
 
 def test_a_robot_lock_directory_of_another_user_is_refused(tmp_path, monkeypatch):
