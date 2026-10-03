@@ -166,6 +166,10 @@ export async function topicSSE(app: FastifyInstance) {
     const unsubscribe = streamHub.subscribe(
       topics,
       (event, cursor) => {
+        // A cursor stream shows only events the hub numbered for it (round 7):
+        // an event without a cursor is never written there, with or without
+        // the projection's say.
+        if (cursorIds && !cursor) return;
         let type = event.type;
         let data = event.payload;
         if (project) {

@@ -571,3 +571,87 @@ describe("StreamHub cursors (N49 r6)", () => {
     expect(live).toEqual([["p4", 4]]);
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// N49 round 7 (MEDIUM): the hub numbered every publication on a batch topic,
+// including the private events the batch projection then drops, so the gaps in
+// the public cursor counted hidden events (a covert channel: N dropped events
+// show as a jump of N). Now only the events the batch stream can show get a
+// cursor on a batch topic.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("N49 r7: batch cursors count only the events a subscriber can see", () => {
+  it("dropped events do not move the visible cursor", async () => {
+    const batchId = `gap-${uid()}`;
+    const sub = await subscribeBatch(batchId);
+
+    for (let i = 0; i < 3; i++) publishOnBatchTopic(batchId, "sensor_reading", { value: i });
+    publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 7 });
+    publishOnBatchTopic(batchId, "sample_added", { slotId: "s", position: "A1" });
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 1, failed: 0 });
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_completed"));
+
+    expect(sub.events().map((f) => [f.event, f.id])).toEqual([
+      ["batch_sealed", "1"],
+      ["batch_completed", "2"],
+    ]);
+  });
+
+  it("replay numbers the same way: Last-Event-ID 0 replays the visible events as 1 and 2", async () => {
+    const batchId = `gap-replay-${uid()}`;
+    publishOnBatchTopic(batchId, "sensor_reading", { value: 1 });
+    publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 3 });
+    publishOnBatchTopic(batchId, "sample_added", { slotId: "s" });
+    publishOnBatchTopic(batchId, "sample_added", { slotId: "t" });
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 3, failed: 0 });
+
+    const sub = await subscribe(`/sse/stream/batch/${batchId}`, { ...bob, "last-event-id": "0" });
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_completed"));
+
+    expect(sub.events().map((f) => [f.event, f.id])).toEqual([
+      ["batch_sealed", "1"],
+      ["batch_completed", "2"],
+    ]);
+  });
+
+  it("resuming after cursor 1 gives the next visible event as 2, however many hidden events came between", async () => {
+    const batchId = `gap-resume-${uid()}`;
+    publishOnBatchTopic(batchId, "batch_sealed", { slotCount: 2 });
+    for (let i = 0; i < 5; i++) publishOnBatchTopic(batchId, "slot_status_changed", { slotId: `s${i}` });
+    publishOnBatchTopic(batchId, "batch_completed", { completed: 2, failed: 0 });
+
+    const sub = await subscribe(`/sse/stream/batch/${batchId}`, { ...bob, "last-event-id": "1" });
+    await sub.waitFor((frames) => frames.some((f) => f.event === "batch_completed"));
+
+    expect(sub.events().map((f) => [f.event, f.id])).toEqual([["batch_completed", "2"]]);
+  });
+});
+
+describe("StreamHub cursor policy (N49 r7)", () => {
+  it("numbers only the events the policy admits; the rest get no cursor and are not in the cursor window", () => {
+    const hub = new StreamHub(10, (event) => event.type === "visible");
+    const topic = { type: "batch" as const, id: "b1" };
+    const event = (id: string, type: string) => ({ id, type, timestamp: "t", topic, payload: {} });
+
+    const live: Array<[string, number | undefined]> = [];
+    hub.subscribe([topic], (e, cursor) => live.push([e.id, cursor?.seq]));
+    hub.publish([topic], event("h1", "hidden"));
+    hub.publish([topic], event("v1", "visible"));
+    hub.publish([topic], event("h2", "hidden"));
+    hub.publish([topic], event("v2", "visible"));
+    expect(live).toEqual([["h1", undefined], ["v1", 1], ["h2", undefined], ["v2", 2]]);
+
+    const replayed: Array<[string, number | undefined]> = [];
+    hub.subscribe([topic], (e, cursor) => replayed.push([e.id, cursor?.seq]), "0", { cursor: "seq" });
+    expect(replayed).toEqual([["v1", 1], ["v2", 2]]);
+  });
+
+  it("a policy that throws admits nothing (fails closed)", () => {
+    const hub = new StreamHub(10, () => { throw new Error("boom"); });
+    const topic = { type: "batch" as const, id: "b2" };
+    const live: Array<number | undefined> = [];
+    hub.subscribe([topic], (_e, cursor) => live.push(cursor?.seq));
+    hub.publish([topic], { id: "x", type: "anything", timestamp: "t", topic, payload: {} });
+    expect(live).toEqual([undefined]);
+  });
+});

@@ -41,6 +41,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Whether an event published on batch topic `batchId` appears on the shared
+ * batch stream (N49 round 7). The hub gives a batch topic's cursor only to
+ * these events, so the cursor a subscriber sees counts visible events alone and
+ * its gaps reveal nothing about the private events the projection drops.
+ */
+export function isPublicBatchStreamEvent(
+  event: { id?: string; type: string; timestamp?: string; payload?: unknown },
+  batchId: string,
+): boolean {
+  return projectBatchStreamEvent({ id: event.id, type: event.type, timestamp: event.timestamp, batchId, payload: event.payload }) !== null;
+}
+
+/**
  * The shared-stream message for a batch event, or null when the event must not
  * be broadcast (any per-sample event, or an unlisted type).
  */

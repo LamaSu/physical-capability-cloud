@@ -7,6 +7,7 @@
  */
 
 import type { StreamTopic } from "@pcc/spec";
+import { isPublicBatchStreamEvent } from "./batch-stream-projection.js";
 
 export interface StreamEvent {
   id: string;
@@ -28,6 +29,9 @@ export interface StreamCursor {
 }
 
 type StreamCallback = (event: StreamEvent, cursor?: StreamCursor) => void;
+
+/** Whether an event gets a cursor on a topic (see the StreamHub constructor). */
+export type CursorPolicy = (event: StreamEvent, topic: StreamTopic) => boolean;
 
 export interface SubscribeOptions {
   /**
@@ -54,8 +58,25 @@ export class StreamHub {
   private cursorBuffers = new Map<string, Array<{ seq: number; event: StreamEvent }>>();
   private replayCapacity: number;
 
-  constructor(replayCapacity = DEFAULT_REPLAY_CAPACITY) {
+  /**
+   * `cursorPolicy` (N49 round 7) decides which events get a cursor on a topic.
+   * An event it does not admit gets none: it is still delivered to subscribers
+   * and kept in the publisher-id replay buffer, but it is not numbered and not
+   * in the cursor window, so a cursor stream neither shows it nor leaves a gap
+   * for it. A policy that throws admits nothing. Without one, every event is
+   * numbered.
+   */
+  constructor(replayCapacity = DEFAULT_REPLAY_CAPACITY, private readonly cursorPolicy?: CursorPolicy) {
     this.replayCapacity = replayCapacity;
+  }
+
+  private admitted(event: StreamEvent, topic: StreamTopic): boolean {
+    if (!this.cursorPolicy) return true;
+    try {
+      return this.cursorPolicy(event, topic) === true;
+    } catch {
+      return false;
+    }
   }
 
   static topicKey(topic: StreamTopic): string {
@@ -137,8 +158,21 @@ export class StreamHub {
 
     for (const topic of allTopics) {
       const key = StreamHub.topicKey(topic);
-      const seq = (this.cursors.get(key) ?? 0) + 1;
-      this.cursors.set(key, seq);
+      let cursor: StreamCursor | undefined;
+      if (this.admitted(event, topic)) {
+        const seq = (this.cursors.get(key) ?? 0) + 1;
+        this.cursors.set(key, seq);
+        cursor = { topicKey: key, seq };
+        let window = this.cursorBuffers.get(key);
+        if (!window) {
+          window = [];
+          this.cursorBuffers.set(key, window);
+        }
+        window.push({ seq, event });
+        if (window.length > this.replayCapacity) {
+          window.shift();
+        }
+      }
 
       // Store in replay buffer
       let buffer = this.replayBuffers.get(key);
@@ -150,15 +184,6 @@ export class StreamHub {
       if (buffer.length > this.replayCapacity) {
         buffer.shift();
       }
-      let window = this.cursorBuffers.get(key);
-      if (!window) {
-        window = [];
-        this.cursorBuffers.set(key, window);
-      }
-      window.push({ seq, event });
-      if (window.length > this.replayCapacity) {
-        window.shift();
-      }
 
       // Notify live subscribers
       const subs = this.subscriptions.get(key);
@@ -167,7 +192,7 @@ export class StreamHub {
           if (!notified.has(cb)) {
             notified.add(cb);
             try {
-              cb(event, { topicKey: key, seq });
+              cb(event, cursor);
             } catch {
               // Ignore callback errors
             }
@@ -195,5 +220,12 @@ export class StreamHub {
   }
 }
 
-/** Singleton hub instance shared across the gateway */
-export const streamHub = new StreamHub();
+/**
+ * Singleton hub instance shared across the gateway. On a batch topic only the
+ * events the shared batch stream can show are numbered (N49 round 7), so its
+ * cursor gaps say nothing about the private events it drops.
+ */
+export const streamHub = new StreamHub(
+  DEFAULT_REPLAY_CAPACITY,
+  (event, topic) => topic.type !== "batch" || isPublicBatchStreamEvent(event, topic.id),
+);
