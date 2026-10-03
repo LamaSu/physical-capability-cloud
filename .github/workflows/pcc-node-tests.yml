@@ -1,0 +1,64 @@
+# The whole packages/pcc-node test suite (board row N117; astra 573, MEDIUM).
+#
+# Until this workflow, no CI job ran pcc-node's tests: ci.yml's Python step runs only
+# scripts/test_ot2_executor_guard.py, pnpm's workspace tests skip pcc-node (it has no
+# package.json), and evidence-signature-parity.yml runs only its own manifest. So a
+# regression in the operating loop, the device runtime, the job port or the no-shell
+# guard passed every check.
+#
+# This runs every test on the oldest Python pcc-node supports (3.9, its requires-python)
+# and on 3.12, with the optional dependencies the tests exercise installed at pinned
+# versions, and fails if ANY test is skipped: a skip here would be a safety test that
+# silently stopped running. There is deliberately no path filter, so a required check
+# never waits on a run that was never started.
+
+name: pcc-node tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Installs pinned PyPI packages, so the token gets read-only access.
+permissions:
+  contents: read
+
+jobs:
+  pcc-node-tests:
+    name: pcc-node tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # click 8.2 and later need Python 3.10; 8.1.8 is the last release for 3.9.
+          - python: "3.9"
+            click: "8.1.8"
+          - python: "3.12"
+            click: "8.3.1"
+    defaults:
+      run:
+        working-directory: packages/pcc-node
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CLICK_VERSION: ${{ matrix.click }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install the pinned test dependencies
+        run: python -m pip install --quiet "click==$CLICK_VERSION" "pynacl==1.5.0" "cryptography==41.0.7" "pytest==8.3.5"
+
+      - name: The whole suite, failing on any skip
+        run: |
+          set -o pipefail
+          python -m pytest -q -p no:cacheprovider -rs 2>&1 | tee "$RUNNER_TEMP/pcc-node-pytest.log"
+          if tail -n 3 "$RUNNER_TEMP/pcc-node-pytest.log" | grep -E -q '[0-9]+ skipped'; then
+            echo "::error::pcc-node tests were skipped; every test must run in this job"
+            exit 1
+          fi
