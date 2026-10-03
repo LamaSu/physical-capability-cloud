@@ -59,7 +59,9 @@ export function KernelsPage() {
               <div className="text-xs text-white/25">
                 {kernel.physicalAddress ||
                   kernel.location?.label ||
-                  (kernel.location ? `${kernel.location.lat.toFixed(4)}, ${kernel.location.lng.toFixed(4)}` : "Location not set")}
+                  (Number.isFinite(kernel.location?.lat) && Number.isFinite(kernel.location?.lng)
+                    ? `${kernel.location.lat.toFixed(4)}, ${kernel.location.lng.toFixed(4)}`
+                    : "Location not set")}
               </div>
             </GlassPanel>
           ))}
