@@ -295,6 +295,50 @@ describe("verifyDeviceSignedEvidence — registered-signer → Ed25519 verify (r
     expect(result).toMatchObject({ ok: true });
   });
 
+  it("NEGATIVE (adk #4322, rule 5): a session bundle is checked against the job being SETTLED, not the job it was signed for", async () => {
+    // /complete builds the slot with contractId = the route's jobId (paid-job-flow.ts), so a
+    // bundle whose delegation names only job A cannot anchor job B.
+    const principal = nacl.sign.keyPair();
+    const handler = createKernelHandler({
+      manifest: {
+        manifestVersion: "1.0.0",
+        kernelId: "kernel-delegated-4322",
+        name: "Delegated Kernel",
+        description: "test",
+        builder: { agentId: "agent:test" },
+        capabilityType: "test.transform",
+        workflowSteps: [],
+        pricing: { currency: "USDC", baseUSD: 0 },
+        maxAssuranceTier: 0,
+        endpointURL: "https://example.test/run",
+        sessionKeyPolicy: { maxTTLSeconds: 300, allowedActions: ["evidence_submit"] },
+        status: "pending",
+      } as any,
+      principalKey: {
+        agentId: "eip155:1:0x0000000000000000000000000000000000000001",
+        walletAddress: "0x0000000000000000000000000000000000000001",
+        publicKey: principal.publicKey,
+      },
+      principalPrivateKey: principal.secretKey,
+      execute: async () => ({ ok: true }),
+    });
+    const { evidenceBundle } = await handler({ jobId: "job-A-4322", input: { value: 1 } });
+    const registeredSigner = { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` };
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: {
+        bundleHash: evidenceBundle.bundleHash,
+        kernelSignature: evidenceBundle.kernelSignature,
+        assuranceTier: 0,
+        sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization,
+        contractId: "job-B-4322",
+      },
+      registeredSigner,
+      fallback: { bundleHash: `sha256:${"aa".repeat(32)}`, kernelSignature: { signer: "gateway", algorithm: "sha256", value: "x" }, assuranceTier: 0 },
+      gateOpen: true,
+    });
+    expect(decision).toMatchObject({ source: "gateway-fallback", reason: "contract_not_allowed" });
+  });
+
   it("naclEd25519Verify round-trips a genuine tweetnacl signature", () => {
     const dev = realDeviceEvidence();
     expect(naclEd25519Verify(dev.bundleHash, dev.signature.value, dev.publicKeyHex)).toBe(true);
