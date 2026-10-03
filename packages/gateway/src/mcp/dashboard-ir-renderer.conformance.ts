@@ -79,6 +79,7 @@ ok("valid rows rendered (j1 with meta+status, j2 title-only)", rowTexts.includes
 // ROW output" rather than assuming the row count IS the total child count.
 const rowEls = (listEl.children as any[]).filter((c) => c.className === "pcc-row");
 ok("malformed rows dropped (no phantom output)", rowEls.length === 2);
+ok("nothing else but the one window note (exact child count)", (listEl.children as any[]).length === 3 && (listEl.children as any[])[2].className === "pcc-window");
 ok("non-selector field ('secret') NEVER rendered", !rowTexts.includes("LEAK"));
 
 // scalar bind: own-property read, proto-safe, type-validated by the field's closed kind (astra

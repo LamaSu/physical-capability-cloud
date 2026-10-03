@@ -1446,13 +1446,13 @@
       if (paged.total !== void 0) {
         const totalRaw = readOwnPath(data, paged.total);
         if (offset !== "unknown" && isSafeIntValue(totalRaw) && totalRaw >= offset + returned) {
-          if (totalRaw > offset + returned) parts.push("showing " + String(returned) + " of " + String(totalRaw));
+          if (totalRaw > offset + returned) parts.push(String(returned) + " of " + String(totalRaw) + " returned");
         } else {
           parts.push("total not shown");
         }
       } else {
         const eff = typeof limit === "number" ? limit : limit === null ? paged.defaultLimit : "unknown";
-        if (eff === "unknown" ? returned > 0 : returned >= eff) parts.push("first " + String(returned) + "; more may exist");
+        if (eff === "unknown" ? returned > 0 : returned >= eff) parts.push(String(returned) + " returned; more may exist");
       }
     }
     const capLimit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);

@@ -780,6 +780,9 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     // the ROW itself, so select it by class rather than assuming it's the only child.
     const rowEls = (listEl.children as RElement[]).filter((c) => c.className === "pcc-row");
     expect(rowEls.length).toBe(1);
+    // ...and nothing else but the one window note: no phantom output (the exact child count kept).
+    expect(listEl.children.length).toBe(2);
+    expect((listEl.children[1] as RElement).className).toBe("pcc-window");
     const texts = (rowEls[0] as RElement).children as RElement[];
     expect(texts.map((c) => c.textContent)).toEqual(["Name:", UNAVAILABLE, "ID:", UNAVAILABLE]);
   });

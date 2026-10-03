@@ -72,9 +72,9 @@ describe("N110 listWindow: unit table (pure, no DOM)", () => {
     expect(r.empty).toBe("none");
   });
 
-  it("capabilities {total:120} with 50 returned: showing 50 of 120", () => {
+  it("capabilities {total:120} with 50 returned: 50 of 120 returned", () => {
     const r = listWindow(listNode({ path: "/api/capabilities" }), { total: 120 }, 50);
-    expect(r.note).toBe("showing 50 of 120");
+    expect(r.note).toBe("50 of 120 returned");
   });
 
   it("capabilities total absent: total not shown", () => {
@@ -87,9 +87,9 @@ describe("N110 listWindow: unit table (pure, no DOM)", () => {
     expect(r.note).toBe("total not shown");
   });
 
-  it("jobs with 50 returned and no query: first 50; more may exist (the facade's own default)", () => {
+  it("jobs with 50 returned and no query: 50 returned; more may exist (the facade's own default)", () => {
     const r = listWindow(listNode({ path: "/api/jobs" }), undefined, 50);
-    expect(r.note).toBe("first 50; more may exist");
+    expect(r.note).toBe("50 returned; more may exist");
   });
 
   it("jobs with 49 returned (under the default): null", () => {
@@ -97,15 +97,15 @@ describe("N110 listWindow: unit table (pure, no DOM)", () => {
     expect(r.note).toBeNull();
   });
 
-  it("jobs {limit:10} with 10 returned: first 10; more may exist", () => {
+  it("jobs {limit:10} with 10 returned: 10 returned; more may exist", () => {
     const r = listWindow(listNode({ path: "/api/jobs", query: { limit: 10 } }), undefined, 10);
-    expect(r.note).toBe("first 10; more may exist");
+    expect(r.note).toBe("10 returned; more may exist");
     expect(r.empty).toBe("none"); // `limit` is not a filter
   });
 
-  it("jobs {limit:\"x\"} (off-grammar) with 1 returned: first 1; more may exist", () => {
+  it("jobs {limit:\"x\"} (off-grammar) with 1 returned: 1 returned; more may exist", () => {
     const r = listWindow(listNode({ path: "/api/jobs", query: { limit: "x" } }), undefined, 1);
-    expect(r.note).toBe("first 1; more may exist");
+    expect(r.note).toBe("1 returned; more may exist");
   });
 
   it("kernels (no paged profile at all) with 300 returned: never a page note", () => {
@@ -225,11 +225,11 @@ describe("N110 equal-time: the window note is part of the committed fingerprint"
     ], T0);
     s.deliver(capsManifest()); await s.settle();
     expect(s.q(".pcc-list").querySelectorAll(".pcc-row").length).toBe(2);
-    expect(s.q(".pcc-list .pcc-window").textContent).toBe("showing 2 of 120");
+    expect(s.q(".pcc-list .pcc-window").textContent).toBe("2 of 120 returned");
     await s.nextPoll();
     // must NOT become 121: an equal-timestamp update is undecidable by time alone when its
     // payload (here, only the window note) differs from what is shown, so it is rejected.
-    expect(s.q(".pcc-list .pcc-window").textContent).toBe("showing 2 of 120");
+    expect(s.q(".pcc-list .pcc-window").textContent).toBe("2 of 120 returned");
     expect(s.q(".pcc-list").querySelectorAll(".pcc-row").length).toBe(2);
     expect(s.q(".pcc-list").className).not.toContain("pcc-unavail");
     s.close();
