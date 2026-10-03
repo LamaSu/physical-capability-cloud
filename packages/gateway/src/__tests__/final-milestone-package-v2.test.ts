@@ -27,6 +27,8 @@ import {
   PackageNotMintableError,
   assertMintablePackage,
   type FinalMilestonePackageV2Body,
+  type KernelRegistryReader,
+  type KernelRegistrySigner,
 } from "../settlement/final-milestone-package-v2.js";
 import { packageDigestV2, canonicalSignatures, type PackageSignature } from "../settlement/package-digest-v2.js";
 import { COMPROMISED_DEVICE_PUBLIC_KEYS } from "@pcc/spec";
@@ -48,6 +50,15 @@ function ed25519PublicKeyHexFromSeed(seedHex: string): string {
   const publicKey = createPublicKey(privateKey);
   const spkiDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
   return `0x${spkiDer.subarray(12).toString("hex")}`;
+}
+
+/** A `KernelRegistryReader` that always answers the same signer (or `null`), regardless of kernelId. */
+function registryReturning(signer: KernelRegistrySigner | null): KernelRegistryReader {
+  return { signerForKernel: async () => signer };
+}
+/** A `KernelRegistryReader` keyed by kernelId — F2: the registry binding must be looked up BY kernel id. */
+function registryFromMap(map: Record<string, KernelRegistrySigner | null>): KernelRegistryReader {
+  return { signerForKernel: async (kernelId) => (Object.hasOwn(map, kernelId) ? map[kernelId]! : null) };
 }
 
 const BODY: FinalMilestonePackageV2Body = {
@@ -508,10 +519,10 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
     scheme: "ed25519-raw32",
     sig: `0x${signWithPrivateKeyHex(DEVICE_SEED, BODY_HASH_RAW32)!}`,
   };
-  const REGISTRY = { algorithm: "ed25519", publicKey: DEVICE_PUB };
+  const REGISTRY = registryReturning({ algorithm: "ed25519", publicKey: DEVICE_PUB });
 
-  it("accepts a real D1 + D2 set and hashes exactly what the digest function would", () => {
-    const minted = assertMintablePackage(MINTABLE, [D2, D1], REGISTRY);
+  it("accepts a real D1 + D2 set and hashes exactly what the digest function would", async () => {
+    const minted = await assertMintablePackage(MINTABLE, [D2, D1], REGISTRY);
     expect(minted.signatures.map((s) => s.scheme)).toEqual(["secp256k1-eip712", "ed25519-raw32"]);
     expect(packageDigestV2(minted.body, minted.signatures)).toBe(packageDigestV2(MINTABLE, [D1, D2]));
   });
@@ -519,57 +530,65 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
   // ── F1 (cross-family E9): D2's ed25519 signature is now cryptographically
   // verified over raw32(packageBodyHash). D1 is unchanged (shape-only; STOP).
   describe("F1 — D2 is cryptographically verified, not just shape-checked", () => {
-    it("refuses random bytes as the D2 signature", () => {
+    it("refuses random bytes as the D2 signature", async () => {
       const d2 = { ...D2, sig: `0x${"ab".repeat(64)}` }; // right shape, not a real signature
-      expect(() => assertMintablePackage(MINTABLE, [D1, d2], REGISTRY)).toThrow(PackageNotMintableError);
-      expect(() => assertMintablePackage(MINTABLE, [D1, d2], REGISTRY)).toThrow(
+      await expect(assertMintablePackage(MINTABLE, [D1, d2], REGISTRY)).rejects.toThrow(PackageNotMintableError);
+      await expect(assertMintablePackage(MINTABLE, [D1, d2], REGISTRY)).rejects.toThrow(
         /D2 ed25519 signature does not verify/,
       );
     });
 
-    it("refuses a real D2 signature over the WRONG body", () => {
+    it("refuses a real D2 signature over the WRONG body", async () => {
       const otherBody = clone(MINTABLE);
       otherBody.unitBinding.milestoneIndex = "999";
       const otherHashRaw32 = Buffer.from(toBytes(computePackageBodyHash(otherBody)));
       const wrongBodySig = { ...D2, sig: `0x${signWithPrivateKeyHex(DEVICE_SEED, otherHashRaw32)!}` };
-      expect(() => assertMintablePackage(MINTABLE, [D1, wrongBodySig], REGISTRY)).toThrow(PackageNotMintableError);
+      await expect(assertMintablePackage(MINTABLE, [D1, wrongBodySig], REGISTRY)).rejects.toThrow(
+        PackageNotMintableError,
+      );
     });
 
-    it("refuses a real signature produced by the WRONG key", () => {
+    it("refuses a real signature produced by the WRONG key", async () => {
       // Signed by OTHER_SEED's key, but the entry still CLAIMS signer = DEVICE_PUB.
       const wrongKeySig = { ...D2, sig: `0x${signWithPrivateKeyHex(OTHER_SEED, BODY_HASH_RAW32)!}` };
-      expect(() => assertMintablePackage(MINTABLE, [D1, wrongKeySig], REGISTRY)).toThrow(PackageNotMintableError);
+      await expect(assertMintablePackage(MINTABLE, [D1, wrongKeySig], REGISTRY)).rejects.toThrow(
+        PackageNotMintableError,
+      );
     });
 
-    it("refuses a real signature over the ASCII-HEX STRING of packageBodyHash instead of its raw 32 bytes", () => {
+    it("refuses a real signature over the ASCII-HEX STRING of packageBodyHash instead of its raw 32 bytes", async () => {
       const hexString = computePackageBodyHash(MINTABLE); // "0x" + 64 hex chars, as ASCII
       const asciiHexSig = {
         ...D2,
         sig: `0x${signWithPrivateKeyHex(DEVICE_SEED, Buffer.from(hexString, "utf8"))!}`,
       };
-      expect(() => assertMintablePackage(MINTABLE, [D1, asciiHexSig], REGISTRY)).toThrow(PackageNotMintableError);
+      await expect(assertMintablePackage(MINTABLE, [D1, asciiHexSig], REGISTRY)).rejects.toThrow(
+        PackageNotMintableError,
+      );
     });
   });
 
-  it("fails closed on the interim challenge nonce: nothing is minted until the durable challenge exists (F7)", () => {
+  it("fails closed on the interim challenge nonce: nothing is minted until the durable challenge exists (F7)", async () => {
     // Everything else about this package is valid (it mints with a real nonce),
     // so the refusal below is the interim check and nothing else.
-    expect(() => assertMintablePackage(MINTABLE, [D1, D2], REGISTRY)).not.toThrow();
+    await expect(assertMintablePackage(MINTABLE, [D1, D2], REGISTRY)).resolves.not.toThrow();
     const b = clone(MINTABLE);
     b.challengeBinding.nonce = INTERIM_NONCE;
     expect(b).toEqual({ ...MINTABLE, challengeBinding: { ...MINTABLE.challengeBinding, nonce: INTERIM_NONCE } });
     expect(isInterimNonce(b)).toBe(true);
-    expect(() => assertMintablePackage(b, [D1, D2], REGISTRY)).toThrow(PackageNotMintableError);
-    expect(() => assertMintablePackage(b, [D1, D2], REGISTRY)).toThrow(/\$\.challengeBinding\.nonce: is the interim placeholder/);
+    await expect(assertMintablePackage(b, [D1, D2], REGISTRY)).rejects.toThrow(PackageNotMintableError);
+    await expect(assertMintablePackage(b, [D1, D2], REGISTRY)).rejects.toThrow(
+      /\$\.challengeBinding\.nonce: is the interim placeholder/,
+    );
   });
 
-  it("refuses anything but exactly one D1 and one D2", () => {
+  it("refuses anything but exactly one D1 and one D2", async () => {
     for (const sigs of [[D1], [D1, D2, { ...D2, signer: `0x${"ef".repeat(32)}` }], [D1, { ...D1, signer: `0x${"cc".repeat(20)}` }], [{ ...D1, scheme: "secp256k1" }, D2], "D1,D2"]) {
-      expect(() => assertMintablePackage(MINTABLE, sigs, REGISTRY)).toThrow(PackageNotMintableError);
+      await expect(assertMintablePackage(MINTABLE, sigs, REGISTRY)).rejects.toThrow(PackageNotMintableError);
     }
   });
 
-  it("refuses an extra key, a foreign scheme or a wrong-form signer or signature", () => {
+  it("refuses an extra key, a foreign scheme or a wrong-form signer or signature", async () => {
     const bad: unknown[] = [
       { ...D2, note: "x" },
       { ...D2, scheme: "ed25519" }, // a bare label says nothing about what was signed
@@ -579,17 +598,21 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
       { ...D2, sig: `0x${"22".repeat(65)}` },
     ];
     for (const d2 of bad) {
-      expect(() => assertMintablePackage(MINTABLE, [D1, d2], REGISTRY), JSON.stringify(d2)).toThrow(PackageNotMintableError);
+      await expect(assertMintablePackage(MINTABLE, [D1, d2], REGISTRY), JSON.stringify(d2)).rejects.toThrow(
+        PackageNotMintableError,
+      );
     }
   });
 
-  it("the published golden's sample signature set is not a mintable set", () => {
+  it("the published golden's sample signature set is not a mintable set", async () => {
     // Its "ed25519" entry carries a 40-hex signer: fine as a digest vector,
     // never as a real kernel signature.
-    expect(() => assertMintablePackage(JSON.parse(GOLDEN.jcsBody), GOLDEN.rawSigs, REGISTRY)).toThrow(PackageNotMintableError);
+    await expect(assertMintablePackage(JSON.parse(GOLDEN.jcsBody), GOLDEN.rawSigs, REGISTRY)).rejects.toThrow(
+      PackageNotMintableError,
+    );
   });
 
-  it("refuses principal ids that are not the pinned forms bound to D1 and D2 (pcc.evidence.principal-id.v1)", () => {
+  it("refuses principal ids that are not the pinned forms bound to D1 and D2 (pcc.evidence.principal-id.v1)", async () => {
     const withProducer = (patch: Partial<typeof MINTABLE.producer>) => {
       const b = clone(MINTABLE);
       Object.assign(b.producer, patch);
@@ -604,29 +627,58 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
       ["device not the D2 signer", withProducer({ devicePrincipalId: `ed25519:0x${"ef".repeat(32)}` })],
     ];
     for (const [name, b] of cases) {
-      expect(() => assertMintablePackage(b, [D1, D2], REGISTRY), name).toThrow(PackageNotMintableError);
+      await expect(assertMintablePackage(b, [D1, D2], REGISTRY), name).rejects.toThrow(PackageNotMintableError);
     }
   });
 
-  it("refuses a device principal the registry holds when the D2 signature is by another key", () => {
+  it("refuses a device principal the registry holds when the D2 signature is by another key", async () => {
     const other = `0x${"ef".repeat(32)}`;
     const b = clone(MINTABLE);
     b.producer.devicePrincipalId = `ed25519:${other}`;
-    expect(() => assertMintablePackage(b, [D1, D2], { algorithm: "ed25519", publicKey: other })).toThrow(PackageNotMintableError);
+    await expect(
+      assertMintablePackage(b, [D1, D2], registryReturning({ algorithm: "ed25519", publicKey: other })),
+    ).rejects.toThrow(PackageNotMintableError);
   });
 
-  it("refuses a device key the registry does not hold for the producing kernel", () => {
-    for (const registry of [{ algorithm: "ed25519", publicKey: `0x${"ef".repeat(32)}` }, null, { algorithm: "secp256k1", address: D1.signer }]) {
-      expect(() => assertMintablePackage(MINTABLE, [D1, D2], registry), JSON.stringify(registry)).toThrow(PackageNotMintableError);
+  it("refuses a device key the registry does not hold for the producing kernel", async () => {
+    for (const registry of [
+      registryReturning({ algorithm: "ed25519", publicKey: `0x${"ef".repeat(32)}` }),
+      registryReturning(null),
+      registryReturning({ algorithm: "secp256k1", address: D1.signer }),
+    ]) {
+      await expect(assertMintablePackage(MINTABLE, [D1, D2], registry)).rejects.toThrow(PackageNotMintableError);
     }
   });
 
-  it("refuses a device principal whose secret is public, even when the registry and D2 agree", () => {
+  it("refuses a device principal whose secret is public, even when the registry and D2 agree", async () => {
     const leaked = [...COMPROMISED_DEVICE_PUBLIC_KEYS][0]!;
     const b = clone(MINTABLE);
     b.producer.devicePrincipalId = `ed25519:${leaked}`;
     const d2 = { ...D2, signer: leaked };
-    expect(() => assertMintablePackage(b, [D1, d2], { algorithm: "ed25519", publicKey: leaked })).toThrow(PackageNotMintableError);
+    await expect(
+      assertMintablePackage(b, [D1, d2], registryReturning({ algorithm: "ed25519", publicKey: leaked })),
+    ).rejects.toThrow(PackageNotMintableError);
+  });
+
+  // ── F2 (cross-family E9): the registry binding is keyed by the VALIDATED
+  // producer.kernelId, never a bare caller-asserted signer.
+  describe("F2 — the kernel registry binding is authenticated, keyed by producer.kernelId", () => {
+    it("refuses a kernelId renamed to another kernel's name when the registry maps it to a DIFFERENT key", async () => {
+      // The reviewer's exact reproduction: kernelId swapped to "kernel-victim"
+      // while the attacker's own D2 key is presented as if it were the answer.
+      // D2's signature verifies fine (it is real, by the attacker's own key) —
+      // the registry lookup, keyed by kernelId, is what must refuse this.
+      const victimKey = `0x${"ef".repeat(32)}`;
+      const b = clone(MINTABLE);
+      b.producer.kernelId = "kernel-victim";
+      const registry = registryFromMap({ "kernel-victim": { algorithm: "ed25519", publicKey: victimKey } });
+      await expect(assertMintablePackage(b, [D1, D2], registry)).rejects.toThrow(PackageNotMintableError);
+    });
+
+    it("refuses when the registry has no entry at all for the claimed kernelId", async () => {
+      const registry = registryFromMap({}); // no kernel registered anywhere
+      await expect(assertMintablePackage(MINTABLE, [D1, D2], registry)).rejects.toThrow(PackageNotMintableError);
+    });
   });
 });
 
@@ -707,7 +759,7 @@ describe("read-once: every input field is read exactly once and only the copies 
     scheme: "ed25519-raw32",
     sig: `0x${signWithPrivateKeyHex(DEVICE_SEED_R, MINT_BODY_HASH_RAW32)!}`,
   };
-  const REGISTRY_ED = { algorithm: "ed25519", publicKey: DEVICE_PUB_R };
+  const REGISTRY_ED = { algorithm: "ed25519" as const, publicKey: DEVICE_PUB_R };
 
   it("validatePackageBody reads each of the body's fields exactly once and returns a copy the caller cannot reach", () => {
     const counts: Counts = {};
@@ -778,17 +830,18 @@ describe("read-once: every input field is read exactly once and only the copies 
     expect(out).toEqual(expected);
   });
 
-  it("assertMintablePackage reads each body field, signature field, list slot and registry field once", () => {
-    for (const registry of [REGISTRY_ED, { algorithm: "secp256k1", address: D1r.signer }]) {
+  it("assertMintablePackage reads each body field, signature field, list slot and registry field once", async () => {
+    for (const registry of [REGISTRY_ED, { algorithm: "secp256k1" as const, address: D1r.signer }]) {
       const body: Counts = {};
       const sigCounts: Counts = {};
       const arrayReads: Counts = {};
       const regCounts: Counts = {};
+      const wrappedRegistry = counting(registry, regCounts, "$reg");
       try {
-        assertMintablePackage(
+        await assertMintablePackage(
           counting(MINT_BODY, body, "$"),
           countingArray([counting(D1r, sigCounts, "$d1"), counting(D2r, sigCounts, "$d2")], arrayReads),
-          counting(registry, regCounts, "$reg"),
+          { signerForKernel: async () => wrappedRegistry as KernelRegistrySigner },
         );
       } catch {
         // the secp256k1 registry is refused (it is not the device key); the reads still must be single
@@ -800,21 +853,22 @@ describe("read-once: every input field is read exactly once and only the copies 
     }
   });
 
-  it("assertMintablePackage over fields that answer differently after the first read returns exactly what it returns over the first answers", () => {
-    const first = assertMintablePackage(MINT_BODY, [D1r, D2r], REGISTRY_ED);
+  it("assertMintablePackage over fields that answer differently after the first read returns exactly what it returns over the first answers", async () => {
+    const first = await assertMintablePackage(MINT_BODY, [D1r, D2r], registryReturning(REGISTRY_ED));
     const flipSig = flipLaterReads([".signer", ".sig"]);
-    const flipped = assertMintablePackage(
+    const flippedRegistry = counting(REGISTRY_ED, {}, "$reg", flipLaterReads([".publicKey"]));
+    const flipped = await assertMintablePackage(
       counting(MINT_BODY, {}, "$", flipLaterReads([".unitBinding.escrow", ".producer.kernelId", ".nonce"])),
       [counting(D1r, {}, "$d1", flipSig), counting(D2r, {}, "$d2", flipSig)],
-      counting(REGISTRY_ED, {}, "$reg", flipLaterReads([".publicKey"])),
+      { signerForKernel: async () => flippedRegistry as KernelRegistrySigner },
     );
     expect(flipped).toEqual(first);
   });
 
-  it("assertMintablePackage returns copies: changing the caller's inputs after the call does not reach the result", () => {
+  it("assertMintablePackage returns copies: changing the caller's inputs after the call does not reach the result", async () => {
     const body = clone(MINT_BODY);
     const sigs = [clone(D1r), clone(D2r)];
-    const out = assertMintablePackage(body, sigs, REGISTRY_ED);
+    const out = await assertMintablePackage(body, sigs, registryReturning(REGISTRY_ED));
     const snapshot = JSON.stringify(out);
     body.unitBinding.chainId = "1";
     body.producer.kernelId = "changed";
@@ -823,10 +877,17 @@ describe("read-once: every input field is read exactly once and only the copies 
     expect(JSON.stringify(out)).toBe(snapshot);
   });
 
-  it("a scheme named like an Object.prototype key is a typed refusal, not a crash", () => {
+  it("a scheme named like an Object.prototype key is a typed refusal, not a crash", async () => {
     for (const scheme of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
-      expect(() => assertMintablePackage(MINT_BODY, [{ ...D1r, scheme }, D2r], REGISTRY_ED), scheme).toThrow(PackageNotMintableError);
-      expect(() => assertMintablePackage(MINT_BODY, [{ ...D1r, scheme }, D2r], REGISTRY_ED), scheme).toThrow(/\.scheme: must be/);
+      const registry = registryReturning(REGISTRY_ED);
+      await expect(
+        assertMintablePackage(MINT_BODY, [{ ...D1r, scheme }, D2r], registry),
+        scheme,
+      ).rejects.toThrow(PackageNotMintableError);
+      await expect(
+        assertMintablePackage(MINT_BODY, [{ ...D1r, scheme }, D2r], registry),
+        scheme,
+      ).rejects.toThrow(/\.scheme: must be/);
     }
   });
 });

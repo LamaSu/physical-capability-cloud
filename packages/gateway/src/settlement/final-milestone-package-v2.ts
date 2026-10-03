@@ -640,6 +640,33 @@ function copyRegisteredSigner(v: unknown): unknown {
 }
 
 /**
+ * The shape `principalFromRegistry` / `normalizeRegisteredSigner` (`@pcc/spec`)
+ * accept. Not re-exported from the package root, so this mirrors it locally;
+ * `principalFromRegistry` is the actual authority on acceptable spellings, so an
+ * imprecise local type costs nothing at runtime — it only narrows what callers
+ * of `KernelRegistryReader` are nudged to return.
+ */
+export type KernelRegistrySigner =
+  | { algorithm: "ed25519"; publicKey: string }
+  | { algorithm: "secp256k1"; address: string };
+
+/**
+ * F2: the kernel registry, injected. `assertMintablePackage` calls
+ * `signerForKernel` with the VALIDATED `producer.kernelId` (never a caller
+ * claim) and requires the D2 key to equal what it returns. `null` means "the
+ * registry holds no signer for this kernel" and is refused, never treated as
+ * "no binding required" — a bare signer argument must never authorize itself.
+ * The reader's authority is the CALLER's: the gateway's own kernel registry, or
+ * a pinned snapshot verified with #416's `ident.registered_key`. This guard
+ * trusts whatever it is given here exactly once (read-once, below) and no more.
+ */
+export interface KernelRegistryReader {
+  signerForKernel(
+    kernelId: string,
+  ): KernelRegistrySigner | null | Promise<KernelRegistrySigner | null>;
+}
+
+/**
  * Refuse anything a real mint must never produce, before any digest exists. The
  * digest path (`canonicalSignatures`) already refuses what the oracle's ingestion
  * would repair (duplicates, case, extra keys); this is the stricter gate for a
@@ -655,8 +682,9 @@ function copyRegisteredSigner(v: unknown): unknown {
  *    and bound to those signatures: operatorPrincipalId is
  *    eip155:<unit chainId>:<the D1 signer>, and devicePrincipalId is
  *    ed25519:<the D2 signer>, which must be the key the kernel registry holds
- *    for producer.kernelId (`registeredDeviceSigner`) and never a key whose
- *    secret is public.
+ *    for the VALIDATED producer.kernelId (F2: looked up through
+ *    `KernelRegistryReader`, never a bare caller-asserted signer) and never a
+ *    key whose secret is public.
  *
  * READ ONCE. Every input is read exactly once into a local copy (the body through
  * `validatePackageBody`'s returned copy, each signature entry's fields and the
@@ -665,14 +693,16 @@ function copyRegisteredSigner(v: unknown): unknown {
  * hashed. No getter's second answer, and no change the caller makes after a
  * check, can make what was validated differ from what is returned.
  *
+ * The registry lookup is async (a real registry is an I/O read), so this
+ * function is too.
+ *
  * Returns the validated body and the canonical signatures to hash.
  */
-export function assertMintablePackage(
+export async function assertMintablePackage(
   body: unknown,
   sigs: unknown,
-  /** The kernel registry's signer for `producer.kernelId`, as the registry returns it. */
-  registeredDeviceSigner: unknown,
-): { body: FinalMilestonePackageV2Body; signatures: PackageSignature[] } {
+  registry: KernelRegistryReader,
+): Promise<{ body: FinalMilestonePackageV2Body; signatures: PackageSignature[] }> {
   const valid = validatePackageBody(body);
   if (isInterimNonce(valid)) {
     throw new PackageNotMintableError(
@@ -733,7 +763,19 @@ export function assertMintablePackage(
     );
   }
 
-  if (principalFromRegistry(copyRegisteredSigner(registeredDeviceSigner), chainId) !== valid.producer.devicePrincipalId) {
+  // F2: the registry binding is authenticated, keyed by the VALIDATED kernel
+  // id — never a caller-asserted signer with no registry lookup at all.
+  const registeredSigner = await registry.signerForKernel(valid.producer.kernelId);
+  if (registeredSigner === null || registeredSigner === undefined) {
+    throw new PackageNotMintableError(
+      "$.producer.kernelId",
+      "the kernel registry holds no signer for this kernel id",
+    );
+  }
+  if (
+    principalFromRegistry(copyRegisteredSigner(registeredSigner), chainId) !==
+    valid.producer.devicePrincipalId
+  ) {
     throw new PackageNotMintableError(
       "$.producer.devicePrincipalId",
       "is not the key the kernel registry holds for producer.kernelId",
