@@ -10,6 +10,7 @@ import { compileEconomics } from "../economics/compile.js";
 import { exampleSparePrinter } from "../economics/examples.js";
 import { domainHash } from "../economics/hash.js";
 import {
+  KIT_LINEAGE_WEIGHTS,
   KIT_ROYALTY_ROLE,
   LICENSE_DOMAIN,
   computeKitSplit,
@@ -127,25 +128,76 @@ describe("computeKitSplit: what a buyer funds, exactly as settlement pays it", (
     expect(computeKitSplit({ ...base, lineage: [] })).toMatchObject({ ok: false });
   });
 
-  it("over 200 quotes, fees, rates and lineages: every unit conserves, and the seam accepts the gross and refuses one less", () => {
-    let seed = 7;
-    const next = (n: number) => {
-      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
-      return seed % n;
+  it("every lineage, fee and rate, at three quotes each (270 cases): every unit conserves, and the seam accepts the gross and refuses one less", () => {
+    // BigInt arithmetic: a Number LCG overflows 2^53 and degenerates, which left two of the six lineages
+    // untested at 320687fc (astra EC4 L2). Every combination now runs explicitly.
+    let seed = 7n;
+    const nextQuote = () => {
+      seed = (seed * 6_364_136_223_846_793_005n + 1_442_695_040_888_963_407n) % 2n ** 64n;
+      return 5n + ((seed >> 33n) % 1_000_000_000n);
     };
     const lineages = [["ann"], ["bob", "ann"], ["carol", "bob", "ann"], ["dave", "carol", "bob", "ann"], ["ann", "bob", "ann"], ["ann", "ann"]];
-    for (let i = 0; i < 200; i++) {
-      const quote = BigInt(5 + next(1_000_000_000));
-      const feeBps = [0, 235, 1000][next(3)]!;
-      const licenseBps = [1, 50, 100, 150, 1000][next(5)]!;
-      const lineage = lineages[next(lineages.length)]!;
-      const s = computeKitSplit({ quoteMinor: quote, currency: USDC, feeBps, licenseBps, lineage });
-      if (!s.ok) throw new Error(`${quote} ${feeBps} ${licenseBps}: ${s.reason}`);
-      const g = BigInt(s.grossMinor);
-      expect(g).toBe(BigInt(s.feeMinor) + BigInt(s.royaltyMinor) + BigInt(s.operatorMinor));
-      expect(s.shares.reduce((t, x) => t + BigInt(x.amountMinor), 0n)).toBe(BigInt(s.royaltyMinor));
-      expect(seam(g, quote, { feeBps, licenseBps, lineage })).toBe("ok");
-      expect(seam(g - 1n, quote, { feeBps, licenseBps, lineage })).toMatch(/OPERATOR_BELOW_QUOTE|QUOTE_NOT_COVERED/);
-    }
+    let cases = 0;
+    const ran = new Set<number>();
+    lineages.forEach((lineage, li) => {
+      for (const feeBps of [0, 235, 1000]) {
+        for (const licenseBps of [1, 50, 100, 150, 1000]) {
+          for (let k = 0; k < 3; k++) {
+            const quote = nextQuote();
+            const s = computeKitSplit({ quoteMinor: quote, currency: USDC, feeBps, licenseBps, lineage });
+            if (!s.ok) throw new Error(`${quote} ${feeBps} ${licenseBps}: ${s.reason}`);
+            const g = BigInt(s.grossMinor);
+            expect(g).toBe(BigInt(s.feeMinor) + BigInt(s.royaltyMinor) + BigInt(s.operatorMinor));
+            expect(s.shares.reduce((t, x) => t + BigInt(x.amountMinor), 0n)).toBe(BigInt(s.royaltyMinor));
+            expect(seam(g, quote, { feeBps, licenseBps, lineage })).toBe("ok");
+            expect(seam(g - 1n, quote, { feeBps, licenseBps, lineage })).toMatch(/OPERATOR_BELOW_QUOTE|QUOTE_NOT_COVERED/);
+            cases++;
+            ran.add(li);
+          }
+        }
+      }
+    });
+    expect(cases).toBe(270);
+    expect(ran.size).toBe(lineages.length);
+  });
+});
+
+describe("astra EC4 (#492 round 1 at 320687fc)", () => {
+  const base = { quoteMinor: "25000000", currency: USDC, feeBps: 235, licenseBps: 50 };
+
+  it("M1: the lineage is read once: a getter that changes its answer cannot misattribute the royalty", () => {
+    let reads = 0;
+    const r = computeKitSplit({
+      quoteMinor: 5n,
+      currency: USDC,
+      feeBps: 0,
+      licenseBps: 1000,
+      get lineage() {
+        return ++reads <= 6 ? ["ann"] : ["bob"];
+      },
+    });
+    expect(r.ok ? r.shares.map((x) => x.party) : "refused").toBe("refused");
+  });
+
+  it("M1: a sparse or non-string lineage is refused, never thrown", () => {
+    expect(() => computeKitSplit({ ...base, lineage: new Array(1) })).not.toThrow();
+    expect(computeKitSplit({ ...base, lineage: new Array(1) })).toMatchObject({ ok: false });
+    expect(computeKitSplit({ ...base, lineage: [42 as unknown as string] })).toMatchObject({ ok: false });
+    expect(() => kitLineageDistribution(new Array(1))).toThrow(RangeError);
+  });
+
+  it("M2: the lineage weights cannot be changed at runtime", () => {
+    expect(() => {
+      (KIT_LINEAGE_WEIGHTS as number[])[0] = 8;
+    }).toThrow(TypeError);
+    expect(kitLineageDistribution(["carol", "bob", "ann"]).map((d) => d.weight)).toEqual([1, 2, 4]);
+  });
+
+  it("M3: kitSplitAgreement refuses a free kit with a RangeError, never a crash", () => {
+    expect(() => kitSplitAgreement(100n, { currency: USDC, feeBps: 235, licenseBps: 0, lineage: ["ann"] })).toThrow(RangeError);
+  });
+
+  it("L1: a quote must be a canonical decimal amount", () => {
+    for (const q of ["0x10", "+16", " 16 ", "016", "1e7"]) expect(computeKitSplit({ ...base, quoteMinor: q, lineage: ["ann"] }), q).toMatchObject({ ok: false });
   });
 });
