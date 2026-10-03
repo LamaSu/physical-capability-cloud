@@ -33,6 +33,9 @@ export * from "./signing-preimage.js";
 // evidenceLevelsOfEvents is the per-event level (bundle index, event index,
 // level); evidenceLevelOfBundles is the maximum over it.
 export * from "./evidence-level.js";
+// summarizeEvidence — EvidenceSummaryV1, the evidence read model for product
+// surfaces: explicit enums so no UI reads "verified" from "evidence exists".
+export * from "./evidence-summary.js";
 export * from "./eligibility.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
