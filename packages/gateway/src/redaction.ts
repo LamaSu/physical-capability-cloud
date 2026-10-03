@@ -40,16 +40,19 @@ const PATTERNS: Array<[RegExp, string]> = [
 ];
 
 // A hex key printed in pieces (N89): groups of 2+ hex digits, each optionally
-// 0x-prefixed, split by any run of whitespace (line breaks included), commas,
-// colons or JSON-escaped line breaks: a wrapped or spaced key, a hexdump, a Buffer
-// printout, a byte list. Redacted when the groups hold 64 or more digits in all, at
-// least one of them a letter a-f, so a list of decimal numbers survives. A group is
-// a whole word: it never starts or ends inside one ("sha256:" keeps its "a256").
-const HEX_GROUPS = /(?<=^|[^0-9A-Za-z_]|\\[nrt])(?:0[xX])?[0-9a-fA-F]{2,}(?![0-9A-Za-z_])(?:(?:[\s,:]|\\[nrt])+(?:0[xX])?[0-9a-fA-F]{2,}(?![0-9A-Za-z_]))+/g;
+// 0x-prefixed, split by any run of characters that are not letters, digits or "_"
+// (whitespace, line breaks, commas, colons, quotes, "+", "|", brackets, …) or by
+// JSON escapes: a wrapped or spaced key, a hexdump, a Buffer printout, a byte list,
+// a code concatenation. A group is a whole word, so "sha256:" keeps its "a256" and
+// "cafeteria" stays whole. Redacted at 56 or more digits in all (a 32-byte key less
+// one or two groups glued to a word in front), with a letter a-f, so a list of
+// decimal numbers survives. The 48-digit floor (6 bytes) keeps a short id list
+// through while still catching a 32-byte key that lost a group or two to a glued word.
+const HEX_GROUPS = /(?<=^|[^0-9A-Za-z_]|\\[nrt])(?:0[xX])?[0-9a-fA-F]{2,}(?![0-9A-Za-z_])(?:(?:\\[nrt]|[^0-9A-Za-z_])+(?:0[xX])?[0-9a-fA-F]{2,}(?![0-9A-Za-z_]))+/g;
 
 function redactHexGroups(run: string): string {
   const digits = run.replace(/0[xX](?=[0-9a-fA-F])/g, "").replace(/\\[rn]|[^0-9a-fA-F]/g, "");
-  return digits.length >= 64 && /[a-fA-F]/.test(digits) ? "[redacted-hex]" : run;
+  return digits.length >= 48 && /[a-fA-F]/.test(digits) ? "[redacted-hex]" : run;
 }
 
 // A PKCS#8 private key in base64 or base64url, whole or wrapped (N89): what
@@ -57,43 +60,39 @@ function redactHexGroups(run: string): string {
 // decoding its DER structure (a SEQUENCE holding version 0 or 1, the algorithm
 // SEQUENCE with an OID, then the key's OCTET STRING, all inside the declared
 // length), not by how it looks, so a public key (SPKI has no version) and other
-// base64 survive. Whitespace never shields it: the detector reads a stream of the
-// text's base64 characters in which any run of spaces, tabs, line breaks or JSON
-// escapes (\n \r \t) between them is skipped (N89 round 3), and every "M" in that
-// stream is a candidate. The redacted span runs as far as the DER length says.
+// base64 survive. No separator shields it: the detector reads a stream of the
+// text's base64 characters in which EVERY other character is skipped (whitespace,
+// line breaks, JSON escapes, quotes, "|", brackets, …), and a "+" between quotes is
+// skipped as a code concatenation (N89 rounds 3-4). Every "M" in that stream is a
+// candidate; the redacted span runs as far as the DER length says.
 function isBase64Char(c: string | undefined): boolean {
   return c !== undefined && /[A-Za-z0-9+/_-]/.test(c);
 }
 
-/** The length of the whitespace unit at `i` (a space, tab or line break, or a JSON escape \n \r \t), or 0. */
-function gapLength(s: string, i: number): number {
-  const c = s[i];
-  if (c === " " || c === "\t" || c === "\n" || c === "\r") return 1;
-  if (c === "\\" && (s[i + 1] === "n" || s[i + 1] === "r" || s[i + 1] === "t")) return 2;
-  return 0;
+/** Whether the "+" at `i` joins two quoted strings ("…" + "…"): a quote is the nearest non-space character on both sides. */
+function isConcatenationPlus(s: string, i: number): boolean {
+  const isQuote = (c: string | undefined) => c === '"' || c === "'" || c === "`";
+  let l = i - 1;
+  for (let k = 0; k < 16 && l >= 0 && /\s/.test(s[l]!); k++) l--;
+  let r = i + 1;
+  for (let k = 0; k < 16 && r < s.length && /\s/.test(s[r]!); k++) r++;
+  return isQuote(s[l]) && isQuote(s[r]);
 }
 
-/** The text's base64 characters with their offsets; runs are split by "\0" wherever a non-base64, non-whitespace character sits. */
+/** The text's base64 characters with their offsets, every other character skipped. */
 function base64Stream(s: string): { chars: string; offsets: number[] } {
   let chars = "";
   const offsets: number[] = [];
-  for (let i = 0; i < s.length; ) {
-    if (isBase64Char(s[i])) {
-      chars += s[i];
-      offsets.push(i);
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    // A JSON escape (\\n \\r \\t): its letter is not data.
+    if (c === "\\" && (s[i + 1] === "n" || s[i + 1] === "r" || s[i + 1] === "t")) {
       i++;
       continue;
     }
-    const gap = gapLength(s, i);
-    if (gap > 0) {
-      i += gap;
-      continue;
-    }
-    if (chars.length > 0 && chars[chars.length - 1] !== "\0") {
-      chars += "\0";
-      offsets.push(-1);
-    }
-    i++;
+    if (!isBase64Char(c) || (c === "+" && isConcatenationPlus(s, i))) continue;
+    chars += c;
+    offsets.push(i);
   }
   return { chars, offsets };
 }
@@ -102,42 +101,47 @@ function decodeBase64(chars: string): Buffer {
   return Buffer.from(chars.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
 
+/**
+ * A DER length at `b[i]`: short form, or 0x81/0x82 in minimal form only (0x81 for
+ * 0x80-0xff, 0x82 for 0x100-0xffff). Returns [header bytes, length] or null.
+ */
+function derLength(b: Buffer, i: number): [number, number] | null {
+  const first = b[i];
+  if (first === undefined) return null;
+  if (first < 0x80) return [1, first];
+  if (first === 0x81 && b[i + 1] !== undefined && b[i + 1]! >= 0x80) return [2, b[i + 1]!];
+  if (first === 0x82 && b[i + 2] !== undefined && ((b[i + 1]! << 8) | b[i + 2]!) >= 0x100) return [3, (b[i + 1]! << 8) | b[i + 2]!];
+  return null;
+}
+
 /** The DER byte length of a PKCS#8 PrivateKeyInfo starting at `chars[at]`, or null. */
 function pkcs8Length(chars: string, at: number): number | null {
-  const run = (n: number) => {
-    const piece = chars.slice(at, at + n);
-    const cut = piece.indexOf("\0");
-    return cut < 0 ? piece : piece.slice(0, cut);
-  };
-  const head = run(16);
+  const head = chars.slice(at, at + 16);
   // 0x30 encodes as "M", and a length byte below 0x80 or 0x81/0x82 puts the next
   // character in A-P (index < 16): a cheap filter before decoding.
   if (head.length < 16 || !/^M[A-P]/.test(head)) return null;
   let b = decodeBase64(head);
-  let hdr: number;
-  let len: number;
-  if (b[1]! < 0x80) [hdr, len] = [2, b[1]!];
-  else if (b[1] === 0x81) [hdr, len] = [3, b[2]!];
-  else if (b[1] === 0x82) [hdr, len] = [4, (b[2]! << 8) | b[3]!];
-  else return null;
+  const outer = derLength(b, 1);
+  if (outer === null) return null;
+  const hdr = 1 + outer[0];
+  const len = outer[1];
   // version INTEGER 0 or 1, then the algorithm SEQUENCE, which opens with an OID
   if (b[hdr] !== 0x02 || b[hdr + 1] !== 0x01 || (b[hdr + 2] !== 0x00 && b[hdr + 2] !== 0x01) || b[hdr + 3] !== 0x30) return null;
   const algorithmLength = b[hdr + 4]!;
   if (algorithmLength < 2 || algorithmLength >= 0x80) return null;
   const octetAt = hdr + 5 + algorithmLength;
-  // the key's OCTET STRING follows the algorithm SEQUENCE
   const need = octetAt + 4;
-  const more = run(Math.ceil(need / 3) * 4);
+  const more = chars.slice(at, at + Math.ceil(need / 3) * 4);
   if (more.length * 3 < need * 4) return null;
   b = decodeBase64(more);
-  if (b[hdr + 5] !== 0x06 || b[octetAt] !== 0x04) return null;
-  let octetTotal: number;
-  if (b[octetAt + 1]! < 0x80) octetTotal = 2 + b[octetAt + 1]!;
-  else if (b[octetAt + 1] === 0x81) octetTotal = 3 + b[octetAt + 2]!;
-  else if (b[octetAt + 1] === 0x82) octetTotal = 4 + ((b[octetAt + 2]! << 8) | b[octetAt + 3]!);
-  else return null;
+  // the OID's own length must fit inside the AlgorithmIdentifier
+  if (b[hdr + 5] !== 0x06 || b[hdr + 6]! >= 0x80 || 2 + b[hdr + 6]! > algorithmLength) return null;
+  // the key's OCTET STRING follows the algorithm SEQUENCE
+  if (b[octetAt] !== 0x04) return null;
+  const octet = derLength(b, octetAt + 1);
+  if (octet === null) return null;
   // everything must sit inside the declared outer length
-  if (octetAt - hdr + octetTotal > len) return null;
+  if (octetAt - hdr + 1 + octet[0] + octet[1] > len) return null;
   return hdr + len;
 }
 
@@ -146,12 +150,10 @@ function redactPkcs8Keys(s: string): string {
   let out = "";
   let last = 0;
   for (let k = chars.indexOf("M"); k >= 0; k = chars.indexOf("M", k + 1)) {
-    const derLength = pkcs8Length(chars, k);
-    if (derLength === null) continue;
-    let count = Math.ceil((derLength * 4) / 3);
-    const cut = chars.indexOf("\0", k);
-    const runEnd = cut >= 0 ? cut : chars.length;
-    if (k + count > runEnd) count = runEnd - k; // a truncated key: what is there goes
+    const keyLength = pkcs8Length(chars, k);
+    if (keyLength === null) continue;
+    let count = Math.ceil((keyLength * 4) / 3);
+    if (k + count > chars.length) count = chars.length - k; // a truncated key: what is there goes
     let end = offsets[k + count - 1]! + 1;
     for (let p = 0; p < 2 && s[end] === "="; p++) end++;
     out += s.slice(last, offsets[k]) + "[redacted-private-key]";

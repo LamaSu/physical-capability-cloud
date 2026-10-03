@@ -360,6 +360,79 @@ describe("redactSecrets: private keys in the forms /api/auth/provision returns (
     expect(redactSecrets("Password: must be at least 12 characters")).toBe("Password: [redacted]");
   });
 
+  // ── Round 4 (pp-n89-478-redaction-r4-af5d96da) ──────────────────────────────
+
+  it("redacts a PKCS#8 key split by any non-base64 character (round 4 C1)", () => {
+    for (const sep of ["|", ",", ";", "#", "] [", ") (", " | ", " "]) {
+      const input = `key=${b64.slice(0, 8)}${sep}${b64.slice(8, 30)}${sep}${b64.slice(30)}`;
+      expect(leaks(redactSecrets(input), b64)).toBe(false);
+    }
+  });
+
+  it("redacts a PKCS#8 key split across quoted code concatenations (round 4 C2)", () => {
+    const [p1, p2, p3] = [b64.slice(0, 8), b64.slice(8, 40), b64.slice(40)];
+    for (const input of [
+      `key="${p1}" + "${p2}" + "${p3}"`,
+      `key='${p1}' + '${p2}' + '${p3}'`,
+      `key = "${p1}"\n    + "${p2}"\n    + "${p3}"`,
+      `key = ("${p1}" "${p2}" "${p3}")`,
+      `key := '${p1}' || '${p2}' || '${p3}'`,
+      `$key = "${p1}" . "${p2}" . "${p3}";`,
+    ]) {
+      expect(leaks(redactSecrets(input), b64)).toBe(false);
+    }
+  });
+
+  it("joins two quoted base64 runs across + only when quotes flank it (round 4 C2)", () => {
+    // Both sides quoted: the key splits across the concatenation and is caught.
+    const [p1, p2] = [b64.slice(0, 24), b64.slice(24)];
+    expect(leaks(redactSecrets(`k = "${p1}" + "${p2}"`), b64)).toBe(false);
+    // A + flanked by a quote and a plain word is ordinary prose, left intact.
+    expect(redactSecrets('comment: "looks good" + ship it')).toBe('comment: "looks good" + ship it');
+  });
+
+  it("keeps a '+' that belongs to the key's own data", () => {
+    let ed2 = generateKeyPairSync("ed25519");
+    while (!/\+/.test(pkcs8(ed2.privateKey).toString("base64"))) ed2 = generateKeyPairSync("ed25519");
+    const withPlus = pkcs8(ed2.privateKey).toString("base64");
+    for (const input of [`k=${withPlus}`, `k="${withPlus}"`, `k=${wrap(withPlus, 16)}`]) {
+      expect(leaks(redactSecrets(input), withPlus)).toBe(false);
+    }
+  });
+
+  it("redacts a hex key split by any punctuation, or with its first group glued to a word (round 4 C3)", () => {
+    const bytes = hexKey.match(/.{2}/g)!;
+    for (const input of [
+      `key=x${bytes[0]} ${bytes.slice(1).join(" ")}`,
+      `key=${bytes.join("|")}`,
+      `key="${hexKey.slice(0, 32)}" + "${hexKey.slice(32)}"`,
+      `key=(${hexKey.match(/.{1,8}/g)!.join(")(")})`,
+      // the first group glued to a word (as the reviewer's case): 62 digits left, still caught
+      `key=x${hexKey.match(/.{2}/g)![0]} ${hexKey.match(/.{2}/g)!.slice(1).join(" ")}`,
+    ]) {
+      expect(leaks(redactSecrets(input), hexKey)).toBe(false);
+    }
+  });
+
+  it("redacts 48+ hex digits but keeps a shorter id list (round 4 floor)", () => {
+    const fifty = "9f".repeat(25); // 50 digits, with letters
+    expect(redactSecrets(`v=${fifty.match(/.{1,8}/g)!.join(" ")}`)).toContain("[redacted-hex]");
+    const forty = "9f".repeat(20); // 40 digits
+    expect(redactSecrets(`v=${forty.match(/.{1,8}/g)!.join(" ")}`)).not.toContain("[redacted-hex]");
+    expect(redactSecrets("ids 1a2b 3c4d 5e6f 7a8b")).toBe("ids 1a2b 3c4d 5e6f 7a8b");
+  });
+
+  it("rejects an OID longer than its AlgorithmIdentifier and non-minimal DER lengths (round 4 M2)", () => {
+    const der = (hex: string) => Buffer.from(hex + "41414141", "hex").toString("base64");
+    for (const keep of [
+      "MAwCAQAwBQZ/K2VwBABBQUFB", // OID length 0x7f
+      der("30810c020100300506032b65700400"), // outer length 0x0c written as 0x81 0x0c
+      der("300d020100300506032b6570048100"), // OCTET length 0 written as 0x81 0x00
+    ]) {
+      expect(redactSecrets(keep)).toBe(keep);
+    }
+  });
+
   it("stays linear on hostile input", () => {
     const hostile = [
       '"password": "' + '\\"'.repeat(30_000),
@@ -380,6 +453,8 @@ describe("redactSecrets: private keys in the forms /api/auth/provision returns (
       ("M" + " ".repeat(1_000)).repeat(60),
       ("ab" + " ".repeat(1_000) + "x").repeat(60),
       ("9f:".repeat(30) + "zz\n").repeat(600),
+      "MAwCAQAwBQYDK2VwBABBQUFB".repeat(2_666),
+      ('"ab" + '.repeat(8) + "x\n").repeat(800),
     ];
     for (const input of hostile) {
       const t0 = performance.now();
