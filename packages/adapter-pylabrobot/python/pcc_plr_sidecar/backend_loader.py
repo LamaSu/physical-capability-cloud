@@ -108,6 +108,11 @@ class BackendHandle:
     execution_mode: str = "stub"
     # The largest volume one aspirate or dispense may move, in uL.
     max_volume_ul: float = DEFAULT_MAX_VOLUME_UL
+    # R39 CRIT3: true for ot2 and any future non-simulator backend. PLR's tip
+    # and volume tracking switches are process-global, so this flag is how the
+    # loader knows, across every OTHER handle it holds, whether weakening
+    # tracking is safe right now (see BackendLoader.load / _configure_tracking).
+    hardware_capable: bool = False
     # R39 CRIT2: one per-device execution lease. ``busy`` + ``busy_job_id`` are
     # the fast synchronous gate `backend.run` and `evidence.startRecording`
     # check before touching anything; ``idle`` is the coordination primitive
@@ -172,10 +177,16 @@ class BackendLoader:
 
         log.info("loading backend %s for device %s", plr_backend, device_id)
         mode = EXECUTION_MODES.get(plr_backend.strip().lower(), "unverified")
-        machine, metadata = await _create_machine(plr_backend, backend_config)
+        # R39 CRIT3: does any OTHER handle already in this process make tracking
+        # hardware-sensitive? If so, this load may not weaken it.
+        other_hardware_loaded = any(h.hardware_capable for h in self._handles.values())
+        machine, metadata, hardware_capable = await _create_machine(
+            plr_backend, backend_config, other_hardware_loaded,
+        )
         handle = BackendHandle(
             plr_backend=plr_backend,
             device_id=device_id,
+            hardware_capable=hardware_capable,
             machine=machine,
             backend_config=dict(backend_config),
             metadata={"loaded_via": "BackendLoader.load", "executionMode": mode, **metadata},
@@ -206,23 +217,30 @@ class BackendLoader:
 
 # ── private — backend instantiation ────────────────────────────────────────
 
-async def _create_machine(plr_backend: str, config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+async def _create_machine(
+    plr_backend: str, config: dict[str, Any], other_hardware_loaded: bool,
+) -> tuple[Any, dict[str, Any], bool]:
     """Dispatch on ``plr_backend`` to a concrete PLR Machine constructor.
 
-    Returns the machine and what the loader learned while building it (for the
-    handle's metadata). Imports are inline + per-branch so the operator only
+    Returns the machine, what the loader learned while building it (for the
+    handle's metadata), and whether this backend is hardware-capable (R39
+    CRIT3 — a non-simulator; drives ``BackendHandle.hardware_capable``, which
+    gates weakening PLR's process-global tracking switches and whether a run
+    re-asserts them). Imports are inline + per-branch so the operator only
     needs the vendor extras they actually use.
     """
     plr_backend = plr_backend.strip().lower()
 
     if plr_backend in ("chatterbox", "chatter"):
-        return _create_chatterbox(config)
+        machine, metadata = _create_chatterbox(config, other_hardware_loaded)
+        return machine, metadata, False
 
     if plr_backend == "stub":
-        return _create_stub(config), {}
+        return _create_stub(config), {}, False
 
     if plr_backend == "ot2":
-        return await _create_ot2(config)
+        machine, metadata = await _create_ot2(config, other_hardware_loaded)
+        return machine, metadata, True
 
     raise ValueError(
         f"unknown plrBackend: {plr_backend!r}. Phase 1 supports: chatterbox, ot2, stub",
@@ -384,11 +402,16 @@ def _load_deck(config: dict[str, Any], expected_cls: type, root_types: frozenset
     return deck, stripped
 
 
-def _configure_tracking(config: dict[str, Any], hardware: bool) -> dict[str, bool]:
+def _configure_tracking(
+    config: dict[str, Any], hardware: bool, other_hardware_loaded: bool,
+) -> dict[str, bool]:
     """Switch on PLR's tip and volume tracking (process-wide; one sidecar per device).
 
     On hardware both are required. On the simulator either may be switched off
-    explicitly with ``backendConfig.tracking = {"tips": false}`` and the like.
+    explicitly with ``backendConfig.tracking = {"tips": false}`` and the like --
+    but never while another hardware-capable handle is already loaded in this
+    process (R39 CRIT3): the switches are process-global, so a simulator
+    weakening them would also weaken them for that other handle's hardware.
     """
     from pylabrobot.resources import set_tip_tracking, set_volume_tracking
 
@@ -400,9 +423,41 @@ def _configure_tracking(config: dict[str, Any], hardware: bool) -> dict[str, boo
     tracking = {"tips": requested.get("tips", True), "volume": requested.get("volume", True)}
     if hardware and not all(tracking.values()):
         raise ValueError("tip and volume tracking cannot be switched off on a hardware backend")
+    if not all(tracking.values()) and other_hardware_loaded:
+        raise ValueError(
+            "tip and volume tracking cannot be weakened while a hardware-capable "
+            "backend is already loaded in this process",
+        )
     set_tip_tracking(tracking["tips"])
     set_volume_tracking(tracking["volume"])
     return tracking
+
+
+def reassert_tracking(handle: "BackendHandle") -> None:
+    """R39 CRIT3: immediately before every non-simulated run, re-establish PLR's
+    tip and volume tracking ON and read it back. PLR's tracking switches are
+    process-global, so a simulator loaded (or reloaded) after this handle could
+    have weakened them; re-asserting before every hardware-capable run closes
+    that window instead of trusting state set once at load time. If tracking
+    can't be verified ON, the run is refused rather than proceeding unverified.
+    No-op for simulators and the stub (``hardware_capable`` is False for both).
+    """
+    if not handle.hardware_capable:
+        return
+    from pylabrobot.resources import (
+        does_tip_tracking,
+        does_volume_tracking,
+        set_tip_tracking,
+        set_volume_tracking,
+    )
+
+    set_tip_tracking(True)
+    set_volume_tracking(True)
+    if not (does_tip_tracking() and does_volume_tracking()):
+        raise RuntimeError(
+            "PLR tip/volume tracking could not be verified ON immediately before "
+            "a hardware-capable run; refusing to proceed unverified",
+        )
 
 
 def _declare_liquids(deck: Any, config: dict[str, Any]) -> int:
@@ -433,7 +488,7 @@ def _declare_liquids(deck: Any, config: dict[str, Any]) -> int:
     return count
 
 
-def _create_chatterbox(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+def _create_chatterbox(config: dict[str, Any], other_hardware_loaded: bool) -> tuple[Any, dict[str, Any]]:
     """PLR's ``LiquidHandlerChatterboxBackend`` over the declared deck.
 
     ``ChatterboxBackend`` does not exist in pylabrobot 0.2.2, and
@@ -448,7 +503,7 @@ def _create_chatterbox(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     if not isinstance(num_channels, int) or isinstance(num_channels, bool) or not 1 <= num_channels <= 96:
         raise ValueError("backendConfig.numChannels must be an integer from 1 to 96")
     _max_volume(config)
-    tracking = _configure_tracking(config, hardware=False)
+    tracking = _configure_tracking(config, hardware=False, other_hardware_loaded=other_hardware_loaded)
     deck, stripped = _load_deck(config, Deck, frozenset({"Deck", "OTDeck"}))
     liquids = _declare_liquids(deck, config)
     machine = LiquidHandler(backend=LiquidHandlerChatterboxBackend(num_channels=num_channels), deck=deck)
@@ -470,7 +525,7 @@ def _parse_ot2_url(url: str) -> tuple[str, int]:
     return host, port
 
 
-async def _create_ot2(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+async def _create_ot2(config: dict[str, Any], other_hardware_loaded: bool) -> tuple[Any, dict[str, Any]]:
     """Opentrons OT-2 via PLR's ``OpentronsOT2Backend(host, port)``.
 
     Requires ``ot2Url`` (for example ``http://192.168.1.50:31950``) and a
@@ -490,7 +545,7 @@ async def _create_ot2(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         log.warning("ot2ApiKey is not used: OpentronsOT2Backend takes no API key")
     host, port = _parse_ot2_url(ot2_url)
     _max_volume(config)
-    tracking = _configure_tracking(config, hardware=True)
+    tracking = _configure_tracking(config, hardware=True, other_hardware_loaded=other_hardware_loaded)
     deck, stripped = _load_deck(config, OTDeck, frozenset({"OTDeck"}))
     liquids = _declare_liquids(deck, config)
     machine = LiquidHandler(backend=OpentronsOT2Backend(host=host, port=port), deck=deck)

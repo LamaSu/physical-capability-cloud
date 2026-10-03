@@ -168,7 +168,11 @@ missing tip, a well without enough liquid or an overfilled well fails inside PLR
 before it becomes a physical action. `initialLiquids` declares what the operator
 loaded, as `{resource: {well: uL}}`. On the simulator, `tracking: {"tips": false}`
 or `{"volume": false}` switches tracking off explicitly; on hardware it can't be
-switched off.
+switched off. **These switches are process-global in PLR** (R39 CRIT3), so a
+simulator may not weaken them while a hardware-capable backend (`ot2`) is
+already loaded in this sidecar process — that `backend.init` is refused — and
+every `ot2` run re-asserts tip/volume tracking ON and reads it back immediately
+before actuating, refusing the run outright if it can't be verified.
 
 Each inline op is one real `LiquidHandler` call. An op may carry only its own
 fields, and anything else (a typo, a test hook such as `__delay_ms`) refuses the

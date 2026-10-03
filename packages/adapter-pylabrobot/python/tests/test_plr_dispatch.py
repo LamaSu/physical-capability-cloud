@@ -569,6 +569,63 @@ async def test_tracking_can_be_switched_off_on_the_simulator_but_not_on_hardware
         assert (await init(s, out, deckLayout=DECK, tracking=bad))["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"]
 
 
+
+# ── R39 CRIT3: PLR tracking is not process-global across hardware + simulators ─
+
+async def test_loading_a_simulator_cannot_weaken_tracking_while_hardware_is_loaded(fake_plr):
+    from pylabrobot.resources import TRACKING
+
+    s, out = _server()
+    await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}})
+    assert TRACKING == {"tips": True, "volume": True}
+
+    weakened = await call(s, out, "backend.init", {"deviceId": "lh1", "plrBackend": "chatterbox", "backendConfig": {
+        "deckLayout": DECK, "tracking": {"volume": False}}})
+    assert weakened["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], weakened
+    assert not s.loader.has("lh1")  # the simulator never finished loading either
+    assert TRACKING == {"tips": True, "volume": True}  # the switches stayed ON
+
+    run = await call(s, out, "backend.run", {
+        "deviceId": "ot", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
+    }, "9")
+    assert run["result"]["ok"] is True, run  # the ot2 run still sees tracking ON
+    assert TRACKING == {"tips": True, "volume": True}
+
+
+async def test_an_ot2_run_reasserts_tracking_even_if_something_flipped_it(fake_plr):
+    from pylabrobot.resources import TRACKING, set_volume_tracking
+
+    s, out = _server()
+    await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}})
+    # Something flipped the global switch between runs (a race, a bug, a future
+    # code path -- CRIT3 doesn't need to know what).
+    set_volume_tracking(False)
+    assert TRACKING["volume"] is False
+
+    run = await call(s, out, "backend.run", {
+        "deviceId": "ot", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
+    }, "9")
+    assert run["result"]["ok"] is True, run
+    assert TRACKING == {"tips": True, "volume": True}  # re-asserted before the run
+
+
+async def test_an_ot2_run_refuses_if_tracking_cannot_be_verified(fake_plr, monkeypatch):
+    import pylabrobot.resources as plr_resources
+
+    s, out = _server()
+    await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}})
+    monkeypatch.setattr(plr_resources, "does_volume_tracking", lambda: False)
+    run = await call(s, out, "backend.run", {
+        "deviceId": "ot", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
+    }, "9")
+    assert run["error"]["code"] == RPC_ERROR_CODES["NON_RETRYABLE"], run
+    ot_machine = s.loader.get("ot").machine
+    assert ot_machine.calls == [("setup",)]  # refused before pick_up_tips ran
+
+
 async def test_initial_liquids_declare_what_the_operator_loaded(fake_plr):
     s, out = _server()
     resp = await init(s, out, deckLayout=DECK, initialLiquids={"src": {"A1": 20}})

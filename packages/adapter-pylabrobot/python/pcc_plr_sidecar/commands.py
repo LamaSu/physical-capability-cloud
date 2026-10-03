@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
-from .backend_loader import is_stub_machine
+from .backend_loader import is_stub_machine, reassert_tracking
 from .dispatcher import RPC_ERROR_CODES, RpcException
 
 if TYPE_CHECKING:
@@ -130,6 +130,15 @@ class Commands:
 
             started_at = time.monotonic()
             if not is_stub_machine(handle.machine):
+                # R39 CRIT3: re-assert + verify tracking immediately before every
+                # non-simulated run (no-op for simulators -- see reassert_tracking).
+                try:
+                    reassert_tracking(handle)
+                except RuntimeError as e:
+                    raise RpcException(
+                        RPC_ERROR_CODES["NON_RETRYABLE"], str(e),
+                        {"jobId": job_id, "deviceId": device_id},
+                    ) from e
                 # R39: a PLR LiquidHandler runs every op for real. The evidence is
                 # what the machine did, never an echo of the request.
                 op_count = await self._run_plr_ops(

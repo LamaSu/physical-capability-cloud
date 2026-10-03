@@ -15,6 +15,14 @@ def set_volume_tracking(enabled):
     TRACKING["volume"] = enabled
 
 
+def does_tip_tracking():
+    return TRACKING.get("tips", True)
+
+
+def does_volume_tracking():
+    return TRACKING.get("volume", True)
+
+
 class ResourceNotFoundError(Exception):
     pass
 
