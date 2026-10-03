@@ -15,7 +15,12 @@ the sdist, and exits 1 if:
   .p12 or .pfx file, or a PEM private-key block. Only the file name is
   printed, never the content;
 - the wheel holds anything outside pcc_node/ and its .dist-info, or the
-  sdist holds a link or a special file.
+  sdist holds a link or a special file;
+- a member name is not a plain relative path (absolute, a backslash, an
+  empty, "." or ".." part), appears twice, or is a ZIP symlink or special
+  file;
+- a member is too large to check (over 5 MiB): it is refused, not skipped.
+Member names are printed escaped, so a name cannot add log lines.
 
 Standard library only, so the check runs before any downloaded code can
 influence it. Usage: check_pcc_node_dist.py --tag pcc-node-v0.1.1 DIST_DIR
@@ -25,6 +30,7 @@ import argparse
 import email.parser
 import pathlib
 import re
+import stat
 import sys
 import tarfile
 import zipfile
@@ -38,9 +44,27 @@ PEM_PRIVATE_KEY = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 MAX_SCAN_BYTES = 5 * 1024 * 1024
 
 
-def member_problems(rel, read):
+def shown(text):
+    """Text as printed: escaped, so an archive member's name cannot add lines,
+    workflow commands or terminal controls to the log (verdict 93, finding 6)."""
+    return ascii(text)[1:-1]
+
+
+def path_problem(name):
+    """Why an archive member's name is not a plain relative path, or None
+    (verdict 93, finding 4): the scope checks compare names, so a name must
+    mean what it says."""
+    parts = name[:-1].split("/") if name.endswith("/") else name.split("/")
+    if name.startswith("/") or "\\" in name or any(part in ("", ".", "..") for part in parts):
+        return "not a plain relative path"
+    return None
+
+
+def member_problems(rel, size, read):
     """Problems with one archive member. rel is its path inside the project
-    ("pcc_node/cli.py"). read() returns its bytes. Content is never echoed."""
+    ("pcc_node/cli.py"). read() returns its bytes. Content is never echoed.
+    A member too large to read in full is refused, never passed unread
+    (verdict 93, finding 3)."""
     problems = []
     name = rel.rsplit("/", 1)[-1]
     if rel == "pcc_node/executor.py":
@@ -49,9 +73,10 @@ def member_problems(rel, read):
         problems.append(f"{rel}: compiled bytecode, which can carry a deleted module")
     if name == "pcc-keys.json" or name.endswith(KEY_SUFFIXES):
         problems.append(f"{rel}: a key file by name (content not shown)")
-    data = read()
-    if data is None:
+    if size > MAX_SCAN_BYTES:
+        problems.append(f"{rel}: too large to check ({size} bytes; the limit is {MAX_SCAN_BYTES})")
         return problems
+    data = read()
     if PEM_PRIVATE_KEY.search(data):
         problems.append(f"{rel}: holds a PEM private-key block (content not shown)")
     if rel.startswith("pcc_node/") and name.endswith(".py"):
@@ -69,20 +94,27 @@ def check_wheel(path, version):
         print(f"== wheel {path.name}: {len(infos)} files")
         dist_info = f"pcc_node-{version}.dist-info/"
         for info in infos:
-            print(f"   {info.file_size:>8}  {info.filename}")
+            print(f"   {info.file_size:>8}  {shown(info.filename)}")
+        seen = set()
         for info in infos:
             rel = info.filename
+            if rel in seen:
+                problems.append(f"wheel {rel}: appears more than once")
+            seen.add(rel)
+            bad_path = path_problem(rel)
+            if bad_path:
+                problems.append(f"wheel {rel}: {bad_path}")
+                continue
             if info.is_dir():
+                continue
+            mode = info.external_attr >> 16
+            if stat.S_IFMT(mode) and not stat.S_ISREG(mode):
+                problems.append(f"wheel {rel}: a link or special file")
                 continue
             if not (rel.startswith("pcc_node/") or rel.startswith(dist_info)):
                 problems.append(f"{rel}: outside pcc_node/ and {dist_info}")
 
-            def read(info=info):
-                if info.file_size > MAX_SCAN_BYTES:
-                    return None
-                return wheel.read(info)
-
-            problems += [f"wheel {p}" for p in member_problems(rel, read)]
+            problems += [f"wheel {p}" for p in member_problems(rel, info.file_size, lambda info=info: wheel.read(info))]
         try:
             metadata = wheel.read(dist_info + "METADATA").decode("utf-8")
         except KeyError:
@@ -100,9 +132,17 @@ def check_sdist(path, version):
         members = sdist.getmembers()
         print(f"== sdist {path.name}: {len(members)} entries")
         for member in members:
-            print(f"   {member.size:>8}  {member.name}")
+            print(f"   {member.size:>8}  {shown(member.name)}")
         pkg_info = None
+        seen = set()
         for member in members:
+            if member.name in seen:
+                problems.append(f"sdist {member.name}: appears more than once")
+            seen.add(member.name)
+            bad_path = path_problem(member.name)
+            if bad_path:
+                problems.append(f"sdist {member.name}: {bad_path}")
+                continue
             if member.isdir():
                 continue
             if not member.isfile():
@@ -112,13 +152,8 @@ def check_sdist(path, version):
                 problems.append(f"sdist {member.name}: outside {top}")
                 continue
             rel = member.name[len(top):]
-
-            def read(member=member):
-                if member.size > MAX_SCAN_BYTES:
-                    return None
-                return sdist.extractfile(member).read()
-
-            problems += [f"sdist {p}" for p in member_problems(rel, read)]
+            problems += [f"sdist {p}" for p in member_problems(rel, member.size,
+                                                              lambda member=member: sdist.extractfile(member).read())]
             if rel == "PKG-INFO":
                 pkg_info = sdist.extractfile(member).read().decode("utf-8")
     if pkg_info is None:
@@ -158,7 +193,7 @@ def main(argv=None):
     if problems:
         print(f"REFUSED: {len(problems)} problem(s) in the pcc-node {version} build:")
         for problem in problems:
-            print(f"  - {problem}")
+            print(f"  - {shown(problem)}")
         return 1
     print(f"OK: pcc-node {version}: one wheel and one sdist; no executor.py, bytecode, shell=True or key material")
     return 0

@@ -149,5 +149,95 @@ class ReleaseGate(unittest.TestCase):
         self.assertRefused(dist, "expected one wheel and one sdist, found 1 and 0")
 
 
+def add_zip_symlink(wheel_path, name, target):
+    info = zipfile.ZipInfo(name)
+    info.create_system = 3  # Unix, so external_attr carries the file type
+    info.external_attr = (0o120777 << 16)
+    with zipfile.ZipFile(wheel_path, "a") as wheel:
+        wheel.writestr(info, target)
+
+
+def add_tar_member(sdist_path, name, data):
+    # Rewrites the gzip'd tar with one more member (tarfile cannot append to .gz).
+    with tarfile.open(sdist_path, "r:gz") as old:
+        members = [(m, old.extractfile(m).read() if m.isfile() else None) for m in old.getmembers()]
+    with tarfile.open(sdist_path, "w:gz") as sdist:
+        for member, content in members:
+            sdist.addfile(member, io.BytesIO(content) if content is not None else None)
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        sdist.addfile(info, io.BytesIO(data))
+
+
+class ReleaseGateRound2(unittest.TestCase):
+    """Verdict 93 on #449, findings 3, 4 and 6: each case passed the gate at 34332a67."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def refused(self, dist, reason):
+        code, out = run_gate(dist)
+        self.assertEqual(code, 1, out)
+        self.assertIn(reason, out)
+        return out
+
+    def big(self, tail):
+        return "#" * (gate.MAX_SCAN_BYTES + 1) + "\n" + tail
+
+    def test_an_oversized_module_is_refused_in_the_wheel(self):
+        dist = build_dist(self.root, wheel_extra={"pcc_node/job_executor.py": self.big("subprocess.run(cmd, shell=True)\n")})
+        self.refused(dist, "wheel pcc_node/job_executor.py: too large to check")
+
+    def test_an_oversized_module_is_refused_in_the_sdist(self):
+        dist = build_dist(self.root, sdist_extra={"pcc_node/job_executor.py": self.big("subprocess.run(cmd, shell=True)\n")})
+        self.refused(dist, "sdist pcc_node/job_executor.py: too large to check")
+
+    def test_an_oversized_file_with_a_private_key_is_refused(self):
+        marker = "PRIVATE " + "KEY-----"
+        dist = build_dist(self.root, wheel_extra={"pcc_node/ui_templates/big.txt": self.big(f"-----BEGIN {marker}\n")})
+        out = self.refused(dist, "wheel pcc_node/ui_templates/big.txt: too large to check")
+        self.assertNotIn("BEGIN", out)
+
+    def test_traversal_and_absolute_names_are_refused_in_the_wheel(self):
+        for name in ("pcc_node/../../outside.py", f"pcc_node-{VERSION}.dist-info/../x.py", "/etc/cron.d/x",
+                     "pcc_node/./cli.py", "pcc_node\\..\\x.py", "pcc_node//cli2.py"):
+            with self.subTest(name=name):
+                sub = pathlib.Path(self.root) / str(abs(hash(name)))
+                sub.mkdir()
+                dist = build_dist(sub, wheel_extra={name: "x = 1\n"})
+                self.refused(dist, "not a plain relative path")
+
+    def test_traversal_names_are_refused_in_the_sdist(self):
+        dist = build_dist(self.root)
+        add_tar_member(dist / f"pcc_node-{VERSION}.tar.gz", f"pcc_node-{VERSION}/../outside.py", b"x = 1\n")
+        self.refused(dist, "not a plain relative path")
+
+    def test_duplicate_names_are_refused(self):
+        dist = build_dist(self.root)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with zipfile.ZipFile(dist / f"pcc_node-{VERSION}-py3-none-any.whl", "a") as wheel:
+                wheel.writestr("pcc_node/job_executor.py", "x = 2\n")
+        self.refused(dist, "wheel pcc_node/job_executor.py: appears more than once")
+
+    def test_a_zip_symlink_is_refused(self):
+        dist = build_dist(self.root)
+        add_zip_symlink(dist / f"pcc_node-{VERSION}-py3-none-any.whl", "pcc_node/linked.py", "/etc/passwd")
+        self.refused(dist, "wheel pcc_node/linked.py: a link or special file")
+
+    def test_member_names_are_printed_escaped(self):
+        name = "pcc_node/x\n::error::injected\x1b[31m.py"
+        dist = build_dist(self.root, wheel_extra={name: "x = 1\n"})
+        code, out = run_gate(dist)
+        self.assertNotIn("\n::error::", out)
+        self.assertNotIn("\x1b", out)
+        self.assertIn("\\n::error::injected\\x1b", out)
+
+
 if __name__ == "__main__":
     unittest.main()
