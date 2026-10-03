@@ -83,3 +83,44 @@ describe("redactSecrets", () => {
     expect(redactOrNull("pcc_live_XXXXXXXX")).toBe("pcc_live_redacted");
   });
 });
+
+describe("redactSecrets: formats added in #458 round 1", () => {
+  const pemBody = ["MIIEpAIBAAKCAQEA", "y".repeat(40)].join("");
+  const pem = ["-----BEGIN ", "RSA PRIVATE KEY-----\n", pemBody, "\n-----END ", "RSA PRIVATE KEY-----"].join("");
+
+  it("redacts a PEM private-key block and keeps the text around it", () => {
+    expect(redactSecrets(`before\n${pem}\nafter`)).toBe("before\n[redacted-private-key]\nafter");
+  });
+
+  it("redacts a PEM block cut off before its END line", () => {
+    const cut = ["-----BEGIN ", "PRIVATE KEY-----\n", pemBody].join("");
+    expect(redactSecrets(`x ${cut}`)).toBe("x [redacted-private-key]");
+  });
+
+  it("redacts Google, Stripe, GitHub app / fine-grained and Hugging Face keys", () => {
+    const keys = [
+      "AI" + "za" + "Sy" + "B".repeat(33),
+      "sk" + "_live_" + "c".repeat(24),
+      "rk" + "_test_" + "c".repeat(24),
+      "gh" + "s_" + "d".repeat(30),
+      "github" + "_pat_" + "e".repeat(30),
+      "hf" + "_" + "f".repeat(34),
+    ];
+    for (const k of keys) expect(redactSecrets(`key ${k} end`)).toBe("key [redacted-key] end");
+  });
+
+  it("redacts credential-looking key=value pairs but keeps prose", () => {
+    expect(redactSecrets("token=abc12345xyz failed")).toBe("token=[redacted] failed");
+    expect(redactSecrets('password: "correcthorsebatterystaple"')).toBe('password: "[redacted]"');
+    expect(redactSecrets("api_key=A1b2C3d4")).toBe("api_key=[redacted]");
+    expect(redactSecrets("the token: expired")).toBe("the token: expired");
+    expect(redactSecrets("password: incorrect")).toBe("password: incorrect");
+  });
+
+  it("stays linear on a long hostile input", () => {
+    const hostile = ["-----BEGIN ", "PRIVATE KEY-----"].join("").repeat(2000) + "token=".repeat(5000);
+    const t0 = performance.now();
+    redactSecrets(hostile.slice(0, 64_000));
+    expect(performance.now() - t0).toBeLessThan(200);
+  });
+});

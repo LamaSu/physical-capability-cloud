@@ -27,6 +27,7 @@ export {
 // the V2 client.
 export {
   BountyService,
+  type BountyServiceOptions,
   type DemandSignal,
   type CapabilityBounty,
   type BountyHunter,

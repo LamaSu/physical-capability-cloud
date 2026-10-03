@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import {
   geohash,
   matchedCapabilityDigest,
+  matchedCapabilityDigestPreImage,
   matchedCapabilityDigestV2,
   matchedCapabilityDigestV2PreImage,
   type MatchedCapabilitySnapshotV2,
@@ -138,7 +139,6 @@ describe("matched-capability digest v2 (board N20)", () => {
       ["an undefined profile (must be explicit null)", { measurementProfile: undefined }],
       ["a profile with an empty id", { measurementProfile: { id: "", version: "1" } }],
       ["a profile with an empty version", { measurementProfile: { id: "p", version: "" } }],
-      ["no kernel location", { kernelLocation: null }],
       ["latitude 91", { kernelLocation: { lat: 91, lng: 0 } }],
       ["longitude 181", { kernelLocation: { lat: 0, lng: 181 } }],
       ["NaN latitude", { kernelLocation: { lat: Number.NaN, lng: 0 } }],
@@ -160,5 +160,127 @@ describe("matched-capability digest v2 (board N20)", () => {
     });
     expect(v1).toMatch(/^0x[0-9a-f]{64}$/);
     expect(v1).not.toBe(GOLDEN_DIGEST);
+  });
+
+  it("rejects_empty_or_substituted_tier_iteration", () => {
+    // A substituted iterator that yields nothing must not silently hash an
+    // empty tier set (board N20 follow-up #440-A).
+    const emptyIterator = [0];
+    emptyIterator[Symbol.iterator] = function* () {};
+    expect(() => v2({ assuranceTiers: emptyIterator })).toThrow(TypeError);
+
+    // The real element (99) is invalid; a substituted iterator must not be
+    // able to launder it into a different, valid-looking value (3) either.
+    const fakeIterator = [99];
+    fakeIterator[Symbol.iterator] = function* () {
+      yield 3;
+    };
+    expect(() => v2({ assuranceTiers: fakeIterator })).toThrow(TypeError);
+  });
+
+  it("a tier list whose length reads as zero or negative never commits an empty tier set (astra, #440 follow-up confirmation)", () => {
+    for (const length of [-1, -16, 0]) {
+      const tiers = new Proxy([0], {
+        get(target, key, receiver) {
+          return key === "length" ? length : Reflect.get(target, key, receiver);
+        },
+      });
+      expect(() => v2({ assuranceTiers: tiers }), `length ${length}`).toThrow(TypeError);
+    }
+  });
+
+  it("pins existing behavior: an ordinary sparse tier array throws (a hole, not skipped)", () => {
+    const sparse: number[] = [0, , 2];
+    expect(() => v2({ assuranceTiers: sparse })).toThrow(TypeError);
+  });
+
+  it("pins existing behavior: a NaN tier throws", () => {
+    expect(() => v2({ assuranceTiers: [Number.NaN] })).toThrow(TypeError);
+  });
+
+  it("pins existing behavior: -0 normalizes to 0 in assuranceTiers", () => {
+    expect(v2({ assuranceTiers: [-0, 1, 2, 2] })).toBe(GOLDEN_DIGEST);
+  });
+
+  it("pins existing behavior: an identifier cannot break out of its JSON string to forge another key", () => {
+    const injected = 'x","capabilityType":"forged';
+    const preimage = matchedCapabilityDigestV2PreImage({ ...GOLDEN, capabilityId: injected });
+    const parsed = JSON.parse(preimage) as { capabilityId: string; capabilityType: string };
+    expect(parsed.capabilityId).toBe(injected);
+    expect(parsed.capabilityType).toBe(GOLDEN.capabilityType);
+    expect(() => matchedCapabilityDigestV2({ ...GOLDEN, capabilityId: injected })).not.toThrow();
+  });
+
+  it("pins existing behavior: a trailing slash in the CSD url throws; a query string without another slash is accepted literally", () => {
+    expect(() =>
+      v2({ csd: { ...GOLDEN.csd, url: "pcc://capabilities/document-print-and-mail/v1/" } }),
+    ).toThrow(TypeError);
+
+    const withQuery = "pcc://capabilities/document-print-and-mail/v1?rev=2";
+    const preimage = matchedCapabilityDigestV2PreImage({ ...GOLDEN, csd: { ...GOLDEN.csd, url: withQuery } });
+    expect((JSON.parse(preimage) as { csd: { url: string } }).csd.url).toBe(withQuery);
+  });
+
+  it("pins_v1_preimage_and_digest_to_base_vector", () => {
+    // Computed from the v1 implementation as it is at this revision (v1 is
+    // untouched by #440) -- pins exact bytes so a future change to v1's
+    // preimage or price precision is caught here, not just by a shape
+    // check against v2 (board N20 follow-up #440-B).
+    const fixture = {
+      capabilityId: "cap-v1-pin-fixture",
+      capabilityType: "wood-fired-pizza",
+      kernelId: "kernel-v1-pin",
+      price: 12.5,
+      currency: "USDC",
+      assuranceTiers: [1, 0],
+    };
+    const expectedPreImage =
+      '{"assuranceTiers":[0,1],"capabilityId":"cap-v1-pin-fixture","capabilityType":"wood-fired-pizza",' +
+      '"currency":"USDC","kernelId":"kernel-v1-pin","price":"12.50"}';
+    const expectedDigest = "0x3f07c6dd4d7242f19d067c576532eaf8376371c6952c723c9092f587fe29c5d2";
+
+    expect(matchedCapabilityDigestPreImage(fixture)).toBe(expectedPreImage);
+    expect(Buffer.byteLength(expectedPreImage, "utf8")).toBe(157);
+    expect(matchedCapabilityDigest(fixture)).toBe(expectedDigest);
+  });
+});
+
+describe("matched-capability digest v2 — kernel location (board N20 round 2, #3603)", () => {
+  const NULL_LOCATION_PRE =
+    '{"assuranceTiers":[0,1,2],"capabilityId":"cap-k-print-1-document-print-and-mail","capabilityType":"document-print-and-mail",' +
+    '"csd":{"contractDigest":"sha256:abababababababababababababababababababababababababababababababab","url":"pcc://capabilities/document-print-and-mail/v1"},' +
+    '"currency":"USDC","currencyDecimals":"6","domain":"PCC:matched-capability:v2","kernelId":"k-print-1","kernelLocationGeohash6":null,' +
+    '"measurementProfile":null,"operatorSettlementAddress":"0xabcdef0123456789abcdef0123456789abcdef01","priceMinorUnits":"25000000"}';
+  const NULL_LOCATION_DIGEST = "0xfacd369395f056b2ca426c49fff8706146d0ff4bac212bd5c4990e5b72c71925";
+
+  it("an exact {lat:0,lng:0} counts as NO location, and encodes identically to null/absent", () => {
+    expect(matchedCapabilityDigestV2PreImage({ ...GOLDEN, kernelLocation: null })).toBe(NULL_LOCATION_PRE);
+    expect(Buffer.byteLength(NULL_LOCATION_PRE, "utf8")).toBe(536);
+
+    const nullDigest = v2({ kernelLocation: null });
+    const originDigest = v2({ kernelLocation: { lat: 0, lng: 0 } });
+    const absent: MatchedCapabilitySnapshotV2 = { ...GOLDEN };
+    delete absent.kernelLocation;
+    const absentDigest = matchedCapabilityDigestV2(absent);
+
+    expect(nullDigest).toBe(NULL_LOCATION_DIGEST);
+    expect(originDigest).toBe(NULL_LOCATION_DIGEST);
+    expect(absentDigest).toBe(NULL_LOCATION_DIGEST);
+  });
+
+  it("the existing 540-byte real-location golden is unchanged", () => {
+    expect(matchedCapabilityDigestV2PreImage(GOLDEN)).toBe(GOLDEN_BYTES);
+    expect(Buffer.byteLength(GOLDEN_BYTES, "utf8")).toBe(540);
+    expect(matchedCapabilityDigestV2(GOLDEN)).toBe(GOLDEN_DIGEST);
+  });
+
+  it("a real on-equator location ({lat:0,lng:45}) is NOT treated as 'no location'", () => {
+    const preimage = matchedCapabilityDigestV2PreImage({ ...GOLDEN, kernelLocation: { lat: 0, lng: 45 } });
+    const parsed = JSON.parse(preimage) as { kernelLocationGeohash6: string | null };
+    expect(parsed.kernelLocationGeohash6).not.toBeNull();
+    expect(parsed.kernelLocationGeohash6).toBe(geohash(0, 45, 6));
+    expect(matchedCapabilityDigestV2({ ...GOLDEN, kernelLocation: { lat: 0, lng: 45 } })).not.toBe(
+      NULL_LOCATION_DIGEST,
+    );
   });
 });
