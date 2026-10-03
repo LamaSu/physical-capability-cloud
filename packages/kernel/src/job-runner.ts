@@ -161,9 +161,10 @@ export class JobRunner {
             );
           }
 
-          // 8. Check tier requirements are met
+          // 8. Check tier requirements are met. A camera event counts only as an
+          //    LO-SE-1 capture for THIS job, so the check needs the jobId.
           const events = this.evidenceEmitter.getEvents(jobId, stepId);
-          const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier);
+          const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier, undefined, { jobId });
           if (!check.met) {
             // For tier >= 2, unmet requirements are a hard failure
             if (assuranceTier >= 2) {
