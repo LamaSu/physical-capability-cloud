@@ -331,6 +331,33 @@ describe("gateway answering", () => {
     for (const [, init] of fetchMock.mock.calls) expect(init?.method ?? "GET").toBe("GET");
   });
 
+  it("an operator pipeline, in the phases only the gateway lists, renders as real data (astra 408e item 5)", async () => {
+    // packages/gateway/src/telemetry.ts PipelinePhase: operator_register, operator_verify and dht_query too.
+    stubFetch({
+      ...LIVE,
+      "/api/telemetry/active": {
+        status: 200,
+        body: { active: [{ jobId: "op-reg-1", currentPhase: "dht_query", startedAt: iso(30_000), eventCount: 3, lastUpdated: iso(5_000) }], count: 1 },
+      },
+      "/api/telemetry/pipeline/op-reg-1": {
+        status: 200,
+        body: {
+          jobId: "op-reg-1",
+          timeline: [
+            { id: "o1", jobId: "op-reg-1", timestamp: iso(30_000), phase: "operator_register", status: "completed", metadata: {}, level: "info", source: "gateway" },
+            { id: "o2", jobId: "op-reg-1", timestamp: iso(20_000), phase: "operator_verify", status: "completed", metadata: {}, level: "info", source: "gateway" },
+            { id: "o3", jobId: "op-reg-1", timestamp: iso(5_000), phase: "dht_query", status: "started", metadata: {}, level: "info", source: "gateway" },
+          ],
+          phases: [],
+        },
+      },
+    });
+    const t = (await renderPage()).text();
+    expect(t).not.toContain("Couldn't load");
+    expect(t).toContain("op-reg-1");
+    expect(t).toContain("3 events");
+  });
+
   it("while a new log filter loads, the previous filter's entries are not listed as its own", async () => {
     const fetchMock = stubFetch(LIVE);
     const { text } = await renderPage();

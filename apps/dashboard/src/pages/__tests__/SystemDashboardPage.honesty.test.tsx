@@ -388,6 +388,14 @@ describe("gateway answering", () => {
     expect(valueIn("Jobs", "Jobs")).toBe("5");
   });
 
+  it("a malformed row isn't counted even from a gateway too old to report section reads (astra 408e item 6)", async () => {
+    const { unavailable: _unreported, ...older } = REPORT;
+    stubFetch({ [ROUTE]: { status: 200, body: { ...older, db: { ...REPORT.db, kernels: [{}] } } } });
+    const t = (await renderPage()).text();
+    expect(valueIn("Kernels", "Registered")).toBeNull();
+    expect(t).toContain("rows that aren't records");
+  });
+
   it("a full page of jobs is counted as a lower bound", async () => {
     const jobs = Array.from({ length: 50 }, (_, i) => ({ id: `job-${i}`, status: i < 10 ? "in_progress" : "completed" }));
     stubFetch({ [ROUTE]: { status: 200, body: { ...REPORT, db: { ...REPORT.db, jobs } } } });
