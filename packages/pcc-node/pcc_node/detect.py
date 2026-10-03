@@ -212,12 +212,16 @@ def detect_mdns(timeout=3.0):
 
     Requires the optional ``zeroconf`` package.  Returns [] if not installed.
     """
+    from .spawn_guard import SpawnRefused
     try:
         from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
-    except (ImportError, RuntimeError):
-        # Not installed, or its native interface enumeration (ifaddr -> ctypes.dlopen) is refused by
-        # the spawn guard. mDNS is best-effort; degrade to the other detectors either way.
-        log.debug("mDNS discovery unavailable (zeroconf absent or blocked) -- skipping")
+    except ImportError:
+        log.debug("zeroconf not installed -- skipping mDNS discovery")
+        return []
+    except SpawnRefused:
+        # Its native interface enumeration (ifaddr -> ctypes.dlopen) is refused by the spawn guard.
+        # mDNS is best-effort; degrade. A genuine zeroconf error is not masked (it propagates).
+        log.debug("mDNS discovery blocked by the spawn guard (native load) -- skipping")
         return []
 
     import time

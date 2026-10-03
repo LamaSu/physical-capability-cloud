@@ -1,17 +1,18 @@
-"""The runtime spawn guard behind the static no-shell guard (steward #5194/#5224, verdicts 105i/105j).
+"""The runtime spawn guard behind the static no-shell guard (steward #5194/#5224, verdicts 105i/j/k).
 
-The static guard (test_no_shell_execution.py) reads the package's syntax, so a process start reached a
-new way slips past it. This guard watches what CPython actually does: pcc_node.spawn_guard.install()
-adds an audit hook that refuses every process start or native load except a subprocess.Popen of a bare
-device executable with the node's own environment.
+The static guard (test_no_shell_execution.py) reads syntax, so a process start reached a new way slips
+past it. This guard watches what CPython does: pcc_node.spawn_guard.install() adds an audit hook that
+refuses every process start or native load except a subprocess.Popen proven to run the very device
+executable pinned at startup, with the node's own environment.
 
-Everything runs in child processes, because an audit hook cannot be removed once installed. The 105j
-tests additionally confirm the hook is NOT disabled by the same evaluated Python it is meant to contain
-(HIGH 1), does not trust an attacker-controlled PATH/env (HIGH 2), and is installed before the CLI's
-dependencies import (HIGH 4). The guard is defense in depth, not a sandbox against Python that reaches
-the interpreter's object graph (gc/ctypes/frame) -- that is the static import guard's and the
-deployment's boundary.
+Everything runs in child processes, because an audit hook cannot be removed once installed. The 105j/k
+tests confirm the hook is not disabled by the evaluated Python it contains (reassigning spawn_guard.os
+or the module policy), does not trust a bare name through cwd/env/PATH games, and is installed before
+the CLI's dependencies import. It is defense in depth, not a sandbox against Python that reaches the
+interpreter object graph (gc/ctypes/frame) -- that is the static guard's and the deployment's boundary.
 """
+
+from __future__ import annotations  # so `dict | None` hints parse on Python 3.8/3.9 too
 
 import os
 import subprocess
@@ -23,28 +24,46 @@ from pathlib import Path
 import pytest
 
 PKG = Path(__file__).resolve().parents[1]  # packages/pcc-node, so a child's `import pcc_node` resolves
-TMP = "/mnt/sparkbulk/tmp"
+ABSPATH = "/usr/bin:/bin:/usr/sbin:/sbin"  # a clean, all-absolute PATH for the allowed-executable tests
 
 
-def _run_raw(code: str) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env.pop("PYTEST_CURRENT_TEST", None)  # a child must run as a real interpreter, not "under pytest"
-    return subprocess.run([sys.executable, "-c", textwrap.dedent(code)], cwd=str(PKG), env=env,
+def _run_raw(code: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    e = dict(os.environ)
+    e.pop("PYTEST_CURRENT_TEST", None)  # a child must run as a real interpreter, not "under pytest"
+    if env:
+        e.update(env)
+    return subprocess.run([sys.executable, "-c", textwrap.dedent(code)], cwd=str(PKG), env=e,
                           capture_output=True, text=True, timeout=90)
 
 
-def _run_guarded(body: str) -> subprocess.CompletedProcess:
-    return _run_raw("import pcc_node.spawn_guard as _g\n_g.install()\n" + textwrap.dedent(body))
+def _run_guarded(body: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    return _run_raw("import pcc_node.spawn_guard as _g\n_g.install()\n" + textwrap.dedent(body), env)
 
 
-def _attempt(op: str) -> subprocess.CompletedProcess:
+def _attempt(op: str, env: dict | None = None) -> subprocess.CompletedProcess:
     body = (
         "from pcc_node.spawn_guard import SpawnRefused\n"
         "try:\n" + textwrap.indent(textwrap.dedent(op), "    ") + "\n    print('RAN')\n"
         "except SpawnRefused:\n    print('REFUSED')\n"
         "except BaseException as e:\n    print('OTHER:' + type(e).__name__)\n"
     )
-    return _run_guarded(body)
+    return _run_guarded(body, env)
+
+
+def _sentinel() -> str:
+    fd, path = tempfile.mkstemp()  # honours TMPDIR; portable (verdict 105k LOW 1)
+    os.close(fd)
+    os.unlink(path)
+    return path
+
+
+def _fake_dir_with_dd():
+    d = tempfile.mkdtemp()
+    mark = Path(d, "RAN")
+    fake = Path(d, "dd")
+    fake.write_text(f'#!/bin/sh\n: > "{mark}"\n')
+    fake.chmod(0o755)
+    return d, mark
 
 
 # ---- the standard spawn surface, reached every which way (astra 68/105e-105g and 105i) ------------
@@ -87,16 +106,15 @@ def test_a_process_start_reached_any_of_these_ways_is_refused(name):
     ids=["ProcessPoolExecutor", "ProcessPoolExecutor via getattr (105i M1)"],
 )
 def test_a_process_pool_cannot_start_a_worker(op):
-    # The pool forks its worker off the caller's thread, so the refusal surfaces as a broken pool, not
-    # SpawnRefused in the caller. The point is that the worker never ran: no result comes back.
     r = _attempt(op)
     assert "RAN" not in r.stdout, f"a pool worker ran: {r.stdout!r} {r.stderr!r}"
     assert "OTHER:" in r.stdout or "REFUSED" in r.stdout, f"{r.stdout!r} {r.stderr!r}"
 
 
-# ---- the allowed case still works ----------------------------------------------------------------
+# ---- the allowed case still works (clean absolute PATH, pinned binary) ----------------------------
 def test_a_device_executable_still_runs_by_bare_name():
-    r = _attempt("import subprocess; subprocess.run(['dd', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)")
+    r = _attempt("import subprocess; subprocess.run(['dd', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+                 env={"PATH": ABSPATH})
     assert "RAN" in r.stdout, f"dd was refused: {r.stdout!r} {r.stderr!r}"
 
 
@@ -107,21 +125,30 @@ def test_asyncio_create_subprocess_exec_of_a_bare_executable_runs():
         "    p = await asyncio.create_subprocess_exec('dd', '--version',\n"
         "        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)\n"
         "    await p.wait()\n"
-        "asyncio.run(m())"
+        "asyncio.run(m())",
+        env={"PATH": ABSPATH},
     )
     assert "RAN" in r.stdout, f"create_subprocess_exec('dd') was refused: {r.stdout!r} {r.stderr!r}"
 
 
-# ---- HIGH 1: the policy is not disable-able from evaluated / in-process Python --------------------
-def _sentinel():
-    fd, path = tempfile.mkstemp(dir=TMP)
-    os.close(fd); os.unlink(path)
-    return path
+# ---- HIGH 1: not disable-able from ordinary evaluated / in-process Python --------------------------
+def test_reassigning_spawn_guard_os_does_not_weaken_the_hook():
+    # astra's 105k HIGH 1 repro: reassign spawn_guard.os so the hook "sees" an allowed dd while real
+    # subprocess runs sh. The hook captured os.fsdecode/os.environ at install, so this does nothing.
+    r = _run_raw(
+        "import os, subprocess, types\n"
+        "import pcc_node.spawn_guard as g\n"
+        "g.install()\n"
+        "g.os = types.SimpleNamespace(fsdecode=lambda v: 'dd', environ={'PATH': os.environ.get('PATH')})\n"
+        "from pcc_node.spawn_guard import SpawnRefused\n"
+        "try:\n    r = subprocess.run(['sh', '-c', 'exit 37']); print('RETURNCODE', r.returncode)\n"
+        "except SpawnRefused:\n    print('REFUSED')\n",
+        env={"PATH": ABSPATH},
+    )
+    assert "REFUSED" in r.stdout and "RETURNCODE 37" not in r.stdout, f"{r.stdout!r} {r.stderr!r}"
 
 
 def test_evaluated_python_cannot_empty_the_policy():
-    # astra's 105j HIGH 1 reproduction: a type-hint annotation that first empties REFUSED_EVENTS, then
-    # spawns. The hook reads a closure copy of the policy, so emptying the module global does nothing.
     s = _sentinel()
     ann = ("__import__('pcc_node.spawn_guard', fromlist=['x']).__dict__.__setitem__("
            "'REFUSED_EVENTS', frozenset()) or __import__('os').system('touch " + s + "')")
@@ -136,91 +163,90 @@ def test_evaluated_python_cannot_empty_the_policy():
     ran = os.path.exists(s)
     if ran:
         os.unlink(s)
-    assert not ran, f"the os.system bypass ran: {r.stdout!r} {r.stderr!r}"
-    assert "REFUSED" in r.stdout, f"not refused: {r.stdout!r} {r.stderr!r}"
+    assert not ran and "REFUSED" in r.stdout, f"{r.stdout!r} {r.stderr!r}"
 
 
 def test_reassigning_the_module_policy_does_not_weaken_an_installed_hook():
-    # After install(), reassigning EXECUTABLES / REFUSED_EVENTS on the module must not change the hook.
     s = _sentinel()
     r = _run_guarded(
         "import pcc_node.spawn_guard as g, os\n"
         "g.EXECUTABLES = frozenset({'id', 'sh', 'touch'})\n"
         "g.REFUSED_EVENTS = frozenset()\n"
         "from pcc_node.spawn_guard import SpawnRefused\n"
-        "try:\n"
-        f"    os.system('touch {s}'); print('RAN')\n"
+        f"try:\n    os.system('touch {s}'); print('RAN')\n"
         "except SpawnRefused:\n    print('REFUSED')\n"
     )
     ran = os.path.exists(s)
     if ran:
         os.unlink(s)
-    assert not ran and "REFUSED" in r.stdout, f"reassigning the policy weakened the hook: {r.stdout!r} {r.stderr!r}"
+    assert not ran and "REFUSED" in r.stdout, f"{r.stdout!r} {r.stderr!r}"
 
 
-# ---- HIGH 2: a bare name is not allowed through an attacker's env / PATH --------------------------
-def _fake_dd():
-    d = tempfile.mkdtemp(dir=TMP)
-    mark = Path(d, "RAN")
-    fake = Path(d, "dd")
-    fake.write_text(f'#!/bin/sh\n: > "{mark}"\n')
-    fake.chmod(0o755)
-    return d, mark
-
-
+# ---- HIGH 2: a bare name is bound to the pinned binary, not trusted through env / PATH / cwd -------
 def test_a_per_call_env_is_refused():
-    d, mark = _fake_dd()
-    r = _attempt(f"import subprocess; subprocess.run(['dd'], env={{'PATH': {d!r}}})")
-    assert not mark.exists(), f"a fake dd ran via per-call env: {r.stdout!r} {r.stderr!r}"
-    assert "REFUSED" in r.stdout, f"{r.stdout!r} {r.stderr!r}"
+    d, mark = _fake_dir_with_dd()
+    r = _attempt(f"import subprocess; subprocess.run(['dd'], env={{'PATH': {d!r}}})", env={"PATH": ABSPATH})
+    assert not mark.exists() and "REFUSED" in r.stdout, f"{r.stdout!r} {r.stderr!r}"
 
 
 def test_a_changed_process_PATH_is_refused():
-    d, mark = _fake_dd()
-    r = _attempt(f"import os, subprocess\nos.environ['PATH'] = {d!r}\nsubprocess.run(['dd'])")
-    assert not mark.exists(), f"a fake dd ran via a mutated PATH: {r.stdout!r} {r.stderr!r}"
-    assert "REFUSED" in r.stdout, f"{r.stdout!r} {r.stderr!r}"
+    d, mark = _fake_dir_with_dd()
+    r = _attempt(f"import os, subprocess\nos.environ['PATH'] = {d!r}\nsubprocess.run(['dd'])", env={"PATH": ABSPATH})
+    assert not mark.exists() and "REFUSED" in r.stdout, f"{r.stdout!r} {r.stderr!r}"
 
 
-# ---- MEDIUM 7: the 105i reaches that were untested --------------------------------------------------
-@pytest.mark.parametrize(
-    "op",
-    ["from click import utils; utils.launch('https://127.0.0.1:0/x')",
-     "from click import utils; utils.edit('x')"],
-    ids=["click.utils.launch", "click.utils.edit"],
-)
-def test_click_public_submodule_launchers_are_refused(op):
-    pytest.importorskip("click")
-    r = _attempt(op)
-    # click opens the URL/editor through a non-allowlisted subprocess; it must not complete.
-    assert "RAN" not in r.stdout, f"a click launcher ran: {r.stdout!r} {r.stderr!r}"
+def test_a_cwd_is_refused():
+    d, mark = _fake_dir_with_dd()
+    r = _attempt(f"import subprocess; subprocess.run(['dd'], cwd={d!r})", env={"PATH": ABSPATH})
+    assert not mark.exists() and "REFUSED" in r.stdout, f"{r.stdout!r} {r.stderr!r}"
 
 
-def test_a_real_cross_module_star_reexport_is_refused():
-    # A genuine two-module `import *` re-export of os (not a same-file alias): helper re-exports os as
-    # `platform`; consumer does `from helper import *` and calls platform.system.
+def test_a_relative_PATH_component_with_a_matching_cwd_is_refused():
+    # Start with '.' on PATH and chdir into a dir holding a fake dd; PATH stays byte-identical. The
+    # guard refuses because PATH has a relative component the cwd could (and here would) redirect.
+    d, mark = _fake_dir_with_dd()
+    r = _attempt(f"import os, subprocess\nos.chdir({d!r})\nsubprocess.run(['dd'])", env={"PATH": ".:" + ABSPATH})
+    assert not mark.exists() and "REFUSED" in r.stdout, f"{r.stdout!r} {r.stderr!r}"
+
+
+# ---- HIGH 3: no unguarded runnable entry; install happens before the CLI's imports ----------------
+def test_python_dash_m_cli_is_refused_fail_closed():
+    # `python -m pcc_node.cli detect` must not run the CLI unguarded: a fake zeroconf on PYTHONPATH
+    # whose import spawns must not run, because the module exits before dispatching.
+    z = tempfile.mkdtemp()
+    zmark = Path(z, "ZRAN")
+    Path(z, "zeroconf.py").write_text(f"import os\nos.system('touch {zmark}')\n")
+    r = subprocess.run([sys.executable, "-m", "pcc_node.cli", "detect"], cwd=str(PKG),
+                       env={**{k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"},
+                            "PYTHONPATH": z + os.pathsep + str(PKG)},
+                       capture_output=True, text=True, timeout=60)
+    assert not zmark.exists(), f"an unguarded import-time spawn ran: {r.stdout!r} {r.stderr!r}"
+    assert r.returncode != 0 and "Refused" in (r.stdout + r.stderr), f"did not fail closed: {r.stdout!r} {r.stderr!r}"
+
+
+def test_the_entry_installs_the_guard_before_importing_the_cli():
+    # astra 105k MEDIUM 2: prove the ordering. A hostile `click` shadow on PYTHONPATH spawns at import;
+    # _entry.run() installs the guard, then imports the CLI (which imports click), so the spawn is
+    # refused -- proving install precedes the CLI's dependency imports.
     s = _sentinel()
-    d = tempfile.mkdtemp(dir=TMP)
-    Path(d, "helper_mod.py").write_text("import os as platform\n")
-    Path(d, "consumer_mod.py").write_text("from helper_mod import *\n")
-    r = _run_guarded(
-        f"import sys; sys.path.insert(0, {d!r})\n"
-        "import consumer_mod\n"
+    d = tempfile.mkdtemp()
+    Path(d, "click.py").write_text(f"import os\nos.system('touch {s}')\n")
+    r = _run_raw(
+        "import pcc_node._entry as e\n"
         "from pcc_node.spawn_guard import SpawnRefused\n"
-        "try:\n"
-        f"    consumer_mod.platform.system('touch {s}'); print('RAN')\n"
+        "try:\n    e.run()\n    print('NO-REFUSAL')\n"
         "except SpawnRefused:\n    print('REFUSED')\n"
+        "except BaseException as ex:\n    print('OTHER:' + type(ex).__name__)\n",
+        env={"PYTHONPATH": d + os.pathsep + str(PKG)},
     )
     ran = os.path.exists(s)
     if ran:
         os.unlink(s)
-    assert not ran and "REFUSED" in r.stdout, f"a cross-module re-export ran: {r.stdout!r} {r.stderr!r}"
+    assert not ran, f"a hostile import-time spawn ran before the guard: {r.stdout!r} {r.stderr!r}"
+    assert "REFUSED" in r.stdout, f"the shadowed import's spawn was not refused: {r.stdout!r} {r.stderr!r}"
 
 
-# ---- HIGH 4 / wiring ------------------------------------------------------------------------------
 def test_importing_the_entry_module_does_not_install_the_hook_in_process():
-    # Importing pcc_node._entry must not install the hook (that would poison any in-process importer);
-    # and it must not import the CLI at module load, so run() can install before the CLI's deps load.
     r = _run_raw(
         "import sys, pcc_node._entry as e\n"
         "from pcc_node.spawn_guard import installed\n"
@@ -229,22 +255,43 @@ def test_importing_the_entry_module_does_not_install_the_hook_in_process():
     assert r.stdout.strip().splitlines()[-1] == "not-installed no-cli", (r.stdout, r.stderr)
 
 
-def test_the_console_entry_installs_the_guard_then_dispatches():
-    # cli.run via _entry.run installs the guard, then imports and calls the CLI. Stub main so nothing
-    # dispatches; after run() the hook is live and the CLI has been imported (so it loaded under it).
-    r = _run_raw(
-        "import pcc_node.cli as c\n"
-        "c.main = lambda *a, **k: None\n"
-        "import pcc_node._entry as e\n"
-        "e.run()\n"
-        "import sys\n"
-        "from pcc_node.spawn_guard import SpawnRefused, installed\n"
-        "assert installed() and 'pcc_node.cli' in sys.modules, 'entry did not install + import cli'\n"
-        "import os\n"
-        "try:\n    os.system('id'); print('NOT-REFUSED')\n"
+# ---- MEDIUM 7 (105j) + MEDIUM 4 (105k): the click public-submodule launchers, proven refused -------
+@pytest.mark.parametrize(
+    "op",
+    ["from click import termui; termui.launch('https://127.0.0.1:0/x')",
+     "from click import termui; termui.edit('x')"],
+    ids=["click.termui.launch", "click.termui.edit"],
+)
+def test_click_public_submodule_launchers_are_refused(op):
+    pytest.importorskip("click")
+    # Point every launcher click might use at a sentinel; the guard must refuse the spawn, so the
+    # sentinel never appears and SpawnRefused (not an unrelated error) is what stops it.
+    s = _sentinel()
+    sentinel_cmd = f"touch {s}"
+    r = _attempt(op, env={"BROWSER": sentinel_cmd, "EDITOR": sentinel_cmd, "VISUAL": sentinel_cmd, "PATH": ABSPATH})
+    ran = os.path.exists(s)
+    if ran:
+        os.unlink(s)
+    assert not ran, f"a click launcher spawned: {r.stdout!r} {r.stderr!r}"
+    assert "REFUSED" in r.stdout, f"not a guard refusal: {r.stdout!r} {r.stderr!r}"
+
+
+def test_a_real_cross_module_star_reexport_is_refused():
+    s = _sentinel()
+    d = tempfile.mkdtemp()
+    Path(d, "helper_mod.py").write_text("import os as platform\n")
+    Path(d, "consumer_mod.py").write_text("from helper_mod import *\n")
+    r = _run_guarded(
+        f"import sys; sys.path.insert(0, {d!r})\n"
+        "import consumer_mod\n"
+        "from pcc_node.spawn_guard import SpawnRefused\n"
+        f"try:\n    consumer_mod.platform.system('touch {s}'); print('RAN')\n"
         "except SpawnRefused:\n    print('REFUSED')\n"
     )
-    assert r.stdout.strip().splitlines()[-1] == "REFUSED", (r.stdout, r.stderr)
+    ran = os.path.exists(s)
+    if ran:
+        os.unlink(s)
+    assert not ran and "REFUSED" in r.stdout, f"a cross-module re-export ran: {r.stdout!r} {r.stderr!r}"
 
 
 def test_install_is_idempotent_and_reports_state():

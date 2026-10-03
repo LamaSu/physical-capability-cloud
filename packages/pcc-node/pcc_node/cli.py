@@ -1295,4 +1295,10 @@ def support_cmd(message, config_file, pcc_base, api_key, attach_logs, check):
 
 
 if __name__ == "__main__":
-    main()
+    # `python -m pcc_node.cli` would run the CLI with no spawn guard installed (verdict 105k HIGH 3):
+    # cli's dependencies have already imported, and nothing installed the hook. Fail closed; the
+    # guarded entries are the `pcc-node` console script and `python -m pcc_node`.
+    raise SystemExit(
+        "Refused: run pcc-node via the 'pcc-node' command or 'python -m pcc_node', which install the "
+        "runtime spawn guard first. 'python -m pcc_node.cli' does not and is not a supported entry."
+    )

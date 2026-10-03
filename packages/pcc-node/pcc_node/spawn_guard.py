@@ -1,61 +1,62 @@
 """A runtime guard on process starts: an audit hook installed when pcc-node starts.
 
 The no-shell guard (tests/test_no_shell_execution.py) reads the package's syntax. Static rules lose
-to new spellings, so this one watches what CPython actually does (the steward's ruling after verdict
-105g). :func:`install` adds a PEP 578 audit hook (``sys.addaudithook``) that refuses, by raising
+to new spellings, so this one watches what CPython actually does (the steward's ruling after 105g).
+:func:`install` adds a PEP 578 audit hook (``sys.addaudithook``) that refuses, by raising
 :class:`SpawnRefused`, every audited event that starts a process or loads native code -- except a
-``subprocess.Popen`` of one of the fixed executables pcc-node runs (:data:`EXECUTABLES`), by bare
-name, as an argument list, with no shell, no ``executable=`` override, no per-call environment, and
-an unchanged ``PATH``. That covers the same starts the static guard allows, however the call was
-reached: an alias, a re-export, ``getattr``, ``string.Formatter``, ``exec``, or a process pool.
+``subprocess.Popen`` of one of the fixed executables pcc-node runs (:data:`EXECUTABLES`), proven to
+be the very binary resolved at startup. However the call was reached -- an alias, a re-export,
+``getattr``, ``string.Formatter``, ``exec``, a process pool -- the event is what it checks.
 
-Refused events: ``subprocess.Popen`` (unless allowed as above); ``os.system``, ``os.exec``,
+Refused events: ``subprocess.Popen`` (unless allowed as below); ``os.system``, ``os.exec``,
 ``os.spawn``, ``os.posix_spawn``, ``os.fork``, ``os.forkpty``, ``os.startfile``, ``pty.spawn``;
-``ctypes.dlopen``; and ``_winapi.CreateProcess``.
+``ctypes.dlopen``; ``_winapi.CreateProcess``.
 
-Tamper resistance (verdict 105j HIGH 1). The 105i threat is evaluated Python, so the hook must not
-decide anything from state evaluated Python can reassign. :func:`install` copies the policy
-(:data:`EXECUTABLES` and the refused-event set, both frozen) and ``isinstance`` into closure locals,
-so reassigning ``spawn_guard.EXECUTABLES``, mutating the refused set, or shadowing ``isinstance`` on
-this module does not change the installed hook. It reads ``os.environ`` and ``os.fsdecode`` through
-the ``os`` module, as the rest of the package does and as the static guard requires, so a
-``spawn_guard.os`` reassignment is part of the object-graph boundary below, not a cheap policy bypass.
+Tamper resistance (verdict 105j/105k HIGH 1). The 105i threat is evaluated Python, so the hook must
+not decide anything from state evaluated Python can reassign. :func:`install` copies into closure
+locals: the policy (:data:`EXECUTABLES`, the refused set, both frozen), ``isinstance`` and the
+sequence types, and the *functions* the hook calls -- ``os.fsdecode``, ``os.getenv``, ``shutil.which``
+and ``os.stat``. The hook dereferences no module global, so reassigning ``spawn_guard.os`` /
+``spawn_guard.shutil`` or the module policy, or shadowing a builtin, cannot weaken it. (Rebinding the
+real ``os.environ`` name does not help an attacker: the OS resolves ``PATH`` from the C environment,
+which only in-place ``os.environ[...]`` mutation changes -- and ``os.getenv`` reflects that and the
+guard refuses it.)
 
-PATH / env (verdict 105j HIGH 2). A bare name resolves through ``PATH``, so an allowed start is
-refused when the call passes its own ``env``, or when ``PATH`` differs from its value at startup --
-either could point ``dd`` at an attacker's binary. pcc-node's own device calls pass no ``env`` and do
-not touch ``PATH``.
+Executable identity, not a bare name (verdict 105k HIGH 2). At install each allowed name is resolved
+against the absolute components of the startup ``PATH`` and pinned by its inode ``(st_dev, st_ino)``.
+An allowed ``subprocess.Popen`` must: pass an argv list whose argv[0] is a pinned name with no
+``executable=`` override; pass no per-call ``env`` and no ``cwd``; run with the startup ``PATH``
+unchanged and containing no relative or empty component (which ``cwd`` could redirect); and resolve,
+right now, to the pinned realpath and inode (so a replaced, symlinked or shadowed binary is refused).
 
-Boundary. An audit hook is defense in depth, not a sandbox. It sees only what CPython audits, and it
-is Python: code that reaches the interpreter's own object graph -- ``gc`` to find and rewrite the hook
-object, ``ctypes`` or other native code, frame introspection -- can still get around any in-process
-Python hook, and a dependency replaced on ``PYTHONPATH`` runs its own import-time code. Those belong
-to the static import guard (#507 refuses ``gc``, ``ctypes`` and the like in package source) and to the
-deployment (a trusted ``sys.path`` and vetted dependencies). Within that boundary the hook closes the
-standard, audited spawn and native-load surface: the 105i reaches -- a ``getattr`` to
-``ProcessPoolExecutor``, ``click.utils.launch``/``edit``, an allowlisted API that evaluates data, a
-wildcard re-export of ``os`` -- all end in one of the refused events and are refused.
+Scope. The hook is installed only on POSIX. pcc-node's device executables are POSIX tools; on Windows
+the ``subprocess.Popen`` audit event carries a rendered command line, not an argv list, and a sound
+check of ``_winapi.CreateProcess``'s application-name against the pinned paths needs a Windows host to
+test -- that is tracked follow-up, so on Windows :func:`install` is a no-op and the node runs
+unguarded (as it did before this layer existed).
 
-Placement. The hook cannot be removed once installed, so :func:`install` runs once, from the console
-entry (:func:`pcc_node._entry.run`) before the CLI and its dependencies are imported, so no import-time
-code runs ahead of it (verdict 105j HIGH 4). The tests call ``main`` and ``run_daemon`` directly and so
-never install it in the shared test process. On Windows every ``subprocess.Popen`` (whose audit event
-carries a rendered command-line string, not an argv list) and every ``_winapi.CreateProcess`` is
-refused: pcc-node's device executables are POSIX, so the guard fails closed there.
+Boundary. An audit hook is defense in depth, not a sandbox. It is Python: code that reaches the
+interpreter's own object graph -- ``gc`` to find and rewrite the hook's closure, ``ctypes`` or other
+native code, frame surgery -- can get around any in-process Python hook, and a dependency whose
+*non-spawn* import-time code is malicious (reading files, say) is not its concern. Those belong to the
+static import guard (#507 refuses ``gc``/``ctypes`` etc. in package source) and the deployment (a
+trusted ``sys.path``, vetted dependencies). A shadowed dependency's import-time *spawn* is still
+refused, because :func:`install` runs before the CLI and its dependencies are imported
+(:func:`pcc_node._entry.run`); the tests call ``main``/``run_daemon`` directly and never install it.
 """
 
 import os
+import shutil
 import sys
 import threading
 from typing import Any, Tuple
 
-# The executables pcc-node runs, by bare name: the documented allowlist. The static guard's census
-# couples spawn_guard.EXECUTABLES to it; install() copies it into the hook's closure, so the hook is
-# unaffected by any later reassignment of this name.
+# The executables pcc-node runs, by bare name: the documented allowlist (the static guard's census
+# couples spawn_guard.EXECUTABLES to it). install() pins each to an absolute path + inode and closes
+# over the result, so reassigning this name cannot weaken an installed hook.
 EXECUTABLES = frozenset({"arp", "dd", "ffmpeg", "journalctl", "sysctl", "v4l2-ctl"})
 
-# Audited events that start a process or load native code. subprocess.Popen is handled on its own
-# (it alone has an allowed case).
+# Audited events that start a process or load native code. subprocess.Popen is handled on its own.
 REFUSED_EVENTS = frozenset({
     "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.fork", "os.forkpty", "os.startfile",
     "pty.spawn", "ctypes.dlopen", "_winapi.CreateProcess",
@@ -70,23 +71,55 @@ class SpawnRefused(RuntimeError):
 
 
 def install() -> None:
-    """Install the spawn guard for the rest of this process (once; later calls do nothing)."""
+    """Install the spawn guard for the rest of this process (once; later calls do nothing).
+
+    POSIX only: on Windows it is a no-op (see the module docstring's Scope note).
+    """
     global _installed
     with _install_lock:
-        if _installed:
+        if _installed or sys.platform == "win32":
             return
-        # Capture everything the hook reads as closure locals now, so it reads nothing from this
-        # module's (reassignable) globals -- the 105i threat is evaluated Python (verdict 105j HIGH 1).
+        # Capture every name the hook uses as a closure local, from the real modules, now -- the hook
+        # dereferences no module global (verdict 105k HIGH 1). These are attribute reads, which the
+        # static no-shell guard allows (unlike binding the bare `os` module).
         executables = frozenset(EXECUTABLES)
         refused = frozenset(REFUSED_EVENTS)
         _isinstance = isinstance
         _seqs = (list, tuple)
-        trusted_path = os.environ.get("PATH")
+        _fsdecode = os.fsdecode
+        _getenv = os.getenv
+        _which = shutil.which
+        _stat = os.stat
         Refused = SpawnRefused
 
-        def _bare(name: Any) -> str:
+        def _absolute_path(value: Any) -> str:
+            # The PATH to resolve against: only its absolute (POSIX, "/"-rooted) components, in order.
+            # A relative or empty component is where cwd/chdir could point a bare name at an attacker's
+            # binary. The guard is POSIX-only, so the separator is ":".
             try:
-                return os.fsdecode(name)
+                text = _fsdecode(value)
+            except TypeError:
+                return ""
+            return ":".join(c for c in text.split(":") if c.startswith("/"))
+
+        def _pin(name: str, path: str):
+            p = _which(name, path=path or None)
+            if p is None:
+                return None
+            try:
+                st = _stat(p)
+            except OSError:
+                return None
+            return (st.st_dev, st.st_ino)  # the inode: identity independent of path or symlink
+
+        startup_path = _getenv("PATH") or ""
+        startup_absolute = _absolute_path(startup_path)
+        pinned = {name: _pin(name, startup_absolute) for name in executables}
+        pinned = {name: ident for name, ident in pinned.items() if ident is not None}
+
+        def _bare(value: Any) -> str:
+            try:
+                return _fsdecode(value)
             except TypeError:
                 return ""
 
@@ -96,15 +129,28 @@ def install() -> None:
                 if not _isinstance(argv, _seqs) or not argv:
                     raise Refused("pcc-node spawn guard: refused subprocess.Popen: the arguments are not a list")
                 first, chosen = _bare(argv[0]), _bare(executable)
-                if first not in executables:
-                    raise Refused(f"pcc-node spawn guard: refused subprocess.Popen: {first!r} is not a device executable")
                 if chosen != first:
                     raise Refused(f"pcc-node spawn guard: refused subprocess.Popen: executable {chosen!r} replaces {first!r}")
-                env = args[3] if len(args) > 3 else None
-                if env is not None:
+                if first not in pinned:
+                    raise Refused(f"pcc-node spawn guard: refused subprocess.Popen: {first!r} is not a device executable pinned at startup")
+                if (args[3] if len(args) > 3 else None) is not None:
                     raise Refused("pcc-node spawn guard: refused subprocess.Popen: a per-call env could repoint the bare name")
-                if os.environ.get("PATH") != trusted_path:
+                if (args[2] if len(args) > 2 else None) is not None:
+                    raise Refused("pcc-node spawn guard: refused subprocess.Popen: a cwd could repoint the bare name")
+                live = _getenv("PATH") or ""
+                if live != startup_path:
                     raise Refused("pcc-node spawn guard: refused subprocess.Popen: PATH changed since startup")
+                if _absolute_path(live) != live:
+                    raise Refused("pcc-node spawn guard: refused subprocess.Popen: PATH has a relative or empty component")
+                resolved = _which(first, path=startup_absolute or None)
+                if resolved is None:
+                    raise Refused(f"pcc-node spawn guard: refused subprocess.Popen: {first!r} no longer resolves on PATH")
+                try:
+                    st = _stat(resolved)
+                except OSError:
+                    raise Refused(f"pcc-node spawn guard: refused subprocess.Popen: cannot stat {first!r}")
+                if (st.st_dev, st.st_ino) != pinned[first]:
+                    raise Refused(f"pcc-node spawn guard: refused subprocess.Popen: {first!r} is not the binary pinned at startup")
                 return
             if event in refused:
                 raise Refused(f"pcc-node spawn guard: refused {event}")
