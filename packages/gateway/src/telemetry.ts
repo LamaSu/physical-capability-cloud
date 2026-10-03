@@ -177,6 +177,11 @@ export class PipelineTelemetryService {
 
     // Add a Sentry breadcrumb for every telemetry event so the trace waterfall
     // in Sentry shows the pipeline phase progression alongside spans.
+    // N107b codemod: sentry.ts wires beforeBreadcrumb: closedBreadcrumb, which keeps ONLY
+    // type/category/level/timestamp from every breadcrumb — message and data (jobId, phase,
+    // status, ...) never leave, by construction, whatever this call puts in them (closedBreadcrumb
+    // also re-checks category/level against its own closed vocabularies regardless of this call).
+    // Sentry's own Breadcrumb type takes category as a plain string, so lit() cannot wrap it here.
     Sentry.addBreadcrumb({
       category: "pcc.pipeline",
       message: `[${jobId}] ${phase} → ${status}`,
