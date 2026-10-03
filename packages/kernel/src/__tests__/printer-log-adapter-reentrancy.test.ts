@@ -26,8 +26,9 @@
  *   - a summary covers exactly the entries emitted before it in its recording: chainLength,
  *     headHash and tailHash;
  *   - nothing of a job's recording is emitted after its summary;
- *   - a recording whose first or timer poll failed has no summary. A failed final poll fails its
- *     stop, and a retried stop may still summarize what was captured (the lifecycle's design);
+ *   - a recording in which a log poll failed (its first, a timer or the final poll) has no
+ *     summary, even after a retried stop: a failed poll may have consumed a line it never
+ *     delivered (astra pack 208);
  *   - a recording that nothing disrupted (no failure, no dispose) emits its entries and exactly
  *     one summary, and every stop asked of it resolves with that summary;
  *   - quiesceEvidence() never answers while a start, a recording or a stop is in flight, and
@@ -71,7 +72,7 @@ it.each(CASES)("%s re-enters %s, then %s", async (site, action, outcome) => {
   const counts = { reset: 0, provider: 0, capture: 0, getChain: 0, listener: 0 };
   let n = 0;
   let fired = false;
-  let failedPoll = false; // its first or timer poll failed: the recording's chain may lack lines
+  let failedPoll = false; // a poll of the recording failed: its chain may lack lines
   let failedAny = false;
   let disposed = false;
   let capturedAfterDispose = 0;
@@ -139,8 +140,7 @@ it.each(CASES)("%s re-enters %s, then %s", async (site, action, outcome) => {
     return new Promise<T>((resolve, reject) =>
       held.push(() => {
         if (outcome === "answers") return resolve(value());
-        failedAny = true;
-        if (!here.endsWith("#3")) failedPoll = true; // the first or the timer poll, not the final one
+        failedPoll = failedAny = true;
         reject(Object.create(null)); // a legal rejection with no text form (astra pack 200)
       }),
     );
@@ -231,8 +231,8 @@ it.each(CASES)("%s re-enters %s, then %s", async (site, action, outcome) => {
   expect.soft(quiet.resolved, "quiesceEvidence() at the end").toBe(true);
   // At most one summary per recording, across retries.
   expect.soft(summaries.filter((e) => e.payload.jobId === "job-a").length, "summaries of job-a's recording").toBeLessThanOrEqual(1);
-  // A recording whose first or timer poll failed has no summary.
-  if (failedPoll) expect.soft(summaries.map((e) => e.payload.chainLength), "summaries of a recording whose first or timer poll failed").toEqual([]);
+  // A recording in which a log poll failed has no summary, even after a retried stop.
+  if (failedPoll) expect.soft(summaries.map((e) => e.payload.chainLength), "summaries of a recording in which a log poll failed").toEqual([]);
   // Each summary covers exactly the entries before it, and nothing of its job follows it.
   let since: Emitted[] = [];
   events.forEach((e, i) => {

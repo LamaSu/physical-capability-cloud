@@ -100,8 +100,8 @@ function failureText(err: unknown): string {
  *   stopping    A stop is in flight, from the moment it is accepted, including a stop
  *               accepted while starting, which first waits for the start to settle.
  *   stopFailed  A stop failed and emitted no summary. Nothing polls. A retried stop can
- *               still emit the job's last entry and its summary, unless a timer poll
- *               failed: then the retry refuses too.
+ *               still emit the job's last entry and its summary, unless a poll failed, a
+ *               timer poll or the final one: then the retry refuses too.
  *   disposed    Final: nothing leaves it.
  *
  * Transitions. Each is single-flight, so one recording's polls and summary never overlap
@@ -186,7 +186,10 @@ export class PrinterLogAdapter implements SensorAdapter {
    * Each is here before it calls the log provider, and until its failure, if any, is latched.
    */
   private readonly polls = new Set<Promise<void>>();
-  /** The first timer poll of this recording that failed: its chain may lack lines. */
+  /**
+   * The first poll of this recording that failed, a timer poll or the final one: its chain may
+   * lack lines, since a provider can consume a line and then fail (astra packs 190 and 208).
+   */
   private pollFailure: string | null = null;
   /**
    * Set when this recording's summary is emitted, before any listener runs: a recording has one
@@ -434,17 +437,24 @@ export class PrinterLogAdapter implements SensorAdapter {
       throw new Error(`[printer-log-adapter] ${this.id}: disposed while job ${this.jobId ?? "unknown"} was stopping, so it has no summary`);
     }
 
-    // A timer poll that failed may have lost lines, so a summary would vouch for a chain that
-    // could be incomplete: refused, emitting nothing (astra pack 190). A retry refuses too.
+    // A poll that failed may have lost lines, so a summary would vouch for a chain that could be
+    // incomplete: refused, emitting nothing (astra pack 190). A retry refuses too.
     if (this.pollFailure !== null) {
       throw new Error(
         `[printer-log-adapter] ${this.id}: a log poll failed during the recording (${this.pollFailure}), so its chain may be incomplete`,
       );
     }
 
-    // Do a final poll to capture any remaining lines
+    // Do a final poll to capture any remaining lines. One that fails may have consumed a line it
+    // never delivered, so it is latched like a timer poll's: this stop fails, and a retried stop
+    // refuses at the check above (astra pack 208).
     if (this.jobId) {
-      await this.poll(this.jobId);
+      try {
+        await this.poll(this.jobId);
+      } catch (err) {
+        this.pollFailure ??= failureText(err);
+        throw err;
+      }
     }
 
     // Disposed during the final poll: no summary (astra pack 196).
