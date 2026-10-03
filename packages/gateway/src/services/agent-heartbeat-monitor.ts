@@ -218,15 +218,16 @@ export class AgentHeartbeatMonitor {
 
         // Audit — rogue designation
         auditService.log({
-          eventType: "agent_rogue_detected",
-          actor: agentId,
-          resourceType: "agent",
-          resourceId: agentId,
-          action: "rogue_detected",
+          eventType: lit("agent_rogue_detected"),
+          actor: declare.id(agentId),
+          resourceType: lit("agent"),
+          resourceId: declare.id(agentId),
+          action: lit("rogue_detected"),
           metadata: {
-            missedBeats: missed,
-            lastSeen: new Date(record.lastHeartbeat).toISOString(),
-            silenceMs,
+            // Timer-derived measurements (this.checkIntervalMs, the server's own clock) — metric.
+            missedBeats: declare.metric(missed),
+            lastSeen: declare.serverTime(new Date(record.lastHeartbeat)),
+            silenceMs: declare.metric(silenceMs),
           },
         });
 
@@ -245,12 +246,13 @@ export class AgentHeartbeatMonitor {
           console.log(`[heartbeat-monitor] Agent ${agentId} → suspended, ${count} scopes revoked`);
 
           auditService.log({
-            eventType: "agent_scope_suspended",
-            actor: "heartbeat-monitor",
-            resourceType: "agent",
-            resourceId: agentId,
-            action: "scopes_suspended",
-            metadata: { scopesSuspended: count, agentId },
+            eventType: lit("agent_scope_suspended"),
+            actor: lit("heartbeat-monitor"),
+            resourceType: lit("agent"),
+            resourceId: declare.id(agentId),
+            action: lit("scopes_suspended"),
+            // count is the DB UPDATE's own affected-row count — a server measurement — metric.
+            metadata: { scopesSuspended: declare.metric(count), agentId: declare.id(agentId) },
           });
         }).catch((err) => {
           console.error(`[heartbeat-monitor] Scope suspension failed for ${agentId}:`, err);
@@ -275,15 +277,15 @@ export class AgentHeartbeatMonitor {
 
         // Audit — heartbeat missed
         auditService.log({
-          eventType: "agent_heartbeat_missed",
-          actor: agentId,
-          resourceType: "agent",
-          resourceId: agentId,
-          action: "heartbeat_missed",
+          eventType: lit("agent_heartbeat_missed"),
+          actor: declare.id(agentId),
+          resourceType: lit("agent"),
+          resourceId: declare.id(agentId),
+          action: lit("heartbeat_missed"),
           metadata: {
-            missedBeats: missed,
-            lastSeen: new Date(record.lastHeartbeat).toISOString(),
-            silenceMs,
+            missedBeats: declare.metric(missed),
+            lastSeen: declare.serverTime(new Date(record.lastHeartbeat)),
+            silenceMs: declare.metric(silenceMs),
           },
         });
 
