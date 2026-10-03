@@ -237,6 +237,68 @@ describe("redactSecrets: private keys in the forms /api/auth/provision returns (
     }
   });
 
+  // ── Round 2 (pp-n89-478-redaction-r2-0548028e) ──────────────────────────────
+
+  it("redacts a PKCS#8 key right after a / or - (round 2 C1)", () => {
+    for (const input of [`POST /debug/${b64}`, `id-${b64}`, `x_${b64url}`, `a+${b64}`]) {
+      expect(leaks(redactSecrets(input), input.slice(-b64.length))).toBe(false);
+    }
+    expect(redactSecrets(`POST /debug/${b64}`)).toBe("POST /debug/[redacted-private-key]");
+  });
+
+  it("redacts a key wrapped with deep indentation or wider inline gaps (round 2 C2a, C2d)", () => {
+    const deep = `private_key_pkcs8_base64: |\n         ${wrap(b64, 8, "\n         ")}`;
+    expect(leaks(redactSecrets(deep), b64)).toBe(false);
+    // Under a name that isn't secret, only the PKCS#8 reader can catch it.
+    expect(leaks(redactSecrets(`material: |\n         ${wrap(b64, 8, "\n         ")}`), b64)).toBe(false);
+    expect(leaks(redactSecrets(`k ${wrap(b64, 8, "   ")}`), b64)).toBe(false);
+    expect(leaks(redactSecrets(`k ${wrap(b64, 8, "\t\t")}`), b64)).toBe(false);
+  });
+
+  it("redacts a hex key printed in groups: spaced, a hexdump, a Buffer, 0x bytes, wrapped (round 2 C2b)", () => {
+    const bytes = hexKey.match(/.{2}/g)!;
+    for (const input of [
+      `wallet ${hexKey.match(/.{1,8}/g)!.join(" ")}`,
+      `private_key: ${hexKey.match(/.{1,8}/g)!.join(" ")}`,
+      `<Buffer ${bytes.join(" ")}>`,
+      `[${bytes.map((x) => "0x" + x).join(", ")}]`,
+      `k:\n  ${wrap(hexKey, 16, "\n  ")}`,
+    ]) {
+      expect(leaks(redactSecrets(input), hexKey)).toBe(false);
+    }
+  });
+
+  it("redacts a YAML key's whole value: the rest of the line, a block body, continuation lines (round 2 C2c)", () => {
+    expect(redactSecrets("password: correct horse battery staple")).toBe("password: [redacted]");
+    expect(redactSecrets("db:\n  password: correct horse\n  user: bob")).toBe("db:\n  password: [redacted]\n  user: bob");
+    expect(redactSecrets("secret: |\n  line one\n  line two\nnext: 1")).toBe("secret: |\n  [redacted]\nnext: 1");
+    expect(redactSecrets("- api_key: abc def\n- other: x")).toBe("- api_key: [redacted]\n- other: x");
+    // An inline map keeps token semantics.
+    expect(redactSecrets("{password: hunter2, user: bob}")).toBe("{password: [redacted], user: bob}");
+  });
+
+  it("keeps status words and decimal id lists; malformed DER is not a key (round 2 M2, M3, M4)", () => {
+    for (const keep of [
+      "validation returned password=required",
+      "password: null,",
+      "ids:\n1111111111111111\n2222222222222222\n3333333333333333\n4444444444444444",
+      "latencies 120 340 560 780 120 340 560 780 120 340 560 780 120 340 560 780 120 340 560 780 120 340 560 780",
+      "MAACAQAwAEFBQUFB",
+    ]) {
+      expect(redactSecrets(keep)).toBe(keep);
+    }
+    expect(redactSecrets("password=hunter")).toBe("password=[redacted]");
+  });
+
+  it("still redacts hex ids with letters on adjacent lines that reach 64 digits: a wrapped key has the same shape", () => {
+    expect(redactSecrets(`ids:\n${wrap(hexKey, 16)}`)).toBe("ids:\n[redacted-hex]");
+  });
+
+  it("redacts a secret in JSON encoded four times (round 2: more than three backslashes)", () => {
+    const s4 = JSON.stringify(JSON.stringify(JSON.stringify(JSON.stringify({ password: "hunter2pass" }))));
+    expect(redactSecrets(s4)).not.toContain("hunter2pass");
+  });
+
   it("stays linear on hostile input", () => {
     const hostile = [
       '"password": "' + '\\"'.repeat(30_000),
@@ -249,6 +311,11 @@ describe("redactSecrets: private keys in the forms /api/auth/provision returns (
       "MIIB ".repeat(12_000),
       ("0123456789abcdef".repeat(1) + "\n").repeat(3_500),
       "aB3".repeat(20_000),
+      ("ab ".repeat(30) + "\n").repeat(700),
+      ("M\n" + " ".repeat(200)).repeat(300),
+      ("password: x\n" + "  y\n".repeat(20)).repeat(200),
+      ('\\\\\\\"password\\\\\\\":\\\\\\\"').repeat(2_000),
+      "Mx ".repeat(21_000),
     ];
     for (const input of hostile) {
       const t0 = performance.now();
