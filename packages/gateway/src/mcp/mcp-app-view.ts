@@ -1545,9 +1545,8 @@ export interface McpAppResourceOptions {
   /**
    * When provided, each ui:// resource read first calls this guard; a non-null
    * return message makes the read throw that message as a JSON-RPC error (the
-   * `/mcp/apps` prod domain gate — gates 5/6). Omitted on the full `/mcp` surface,
-   * so its reads behave exactly as before (#262 stands — the gateway never
-   * crashes; only the FEATURE degrades).
+   * prod domain gate, gates 5/6). Both `/mcp/apps` and the full `/mcp` pass it.
+   * #262 stands: the gateway never crashes; only the FEATURE degrades.
    */
   surfaceGuard?: () => string | null;
 }
@@ -1560,8 +1559,9 @@ function assertResourceSurfaceAvailable(options?: McpAppResourceOptions): void {
 
 /** Register the three fixed UI resources (render, saved, gallery) + the per-slug
  * public share template. One entry point so http-mcp-server wires them together.
- * `options.surfaceGuard`, when set (the read-only `/mcp/apps` surface), gates every
- * resource read behind the prod domain check; absent (full `/mcp`) → unchanged. */
+ * `options.surfaceGuard` gates every resource read behind the prod domain check. Both
+ * surfaces pass it (/mcp/apps and the full /mcp), so no MCP App view is served in
+ * production without a unique per-view origin (D14); absent → unguarded. */
 export function registerMcpAppResources(
   server: McpServer,
   options?: McpAppResourceOptions,
@@ -1831,10 +1831,29 @@ export function enrichOnRampToolResult(
 // Fastify onSend hooks run there — it carries the CSP only via <meta>). This
 // route serves the IDENTICAL render document with a REAL Content-Security-Policy
 // header, for any consumer that fetches the view directly instead of over MCP.
+// In production it obeys D14 like every ui:// read (see mcpAppMirrorRefusal).
 // ---------------------------------------------------------------------------
 
+/** The plain HTTP mirror's D14 gate for one request: null when it may serve, otherwise the
+ * status and plain-text body to answer instead. Outside production it always serves. In
+ * production it serves only when a unique app domain is configured (the same gate as the
+ * ui:// reads) AND the request arrived on that domain's own host, so the view never runs on
+ * a shared origin such as the gateway's. It compares the raw Host header, lowercased, never
+ * X-Forwarded-Host; a proxy that rewrites Host makes the mirror refuse (fail closed). */
+export function mcpAppMirrorRefusal(host: string | undefined): { status: number; message: string } | null {
+  if (process.env.NODE_ENV !== "production") return null;
+  if (!isMcpAppSurfaceAvailable()) return { status: 503, message: MCP_APP_SURFACE_UNAVAILABLE_MESSAGE };
+  const expected = new URL(resolveMcpAppDomain()).host.toLowerCase();
+  if (typeof host === "string" && host.trim().toLowerCase() === expected) return null;
+  return { status: 404, message: "Not found: this MCP App view is served only on its own origin." };
+}
+
 export function registerMcpAppHttpRoute(app: FastifyInstance): void {
-  app.get(HTTP_MIRROR_PATH, async (_request, reply) => {
+  app.get(HTTP_MIRROR_PATH, async (request, reply) => {
+    const refusal = mcpAppMirrorRefusal(request.headers.host);
+    if (refusal) {
+      return reply.code(refusal.status).type("text/plain; charset=utf-8").send(refusal.message);
+    }
     // One nonce per response, shared by the served HTML's inline <script nonce>
     // and this REAL Content-Security-Policy header (directive 12). Because the
     // mirror is fetched by a browser directly, the HEADER — not the <meta> — is
