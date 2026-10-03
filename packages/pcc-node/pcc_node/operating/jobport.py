@@ -5,26 +5,41 @@ this port. It uses only the node's own routes, with the operator's API key:
 
 - ``claim_next``: ``GET /api/operator/jobs?kernelId=…&status=queued``, then the
   gateway's atomic claim, ``POST /api/operator/jobs/:id/claim``. That is a
-  compare-and-set from ``queued`` which answers 200 with a ``claimToken`` exactly
-  once and 409 to everyone else, so two nodes can never both run one job
-  (verdict 117). Until the gateway serves that route, nothing is claimed.
+  compare-and-set from ``queued`` which answers 200 with a ``claimToken`` and a
+  ``leaseExpiresAt`` exactly once, and 409 to everyone else, so two nodes can
+  never both run one job (verdict 117). Until the gateway serves that route,
+  nothing is claimed.
+- **The lease** (verdict 117b): the gateway's lease ends a claim, and at its
+  expiry the job fails (``lease_expired``) rather than going back to the queue,
+  since a node that lost its lease may still be driving the device. A claimed
+  job carries a :class:`Lease` that renews itself in the background
+  (``POST /api/operator/jobs/:id/claim/renew``) at half its remaining time. The
+  node treats the lease as over a margin before the gateway's expiry (clocks
+  differ), and at once when a renewal is refused. ``ClaimedJob.lease_alive()``
+  is what the runtime checks before and throughout a run. A claim with no
+  usable lease is never run: it is failed at once (``claim_lease_unusable``)
+  instead of stranding the job.
 - ``resolve_params``: on the current gateway a polled job carries no parameters
   (board G6). The buyer's selections live in the job's negotiation session:
   ``GET /api/jobs/:id/settlement`` gives ``session.id``, then
   ``GET /api/negotiate/session/:id`` gives ``session.selections``.
-- ``report``: first checks the runtime's evidence. Its operation, run id,
-  record and signed log chain must all be from this node's key, the chain
-  unbroken, and its first entry must commit to that operation, run and record.
-  Evidence that fails a check is never signed. Then it signs a bundle binding
-  the job, the kernel and that evidence: ``bundleHash`` is sha256 over its
-  canonical JSON (the same canonical form as ``@pcc/spec``), and
-  ``kernelSignature`` is the node key's Ed25519 signature over that hash. The
-  device record travels as canonical text (``recordCanonical``), so no device
-  number has to render the same in Python and JavaScript. Posted to
+- ``report``: first checks the runtime's evidence, exactly. It must have the
+  runtime's shape and nothing else, at every level, so no unsigned field can
+  ride inside the bundle the node signs (verdict 117b). Its operation, run id
+  and record must match, its record must be portable JSON, and its log chain
+  must come from this node's key, unbroken. Its first entry must commit to this
+  claim, job and kernel as well as the operation, run and record, so evidence
+  made for another claim is refused. Evidence that fails a check is never
+  signed. Then it signs a bundle binding the job, the kernel, the claim's digest
+  and that evidence: ``bundleHash`` is sha256 over its canonical JSON (the same
+  canonical form as ``@pcc/spec``), and ``kernelSignature`` is the node key's
+  Ed25519 signature over that hash. The device record travels as canonical
+  text (``recordCanonical``, schema ``pcc-node.job-evidence/1``): hash it as a
+  string; it parses back exactly with any JSON parser. Posted to
   ``POST /api/operator/evidence`` with the claim token.
 - ``complete``: ``POST /api/operator/job-status`` ``completed`` or ``failed``,
-  with the reason and the claim token. A job whose evidence was not stored is
-  never marked ``completed``.
+  with the reason and the claim token, then ends the lease. A job whose evidence
+  was not stored is never marked ``completed``.
 
 ``report`` and ``complete`` return what the gateway acknowledged
 (:class:`ReportAck`, :class:`CompleteAck`), so the loop's outcome can follow
@@ -33,7 +48,10 @@ the job id the bundle must bind.
 """
 
 import logging
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Set, Tuple
 from urllib.parse import quote
 
@@ -41,20 +59,136 @@ from pcc_node.http_util import pcc_request
 from pcc_node.log_capture import (
     GENESIS, assert_ed25519_available, canonicalize, compute_entry_hash, sha256_hex, sign_ed25519_utf8,
 )
+from pcc_node.operating.commitment import EVIDENCE_SCHEMA, claim_digest, portable, record_commitment
 
 log = logging.getLogger("pcc-node.operating.jobport")
 
 Request = Callable[..., Tuple[int, Any]]
 
+# The node's lease ends this long before the gateway's: a quarter of the time left, at most 5 s.
+_LEASE_MARGIN_FRACTION = 0.25
+_LEASE_MARGIN_MAX_S = 5.0
+_LEASE_MIN_WINDOW_S = 0.5
+_RENEW_MIN_WAIT_S = 0.1
+# A claim is renewed for at most the longest operation (24 h) plus an hour, even if never completed.
+_MAX_HOLD_S = 86400.0 + 3600.0
+
+# The runtime's evidence, exactly: anything else is refused before it can be signed (verdict 117b).
+_EVIDENCE_KEYS = frozenset({"operation", "runId", "record", "logChain", "signer"})
+_EVENT_KEYS = frozenset({"type", "timestamp", "payload"})
+_PAYLOAD_KEYS = frozenset({"entryId", "entryHash", "previousHash", "source", "capturedAt", "kernelSignature",
+                           "rawContent"})
+_SIGNATURE_KEYS = frozenset({"signer", "algorithm", "value"})
+
+
+def _parse_expiry(value: Any) -> Optional[float]:
+    """leaseExpiresAt as a POSIX time, or None. It must name its time zone."""
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return None
+    return when.timestamp()
+
+
+class Lease:
+    """A claim's lease: alive until a margin before the gateway's expiry, renewed in the background.
+
+    ``renew()`` returns ``("ok", expires_at)`` (a POSIX time), ``("refused", None)`` when the
+    gateway says the lease is gone, or ``("error", None)`` for anything transient, which is
+    retried until the lease runs out. A lease that lapsed or was refused stays over.
+    """
+
+    def __init__(self, job_id: str, expires_at: float, renew: Callable[[], Tuple[str, Optional[float]]], *,
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
+                 max_hold_s: float = _MAX_HOLD_S) -> None:
+        self._renew = renew
+        self._clock, self._wall = clock, wall
+        self._lock = threading.Lock()
+        self._release = threading.Event()
+        self._hold_until = clock() + max_hold_s
+        deadline = self._local_deadline(expires_at)
+        self._dead = deadline is None
+        self._deadline = deadline if deadline is not None else clock()
+        if not self._dead:
+            threading.Thread(target=self._keep, name=f"pcc-lease-{job_id}", daemon=True).start()
+
+    def usable(self) -> bool:
+        """Whether the gateway's lease left the node any time to run in."""
+        return not self._dead
+
+    def _local_deadline(self, expires_at: Optional[float]) -> Optional[float]:
+        if expires_at is None:
+            return None
+        remaining = expires_at - self._wall()
+        window = remaining - min(_LEASE_MARGIN_MAX_S, remaining * _LEASE_MARGIN_FRACTION)
+        if window <= _LEASE_MIN_WINDOW_S:
+            return None
+        return self._clock() + window
+
+    def alive(self) -> bool:
+        with self._lock:
+            if not self._dead and self._clock() >= self._deadline:
+                self._dead = True  # a lease that lapsed stays lapsed, even if a late renewal succeeds
+            return not self._dead
+
+    def release(self) -> None:
+        """End the lease: the job is finished, or abandoned."""
+        with self._lock:
+            self._dead = True
+        self._release.set()
+
+    def _keep(self) -> None:
+        while True:
+            with self._lock:
+                now = self._clock()
+                if self._dead or now >= self._deadline:
+                    self._dead = True
+                    return
+                if now >= self._hold_until:
+                    return  # stop renewing; the lease runs out on its own
+                wait = max(_RENEW_MIN_WAIT_S, (self._deadline - now) / 2)
+            if self._release.wait(wait):
+                return
+            try:
+                outcome, expires_at = self._renew()
+            except Exception:  # a renewal that cannot run is a transient failure
+                outcome, expires_at = "error", None
+            with self._lock:
+                if self._dead:
+                    return
+                if outcome == "refused":
+                    self._dead = True
+                    return
+                if outcome == "ok":
+                    deadline = self._local_deadline(expires_at)
+                    if deadline is None:
+                        self._dead = True
+                        return
+                    self._deadline = deadline
+
 
 @dataclass(frozen=True)
 class ClaimedJob:
-    """A job this node has claimed. ``job_id`` and ``operation`` are what the loop reads."""
+    """A job this node has claimed. ``job_id`` and ``operation`` are what the loop reads.
+
+    The runtime reads ``job_id``, ``kernel_id`` and ``claim_token`` to bind its run to this
+    claim, and ``lease_alive()`` before and throughout the run.
+    """
 
     job_id: str
     operation: str
     capability_type: str
-    claim_token: str = ""
+    claim_token: str = field(default="", repr=False)
+    kernel_id: str = ""
+    lease: Optional[Lease] = field(default=None, repr=False, compare=False)
+
+    def lease_alive(self) -> bool:
+        return self.lease is not None and self.lease.alive()
 
 
 @dataclass(frozen=True)
@@ -128,7 +262,7 @@ class GatewayJobPort:
         return self._request(method, path, body, base_url=self._base, api_key=self._api_key)
 
     def claim_next(self, kernel_id: str) -> Optional[ClaimedJob]:
-        """Atomically claim the next queued job this node can run, or return None."""
+        """Atomically claim the next queued job this node can run, with a live lease, or return None."""
         if kernel_id != self._kernel_id:
             log.warning("asked to claim for kernel %s, but this port serves %s", kernel_id, self._kernel_id)
             return None
@@ -149,14 +283,38 @@ class GatewayJobPort:
                 continue
             status, claimed = self._call("POST", f"/api/operator/jobs/{quote(job_id, safe='')}/claim",
                                          {"kernelId": self._kernel_id})
-            token = claimed.get("claimToken") if isinstance(claimed, dict) else None
-            if (status == 200 and claimed.get("claimed") is True and claimed.get("jobId") == job_id
+            if not isinstance(claimed, dict):
+                log.warning("job %s: not claimed (HTTP %s, malformed answer)", job_id, status)
+                continue
+            token = claimed.get("claimToken")
+            if not (status == 200 and claimed.get("claimed") is True and claimed.get("jobId") == job_id
                     and isinstance(token, str) and token):
-                # Seen only once claimed: a refused or failed claim is tried again next time.
-                self._seen.add(job_id)
-                return ClaimedJob(job_id=job_id, operation=operation, capability_type=cap_type, claim_token=token)
-            log.warning("job %s: not claimed (HTTP %s)", job_id, status)
+                log.warning("job %s: not claimed (HTTP %s)", job_id, status)
+                continue
+            # Seen only once claimed: a refused or failed claim is tried again next time.
+            self._seen.add(job_id)
+            lease = Lease(job_id, _parse_expiry(claimed.get("leaseExpiresAt")),
+                          lambda job_id=job_id, token=token: self._renew(job_id, token))
+            if not lease.usable():
+                # The gateway gave this node the job, but no lease it can keep: never run it,
+                # and fail it now rather than strand it in_progress.
+                log.warning("job %s: claimed without a usable lease; failing it", job_id)
+                self._post_status(job_id, token, "failed", "claim_lease_unusable")
+                continue
+            return ClaimedJob(job_id=job_id, operation=operation, capability_type=cap_type, claim_token=token,
+                              kernel_id=self._kernel_id, lease=lease)
         return None
+
+    def _renew(self, job_id: str, token: str) -> Tuple[str, Optional[float]]:
+        status, answer = self._call("POST", f"/api/operator/jobs/{quote(job_id, safe='')}/claim/renew",
+                                    {"claimToken": token})
+        if status == 409 or (status == 200 and isinstance(answer, dict) and answer.get("renewed") is False):
+            return "refused", None
+        if status == 200 and isinstance(answer, dict):
+            expires_at = _parse_expiry(answer.get("leaseExpiresAt"))
+            if expires_at is not None:
+                return "ok", expires_at
+        return "error", None
 
     def resolve_params(self, job: ClaimedJob) -> Optional[Dict[str, Any]]:
         """The buyer's selections from the job's negotiation session, or None."""
@@ -171,48 +329,66 @@ class GatewayJobPort:
         return dict(selections) if isinstance(selections, dict) else None
 
     def _check_evidence(self, job: ClaimedJob, evidence: Any) -> None:
-        """Raise EvidenceInvalid unless the evidence is this node's own signed account of this run."""
-        if not isinstance(evidence, dict):
-            raise EvidenceInvalid("not_an_object")
-        if evidence.get("operation") != job.operation:
+        """Raise EvidenceInvalid unless the evidence is exactly this node's signed account of a run under this claim."""
+        try:
+            self._check_evidence_exactly(job, evidence)
+        except EvidenceInvalid:
+            raise
+        except (TypeError, ValueError, UnicodeError, RecursionError) as why:
+            raise EvidenceInvalid("unreadable") from why
+
+    def _check_evidence_exactly(self, job: ClaimedJob, evidence: Any) -> None:
+        if not isinstance(evidence, dict) or set(evidence) != _EVIDENCE_KEYS:
+            raise EvidenceInvalid("not_runtime_evidence")
+        if evidence["operation"] != job.operation:
             raise EvidenceInvalid("operation_mismatch")
-        run_id = evidence.get("runId")
-        if not isinstance(run_id, str) or not run_id:
+        run_id = evidence["runId"]
+        if not isinstance(run_id, str) or not run_id or len(run_id) > 256:
             raise EvidenceInvalid("no_run_id")
-        if evidence.get("record") is None:
+        record = evidence["record"]
+        if record is None:
             raise EvidenceInvalid("no_record")
-        if evidence.get("signer") != self._signer:
+        if not portable(record):
+            raise EvidenceInvalid("record_not_portable")
+        if evidence["signer"] != self._signer:
             raise EvidenceInvalid("foreign_signer")
-        chain = evidence.get("logChain")
+        if not isinstance(job.claim_token, str) or not job.claim_token:
+            raise EvidenceInvalid("no_claim")
+        chain = evidence["logChain"]
         if not isinstance(chain, list) or not chain:
             raise EvidenceInvalid("empty_chain")
+        if len(chain) > 2:
+            raise EvidenceInvalid("chain_too_long")  # the runtime writes the record, then at most a log
         previous = GENESIS
         for i, event in enumerate(chain):
-            if not isinstance(event, dict) or event.get("type") != "log_hash_chain_entry":
+            if not isinstance(event, dict) or set(event) != _EVENT_KEYS or event["type"] != "log_hash_chain_entry":
                 raise EvidenceInvalid(f"entry_{i}_malformed")
-            payload = event.get("payload")
-            if not isinstance(payload, dict):
+            payload = event["payload"]
+            if not isinstance(payload, dict) or set(payload) != _PAYLOAD_KEYS:
                 raise EvidenceInvalid(f"entry_{i}_malformed")
-            raw, source, captured_at = payload.get("rawContent"), payload.get("source"), payload.get("capturedAt")
+            raw, source, captured_at = payload["rawContent"], payload["source"], payload["capturedAt"]
             if not all(isinstance(v, str) for v in (raw, source, captured_at)):
                 raise EvidenceInvalid(f"entry_{i}_malformed")
-            if payload.get("previousHash") != previous:
+            # The fields no signature covers must be the ones the runtime derives.
+            if event["timestamp"] != captured_at or payload["entryId"] != f"{run_id}:{'record' if i == 0 else 'log'}":
+                raise EvidenceInvalid(f"entry_{i}_malformed")
+            if payload["previousHash"] != previous:
                 raise EvidenceInvalid(f"entry_{i}_broken_link")
             entry_hash = compute_entry_hash(raw, source, captured_at)
-            if payload.get("entryHash") != entry_hash:
+            if payload["entryHash"] != entry_hash:
                 raise EvidenceInvalid(f"entry_{i}_hash_mismatch")
-            signature = payload.get("kernelSignature")
-            if (not isinstance(signature, dict) or signature.get("signer") != self._signer
-                    or signature.get("algorithm") != "ed25519"
-                    or not _signature_ok(entry_hash, signature.get("value"), self._public_hex)):
+            signature = payload["kernelSignature"]
+            if (not isinstance(signature, dict) or set(signature) != _SIGNATURE_KEYS
+                    or signature["signer"] != self._signer or signature["algorithm"] != "ed25519"
+                    or not _signature_ok(entry_hash, signature["value"], self._public_hex)):
                 raise EvidenceInvalid(f"entry_{i}_bad_signature")
             previous = entry_hash
-        committed = canonicalize({"operation": job.operation, "record": evidence["record"], "runId": run_id})
+        committed = record_commitment(job.claim_token, job.job_id, self._kernel_id, job.operation, record, run_id)
         if chain[0]["payload"]["rawContent"] != committed:
             raise EvidenceInvalid("record_not_committed")
 
     def report(self, job: ClaimedJob, evidence: Dict[str, Any]) -> ReportAck:
-        """Check the runtime's evidence, sign a bundle binding it to this job, and post it."""
+        """Check the runtime's evidence, sign a bundle binding it to this job and claim, and post it."""
         self._stored[job.job_id] = False
         try:
             self._check_evidence(job, evidence)
@@ -222,8 +398,10 @@ class GatewayJobPort:
             log.warning("job %s: evidence not signed (%s)", job.job_id, why)
             return ReportAck(stored=False, reason=reason)
         bundle = {
+            "schema": EVIDENCE_SCHEMA,
             "jobId": job.job_id,
             "kernelId": self._kernel_id,
+            "claim": claim_digest(job.claim_token),
             "operation": job.operation,
             "runId": evidence["runId"],
             "recordCanonical": canonicalize(evidence["record"]),
@@ -250,20 +428,27 @@ class GatewayJobPort:
             return ReportAck(stored=False, reason="evidence_not_stored")
         return ReportAck(stored=True)
 
+    def _post_status(self, job_id: str, token: str, final: str, reason: Optional[str]) -> bool:
+        body: Dict[str, Any] = {"jobId": job_id, "kernelId": self._kernel_id, "status": final, "claimToken": token}
+        if reason:
+            body["metadata"] = {"reason": reason}
+        status, answer = self._call("POST", "/api/operator/job-status", body)
+        accepted = status == 200 and isinstance(answer, dict) and answer.get("updated") is True
+        if not accepted:
+            log.warning("job %s: final status %s not applied (HTTP %s)", job_id, final, status)
+        return accepted
+
     def complete(self, job: ClaimedJob, *, passed: bool, reason: Optional[str]) -> CompleteAck:
-        """Finish the job the node's way, and say whether the gateway applied it.
+        """Finish the job the node's way, say whether the gateway applied it, and end the lease.
 
         Never ``completed`` without stored evidence.
         """
         if passed and not self._stored.get(job.job_id):
             passed, reason = False, self._failure.get(job.job_id, "evidence_not_stored")
         final = "completed" if passed else "failed"
-        body: Dict[str, Any] = {"jobId": job.job_id, "kernelId": self._kernel_id,
-                                "status": final, "claimToken": job.claim_token}
-        if reason:
-            body["metadata"] = {"reason": reason}
-        status, answer = self._call("POST", "/api/operator/job-status", body)
-        accepted = status == 200 and isinstance(answer, dict) and answer.get("updated") is True
-        if not accepted:
-            log.warning("job %s: final status %s not applied (HTTP %s)", job.job_id, final, status)
+        try:
+            accepted = self._post_status(job.job_id, job.claim_token, final, reason)
+        finally:
+            if job.lease is not None:
+                job.lease.release()
         return CompleteAck(status=final, accepted=accepted, reason=reason)

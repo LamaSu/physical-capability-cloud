@@ -1,6 +1,7 @@
 """GatewayJobPort: claims only mappable jobs, signs bundles the gateway can verify, never completes without evidence."""
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -8,6 +9,7 @@ nacl_signing = pytest.importorskip("nacl.signing")
 
 from pcc_node import log_capture
 from pcc_node.log_capture import LogCapture, LogSigningRefused, canonicalize, sha256_hex
+from pcc_node.operating.commitment import record_commitment
 from pcc_node.operating.jobport import ClaimedJob, GatewayJobPort
 
 KERNEL = "kernel_bench"
@@ -46,11 +48,11 @@ def _port_and_keys(gateway, **kwargs):
     return port, pub, sec
 
 
-def _evidence(pub, sec, run_id="run-1"):
-    """Evidence as AdapterRuntime builds it: the node's own signed chain for one run."""
+def _evidence(pub, sec, job, run_id="run-1"):
+    """Evidence as AdapterRuntime builds it: the node's own signed chain for one run under this job's claim."""
     record = {"status": "succeeded"}
     capture = LogCapture(pub, sec)
-    entry = capture.capture(canonicalize({"operation": "read_absorbance", "record": record, "runId": run_id}),
+    entry = capture.capture(record_commitment(job.claim_token, job.job_id, KERNEL, "read_absorbance", record, run_id),
                             "device:run", "2026-10-03T00:00:00Z", entry_id=f"{run_id}:record")
     return {"operation": "read_absorbance", "runId": run_id, "record": record, "logChain": [entry],
             "signer": capture.signer}
@@ -60,7 +62,8 @@ JOBS = f"/api/operator/jobs?kernelId={KERNEL}&status=queued"
 STATUS = "/api/operator/job-status"
 UPDATED = (200, {"updated": True})
 CLAIM_J1 = "/api/operator/jobs/j-1/claim"
-CLAIMED_J1 = (200, {"claimed": True, "jobId": "j-1", "claimToken": "tok-1", "leaseExpiresAt": "2026-10-03T00:10:00Z"})
+LEASE = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+CLAIMED_J1 = (200, {"claimed": True, "jobId": "j-1", "claimToken": "tok-1", "leaseExpiresAt": LEASE})
 
 
 class TestSigningIsMandatory:
@@ -89,7 +92,9 @@ class TestClaim:
         })
         port, _ = _port(gw)
         job = port.claim_next(KERNEL)
-        assert job == ClaimedJob("j-1", "read_absorbance", "lab.absorbance", "tok-1")
+        assert (job.job_id, job.operation, job.capability_type, job.claim_token, job.kernel_id) == (
+            "j-1", "read_absorbance", "lab.absorbance", "tok-1", KERNEL)
+        assert job.lease_alive()  # a claim carries its lease (117b)
         assert gw.posted(CLAIM_J1) == [{"kernelId": KERNEL}]
         assert gw.posted(STATUS) == []  # the claim itself moves the job to in_progress
         assert all(api_key == "k-operator" for *_, api_key in gw.calls)
@@ -159,7 +164,7 @@ class TestReportAndComplete:
     def test_the_bundle_binds_the_job_and_its_signature_verifies(self):
         gw = FakeGateway({("POST", "/api/operator/evidence"): (200, {"stored": True, "jobId": "j-1", "deviceSigned": True})})
         port, pub, sec = _port_and_keys(gw)
-        evidence = _evidence(pub, sec)
+        evidence = _evidence(pub, sec, self.JOB)
         assert port.report(self.JOB, evidence).stored is True
         [posted] = gw.posted("/api/operator/evidence")
         assert (posted["jobId"], posted["kernelId"], posted["claimToken"]) == ("j-1", KERNEL, "tok-1")
@@ -168,23 +173,25 @@ class TestReportAndComplete:
         bundle_hash = bundle.pop("bundleHash")
         assert bundle["jobId"] == "j-1" and bundle["kernelId"] == KERNEL and bundle["logChain"] == evidence["logChain"]
         assert bundle["recordCanonical"] == canonicalize(evidence["record"])
+        assert bundle["claim"] == hashlib.sha256(b"tok-1").hexdigest() and bundle["schema"] == "pcc-node.job-evidence/1"
         assert bundle_hash == sha256_hex(canonicalize(bundle))
         assert signature["algorithm"] == "ed25519" and signature["signer"] == "0x" + pub
         nacl_signing.VerifyKey(bytes.fromhex(pub)).verify(bundle_hash.encode(), bytes.fromhex(signature["value"]))
 
-    def test_the_same_evidence_for_another_job_hashes_differently(self):
+    def test_evidence_made_under_one_claim_is_never_signed_for_another(self):
+        # 117b HIGH: a different outer hash was not enough; the evidence itself names its claim.
         gw = FakeGateway({("POST", "/api/operator/evidence"): (200, {"stored": True, "jobId": "j-1"})})
         port, pub, sec = _port_and_keys(gw)
-        evidence = _evidence(pub, sec)
-        port.report(self.JOB, evidence)
-        port.report(ClaimedJob("j-2", "read_absorbance", "lab.absorbance", "tok-2"), evidence)
-        first, second = (b["evidence"]["bundle"]["bundleHash"] for b in gw.posted("/api/operator/evidence"))
-        assert first != second
+        evidence = _evidence(pub, sec, self.JOB)
+        assert port.report(self.JOB, evidence).stored is True
+        ack = port.report(ClaimedJob("j-2", "read_absorbance", "lab.absorbance", "tok-2"), evidence)
+        assert (ack.stored, ack.reason) == (False, "evidence_invalid:record_not_committed")
+        assert len(gw.posted("/api/operator/evidence")) == 1
 
     def test_completed_only_with_stored_evidence(self):
         gw = FakeGateway({("POST", "/api/operator/evidence"): (200, {"stored": True, "jobId": "j-1"}), ("POST", STATUS): UPDATED})
         port, pub, sec = _port_and_keys(gw)
-        port.report(self.JOB, _evidence(pub, sec))
+        port.report(self.JOB, _evidence(pub, sec, self.JOB))
         ack = port.complete(self.JOB, passed=True, reason=None)
         assert gw.posted(STATUS)[-1] == {"jobId": "j-1", "kernelId": KERNEL, "status": "completed", "claimToken": "tok-1"}
         assert ack.accepted is True and ack.status == "completed"
@@ -198,7 +205,7 @@ class TestReportAndComplete:
         gw = FakeGateway(routes)
         port, pub, sec = _port_and_keys(gw)
         if stored is not None:
-            assert port.report(self.JOB, _evidence(pub, sec)).stored is False
+            assert port.report(self.JOB, _evidence(pub, sec, self.JOB)).stored is False
         port.complete(self.JOB, passed=True, reason=None)
         assert gw.posted(STATUS)[-1] == {"jobId": "j-1", "kernelId": KERNEL, "status": "failed", "claimToken": "tok-1",
                                          "metadata": {"reason": "evidence_not_stored"}}

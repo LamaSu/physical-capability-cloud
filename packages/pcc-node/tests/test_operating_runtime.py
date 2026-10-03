@@ -3,6 +3,7 @@
 import hashlib
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -17,6 +18,18 @@ from pcc_node.operating.runtime import AdapterRuntime, BindingError, OperationBi
 def _keys():
     sk = nacl_signing.SigningKey.generate()
     return sk.verify_key.encode().hex(), sk.encode().hex()
+
+
+class Claim:
+    """The claim a run belongs to (verdict 117b): job, kernel, token, and a live lease."""
+
+    job_id, kernel_id, claim_token = "j-1", "kernel_bench", "tok-j-1"
+
+    def lease_alive(self):
+        return True
+
+
+CLAIM = Claim()
 
 
 class FakeDevice:
@@ -121,20 +134,20 @@ class TestAJobNeverChoosesTheRequest:
         params = {"wavelengthNm": 450, "wells": ["A1", "A2"],
                   "method": "DELETE", "path": "/admin", "url": "http://203.0.113.9:1/", "host": "evil.example",
                   "plateFormat": "384-well"}
-        result = runtime.run("read_absorbance", params)
+        result = runtime.run("read_absorbance", params, claim=CLAIM)
         assert result.ok, result.error
         assert device.posts() == [("POST", "/runs", {"wavelengthNm": 450, "wells": ["A1", "A2"], "plateFormat": "96-well"})]
         assert {path for _, path, _ in device.requests} == {"/runs", "/runs/run-1", "/runs/run-1/log"}
 
     def test_a_missing_slot_leaves_the_device_untouched(self, device):
         runtime, _ = _runtime(device.url)
-        result = runtime.run("read_absorbance", {"wavelengthNm": 450})
+        result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
         assert (result.ok, result.error) == (False, "param_missing:wells")
         assert device.requests == []
 
     def test_an_unbound_operation_leaves_the_device_untouched(self, device):
         runtime, _ = _runtime(device.url)
-        result = runtime.run("self_destruct", {"wavelengthNm": 450, "wells": ["A1"]})
+        result = runtime.run("self_destruct", {"wavelengthNm": 450, "wells": ["A1"]}, claim=CLAIM)
         assert (result.ok, result.error) == (False, "unknown_operation:self_destruct")
         assert device.requests == []
 
@@ -143,7 +156,7 @@ class TestAJobNeverChoosesTheRequest:
         try:
             device.redirect_to = other.url + "/runs"
             runtime, _ = _runtime(device.url)
-            result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]})
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]}, claim=CLAIM)
             assert (result.ok, result.error) == (False, "device_refused:302")
             assert other.requests == []
         finally:
@@ -153,7 +166,7 @@ class TestAJobNeverChoosesTheRequest:
         d = FakeDevice(run_id="../admin?x=1")
         try:
             runtime, _ = _runtime(d.url)
-            runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]})
+            runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]}, claim=CLAIM)
             polled = [path for method, path, _ in d.requests if method == "GET"]
             assert polled and all(p.startswith("/runs/..%2Fadmin%3Fx%3D1") for p in polled)
         finally:
@@ -206,7 +219,7 @@ class TestIdle:
 class TestEvidence:
     def test_a_finished_run_returns_signed_entries_that_verify(self, device):
         runtime, pub = _runtime(device.url)
-        result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1", "A2"]})
+        result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1", "A2"]}, claim=CLAIM)
         assert result.ok and result.output["result"] == {"A1": 0.12, "A2": 0.34}
         chain = result.evidence["logChain"]
         assert [e["payload"]["source"] for e in chain] == ["device:run", "device:log"]
@@ -226,20 +239,24 @@ class TestEvidence:
         d = FakeDevice(states=("running", "failed"))
         try:
             runtime, _ = _runtime(d.url)
-            result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]})
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]}, claim=CLAIM)
             assert (result.ok, result.error) == (False, "run_failed")
             assert result.evidence["logChain"]
         finally:
             d.close()
 
     def test_a_run_that_never_ends_times_out(self):
+        # A real clock: the watchdog that enforces the deadline reads it from its own thread.
         d = FakeDevice(states=("running",))
-        ticks = iter(range(0, 10_000, 100))
         try:
             pub, sec = _keys()
-            runtime = AdapterRuntime.from_profile(_profile(d.url), pub, sec, clock=lambda: next(ticks), sleep=lambda s: None)
-            result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]})
+            profile = _profile(d.url)
+            profile["operations"]["read_absorbance"]["poll"]["timeoutS"] = 0.5
+            runtime = AdapterRuntime.from_profile(profile, pub, sec)
+            started = time.monotonic()
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]}, claim=CLAIM)
             assert (result.ok, result.error) == (False, "timeout:device_state_unknown")
+            assert time.monotonic() - started < 2.0
         finally:
             d.close()
 
@@ -247,7 +264,7 @@ class TestEvidence:
         d = FakeDevice(start_status=409)
         try:
             runtime, _ = _runtime(d.url)
-            result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]})
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450, "wells": ["A1"]}, claim=CLAIM)
             assert (result.ok, result.error, result.evidence) == (False, "device_refused:409", None)
         finally:
             d.close()

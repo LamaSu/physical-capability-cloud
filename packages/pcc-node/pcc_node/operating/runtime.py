@@ -2,8 +2,8 @@
 
 The operating loop (refvertical's ``loop.py``) owns the job contract: resolve a
 job's parameters, type-check and envelope-check them, check the device is idle,
-then call ``run(operation, params)`` exactly once. This module is the only part
-that touches the device, and it keeps two promises:
+then call ``run(operation, params, claim=job)`` exactly once. This module is the
+only part that touches the device, and it keeps these promises:
 
 1. **A job never chooses the request.** Each operation is bound, in the
    operating profile, to one fixed request: method, path and body template.
@@ -14,14 +14,28 @@ that touches the device, and it keeps two promises:
 2. **Evidence is signed or absent.** The runtime refuses to start without a
    genuine Ed25519 key (pynacl), and every record it returns is a signed
    ``log_hash_chain_entry`` from :class:`~pcc_node.log_capture.LogCapture`.
-
-3. **Device I/O is bounded** (verdict 117). Every device answer is capped in
-   size, every request runs against the operation's total deadline, a run id
-   of "." or ".." is refused before it can change a path, and :meth:`cancel`
-   stops a run between reads. A timeout or a cancel leaves the device's state
-   unknown, and the result says so.
-4. **Each job is its own log chain**, starting at GENESIS, so every job's
+3. **A run belongs to its claim** (verdict 117b). The first entry of its log
+   chain commits to the claim, the job and the kernel, so its evidence can be
+   signed for no other job. The start request carries an ``Idempotency-Key``
+   derived from the claim. The run never starts without a live lease, and it
+   stops the moment the lease is lost.
+4. **Device I/O is bounded and interruptible** (verdicts 117 and 117b). Every
+   answer is capped in size. A watchdog shuts the request's socket the moment
+   the run is cancelled, its lease is lost, or the operation's total deadline
+   passes: a header wait, a stalled read or a slow connect never outlives
+   them. A run id of "." or ".." is refused before it can change a path.
+5. **The result says whether the device may be running.** Once any byte of the
+   start request has left the node, every failure is labelled
+   ``<reason>:device_state_unknown``: a lost connection, a 5xx, a timeout, a
+   cancel, a lost lease, an unusable run id. Only an answer of 3xx or 4xx is a
+   refusal (``device_refused:<status>``). A stop before anything was sent is
+   ``<reason>:not_started``, and a device that could not be reached is
+   ``device_unreachable``.
+6. **Each job is its own log chain**, starting at GENESIS, so every job's
    evidence verifies on its own.
+
+:meth:`AdapterRuntime.cancel` cancels the run in progress, or the next run if
+none is: a cancel is never erased by the run that follows it.
 
 This first cut drives generic-HTTP devices, the kind with their own run API
 (``POST /runs``, poll ``GET /runs/{runId}``). OctoPrint and Opentrons bindings
@@ -30,20 +44,25 @@ device half returns (held out of #454), since nothing here can stop a device
 whose run outlived its deadline.
 """
 
+import errno
+import http.client
 import json
 import logging
+import os
 import re
+import select
+import socket
+import ssl
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pcc_node.http_util import USER_AGENT
 from pcc_node.log_capture import LogCapture, canonicalize
+from pcc_node.operating.commitment import idempotency_key, portable, record_commitment
 
 log = logging.getLogger("pcc-node.operating.runtime")
 
@@ -53,8 +72,12 @@ _METHODS = ("POST", "PUT")
 # Bounds on what a device may send back (verdict 117).
 _MAX_RESPONSE_BYTES = 1 << 20
 _MAX_LOG_BYTES = 4 << 20
-_REQUEST_TIMEOUT_S = 30.0
 _IDLE_CHECK_S = 10.0
+# How often a request, a connect or a wait between polls checks whether it must stop.
+_WATCH_S = 0.02
+_CONNECTING = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, getattr(errno, "WSAEWOULDBLOCK", errno.EWOULDBLOCK)}
+
+Stop = Callable[[], Optional[str]]
 
 
 class BindingError(ValueError):
@@ -214,33 +237,152 @@ def _fill(template: Any, params: Dict[str, Any]) -> Any:
     return template
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None  # a 3xx is an answer, never a new target
-
-
-_OPENER = build_opener(_NoRedirect)
-
-
 class _Abort(Exception):
-    """A device request stopped before its answer was complete: why, as a result error."""
+    """A device request stopped before its answer was complete: why, and whether any of it was sent."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, sent: bool = False) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.sent = sent
 
 
-def _read_bounded(source: Any, max_bytes: int, deadline: float, clock: Callable[[], float],
-                  cancelled: Callable[[], bool]) -> str:
-    """Read an answer in pieces, never more than max_bytes, never past the deadline."""
-    read1 = getattr(source, "read1", None)
+@dataclass(frozen=True)
+class _Answer:
+    """What a device request got back. status is 0 when no status line arrived; body is None when the
+    body did not arrive whole; sent says whether any byte of the request left the node."""
+
+    status: int
+    body: Any
+    sent: bool
+
+
+def _stop_reason(deadline: float, clock: Callable[[], float], stop: Optional[Stop]) -> Optional[str]:
+    reason = stop() if stop is not None else None
+    if reason:
+        return reason
+    return "timeout" if clock() >= deadline else None
+
+
+class _Watch:
+    """Shuts a request's socket the moment it must stop: a cancel, a lost lease, or the deadline.
+
+    A blocked connect, header wait or read then returns at once, instead of when the device
+    next sends a byte (verdict 117b).
+    """
+
+    def __init__(self, deadline: float, clock: Callable[[], float], stop: Optional[Stop]) -> None:
+        self._deadline, self._clock, self._stop = deadline, clock, stop
+        self._sock: Optional[socket.socket] = None
+        self._reason: Optional[str] = None
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._watch, name="pcc-device-io-watch", daemon=True)
+        self._thread.start()
+
+    def reason(self) -> Optional[str]:
+        """Why the request must stop, if it must."""
+        return self._reason or _stop_reason(self._deadline, self._clock, self._stop)
+
+    def check(self) -> None:
+        reason = self.reason()
+        if reason:
+            raise _Abort(reason)
+
+    def arm(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._sock = sock
+            if self._reason:
+                self._shut()
+
+    def close(self) -> None:
+        self._done.set()
+
+    def _watch(self) -> None:
+        while not self._done.wait(_WATCH_S):
+            reason = _stop_reason(self._deadline, self._clock, self._stop)
+            if reason:
+                with self._lock:
+                    self._reason = reason
+                    self._shut()
+                return
+
+    def _shut(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+
+def _resolve(host: str, port: int, watch: _Watch) -> list:
+    """getaddrinfo, abandoned (not waited for) if the request must stop first."""
+    found: Dict[str, Any] = {}
+
+    def lookup() -> None:
+        try:
+            found["infos"] = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as e:
+            found["error"] = e
+
+    worker = threading.Thread(target=lookup, name="pcc-device-resolve", daemon=True)
+    worker.start()
+    while worker.is_alive():
+        watch.check()
+        worker.join(_WATCH_S)
+    if "error" in found:
+        raise found["error"]
+    return found["infos"]
+
+
+def _connect(host: str, port: int, tls: bool, watch: _Watch) -> socket.socket:
+    """A connected (and, for https, TLS-wrapped) socket. Every wait checks the watch, so a cancel,
+    a lost lease or the deadline stops a slow connect too. Nothing has been sent when it raises."""
+    last: Optional[OSError] = None
+    for family, kind, proto, _, address in _resolve(host, port, watch):
+        sock = socket.socket(family, kind, proto)
+        try:
+            sock.setblocking(False)
+            err = sock.connect_ex(address)
+            if err not in (0, *_CONNECTING):
+                raise OSError(err, os.strerror(err))
+            while err != 0:
+                watch.check()
+                _, writable, _ = select.select([], [sock], [], _WATCH_S)
+                if writable:
+                    err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if err:
+                        raise OSError(err, os.strerror(err))
+                    break
+            if tls:
+                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host,
+                                                                do_handshake_on_connect=False)
+                while True:
+                    watch.check()
+                    try:
+                        sock.do_handshake()
+                        break
+                    except ssl.SSLWantReadError:
+                        select.select([sock], [], [], _WATCH_S)
+                    except ssl.SSLWantWriteError:
+                        select.select([], [sock], [], _WATCH_S)
+            sock.setblocking(True)
+            return sock
+        except _Abort:
+            sock.close()
+            raise
+        except OSError as e:
+            sock.close()
+            last = e
+    raise last or OSError("the device's address did not resolve")
+
+
+def _read_bounded(resp: http.client.HTTPResponse, max_bytes: int, watch: _Watch) -> str:
+    """Read an answer in pieces, never more than max_bytes, never past the watch."""
+    read1 = getattr(resp, "read1", None)
     chunks, total = [], 0
     while True:
-        if cancelled():
-            raise _Abort("cancelled")
-        if clock() >= deadline:
-            raise _Abort("timeout")
-        chunk = read1(65536) if read1 is not None else source.read(max_bytes + 1 - total)
+        watch.check()
+        chunk = read1(65536) if read1 is not None else resp.read(min(65536, max_bytes + 1 - total))
         if not chunk:
             break
         total += len(chunk)
@@ -251,39 +393,74 @@ def _read_bounded(source: Any, max_bytes: int, deadline: float, clock: Callable[
 
 
 def _request(method: str, url: str, body: Any = None, *, deadline: float, clock: Callable[[], float],
-             cancelled: Callable[[], bool] = lambda: False, max_bytes: int = _MAX_RESPONSE_BYTES) -> Tuple[int, Any]:
-    """One device request, bounded in size and by the deadline.
+             stop: Optional[Stop] = None, max_bytes: int = _MAX_RESPONSE_BYTES,
+             headers: Optional[Dict[str, str]] = None) -> _Answer:
+    """One device request, bounded in size and time, and interruptible.
 
-    Returns (status, parsed body), with status 0 on a connection error, or
-    raises _Abort when the deadline passes, the run is cancelled, or the
-    answer is too large.
+    Raises _Abort(reason, sent) when the deadline passes, stop() names a reason
+    (cancelled, lease_lost), or the answer is too large. A transport failure is an
+    _Answer with status 0 (none arrived) or with body None (the body did not arrive
+    whole); its ``sent`` says whether the device may have received the request.
     """
-    remaining = deadline - clock()
-    if remaining <= 0:
-        raise _Abort("timeout")
-    headers = {"User-Agent": USER_AGENT}
-    data = None
+    reason = _stop_reason(deadline, clock, stop)
+    if reason:
+        raise _Abort(reason)
+    target = urlparse(url)
+    path = target.path or "/"
+    send_headers = {"User-Agent": USER_AGENT, "Accept": "application/json", "Connection": "close"}
+    send_headers.update(headers or {})
+    payload = None
     if body is not None:
-        data = json.dumps(body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    timeout = min(_REQUEST_TIMEOUT_S, remaining)
+        payload = json.dumps(body).encode("utf-8")
+        send_headers["Content-Type"] = "application/json"
+    if payload is not None or method in _METHODS:
+        send_headers["Content-Length"] = str(len(payload or b""))  # putrequest does not add it
+    watch = _Watch(deadline, clock, stop)
+    conn: Optional[http.client.HTTPConnection] = None
+    sent, status = False, 0
     try:
-        with _OPENER.open(Request(url, data=data, headers=headers, method=method), timeout=timeout) as resp:
-            status, raw = resp.status, _read_bounded(resp, max_bytes, deadline, clock, cancelled)
-    except HTTPError as e:
-        status, raw = e.code, _read_bounded(e, max_bytes, deadline, clock, cancelled)
-    except (URLError, OSError) as e:
-        if clock() >= deadline:
-            raise _Abort("timeout")
-        return 0, {"error": str(e)}
+        try:
+            sock = _connect(target.hostname, target.port, target.scheme == "https", watch)
+        except OSError as e:
+            return _Answer(0, {"error": str(e)}, False)
+        sock.settimeout(max(_WATCH_S, deadline - clock()))  # a backstop: the watch acts first
+        watch.arm(sock)
+        conn = http.client.HTTPConnection(target.hostname, target.port)
+        conn.sock = sock
+        conn.putrequest(method, path, skip_accept_encoding=True)
+        for name, value in send_headers.items():
+            conn.putheader(name, value)
+        watch.check()  # a stop that came during the connect: nothing has been sent yet
+        sent = True  # from here on the device may have received the request
+        conn.endheaders(payload)
+        resp = conn.getresponse()
+        status = resp.status
+        raw = _read_bounded(resp, max_bytes, watch)
+    except _Abort as halt:
+        raise _Abort(halt.reason, sent)
+    except (OSError, http.client.HTTPException) as e:
+        reason = watch.reason()
+        if reason:
+            raise _Abort(reason, sent)
+        return _Answer(status, None, sent) if status else _Answer(0, {"error": str(e)}, sent)
+    finally:
+        watch.close()
+        if conn is not None:
+            conn.close()
     try:
-        return status, json.loads(raw)
+        return _Answer(status, json.loads(raw), sent)
     except ValueError:
-        return status, raw
+        return _Answer(status, raw, sent)
 
 
 def _now() -> str:
     return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _claim_ok(claim: Any) -> bool:
+    return (all(isinstance(getattr(claim, name, None), str) and getattr(claim, name)
+                for name in ("job_id", "kernel_id", "claim_token"))
+            and callable(getattr(claim, "lease_alive", None)))
 
 
 class AdapterRuntime:
@@ -314,8 +491,13 @@ class AdapterRuntime:
         self._bindings = dict(bindings)
         self._source = source
         self._clock = clock
-        self._cancelled = threading.Event()
-        self._sleep = sleep or self._cancelled.wait
+        self._sleep = sleep
+        # Generation-scoped cancel (verdict 117b): a cancel names the run in progress, or the
+        # next run if none is, and no run can erase it.
+        self._gen_lock = threading.Lock()
+        self._generation = 0
+        self._cancel_upto = -1
+        self._running = threading.Lock()
 
     @classmethod
     def from_profile(cls, device: Dict[str, Any], public_hex: str, secret_hex: str, **kwargs) -> "AdapterRuntime":
@@ -338,22 +520,52 @@ class AdapterRuntime:
         return self._signer
 
     def cancel(self) -> None:
-        """Stop the run in progress at its next read or poll. The device's state is then unknown."""
-        self._cancelled.set()
+        """Stop the run in progress, or the next run if none is in progress.
+
+        A run started after a cancel refuses without touching the device. A run stopped
+        mid-way leaves the device's state unknown, and its result says so.
+        """
+        with self._gen_lock:
+            self._cancel_upto = self._generation
 
     def is_idle(self) -> bool:
         """True only if the device answers and reports an idle state. Anything else is busy."""
         try:
-            status, body = _request("GET", self._base + self._status.path,
-                                    deadline=self._clock() + _IDLE_CHECK_S, clock=self._clock)
+            answer = _request("GET", self._base + self._status.path,
+                              deadline=self._clock() + _IDLE_CHECK_S, clock=self._clock)
         except _Abort:
             return False
-        if status != 200 or not isinstance(body, dict):
+        if answer.status != 200 or not isinstance(answer.body, dict):
             return False
-        return body.get(self._status.field) in self._status.idle
+        return answer.body.get(self._status.field) in self._status.idle
 
-    def run(self, operation: str, params: Dict[str, Any]) -> RunResult:
-        """Run one bound operation with already-checked params, and sign what the device reports."""
+    def run(self, operation: str, params: Dict[str, Any], *, claim: Any) -> RunResult:
+        """Run one bound operation for a claimed job, with already-checked params, and sign what the device reports.
+
+        ``claim`` is the job's claim (a :class:`~pcc_node.operating.jobport.ClaimedJob`): its
+        ``job_id``, ``kernel_id`` and ``claim_token`` bind the request and the evidence to it,
+        and the run stops, its device state unknown, the moment ``claim.lease_alive()`` is false.
+        """
+        if not self._running.acquire(blocking=False):
+            return RunResult(False, error="busy")
+        with self._gen_lock:
+            generation = self._generation
+        result = RunResult(False, error="runtime_error")
+        try:
+            result = self._run(operation, params, claim, generation)
+            return result
+        finally:
+            with self._gen_lock:
+                self._generation = generation + 1
+                if self._cancel_upto >= generation and not (result.error or "").startswith("cancelled"):
+                    # A cancel this run's result does not report (it came as the run finished)
+                    # stops the next run instead: a cancel is never lost.
+                    self._cancel_upto = generation + 1
+            self._running.release()
+
+    def _run(self, operation: str, params: Dict[str, Any], claim: Any, generation: int) -> RunResult:
+        if not _claim_ok(claim):
+            return RunResult(False, error="no_claim")
         binding = self._bindings.get(operation)
         if binding is None:
             return RunResult(False, error=f"unknown_operation:{operation}")
@@ -362,75 +574,112 @@ class AdapterRuntime:
         except KeyError as missing:
             return RunResult(False, error=f"param_missing:{missing.args[0]}")
 
-        self._cancelled.clear()
+        def stop() -> Optional[str]:
+            if self._cancel_upto >= generation:
+                return "cancelled"
+            try:
+                alive = claim.lease_alive()
+            except Exception:  # a lease that cannot answer is not alive
+                alive = False
+            return None if alive is True else "lease_lost"
+
+        reason = stop()
+        if reason:
+            return RunResult(False, error=f"{reason}:not_started")
         deadline = self._clock() + binding.timeout_s
 
-        def call(method: str, path: str, payload: Any = None, max_bytes: int = _MAX_RESPONSE_BYTES):
+        def call(method: str, path: str, payload: Any = None, *, max_bytes: int = _MAX_RESPONSE_BYTES,
+                 headers: Optional[Dict[str, str]] = None) -> _Answer:
             return _request(method, self._base + path, payload, deadline=deadline, clock=self._clock,
-                            cancelled=self._cancelled.is_set, max_bytes=max_bytes)
+                            stop=stop, max_bytes=max_bytes, headers=headers)
 
+        key = idempotency_key(claim.job_id, claim.kernel_id, claim.claim_token)
         try:
-            status, started = call(binding.method, binding.path, body)
-        except _Abort as stop:
-            # The device may or may not have started: its state is unknown.
-            return RunResult(False, error=_stopped(stop.reason))
-        if not 200 <= status < 300:
-            return RunResult(False, error=f"device_refused:{status}")
-        run_id = started.get(binding.run_id_field) if isinstance(started, dict) else None
+            started = call(binding.method, binding.path, body, headers={"Idempotency-Key": key})
+        except _Abort as halt:
+            return RunResult(False, error=_label(halt.reason, halt.sent))
+        if not started.sent:
+            return RunResult(False, error="device_unreachable")
+        if 300 <= started.status < 500:
+            return RunResult(False, error=f"device_refused:{started.status}")  # the device answered no
+        if not 200 <= started.status < 300:
+            what = "connection_lost" if started.status == 0 else f"device_error:{started.status}"
+            return RunResult(False, error=f"{what}:device_state_unknown")
+        run_id = started.body.get(binding.run_id_field) if isinstance(started.body, dict) else None
         if not isinstance(run_id, (str, int)) or isinstance(run_id, bool) or str(run_id) == "":
-            return RunResult(False, error="no_run_id")
+            return RunResult(False, error="no_run_id:device_state_unknown")  # it started, and cannot be followed
         run_id = str(run_id)
         if run_id in (".", "..") or len(run_id) > 256:
-            return RunResult(False, error="bad_run_id")  # "." and ".." would change the polled path
+            return RunResult(False, error="bad_run_id:device_state_unknown")  # "." and ".." would change the path
         segment = quote(run_id, safe="")  # the device's id stays one path segment
 
-        record: Any = started
+        record: Any = started.body
         state = None
         try:
             while True:
-                status, polled = call("GET", _run_path(binding.poll_path, segment))
-                if status == 200 and isinstance(polled, dict):
-                    record, state = polled, polled.get(binding.state_field)
+                polled = call("GET", _run_path(binding.poll_path, segment))
+                if polled.status == 200 and isinstance(polled.body, dict):
+                    record, state = polled.body, polled.body.get(binding.state_field)
                     if state in binding.done or state in binding.failed:
                         break
-                if self._cancelled.is_set():
-                    raise _Abort("cancelled")
-                if self._clock() >= deadline:
-                    raise _Abort("timeout")
-                self._sleep(binding.poll_interval_s)
-                if self._cancelled.is_set():
-                    raise _Abort("cancelled")
-        except _Abort as stop:
-            evidence = self._evidence(operation, run_id, record, None)
-            return RunResult(False, output=record, evidence=evidence, error=_stopped(stop.reason))
+                reason = _stop_reason(deadline, self._clock, stop)
+                if reason:
+                    raise _Abort(reason, True)
+                self._wait(binding.poll_interval_s, deadline, stop)
+        except _Abort as halt:
+            # The device was started: whatever stopped the run, its state is unknown.
+            evidence = self._evidence(operation, run_id, record, None, claim)
+            return RunResult(False, output=record, evidence=evidence, error=f"{halt.reason}:device_state_unknown")
 
         log_text = None
         if binding.log_path is not None:
             try:
-                status, fetched = call("GET", _run_path(binding.log_path, segment), max_bytes=_MAX_LOG_BYTES)
-            except _Abort as stop:
-                log.warning("run %s: log not fetched (%s)", run_id, stop.reason)
-                status, fetched = 0, None
-            if status == 200:
-                log_text = fetched if isinstance(fetched, str) else canonicalize(fetched)
-        evidence = self._evidence(operation, run_id, record, log_text)
+                fetched = call("GET", _run_path(binding.log_path, segment), max_bytes=_MAX_LOG_BYTES)
+                if fetched.status == 200 and fetched.body is not None:
+                    log_text = fetched.body if isinstance(fetched.body, str) else canonicalize(fetched.body)
+            except _Abort as halt:
+                log.warning("run %s: log not fetched (%s)", run_id, halt.reason)
+        if not portable(record):
+            return RunResult(False, output=record, error="record_not_portable")
+        evidence = self._evidence(operation, run_id, record, log_text, claim)
         if state in binding.done:
             return RunResult(True, output=record, evidence=evidence)
         return RunResult(False, output=record, evidence=evidence, error=f"run_{state}")
 
-    def _evidence(self, operation: str, run_id: str, record: Any, log_text: Optional[str]) -> dict:
-        """The device's own account of the run, as signed log-chain entries.
+    def _wait(self, seconds: float, deadline: float, stop: Stop) -> None:
+        """The pause between polls, cut short by a cancel, a lost lease or the deadline."""
+        if self._sleep is not None:
+            self._sleep(seconds)
+            return
+        end = self._clock() + seconds
+        while True:
+            reason = _stop_reason(deadline, self._clock, stop)
+            if reason:
+                raise _Abort(reason, True)
+            left = end - self._clock()
+            if left <= 0:
+                return
+            time.sleep(min(_WATCH_S, left))
 
-        Each job gets a fresh chain from GENESIS, so its evidence verifies on its own.
+    def _evidence(self, operation: str, run_id: str, record: Any, log_text: Optional[str], claim: Any) -> Optional[dict]:
+        """The device's own account of the run, as signed log-chain entries bound to the claim.
+
+        Each job gets a fresh chain from GENESIS, so its evidence verifies on its own. A record
+        that is not portable JSON gets no evidence, and a log that is not valid Unicode is left out.
         """
+        if not portable(record):
+            return None
         capture = LogCapture(*self._keys)
         captured_at = _now()
         chain = [capture.capture(
-            canonicalize({"operation": operation, "record": record, "runId": run_id}),
+            record_commitment(claim.claim_token, claim.job_id, claim.kernel_id, operation, record, run_id),
             f"{self._source}:run", captured_at, entry_id=f"{run_id}:record",
         )]
         if log_text is not None:
-            chain.append(capture.capture(log_text, f"{self._source}:log", captured_at, entry_id=f"{run_id}:log"))
+            if portable(log_text):
+                chain.append(capture.capture(log_text, f"{self._source}:log", captured_at, entry_id=f"{run_id}:log"))
+            else:
+                log.warning("run %s: log left out (not valid Unicode)", run_id)
         return {"operation": operation, "runId": run_id, "record": record, "logChain": chain, "signer": self.signer}
 
 
@@ -442,6 +691,6 @@ def _run_path(template: str, segment: str) -> str:
     return path
 
 
-def _stopped(reason: str) -> str:
-    """A result error for a stopped request. After a timeout or cancel the device's state is unknown."""
-    return f"{reason}:device_state_unknown" if reason in ("timeout", "cancelled") else reason
+def _label(reason: str, sent: bool) -> str:
+    """A start request's stop: the device may be running once any of the request was sent."""
+    return f"{reason}:device_state_unknown" if sent else f"{reason}:not_started"

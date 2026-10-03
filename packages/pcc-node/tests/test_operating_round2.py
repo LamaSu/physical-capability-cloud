@@ -12,6 +12,7 @@
 import json
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -19,6 +20,7 @@ import pytest
 nacl_signing = pytest.importorskip("nacl.signing")
 
 from pcc_node.log_capture import GENESIS, LogCapture, canonicalize
+from pcc_node.operating.commitment import record_commitment
 from pcc_node.operating.jobport import ClaimedJob, GatewayJobPort
 from pcc_node.operating.runtime import AdapterRuntime, BindingError, OperationBinding
 
@@ -32,6 +34,22 @@ OPS = {"lab.absorbance": "read_absorbance"}
 def _keys():
     sk = nacl_signing.SigningKey.generate()
     return sk.verify_key.encode().hex(), sk.encode().hex()
+
+
+def _iso(seconds_from_now):
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds_from_now)).isoformat().replace("+00:00", "Z")
+
+
+class Claim:
+    """The claim a run belongs to (verdict 117b): job, kernel, token, and a live lease."""
+
+    job_id, kernel_id, claim_token = "j-1", KERNEL, "tok-j-1"
+
+    def lease_alive(self):
+        return True
+
+
+CLAIM = Claim()
 
 
 class Gateway:
@@ -59,7 +77,9 @@ class Gateway:
                 if job_id in self.claimed:
                     return 409, {"error": "job_not_claimable", "status": "in_progress"}
                 self.claimed[job_id] = f"tok-{job_id}"
-            return 200, {"claimed": True, "jobId": job_id, "claimToken": f"tok-{job_id}", "leaseExpiresAt": "2026-10-03T00:10:00Z"}
+            return 200, {"claimed": True, "jobId": job_id, "claimToken": f"tok-{job_id}", "leaseExpiresAt": _iso(60)}
+        if method == "POST" and path.endswith("/claim/renew"):
+            return 200, {"renewed": True, "leaseExpiresAt": _iso(60)}
         if method == "POST" and path == STATUS:
             if body.get("status") == "in_progress" and self.failing_claims:
                 self.failing_claims -= 1
@@ -79,12 +99,12 @@ def _port(gateway, keys=None):
     return GatewayJobPort("http://gw.test:4310", "k-operator", KERNEL, OPS, pub, sec, request=gateway)
 
 
-def _runtime_evidence(pub, sec, operation="read_absorbance", run_id="run-1", record=None):
-    """Evidence exactly as AdapterRuntime builds it: one fresh chain, signed by the node key."""
+def _runtime_evidence(pub, sec, job, operation="read_absorbance", run_id="run-1", record=None):
+    """Evidence exactly as AdapterRuntime builds it for this claimed job: one fresh chain, signed by the node key."""
     record = {"status": "succeeded", "result": {"A1": 0.12}} if record is None else record
     capture = LogCapture(pub, sec)
     at = "2026-10-03T00:00:00Z"
-    chain = [capture.capture(canonicalize({"operation": operation, "record": record, "runId": run_id}),
+    chain = [capture.capture(record_commitment(job.claim_token, job.job_id, KERNEL, operation, record, run_id),
                              "device:run", at, entry_id=f"{run_id}:record"),
              capture.capture("450nm read complete", "device:log", at, entry_id=f"{run_id}:log")]
     return {"operation": operation, "runId": run_id, "record": record, "logChain": chain, "signer": capture.signer}
@@ -103,7 +123,7 @@ class TestClaimIsAtomic:
         pub, sec = _keys()
         port = _port(gw, (pub, sec))
         job = port.claim_next(KERNEL)
-        port.report(job, _runtime_evidence(pub, sec))
+        port.report(job, _runtime_evidence(pub, sec, job))
         port.complete(job, passed=True, reason=None)
         assert gw.posted(EVIDENCE)[0]["claimToken"] == "tok-j-1"
         assert gw.posted(STATUS)[-1]["claimToken"] == "tok-j-1"
@@ -130,7 +150,7 @@ class TestReportChecksBeforeSigning:
         gw = Gateway()
         pub, sec = _keys()
         port, job = self._claimed(gw, (pub, sec))
-        evidence = _runtime_evidence(pub, sec)
+        evidence = _runtime_evidence(pub, sec, job)
         if bad == "anything":
             evidence = {"anything": 1}
         elif bad == "no_run_id":
@@ -140,9 +160,9 @@ class TestReportChecksBeforeSigning:
         elif bad == "empty_chain":
             evidence["logChain"] = []
         elif bad == "wrong_operation":
-            evidence = _runtime_evidence(pub, sec, operation="dispense")
+            evidence = _runtime_evidence(pub, sec, job, operation="dispense")
         elif bad == "foreign_signer":
-            evidence = _runtime_evidence(*_keys())
+            evidence = _runtime_evidence(*_keys(), job)
         elif bad == "broken_link":
             evidence["logChain"][1]["payload"]["previousHash"] = GENESIS
         elif bad == "tampered_record":
@@ -160,8 +180,9 @@ class TestReportChecksBeforeSigning:
         gw = Gateway()
         pub, sec = _keys()
         port, job = self._claimed(gw, (pub, sec))
-        record = {"status": "succeeded", "result": {"A1": 1.5e-07, "count": 2 ** 60}}
-        port.report(job, _runtime_evidence(pub, sec, record=record))
+        # A portable record (117b: integers within 2^53 - 1, so any JSON parser reads it back exactly).
+        record = {"status": "succeeded", "result": {"A1": 1.5e-07, "count": 2 ** 52}}
+        port.report(job, _runtime_evidence(pub, sec, job, record=record))
         bundle = gw.posted(EVIDENCE)[0]["evidence"]["bundle"]
         assert bundle["recordCanonical"] == canonicalize(record) and "record" not in bundle
         assert all(not isinstance(v, (int, float)) or isinstance(v, bool) for v in bundle.values())
@@ -174,7 +195,7 @@ class TestAcknowledgements:
         pub, sec = _keys()
         port = _port(gw, (pub, sec))
         job = port.claim_next(KERNEL)
-        assert port.report(job, _runtime_evidence(pub, sec)).stored is True
+        assert port.report(job, _runtime_evidence(pub, sec, job)).stored is True
         ack = port.complete(job, passed=True, reason=None)
         assert ack.accepted is False and ack.status == "completed"
 
@@ -184,7 +205,7 @@ class TestAcknowledgements:
         pub, sec = _keys()
         port = _port(gw, (pub, sec))
         job = port.claim_next(KERNEL)
-        ack = port.report(job, _runtime_evidence(pub, sec))
+        ack = port.report(job, _runtime_evidence(pub, sec, job))
         assert ack.stored is False
         assert port.complete(job, passed=True, reason=None).status == "failed"
 
@@ -247,8 +268,9 @@ class TestRunIdsAndPaths:
         dev = Device(run_id=run_id)
         try:
             runtime = AdapterRuntime.from_profile(_profile(dev.url), *_keys())
-            result = runtime.run("read_absorbance", {"wavelengthNm": 450})
-            assert result.ok is False and result.error == "bad_run_id"
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
+            # The device started a run it cannot be followed by: its state is unknown (117b).
+            assert result.ok is False and result.error == "bad_run_id:device_state_unknown"
             assert [p for m, p in dev.requests if m == "GET"] == []
         finally:
             dev.close()
@@ -264,8 +286,8 @@ class TestOneChainPerJob:
         dev = Device()
         try:
             runtime = AdapterRuntime.from_profile(_profile(dev.url), *_keys())
-            first = runtime.run("read_absorbance", {"wavelengthNm": 450})
-            second = runtime.run("read_absorbance", {"wavelengthNm": 450})
+            first = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
+            second = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
             assert first.ok and second.ok
             assert second.evidence["logChain"][0]["payload"]["previousHash"] == GENESIS
         finally:
@@ -277,8 +299,8 @@ class TestBoundedDeviceIO:
         dev = Device(poll_body=b"{" + b" " * (3 << 20) + b"}")
         try:
             runtime = AdapterRuntime.from_profile(_profile(dev.url), *_keys())
-            result = runtime.run("read_absorbance", {"wavelengthNm": 450})
-            assert result.ok is False and result.error == "device_response_too_large"
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
+            assert result.ok is False and result.error == "device_response_too_large:device_state_unknown"
         finally:
             dev.close()
 
@@ -287,7 +309,7 @@ class TestBoundedDeviceIO:
         try:
             runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=1), *_keys())
             started = time.monotonic()
-            result = runtime.run("read_absorbance", {"wavelengthNm": 450})
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
             assert time.monotonic() - started < 2.2  # the 1 s deadline, not the device's pace
             assert result.ok is False and result.error.startswith("timeout")
         finally:
@@ -299,7 +321,7 @@ class TestBoundedDeviceIO:
             runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=30), *_keys())
             threading.Timer(0.3, runtime.cancel).start()
             started = time.monotonic()
-            result = runtime.run("read_absorbance", {"wavelengthNm": 450})
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
             assert time.monotonic() - started < 5
             assert result.ok is False and result.error == "cancelled:device_state_unknown"
         finally:
