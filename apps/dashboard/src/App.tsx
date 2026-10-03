@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useSyncExternalStore } from "react";
+import React, { Suspense, lazy, useEffect, useSyncExternalStore } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell, Sidebar, TopBar, ParticleBackground } from "@pcc/ui";
@@ -6,7 +6,7 @@ import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
 import { useAuthStore, onIdentityChange, onAccountChange } from "./stores/auth-store.js";
 import { resetAccountScopedState } from "./lib/account-scope.js";
-import { endWalletSession } from "./lib/wallet-session.js";
+import { clearWalletSessionEnding, endWalletSession, markWalletSessionEnding, walletSessionEnding } from "./lib/wallet-session.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -138,8 +138,15 @@ onIdentityChange(() => queryClient.clear());
 //    component state, and gives every query a fresh observer. If the gateway
 //    can't confirm the cookie is gone, the next account doesn't load (fail
 //    closed), and the page offers a retry.
+// 4. Until the gateway confirms, a mark in localStorage says a teardown is
+//    unfinished (astra 19e). The next account's key is already stored, so a
+//    page reloaded or reopened before then would otherwise mount the next
+//    account straight away, beside the previous account's cookie. A page that
+//    loads with the mark finishes the teardown before it mounts anything.
 type AccountTransition = "settled" | "ending" | "failed";
-let account: { epoch: number; transition: AccountTransition } = { epoch: 0, transition: "settled" };
+/** The last page started a teardown and never saw it confirmed. */
+let endingAtLoad = walletSessionEnding();
+let account: { epoch: number; transition: AccountTransition } = { epoch: 0, transition: endingAtLoad ? "ending" : "settled" };
 const accountListeners = new Set<() => void>();
 let teardownRun = 0;
 
@@ -153,11 +160,13 @@ function endPreviousWallet(): void {
   setAccount({ ...account, transition: "ending" });
   void endWalletSession().then((ended) => {
     if (run !== teardownRun) return; // a later account change owns the transition now
+    if (ended) clearWalletSessionEnding();
     setAccount({ epoch: account.epoch + 1, transition: ended ? "settled" : "failed" });
   });
 }
 
 onAccountChange(() => {
+  markWalletSessionEnding(); // in the task that stored the next key: no reload can come between them
   resetAccountScopedState();
   useAuthStore.setState({ address: null, sessionToken: null, isVerifying: false });
   endPreviousWallet();
@@ -487,6 +496,14 @@ function Shell() {
 
 export function App() {
   const boundary = useAccountBoundary();
+  // Finish the teardown the last page left unconfirmed. By this effect wagmi
+  // has begun restoring that page's wallet connection, so the teardown
+  // disconnects what it restores (lib/wallet-session.ts).
+  useEffect(() => {
+    if (!endingAtLoad) return;
+    endingAtLoad = false;
+    endPreviousWallet();
+  }, []);
   return (
     // Sentry.ErrorBoundary captures errors to Sentry before falling through
     // to the local ErrorBoundary for display. When VITE_SENTRY_DSN is not set,

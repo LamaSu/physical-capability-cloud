@@ -69,6 +69,20 @@ export const useAuthStore = create<AuthState>((set) => {
   };
 });
 
+// The key is the browser's, not one tab's: every tab reads the same
+// localStorage, and shares the gateway's SIWE cookie. When another tab signs
+// in, out or as someone else, this tab follows, so its own account boundary
+// runs (App.tsx). A tab left as the previous account could otherwise start a
+// SIWE sign-in whose cookie the new account's tabs would carry.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== STORAGE_KEY && event.key !== null) return; // null: another tab cleared storage
+    const key = localStorage.getItem(STORAGE_KEY);
+    if (key === useAuthStore.getState().apiKey) return;
+    useAuthStore.setState({ apiKey: key, isAuthenticated: !!key });
+  });
+}
+
 /**
  * Calls `onChange` whenever the signed-in identity changes: a key signed in or out, a
  * different key, wallet or SIWE session. A cached read must not outlive the identity that

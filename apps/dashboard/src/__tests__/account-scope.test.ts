@@ -40,6 +40,27 @@ const DIRECT_STORE_CALLERS: Record<string, string> = {
   "features/spatial/FloatingPanel.tsx": "the minimize button, in its click handler; its one .then() loads the panel's component into local state",
 };
 
+/**
+ * A module being synchronous isn't enough when what calls it isn't (astra
+ * 19e): HandTracker builds MediaPipe callbacks after an await, and they call
+ * useGestures. A direct caller imported by a module with an await or a
+ * .then() checks the account epoch it was created under, and is listed here.
+ */
+const EPOCH_GUARDED: Record<string, string> = {
+  "features/gestures/useGestures.ts": "HandTracker calls it from MediaPipe callbacks it creates after loading the library",
+};
+
+/** Production modules that import `rel`, by a relative static or dynamic import. */
+function importersOf(rel: string, files: Array<{ rel: string; text: string }>): Array<{ rel: string; text: string }> {
+  const target = rel.replace(/\.tsx?$/, "");
+  return files.filter((f) =>
+    [...f.text.matchAll(/(?:from\s+|import\(\s*)["'](\.{1,2}\/[^"']+)["']/g)].some((m) => {
+      const resolved = join(dirname(f.rel), m[1]!).split(sep).join("/").replace(/\.(js|jsx|ts|tsx)$/, "");
+      return resolved === target;
+    }),
+  );
+}
+
 describe("every store but the identity is the account's state (astra 19c)", () => {
   it("finds the stores", () => {
     expect(STORE_MODULES.map((f) => f.rel)).toEqual(expect.arrayContaining(["features/chat/ChatStore.ts", "features/spatial/PanelStore.ts", "stores/auth-store.ts"]));
@@ -88,6 +109,28 @@ describe("every store but the identity is the account's state (astra 19c)", () =
       "Read the action in the component instead, or review the module and list it with a reason",
     ).toEqual([]);
     for (const f of callers) expect(/\bawait\b/.test(f.text), `${f.rel} must stay synchronous`).toBe(false);
+  });
+
+  it("a direct caller that async code reaches checks the account epoch itself (astra 19e)", () => {
+    const files = productionFiles(SRC).map((full) => ({ rel: relative(SRC, full).split(sep).join("/"), text: readFileSync(full, "utf-8") }));
+    for (const rel of Object.keys(DIRECT_STORE_CALLERS)) {
+      const asyncImporters = importersOf(rel, files)
+        .filter((i) => /\bawait\b|\.then\(/.test(i.text))
+        .map((i) => i.rel);
+      if (rel in EPOCH_GUARDED) {
+        expect(asyncImporters.length, `${rel} is listed as reached from async code; drop it from EPOCH_GUARDED if nothing async imports it`).toBeGreaterThan(0);
+        const text = files.find((f) => f.rel === rel)!.text;
+        expect(text, `${rel} compares the account epoch before it touches a store`).toMatch(/currentAccountEpoch\(\)\s*!==/);
+      } else {
+        expect(asyncImporters, `${rel} is imported by async code: check the account epoch in it, and list it in EPOCH_GUARDED`).toEqual([]);
+      }
+    }
+  });
+
+  it("finds the importers it checks", () => {
+    const files = productionFiles(SRC).map((full) => ({ rel: relative(SRC, full).split(sep).join("/"), text: readFileSync(full, "utf-8") }));
+    expect(importersOf("features/gestures/useGestures.ts", files).map((f) => f.rel)).toEqual(["features/gestures/HandTracker.tsx"]);
+    expect(importersOf("features/chat/ChatEngine.ts", files).map((f) => f.rel)).toEqual(["features/chat/ChatBar.tsx"]);
   });
 
   it("a reset restores each store's initial state, even after a store mutates its state in place", async () => {

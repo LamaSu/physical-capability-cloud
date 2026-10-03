@@ -2,6 +2,7 @@ import React from "react";
 import { useAccount, useConnect, useDisconnect, useSignMessage } from "wagmi";
 import { GlassPanel } from "@pcc/ui";
 import { useAuthStore } from "../stores/auth-store.js";
+import { beginSignIn, verifySignIn } from "../lib/wallet-session.js";
 
 /**
  * Build an EIP-4361 SIWE message string.
@@ -91,9 +92,13 @@ export function ConnectWallet() {
     };
   }, [setSession]);
 
-  // SIWE sign-in after wallet connects
+  // SIWE sign-in after wallet connects. An account change aborts it
+  // (lib/wallet-session.ts): from then on it sends nothing and writes nothing,
+  // and the teardown waits for a verification already sent before it logs the
+  // gateway out (astra 19e).
   const handleSIWE = React.useCallback(async () => {
     if (!address || !chainId) return;
+    const signIn = beginSignIn();
     setVerifying(true);
     setError(null);
 
@@ -101,6 +106,7 @@ export function ConnectWallet() {
       // 1. Get nonce from gateway
       const nonceRes = await fetch("/api/auth/nonce", {
         credentials: "include",
+        signal: signIn.signal,
       });
       if (!nonceRes.ok) throw new Error("Failed to get nonce");
       const { nonce } = await nonceRes.json();
@@ -120,13 +126,9 @@ export function ConnectWallet() {
       // 3. Sign with wallet
       const signature = await signMessageAsync({ message });
 
-      // 4. Verify with gateway
-      const verifyRes = await fetch("/api/auth/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ message, signature }),
-      });
+      // 4. Verify with gateway (it sets the session cookie), unless the
+      // account changed while the wallet was signing
+      const verifyRes = await verifySignIn(JSON.stringify({ message, signature }), signIn.signal);
 
       if (!verifyRes.ok) {
         const err = await verifyRes.json().catch(() => ({}));
@@ -134,16 +136,15 @@ export function ConnectWallet() {
       }
 
       const data = await verifyRes.json();
-      if (!alive.current) {
-        // The account changed while this wallet was signing in. The cookie the
-        // gateway just set belongs to the previous account: destroy it.
-        void fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
-        return;
-      }
+      // The account changed after the gateway answered: the teardown that
+      // waited for this verification destroys its cookie. Adopt nothing.
+      if (signIn.signal.aborted) return;
       // Session cookie is set automatically; also store the bearer token
       setSession(data.token ?? "cookie");
     } catch (err) {
-      if (alive.current) setError(err instanceof Error ? err.message : "Sign-in failed");
+      if (!signIn.signal.aborted && alive.current) setError(err instanceof Error ? err.message : "Sign-in failed");
+    } finally {
+      signIn.finish();
     }
   }, [address, chainId, signMessageAsync, setVerifying, setError, setSession]);
 
