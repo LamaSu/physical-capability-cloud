@@ -570,6 +570,49 @@ describe("astra r3 (#344 @e909337a) and #348 r2 F1: reproduced findings (verify 
     for (const t of texts) expect(t).toBe(UNAVAILABLE);
     expect(okFlag).toBe(false);
   });
+
+  // genui's review of e675595f (mutation survivors and one residual, verify before fix).
+  it("review (survivor): the row backstop WITHHOLDS a split claim; PCC's interleaved labels alone are not the guard", () => {
+    const listEl = fdoc.createElement("div");
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["type"] }, bind: { path: "/api/capabilities" } } as unknown as IrNode;
+    bindListRows(fdoc, listEl, node, [{ name: "Payment", type: "complete" }]);
+    const text = textOf(listEl);
+    expect(text).not.toContain("Payment");
+    expect(text).not.toMatch(/\bcomplete\b/);
+    expect(text).toContain(WITHHELD_FIELD);
+  });
+
+  it("review (survivor): a card whose ONLY bad field is its currency fails closed on every slot", () => {
+    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    const okFlag = bindSchemaCard("capability-summary-v1", { name: "Arm", type: "arm", pricing: { baseCost: "5", currency: "verified" }, assuranceTiers: [1], available: true }, slots);
+    for (const t of slots.map((s) => s.textContent)) expect(t).toBe(UNAVAILABLE);
+    expect(okFlag).toBe(false);
+  });
+
+  it("review (residual H2): a claim split across a row's title and its STATUS is withheld", () => {
+    const listEl = fdoc.createElement("div");
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", statusFrom: "status" }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    bindListRows(fdoc, listEl, node, [{ name: "Your payment", status: "completed" }]);
+    expect(textOf(listEl)).not.toContain("Your payment");
+  });
+
+  it("review (regression guard): a money-word status never switches off the title+meta backstop", () => {
+    const listEl = fdoc.createElement("div");
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["type"], statusFrom: "status" }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    bindListRows(fdoc, listEl, node, [{ name: "$", type: "100", status: "PAID" }]);
+    const text = textOf(listEl);
+    expect(text).not.toMatch(/Name: \$/);
+    expect(text).not.toContain("Type: 100");
+  });
+
+  it("review (control): a status that is itself a money word is noted, and an innocent title is NOT withheld for it", () => {
+    const listEl = fdoc.createElement("div");
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", statusFrom: "status" }, bind: { path: "/api/jobs" } } as unknown as IrNode;
+    bindListRows(fdoc, listEl, node, [{ name: "Arm calibration", status: "PAID" }]);
+    const text = textOf(listEl);
+    expect(text).toContain("Arm calibration");
+    expect(text).toContain("PAID" + RECORD_STATUS_NOTE); // the status never stands bare: boundValueText notes it
+  });
 });
 
 describe("astra r3 H1: SAFE_STATUS_WORDS is a closed vocabulary with no payment word in it", () => {

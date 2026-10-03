@@ -1252,9 +1252,13 @@
       const isStatusField = (field) => /(^|\.)status$/.test(field);
       const nonStatus = [{ field: rowTitle, text: title }, ...meta.filter((m) => !isStatusField(m.field))];
       const alreadyWithheld = nonStatus.some((v) => v.text === WITHHELD_FIELD);
+      const statusRaw = [...rowMeta.filter(isStatusField), ...statusFrom ? [statusFrom] : []].map((field) => readSelector(row, field)).filter((v) => v !== "");
+      const joined = [...nonStatus.map((v) => v.text), ...statusRaw];
       let finalTitle = title;
       let finalMeta = meta;
-      if (!alreadyWithheld && nonStatus.length > 1 && isMoneyClaim(nonStatus.map((v) => v.text).join(" "))) {
+      const nonStatusClaim = nonStatus.length > 1 && isMoneyClaim(nonStatus.map((v) => v.text).join(" "));
+      const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
+      if (!alreadyWithheld && (nonStatusClaim || crossClaim)) {
         finalTitle = isStatusField(rowTitle) ? title : WITHHELD_FIELD;
         finalMeta = meta.map((m) => isStatusField(m.field) ? m : { field: m.field, text: WITHHELD_FIELD });
       }
