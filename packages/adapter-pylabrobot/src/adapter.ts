@@ -21,6 +21,7 @@ import { EventEmitter } from "node:events";
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 
 import { EvidenceCollector, type CameraHook, type SensorHook } from "./evidence.js";
+import { OutstandingWork } from "./outstanding-work.js";
 import {
   RPC_ERROR_CODES,
   RPC_METHODS,
@@ -118,6 +119,12 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   private disposed = false;
   /** Have we wired crash/notification/stderr handlers to the current sidecar? */
   private sidecarHandlersWired = false;
+  /**
+   * What can still emit for work given: each command and status call in flight (a start
+   * runs the whole protocol; any call may initialise the sidecar and emit device_birth),
+   * and each mock completion not yet emitted.
+   */
+  private readonly work = new OutstandingWork();
 
   constructor(config: PyLabRobotConfig) {
     super();
@@ -135,7 +142,11 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
 
   // ── MachineAdapter ─────────────────────────────────────────────────────
 
-  async getStatus(): Promise<MachineStatus> {
+  getStatus(): Promise<MachineStatus> {
+    return this.work.track(this.readStatus());
+  }
+
+  private async readStatus(): Promise<MachineStatus> {
     if (this.disposed) return "offline";
     if (this.config.mockMode) return this.mockStatus;
     try {
@@ -167,7 +178,11 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     }
   }
 
-  async execute(command: MachineCommand): Promise<MachineCommandResult> {
+  execute(command: MachineCommand): Promise<MachineCommandResult> {
+    return this.work.track(this.executeCommand(command));
+  }
+
+  private async executeCommand(command: MachineCommand): Promise<MachineCommandResult> {
     if (this.disposed) {
       return { success: false, message: "adapter disposed" };
     }
@@ -214,6 +229,19 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
 
   onEvidence(callback: EvidenceCallback): void {
     this.evidenceListeners.push(callback);
+  }
+
+  /**
+   * Resolves once no command or status call is in flight and every mock completion has
+   * been emitted; at once when none is. A real run is one `start` call: it returns after
+   * backend.run and evidence.stopRecording have answered, and the sidecar writes a run's
+   * evidence notifications to stdout before those answers, so every notification of the run
+   * has been forwarded by then. What the sidecar sends outside any call (a crash's
+   * execution_failed, a notification outside a recording window) is not work this adapter
+   * was given, and this does not wait for it.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
   }
 
   async dispose(): Promise<void> {
@@ -411,6 +439,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
             },
           });
         }
+        const endRun = this.work.begin();
         setTimeout(() => {
           this.mockStatus = "idle";
           this.forwardEvent({
@@ -420,6 +449,8 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
             payload: { mock: true, jobId, opCount: 5, durationMs: 1 },
           });
           this.emit("mock_run_complete", { jobId });
+          // Ended only after the completion is emitted.
+          endRun();
         }, 0);
         return { success: true, message: `mock run ${jobId} started` };
       }
