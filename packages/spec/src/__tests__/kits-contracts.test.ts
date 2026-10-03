@@ -977,6 +977,17 @@ describe("astra pack 112b", () => {
       refused(buildRelease([aggregateRecord(cnc), aggregateRecord(cnc, "10-24")])).toThrow(/aggregate 1 repeats a capability type/);
     });
 
+    it("astra pack 112d CRITICAL 1: the aggregates must be in #365's canonical order (capabilityType strictly increasing)", () => {
+      expect(cnc < liquid).toBe(true);
+      // buildRelease recomputes both digests, so the reversed record is self-consistent: only its order is wrong.
+      refused(buildRelease([aggregateRecord(liquid), aggregateRecord(cnc)])).toThrow(/aggregate 1 breaks #365's canonical order/);
+      // The same aggregates in #365's order are accepted, in that order.
+      const dtos = demandAggregatesFromRelease(buildRelease([aggregateRecord(cnc), aggregateRecord(liquid)]), approved, asOf);
+      expect(dtos.map((d) => d.capabilityType)).toEqual([cnc, liquid]);
+      // #365's own sort, applied to the reversed list, gives the accepted order.
+      expect([liquid, cnc].sort(byCodeUnit)).toEqual([cnc, liquid]);
+    });
+
     it("throws when a DTO would be invalid: an asOf before the period closed, or not a timestamp", () => {
       const release = buildRelease([aggregateRecord(cnc)]);
       refused(release, approved, "2026-08-15T00:00:00Z").toThrow(/aggregate 0 is not a valid demand_aggregate/);
@@ -1057,12 +1068,37 @@ describe("astra pack 112b", () => {
       expect(evidenceIsExecutable(3, [...chain, payer])).toBe(true);
       // A ref that cannot contribute at any tier up to the target makes the requirement not executable.
       expect(evidenceIsExecutable(1, [...chain, payer])).toBe(false);
-      // Dependency closure still holds: without receipt.kernel_signed, confirm.execution_mode has nothing to stand on.
-      expect(evidenceIsExecutable(1, [{ id: "ident.registered_key" }, { id: "confirm.execution_mode" }])).toBe(true);
+      // Dependency closure: without receipt.kernel_signed, confirm.execution_mode has nothing to stand on, so a
+      // requirement naming it is not executable; the reduced program is never judged in its place (astra pack 112d).
+      expect(evidenceIsExecutable(1, [{ id: "ident.registered_key" }, { id: "confirm.execution_mode" }])).toBe(false);
       expect(evidenceIsExecutable(1, [{ id: "confirm.execution_mode" }])).toBe(false);
     });
     // Restored: the stub is a stub again.
     expect(evidenceIsExecutable(1, chain)).toBe(false);
+  });
+
+  it("astra pack 112d HIGH 4: a named primitive the dependency pass removes from every tier makes the requirement not executable", () => {
+    const gate = { id: "confirm.execution_mode" };
+    // The verdict's case: the live negative gate alone at tier 0. Its dependency (receipt.kernel_signed) is missing.
+    expect(EVIDENCE_PRIMITIVES.find((p) => p.id === "confirm.execution_mode")?.verifierStatus).toBe("live");
+    expect(EVIDENCE_PRIMITIVES.find((p) => p.id === "confirm.execution_mode")?.dependsOn).toContain("receipt.kernel_signed");
+    expect(evidenceIsExecutable(0, [gate])).toBe(false);
+    // A duplicate does not repair a missing dependency.
+    expect(evidenceIsExecutable(0, [gate, gate])).toBe(false);
+    // The tier-0 floor and decl.self_attested stay executable: nothing in them is dropped.
+    expect(evidenceIsExecutable(0, [])).toBe(true);
+    expect(evidenceIsExecutable(0, [{ id: "decl.self_attested" }])).toBe(true);
+    withLiveVerifiers(["ident.registered_key"], () => {
+      // receipt.kernel_signed without ident.registered_key is dropped, and confirm.execution_mode with it.
+      expect(evidenceIsExecutable(1, [{ id: "receipt.kernel_signed" }, gate])).toBe(false);
+      // A complete chain plus the gate at tier 0 and 1: everything named sits in some tier.
+      expect(evidenceIsExecutable(1, [{ id: "ident.registered_key" }, { id: "receipt.kernel_signed" }, gate])).toBe(true);
+    });
+    // A funded offer cannot name the gate without its dependency and claim executable evidence...
+    expect(parses({ ...fundedOffer(), evidence: { tier: 0, requiredPrimitives: [gate], executable: true } })).toBe(false);
+    // ...nor carry it honestly as not executable; an unfunded kit request may describe it honestly.
+    expect(parses({ ...fundedOffer(), evidence: { tier: 0, requiredPrimitives: [gate], executable: false } })).toBe(false);
+    expect(parses({ ...kitRequest(), evidence: { tier: 0, requiredPrimitives: [gate], executable: false } })).toBe(true);
   });
 
   it("the executable flag must equal evidenceIsExecutable, in both directions, and funded kinds need it true", () => {
@@ -1543,7 +1579,7 @@ describe("pack 112 MEDIUM 8 and 112b: every shape, enum or accepted-value change
   // stop a PR from rewriting its own pins; the merge-gate review is the control. The one exception is the
   // pre-release window before the first merge, when no producer or consumer is deployed.
   const LOCK: Record<string, { literal: string; shape: string; corpus: string; source: string }> = {
-    "pcc.opportunity.v0": { literal: "pcc.opportunity.v0", shape: "91d25641c69b4970", corpus: "da093e433fef5264", source: "26c4224554829be7" },
+    "pcc.opportunity.v0": { literal: "pcc.opportunity.v0", shape: "91d25641c69b4970", corpus: "4fb26628cccab46e", source: "4deb00fd1332e7d0" },
     "pcc.operator-binding.v0": { literal: "pcc.operator-binding.v0", shape: "ca2f94ba7aa72ade", corpus: "8e2aa2dd88af2f74", source: "4dbcbaa125103737" },
     "pcc.capability-kit/v1": { literal: "pcc.capability-kit/v1", shape: "0ade760b67d57c08", corpus: "99a0669d56f0e163", source: "5c97266f279b1ced" },
   };

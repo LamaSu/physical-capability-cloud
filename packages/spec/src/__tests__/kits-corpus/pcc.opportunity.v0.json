@@ -52,6 +52,11 @@
       "value": {"schema": "pcc.opportunity.v0", "id": "offer-2", "kind": "funded_offer", "capabilityType": "pcc://capabilities/hplc/v1", "capabilityContractDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "title": "Run an HPLC purity assay", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "fundingRef": {"kind": "escrow", "id": "esc-1"}, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 0, "requiredPrimitives": [{"id": "decl.self_attested"}], "executable": true}}
     },
     {
+      "name": "accept: a kit_build_request naming confirm.execution_mode without its dependency, said honestly not executable (112d HIGH 4)",
+      "expect": "accept",
+      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 0, "requiredPrimitives": [{"id": "confirm.execution_mode"}], "executable": false}}
+    },
+    {
       "name": "accept: a funded kit_build_request: authoritative, with its funding record and executable evidence (the tier 0 floor)",
       "expect": "accept",
       "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "kitRef": null, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "fundingRef": {"kind": "escrow", "id": "esc-1"}, "evidence": {"tier": 0, "requiredPrimitives": [], "executable": true}}
@@ -352,6 +357,11 @@
       "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 2, "requiredPrimitives": [{"id": "approval.payer"}], "executable": true}}
     },
     {
+      "name": "reject: executable claimed for confirm.execution_mode without its dependency at tier 0 (112d HIGH 4: a named primitive is never dropped)",
+      "expect": "reject",
+      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 0, "requiredPrimitives": [{"id": "confirm.execution_mode"}], "executable": true}}
+    },
+    {
       "name": "reject: asOf in the future on a funded_offer",
       "expect": "reject",
       "value": {"schema": "pcc.opportunity.v0", "id": "offer-2", "kind": "funded_offer", "capabilityType": "pcc://capabilities/hplc/v1", "capabilityContractDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "title": "Run an HPLC purity assay", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "fundingRef": {"kind": "escrow", "id": "esc-1"}, "authority": "authoritative", "asOf": "2100-01-01T00:00:00Z"}
@@ -375,6 +385,11 @@
       "name": "reject: a funded_offer whose evidence is truthfully not executable",
       "expect": "reject",
       "value": {"schema": "pcc.opportunity.v0", "id": "offer-2", "kind": "funded_offer", "capabilityType": "pcc://capabilities/hplc/v1", "capabilityContractDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "title": "Run an HPLC purity assay", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "fundingRef": {"kind": "escrow", "id": "esc-1"}, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 1, "requiredPrimitives": [{"id": "artifact.hash"}], "executable": false}}
+    },
+    {
+      "name": "reject: a funded_offer naming a live gate without its dependency, claimed executable (112d HIGH 4)",
+      "expect": "reject",
+      "value": {"schema": "pcc.opportunity.v0", "id": "offer-2", "kind": "funded_offer", "capabilityType": "pcc://capabilities/hplc/v1", "capabilityContractDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "title": "Run an HPLC purity assay", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "fundingRef": {"kind": "escrow", "id": "esc-1"}, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 0, "requiredPrimitives": [{"id": "confirm.execution_mode"}], "executable": true}}
     },
     {
       "name": "reject: a funded kit_build_request that is not authoritative",

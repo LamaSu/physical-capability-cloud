@@ -47,8 +47,11 @@
  * 8, 112b, 112c). What this literal accepts also reads inputs this file does not
  * hold: the evidence primitive registry and evidence/eligibility.ts (executable),
  * the built-in CSD list (the approved public set), types/kit-demand.ts (#365's
- * release policy) and util/canonical.ts. Their owners version them; a change
- * there that alters what this literal accepts needs the same bump.
+ * release policy), csd/schema.ts (CsdEvidencePrimitiveRefSchema, the shape of a
+ * primitive reference), types/capability-kit.ts (CSD_CAPABILITY_URL_PATTERN, the
+ * capability url shape) and util/canonical.ts. Their owners version them; a
+ * change there that alters what this literal accepts needs the same bump (astra
+ * pack 112d).
  */
 
 import { z } from "zod";
@@ -218,7 +221,11 @@ const EVIDENCE_REQUIREMENT_URL = "pcc://opportunity/evidence-requirement";
  * dependsOn present in the same or a lower tier, a Family-G (human attestation)
  * primitive from tier 2 up, a primitive other than decl.self_attested from tier 1
  * up, and a live verifier for every primitive. A ref that supports no tier up to
- * `tier` cannot contribute, and makes the requirement not executable. Tier 0 with
+ * `tier` cannot contribute, and makes the requirement not executable. So does a
+ * ref that the dependency pass removes from EVERY tier (a dependency the
+ * requirement does not name, or one no tier through `tier` can hold): a
+ * requirement that names a primitive it cannot run is not executable, and the
+ * reduced program is never judged in its place (astra pack 112d). Tier 0 with
  * no primitives is the permissionless floor, and is executable.
  *
  * So payer approval alone (tiers 2-3) is not executable at tier 2 or 3: its tier-1
@@ -229,7 +236,6 @@ const EVIDENCE_REQUIREMENT_URL = "pcc://opportunity/evidence-requirement";
 export function evidenceIsExecutable(tier: 0 | 1 | 2 | 3, refs: readonly CsdEvidencePrimitiveRef[]): boolean {
   const supports = (r: CsdEvidencePrimitiveRef, k: number) =>
     PRIMITIVES.get(r.id)?.tierSupport.some((t) => t.tier === k) === true;
-  if (!refs.every((r) => Array.from({ length: tier + 1 }, (_, k) => k).some((k) => supports(r, k)))) return false;
   const evidence: Record<string, { description: string; required: string[]; primitives: CsdEvidencePrimitiveRef[] }> = {};
   const lower = new Set<string>();
   for (let k = 0; k <= tier; k++) {
@@ -243,6 +249,9 @@ export function evidenceIsExecutable(tier: 0 | 1 | 2 | 3, refs: readonly CsdEvid
     evidence[`tier${k}`] = { description: `opportunity requirement, tier ${k}`, required: [], primitives: atK };
     for (const r of atK) lower.add(r.id);
   }
+  // Every named ref must sit in some tier. One that supports no tier through `tier`, or that the dependency pass
+  // removed from every tier, makes the requirement not executable (astra pack 112d).
+  if (!refs.every((r) => lower.has(r.id))) return false;
   const report = computeCsdEligibility({ url: EVIDENCE_REQUIREMENT_URL, evidence }, { requireImplementedVerifier: true });
   return report.eligibleTier >= tier && report.perTier.every((p) => p.eligible);
 }
@@ -628,8 +637,11 @@ const PublicOpportunityReleaseRecordSchema = z
  * this clock); its `digest` equals the digest of its other fields (the
  * construction #365 uses); its approvedSetDigest equals
  * approvedSetDigest(approvedUrls); every aggregate's period equals the record's
- * period and no capabilityType repeats; every capabilityType is in the approved
- * set; and every DTO passes opportunityDTOSchemaFor(approvedUrls). Each DTO
+ * period; the aggregates are in #365's canonical order, strictly increasing by
+ * capabilityType in code-unit order (the order buildPublicRelease sorts into, so
+ * no capabilityType repeats and the order carries no information: astra pack
+ * 112d); every capabilityType is in the approved set; and every DTO passes
+ * opportunityDTOSchemaFor(approvedUrls). Each DTO
  * carries the record's digest as its releaseDigest, the record's period as its
  * releasePeriod, and the given asOf, which is the producer's read time.
  *
@@ -670,6 +682,10 @@ export function demandAggregatesFromRelease(
       throw new Error(`demandAggregatesFromRelease: aggregate ${i} repeats a capability type`);
     }
     seen.add(a.capabilityType);
+    // #365's buildPublicRelease sorts by capabilityType (code units); any other order is not a record it wrote.
+    if (i > 0 && !(body.aggregates[i - 1]!.capabilityType < a.capabilityType)) {
+      throw new Error(`demandAggregatesFromRelease: aggregate ${i} breaks #365's canonical order (capabilityType strictly increasing)`);
+    }
     const dto = dtoSchema.safeParse({
       schema: OPPORTUNITY_SCHEMA,
       kind: "demand_aggregate",
