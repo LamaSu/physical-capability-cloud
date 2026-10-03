@@ -50,6 +50,7 @@ import {
   type ToolSource,
 } from "@pcc/tool-index";
 import { isHybridActive, isHybridServed, readRankerMode } from "../ranker-config.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ── Allowlist for /reload ────────────────────────────────────────────────
 
@@ -284,8 +285,8 @@ export async function toolSearchRoutes(app: FastifyInstance) {
 
     const mode = readRankerMode();
     const st = getIndex({
-      info: (m) => app.log.info(m),
-      warn: (m) => app.log.warn(m),
+      info: (m) => app.log.info({ note: declare.id(m) }, lit("[tool-index] note")),
+      warn: (m) => app.log.warn({ note: declare.id(m) }, lit("[tool-index] note")),
     });
 
     // Legacy ranker (always evaluated for legacy + shadow modes).
@@ -324,9 +325,8 @@ export async function toolSearchRoutes(app: FastifyInstance) {
       void appendShadowEvent(event, {
         onError: (e) =>
           app.log.warn(
-            `[tool-search] shadow log append failed: ${
-              e instanceof Error ? e.message : String(e)
-            }`,
+            { err: e },
+            lit("[tool-search] shadow log append failed"),
           ),
       });
     }
@@ -374,8 +374,8 @@ export async function toolSearchRoutes(app: FastifyInstance) {
   // ── GET /api/tools/status ──────────────────────────────────────────────
   app.get("/api/tools/status", async (_req, reply) => {
     const st = getIndex({
-      info: (m) => app.log.info(m),
-      warn: (m) => app.log.warn(m),
+      info: (m) => app.log.info({ note: declare.id(m) }, lit("[tool-index] note")),
+      warn: (m) => app.log.warn({ note: declare.id(m) }, lit("[tool-index] note")),
     });
     const mode = readRankerMode();
     return reply.send({
@@ -399,8 +399,8 @@ export async function toolSearchRoutes(app: FastifyInstance) {
   app.post("/api/tools/reload", async (req, reply) => {
     if (!requireToolIndexAdmin(req, reply)) return;
     const built = buildIndex({
-      info: (m) => app.log.info(m),
-      warn: (m) => app.log.warn(m),
+      info: (m) => app.log.info({ note: declare.id(m) }, lit("[tool-index] note")),
+      warn: (m) => app.log.warn({ note: declare.id(m) }, lit("[tool-index] note")),
     });
     state = {
       index: built.index,
