@@ -341,6 +341,11 @@ describe("KernelService.submitJob — Sentry spans", () => {
       jobId: "job-tracing-ks-001",
       stepId: "step-ks-tracing",
       assuranceTier: 0,
+      // Setup only: a job's actuation commands are class "scoped", so
+      // submitJob now denies an unscoped submission before it ever creates a
+      // span. This test is about span shape, not admission — supplying the
+      // scope satisfies the precondition so the span path is reached at all.
+      scopeId: "scope-tracing-ks-001",
     });
 
     // Wait briefly for async fire-and-forget to start
@@ -361,6 +366,8 @@ describe("KernelService.submitJob — Sentry spans", () => {
       jobId: "job-tracing-ks-002",
       stepId: "step-ks-attrs",
       assuranceTier: 1,
+      // Setup only — see the note on job-tracing-ks-001 above.
+      scopeId: "scope-tracing-ks-002",
     });
 
     await new Promise<void>((r) => setTimeout(r, 100));

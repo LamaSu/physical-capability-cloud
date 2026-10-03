@@ -218,10 +218,16 @@ export class KernelService {
    * Admission control runs synchronously first via SafetyGateway.validateOnly()
    * (circuit-breaker fast-fail + governor): if the governor denies the command
    * or the device's breaker is already open, an error is thrown immediately and
-   * no job is accepted. The real runner.run() executes out-of-band below and
-   * reports its true success/failure back to the breaker via
-   * recordDeviceSuccess()/recordDeviceFailure() — so a device that keeps failing
-   * actually trips the breaker and blocks subsequent jobs.
+   * no job is accepted. The real runner.run() executes out-of-band below, and
+   * every machine command it issues goes through SafetyGateway.validateAndRelay(),
+   * which reports that command's true outcome to the breaker — so a device that
+   * keeps failing actually trips the breaker and blocks subsequent jobs.
+   *
+   * A job's actuation commands (load_gcode, start) are class "scoped", so a
+   * submission with no `scopeId` is denied here and never reaches a device.
+   * That is intentional fail-closed behaviour, not a bug: callers that hold an
+   * execution scope must pass it, and callers that do not hold one are not
+   * authorised to actuate. KernelService never mints a scope of its own.
    */
   async submitJob(params: SubmitJobParams): Promise<{ jobId: string; deviceId: string; status: "accepted" }> {
     const { jobId, stepId, gcodeHash, assuranceTier = 0 } = params;
@@ -234,11 +240,26 @@ export class KernelService {
     const runner = this.runners.get(deviceId)!;
 
     // ── Safety gateway pre-flight ──────────────────────────────────────────
-    // Build a PhysicalCommand descriptor for this job. Jobs submitted without
-    // an explicit scopeId use class "safe" (operator-initiated or system jobs).
-    // Jobs with a scopeId use class "scoped" (agent-initiated, requires scope).
+    // Build a PhysicalCommand descriptor for this job.
+    //
+    // The class is FIXED at "scoped" and deliberately does NOT vary with
+    // whether a scopeId happens to be present. A job's actuation commands are
+    // load_gcode and start, and JobRunner classifies both "scoped" from its own
+    // fixed table (job-runner.ts MACHINE_COMMAND_CLASS — module-private and not
+    // re-exported from @pcc/kernel, so the constant is restated here rather
+    // than imported; if that table ever changes, this line must follow it).
+    //
+    // This line previously read `params.scopeId ? "scoped" : "safe"`, which
+    // downgraded the class exactly when the credential was missing. Under the
+    // default governor config the class check is the ONLY check that bites a
+    // job command (no e-stop, empty breaker, and the velocity/temperature/force
+    // envelope checks never fire because load_gcode's payload is {gcodeHash}),
+    // so the downgrade made admission unfalsifiable: an unscoped job was
+    // admitted as "safe" here and then denied later, out of band, inside
+    // runner.run(). The pre-flight now denies it up front, synchronously,
+    // where the caller can see the reason.
     const gateway = getSafetyGateway();
-    const cmdClass = params.scopeId ? "scoped" : "safe";
+    const cmdClass = "scoped" as const;
 
     // We validate synchronously before accepting the job (not fire-and-forget).
     // This is admission control ONLY — the circuit breaker's fast-fail plus the
@@ -248,7 +269,7 @@ export class KernelService {
     const preflightCmd = {
       commandId: `preflight:${jobId}`,
       deviceId,
-      class: cmdClass as "safe" | "scoped",
+      class: cmdClass,
       type: "submit_job",
       params: { jobId, stepId, gcodeHash: gcodeHash ?? `sha256:${jobId}`, assuranceTier },
       agentDid: params.agentDid ?? "kernel-service",
@@ -313,6 +334,14 @@ export class KernelService {
               stepId,
               gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
               assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
+              // Thread the caller's execution scope through to the dispatch
+              // boundary. JobRunner classifies load_gcode/start as "scoped" and
+              // the governor denies a scoped command with no scope, so WITHOUT
+              // these two fields every gateway-dispatched job fails closed with
+              // zero machine.execute calls. KernelService never mints a scope —
+              // it only carries the one its caller was granted.
+              scopeId: params.scopeId,
+              agentDid: params.agentDid,
               // Bridge job-runner phase events to gateway telemetry
               onPhase: (jid, phase, status, meta) => {
                 pipelineTelemetry.emit(jid, phase, status, { metadata: meta });
@@ -320,14 +349,18 @@ export class KernelService {
             })
             .then(async (result) => {
               this.runningJobs.delete(jobId);
-              // Feed the REAL execution outcome into the safety breaker. Admission
-              // used validateOnly (which records nothing), so this is the only
-              // place a genuine device success/failure reaches the breaker.
-              if (result.success) {
-                gateway.recordDeviceSuccess(deviceId);
-              } else {
-                gateway.recordDeviceFailure(deviceId);
-              }
+              // The job-level breaker recording that used to sit here is gone on
+              // purpose. JobRunner now dispatches every machine command through
+              // SafetyGateway.validateAndRelay(), which records that command's
+              // real outcome against the device breaker as it happens. Recording
+              // a second time per job double-counted every device failure (a
+              // failureThreshold of 2 tripped after ONE failing job) and, worse,
+              // mis-attributed a SAFETY DENIAL — a job refused for want of an
+              // execution scope, which never touches the adapter — as a fault of
+              // a perfectly healthy device. The breaker now sees each real
+              // outcome exactly once, from the boundary that observed it.
+              // The .catch() below still records, because a rejected run()
+              // never reached the dispatch boundary at all.
               try {
                 const repos = getRepos();
                 if (result.success) {
@@ -401,6 +434,12 @@ export class KernelService {
           stepId,
           gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
           assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
+          // Same scope threading as the Sentry path above. This fallback runs
+          // whenever Sentry is uninitialised, so omitting it here would leave
+          // the boundary un-threaded on the path most test and self-hosted
+          // deployments actually take.
+          scopeId: params.scopeId,
+          agentDid: params.agentDid,
           // Bridge job-runner phase events to gateway telemetry (fallback path)
           onPhase: (jid, phase, status, meta) => {
             pipelineTelemetry.emit(jid, phase, status, { metadata: meta });
@@ -408,12 +447,9 @@ export class KernelService {
         })
         .then(async (result) => {
           this.runningJobs.delete(jobId);
-          // Feed the REAL execution outcome into the safety breaker (fallback path).
-          if (result.success) {
-            gateway.recordDeviceSuccess(deviceId);
-          } else {
-            gateway.recordDeviceFailure(deviceId);
-          }
+          // Same removal as the Sentry path above (fallback path): the dispatch
+          // boundary inside JobRunner already recorded each command's real
+          // outcome against the breaker. See the note there.
           try {
             const repos = getRepos();
             if (result.success) {
