@@ -19,6 +19,7 @@ import type { CameraAdapter, MachineAdapter, MachineCommand, MachineCommandResul
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
 import type { JobResult } from "../job-runner.js";
+import { lose1Capture } from "./lose1-capture-fixture.js";
 
 // Plain functions, not vi.fn(), so vi.restoreAllMocks() cannot strip them.
 vi.mock("@sentry/node", () => ({
@@ -153,10 +154,11 @@ function testCamera(id: string, inspectionsThatEmit = Number.POSITIVE_INFINITY):
     async captureSnapshot() {
       return { imageHash: "sha256:none", storageRef: "none" };
     },
-    async runInspection() {
+    async runInspection(_referenceHash?: string, context?: { jobId?: string }) {
       if (camera.inspectionsEmitted < camera.inspectionsThatEmit) {
         camera.inspectionsEmitted += 1;
-        camera.emit(evidence("cv_inspection_result", id, "camera", { passed: true, inspection: camera.inspectionsEmitted }));
+        // A complete LO-SE-1 capture for the job it was asked for: since #489 only one counts.
+        camera.emit(lose1Capture("cv_inspection_result", id, KERNEL_ID, String(context?.jobId)));
       }
       camera.afterInspection?.();
       return { passed: true, confidence: 100, findings: [], imageHash: "sha256:none" };
