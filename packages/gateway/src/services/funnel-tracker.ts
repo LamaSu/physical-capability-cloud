@@ -285,3 +285,276 @@ const funnelTrackerPluginImpl: FastifyPluginAsync = async (app: FastifyInstance)
 (funnelTrackerPluginImpl as unknown as Record<symbol, unknown>)[Symbol.for("fastify.display-name")] = "funnelTrackerPlugin";
 
 export const funnelTrackerPlugin = funnelTrackerPluginImpl;
+
+// ── Operator-onboarding funnel (ADK track item 4) ───────────────────────────
+//
+// A second funnel, parallel to the BUYER (agent-onboarding) funnel above and
+// sharing its flag + sink style, but for OPERATORS bringing physical
+// capability online:
+//
+//     kernel_created → device_registered → adapter_ready →
+//     capability_published → test_job_passed → verified_run
+//
+// Unlike the buyer funnel, this one is NOT detected via a generic onResponse
+// hook + route/status classifier. Per the stage inventory
+// (pcc-painpoints-work/item4-stage-inventory.md), most of these checkpoints
+// can't be classified from method+route+statusCode alone:
+//   - device_registered / capability_published are 2xx-detectable, but
+//   - adapter_ready isn't a route at all (it lives inside a health-check
+//     facade method, gated on a body field plus a side lookup), and
+//   - test_job_passed returns HTTP 200 in BOTH the honest and the
+//     self-attested (fabricated) paths — status code alone would silently
+//     count the self-attest trap. Recording has to happen from explicit call
+//     sites, each gated on the real success condition for that stage.
+//
+// Keyed on `kernelId`, not `trace_id`: operator-onboarding steps are
+// separate CLI/daemon calls spread over minutes-to-days (register kernel,
+// register a device later, publish a capability later still), so nothing
+// guarantees a shared trace_id recurs across them. `kernelId` is present
+// and verifiable at every stage (see the inventory's "Identifier
+// recommendation" section).
+
+export type OperatorStage =
+  | "kernel_created"
+  | "device_registered"
+  | "adapter_ready"
+  | "capability_published"
+  | "test_job_passed"
+  | "verified_run";
+
+/** Funnel order — used for conversion math and display. */
+export const OPERATOR_STAGES: OperatorStage[] = [
+  "kernel_created",
+  "device_registered",
+  "adapter_ready",
+  "capability_published",
+  "test_job_passed",
+  "verified_run",
+];
+
+/** auditService eventType used for every operator-funnel stage row. */
+export const OPERATOR_FUNNEL_AUDIT_EVENT = "operator.funnel";
+
+/** Kernel ids are opaque but bounded — mirrors ids minted across kernel.facade.ts. */
+const OPERATOR_KERNEL_ID_RE = /^[A-Za-z0-9:._-]{1,200}$/;
+
+/**
+ * The setup-wizard's hardcoded fallback kernel id (routes/setup.ts:714,
+ * `kernelId ?? "kernel_dev_001"`). An operator who omits kernelId on a call
+ * silently lands on this shared placeholder — recording it would attribute
+ * one operator's progress to every operator who forgot the field, so it is
+ * always rejected as "unattributable" rather than tracked.
+ */
+const DEV_PLACEHOLDER_KERNEL_ID = "kernel_dev_001";
+
+// ── Dedup (bounded, in-memory) — same shape as the buyer funnel's `seen` ────
+
+const MAX_TRACKED_KERNELS = 5000;
+const operatorSeen = new Map<string, Set<OperatorStage>>();
+const operatorKernelOrder: string[] = [];
+
+/** Whether this process already recorded (kernelId, stage). */
+function operatorSeenHas(kernelId: string, stage: OperatorStage): boolean {
+  return operatorSeen.get(kernelId)?.has(stage) ?? false;
+}
+
+/** Remember (kernelId, stage) as recorded; the map stays bounded to MAX_TRACKED_KERNELS. */
+function markOperatorSeen(kernelId: string, stage: OperatorStage): void {
+  let stages = operatorSeen.get(kernelId);
+  if (!stages) {
+    if (operatorSeen.size >= MAX_TRACKED_KERNELS && operatorKernelOrder.length > 0) {
+      const oldest = operatorKernelOrder.shift()!;
+      operatorSeen.delete(oldest);
+    }
+    stages = new Set<OperatorStage>();
+    operatorSeen.set(kernelId, stages);
+    operatorKernelOrder.push(kernelId);
+  }
+  stages.add(stage);
+}
+
+/**
+ * Whether the audit log already holds this (kernelId, stage) row. The in-memory
+ * map is only a cache: eviction, a restart or a second gateway instance would
+ * otherwise write the stage again (#469 round 1). Two instances racing past this
+ * check can still both write; read-side counts are distinct per kernel, so a rare
+ * duplicate never changes the funnel.
+ */
+function operatorStageDurable(kernelId: string, stage: OperatorStage): boolean {
+  try {
+    return auditService
+      .query({ eventType: OPERATOR_FUNNEL_AUDIT_EVENT, resourceType: "kernel", resourceId: kernelId, limit: 50 })
+      .some((r) => r.action === stage);
+  } catch {
+    return false;
+  }
+}
+
+/** Reset operator-funnel dedup state. Test-only. */
+export function __resetOperatorFunnelState(): void {
+  operatorSeen.clear();
+  operatorKernelOrder.length = 0;
+}
+
+export interface OperatorStageMeta {
+  operatorId?: string | null;
+  deviceId?: string | null;
+  capabilityId?: string | null;
+  jobId?: string | null;
+}
+
+/**
+ * Record one operator-onboarding funnel stage for a kernel, from an explicit
+ * call site (see call sites in routes/kernels.ts, routes/setup.ts,
+ * routes/capabilities.ts, facades/job.facade.ts). No-op unless
+ * `funnelEnabled()`. Never throws — every sink is best-effort internally,
+ * but call sites should still wrap this call in try/catch per the "telemetry
+ * must never break a request" rule, since this function's own guards
+ * (kernelId validation, dedup) run before any try/catch below.
+ *
+ * Returns true iff this call actually recorded a new (kernelId, stage) row;
+ * false for: flag off, invalid/missing kernelId, the "kernel_dev_001" dev
+ * placeholder, or a (kernelId, stage) pair already recorded.
+ *
+ * `verified_run` is a real member of OperatorStage/OPERATOR_STAGES, but
+ * NOTHING on master calls `recordOperatorStage(_, "verified_run", _)` today.
+ * Per the stage inventory: the D4a readiness check (unmerged PR #428,
+ * branch feat/d4a-operator-readiness) is intended to be its recorder once it
+ * lands — it verifies a completed job's evidence bundle against the
+ * kernel's own registered Ed25519 signer. The setup test-job path
+ * (POST /api/setup/test-job) must NEVER record verified_run: it either
+ * self-attests (`algorithm: "none"`) or, for a real device run, has no
+ * signature-verification step against the kernel's registered key — neither
+ * constitutes a verified run.
+ */
+export function recordOperatorStage(
+  kernelId: unknown,
+  stage: OperatorStage,
+  meta?: OperatorStageMeta,
+): boolean {
+  if (!funnelEnabled()) return false;
+  if (typeof kernelId !== "string" || !OPERATOR_KERNEL_ID_RE.test(kernelId)) return false;
+  if (kernelId === DEV_PLACEHOLDER_KERNEL_ID) return false;
+  if (operatorSeenHas(kernelId, stage)) return false;
+  if (operatorStageDurable(kernelId, stage)) {
+    markOperatorSeen(kernelId, stage);
+    return false;
+  }
+
+  const operatorId = meta?.operatorId ?? null;
+  const deviceId = meta?.deviceId ?? null;
+  const capabilityId = meta?.capabilityId ?? null;
+  const jobId = meta?.jobId ?? null;
+
+  // 1. Durable audit row (system of record) — mirrors recordStage's shape. The
+  // stage counts as recorded only once this row is written, so a failed write
+  // leaves it free to record on the next success (#469 round 1).
+  let written = false;
+  try {
+    written = auditService.log({
+      eventType: OPERATOR_FUNNEL_AUDIT_EVENT,
+      actor: operatorId ?? "unknown",
+      resourceType: "kernel",
+      resourceId: kernelId,
+      action: stage,
+      metadata: {
+        stage,
+        kernel_id: kernelId,
+        device_id: deviceId,
+        capability_id: capabilityId,
+        job_id: jobId,
+      },
+    }) === true;
+  } catch {
+    /* funnel tracking must never affect request handling */
+  }
+  if (!written) return false;
+  markOperatorSeen(kernelId, stage);
+
+  // 2. PostHog — capture per stage, distinctId = kernelId so PostHog funnels
+  // reconstruct the operator-onboarding chart natively.
+  try {
+    trackServerEvent(
+      `operator_${stage}`,
+      {
+        kernel_id: kernelId,
+        device_id: deviceId,
+        capability_id: capabilityId,
+        job_id: jobId,
+      },
+      kernelId,
+    );
+  } catch {
+    /* analytics must never break request flow */
+  }
+
+  // 3. OTel span event on the active span (no new span).
+  try {
+    trace.getActiveSpan()?.addEvent(`pcc.operator_funnel.${stage}`, {
+      "pcc.kernel_id": kernelId,
+      "pcc.operator_funnel.stage": stage,
+      ...(deviceId ? { "pcc.device_id": deviceId } : {}),
+      ...(capabilityId ? { "pcc.capability_id": capabilityId } : {}),
+      ...(jobId ? { "pcc.job_id": jobId } : {}),
+    });
+  } catch {
+    /* OTel may be uninitialised in tests */
+  }
+
+  return true;
+}
+
+// ── Read API (audit-log backed) ─────────────────────────────────────────────
+
+export interface OperatorFunnelRow {
+  stage: OperatorStage;
+  kernels: number;
+  /** Conversion from kernel_created, 0..1, or null when no kernel_created rows exist. */
+  conversion: number | null;
+}
+
+/**
+ * Cohort funnel: distinct kernelIds that reached each stage since `since`.
+ * Conversion is relative to the `kernel_created` (entry) count; mirrors
+ * getCohortFunnel's shape.
+ */
+export function getOperatorFunnel(opts: { since?: string } = {}): OperatorFunnelRow[] {
+  const rows = auditService.query({
+    eventType: OPERATOR_FUNNEL_AUDIT_EVENT,
+    since: opts.since,
+    limit: 100000,
+  });
+
+  const perStage = new Map<OperatorStage, Set<string>>();
+  for (const s of OPERATOR_STAGES) perStage.set(s, new Set());
+  for (const r of rows) {
+    const meta = (r.metadata ?? {}) as Record<string, unknown>;
+    const stage = (r.action as OperatorStage) ?? (meta.stage as OperatorStage);
+    const kernelId = r.resourceId;
+    if (!stage || !kernelId || !perStage.has(stage)) continue;
+    perStage.get(stage)!.add(kernelId);
+  }
+
+  const entry = perStage.get("kernel_created")!.size;
+  return OPERATOR_STAGES.map((stage) => {
+    const kernels = perStage.get(stage)!.size;
+    return { stage, kernels, conversion: entry > 0 ? kernels / entry : null };
+  });
+}
+
+/**
+ * Ordered list of operator-funnel stages a single kernelId reached. The audit
+ * query can't filter by resource id, so this scans at most 10,000 operator-funnel
+ * rows: for full history on a busy gateway, use the private observability store.
+ */
+export function getOperatorStagesForKernel(kernelId: string): OperatorStage[] {
+  const rows = auditService.query({ eventType: OPERATOR_FUNNEL_AUDIT_EVENT, limit: 10000 });
+  const found = new Set<OperatorStage>();
+  for (const r of rows) {
+    if (r.resourceId !== kernelId) continue;
+    const meta = (r.metadata ?? {}) as Record<string, unknown>;
+    const stage = (r.action as OperatorStage) ?? (meta.stage as OperatorStage);
+    if (stage) found.add(stage);
+  }
+  return OPERATOR_STAGES.filter((s) => found.has(s));
+}

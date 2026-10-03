@@ -26,6 +26,27 @@ import { getKernelService } from "../services/kernel-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
+
+/**
+ * Adapters that never count toward the operator-onboarding funnel's
+ * adapter_ready stage: "mock" is the test/simulator adapter and
+ * "generic-http" is the catch-all placeholder adapter — neither proves a
+ * real machine is reachable. Mirrors the unmerged onboarding-readiness.ts's
+ * NON_EXECUTING_ADAPTERS set (see item4-stage-inventory.md). Exported so it
+ * can be unit-tested independent of KernelService/adapter wiring.
+ */
+export function isRealAdapterHealthy(
+  healthy: boolean,
+  adapterType: string | null | undefined,
+): boolean {
+  return healthy === true && isExecutingAdapter(adapterType);
+}
+
+/** A real adapter: not the "mock" simulator and not the "generic-http" placeholder. */
+export function isExecutingAdapter(adapterType: string | null | undefined): boolean {
+  return !!adapterType && adapterType !== "mock" && adapterType !== "generic-http";
+}
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -418,9 +439,18 @@ export class JobFacade extends BaseFacade {
    */
   async checkDeviceHealth(
     deviceId: string,
+    opts: { operatorId?: string | null } = {},
   ): Promise<Result<{ healthy: boolean; details: unknown }>> {
     return this.execute("checkDeviceHealth", async () => {
       const svc = getKernelService();
+      // Snapshot the device row BEFORE the check, so the funnel attributes the
+      // result to the device that was actually checked (#469 round 1).
+      let before: { kernelId?: string | null; adapterType?: string | null } | undefined;
+      try {
+        before = this.repos.kernels.findDeviceById(deviceId);
+      } catch {
+        before = undefined;
+      }
       const result = await svc.checkDeviceHealth(deviceId);
 
       // Update DB health record (best-effort)
@@ -432,6 +462,30 @@ export class JobFacade extends BaseFacade {
         );
       } catch {
         // non-fatal
+      }
+
+      // Operator-onboarding funnel (ADK track item 4): adapter_ready. Only a
+      // REAL adapter (not mock/generic-http) that is actually healthy
+      // counts. kernelId + adapterType are resolved from the device's own
+      // DB row (the health-check route only has deviceId) — if the row
+      // can't be found, there's nothing to attribute the stage to, so we
+      // don't record. Telemetry must never break a health-check response.
+      // Recorded only for an authenticated caller, and only if the device row is
+      // unchanged across the check: a device moved to another kernel (or given
+      // another adapter) mid-check is not attributed to either (#469 round 1).
+      try {
+        const after = this.repos.kernels.findDeviceById(deviceId);
+        if (
+          opts.operatorId &&
+          before?.kernelId &&
+          after?.kernelId === before.kernelId &&
+          after?.adapterType === before.adapterType &&
+          isRealAdapterHealthy(result.healthy, before.adapterType)
+        ) {
+          recordOperatorStage(before.kernelId, "adapter_ready", { deviceId, operatorId: opts.operatorId });
+        }
+      } catch {
+        /* funnel tracking must never break a health-check response */
       }
 
       return { healthy: result.healthy, details: result.details ?? null };
