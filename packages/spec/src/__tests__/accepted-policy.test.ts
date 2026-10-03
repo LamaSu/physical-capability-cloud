@@ -440,4 +440,21 @@ describe("accepted-policy: code-running input is refused before it is read (E7c-
       delete pollutedProto[1];
     }
   });
+
+  it("E12: the field snapshot is a null-prototype record, so a replaced Map.prototype.get cannot answer a field", () => {
+    const original = Map.prototype.get;
+    Map.prototype.get = function () {
+      return K("forged-by-map-get");
+    };
+    let root: string;
+    let subjectBlockHash: string;
+    try {
+      root = computeBindingsRoot(GOLDEN_BINDINGS);
+      subjectBlockHash = computeSubjectBlockHash(GOLDEN_SUBJECT);
+    } finally {
+      Map.prototype.get = original;
+    }
+    expect(root).toBe(EXPECT.bindingsRoot);
+    expect(subjectBlockHash).toBe(EXPECT.subjectBlockHash);
+  });
 });

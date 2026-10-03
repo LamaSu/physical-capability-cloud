@@ -130,6 +130,8 @@ const ownKeys = Reflect.ownKeys;
 const getOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
 const getPrototypeOf = Reflect.getPrototypeOf;
 const isSafeInteger = Number.isSafeInteger;
+const createObject = Object.create;
+const defineProperty = Reflect.defineProperty;
 const toBigInt = BigInt;
 const hostIsProxy = takeHostIsProxy();
 
@@ -209,7 +211,9 @@ function admitPlainArray(value: unknown, field: string): readonly unknown[] {
   // exactly the canonical indices leaves no room (by key count) for any other own key — so
   // this also rejects a hole papered over by an unrelated extra key, e.g. `delete a[1];
   // a.extra = y`, which keeps `ownKeys(value).length === length + 1` but is missing index 1.
-  const snapshot: unknown[] = new Array(length);
+  // Built with the captured defineProperty and a null-prototype descriptor, never an
+  // assignment: `snapshot[i] = x` would run a setter that Array.prototype serves for index i.
+  const snapshot: unknown[] = [];
   for (let i = 0; i < length; i++) {
     if (!isOwnEnumerable(value, i)) {
       throw new AcceptedPolicyDigestInputError(`${field}[${i}]`, "index is missing, non-enumerable, or not its own property");
@@ -218,9 +222,19 @@ function admitPlainArray(value: unknown, field: string): readonly unknown[] {
     if (element === ACCESSOR) {
       throw new AcceptedPolicyDigestInputError(`${field}[${i}]`, "is an accessor: a getter runs code, so it is refused before it is read");
     }
-    snapshot[i] = element;
+    defineProperty(snapshot, i, dataDescriptor(element));
   }
   return snapshot;
+}
+
+/** A data-property descriptor with a null prototype, so no inherited `get` or `set` is read as its own. */
+function dataDescriptor(value: unknown): PropertyDescriptor {
+  const descriptor = createObject(null) as PropertyDescriptor;
+  descriptor.value = value;
+  descriptor.writable = true;
+  descriptor.enumerable = true;
+  descriptor.configurable = true;
+  return descriptor;
 }
 
 /** What `ownDataValue` returns for a missing property and for an accessor. Module-private, so neither can equal a value read from input. */
@@ -291,12 +305,13 @@ function joinStrings(list: readonly string[], sep: string): string {
  * returned snapshot. Callers must read fields via `requiredField(snapshot, ...)`, never by
  * re-reading `owner` — so the "read once" contract is literal, not just a comment.
  */
-function checkExactKeys(owner: object, field: string, allowed: readonly string[]): ReadonlyMap<string, unknown> {
+function checkExactKeys(owner: object, field: string, allowed: readonly string[]): Readonly<Record<string, unknown>> {
   const keys = ownKeys(owner);
   if (keys.length !== allowed.length) {
     throw new AcceptedPolicyDigestInputError(field, `expected exactly the keys [${joinStrings(allowed, ", ")}]`);
   }
-  const snapshot = new Map<string, unknown>();
+  // A null-prototype record, not a Map: Map.prototype.get and set are looked up when called.
+  const snapshot = createObject(null) as Record<string, unknown>;
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i]!;
     if (typeof key === "symbol" || !includesString(allowed, key)) {
@@ -306,19 +321,20 @@ function checkExactKeys(owner: object, field: string, allowed: readonly string[]
     if (value === ACCESSOR || !isOwnEnumerable(owner, key)) {
       throw new AcceptedPolicyDigestInputError(`${field}.${key}`, "accessor or non-enumerable properties are not accepted; pass plain data");
     }
-    snapshot.set(key, value);
+    defineProperty(snapshot, key, dataDescriptor(value));
   }
   return snapshot;
 }
 
 /** One required declared field's value, taken from the snapshot `checkExactKeys` already built in its single read pass; never re-read from the original object. */
-function requiredField(snapshot: ReadonlyMap<string, unknown>, field: string, key: string): unknown {
-  if (!snapshot.has(key)) {
+function requiredField(snapshot: Readonly<Record<string, unknown>>, field: string, key: string): unknown {
+  const descriptor = getOwnPropertyDescriptor(snapshot, key);
+  if (descriptor === undefined) {
     // Unreachable for any caller passing a key from the same allowed-list checkExactKeys
     // validated against; kept as a defensive invariant, not a user-input path.
     throw new AcceptedPolicyDigestInputError(`${field}.${key}`, "is required as a plain own data property");
   }
-  return snapshot.get(key);
+  return descriptor.value;
 }
 
 // ── Pinned input forms: 0x + lowercase hex of exact width; canonical decimal integers; no -0. ──
