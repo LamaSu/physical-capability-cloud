@@ -824,6 +824,16 @@ describe("per-caller API responses are never stored (astra pack 146b)", () => {
     assertNeverStored(res, "default /api policy");
   });
 
+  it("[neg] astra pack 146c, the class: a CREDENTIALED request outside /api with no policy of its own is private, no-store", async () => {
+    const res = await call("GET", "/n146c-no-such-page", keyA);
+    assertNeverStored(res, "credentialed request outside /api");
+  });
+
+  it("an ANONYMOUS request outside /api gets no forced no-store", async () => {
+    const res = await call("GET", "/n146c-no-such-page", null);
+    expect(String(res.headers["cache-control"] ?? "")).not.toMatch(/\bno-store\b/);
+  });
+
   it("a deliberately public document outside /api keeps its own policy (GET /openapi.json)", async () => {
     const res = await call("GET", "/openapi.json", null);
     expect(res.statusCode).toBe(200);
