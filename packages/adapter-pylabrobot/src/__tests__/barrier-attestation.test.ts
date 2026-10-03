@@ -163,6 +163,30 @@ describe("the fix's own rules (astra pack 194)", () => {
     expect.soft(hook.resolved, "the hook, once it has").toBe(released);
   });
 
+  it("once the window was attested open, the same process's \"no window\" is no proof: a held adapter stays held", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let stops = 0;
+    const fake = fakeSidecar({
+      "backend.init": init("dev-confirmed"),
+      "evidence.startRecording": opened(),
+      "backend.run": ran,
+      // The barrier fails; every retry says no such window, from the SAME process.
+      "evidence.stopRecording": () =>
+        ++stops === 1
+          ? { error: { code: -32603, message: "drain failed" } }
+          : { error: { code: -32006, message: "no recording window", data: { generation: GEN } } },
+    });
+    const { adapter } = await adapterOn(fake.transport, "dev-confirmed");
+    const r = adapter.execute({ type: "start", payload: { jobId: "j-confirmed" } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft((await r).success, "the run").toBe(false);
+    const hook = ask(adapter);
+    await vi.advanceTimersByTimeAsync(1_000 + 2_000 + 4_000);
+    expect.soft(stops, "barrier calls").toBeGreaterThanOrEqual(3);
+    expect.soft(hook.resolved, "the hook").toBe(false);
+  });
+
   it("a start without the job's id is refused before anything reaches the sidecar", async () => {
     const fake = fakeSidecar({ "backend.init": init("dev-noid") });
     const { adapter } = await adapterOn(fake.transport, "dev-noid");
