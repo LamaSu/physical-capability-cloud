@@ -311,7 +311,7 @@ export function SettlementPage() {
             <>
               <GlassPanel>
                 <p className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-                  By Agent
+                  Intents by Agent
                 </p>
                 <div className="space-y-1.5">
                   {Object.entries(selected.byAgent).map(([agent, count]) => (
@@ -329,7 +329,7 @@ export function SettlementPage() {
               </GlassPanel>
               <GlassPanel>
                 <p className="text-[10px] uppercase tracking-wider text-white/40 mb-2">
-                  By Operation
+                  Intents by Operation
                 </p>
                 <div className="space-y-1.5">
                   {Object.entries(selected.byOperation).map(([op, count]) => (

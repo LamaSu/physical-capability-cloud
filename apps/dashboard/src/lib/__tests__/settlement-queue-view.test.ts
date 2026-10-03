@@ -191,7 +191,8 @@ describe("flushOutcome", () => {
       duration: 12,
     })).toEqual({
       ok: true,
-      message: "The gateway reports epoch 3 flushed: 5 operations in 1 batch(es).",
+      // Intents and batch-carried operations reported separately (review r3 of #425, M1).
+      message: "The gateway reports epoch 3 flushed: 5 intents, 5 operations carried in 1 batch.",
     });
     // The counts alone are not the route's answer (review r2 of #425, H1).
     expect(flushOutcome(200, { epoch: 3, totalIntents: 5, batches: 1 }).ok).toBe(false);
@@ -250,7 +251,7 @@ describe("flushOutcome: a malformed 2xx is never assumed accepted (H1)", () => {
       byAgent: { a: 5 },
       byOperation: { release: 5 },
       duration: 12,
-    })).toEqual({ ok: true, message: "The gateway reports epoch 3 flushed: 5 operations in 1 batch(es)." });
+    })).toEqual({ ok: true, message: "The gateway reports epoch 3 flushed: 5 intents, 5 operations carried in 1 batch." });
   });
 });
 

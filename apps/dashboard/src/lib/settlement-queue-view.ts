@@ -79,6 +79,16 @@ const isSignedAge = (v: unknown): v is number =>
   typeof v === "number" && Number.isSafeInteger(v) && v >= -MAX_DATE_MS && v <= MAX_DATE_MS;
 /** A record of per-key counts (byAgent / byOperation): every value is itself a safe count. */
 const isCountRecord = (v: unknown): v is Record<string, number> => isObj(v) && Object.values(v).every(isCount);
+/** A count record's values summed, or null if the running total ever leaves Number's safe-integer
+ * range — so it can never be mistaken for a match against totalIntents (review r3 of #425, M2). */
+const safeSum = (record: Record<string, number>): number | null => {
+  let sum = 0;
+  for (const v of Object.values(record)) {
+    sum += v;
+    if (!Number.isSafeInteger(sum)) return null;
+  }
+  return sum;
+};
 const FLUSH_TRIGGERS: ReadonlySet<string> = new Set(["manual", "size", "age", "value"]);
 const isTrigger = (v: unknown): v is FlushTrigger => typeof v === "string" && FLUSH_TRIGGERS.has(v);
 /** An ERC-4337 UserOperation hash from the bundler: 0x + 32 bytes. */
@@ -202,7 +212,10 @@ export function flushOutcome(httpStatus: number, body: unknown): { ok: boolean; 
   // Every member the route always sends must be there and well formed (review r2 of #425, H1):
   // batchDetails (one per batch), byAgent, byOperation and duration. A duration is a signed ms
   // count: the bundler stamps both ends with Date.now(), so a clock that moved back makes it
-  // negative (M4).
+  // negative (M4). byAgent and byOperation are counted from the same intent snapshot as
+  // totalIntents (batch-settler.ts settle()), so each must sum to it exactly; a body where they
+  // don't is outside the route's contract and fails closed like any other malformed answer
+  // (review r3 of #425, M2).
   if (
     isObj(body) &&
     isCount(body.epoch) &&
@@ -213,12 +226,20 @@ export function flushOutcome(httpStatus: number, body: unknown): { ok: boolean; 
     body.batchDetails.every(isBatchDetail) &&
     isCountRecord(body.byAgent) &&
     isCountRecord(body.byOperation) &&
+    safeSum(body.byAgent) === body.totalIntents &&
+    safeSum(body.byOperation) === body.totalIntents &&
     typeof body.duration === "number" &&
     Number.isSafeInteger(body.duration)
   ) {
+    // totalIntents counts intents, not operations: the queue batchDetails carries can hold
+    // operations from other sources too, and an epoch can flush zero batches (an empty queue).
+    // The two are never conflated in this message (review r3 of #425, M1).
+    const opsCarried = body.batchDetails.reduce((sum, b) => sum + b.operationCount, 0);
     return {
       ok: true,
-      message: `The gateway reports epoch ${body.epoch} flushed: ${body.totalIntents} operations in ${body.batches} batch(es).`,
+      message:
+        `The gateway reports epoch ${body.epoch} flushed: ${body.totalIntents} intent${body.totalIntents === 1 ? "" : "s"}, ` +
+        `${opsCarried} operation${opsCarried === 1 ? "" : "s"} carried in ${body.batches} batch${body.batches === 1 ? "" : "es"}.`,
     };
   }
   return { ok: false, message: SHAPE };

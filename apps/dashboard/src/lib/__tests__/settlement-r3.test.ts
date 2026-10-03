@@ -45,7 +45,9 @@ describe("H1 (review r2 of #425): a 2xx flush answer outside the route's contrac
   });
 
   it("the route's whole answer is a success, and says what the gateway reports, not that anything settled", () => {
-    expect(flushOutcome(200, FLUSH)).toEqual({ ok: true, message: "The gateway reports epoch 3 flushed: 5 operations in 1 batch(es)." });
+    // Wording updated for review r3 of #425, M1: intents and batch-carried operations are
+    // reported separately, not conflated as "N operations in M batch(es)".
+    expect(flushOutcome(200, FLUSH)).toEqual({ ok: true, message: "The gateway reports epoch 3 flushed: 5 intents, 5 operations carried in 1 batch." });
   });
 });
 
