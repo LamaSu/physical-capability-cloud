@@ -620,21 +620,33 @@ def test_landlock_module_uses_ctypes_only_for_landlock():
         arg = call.args[0] if call.args else None
         assert isinstance(arg, ast.Constant) and arg.value is None, "ctypes.CDLL must be CDLL(None) only"
 
-    # (5) the only attributes invoked on the libc handle (a CDLL(None) result, bound or direct) are the
-    #     pinned syscall surface -- so CDLL(None).system(...) is refused even though its argument is None.
-    libc_names = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
-                  and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute)
-                  and n.value.func.attr == "CDLL" and isinstance(n.value.func.value, ast.Name)
-                  and n.value.func.value.id == "ctypes"
-                  for t in n.targets if isinstance(t, ast.Name)}
+    # (5) No dynamic attribute access: getattr/hasattr can reach a libc method by a constant name the
+    #     general scanner does not reject (`getattr(ctypes.CDLL(None), "system")`). _landlock.py has no
+    #     legitimate use of them, so forbid them outright (verdict 105n MED2).
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Attribute):
-            continue
-        v = node.value
-        on_handle = (isinstance(v, ast.Name) and v.id in libc_names) or (
-            isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr == "CDLL"
-            and isinstance(v.func.value, ast.Name) and v.func.value.id == "ctypes")
-        if on_handle:
+        if isinstance(node, ast.Name) and node.id in ("getattr", "hasattr"):
+            assert False, "_landlock.py must not use getattr/hasattr (a constant-name reach past the surface)"
+
+    # (6) the only attributes invoked on the libc handle -- the CDLL(None) result, any name bound to it,
+    #     or a transitive alias of such a name -- are the pinned syscall surface. So neither
+    #     `CDLL(None).system(...)` nor `alias = libc; alias.system(...)` can reach another libc symbol.
+    def _is_cdll_call(n):
+        return (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "CDLL"
+                and isinstance(n.func.value, ast.Name) and n.func.value.id == "ctypes")
+    handle_names, changed = set(), True
+    while changed:  # seed from `x = ctypes.CDLL(...)`, then follow `y = x` to a fixpoint
+        changed = False
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Assign):
+                continue
+            if _is_cdll_call(n.value) or (isinstance(n.value, ast.Name) and n.value.id in handle_names):
+                for t in n.targets:
+                    if isinstance(t, ast.Name) and t.id not in handle_names:
+                        handle_names.add(t.id)
+                        changed = True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and (
+                (isinstance(node.value, ast.Name) and node.value.id in handle_names) or _is_cdll_call(node.value)):
             assert node.attr in LANDLOCK_LIBC_ATTRS, f"libc.{node.attr} is outside the pinned syscall surface"
 
 

@@ -1,9 +1,9 @@
 #!/bin/sh
-# Install pcc-node as a hardened systemd service (steward ruling 10/03, verdict 105n). Three layers keep
-# pcc-node from being coerced into running anything but its pinned device utilities:
-#   L1 (HARD)    AppArmor profile deploy/apparmor/pcc-node -- loaded here; the OS exec allowlist.
-#   L2 (partial) Landlock, applied in-process by pcc-node itself at startup (no action needed here).
-#   L3           the PEP 578 spawn hook, installed in-process (no action needed here).
+# Install pcc-node as a hardened systemd service (steward ruling 10/03, verdict 105n). The hard exec
+# allowlist is two kernel layers TOGETHER (neither alone), plus an accidental-spawn hook:
+#   AppArmor  deploy/apparmor/pcc-node -- loaded here; closes the loader residual Landlock leaves.
+#   Landlock  applied in-process by pcc-node at startup (mandatory; no action here); closes python3 re-exec.
+#   Hook      the PEP 578 spawn hook, installed in-process (no action needed here).
 # This script installs the unit, loads the AppArmor profile, and prepares /etc/pcc-node. Clean-room:
 # no network, no downloads. Run as root (it writes under /etc). It does NOT compute an ExecPaths list:
 # systemd NoExecPaths/ExecPaths was retired (verdict 105m -- it cannot split mmap from execve).
@@ -17,7 +17,7 @@ CONFDIR=/etc/pcc-node
 PYTHON=$(command -v python3 || true)
 [ -n "$PYTHON" ] || { echo "install.sh: python3 not found on PATH" >&2; exit 1; }
 
-# Config dir for the operator's secrets (PCC_API_KEY) and optional KERNEL_CONFIG_FILE. systemd also
+# Config dir for the operator's secrets (PCC_API_KEY). systemd also
 # creates it via ConfigurationDirectory=, but we seed a template env file now so first boot is clean.
 mkdir -p "$CONFDIR"
 if [ ! -e "$CONFDIR/pcc-node.env" ]; then
@@ -29,16 +29,17 @@ ENV
     echo "install.sh: wrote template $CONFDIR/pcc-node.env (add PCC_API_KEY, chmod 600 kept)"
 fi
 
-# L1: load the AppArmor profile. This is the hard exec allowlist; the unit's AppArmorProfile=pcc-node
-# makes the service FAIL if it is not loaded, so do this before enabling the unit.
+# Load the AppArmor profile. With the mandatory in-process Landlock it forms the hard exec allowlist
+# (AppArmor closes the loader residual); the unit's AppArmorProfile=pcc-node makes the service FAIL if
+# it is not loaded, so do this before enabling the unit.
 if command -v apparmor_parser >/dev/null 2>&1; then
     apparmor_parser -r -W "$HERE/apparmor/pcc-node"
     echo "install.sh: loaded AppArmor profile 'pcc-node' (L1 exec allowlist)"
 else
-    echo "install.sh: WARNING -- apparmor_parser not found. L1 (the hard exec allowlist) is NOT in" >&2
-    echo "            force. Use a SELinux-equivalent policy, or edit the unit to drop" >&2
-    echo "            AppArmorProfile= only after accepting that only L2 (Landlock, partial) + L3" >&2
-    echo "            (the spawn hook) remain. See deploy/README.md." >&2
+    echo "install.sh: WARNING -- apparmor_parser not found. Half the hard exec allowlist (AppArmor," >&2
+    echo "            which closes the loader residual) is NOT in force. Use a SELinux-equivalent" >&2
+    echo "            policy, or edit the unit to drop AppArmorProfile= only after accepting that the" >&2
+    echo "            loader gadget is open and only mandatory Landlock + the spawn hook remain. See deploy/README.md." >&2
 fi
 
 # Install the unit, pointing ExecStart at the resolved interpreter.

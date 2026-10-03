@@ -23,7 +23,7 @@ def run() -> None:
     # to grant python3 execute (pcc-node IS python) and so cannot stop `python3 -c ...` (verdict 105n,
     # sol HIGH1). Where Landlock is unavailable we refuse by default, unless the operator consciously
     # opts out with PCC_ALLOW_NO_LANDLOCK=1 -- then only AppArmor (L1) + the accidental hook (L3) apply
-    # and the operating runtime must stay unarmed (item 118 / #471). Landlock + AppArmor together are
+    # and the operating runtime must stay unarmed (item 124 / #471). Landlock + AppArmor together are
     # the hard guarantee; neither alone is (AppArmor leaves the python path, Landlock the loader gadget).
     paths = [p for n in sorted(spawn_guard.EXECUTABLES) if (p := shutil.which(n))]
     if not _landlock.restrict(paths) and os.getenv("PCC_ALLOW_NO_LANDLOCK") != "1":

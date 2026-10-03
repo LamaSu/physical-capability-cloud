@@ -31,7 +31,7 @@ loader gadget); together they are. Both pair with :mod:`pcc_node.spawn_guard` (t
 
 Where Landlock is unavailable :func:`restrict` returns False and :mod:`pcc_node._entry` refuses to run
 unless the operator sets ``PCC_ALLOW_NO_LANDLOCK=1`` -- then only AppArmor + the hook apply and the
-operating runtime must stay unarmed (steward ruling, folded into item 118 / #471).
+operating runtime must stay unarmed (steward ruling, folded into item 124 / #471).
 
 This module is the ONE place pcc-node uses ``ctypes`` (there is no stdlib Landlock API): it issues
 the three Landlock syscalls and nothing else. The no-shell guard (tests/test_no_shell_execution.py)
