@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from typing import Any, TYPE_CHECKING
 
 from .dispatcher import RPC_ERROR_CODES, RpcException
@@ -36,6 +37,9 @@ class Commands:
     ) -> None:
         self.loader = loader
         self.evidence = evidence
+        # Windows this process closed, by (deviceId, jobId): the drain's watermark and the op
+        # count, so a retried evidence.stopRecording answers as the first did. The last 64.
+        self._closed: "OrderedDict[tuple[str, str], tuple[int, int]]" = OrderedDict()
 
     def register_all(self, dispatcher: Any) -> None:
         dispatcher.register("backend.init", self.backend_init)
@@ -98,6 +102,7 @@ class Commands:
             "deviceId": device_id,
             "plrBackend": plr_backend,
             "deckSnapshot": deck_snapshot,
+            "generation": self.evidence.generation,
             "metadata": dict(handle.metadata),
         }
 
@@ -111,9 +116,16 @@ class Commands:
 
         handle = self._require_handle(device_id)
 
-        if not self.evidence.is_recording(device_id):
-            # Auto-start recording window if the TS adapter didn't pre-arm it.
-            self.evidence.start_recording(device_id, job_id)
+        # A run records only into its own job's window, which the adapter opened (and saw
+        # attested) first. No window, or another job's, is refused: nothing runs unrecorded,
+        # and no op is attributed to another job (astra pack 194; there is no auto-open).
+        window = self.evidence.get_window(device_id)
+        if window is None or window.job_id != job_id:
+            raise RpcException(
+                RPC_ERROR_CODES["NO_RECORDING_WINDOW"],
+                f"no recording window for job {job_id} on device {device_id}",
+                {"generation": self.evidence.generation},
+            )
 
         started_at = time.monotonic()
         try:
@@ -227,20 +239,41 @@ class Commands:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
         window = self.evidence.start_recording(device_id, job_id)
-        return {"ok": True, "jobId": window.job_id, "startedAt": window.started_at.isoformat()}
+        return {
+            "ok": True,
+            "jobId": window.job_id,
+            "startedAt": window.started_at.isoformat(),
+            "generation": self.evidence.generation,
+        }
 
     async def evidence_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
         window = self.evidence.stop_recording(device_id, job_id)
+        key = (device_id, job_id)
+        if window is not None:
+            self._closed[key] = (self.evidence.watermark(), window.op_count)
+            while len(self._closed) > 64:
+                self._closed.popitem(last=False)
+        elif key not in self._closed:
+            # No window of this job was ever open in this process: nothing to attest. A
+            # restarted sidecar says so, with its own generation (astra pack 194).
+            raise RpcException(
+                RPC_ERROR_CODES["NO_RECORDING_WINDOW"],
+                f"no recording window for job {job_id} on device {device_id} in this sidecar",
+                {"generation": self.evidence.generation},
+            )
+        mark, op_count = self._closed[key]
         # A barrier: every notification scheduled before the window closed is written
         # before this answer, so once the TS adapter has it, it has all of the job's
-        # evidence (astra pack 186). Notifications scheduled later are not waited for.
-        await self.evidence.drain_through(self.evidence.watermark())
+        # evidence (astra pack 186). A retried close of the same window answers the same
+        # way, once that drain is done. Notifications scheduled later are not waited for.
+        await self.evidence.drain_through(mark)
         return {
             "ok": True,
             "jobId": job_id,
-            "opCount": window.op_count if window else 0,
+            "opCount": op_count,
+            "generation": self.evidence.generation,
         }
 
     async def evidence_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -46,6 +46,8 @@ import type { KernelConfig, DeviceConfig } from "./kernel-config.js";
 import { MockFDMAdapter } from "./adapters/mock-fdm.js";
 import { MockPowerMonitorAdapter } from "./adapters/mock-power-monitor.js";
 import { MockCameraAdapter } from "./adapters/mock-camera.js";
+import { PullCameraAdapter, type CameraDeviceSpec } from "./adapters/pull-camera-adapter.js";
+import { PhotoCaptureService } from "./photo-capture-service.js";
 
 // Real adapters
 import { OctoPrintAdapter } from "./adapters/octoprint-adapter.js";
@@ -502,6 +504,19 @@ registerSensorAdapter("sila", buildSiLA);
 
 // Camera adapters
 registerCameraAdapter("mock", buildMockCamera);
+// A real camera: the kernel pulls every frame itself (LO-SE-1). Device and identity are required config.
+registerCameraAdapter("photo", (device, cfg, kernelId) => {
+  const capture = (cfg.capture ?? {}) as Partial<CameraDeviceSpec> & { timeoutMs?: number };
+  const timeoutMs = capture.timeoutMs ?? 10_000;
+  return new PullCameraAdapter(
+    device.id,
+    kernelId,
+    { platform: capture.platform as CameraDeviceSpec["platform"], device: capture.device as string, identity: capture.identity as string },
+    new PhotoCaptureService(),
+    undefined,
+    { timeoutMs, now: () => Date.now() },
+  );
+});
 registerCameraAdapter("generic-http", buildGenericHttpRefusal<CameraAdapter>("camera"));
 
 // ---------------------------------------------------------------------------
