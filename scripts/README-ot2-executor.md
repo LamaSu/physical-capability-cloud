@@ -92,9 +92,11 @@ Two layers keep it from running twice (steward P0 #4698, readmodels #4558):
    directory, a full disk) fails closed -- the job is not run, and it is picked up again
    once the problem is fixed.
 
-   **Durability.** A marker only survives a power cut if its directory entry reaches the
-   disk. So every state directory the agent creates is fsynced into its parent, and the
-   marker's directory is fsynced after the marker is written. When that can't be done
+   **Durability.** A marker only survives a power cut if its directory entry, and the entry
+   of every directory on the state path, reach the disk. So after each marker is written,
+   every directory from `OT2_AGENT_STATE_DIR` up to the filesystem root is fsynced, on
+   every claim. That includes directories an earlier, failed attempt created and never
+   synced. When that can't be done
    (an I/O error; or Windows, where a directory can't be fsynced this way), the marker is
    kept, and:
    - with `OT2_AGENT_SERVER_CONSUME=off`, where the marker is the ONLY record, the job is

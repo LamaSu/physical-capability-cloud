@@ -640,6 +640,28 @@ def _makedirs_durable(path):
         raise first_error
 
 
+def _sync_dir_chain(path):
+    """fsync `path` and every directory above it, up to the filesystem root.
+
+    fsyncing a directory persists the entries of its children, so this makes every component
+    of `path` (and a mark inside it) reach stable storage, including directories an earlier,
+    failed attempt created and never synced. Every directory is attempted; the first failure is
+    raised at the end."""
+    current = os.path.abspath(path)
+    first_error = None
+    while True:
+        try:
+            _fsync_dir(current)
+        except OSError as err:
+            first_error = first_error or err
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    if first_error is not None:
+        raise first_error
+
+
 def claim_job_once(record, require_durable=True):
     """Mark an approved job as handled and return True: it may go to the agent, this once.
 
@@ -650,10 +672,11 @@ def claim_job_once(record, require_durable=True):
     however hostile, can name a path. O_CREAT | O_EXCL makes the claim atomic: of any number of
     threads or processes claiming one key, exactly one gets True. No fcntl or msvcrt.
 
-    Durability. The mark only survives a power cut if its directory entry, and every state
-    directory created on the way, reach stable storage. So new directories are fsynced into
-    their parents, and the marker's directory is fsynced after the marker is written. When
-    that can't be done, the mark is kept (it still blocks this machine while it exists). With
+    Durability. The mark only survives a power cut if its directory entry, and the entry of
+    every directory on the state path, reach stable storage. So after the marker is written,
+    every directory from the state directory up to the root is fsynced, on every claim. That
+    includes directories an earlier, failed attempt created and never synced. When that can't
+    be done, the mark is kept (it still blocks this machine while it exists). With
     require_durable (the default, and what OT2_AGENT_SERVER_CONSUME=off uses, where the mark
     is the ONLY record), the approval is refused: after a power cut the mark could be gone,
     and the approval run again. Without it (consume "required"), the gateway's consume is the
@@ -710,8 +733,10 @@ def claim_job_once(record, require_durable=True):
                   "run, and it will not run again unless it is re-approved or the marker is deleted.",
                   key, marker, err)
         return False
+    # The whole state path, every time: an earlier failed attempt may have created the chain
+    # without syncing it, and a mark is only as durable as every entry above it (#499 r2).
     try:
-        _fsync_dir(directory)
+        _sync_dir_chain(directory)
     except OSError as err:
         durability_error = durability_error or err
     if durability_error is not None:

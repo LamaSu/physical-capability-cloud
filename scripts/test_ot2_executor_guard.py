@@ -1422,3 +1422,43 @@ class MarkDurabilityTests(DaemonLoopTestCase):
             self.assertEqual(proc.returncode, 0, out)
             outputs.append(out.decode("ascii", "replace").strip().splitlines()[-1])
         self.assertEqual(sorted(outputs), ["CLAIM False", "CLAIM True"], outputs)
+
+
+class MarkChainDurabilityTests(DaemonLoopTestCase):
+    """#499 r2 CRITICAL: under OFF, every claim must make the WHOLE state-directory path durable,
+    not just the directories that call created. A failed attempt can leave the chain created but
+    never synced; a later approval must not dispatch on top of it."""
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc/self/fd to name a directory fd")
+    def test_a_later_approval_after_a_failed_one_syncs_every_directory_on_the_state_path(self):
+        real_fsync = os.fsync
+        synced = []
+        failing = {"on": True}
+
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                if failing["on"]:
+                    raise OSError(errno.EIO, "injected EIO on a directory fsync")
+                synced.append(os.path.realpath(os.readlink("/proc/self/fd/%d" % fd)))
+            return real_fsync(fd)
+
+        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}), mock.patch("os.fsync", fsync):
+            # Approval A: the chain is created, its syncs fail, A is refused (the mark is kept).
+            first = self.drive([[approval(30, id="chain-a")]])
+            self.assertEqual(first, [])
+            # The operator fixes the disk and approves B.
+            failing["on"] = False
+            second = self.drive([[approval(31, id="chain-b")]])
+        self.assertEqual(len(second), 1, second)
+        # Before B ran, every directory from the state dir up to the temp root was synced
+        # (each one persists its children's entries), so B's mark survives a power cut.
+        state = os.path.realpath(self.state)
+        expected = []
+        walk = state
+        while True:
+            expected.append(walk)
+            if walk == os.path.realpath(self.tmp):
+                break
+            walk = os.path.dirname(walk)
+        missing = [d for d in expected if d not in synced]
+        self.assertEqual(missing, [], "B dispatched while these directories were never synced: {}".format(missing))
