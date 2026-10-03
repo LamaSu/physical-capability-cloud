@@ -26,7 +26,7 @@ claim is safe: rule 12 keys `finalState` off `unitState() ∈ {8, 9}`, which sta
 **Updated 2026-09-24 per escrow's ruling #3163: the target is master's routes.** The earlier rows (a 404 or "no receipt"
 for states 1-5; `finalState: RELEASE_ALLOCATED` / `REFUND_ALLOCATED` for 6/7, from #667) are SUPERSEDED, for two reasons:
 - 404 must stay the unambiguous "this unit does not exist";
-- `finalState` means TERMINAL (rule 12). A receipt exists from allocation onward while money can still be outstanding.
+- `finalState` means TERMINAL (rule 12). `/receipt` itself answers 200 throughout; only the allocation record exists from allocation onward, while money can still be outstanding.
 
 | unitState | /receipt | finalState | isAllocated | finalizedBlock | phase | presentation (kit, #313) |
 |---|---|---|---|---|---|---|

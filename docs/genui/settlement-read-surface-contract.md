@@ -23,7 +23,7 @@ Field semantics (unit-state-mapper):
 - `finalState` is `"SETTLED_RELEASED"` or `"SETTLED_REFUNDED"` for states 8/9 and **null for every other state**. It is never `RELEASE_ALLOCATED` / `REFUND_ALLOCATED` (the design DTO's non-terminal values).
 - `isTerminal` is true for 8/9 only. `isAllocated` is true for **6/7 ONLY** ("outcome decided, money NOT fully moved"), so a settled body says `isAllocated: false`.
 - `phase`: 1 `active`; 2-3 `contest`; 4-5 `escalation`; 6-7 `allocated`; 8-9 `settled`.
-- The receipt route answers 200 for states 1-5 too (`finalState: null, isAllocated: false`), not the golden matrix's 404.
+- The receipt route answers 200 for states 1-5 too (`finalState: null, isAllocated: false`), matching the golden matrix (§A, updated 2026-09-24 per #3163).
 - Not emitted yet (design fields): `authorizationType`, `authorizationId`, `vcrReceiptPointer`, `evidenceBundleHash`, `verdictHash`, `oracleAuthEpoch`, `compositionRoot`, `allocatedBlock`, and a root-level `revision`.
 
 **Consumer rule (Surface A).** Settled-green comes only from a consistent state 8. That means `/lifecycle` with
@@ -85,10 +85,11 @@ type SettlementReceiptDTO = {
                                                           // TERMINAL-ONLY per rule 12 / escrow ruling #3163: null for EVERY non-terminal state (1-7),
                                                           // never `RELEASE_ALLOCATED` / `REFUND_ALLOCATED` — see "Implemented on master" above. The
                                                           // pre-#3163 design DTO (superseded) allowed the two allocated values here; master never emits them.
-  // A RECEIPT EXISTING DOES NOT MEAN SETTLED. The receipt is written at ALLOCATION and finalized when the last claim
-  // discharges. Normally that is the same tx, but a payout leg that falls back to a collateralized claim (the
-  // recipient transfer reverts, so a claim is recorded instead of discharged) leaves the unit in *_ALLOCATED with the
-  // receipt PRESENT and finalState NON-TERMINAL.
+  // A RECEIPT EXISTING DOES NOT MEAN SETTLED. `/receipt` answers 200 from state 1 onward; what is written at
+  // ALLOCATION is the allocation RECORD this DTO carries (authorizationType, evidence/verdict fields,
+  // allocatedBlock), finalized when the last claim discharges. Normally that is the same tx, but a payout leg that
+  // falls back to a collateralized claim (the recipient transfer reverts, so a claim is recorded instead of
+  // discharged) leaves the unit in *_ALLOCATED with the allocation record PRESENT and finalState NON-TERMINAL.
   // RULE: Surface A keys settlement off finalState ∈ {SETTLED_RELEASED, SETTLED_REFUNDED} and renders every other
   // value as IN PROGRESS. Treating receipt presence as the settlement signal is the refund-as-paid error one layer deeper.
   authorizationType: "EVIDENCE" | "BUYER_APPROVAL" | "DISPUTE" | "RECLAIM";
@@ -96,13 +97,15 @@ type SettlementReceiptDTO = {
                                                           // LOG-derived, not staticcall-derivable: unitState() returns 7/9 with no cause, and _allocateRefund emits
                                                           // RefundAllocated(unitId, remaining) with no discriminator; the cause lives only in the companion event of
                                                           // the calling path. It is index-derived (reorg-exposed): mark it per rule 21.
-    | "NONE" | "EVIDENCE_FAIL" | "DISPUTE_PAYER_WIN"
+    | "EVIDENCE_FAIL" | "DISPUTE_PAYER_WIN"
     | "APPEAL_OVERTURN" | "EMERGENCY_OVERTURN" | "EMERGENCY_SILENCE"
     | "BACKUP_NO_RELEASE"                                  // one code for backup timeout and backup reject: the BACKUP_PENDING -> refund branch exits only on the
                                                           // assertion cutoff and emits Finalized(unitId, false, 2) for both, so "backup reject" is not a distinctly witnessable path.
-    | "COHORT_REVOKED" | "DEADLINE_RECLAIM";               // DEADLINE_RECLAIM (reclaimAfterDeadline) emits a BARE RefundAllocated with no companion event, so it is
+    | "COHORT_REVOKED" | "DEADLINE_RECLAIM"               // DEADLINE_RECLAIM (reclaimAfterDeadline) emits a BARE RefundAllocated with no companion event, so it is
                                                           // identifiable only BY ELIMINATION, which any future bare-RefundAllocated path silently breaks.
                                                           // Open ask to escrow: emit an explicit discriminator so the cause is witnessed, not inferred.
+    | null;                                               // null — no cause to report on a release path, or before a terminal refund; RefundReason has NO
+                                                          // "NONE" member (the implemented route uses null; see matrix §B fixture 1a).
   authorizationId: string;                                // EAS UID | dispute id | reclaim id | (buyer path:) the execution receipt id
   vcrReceiptPointer: string | null;                       // NON-null ONLY when authorizationType == "BUYER_APPROVAL": the execution receipt id to DEFER to. Never an inline signed receipt.
   evidenceBundleHash: string | null;                      // hex; null off the evidence path
@@ -223,7 +226,7 @@ type LifecycleDTO = {
                                                 // UNKNOWN_UNIT -> 404 (error union), NOT an "AWAITING_FUNDING" DTO. Never render "awaiting funding" off a decode failure.
     | "PRIMARY_ASSERTED" | "CHALLENGED"         // 2-3: challenge / appeal window running
     | "BACKUP_PENDING" | "BACKUP_ASSERTED"      // 4-5: primary lane closed, operator escalated
-    | "RELEASE_ALLOCATED" | "REFUND_ALLOCATED"  // 6-7: allocated; the RECEIPT now exists (Route 1); a claim may still be undischarged
+    | "RELEASE_ALLOCATED" | "REFUND_ALLOCATED"  // 6-7: allocated; the allocation record now exists on the always-live receipt (Route 1); a claim may still be undischarged
     | "SETTLED_RELEASED" | "SETTLED_REFUNDED";  // 8-9: terminal
   phase: "funding" | "active" | "contest" | "escalation" | "allocated" | "settled"; // PCC-owned coarse grouping for the render, derived server-side from unitState, never manifest-supplied
   // Frozen deadline of the CURRENT window, so the render can show "decision by <date>". Null when no window is running.
@@ -235,8 +238,9 @@ type LifecycleDTO = {
 ```
 - **Render, don't assert:** show the state, window and deadline. The *outcome* (who was paid) comes from the receipt
   once allocated or terminal, never inferred from a lifecycle state.
-- Same neutral-component ownership, tenant scoping and `Result<T>` error union (including `UNKNOWN_UNIT` /
-  `TENANT_FORBIDDEN`) as Routes 1 and 2.
+- Same neutral-component ownership, tenant scoping and `Result<T>` error union as Routes 1 and 2: externally
+  `UNKNOWN_UNIT` only (404) — `TENANT_FORBIDDEN` is an internal-only authorization label mapped to that same
+  external 404, never its own status code (see "Failure semantics" below).
 
 ---
 
@@ -252,7 +256,7 @@ type LifecycleDTO = {
 9. Merkle proofs are a fetchable **root-relative same-origin `merkleProofPath`** (never an absolute href: a naive consumer must not attach its credential to an attacker-supplied URL); verification is a separate act → the render defers to a sound anchor.
 10. `provenanceAvailability` (AVAILABLE / WITHHELD / UNANCHORED) is a first-class field → a withheld-preimage-but-settled unit renders as "provenance unverifiable", never as clean or as "no lineage" (a root gives integrity, not availability).
 11. `network` is server-derived from `chainId`; **`assetReality` is REGISTRY-derived, never chainId-derived** (a fake mainnet token could pose as USDC), on every DTO → a test-USDC settlement can never render as a real payment; mixed-network lineage is flagged, not silently merged.
-12. Settlement is keyed off `finalState` ∈ {SETTLED_RELEASED, SETTLED_REFUNDED}, **never off receipt existence** (the receipt is written at allocation; a collateralized-claim fallback leaves it present but non-terminal) → an allocated-but-undischarged unit renders as IN PROGRESS.
+12. Settlement is keyed off `finalState` ∈ {SETTLED_RELEASED, SETTLED_REFUNDED}, **never off allocation-record existence** (`/receipt` itself answers 200 from state 1 onward; the allocation record is written at allocation, and a collateralized-claim fallback leaves it present but non-terminal) → an allocated-but-undischarged unit renders as IN PROGRESS.
 13. `{chainId, escrow}` are MANDATORY on every DTO from every route, never a bare `unitId` (a consumer needs the address to query on-chain, even though `settlementUnitId` is globally unique by construction).
 14. Economics fields (feeBps, feeRecipient, amounts, achievedTier) come from the RELEASE-VERIFIED frozen escrow record, NEVER from raw attestation fields → a raw attestation can record economics that disagree with what was actually paid; render only release-verified value.
 
@@ -260,7 +264,7 @@ type LifecycleDTO = {
 - **A.** TWO routes (not `?view=`): different cache and auth profiles.
 - **B.** UNIT-KEYED paths (`/api/settlement/units/:unitId/*`); `{chainId, escrow}` mandatory on every DTO.
 - **C.** The NEUTRAL provenance component (not escrow, not gen-UI) serves the proof path; composition owns the derivation and validator.
-- **D.** There is **no `UnitSettled` event**; the only on-chain read is `unitState()`. Surface A polls the lifecycle route (Route 3) and reads the receipt (Route 1) once `unitState` reaches allocated (6-7) or terminal (8-9). Key settlement off `finalState`, never receipt presence.
+- **D.** There is **no `UnitSettled` event**; the only on-chain read is `unitState()`. Surface A polls the lifecycle route (Route 3) throughout, and reads the receipt (Route 1) — live from state 1 onward, but with no allocation record to show until then — once `unitState` reaches allocated (6-7) or terminal (8-9). Key settlement off `finalState`, never receipt presence.
 
 ## Failure semantics: the `Result<T>` error union
 Every route returns `Result<T>`; the error side is a DEFINED union so consumers handle it deterministically:
