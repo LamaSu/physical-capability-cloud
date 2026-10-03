@@ -513,3 +513,41 @@ describe("pack 103b F4: the rules behind the fix", () => {
     expect(admitRelay({ principal: "pr3", apiKeyId: "kr3" })).toMatchObject({ status: 503, error: "gateway_pays_clock_regressed" });
   });
 });
+
+// astra pack 103c, NEW HIGH: a later admission's prune dropped the previous UTC day's hourly records, and a
+// clock rollback WITHIN the later day (which the day-level high-water mark cannot see) then evaluated an hour
+// that should have contained them: the relay's and the faucet's gateway-funded hourly throttles reset.
+describe("hourly throttles survive an intra-day clock rollback after a prune (astra pack 103c)", () => {
+  const D_2350 = Date.UTC(2026, 8, 29, 23, 50, 0);
+  const D1_0101 = Date.UTC(2026, 8, 30, 1, 1, 0);
+  const D1_0010 = Date.UTC(2026, 8, 30, 0, 10, 0);
+  beforeEach(() => {
+    process.env.PCC_NETWORK = "base-sepolia";
+    process.env.PCC_GATEWAY_PAYS_ENABLED = "true";
+  });
+
+  it("[neg] astra's reproduction (relay): five relays at D 23:50, a prune at D+1 01:01, then D+1 00:10 must still refuse the sixth", () => {
+    process.env.PCC_RELAY_MAX_PER_KEY_HOUR = "5";
+    process.env.PCC_RELAY_MAX_GLOBAL_DAY = "200";
+    t = D_2350;
+    for (let i = 0; i < 5; i++) expect(admitRelay({ principal: "p", apiKeyId: "kp" }).ok, `relay ${i}`).toBe(true);
+    expect(admitRelay({ principal: "p", apiKeyId: "kp" })).toMatchObject({ status: 429, error: "relay_rate_limited" }); // control: the hour is full
+    t = D1_0101;
+    expect(admitRelay({ principal: "q", apiKeyId: "kq" }).ok).toBe(true); // another caller's admission prunes
+    t = D1_0010; // back WITHIN D+1: the day-level mark sees no regression
+    expect(admitRelay({ principal: "p", apiKeyId: "kp" })).toMatchObject({ status: 429, error: "relay_rate_limited" });
+  });
+
+  it("[neg] the same through the faucet: five drips at D 23:50, a prune at D+1 01:01, then D+1 00:10 must still refuse the sixth", () => {
+    process.env.PCC_FAUCET_MAX_CALLS_PER_KEY_HOUR = "5";
+    t = D_2350;
+    for (let i = 0; i < 5; i++) {
+      expect(admitFaucetDrip({ wallet: `0xwp${i}`, amount: 1, spender: { apiKeyId: "kp" } }).ok, `drip ${i}`).toBe(true);
+    }
+    expect(admitFaucetDrip({ wallet: "0xwp5", amount: 1, spender: { apiKeyId: "kp" } })).toMatchObject({ status: 429, error: "faucet_rate_limited" });
+    t = D1_0101;
+    expect(admitFaucetDrip({ wallet: "0xwq", amount: 1, spender: { apiKeyId: "kq" } }).ok).toBe(true);
+    t = D1_0010;
+    expect(admitFaucetDrip({ wallet: "0xwp6", amount: 1, spender: { apiKeyId: "kp" } })).toMatchObject({ status: 429, error: "faucet_rate_limited" });
+  });
+});
