@@ -42,11 +42,16 @@ export class PhotoCameraAdapter implements CameraAdapter {
     private readonly geminiService?: GeminiComparisonService,
   ) {
     this.id = id;
+    // Push-fed: the bytes come from the caller, so nothing proves this device
+    // acquired them (gpt-5.6-sol, pack 41 HIGH 1). Its events are simulated by
+    // design and never count toward assurance; a real camera is the
+    // PullCameraAdapter ("photo"), which acquires every frame itself.
     this.source = {
       deviceId: id,
       deviceType: "camera",
       kernelId,
       firmwareVersion: "PhotoCameraAdapter-1.0.0",
+      simulated: true,
     };
   }
 
@@ -93,6 +98,7 @@ export class PhotoCameraAdapter implements CameraAdapter {
       timestamp: new Date().toISOString(),
       source: this.source,
       payload: {
+        captureMode: "handed-in",
         imageHash,
         storageRef,
         rawSizeBytes: result.rawSizeBytes,
@@ -203,6 +209,7 @@ export class PhotoCameraAdapter implements CameraAdapter {
       timestamp: new Date().toISOString(),
       source: this.source,
       payload: {
+        captureMode: "handed-in",
         ...result,
         referenceHash: referenceHash ?? null,
         model: this.geminiService ? "gemini-2.0-flash" : "anti-spoof-heuristic",

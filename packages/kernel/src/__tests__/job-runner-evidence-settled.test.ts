@@ -16,6 +16,7 @@ import type { EvidenceEvent, EvidenceSource, SHA256 } from "@pcc/spec";
 import type { CameraAdapter, MachineAdapter } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
+import { lose1Capture } from "./lose1-capture-fixture.js";
 
 vi.mock("@sentry/node", () => ({
   startSpan: vi.fn().mockImplementation((_opts: unknown, fn: () => unknown) => fn()),
@@ -61,8 +62,9 @@ function lateCamera(): CameraAdapter & { emitted: Emitted[] } {
     async captureSnapshot() {
       return { imageHash: "sha256:none", storageRef: "none" };
     },
-    async runInspection() {
-      const event: Emitted = { type: "cv_inspection_result", timestamp: new Date().toISOString(), source: src, payload: { passed: true } };
+    async runInspection(_referenceHash?: string, context?: { jobId?: string }) {
+      // A complete LO-SE-1 capture for the job it was asked for: since #489 only one counts.
+      const event = lose1Capture("cv_inspection_result", src.deviceId, src.kernelId, String(context?.jobId)) as Emitted;
       emitted.push(event);
       for (const cb of listeners) cb(event);
       return { passed: true, confidence: 100, findings: [], imageHash: "sha256:none" };
