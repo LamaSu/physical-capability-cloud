@@ -16,6 +16,12 @@ import { run } from "../../../../scripts/hp-full-chain-e2e.js";
 import { fakeResponse, makeFakeChain } from "./support/fc8-round3-fakes.js";
 
 const CANARY = "SENTINEL ORACLE KEY 5f1e"; // space: not id/enum/hex/content-type-shaped anywhere
+// hp-full-chain-e2e.ts's signature line truncates to .slice(0, 20) even
+// after the fix (safeLogHex itself caps a *valid* hex string there); a
+// short prefix is what actually survives a 20-char truncation, so this is
+// the meaningful thing to assert absent for that specific site, alongside
+// the full CANARY check for every other (non-truncating) site.
+const CANARY_PREFIX = CANARY.slice(0, 12); // "SENTINEL ORA" — well under any 20-char slice budget
 const CONTRACTS_DIR = fileURLToPath(new URL("./support/fake-contracts", import.meta.url));
 const REPORT_PATH = "/mnt/sparkbulk/tmp/fc8-r3-hp-full-chain-report.txt";
 
@@ -75,7 +81,9 @@ describe("FC-8 round 3 — hp-full-chain-e2e.ts run() — success path, every ce
       env: BASE_ENV, fetchImpl: makeCanaryFetch(CANARY), wallet, pub,
       contractsDir: CONTRACTS_DIR, reportPath: REPORT_PATH,
     });
-    expect(allCapturedText(result)).not.toContain(CANARY);
+    const all = allCapturedText(result);
+    expect(all).not.toContain(CANARY);
+    expect(all).not.toContain(CANARY_PREFIX);
   }, 30_000);
 });
 
