@@ -891,6 +891,8 @@ const JS_ONLY: Vector[] = [
   { name: "a getter in params", envelope: OT2, command: { name: "aspirate", params: withGetter({}, "volumeUl", 150) }, state: stateFor(OT2) },
   { name: "a getter in a limit", envelope: changed(OT2, (e) => withGetter(e.limits[0], "max", 300)), command: ASPIRATE, state: stateFor(OT2) },
   { name: "a getter in the state", envelope: OT2, command: ASPIRATE, state: withGetter({ ...stateFor(OT2) }, "nowMs", NOW) },
+  // An accessor on a list element: read through an inherited `value`, it would look like data.
+  { name: "a getter on a list element", envelope: PLATE, command: { name: "read", params: { seconds: 30, wavelengthNm: 450, wells: withGetter(["A1"], "0", "A1") } }, state: stateFor(PLATE) },
   { name: "NaN in params", envelope: OT2, command: { name: "aspirate", params: { volumeUl: Number.NaN } }, state: stateFor(OT2) },
   { name: "Infinity in params", envelope: OT2, command: { name: "aspirate", params: { volumeUl: Number.POSITIVE_INFINITY } }, state: stateFor(OT2) },
   { name: "-0 at a 0 min", envelope: OT2, command: { name: "runProtocol", params: { minutes: -0, labwareSlot: 1 } }, state: stateFor(OT2) },
@@ -1022,7 +1024,7 @@ function withPatch<T>(target: object, key: PropertyKey, replacement: unknown, ru
 describe("intrinsics replaced after load cannot change a decision (astra pack 164)", () => {
   it("the harness covers every fixture vector and the vectors JSON cannot carry, none of which runs code", () => {
     expect(FIXTURE_VECTORS.length).toBeGreaterThan(100);
-    expect(JS_ONLY.length).toBeGreaterThan(15);
+    expect(JS_ONLY.length).toBeGreaterThan(16);
     const decisions = JSON.parse(CLEAN_DECISIONS) as Array<{ allowed: boolean; code?: string }>;
     expect(new Set(decisions.map((d) => (d.allowed ? "allowed" : d.code))).size).toBe(13);
     expect(touched).toBe(0);
@@ -1490,5 +1492,32 @@ describe("a setter on Array.prototype indices never runs (copies define own prop
     }
     expect(ran).toBe(0);
     expect(JSON.stringify(out)).toBe(CLEAN_DECISIONS);
+  });
+});
+
+describe("the plain copy names what it refused (each refusal is its own check, not a later accident)", () => {
+  it("refuses each kind of non-plain data in a command with its own reason, running no code supplied with it", () => {
+    let ran = 0;
+    const getter = (target: object, key: string) => Object.defineProperty(target, key, { enumerable: true, configurable: true, get: () => (ran++, "A1") });
+    const counting: ProxyHandler<object> = new Proxy({}, { get: () => (ran++, undefined) });
+    const wells = (value: unknown) => ({ name: "read", params: { seconds: 30, wavelengthNm: 450, wells: value } });
+    const cases: Array<[string, unknown, RegExp]> = [
+      ["a proxy", wells(new Proxy(["A1"], counting)), /wells: a proxy/],
+      ["an accessor on an object member", { name: "read", params: getter({ seconds: 30, wavelengthNm: 450 }, "wells") }, /params\.wells: an accessor/],
+      ["an accessor on a list element", wells(getter(["A1"], "0")), /wells\[0\]: an accessor/],
+      ["a hole", wells([, "A1"]), /wells\[0\]: a hole in an array/], // eslint-disable-line no-sparse-arrays
+      ["undefined in a list", wells([undefined]), /wells\[0\]: undefined in an array/],
+      ["NaN", wells(Number.NaN), /wells: NaN is not a finite number/],
+      ["a function", wells(() => "A1"), /wells: a function is not JSON data/],
+      ["a list with another prototype", wells(Object.setPrototypeOf(["A1"], Object.create(Array.prototype))), /wells: an array with a nonstandard prototype/],
+      ["a class instance", wells(new Date(0)), /wells: not a plain object/],
+      ["a key named __proto__", wells(JSON.parse('{"__proto__": ["A1"]}')), /wells: a key named __proto__/],
+    ];
+    for (const [label, command, reason] of cases) {
+      const d = checkRuntimeCommand(PLATE, command, stateFor(PLATE));
+      expect(codeOf(d), label).toBe("command-malformed");
+      if (!d.allowed) expect(d.reason, label).toMatch(reason);
+    }
+    expect(ran).toBe(0);
   });
 });
