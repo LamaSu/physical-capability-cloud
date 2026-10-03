@@ -11,12 +11,14 @@ computed argv and ``/usr/bin/env sh``). The rules:
 
 1. A process is started only by ``subprocess.run/call/check_call/
    check_output/Popen`` or ``asyncio.create_subprocess_exec``. Its first
-   argument is a list or tuple literal whose first item is a fixed executable
-   name, never a shell, ``env`` or ``busybox``, and never a variable. No
-   ``shell=`` other than the literal ``False``, no ``executable=``, and no ``**``
-   keyword expansion (a dict with constant keys and no ``shell`` is allowed).
-   A starter is only ever called directly: binding it to another name or
-   passing it as a value is refused (verdict 68d, finding 2).
+   argument is a list or tuple literal whose first item is one of the fixed
+   executables pcc-node runs (``EXECUTABLES``), by bare name: an allowlist,
+   because a list of shells cannot name every interpreter (verdict 68e,
+   finding 2). No ``shell=`` other than the literal ``False``, no
+   ``executable=``, and no ``**`` keyword expansion (a dict with constant keys
+   and no ``shell`` is allowed). A starter is only ever called directly:
+   binding it to another name or passing it as a value is refused (verdict
+   68d, finding 2).
 2. Every other way to start a process or replace this one is refused:
    ``os.system/popen/exec*/spawn*/posix_spawn*``, ``pty.spawn``,
    ``subprocess.getoutput/getstatusoutput``,
@@ -26,6 +28,11 @@ computed argv and ``/usr/bin/env sh``). The rules:
    ``__import__``, ``importlib.import_module``, ``runpy``, ``pickle``/
    ``marshal`` loads and ``yaml.load`` are refused.
 4. The package ships no bytecode. Its checked-in ``.pyc`` files were removed.
+5. ``getattr``/``hasattr`` with a constant name is judged as that attribute
+   only where the name is demonstrably the builtin: nothing in the package
+   rebinds it (a def, an assignment, a parameter, an import, ``globals()``,
+   ``setattr``, an attribute store), and nothing imports ``builtins``
+   (verdict 68e, finding 2).
 """
 
 import ast
@@ -56,11 +63,39 @@ REFUSED = {
 }
 # Modules with no business in pcc-node: each can run code or start processes.
 REFUSED_IMPORTS = {"ctypes", "cffi", "multiprocessing", "webbrowser", "posix", "nt", "_posixsubprocess",
-                   "commands", "codeop", "shelve"}
+                   "commands", "codeop", "shelve", "builtins"}
 REFUSED_BUILTINS = {"eval", "exec", "compile", "__import__"}
-SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash", "env", "busybox",
-          "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "python", "python3"}
+# The executables pcc-node runs, by bare name (test_the_allowlist_is_what_the_package_runs keeps
+# this list exactly that). A path, or any other executable, is refused.
+EXECUTABLES = {"arp", "dd", "ffmpeg", "journalctl", "sysctl", "v4l2-ctl"}
 MODULES = set(REFUSED) | {m for m, _ in ALLOWED_STARTS}
+LOOKUPS = {"getattr", "hasattr"}
+# Calls that rebind names behind the syntax tree's back.
+REBINDERS = {"globals", "locals", "vars", "setattr", "delattr"}
+_MATCH_BINDINGS = tuple(getattr(ast, n) for n in ("MatchAs", "MatchStar") if hasattr(ast, n))
+
+
+def _bound_names(tree):
+    """Every name the module binds, at any scope."""
+    bound = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(n.name)
+        elif isinstance(n, ast.arg):
+            bound.add(n.arg)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            bound.add(n.id)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            bound.update((a.asname or a.name).split(".")[0] for a in n.names)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            bound.add(n.name)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            bound.update(n.names)
+        elif _MATCH_BINDINGS and isinstance(n, _MATCH_BINDINGS) and n.name:
+            bound.add(n.name)
+        elif isinstance(n, getattr(ast, "MatchMapping", ())) and n.rest:
+            bound.add(n.rest)
+    return bound
 
 
 def _root(name):
@@ -98,10 +133,12 @@ def violations(source, filename="<src>"):
     call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
     # getattr/hasattr(module, "constant") names one attribute, like module.constant does, so it
     # is judged as that attribute; a computed name still counts as the module used as a value.
+    # Only while the lookup is the builtin: a module that rebinds the name gets no exemption.
+    builtin_lookups = LOOKUPS - _bound_names(tree)
     constant_lookups = {
         id(n.args[0]): n.args[1].value
         for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("getattr", "hasattr")
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in builtin_lookups
         and len(n.args) >= 2 and isinstance(n.args[0], ast.Name) and n.args[0].id in modules
         and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str)
     }
@@ -125,6 +162,9 @@ def violations(source, filename="<src>"):
                     bad(node, f"{module}.{attr} through getattr")
             elif node.id == "__builtins__":
                 bad(node, "__builtins__")
+        # Rebinding getattr/hasattr on another object (a module, from outside it).
+        if isinstance(node, ast.Attribute) and node.attr in LOOKUPS and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bad(node, f"rebinds {node.attr} on another object")
         # Any reference to a refused attribute, called or not (invoke = os.system).
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
             module = modules[node.value.id]
@@ -146,6 +186,9 @@ def violations(source, filename="<src>"):
         func = node.func
         if isinstance(func, ast.Name) and func.id in REFUSED_BUILTINS:
             bad(node, f"{func.id}() runs code from data")
+            continue
+        if isinstance(func, ast.Name) and func.id in REBINDERS:
+            bad(node, f"{func.id}() can rebind names out of the guard's sight")
             continue
         resolved = target(func)
         if resolved is None or (resolved[0], resolved[1]) not in ALLOWED_STARTS:
@@ -172,9 +215,26 @@ def violations(source, filename="<src>"):
             continue
         if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
             bad(node, f"{module}.{attr}: the executable must be a fixed string")
-        elif pathlib.PurePath(first.value).name.lower() in SHELLS:
-            bad(node, f"{module}.{attr}: {first.value!r} is a shell or interpreter")
+        elif first.value not in EXECUTABLES:
+            bad(node, f"{module}.{attr}: {first.value!r} is not one of the executables pcc-node runs")
     return found
+
+
+def executables_started(source):
+    """The fixed executables a source starts, as written."""
+    started = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name not in {a for _, a in ALLOWED_STARTS}:
+            continue
+        argv = node.args[0] if node.args else None
+        first = argv.elts[0] if isinstance(argv, (ast.List, ast.Tuple)) and argv.elts else argv
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            started.add(first.value)
+    return started
 
 
 def _sources():
@@ -192,6 +252,14 @@ def test_no_module_starts_a_shell_or_runs_code_it_was_sent():
         for v in violations(path.read_text(encoding="utf-8"), str(path)):
             hits.append(f"{path.relative_to(PACKAGE)}:{v}")
     assert hits == [], "pcc-node must never start a shell or run code it was sent:\n" + "\n".join(hits)
+
+
+def test_the_allowlist_is_what_the_package_runs():
+    # A new executable is a reviewed change to EXECUTABLES; an unused entry is removed.
+    started = set()
+    for path in _sources():
+        started |= executables_started(path.read_text(encoding="utf-8"))
+    assert started == EXECUTABLES
 
 
 def test_the_relay_shell_executor_is_gone():
@@ -262,16 +330,31 @@ EVASIONS = {
     "executable= variable": "import subprocess as sp\nsp.Popen(['ls'], executable=exe)",
     "getattr of a starter": "import subprocess\ngetattr(subprocess, 'run')(x, shell=True)",
     "getattr of a dunder": "import os\ngetattr(os, '__dict__')['system']('id')",
+    # Verdict 68e, finding 2: a shadowed getattr, and interpreters the shell list did not name.
+    "shadowed getattr": "import subprocess\ndef getattr(obj, name):\n    return obj.run\ngetattr(subprocess, 'harmless')(['ignored'], shell=True)",
+    "getattr rebound by assignment": "import subprocess\ngetattr = lambda o, n: o.run\ngetattr(subprocess, 'x')(['ls'], shell=True)",
+    "getattr as a parameter": "import subprocess\ndef f(getattr):\n    getattr(subprocess, 'x')(['ls'], shell=True)",
+    "getattr imported": "import subprocess\nfrom helpers import picker as getattr\ngetattr(subprocess, 'x')(['ls'])",
+    "getattr through globals()": "import subprocess\nglobals()['getattr'] = f\ngetattr(subprocess, 'x')(['ls'])",
+    "getattr rebound on another module": "import pcc_node.camera as cam\ncam.getattr = lambda o, n: o.run",
+    "import builtins": "import builtins\nprint_ = builtins.print",
+    "builtins rebound": "import builtins, subprocess\nbuiltins.getattr = f\ngetattr(subprocess, 'x')(['ls'])",
+    "perl -e": "import subprocess\nsubprocess.run(['perl', '-e', payload])",
+    "ruby -e": "import subprocess\nsubprocess.run(['ruby', '-e', payload])",
+    "node -e": "import subprocess\nsubprocess.run(['node', '-e', payload])",
+    "awk": "import subprocess\nsubprocess.run(['awk', payload])",
+    "a path to an allowed name": "import subprocess\nsubprocess.run(['/tmp/x/arp', '-a'])",
 }
 SAFE = {
     "fixed argv": "import subprocess\nsubprocess.run(['v4l2-ctl', '--device', dev, '--all'], capture_output=True)",
     "shell=False": "import subprocess\nsubprocess.run(('arp', '-a'), shell=False)",
     "fixed exec": "import asyncio\nasyncio.create_subprocess_exec('ffmpeg', '-i', dev)",
     "yaml.safe_load": "import yaml\nyaml.safe_load(text)",
-    "constant ** without shell": "import subprocess\nsubprocess.run(['git', 'status'], **{'check': True})",
+    "constant ** without shell": "import subprocess\nsubprocess.run(['journalctl', '-n', '20'], **{'check': True})",
     # A constant, harmless attribute through getattr: #447's ui_server.py and #454 use these.
     "constant getattr": "import os\nflags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0)",
     "constant hasattr": "import os\nsupported = hasattr(os, 'O_CLOEXEC')",
+    "an unrelated name that contains getattr": "import os\nmy_getattr = 1\nflags = getattr(os, 'O_NOFOLLOW', 0)",
 }
 
 
