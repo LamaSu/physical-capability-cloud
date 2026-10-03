@@ -24,7 +24,9 @@
  *   - no code supplied with the data runs: a proxy, an accessor (a getter or
  *     setter), an array with a nonstandard prototype, and an array index that
  *     is not the array's own data (a hole, or one served by a prototype) are
- *     refused through property descriptors, never by reading them.
+ *     refused through property descriptors, never by reading them;
+ *   - building the copy runs no inherited setter either: array elements are
+ *     installed with `Object.defineProperty`, and objects have no prototype.
  */
 
 import { types } from "node:util";
@@ -58,7 +60,9 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
           if (!("value" in element)) throw new NotPlainData(`${at}[${i}]: an accessor (a getter or setter)`);
           const item: unknown = element.value;
           if (item === undefined) throw new NotPlainData(`${at}[${i}]: undefined in an array`);
-          out[i] = walk(item, `${path}[${i}]`);
+          // Installed as the copy's own data property. An assignment would run a
+          // setter that Array.prototype serves for this index (astra pack 158).
+          Object.defineProperty(out, i, { value: walk(item, `${path}[${i}]`), writable: true, enumerable: true, configurable: true });
         }
         return out;
       }

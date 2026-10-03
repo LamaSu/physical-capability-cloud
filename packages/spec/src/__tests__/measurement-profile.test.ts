@@ -609,6 +609,41 @@ describe("plain-data boundary: no inherited values, and -0 is 0 (astra packs 124
 });
 
 // ── astra (pack 154, gpt-5.6-sol): no code supplied with the data runs during the copy ──
+describe("plain-data boundary: writing the copy runs no inherited setter (astra pack 158)", () => {
+  it("astra's recipe: a setter on Array.prototype[0] never runs while the copy is built, and cannot substitute a value", () => {
+    let ran = false;
+    let copy: ReturnType<typeof plainDataCopy> | undefined;
+    Object.defineProperty(Array.prototype, "0", {
+      configurable: true,
+      set(this: unknown[]) {
+        ran = true;
+        Object.defineProperty(this, "0", { value: "substituted", writable: true, enumerable: true, configurable: true });
+      },
+    });
+    try {
+      copy = plainDataCopy({ list: [1] });
+    } finally {
+      delete (Array.prototype as unknown as Record<string, unknown>)["0"];
+    }
+    expect(ran).toBe(false);
+    expect(copy).toEqual({ ok: true, value: { list: [1] } });
+  });
+
+  it("every element of a copied array is the copy's own data property, at every index", () => {
+    const copy = plainDataCopy({ list: ["a", 2, null, { b: true }, [3]] });
+    expect(copy.ok).toBe(true);
+    const list = (copy as { ok: true; value: { list: unknown[] } }).value.list;
+    expect(Array.isArray(list)).toBe(true);
+    expect(Object.getPrototypeOf(list)).toBe(Array.prototype);
+    expect(list).toHaveLength(5);
+    for (let i = 0; i < list.length; i++) {
+      const d = Object.getOwnPropertyDescriptor(list, i);
+      expect(d && "value" in d && d.writable && d.enumerable && d.configurable).toBe(true);
+    }
+    expect(list).toEqual(["a", 2, null, { b: true }, [3]]);
+  });
+});
+
 describe("plain-data boundary: accessors, proxies and nonstandard arrays never run (astra pack 154)", () => {
   it("an inherited index getter on a sparse array with a custom prototype never runs", () => {
     let ran = false;
