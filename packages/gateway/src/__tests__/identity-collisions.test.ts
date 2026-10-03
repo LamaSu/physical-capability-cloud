@@ -174,11 +174,15 @@ describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95
 
   it("control: a table the CATALOG lacks, on an allowlisted source, is still exit 0", () => {
     const out = findIdentityCollisions(withCatalog(EMPTY_ROWS, schemaWithout("ui_artifacts")));
+    expect(out.skipped).toEqual(["ui_artifacts.owner"]); // skipped by the catalog, not read and not failed
+    expect(out.read).not.toContain("ui_artifacts.owner");
     expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never).code).toBe(0);
   });
 
   it("control: a column the CATALOG lacks, on an allowlisted source, is exit 0", () => {
     const out = findIdentityCollisions(withCatalog(EMPTY_ROWS, schemaWithout("ui_artifacts", "owner")));
+    expect(out.skipped).toEqual(["ui_artifacts.owner"]); // skipped by the catalog, not read and not failed
+    expect(out.read).not.toContain("ui_artifacts.owner");
     expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never).code).toBe(0);
   });
 
