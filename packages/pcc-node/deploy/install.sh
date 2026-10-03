@@ -24,7 +24,6 @@ if [ ! -e "$CONFDIR/pcc-node.env" ]; then
     cat > "$CONFDIR/pcc-node.env" <<'ENV'
 # pcc-node service environment. Secrets live here, not in the unit (root-only; chmod 600).
 # PCC_API_KEY=pcc_live_...
-# KERNEL_CONFIG_FILE=/etc/pcc-node/kernel.json
 ENV
     chmod 600 "$CONFDIR/pcc-node.env"
     echo "install.sh: wrote template $CONFDIR/pcc-node.env (add PCC_API_KEY, chmod 600 kept)"

@@ -50,6 +50,13 @@ profile pcc-node flags=(attach_disconnected) {
   /etc/pcc-node/** r,
   /var/lib/pcc-node/** rwk,
   owner @{HOME}/.pcc-node/** rwk,
+
+  # Camera capture (verdict 105n MEDIUM3): the pinned utilities v4l2-ctl/ffmpeg/dd run under this
+  # profile (ix), so they inherit these grants -- the video devices and the frame scratch file that
+  # pcc_node/camera.py reads and writes. Without them the profile denies real capture operations.
+  /dev/video[0-9]* rw,
+  /tmp/pcc_frame.jpg rwk,
+
   network inet stream,
   network inet6 stream,
 }

@@ -43,10 +43,11 @@ needed -- can still defeat the *allowed* path: mutate a captured function's ``__
 misreads the executable (105l HIGH 1), or pass a ``preexec_fn`` (absent from the ``subprocess.Popen``
 audit tuple, so the hook cannot see it) or race a thread to swap the binary between the audit-time
 ``stat`` and ``execvp`` -- an irreducible TOCTOU (105l HIGH 2). The HARD guarantee -- that pcc-node can
-execute only the pinned utilities -- is enforced by the OS, not here: the shipped systemd unit sets
-``NoExecPaths=/`` plus ``ExecPaths=`` for the pinned binaries (and the interpreter and its libraries)
-and ``NoNewPrivileges=yes``, with an AppArmor profile as the fallback (see ``deploy/`` and
-``install.sh``). The hook still runs before the CLI and its dependencies import
+execute only the pinned utilities -- is enforced below this hook, by two kernel layers together
+(verdict 105n): a Landlock execute restriction applied in process (:mod:`pcc_node._landlock`, which
+blocks re-executing the interpreter and every non-pinned binary, and is mandatory) and an AppArmor
+profile applied at deploy time (:mod:`deploy/apparmor/pcc-node`, which closes the ELF-loader gadget
+Landlock leaves). See ``deploy/README.md``. The hook still runs before the CLI and its dependencies import
 (:func:`pcc_node._entry.run`), so an accidental import-time spawn is refused; the tests call
 ``main``/``run_daemon`` directly and never install it in-process.
 """

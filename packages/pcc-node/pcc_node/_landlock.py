@@ -15,17 +15,23 @@ Python can mutate the hook's captured functions or race a ``preexec_fn``/thread.
 EACCES until the loader is granted). It blocks the *direct* ``execve`` of any non-pinned binary (a
 shell, an arbitrary ELF in ``/tmp`` or under ``/usr/lib``).
 
-IMPORTANT -- this is NOT a complete "only the pinned utilities can execute" guarantee. Because the
-loader must be execute-granted and Landlock does not mediate ``mmap(PROT_EXEC)``, an in-process
-caller can still run an arbitrary ELF through the loader: ``execve(ld.so, [ld, "/bin/sh"])`` runs it
-(the loader maps it; Landlock sees only the ``execve`` of the already-granted loader). Verified
-in-lane (6.17/aarch64). So Landlock is defense-in-depth that stops naive/direct spawns, not a jail.
-The COMPLETE execve allowlist is the AppArmor/SELinux profile in ``deploy/`` -- a MAC LSM has
-separate permissions for execute-as-program and executable-mmap, so it grants the loader map-only
-(no execute-as-program) and the loader gadget is refused. Pair both with :mod:`pcc_node.spawn_guard`.
+Landlock and AppArmor are COMPLEMENTARY, and the hard guarantee is the two TOGETHER -- pcc-node
+refuses to run without Landlock (see :mod:`pcc_node._entry`), so neither is relied on alone:
+- Landlock blocks the direct ``execve`` of ANY non-pinned binary, INCLUDING re-executing the
+  interpreter: ``execve(python3, ["-c", <arbitrary>])`` is EACCES, because python3 is not a pinned
+  utility. That is the path AppArmor cannot close, since it must grant python3 execute to run pcc-node
+  at all -- so this is why Landlock is MANDATORY, not optional (verdict 105n, sol HIGH1).
+- Landlock does NOT close the loader gadget: a dynamic binary needs its loader execute-granted, and
+  Landlock's execute right does not mediate ``mmap(PROT_EXEC)``, so ``execve(ld.so, [ld, <any ELF>])``
+  runs that ELF (the loader maps it). Verified in-lane (6.17/aarch64). AppArmor closes this -- a MAC
+  LSM has separate execute-as-program and executable-mmap permissions, so it grants the loader
+  map-only and denies execute-as-program.
+So neither layer alone is the complete allowlist (AppArmor leaves the python path; Landlock leaves the
+loader gadget); together they are. Both pair with :mod:`pcc_node.spawn_guard` (the accidental hook).
 
-Where Landlock is unavailable :func:`restrict` returns False and the caller refuses to arm device
-execution (steward ruling; the operator decides whether such a host may run unarmed, item 118).
+Where Landlock is unavailable :func:`restrict` returns False and :mod:`pcc_node._entry` refuses to run
+unless the operator sets ``PCC_ALLOW_NO_LANDLOCK=1`` -- then only AppArmor + the hook apply and the
+operating runtime must stay unarmed (steward ruling, folded into item 118 / #471).
 
 This module is the ONE place pcc-node uses ``ctypes`` (there is no stdlib Landlock API): it issues
 the three Landlock syscalls and nothing else. The no-shell guard (tests/test_no_shell_execution.py)

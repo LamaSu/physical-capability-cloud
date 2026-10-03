@@ -260,6 +260,44 @@ def test_importing_the_entry_module_does_not_install_the_hook_in_process():
     assert r.stdout.strip().splitlines()[-1] == "not-installed no-cli", (r.stdout, r.stderr)
 
 
+def test_entry_refuses_to_run_when_landlock_is_unavailable():
+    # verdict 105n HIGH1: _entry must NOT fail open. With Landlock unavailable (restrict()->False) and
+    # no operator override, run() refuses BEFORE installing the hook or importing the CLI -- otherwise
+    # the exec floor rests on AppArmor alone, which must grant python3 execute and cannot stop
+    # `python3 -c ...`. Run in a child, since calling run() installs the unremovable hook.
+    r = _run_raw(
+        "import os\n"
+        "os.environ.pop('PCC_ALLOW_NO_LANDLOCK', None)\n"
+        "import pcc_node._entry as e, pcc_node._landlock as L, pcc_node.spawn_guard as g, pcc_node.cli as cli\n"
+        "L.restrict = lambda paths: False\n"
+        "reached = []\n"
+        "g.install = lambda: reached.append('install')\n"
+        "cli.main = lambda *a, **k: reached.append('main')\n"
+        "try:\n    e.run()\n    print('NO-REFUSAL|' + ','.join(reached))\n"
+        "except SystemExit:\n    print('REFUSED|' + ','.join(reached))\n"
+    )
+    last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    assert last == "REFUSED|", f"entry did not fail closed on unavailable Landlock: {r.stdout!r} {r.stderr!r}"
+
+
+def test_entry_runs_without_landlock_only_with_the_explicit_override():
+    # The operator may consciously accept the weaker posture (AppArmor + hook only, runtime unarmed)
+    # with PCC_ALLOW_NO_LANDLOCK=1; then run() proceeds -- installing the hook and entering the CLI.
+    r = _run_raw(
+        "import os\n"
+        "os.environ['PCC_ALLOW_NO_LANDLOCK'] = '1'\n"
+        "import pcc_node._entry as e, pcc_node._landlock as L, pcc_node.spawn_guard as g, pcc_node.cli as cli\n"
+        "L.restrict = lambda paths: False\n"
+        "reached = []\n"
+        "g.install = lambda: reached.append('install')\n"
+        "cli.main = lambda *a, **k: reached.append('main')\n"
+        "e.run()\n"
+        "print('RAN|' + ','.join(reached))\n"
+    )
+    last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    assert last == "RAN|install,main", f"override did not let the node run: {r.stdout!r} {r.stderr!r}"
+
+
 # ---- MEDIUM 7 (105j) + MEDIUM 4 (105k): the click public-submodule launchers, proven refused -------
 @pytest.mark.parametrize(
     "op",

@@ -11,18 +11,29 @@ only running the installed ``pcc-node`` script (or :func:`run` below) does.
 
 
 def run() -> None:
+    import os
     import shutil
 
     from . import _landlock, spawn_guard
 
-    # In-process hardening (partial): raise the bar at the kernel before anything else runs -- block
-    # the direct execve of non-pinned binaries, irreversibly (steward ruling 10/03). This is NOT the
-    # hard "only pinned execute" guarantee: the granted ELF loader remains an exec gadget (see
-    # _landlock.py). The complete allowlist is the AppArmor/SELinux profile in deploy/ (applied by the
-    # operator at deploy time, where a MAC LSM can grant the loader map-only).
+    # Layer 2, applied first and irreversibly: confine execve at the kernel. Landlock blocks the direct
+    # execve of ANY non-pinned binary -- INCLUDING re-executing the interpreter, which is how a
+    # compromised process would otherwise run `python3 -c <arbitrary>` and escape the in-process hook.
+    # It MUST succeed before the node runs: otherwise the exec floor rests on AppArmor alone, which has
+    # to grant python3 execute (pcc-node IS python) and so cannot stop `python3 -c ...` (verdict 105n,
+    # sol HIGH1). Where Landlock is unavailable we refuse by default, unless the operator consciously
+    # opts out with PCC_ALLOW_NO_LANDLOCK=1 -- then only AppArmor (L1) + the accidental hook (L3) apply
+    # and the operating runtime must stay unarmed (item 118 / #471). Landlock + AppArmor together are
+    # the hard guarantee; neither alone is (AppArmor leaves the python path, Landlock the loader gadget).
     paths = [p for n in sorted(spawn_guard.EXECUTABLES) if (p := shutil.which(n))]
-    _landlock.restrict(paths)
-    # The accidental-spawn check: the in-process audit hook, then the CLI under both.
+    if not _landlock.restrict(paths) and os.getenv("PCC_ALLOW_NO_LANDLOCK") != "1":
+        raise SystemExit(
+            "Refused: Landlock (Linux 5.13+) is unavailable, so pcc-node cannot confine execve in "
+            "process, and AppArmor alone cannot stop `python3 -c ...`. Run on a Landlock kernel, or "
+            "load the AppArmor profile and set PCC_ALLOW_NO_LANDLOCK=1 to run with Layer 1 only "
+            "(deploy/README.md). Fail-closed by default."
+        )
+    # Layer 3, the accidental-spawn check: the in-process audit hook, then the CLI under both.
     spawn_guard.install()
     from .cli import main
 
