@@ -59,7 +59,7 @@ import {
   append,
   ArrayIsArray,
   ArrayPrototype,
-  charCodeAt,
+  asciiBytes,
   deepFreeze,
   defineIndex,
   filterList,
@@ -238,14 +238,17 @@ const ENVELOPE_DIGEST_PREFIX = "0x";
 const MANIFEST_DIGEST_PREFIX = "sha256:";
 const HEX_DIGITS = 64;
 
-/** `prefix` followed by exactly 64 lowercase hex digits, checked by char code (no RegExp). */
+/** `prefix` followed by exactly 64 lowercase hex digits, checked code unit by code unit (no RegExp). */
 function isLowerHexDigest(value: unknown, prefix: string): value is string {
   if (typeof value !== "string" || value.length !== prefix.length + HEX_DIGITS) return false;
-  for (let i = 0; i < prefix.length; i++) {
-    if (charCodeAt(value, i) !== charCodeAt(prefix, i)) return false;
+  const units = asciiBytes(value);
+  const head = asciiBytes(prefix);
+  if (units === null || head === null) return false;
+  for (let i = 0; i < head.length; i++) {
+    if (units[i] !== head[i]) return false;
   }
-  for (let i = prefix.length; i < value.length; i++) {
-    const unit = charCodeAt(value, i);
+  for (let i = head.length; i < units.length; i++) {
+    const unit = units[i]!;
     const digit = unit >= 0x30 && unit <= 0x39;
     const lowerHex = unit >= 0x61 && unit <= 0x66;
     if (!digit && !lowerHex) return false;
