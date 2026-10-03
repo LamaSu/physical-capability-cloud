@@ -1,0 +1,304 @@
+/**
+ * astra's round-5 verdict on #354 (pack 19e, DO-NOT-SHIP) found four more
+ * ways the previous account's authority survives a switch. These reproduce
+ * each, at d8ff4eb2, before any fix.
+ *
+ * C1a: A's SIWE verification, still in flight when B signs in, sets A's cookie
+ *      after the logout that opened B's shell. The old component's cleanup
+ *      logout isn't part of the boundary, and can fail.
+ * C1b: a reload while the teardown is pending skips it. B's key is already
+ *      persisted, and a fresh page starts settled.
+ * HIGH: the teardown accepts HTTP 200 without the gateway's {ok: true}.
+ * MEDIUM: a hand tracker still loading when B signs in registers onResults
+ *      afterwards, and a gesture then drives B's spatial chat through
+ *      getState().
+ *
+ * @vitest-environment jsdom
+ */
+
+import React, { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const wallet = vi.hoisted(() => ({ address: undefined as string | undefined, isConnected: false, chainId: undefined as number | undefined }));
+const disconnectWallet = vi.hoisted(() => () => {
+  wallet.address = undefined;
+  wallet.isConnected = false;
+});
+vi.mock("wagmi", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("wagmi")>();
+  return {
+    ...actual,
+    useAccount: () => ({ address: wallet.address, isConnected: wallet.isConnected, chainId: wallet.chainId }),
+    useDisconnect: () => ({ disconnect: disconnectWallet, disconnectAsync: async () => disconnectWallet() }),
+    useConnect: () => ({ connectors: [], connect: () => {} }),
+    useSignMessage: () => ({ signMessageAsync: async () => "0xsig" }),
+  };
+});
+vi.mock("wagmi/actions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("wagmi/actions")>();
+  return { ...actual, disconnect: async () => disconnectWallet() };
+});
+// Every hand pose reads as "peace", which toggles the spatial chat's sidebar (useGestures).
+vi.mock("../features/gestures/GestureRecognizer.js", () => ({ recognizeGesture: () => ({ type: "peace", confidence: 1 }) }));
+
+const A_WALLET = "0xA11ce00000000000000000000000000000000001";
+
+type LogoutMode = "ok" | "hold" | "fail" | "200-not-ok" | "ok-then-fail";
+
+/** The gateway as these tests see it. The SIWE cookie is set by a completed /api/auth/verify and destroyed by a logout that answers {ok: true}. */
+const gateway = {
+  siweCookie: false,
+  calls: [] as string[],
+  logoutMode: "ok" as LogoutMode,
+  logouts: 0,
+  logoutWaiting: [] as Array<() => void>,
+  verifyWaiting: [] as Array<() => void>,
+};
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+let container: HTMLDivElement;
+let root: Root;
+
+beforeAll(() => {
+  HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext;
+  Element.prototype.scrollIntoView = () => {};
+  vi.stubGlobal("matchMedia", (q: string) => ({
+    matches: false, media: q, onchange: null,
+    addListener: () => {}, removeListener: () => {},
+    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+  }));
+});
+
+beforeEach(() => {
+  gateway.siweCookie = false;
+  gateway.calls = [];
+  gateway.logoutMode = "ok";
+  gateway.logouts = 0;
+  gateway.logoutWaiting = [];
+  gateway.verifyWaiting = [];
+  disconnectWallet();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0]!;
+      const method = (init?.method ?? "GET").toUpperCase();
+      gateway.calls.push(`${method} ${path}`);
+      if (path === "/api/auth/validate") return json({ valid: true });
+      if (path === "/api/auth/me") return gateway.siweCookie ? json({ address: A_WALLET }) : json({ error: "Not authenticated" }, 401);
+      if (path === "/api/auth/nonce") return json({ nonce: "nonce-1" });
+      if (path === "/api/auth/verify" && method === "POST") {
+        // Held until the test answers it. An aborted request never delivers its Set-Cookie.
+        return new Promise<Response>((resolve, reject) => {
+          let aborted = false;
+          init?.signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+          gateway.verifyWaiting.push(() => {
+            if (aborted) return;
+            gateway.siweCookie = true;
+            resolve(json({ token: "siwe-session-of-A" }));
+          });
+        });
+      }
+      if (path === "/api/auth/logout" && method === "POST") {
+        gateway.logouts += 1;
+        const destroy = () => {
+          gateway.siweCookie = false;
+          return json({ ok: true });
+        };
+        switch (gateway.logoutMode) {
+          case "ok":
+            return destroy();
+          case "ok-then-fail":
+            if (gateway.logouts === 1) return destroy();
+            throw new TypeError("Failed to fetch");
+          case "fail":
+            throw new TypeError("Failed to fetch");
+          case "200-not-ok":
+            return json({ ok: false }); // HTTP 200, cookie kept
+          case "hold":
+            return new Promise<Response>((resolve) => gateway.logoutWaiting.push(() => resolve(destroy())));
+        }
+      }
+      throw new TypeError("Failed to fetch");
+    }),
+  );
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  container.remove();
+  window.history.replaceState(null, "", "/");
+  try {
+    localStorage.clear();
+  } catch {
+    // no storage
+  }
+});
+
+async function settle(n = 20) {
+  for (let i = 0; i < n; i++) {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+  }
+}
+
+async function renderAt(path: string, before?: () => void) {
+  window.history.replaceState(null, "", path);
+  const { useAuthStore } = await import("../stores/auth-store.js");
+  useAuthStore.setState({ isAuthenticated: true, apiKey: "pcc_test_key" });
+  await settle(5);
+  before?.();
+  const { App } = await import("../App.js");
+  await act(async () => {
+    root.render(<App />);
+  });
+  await settle();
+  return useAuthStore;
+}
+
+function click(text: string) {
+  const el = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === text || (b.textContent ?? "").includes(text));
+  expect(el, `a button with "${text}"`).toBeDefined();
+  el!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+}
+
+describe("19e C1a: A's SIWE sign-in in flight at the switch leaves no cookie of A's", () => {
+  it("the verification can't land after the logout that opened B's shell", async () => {
+    const useAuthStore = await renderAt("/dashboard", () => {
+      wallet.address = A_WALLET;
+      wallet.isConnected = true;
+      wallet.chainId = 84532;
+    });
+    await act(async () => click("Sign In"));
+    await settle(5);
+    expect(gateway.verifyWaiting, "A's /api/auth/verify is in flight").toHaveLength(1);
+
+    // B signs in. The boundary's logout succeeds; any later logout fails, so cleanup can't be left to chance.
+    gateway.logoutMode = "ok-then-fail";
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    await settle();
+    // A's verification completes now, if it still can.
+    await act(async () => {
+      for (const complete of gateway.verifyWaiting.splice(0)) complete();
+    });
+    await settle();
+    expect(gateway.siweCookie, "no SIWE cookie of A's is live in B's browser").toBe(false);
+    expect(useAuthStore.getState().sessionToken).toBeNull();
+  }, 20_000);
+});
+
+describe("19e C1b: a reload while the teardown is pending doesn't skip it", () => {
+  it("the reloaded page ends A's wallet session before it mounts B", async () => {
+    const useAuthStore = await renderAt("/dashboard", () => {
+      wallet.address = A_WALLET;
+      wallet.isConnected = true;
+      wallet.chainId = 84532;
+      gateway.siweCookie = true;
+    });
+    expect(useAuthStore.getState().sessionToken).toBe("cookie");
+    gateway.logoutMode = "hold";
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    await settle();
+    expect(gateway.logoutWaiting.length, "the teardown's logout is pending").toBeGreaterThanOrEqual(1);
+
+    // The page reloads before the gateway answers. A fresh page: fresh modules, B's key from storage.
+    await act(async () => root.unmount());
+    vi.resetModules();
+    const React2 = await import("react");
+    const { createRoot: createRoot2 } = await import("react-dom/client");
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root2 = createRoot2(host);
+    const { useAuthStore: freshStore } = await import("../stores/auth-store.js");
+    expect(freshStore.getState().isAuthenticated, "B's key was persisted").toBe(true);
+    gateway.logoutMode = "ok"; // the gateway answers the reloaded page
+    const { App: FreshApp } = await import("../App.js");
+    await React2.act(async () => root2.render(React2.createElement(FreshApp)));
+    for (let i = 0; i < 20; i++) {
+      await React2.act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    }
+    expect(gateway.siweCookie, "A's cookie was destroyed before B mounted").toBe(false);
+    expect(freshStore.getState().sessionToken).toBeNull();
+    expect(freshStore.getState().address).toBeNull();
+    await React2.act(async () => root2.unmount());
+    host.remove();
+  }, 20_000);
+});
+
+describe("19e HIGH: the teardown needs the gateway's {ok: true}, not just HTTP 200", () => {
+  it("a logout answered 200 {ok:false} doesn't open B's shell", async () => {
+    const useAuthStore = await renderAt("/dashboard", () => {
+      wallet.address = A_WALLET;
+      wallet.isConnected = true;
+      wallet.chainId = 84532;
+      gateway.siweCookie = true;
+    });
+    gateway.logoutMode = "200-not-ok";
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    await settle();
+    expect(container.textContent).toContain("Couldn't confirm that the previous wallet session ended");
+    expect(useAuthStore.getState().sessionToken).toBeNull();
+  }, 20_000);
+});
+
+describe("19e MEDIUM: a hand tracker still loading at the switch can't drive B's stores", () => {
+  it("its late onResults doesn't toggle B's spatial chat", async () => {
+    let onResults: ((r: unknown) => void) | null = null;
+    (window as unknown as { Hands: unknown }).Hands = class {
+      setOptions() {}
+      onResults(cb: (r: unknown) => void) {
+        onResults = cb;
+      }
+      send() {}
+      close() {}
+    };
+    (window as unknown as { Camera: unknown }).Camera = class {
+      start() {
+        return Promise.resolve();
+      }
+      stop() {}
+    };
+    const useAuthStore = await renderAt("/app");
+    await act(async () => click("Gestures"));
+    await settle(3);
+    const loadScripts = async () => {
+      for (const s of [...document.head.querySelectorAll<HTMLScriptElement>('script[src*="mediapipe"]')]) {
+        await act(async () => s.dispatchEvent(new Event("load")));
+      }
+    };
+    // B signs in while MediaPipe is still loading.
+    await act(async () => {
+      expect(await useAuthStore.getState().login("pcc_test_key_b")).toBe(true);
+    });
+    await settle();
+    await loadScripts(); // the hands script
+    await settle(3);
+    await loadScripts(); // the camera script, requested after the first loaded
+    await settle(3);
+    const { useSpatialChatStore } = await import("../features/chat/ChatStore.js");
+    const before = useSpatialChatStore.getState().sidebarOpen;
+    await act(async () => onResults?.({ multiHandLandmarks: [[{ x: 0, y: 0, z: 0 }]] }));
+    expect(useSpatialChatStore.getState().sidebarOpen, "B's sidebar is unchanged").toBe(before);
+  }, 20_000);
+});
