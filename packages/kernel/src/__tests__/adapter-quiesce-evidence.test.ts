@@ -527,7 +527,7 @@ describe("ModbusSensorAdapter", () => {
 });
 
 describe("PrinterLogAdapter", () => {
-  it("waits for a poll the timer started before stopRecording, which emits after stopRecording returned; nothing after", async () => {
+  it("waits for a poll the timer started before stopRecording: stopRecording, then the hook, answer only after it has emitted; nothing after", async () => {
     const lines = ["line 1", "line 2", "line 3"];
     const timerPoll = deferred();
     let calls = 0;
@@ -553,17 +553,81 @@ describe("PrinterLogAdapter", () => {
 
     await log.startRecording("job-q"); // polls line 1 at once
     await vi.advanceTimersByTimeAsync(1_000); // the timer's poll is now waiting on the log source
-    await log.stopRecording(); // its final poll takes line 2, then it emits the summary and returns
+    let stopped = false;
+    const stop = log.stopRecording().then(() => (stopped = true)); // waits for that poll, then polls once more
     const hook = ask(log, events);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(hook.resolved, "the timer's poll is still in flight").toBe(false);
+    expect(stopped, "stopRecording, while the timer's poll is in flight").toBe(false);
+    expect(hook.resolved, "the hook, while the timer's poll is in flight").toBe(false);
     timerPoll.resolve();
+    await stop;
     await vi.advanceTimersByTimeAsync(0);
 
     expect(hook.resolved).toBe(true);
-    expect(hook.seen).toEqual(["log_hash_chain_entry", "log_hash_chain_entry", "printer_job_verified", "log_hash_chain_entry"]);
-    expect(events.at(-1)?.payload).toMatchObject({ rawContent: "line 3" });
+    expect(hook.seen).toEqual(["log_hash_chain_entry", "log_hash_chain_entry", "log_hash_chain_entry", "printer_job_verified"]);
+    expect(events.at(-2)?.payload).toMatchObject({ rawContent: "line 3" });
     await expectSilenceAfter(events);
+  });
+});
+
+describe("PrinterLogAdapter: astra pack 186 MEDIUMs", () => {
+  /** A log capture that chains entries in memory. */
+  function memoryLogCapture(): LogCaptureService {
+    let n = 0;
+    const chain: Array<{ entryHash: string; previousHash: string }> = [];
+    return {
+      reset: () => void (chain.length = 0),
+      getChain: () => chain,
+      captureEntry: async (rawContent: string) => {
+        const entry = { entryId: `e${++n}`, entryHash: `h${n}`, previousHash: `h${n - 1}`, rawContent, capturedAt: new Date().toISOString(), kernelSignature: "sig" };
+        chain.push(entry);
+        return entry;
+      },
+    } as unknown as LogCaptureService;
+  }
+
+  it("a poll the timer started before stopRecording is the job's: stopRecording waits for it, so the summary is last and covers every entry", async () => {
+    const lines = ["line 1", "line 2", "line 3"];
+    const timerPoll = deferred();
+    let calls = 0;
+    const logProvider = async () => {
+      calls += 1;
+      if (calls === 2) await timerPoll.promise; // the timer's first poll waits on the log source
+      return lines.shift() ?? null;
+    };
+    const log = new PrinterLogAdapter("log-q-late", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 1_000, logProvider });
+    const events = record(log);
+
+    await log.startRecording("job-q"); // polls line 1 at once
+    await vi.advanceTimersByTimeAsync(1_000); // the timer's poll is now waiting on the log source
+    const stopped = log.stopRecording();
+    await vi.advanceTimersByTimeAsync(10_000);
+    timerPoll.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    const summary = await stopped;
+    await vi.advanceTimersByTimeAsync(0);
+
+    const entries = events.filter((e) => e.type === "log_hash_chain_entry");
+    expect.soft(events.at(-1)?.type, "the job's last event").toBe("printer_job_verified");
+    expect.soft(entries.map((e) => e.payload.jobId), "each entry's jobId").toEqual(["job-q", "job-q", "job-q"]);
+    expect.soft(entries.map((e) => e.payload.rawContent), "entries, in the log's order").toEqual(["line 1", "line 2", "line 3"]);
+    expect.soft(summary.payload, "the summary").toMatchObject({ jobId: "job-q", chainLength: 3 });
+    await expectSilenceAfter(events);
+  });
+
+  it("a first poll that fails leaves nothing outstanding: startRecording rejects, and the hook answers at once", async () => {
+    const logProvider = async (): Promise<string | null> => {
+      throw new Error("log source unreachable");
+    };
+    const log = new PrinterLogAdapter("log-q-fail", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 1_000, logProvider });
+    const events = record(log);
+    await expect(log.startRecording("job-q")).rejects.toThrow("log source unreachable");
+    expect.soft(await resolvesAtOnce(log), "the hook, after the failed start").toBe(true);
+    expect.soft(vi.getTimerCount(), "timers left").toBe(0);
+    const hook = ask(log, events);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect.soft(hook.resolved, "the hook, a minute later").toBe(true);
+    expect.soft(events, "events").toEqual([]);
   });
 });
 
