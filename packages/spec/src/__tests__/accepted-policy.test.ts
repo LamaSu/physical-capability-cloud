@@ -400,9 +400,10 @@ describe("accepted-policy: code-running input is refused before it is read (E7c-
   // ── E12 HIGH (astra r1, 98501e35, SHIP-WITH-FIXES): an indexed getter on a bindings
   // element runs code, and reading it twice can make one admitted array yield two
   // different roots. Reviewer's reproduction, added verbatim first against 98501e35
-  // (see /mnt/sparkbulk/tmp/evidence-496-e12-repro-98501e35.txt for the pre-fix run);
-  // the fix made both calls throw instead, so the assertions below are the POST-FIX
-  // expected behavior, landed in the same commit as the fix. ───────────────────────────
+  // (see /mnt/sparkbulk/tmp/evidence-496-e12-repro-98501e35.txt for the pre-fix run,
+  // where this test failed: calls ended at 2, not 0). The fix makes both calls throw
+  // instead of returning a root at all, so the assertions below are the POST-FIX
+  // expected behavior: both calls throw, and the getter never runs. ──────────────────
   it("E12: refuses an indexed getter standing in for a bindings array element; the getter never runs and the array never yields two roots", () => {
     const bindings = [GOLDEN_BINDINGS[0]!];
     let calls = 0;
@@ -414,10 +415,9 @@ describe("accepted-policy: code-running input is refused before it is read (E7c-
         return { ...GOLDEN_BINDINGS[0]!, valueRef: K(calls % 2 ? "first" : "second") };
       },
     });
-    const first = computeBindingsRoot(bindings);
-    const second = computeBindingsRoot(bindings);
+    expect(() => computeBindingsRoot(bindings)).toThrow(AcceptedPolicyDigestInputError);
+    expect(() => computeBindingsRoot(bindings)).toThrow(AcceptedPolicyDigestInputError);
     expect(calls).toBe(0);
-    expect(first).toBe(second);
   });
 
   it("E12: refuses a hole replaced by an unrelated extra key (own-key count matches, but canonical index 1 is missing)", () => {

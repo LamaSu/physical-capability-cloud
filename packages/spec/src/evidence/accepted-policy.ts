@@ -178,7 +178,19 @@ function admitPlainObject(value: unknown, field: string): object {
   return value;
 }
 
-/** Admits a plain, dense array (own keys are exactly the indices plus "length"): refuses null/non-object, a Proxy, or a non-array. */
+/**
+ * Admits a plain, dense array: own keys must be exactly "length" plus every canonical index
+ * "0" to "n-1", each an own ENUMERABLE DATA property (never an accessor, which runs code;
+ * never non-enumerable, a hidden slot pretending not to be there; never a hole, which an
+ * ordinary [[Get]] would fall through to an inherited — possibly attacker-polluted —
+ * Array.prototype value). Refuses null/non-object, a Proxy, or a non-array.
+ *
+ * Every element is read EXACTLY ONCE, through `ownDataValue` (a descriptor read, never an
+ * ordinary [[Get]]), into a fresh snapshot array this function returns. Callers must hash
+ * only that returned snapshot — never index into the original `value` again — so neither an
+ * indexed getter nor a prototype-chain fallthrough at a deleted index can ever be read, let
+ * alone read twice with two different answers (E12 HIGH, astra r1 98501e35).
+ */
 function admitPlainArray(value: unknown, field: string): readonly unknown[] {
   if (value === null || typeof value !== "object") {
     throw new AcceptedPolicyDigestInputError(field, "expected an array");
@@ -193,7 +205,22 @@ function admitPlainArray(value: unknown, field: string): readonly unknown[] {
   if (typeof length !== "number" || !isSafeInteger(length) || length < 0 || ownKeys(value).length !== length + 1) {
     throw new AcceptedPolicyDigestInputError(field, "expected a dense array with no extra or missing elements");
   }
-  return value as readonly unknown[];
+  // The count check above plus this loop's confirmation that `length` of the own keys are
+  // exactly the canonical indices leaves no room (by key count) for any other own key — so
+  // this also rejects a hole papered over by an unrelated extra key, e.g. `delete a[1];
+  // a.extra = y`, which keeps `ownKeys(value).length === length + 1` but is missing index 1.
+  const snapshot: unknown[] = new Array(length);
+  for (let i = 0; i < length; i++) {
+    if (!isOwnEnumerable(value, i)) {
+      throw new AcceptedPolicyDigestInputError(`${field}[${i}]`, "index is missing, non-enumerable, or not its own property");
+    }
+    const element = ownDataValue(value, i);
+    if (element === ACCESSOR) {
+      throw new AcceptedPolicyDigestInputError(`${field}[${i}]`, "is an accessor: a getter runs code, so it is refused before it is read");
+    }
+    snapshot[i] = element;
+  }
+  return snapshot;
 }
 
 /** What `ownDataValue` returns for a missing property and for an accessor. Module-private, so neither can equal a value read from input. */
@@ -235,35 +262,63 @@ function isOwnEnumerable(owner: object, key: PropertyKey): boolean {
   return enumerable !== undefined && enumerable.value === true;
 }
 
+/** Whether `value` equals one of `list`'s entries. Index loop, not `.includes`, so a globally polluted `Array.prototype.includes` cannot change the answer. */
+function includesString(list: readonly string[], value: string): boolean {
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] === value) return true;
+  }
+  return false;
+}
+
+/** `list.join(sep)`, by index loop, not `.join`, for the same reason. */
+function joinStrings(list: readonly string[], sep: string): string {
+  let out = "";
+  for (let i = 0; i < list.length; i++) {
+    if (i > 0) out += sep;
+    out += list[i];
+  }
+  return out;
+}
+
 /**
  * Checks that `owner`'s own keys are EXACTLY `allowed` (sol-style pinning: "nothing
  * unknown"), each an ENUMERABLE own DATA property (never an accessor: a getter runs code,
  * so it is refused before it is read; never non-enumerable: a hidden field pretending not
  * to be there is refused, not silently skipped). `owner` must already be
  * `admitPlainObject`-checked.
+ *
+ * Reads every declared field's value EXACTLY ONCE, in this same validating pass, into the
+ * returned snapshot. Callers must read fields via `requiredField(snapshot, ...)`, never by
+ * re-reading `owner` — so the "read once" contract is literal, not just a comment.
  */
-function checkExactKeys(owner: object, field: string, allowed: readonly string[]): void {
+function checkExactKeys(owner: object, field: string, allowed: readonly string[]): ReadonlyMap<string, unknown> {
   const keys = ownKeys(owner);
   if (keys.length !== allowed.length) {
-    throw new AcceptedPolicyDigestInputError(field, `expected exactly the keys [${allowed.join(", ")}]`);
+    throw new AcceptedPolicyDigestInputError(field, `expected exactly the keys [${joinStrings(allowed, ", ")}]`);
   }
-  for (const key of keys) {
-    if (typeof key === "symbol" || !allowed.includes(key)) {
+  const snapshot = new Map<string, unknown>();
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i]!;
+    if (typeof key === "symbol" || !includesString(allowed, key)) {
       throw new AcceptedPolicyDigestInputError(field, `unknown key ${String(key).slice(0, 64)}`);
     }
-    if (ownDataValue(owner, key) === ACCESSOR || !isOwnEnumerable(owner, key)) {
+    const value = ownDataValue(owner, key);
+    if (value === ACCESSOR || !isOwnEnumerable(owner, key)) {
       throw new AcceptedPolicyDigestInputError(`${field}.${key}`, "accessor or non-enumerable properties are not accepted; pass plain data");
     }
+    snapshot.set(key, value);
   }
+  return snapshot;
 }
 
-/** One required own data field of an object `checkExactKeys` has already passed; re-checked here, read via `ownDataValue`, never a [[Get]]. */
-function requiredField(owner: object, field: string, key: string): unknown {
-  const value = ownDataValue(owner, key);
-  if (value === ABSENT || value === ACCESSOR) {
+/** One required declared field's value, taken from the snapshot `checkExactKeys` already built in its single read pass; never re-read from the original object. */
+function requiredField(snapshot: ReadonlyMap<string, unknown>, field: string, key: string): unknown {
+  if (!snapshot.has(key)) {
+    // Unreachable for any caller passing a key from the same allowed-list checkExactKeys
+    // validated against; kept as a defensive invariant, not a user-input path.
     throw new AcceptedPolicyDigestInputError(`${field}.${key}`, "is required as a plain own data property");
   }
-  return value;
+  return snapshot.get(key);
 }
 
 // ── Pinned input forms: 0x + lowercase hex of exact width; canonical decimal integers; no -0. ──
@@ -469,8 +524,8 @@ type SubjectFieldsMissingFromKeyList = AssertNever<Exclude<keyof SubjectBlockFie
  */
 export function computeSubjectBlockHash(subject: SubjectBlockFields): Bytes32Hex {
   const admitted = admitPlainObject(subject, "subject");
-  checkExactKeys(admitted, "subject", SUBJECT_BLOCK_KEYS);
-  const f = (key: (typeof SUBJECT_BLOCK_KEYS)[number]) => requiredField(admitted, "subject", key);
+  const snapshot = checkExactKeys(admitted, "subject", SUBJECT_BLOCK_KEYS);
+  const f = (key: (typeof SUBJECT_BLOCK_KEYS)[number]) => requiredField(snapshot, "subject", key);
   return keccakWords([
     bytes32Word("SUBJECT_DOMAIN", SUBJECT_DOMAIN),
     bytes32Word("subject.payer", f("payer")),
@@ -535,8 +590,8 @@ export function computeBindingsRoot(bindings: readonly SubjectBinding[]): Bytes3
   for (let i = 0; i < admittedArray.length; i++) {
     const field = `bindings[${i}]`;
     const admitted = admitPlainObject(admittedArray[i], field);
-    checkExactKeys(admitted, field, SUBJECT_BINDING_KEYS);
-    const f = (key: (typeof SUBJECT_BINDING_KEYS)[number]) => requiredField(admitted, field, key);
+    const snapshot = checkExactKeys(admitted, field, SUBJECT_BINDING_KEYS);
+    const f = (key: (typeof SUBJECT_BINDING_KEYS)[number]) => requiredField(snapshot, field, key);
     const planUnitKeyValue = f("planUnitKey");
     const requirementIdHashValue = f("requirementIdHash");
     const planUnitKeyW = bytes32Word(`${field}.planUnitKey`, planUnitKeyValue);
@@ -614,8 +669,8 @@ type DigestInputFieldsMissingFromKeyList = AssertNever<Exclude<keyof AcceptedPol
  */
 export function computeAcceptedPolicyDigest(inputs: AcceptedPolicyDigestInputs): Bytes32Hex {
   const admitted = admitPlainObject(inputs, "inputs");
-  checkExactKeys(admitted, "inputs", ACCEPTED_POLICY_DIGEST_KEYS);
-  const f = (key: (typeof ACCEPTED_POLICY_DIGEST_KEYS)[number]) => requiredField(admitted, "inputs", key);
+  const snapshot = checkExactKeys(admitted, "inputs", ACCEPTED_POLICY_DIGEST_KEYS);
+  const f = (key: (typeof ACCEPTED_POLICY_DIGEST_KEYS)[number]) => requiredField(snapshot, "inputs", key);
   return keccakWords([
     bytes32Word("POLICY_DOMAIN", POLICY_DOMAIN),
     uintWord("POLICY_VERSION", POLICY_VERSION, 16),
