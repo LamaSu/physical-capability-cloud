@@ -192,14 +192,14 @@
  *     `then`, and a native `then` builds the promise it returns with
  *     `constructor[Symbol.species]`. Every promise returned
  *     (`profileAdmitsBundle`, `computeBundleSetDigest`) is an `ownPromise`:
- *     its own `then` is the one captured at load and its species is pinned,
- *     so every promise a caller derives from it is pinned too, at any depth
- *     (astra pack 187). The binding leg's promise is awaited through
- *     `awaitedHere`, so that `await` reads only its own `constructor` and
- *     looks nothing up on the answer. A leg's promise is followed through the
- *     `then` captured at load (`fulfillsWithTrue`). The result is a
- *     null-prototype object, so a `then` written on Object.prototype cannot
- *     take over its resolution.
+ *     its own `then`, `catch` and `finally` are the ones captured at load and
+ *     its species is pinned, so every promise a caller derives from it is
+ *     pinned too, at any depth (astra pack 187). The binding leg's promise is
+ *     awaited through `awaitedHere`, so that `await` reads only its own
+ *     `constructor` and looks nothing up on the answer. A leg's promise is
+ *     followed through the `then` captured at load (`fulfillsWithTrue`). The
+ *     result is a null-prototype object, so a `then` written on
+ *     Object.prototype cannot take over its resolution.
  * The boundary, named honestly: the verification callbacks are the caller's
  * trusted code (a leg's answer must be true, false or a native promise; a
  * thenable is refused). A realm whose intrinsics were replaced BEFORE
@@ -537,8 +537,8 @@ function bundleSetDigest(subject: unknown, bundleHashes: unknown): SHA256 {
  * It reads only the subject's own data properties and the array's own
  * indices, hashes with the SHA-256 captured at load, and returns an
  * `ownPromise` (util/primordials.ts): awaiting it, or following it with
- * `.then` at any depth, hands the caller this digest or this rejection,
- * whatever code running after load replaced on Promise.
+ * `.then`, `.catch` or `.finally` at any depth, hands the caller this digest
+ * or this rejection, whatever code running after load replaced on Promise.
  */
 export function computeBundleSetDigest(
   subject: Pick<EvidenceSubject, "jobId" | "kernelId" | "settlementUnitId">,
@@ -823,8 +823,8 @@ interface Finding {
  * after reads only the copies, so nothing the caller changes, or a getter
  * answers, after that point can reach the decision. The promise returned is an
  * `ownPromise` (util/primordials.ts): it, and every promise a caller derives
- * from it with `.then`, delivers this decision, whatever code running after
- * load replaced on Promise (see the header).
+ * from it with `.then`, `.catch` or `.finally`, delivers this decision,
+ * whatever code running after load replaced on Promise (see the header).
  */
 export function profileAdmitsBundle(input: ProfileAdmissionInput): Promise<ProfileAdmissionResult> {
   return ownPromise(admit(input));

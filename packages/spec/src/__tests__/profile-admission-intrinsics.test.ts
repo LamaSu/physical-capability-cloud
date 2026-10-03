@@ -124,7 +124,7 @@ describe("the patch harness: nothing changed after load changes a decision, a di
       "Date.parse", "Set.prototype.has", "Set.prototype.add", "Map.prototype.get", "RegExp.prototype.test", "RegExp.prototype.exec",
       "String.prototype.trim", "String.prototype.charCodeAt", "Promise.prototype.then", "Hash.prototype.update", "Hash.prototype.digest",
       // astra pack 187: what native then, catch and finally read on the way to the promise a caller receives.
-      "Promise[Symbol.species]",
+      "Promise[Symbol.species]", "Promise.prototype.catch", "Promise.prototype.finally",
     ]) {
       expect(has(`patch: ${name}`), name).toBe(true);
     }

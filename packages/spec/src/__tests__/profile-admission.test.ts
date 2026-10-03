@@ -1524,6 +1524,26 @@ describe("profile admission — astra pack 187: .then, .catch and .finally deliv
     };
   }
 
+  /** Replace Promise.prototype[name] with a method answering a thenable that resolves with `forged`. `this` still gets a handler, so nothing is left unhandled. */
+  function methodReplaced(name: "catch" | "finally", forged: unknown): () => () => void {
+    return () => {
+      const original = Object.getOwnPropertyDescriptor(Promise.prototype, name)!;
+      const thenBefore = Promise.prototype.then;
+      Object.defineProperty(Promise.prototype, name, {
+        ...original,
+        value: function (this: Promise<unknown>) {
+          thenBefore.call(this, undefined, () => undefined);
+          return {
+            then(resolve: (value: unknown) => void) {
+              resolve(forged);
+            },
+          };
+        },
+      });
+      return () => void Object.defineProperty(Promise.prototype, name, original);
+    };
+  }
+
   /**
    * What `deliver` hands its caller while `change` is in place ("threw" for a
    * rejection). Only for changes that leave Promise.prototype.then and
@@ -1603,6 +1623,32 @@ describe("profile admission — astra pack 187: .then, .catch and .finally deliv
 
   it("the replaced species, through every shape: fulfillsWithTrue's promise (util/primordials.ts) delivers false as false", async () => {
     expect(await forgedShapes(speciesReplaced(forgingSpecies(true)), () => fulfillsWithTrue(Promise.resolve(false)) as Promise<boolean>)).toEqual([]);
+  });
+
+  it("Promise.prototype.catch replaced after load: p.catch(...) still delivers admission's rejection, the digest, and a digest's rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    const digest = await computeBundleSetDigest(SUBJECT, SET);
+    expect(
+      mismatches([
+        ["admission", await deliveredUnder(methodReplaced("catch", FORGED_ADMIT), () => profileAdmitsBundle(made).catch(() => "caught")), clean],
+        ["digest", await deliveredUnder(methodReplaced("catch", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, SET).catch(() => "caught")), digest],
+        ["rejected digest", await deliveredUnder(methodReplaced("catch", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, []).catch(() => "caught")), "caught"],
+      ]),
+    ).toEqual([]);
+  });
+
+  it("Promise.prototype.finally replaced after load: p.finally(...) still delivers admission's rejection, the digest, and a digest's rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    const digest = await computeBundleSetDigest(SUBJECT, SET);
+    expect(
+      mismatches([
+        ["admission", await deliveredUnder(methodReplaced("finally", FORGED_ADMIT), () => profileAdmitsBundle(made).finally(() => undefined)), clean],
+        ["digest", await deliveredUnder(methodReplaced("finally", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, SET).finally(() => undefined)), digest],
+        ["rejected digest", await deliveredUnder(methodReplaced("finally", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, []).finally(() => undefined)), "threw"],
+      ]),
+    ).toEqual([]);
   });
 
   it("Promise.prototype.then and .constructor replaced after load: the promise p.then(...) returns, awaited or chained, still delivers the rejection", async () => {

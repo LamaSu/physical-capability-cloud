@@ -868,6 +868,13 @@ function ForgingSpecies(executor: (resolve: (v: unknown) => void, reject: (e: un
   return real;
 }
 
+/** A Promise.prototype method replaced: it runs as before, and what its promise delivers is forged on the way out. */
+function forgingAfter(original: (this: Promise<unknown>, ...args: unknown[]) => Promise<unknown>) {
+  return function (this: Promise<unknown>, ...args: unknown[]) {
+    return ReflectApply(PromiseThenAtLoad, ReflectApply(original, this, args), [forgedAnything]) as Promise<unknown>;
+  };
+}
+
 /** The events a forged binding answer carries, for the case being run. */
 let CURRENT_EVENTS: unknown[] | null = null;
 
@@ -951,6 +958,8 @@ const PATCH_ROWS: Array<[string, Apply]> = [
   ["Promise.prototype.constructor", replace(Promise.prototype, "constructor", () => function NotPromise() {})],
   // astra pack 187: a configurable accessor on the global Promise, read by every native then, catch and finally.
   ["Promise[Symbol.species]", replaceGetter(Promise, Symbol.species, () => () => ForgingSpecies)],
+  ["Promise.prototype.catch", replace(Promise.prototype, "catch", forgingAfter)],
+  ["Promise.prototype.finally", replace(Promise.prototype, "finally", forgingAfter)],
   ["Object.prototype.passed = true", pollute(() => ({ passed: true }))],
   ["Object.prototype.value = \"12.5\"", pollute(() => ({ value: "12.5" }))],
   ["Object.prototype.adapterVersion and firmwareVersion", pollute(() => ({ adapterVersion: CAMERA_VERSION, firmwareVersion: "cam-fw-2.1.0" }))],

@@ -169,6 +169,8 @@ export const SetPrototypeSize = uncurryThis(ObjectGetOwnPropertyDescriptor(Set.p
 /** The runtime's structured clone (HTML, and Node since 17), captured at load. */
 export const StructuredClone = (globalThis as { structuredClone?: <T>(value: T) => T }).structuredClone;
 const PromisePrototypeThenOriginal = Promise.prototype.then;
+const PromisePrototypeCatchOriginal = Promise.prototype.catch;
+const PromisePrototypeFinallyOriginal = Promise.prototype.finally;
 const PromisePrototypeThen = uncurryThis(Promise.prototype.then) as (
   promise: Promise<unknown>,
   onFulfilled: (value: unknown) => unknown,
@@ -251,15 +253,20 @@ ObjectFreeze(PINNED_CONSTRUCTOR);
  * `promise`, ready to hand to a caller: whatever code running after load
  * replaces on Promise, Promise.prototype or Promise[Symbol.species], the
  * caller receives the value the promise settles with, through
- * `await promise`, through `promise.then`, and through every promise `then`
- * returns, at any depth.
+ * `await promise`, through `promise.then`, `.catch` and `.finally`, and
+ * through every promise those return, at any depth.
  *
- * It gets own properties, which are read before anything on Promise.prototype,
- * each fixed (not writable, enumerable or configurable):
- *   - `then`: Promise.prototype.then as it was at load;
+ * It gets four own properties, which are read before anything on
+ * Promise.prototype, each fixed (not writable, enumerable or configurable):
+ *   - `then`, `catch` and `finally`: Promise.prototype's, as they were at
+ *     load. A caller's `promise.catch(...)` would otherwise look the method
+ *     up on Promise.prototype, where code running after load can replace it
+ *     with one that answers anything (astra pack 187, checked with the
+ *     species). The native `catch` and `finally` call the own `then`, and
+ *     `finally` builds its promises with the pinned species;
  *   - `constructor`: PINNED_CONSTRUCTOR, whose `[Symbol.species]` is
- *     PinnedSpecies. Native `then` builds the promise it returns with
- *     SpeciesConstructor(promise), that is
+ *     PinnedSpecies. Native `then`, `catch` and `finally` build the promise
+ *     they return with SpeciesConstructor(promise), that is
  *     `promise.constructor[Symbol.species]`. A `constructor` pinned to the
  *     global Promise (#363 round 9) was not enough: its species is a
  *     configurable accessor, which code running after load can point at a
@@ -284,6 +291,8 @@ ObjectFreeze(PINNED_CONSTRUCTOR);
 export function ownPromise<T>(promise: Promise<T>): Promise<T> {
   ObjectDefineProperty(promise, "constructor", fixedDescriptor(PINNED_CONSTRUCTOR));
   ObjectDefineProperty(promise, "then", fixedDescriptor(PromisePrototypeThenOriginal));
+  ObjectDefineProperty(promise, "catch", fixedDescriptor(PromisePrototypeCatchOriginal));
+  ObjectDefineProperty(promise, "finally", fixedDescriptor(PromisePrototypeFinallyOriginal));
   return promise;
 }
 
@@ -313,10 +322,10 @@ export function awaitedHere<T>(promise: Promise<T>): Promise<T> {
  * promise it returns (that promise is discarded; a species that throws, or
  * never hands over its resolving functions, makes the answer false). The
  * answer is a boolean, or an `ownPromise` of one, so nothing replaced after
- * load changes it, whether it is awaited or followed with `.then` (the
- * boundary is `ownPromise`'s). Anything else answers false: a value that is
- * not exactly true, a rejection, and an object that is not a native promise
- * (a thenable is never followed).
+ * load changes it, whether it is awaited or followed with `.then`, `.catch`
+ * or `.finally` (the boundary is `ownPromise`'s). Anything else answers
+ * false: a value that is not exactly true, a rejection, and an object that is
+ * not a native promise (a thenable is never followed).
  */
 export function fulfillsWithTrue(answer: unknown): boolean | Promise<boolean> {
   if (typeof answer !== "object" || answer === null) return answer === true;
