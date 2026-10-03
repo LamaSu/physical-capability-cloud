@@ -79,16 +79,14 @@ const VERSION_PLUS_SHA256 = /^[0-9A-Za-z][0-9A-Za-z.-]*\+sha256\.[0-9a-f]{64}$/;
 /**
  * How the gateway's claimed pack version compares to the pin's own shape — for
  * the mismatch log (Q1-B). NEVER the string itself: a gateway can put anything,
- * including a credential, in `serverInfo.version`; the log carries only a
- * closed-set SHAPE label and a sha256 prefix (a digest, not the value), so a
- * secret in `reported` can never reach a log line, whatever it looks like.
+ * including a credential, in `serverInfo.version`. The log carries only this
+ * closed-set SHAPE label. Round 7 (243 F3): no digest of the string either, since
+ * a digest of an attacker-chosen value is an offline equality and dictionary oracle.
  */
-function reportedPackShape(reported: unknown): { reportedShape: ReportedPackShape; reportedSha256Prefix: string | null } {
-  if (reported === undefined) return { reportedShape: "absent", reportedSha256Prefix: null };
-  if (typeof reported !== "string") return { reportedShape: "other", reportedSha256Prefix: null };
-  const reportedSha256Prefix = createHash("sha256").update(reported).digest("hex").slice(0, 16);
-  const reportedShape: ReportedPackShape = VERSION_PLUS_SHA256.test(reported) ? "version+sha256" : BARE_VERSION.test(reported) ? "bare-version" : "other";
-  return { reportedShape, reportedSha256Prefix };
+function reportedPackShape(reported: unknown): ReportedPackShape {
+  if (reported === undefined) return "absent";
+  if (typeof reported !== "string") return "other";
+  return VERSION_PLUS_SHA256.test(reported) ? "version+sha256" : BARE_VERSION.test(reported) ? "bare-version" : "other";
 }
 
 /** F3 (round 4, 224a): a CLOSED set. `other` is anything that is not even an
@@ -143,6 +141,22 @@ function errorCategoryUnsafe(err: unknown): ErrorCategory {
   return "Error";
 }
 
+/**
+ * A logger that cannot throw (round 7, 243 F1). A log line is a side effect, never an answer, so a
+ * logger's own failure is dropped. A throw inside the error handler would hand the logger's error to
+ * Fastify's fallback handler, which serializes it to the caller, or, for a value whose prototype read
+ * throws, never answers at all.
+ */
+export function totalLog(log: (line: string) => void): (line: string) => void {
+  return (line) => {
+    try {
+      log(line);
+    } catch {
+      // Dropped: a failed log line never becomes an answer.
+    }
+  };
+}
+
 /*
  * astra 242's class, closed at every route: a thrown value is read ONLY inside the total functions
  * below (a throwing getter, a proxy trap or a revoked proxy can make any read throw, `instanceof`
@@ -150,10 +164,10 @@ function errorCategoryUnsafe(err: unknown): ErrorCategory {
  */
 
 /** The log line for a session that failed to open. A pack mismatch carries the pin from this
- * service's OWN config and only the shape and digest of what the gateway reported. */
+ * service's OWN config and only the closed shape of what the gateway reported. */
 function openFailureLine(err: unknown, expected: string): Record<string, unknown> {
   try {
-    if (err instanceof PackMismatch) return { event: "pack-mismatch", expected, ...reportedPackShape(err.reported) };
+    if (err instanceof PackMismatch) return { event: "pack-mismatch", expected, reportedShape: reportedPackShape(err.reported) };
   } catch {
     // Not provably a pack mismatch: the generic line below.
   }
@@ -202,7 +216,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
   const maxChars = opts.maxMessageChars ?? 8_000;
   const maxTurns = opts.maxTurns ?? 80;
   const idleMs = opts.idleMs ?? 30 * 60_000;
-  const log = opts.log ?? ((line: string) => console.log(line));
+  const log = totalLog(opts.log ?? ((line: string) => console.log(line)));
   const generic = { error: "agent_unavailable" } as const;
 
   // No route answers with a thrown value's text. A client error is Fastify's own, raised while it

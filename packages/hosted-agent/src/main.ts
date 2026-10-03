@@ -27,13 +27,75 @@ import Database from "better-sqlite3";
 import { BudgetMeter, type BudgetCaps, type MessagesClient, type ModelPrice } from "./budget.js";
 import { loadPinnedPack, PackPinMismatch, type PackPin, type PinnedPack } from "./pack.js";
 import { gatewayPrincipal } from "./principal.js";
-import { buildServer, type ServerOptions } from "./server.js";
+import { buildServer, errorCategory, totalLog, type ServerOptions } from "./server.js";
 import type { AttemptReport } from "./session.js";
 import { connectMcp } from "./tools.js";
 
+/** The variables readConfig validates: a closed set (round 7, 243 F2). */
+export type ConfigVariable =
+  | "PCC_HOSTED_GATEWAY_BASE"
+  | "PCC_HOSTED_PACK_SHA256"
+  | "PCC_HOSTED_PORT"
+  | "PCC_HOSTED_L2"
+  | "PCC_HOSTED_TRUSTED_PROXY_HOPS"
+  | "PCC_HOSTED_PACK_VERSION"
+  | "PCC_HOSTED_MODEL"
+  | "PCC_HOSTED_PRICE_INPUT_USD_PER_MTOK"
+  | "PCC_HOSTED_PRICE_OUTPUT_USD_PER_MTOK"
+  | "PCC_HOSTED_CAP_SESSION_USD"
+  | "PCC_HOSTED_CAP_USER_DAY_USD"
+  | "PCC_HOSTED_CAP_MONTH_USD"
+  | "PCC_HOSTED_SPEND_DB";
+const CONFIG_VARIABLE: Readonly<Record<ConfigVariable, true>> = {
+  PCC_HOSTED_GATEWAY_BASE: true,
+  PCC_HOSTED_PACK_SHA256: true,
+  PCC_HOSTED_PORT: true,
+  PCC_HOSTED_L2: true,
+  PCC_HOSTED_TRUSTED_PROXY_HOPS: true,
+  PCC_HOSTED_PACK_VERSION: true,
+  PCC_HOSTED_MODEL: true,
+  PCC_HOSTED_PRICE_INPUT_USD_PER_MTOK: true,
+  PCC_HOSTED_PRICE_OUTPUT_USD_PER_MTOK: true,
+  PCC_HOSTED_CAP_SESSION_USD: true,
+  PCC_HOSTED_CAP_USER_DAY_USD: true,
+  PCC_HOSTED_CAP_MONTH_USD: true,
+  PCC_HOSTED_SPEND_DB: true,
+};
+
+/** What was wrong with a variable: a closed set, each with its own fixed text. A variable's VALUE is
+ * never part of the error, so a secret pasted into the wrong variable is never echoed into a log. */
+export type ConfigProblem =
+  | "required"
+  | "not-a-url"
+  | "userinfo"
+  | "not-sha256-hex"
+  | "not-a-port"
+  | "not-a-flag"
+  | "not-an-integer"
+  | "too-many-hops"
+  | "not-a-decimal"
+  | "too-large"
+  | "too-many-decimals";
+const CONFIG_PROBLEM_TEXT: Readonly<Record<ConfigProblem, string>> = {
+  required: "is required",
+  "not-a-url": "is not a URL",
+  userinfo: "must not contain userinfo (a credential in the URL itself)",
+  "not-sha256-hex": "must be 64 lowercase hex digits",
+  "not-a-port": "must be a TCP port",
+  "not-a-flag": 'must be "1" or "0"',
+  "not-an-integer": "must be a non-negative integer",
+  "too-many-hops": "must be at most 8",
+  "not-a-decimal": "is not a plain non-negative decimal",
+  "too-large": "is too large",
+  "too-many-decimals": "must have at most 3 decimal places (an integer nano-USD per token)",
+};
+
 export class ConfigError extends Error {
-  constructor(readonly variable: string, detail: string) {
-    super(`${variable}: ${detail}`);
+  constructor(
+    readonly variable: ConfigVariable,
+    readonly problem: ConfigProblem,
+  ) {
+    super(`${variable}: ${CONFIG_PROBLEM_TEXT[problem]}`);
     this.name = "ConfigError";
   }
 }
@@ -54,25 +116,25 @@ export interface HostedConfig {
   readonly trustedProxyHops: number;
 }
 
-function required(env: NodeJS.ProcessEnv, name: string): string {
+function required(env: NodeJS.ProcessEnv, name: ConfigVariable): string {
   const v = env[name];
-  if (v === undefined || v.trim() === "") throw new ConfigError(name, "is required");
+  if (v === undefined || v.trim() === "") throw new ConfigError(name, "required");
   return v.trim();
 }
 
 /** An exact decimal (up to 9 places) as an integer number of billionths. */
-function billionths(value: string, name: string): number {
+function billionths(value: string, name: ConfigVariable): number {
   const m = /^(\d+)(?:\.(\d{1,9}))?$/.exec(value);
-  if (!m) throw new ConfigError(name, `"${value}" is not a plain non-negative decimal`);
+  if (!m) throw new ConfigError(name, "not-a-decimal");
   const n = Number(m[1]) * 1_000_000_000 + Number((m[2] ?? "").padEnd(9, "0"));
-  if (!Number.isSafeInteger(n)) throw new ConfigError(name, "is too large");
+  if (!Number.isSafeInteger(n)) throw new ConfigError(name, "too-large");
   return n;
 }
 
 /** USD per million tokens → integer nano-USD per token (USD/MTok × 1000). */
-function nanoPerToken(value: string, name: string): number {
+function nanoPerToken(value: string, name: ConfigVariable): number {
   const b = billionths(value, name);
-  if (b % 1_000_000 !== 0) throw new ConfigError(name, "must have at most 3 decimal places (an integer nano-USD per token)");
+  if (b % 1_000_000 !== 0) throw new ConfigError(name, "too-many-decimals");
   return b / 1_000_000;
 }
 
@@ -82,7 +144,7 @@ export function readConfig(env: NodeJS.ProcessEnv): HostedConfig {
   try {
     gatewayUrl = new URL(gatewayBase);
   } catch {
-    throw new ConfigError("PCC_HOSTED_GATEWAY_BASE", "is not a URL");
+    throw new ConfigError("PCC_HOSTED_GATEWAY_BASE", "not-a-url");
   }
   // P1 (round 5, 239): credentials never enter tool output AT FETCH TIME --
   // a userinfo-bearing gateway base would put a credential on every outgoing
@@ -91,19 +153,19 @@ export function readConfig(env: NodeJS.ProcessEnv): HostedConfig {
   // deploy-time config, never a per-user address, so it has no legitimate
   // reason to carry one.
   if (gatewayUrl.username !== "" || gatewayUrl.password !== "") {
-    throw new ConfigError("PCC_HOSTED_GATEWAY_BASE", "must not contain userinfo (a credential in the URL itself)");
+    throw new ConfigError("PCC_HOSTED_GATEWAY_BASE", "userinfo");
   }
   const sha256 = required(env, "PCC_HOSTED_PACK_SHA256");
-  if (!/^[0-9a-f]{64}$/.test(sha256)) throw new ConfigError("PCC_HOSTED_PACK_SHA256", "must be 64 lowercase hex digits");
+  if (!/^[0-9a-f]{64}$/.test(sha256)) throw new ConfigError("PCC_HOSTED_PACK_SHA256", "not-sha256-hex");
   const portRaw = env.PCC_HOSTED_PORT?.trim() || "4420";
   const port = Number(portRaw);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new ConfigError("PCC_HOSTED_PORT", "must be a TCP port");
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new ConfigError("PCC_HOSTED_PORT", "not-a-port");
   const l2 = env.PCC_HOSTED_L2?.trim() ?? "";
-  if (l2 !== "" && l2 !== "0" && l2 !== "1") throw new ConfigError("PCC_HOSTED_L2", 'must be "1" or "0"');
+  if (l2 !== "" && l2 !== "0" && l2 !== "1") throw new ConfigError("PCC_HOSTED_L2", "not-a-flag");
   const hopsRaw = required(env, "PCC_HOSTED_TRUSTED_PROXY_HOPS");
-  if (!/^\d+$/.test(hopsRaw)) throw new ConfigError("PCC_HOSTED_TRUSTED_PROXY_HOPS", "must be a non-negative integer");
+  if (!/^\d+$/.test(hopsRaw)) throw new ConfigError("PCC_HOSTED_TRUSTED_PROXY_HOPS", "not-an-integer");
   const trustedProxyHops = Number(hopsRaw);
-  if (trustedProxyHops > 8) throw new ConfigError("PCC_HOSTED_TRUSTED_PROXY_HOPS", "must be at most 8");
+  if (trustedProxyHops > 8) throw new ConfigError("PCC_HOSTED_TRUSTED_PROXY_HOPS", "too-many-hops");
   return {
     gatewayBase,
     packUrl: env.PCC_HOSTED_PACK_URL?.trim() || new URL("/agent-package.json", gatewayBase).toString(),
@@ -147,9 +209,11 @@ export function attemptSink(
   log: (line: string) => void = (l) => console.log(l),
 ): (report: AttemptReport) => Promise<void> {
   const url = new URL("/api/feedback", gatewayBase).toString();
+  // Round 7 (243 F1): the sink never throws, so its logger must not either.
+  const safeLog = totalLog(log);
   let notAcceptedLogged = false;
   return async (report) => {
-    log(JSON.stringify({ attempt: report }));
+    safeLog(JSON.stringify({ attempt: report }));
     let accepted = false;
     try {
       const res = await fetch(url, {
@@ -167,22 +231,28 @@ export function attemptSink(
     }
     if (!accepted && !notAcceptedLogged) {
       notAcceptedLogged = true;
-      log(JSON.stringify({ event: "attempt-report-not-accepted" }));
+      safeLog(JSON.stringify({ event: "attempt-report-not-accepted" }));
     }
   };
 }
 
 /**
- * R4 (round 3, check only): on a non-2xx response, the message carries only
- * the operator's OWN configured `url` and the numeric status — never
- * `res.statusText`, the response body, or `res.url` (the post-redirect
- * location), any of which the upstream gateway (or whatever a redirect
- * pointed at) controls. Exported so the property is tested directly, not just
- * read.
+ * A pack fetch answered with a non-2xx status. It carries the numeric status
+ * only. R4 (round 3): never `res.statusText`, the response body or `res.url`
+ * (the post-redirect location), which the upstream controls. Round 7 (243 F2):
+ * not the configured URL either, since an operator's pack URL may carry a token.
  */
+export class PackFetchFailed extends Error {
+  constructor(readonly status: number) {
+    super(`the pack fetch answered ${status}`);
+    this.name = "PackFetchFailed";
+  }
+}
+
+/** Exported so the property is tested directly, not just read. */
 export async function fetchBytes(url: string): Promise<Uint8Array> {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`the pack at ${url} answered ${res.status}`);
+  if (!res.ok) throw new PackFetchFailed(res.status);
   return new Uint8Array(await res.arrayBuffer());
 }
 
@@ -231,20 +301,76 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   console.log(`hosted agent: pack ${pack.version} (${pack.sha256.slice(0, 12)}), L2 ${cfg.l2Enabled ? "on" : "off"}, listening on ${cfg.host}:${cfg.port}`);
 }
 
+const PACK_PIN_FIELD: ReadonlySet<unknown> = new Set(["pin", "sha256", "encoding", "version", "shape"]);
+
+/** Operational error codes a startup failure may name: a closed set, so an operator still sees
+ * EADDRINUSE or SQLITE_CANTOPEN, and nothing else a thrown value carries. */
+const STARTUP_CODE: ReadonlySet<unknown> = new Set([
+  "EADDRINUSE",
+  "EADDRNOTAVAIL",
+  "EACCES",
+  "EPERM",
+  "ENOENT",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "SQLITE_CANTOPEN",
+  "SQLITE_READONLY",
+  "SQLITE_CORRUPT",
+  "SQLITE_NOTADB",
+  "SQLITE_BUSY",
+  "SQLITE_FULL",
+  "SQLITE_PERM",
+]);
+
 /**
- * The line to log for a startup failure (Q1-B round 2). `loadPinnedPack`'s
- * "version" PackPinMismatch echoes the served pack's own `version` field in
- * its message — the SAME upstream trust boundary as the MCP handshake's
- * `serverInfo.version` (Q1-B's original finding), since a compromised or
- * misconfigured gateway serves both. So a PackPinMismatch logs only its
- * closed-set `field`, never the message. Every other startup error (a
- * ConfigError, a pack-fetch HTTP failure) is built entirely from the
- * operator's OWN env vars and config, never from an upstream or caller
- * string, so its message is safe to log in full for operator debugging.
+ * The line to log for a startup failure. main().catch hands it every startup
+ * rejection: a config error, a pack fetch or pin failure, the spend database,
+ * the listener. Round 7 (243 F2): it is TOTAL and CLOSED. No message is ever
+ * logged; each failure becomes an event plus fields from closed sets:
+ * - a config error's variable and problem code;
+ * - a pin mismatch's field (its message echoes the served pack: Q1-B round 2);
+ * - a pack fetch's HTTP status;
+ * - otherwise the closed category plus an operational code (the error's own,
+ *   or its cause's) from STARTUP_CODE.
+ * Every read happens inside one try, so a hostile value logs the generic line.
  */
 export function formatStartupFailure(err: unknown): string {
-  if (err instanceof PackPinMismatch) return JSON.stringify({ event: "pack-pin-mismatch", field: err.field });
-  return err instanceof Error ? err.message : String(err);
+  return JSON.stringify(startupFailureLine(err));
+}
+
+function startupFailureLine(err: unknown): Record<string, unknown> {
+  try {
+    if (err instanceof PackPinMismatch) {
+      const field: unknown = err.field;
+      return PACK_PIN_FIELD.has(field) ? { event: "pack-pin-mismatch", field } : { event: "pack-pin-mismatch" };
+    }
+    if (err instanceof ConfigError) {
+      const variable: unknown = err.variable;
+      const problem: unknown = err.problem;
+      return {
+        event: "config-error",
+        ...(typeof variable === "string" && Object.hasOwn(CONFIG_VARIABLE, variable) ? { variable } : {}),
+        ...(typeof problem === "string" && Object.hasOwn(CONFIG_PROBLEM_TEXT, problem) ? { problem } : {}),
+      };
+    }
+    if (err instanceof PackFetchFailed) {
+      const status: unknown = err.status;
+      return { event: "pack-fetch-failed", ...(Number.isInteger(status) && (status as number) >= 100 && (status as number) <= 599 ? { status } : {}) };
+    }
+    const code: unknown = (err as { code?: unknown } | null)?.code;
+    const cause: unknown = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+    return {
+      event: "startup-failed",
+      error: errorCategory(err),
+      ...(STARTUP_CODE.has(code) ? { code } : {}),
+      ...(STARTUP_CODE.has(cause) ? { cause } : {}),
+    };
+  } catch {
+    return { event: "startup-failed", error: "other" };
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

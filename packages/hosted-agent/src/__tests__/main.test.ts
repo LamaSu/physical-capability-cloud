@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { BudgetMeter } from "../budget.js";
 import type { PinnedPack } from "../pack.js";
 import { PackPinMismatch } from "../pack.js";
-import { readConfig, ConfigError, createAnthropicClient, buildServerOptions, formatStartupFailure } from "../main.js";
+import { readConfig, ConfigError, PackFetchFailed, createAnthropicClient, buildServerOptions, formatStartupFailure } from "../main.js";
 
 const ENV: NodeJS.ProcessEnv = {
   PCC_HOSTED_GATEWAY_BASE: "http://127.0.0.1:4310",
@@ -284,20 +284,23 @@ describe("a startup failure never logs an upstream-served pack field verbatim (Q
     }
   });
 
-  it("any other startup error still logs its message (operator-set config, never upstream- or caller-derived)", () => {
-    const line = formatStartupFailure(new ConfigError("PCC_HOSTED_GATEWAY_BASE", "is not a URL"));
-    expect(line).toContain("PCC_HOSTED_GATEWAY_BASE");
-    expect(line).toContain("is not a URL");
+  // Round 7 (243 F2): a config error is logged as its closed variable and problem code, never as text.
+  it("a config error logs its variable and closed problem code, never a message", () => {
+    expect(JSON.parse(formatStartupFailure(new ConfigError("PCC_HOSTED_GATEWAY_BASE", "not-a-url")))).toEqual({
+      event: "config-error",
+      variable: "PCC_HOSTED_GATEWAY_BASE",
+      problem: "not-a-url",
+    });
   });
 
-  it("a non-Error throw is stringified, not thrown again", () => {
+  it("a non-Error throw is logged as the closed generic line, not stringified and not thrown again", () => {
     expect(() => formatStartupFailure("plain string failure")).not.toThrow();
-    expect(formatStartupFailure("plain string failure")).toContain("plain string failure");
+    expect(JSON.parse(formatStartupFailure("plain string failure"))).toEqual({ event: "startup-failed", error: "other" });
   });
 });
 
 describe("R4 (round 3, check only): pack.ts fetch errors carry no upstream text", () => {
-  it("fetchBytes' HTTP-failure message holds only the operator's own URL and a numeric status — never statusText, the body, or a redirect location", async () => {
+  it("fetchBytes' HTTP failure carries only the numeric status (round 7: not even the configured URL) — never statusText, the body, or a redirect location", async () => {
     const http = await import("node:http");
     const { fetchBytes } = await import("../main.js");
     const server = http.createServer((req, res) => {
@@ -316,13 +319,13 @@ describe("R4 (round 3, check only): pack.ts fetch errors carry no upstream text"
         (e: unknown) => e as Error,
       );
       expect(err).toBeInstanceOf(Error);
-      expect(err!.message).toBe(`the pack at ${url} answered 502`);
+      expect(err!.message).toBe("the pack fetch answered 502");
+      expect((err as unknown as { status: unknown }).status).toBe(502);
       expect(err!.message).not.toContain("pcc_live_SyntheticUpstreamStatusText0009");
       expect(err!.message).not.toContain("pcc_live_SyntheticUpstreamBody0011");
       expect(err!.message).not.toContain("attacker.example");
-      // formatStartupFailure passes a plain Error's message through (it is not a
-      // PackPinMismatch); confirmed here that doing so is still safe for THIS message.
-      expect(formatStartupFailure(err)).toBe(err!.message);
+      // Round 7 (243 F2): the startup line carries the status as a closed field, never a message.
+      expect(JSON.parse(formatStartupFailure(err))).toEqual({ event: "pack-fetch-failed", status: 502 });
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
@@ -336,5 +339,190 @@ describe("R4 (round 3, check only): pack.ts fetch errors carry no upstream text"
       expect(line).not.toContain("pcc_live_SyntheticServedValue0012");
       expect(JSON.parse(line)).toEqual({ event: "pack-pin-mismatch", field });
     }
+  });
+});
+
+/**
+ * Round 7 (243 F2, HIGH): the startup-failure line is TOTAL and CLOSED. main().catch hands every
+ * startup rejection to formatStartupFailure: a config error, a pack fetch or pin failure, the spend
+ * database, the listener. None of their text is logged. Each becomes an event plus closed fields: the
+ * variable and a problem code, the pin field, an HTTP status, or an operational error code.
+ */
+describe("round 7: every startup failure line is total and closed", () => {
+  const MARK = "StartupFixture243";
+  const VARIABLES = [
+    "PCC_HOSTED_GATEWAY_BASE",
+    "PCC_HOSTED_PACK_SHA256",
+    "PCC_HOSTED_PORT",
+    "PCC_HOSTED_L2",
+    "PCC_HOSTED_TRUSTED_PROXY_HOPS",
+    "PCC_HOSTED_PACK_VERSION",
+    "PCC_HOSTED_MODEL",
+    "PCC_HOSTED_PRICE_INPUT_USD_PER_MTOK",
+    "PCC_HOSTED_PRICE_OUTPUT_USD_PER_MTOK",
+    "PCC_HOSTED_CAP_SESSION_USD",
+    "PCC_HOSTED_CAP_USER_DAY_USD",
+    "PCC_HOSTED_CAP_MONTH_USD",
+    "PCC_HOSTED_SPEND_DB",
+  ];
+  const PROBLEMS = ["required", "not-a-url", "userinfo", "not-sha256-hex", "not-a-port", "not-a-flag", "not-an-integer", "too-many-hops", "not-a-decimal", "too-large", "too-many-decimals"];
+  const CATEGORIES = ["ConfigError", "PackMismatch", "PackPinMismatch", "BudgetStop", "TimeoutError", "AbortError", "TypeError", "Error", "other"];
+  const CODES = [
+    "EADDRINUSE",
+    "EADDRNOTAVAIL",
+    "EACCES",
+    "EPERM",
+    "ENOENT",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "ENOTFOUND",
+    "ETIMEDOUT",
+    "EAI_AGAIN",
+    "SQLITE_CANTOPEN",
+    "SQLITE_READONLY",
+    "SQLITE_CORRUPT",
+    "SQLITE_NOTADB",
+    "SQLITE_BUSY",
+    "SQLITE_FULL",
+    "SQLITE_PERM",
+  ];
+  function expectClosedStartupLine(line: string): Record<string, unknown> {
+    expect(line).not.toContain(MARK);
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(parsed)) {
+      if (key === "event") expect(["startup-failed", "config-error", "pack-pin-mismatch", "pack-fetch-failed"]).toContain(value);
+      else if (key === "error") expect(CATEGORIES).toContain(value);
+      else if (key === "field") expect(["pin", "sha256", "encoding", "version", "shape"]).toContain(value);
+      else if (key === "variable") expect(VARIABLES).toContain(value);
+      else if (key === "problem") expect(PROBLEMS).toContain(value);
+      else if (key === "status") expect(Number.isInteger(value) && (value as number) >= 100 && (value as number) <= 599).toBe(true);
+      else if (key === "code" || key === "cause") expect(CODES).toContain(value);
+      else expect.unreachable(`a startup line carries a key outside the closed set: ${key}`);
+    }
+    return parsed;
+  }
+  const boom = (): never => {
+    throw new Error(`pcc_live_${MARK}`);
+  };
+
+  it("a plain Error's message never reaches the line", () => {
+    expect(expectClosedStartupLine(formatStartupFailure(new Error(`pcc_live_${MARK}`)))).toEqual({ event: "startup-failed", error: "Error" });
+  });
+
+  it("a thrown string is closed too", () => {
+    expect(expectClosedStartupLine(formatStartupFailure(`pcc_live_${MARK}`))).toEqual({ event: "startup-failed", error: "other" });
+  });
+
+  it.each([
+    [
+      "an Error whose message getter throws",
+      () => {
+        const e = new Error("x");
+        Object.defineProperty(e, "message", { get: boom });
+        return e;
+      },
+    ],
+    ["a Proxy whose getPrototypeOf trap throws", () => new Proxy(new Error("x"), { getPrototypeOf: boom })],
+    [
+      "a revoked Proxy",
+      () => {
+        const r = Proxy.revocable({}, {});
+        r.revoke();
+        return r.proxy;
+      },
+    ],
+    ["a ConfigError claimant with a secret in every field", () => new Proxy(Object.create(ConfigError.prototype) as object, { get: () => `pcc_live_${MARK}` })],
+    ["a PackPinMismatch claimant with a secret in every field", () => new Proxy(Object.create(PackPinMismatch.prototype) as object, { get: () => `pcc_live_${MARK}` })],
+    ["a PackFetchFailed claimant with a secret in every field", () => new Proxy(Object.create(PackFetchFailed.prototype) as object, { get: () => `pcc_live_${MARK}` })],
+    ["an Error whose code is a secret", () => Object.assign(new Error("x"), { code: `pcc_live_${MARK}` })],
+    ["an Error whose cause's code is a secret", () => new Error("x", { cause: { code: `pcc_live_${MARK}` } })],
+    [
+      "an Error whose code getter throws",
+      () => {
+        const e = new Error("x");
+        Object.defineProperty(e, "code", { get: boom });
+        return e;
+      },
+    ],
+  ])("a hostile value (%s) never throws out of the formatter, and its line is closed", (_label, make) => {
+    const value = make();
+    let line = "";
+    expect(() => {
+      line = formatStartupFailure(value);
+    }).not.toThrow();
+    expectClosedStartupLine(line);
+  });
+
+  it("a pack fetch that fails logs its status, never the URL (an operator's pack URL may carry a token)", async () => {
+    const http = await import("node:http");
+    const { fetchBytes } = await import("../main.js");
+    const server = http.createServer((_req, res) => {
+      res.statusCode = 404;
+      res.end("no");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const err = await fetchBytes(`http://127.0.0.1:${port}/agent-package.json?token=pcc_live_${MARK}`).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(expectClosedStartupLine(formatStartupFailure(err))).toEqual({ event: "pack-fetch-failed", status: 404 });
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it("a misplaced secret in a config value is never echoed, by the error or by the line", async () => {
+    const { main } = await import("../main.js");
+    const err = await main({ ...ENV, PCC_HOSTED_CAP_SESSION_USD: `pcc_live_${MARK}` }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).not.toContain(MARK);
+    expect(expectClosedStartupLine(formatStartupFailure(err))).toEqual({ event: "config-error", variable: "PCC_HOSTED_CAP_SESSION_USD", problem: "not-a-decimal" });
+  });
+
+  it("a spend database that cannot open, and a port already in use, log a closed category and operational code", async () => {
+    // better-sqlite3 refuses a missing directory itself, with a plain TypeError and no code.
+    let dirErr: unknown = null;
+    try {
+      new Database("/mnt/sparkbulk/tmp/no-such-dir-243/spend.db");
+    } catch (e) {
+      dirErr = e;
+    }
+    expect(expectClosedStartupLine(formatStartupFailure(dirErr))).toEqual({ event: "startup-failed", error: "TypeError" });
+    // SQLite's own refusal carries its code.
+    let dbErr: unknown = null;
+    try {
+      new Database("/mnt/sparkbulk/tmp/no-such-file-243.db", { fileMustExist: true });
+    } catch (e) {
+      dbErr = e;
+    }
+    expect(expectClosedStartupLine(formatStartupFailure(dbErr))).toEqual({ event: "startup-failed", error: "Error", code: "SQLITE_CANTOPEN" });
+
+    const net = await import("node:net");
+    const first = net.createServer();
+    await new Promise<void>((r) => first.listen(0, "127.0.0.1", r));
+    try {
+      const port = (first.address() as { port: number }).port;
+      const second = net.createServer();
+      const listenErr = await new Promise<unknown>((r) => {
+        second.once("error", r);
+        second.listen(port, "127.0.0.1");
+      });
+      expect(expectClosedStartupLine(formatStartupFailure(listenErr))).toEqual({ event: "startup-failed", error: "Error", code: "EADDRINUSE" });
+    } finally {
+      await new Promise<void>((r) => first.close(() => r()));
+    }
+  });
+
+  it("243 F1 (the report sink's logger): the sink never rejects, even when its logger throws", async () => {
+    const { attemptSink } = await import("../main.js");
+    const sink = attemptSink("http://127.0.0.1:9", () => {
+      throw Object.assign(new Error(`pcc_live_${MARK}`), { statusCode: 400 });
+    });
+    await expect(sink({ kind: "attempt", contract: 1, sessionId: "6f1c2a4e-8b7d-4c3f-9a21-0d5e6b7c8f90", seq: 0 } as never)).resolves.toBeUndefined();
   });
 });

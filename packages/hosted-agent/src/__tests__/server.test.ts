@@ -67,6 +67,8 @@ function setup(
     reportError?: unknown;
     /** Every tool caller throws this value as-is (the session's tool-builder seam), bypassing packTools' own closing. */
     callerThrows?: unknown;
+    /** The injected logger records each line, then throws this value. */
+    logThrows?: unknown;
     trustProxy?: number | boolean;
     toolGate?: Promise<void>;
   } = {},
@@ -130,7 +132,10 @@ function setup(
   const app = buildServer({
     deps,
     resolvePrincipal: o.resolvePrincipal ?? anyCredential,
-    log: (line) => logs.push(line),
+    log: (line) => {
+      logs.push(line);
+      if (o.logThrows !== undefined) throw o.logThrows;
+    },
     maxTurns: o.maxTurns,
     idleMs: 60_000,
     now: () => clock.t,
@@ -704,14 +709,12 @@ describe("the pack-mismatch log never contains the reported string (Q1-B round 2
     expect(logged).not.toContain("pcc_live");
   });
 
-  it("Q1-B: the log carries expected, reportedShape and a sha256 prefix, never the raw reported field", async () => {
+  // Round 7 (243 F3): no digest of the reported string either (an equality/dictionary oracle).
+  it("Q1-B: the log carries expected and reportedShape only, never the reported field or any digest of it", async () => {
     const { app, logs } = setup({ reported: { version: "pcc_live_SyntheticCredential0001" } });
     await app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
     const line = JSON.parse(logs.find((l) => l.includes("pack-mismatch"))!);
-    expect(line.expected).toBe(`${PACK.version}+sha256.${PACK.sha256}`);
-    expect(line.reportedShape).toBe("other");
-    expect(line.reportedSha256Prefix).toMatch(/^[0-9a-f]{16}$/);
-    expect(line).not.toHaveProperty("reported");
+    expect(line).toEqual({ event: "pack-mismatch", expected: `${PACK.version}+sha256.${PACK.sha256}`, reportedShape: "other" });
     expect(JSON.stringify(line)).not.toContain("pcc_live");
   });
 
@@ -725,7 +728,7 @@ describe("the pack-mismatch log never contains the reported string (Q1-B round 2
     await app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
     const line = JSON.parse(logs.find((l) => l.includes("pack-mismatch"))!);
     expect(line.reportedShape).toBe(shape);
-    if (reported === undefined) expect(line.reportedSha256Prefix).toBeNull();
+    expect(Object.keys(line).sort()).toEqual(["event", "expected", "reportedShape"]);
   });
 });
 
@@ -840,6 +843,22 @@ describe("an outcome that arrives during a message reaches the model (Q6-B, over
   });
 });
 
+/** 243 (Q5): every log line the server writes is built from closed sets only. Each key must be one of
+ * these, and each value a member of its key's set (`expected` is this service's own pin). */
+const LOG_EVENTS = ["server-error", "principal-unresolved", "session-open-failed", "pack-mismatch"];
+const LOG_CATEGORIES = ["ConfigError", "PackMismatch", "PackPinMismatch", "BudgetStop", "TimeoutError", "AbortError", "TypeError", "Error", "other"];
+const LOG_SHAPES = ["absent", "bare-version", "version+sha256", "other"];
+function expectClosedLogLine(line: string): void {
+  const parsed = JSON.parse(line) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key === "event") expect(LOG_EVENTS).toContain(value);
+    else if (key === "error") expect(LOG_CATEGORIES).toContain(value);
+    else if (key === "expected") expect(value).toBe(`${PACK.version}+sha256.${PACK.sha256}`);
+    else if (key === "reportedShape") expect(LOG_SHAPES).toContain(value);
+    else expect.unreachable(`a log line carries a key outside the closed set: ${key}`);
+  }
+}
+
 /**
  * Round 6 (astra 242, Q7): the closed-error property, tested generically at EVERY sink. Whatever an
  * injected dependency throws (the connection, the tool listing, the principal resolver, the model
@@ -896,8 +915,7 @@ describe("round 6: whatever an injected dependency throws, only closed values le
     for (const body of bodies) expect(body).not.toContain(MARK);
     for (const line of env.logs) {
       expect(line).not.toContain(MARK);
-      const parsed = JSON.parse(line) as Record<string, unknown>;
-      if ("error" in parsed) expect(CATEGORIES).toContain(parsed.error);
+      expectClosedLogLine(line);
     }
     expect(JSON.stringify(env.create.mock.calls)).not.toContain(MARK);
     expect(JSON.stringify(env.reports)).not.toContain(MARK);
@@ -917,7 +935,7 @@ describe("round 6: whatever an injected dependency throws, only closed values le
     const res = await env.app.inject({ method: "POST", url: "/session" });
     expect(res.statusCode).toBe(502);
     expect(env.logs.map((l) => JSON.parse(l))).toEqual([
-      { event: "pack-mismatch", expected: `${PACK.version}+sha256.${PACK.sha256}`, reportedShape: "other", reportedSha256Prefix: null },
+      { event: "pack-mismatch", expected: `${PACK.version}+sha256.${PACK.sha256}`, reportedShape: "other" },
     ]);
   });
 
@@ -1008,5 +1026,83 @@ describe("round 6: whatever an injected dependency throws, only closed values le
     expect(res.statusCode).toBe(502);
     expect(res.json()).toEqual({ error: "agent_unavailable" });
     expectClosed(env, res.body);
+  });
+});
+
+/**
+ * Round 7 (243 F1, HIGH): a logger is a dependency too. A log line is a side effect, never an answer:
+ * whatever the injected logger throws, every route answers exactly what it answers with a working
+ * logger, and nothing the logger threw reaches the caller (Fastify's fallback handler would serialize
+ * an error thrown from inside the error handler).
+ */
+describe("round 7: a throwing logger changes no answer", () => {
+  const MARK = "HostileLoggerFixture";
+  const LOGGER_THROWS: Array<[string, () => unknown]> = [
+    ["an Error claiming a client statusCode, with a secret message", () => Object.assign(new Error(`pcc_live_${MARK}`), { statusCode: 400 })],
+    ["an Error claiming a server statusCode, with a secret message", () => Object.assign(new Error(`pcc_live_${MARK}`), { statusCode: 503 })],
+    [
+      "a revoked Proxy",
+      () => {
+        const r = Proxy.revocable({}, {});
+        r.revoke();
+        return r.proxy;
+      },
+    ],
+    ["a bare string", () => `pcc_live_${MARK}`],
+  ];
+
+  it.each(LOGGER_THROWS)("the error handler (a report sink that fails on DELETE), when the logger throws %s", async (_label, make) => {
+    const env = setup({ reportError: new Error("sink down"), logThrows: make() });
+    const id = await open(env.app);
+    const res = await env.app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: "agent_unavailable" });
+    expect(res.body).not.toContain(MARK);
+  });
+
+  it.each(LOGGER_THROWS)("an unresolvable credential still answers 401, when the logger throws %s", async (_label, make) => {
+    const env = setup({ resolvePrincipal: async () => null, logThrows: make() });
+    const res = await env.app.inject({ method: "POST", url: "/session", headers: { authorization: `Bearer ${KEY}` } });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "unauthorized" });
+    expect(res.body).not.toContain(MARK);
+  });
+
+  it.each(LOGGER_THROWS)("a failed open still answers the generic 502, when the logger throws %s", async (_label, make) => {
+    const env = setup({ connectError: new Error("down"), logThrows: make() });
+    const res = await env.app.inject({ method: "POST", url: "/session" });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: "agent_unavailable" });
+    expect(res.body).not.toContain(MARK);
+    expect(env.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(LOGGER_THROWS)("a pack mismatch still answers the generic 502, when the logger throws %s", async (_label, make) => {
+    const env = setup({ reported: { version: "9.9.9" }, logThrows: make() });
+    const res = await env.app.inject({ method: "POST", url: "/session" });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: "agent_unavailable" });
+    expect(res.body).not.toContain(MARK);
+  });
+});
+
+/**
+ * Round 7 (243 F3, MEDIUM): the pack-mismatch line carries nothing derived from the reported string
+ * except its closed shape, so it is no equality or dictionary oracle: two reported strings of the same
+ * shape log the same line.
+ */
+describe("round 7: the pack-mismatch log line is no oracle on the reported string", () => {
+  it("two different reported versions of the same shape log byte-identical lines", async () => {
+    const lineFor = async (version: string): Promise<string> => {
+      const env = setup({ reported: { version } });
+      await env.app.inject({ method: "POST", url: "/session" });
+      expect(env.logs).toHaveLength(1);
+      return env.logs[0]!;
+    };
+    const a = await lineFor("candidate-A");
+    const b = await lineFor("candidate-B");
+    expect(a).toBe(b);
+    expect(JSON.parse(a)).toEqual({ event: "pack-mismatch", expected: `${PACK.version}+sha256.${PACK.sha256}`, reportedShape: "bare-version" });
+    expectClosedLogLine(a);
   });
 });
