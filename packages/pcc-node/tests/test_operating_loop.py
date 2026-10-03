@@ -10,12 +10,20 @@ complete() calls.
 
 from __future__ import annotations
 
+import math
+import os
+import tempfile
 import threading
+import time
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from pcc_node.operating.envelope import check_envelope, check_params
 from pcc_node.operating.loop import (
     CompleteAck,
+    CompletionNotAccepted,
+    DeviceLock,
     DeviceRuntime,
     Job,
     JobPort,
@@ -25,6 +33,7 @@ from pcc_node.operating.loop import (
     run_loop,
     run_once,
 )
+from pcc_node.operating.devicelock import HostDeviceLock
 from pcc_node.operating.profile import build_r0_plate_reader_profile
 
 
@@ -119,6 +128,39 @@ class FakeGate:
 OPEN = FakeGate(True)
 
 
+class FakeLock:
+    """The device hold and one-shot record: holds unless told otherwise; records each job key once."""
+
+    def __init__(self, *, holds=True, raise_on=None):
+        self.holds = holds
+        self.raise_on = raise_on  # "acquire" or "consume": that call raises
+        self.held = False
+        self.consumed = set()
+        self.calls = []
+
+    def acquire(self):
+        self.calls.append("acquire")
+        if self.raise_on == "acquire":
+            raise OSError("lock directory unusable")
+        if not self.holds or self.held:
+            return False
+        self.held = True
+        return True
+
+    def release(self):
+        self.calls.append("release")
+        self.held = False
+
+    def consume(self, key):
+        self.calls.append("consume")
+        if self.raise_on == "consume":
+            raise OSError("record not durable")
+        if key in self.consumed:
+            return False
+        self.consumed.add(key)
+        return True
+
+
 class ProtocolShapeTests(unittest.TestCase):
     """DeviceRuntime/JobPort are structural Protocols; fakes satisfy them
     without inheriting from them."""
@@ -142,13 +184,13 @@ class RunOnceTests(unittest.TestCase):
         evidence = {"readings": {"A1": 0.1}}
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence=evidence))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(len(runtime.run_calls), 1)
         self.assertEqual(runtime.run_calls[0]["operation"], self.op)
         self.assertEqual(runtime.run_calls[0]["params"], params)
         self.assertEqual(
-            outcome, Outcome(ran=True, passed=True, reason=None, evidence=evidence)
+            outcome, Outcome(ran=True, passed=True, reason=None, evidence=evidence, completion_accepted=True)
         )
         self.assertEqual(jobs.report_calls, [("j1", evidence)])
         self.assertEqual(jobs.complete_calls, [("j1", True, None)])
@@ -158,10 +200,10 @@ class RunOnceTests(unittest.TestCase):
         jobs = FakeJobPort(params_by_job={})  # resolve_params -> None
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(runtime.run_calls, [])
-        self.assertEqual(outcome, Outcome(ran=False, passed=False, reason="params_unresolved", evidence=None))
+        self.assertEqual(outcome, Outcome(ran=False, passed=False, reason="params_unresolved", evidence=None, completion_accepted=True))
         self.assertEqual(jobs.complete_calls, [("j2", False, "params_unresolved")])
 
     def test_params_invalid_wrong_plate_format(self):
@@ -171,7 +213,7 @@ class RunOnceTests(unittest.TestCase):
         jobs = FakeJobPort(params_by_job={"j3": params})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(runtime.run_calls, [])
         self.assertFalse(outcome.ran)
@@ -185,7 +227,7 @@ class RunOnceTests(unittest.TestCase):
         jobs = FakeJobPort(params_by_job={"j4": params})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(runtime.run_calls, [])
         self.assertTrue(outcome.reason.startswith("params_invalid"))
@@ -197,7 +239,7 @@ class RunOnceTests(unittest.TestCase):
         jobs = FakeJobPort(params_by_job={"j5": params})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(runtime.run_calls, [])
         self.assertTrue(outcome.reason.startswith("params_invalid"))
@@ -212,7 +254,7 @@ class RunOnceTests(unittest.TestCase):
                     idle=True, result=RuntimeResult(ok=True, evidence={"x": 1})
                 )
 
-                outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+                outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
                 self.assertEqual(runtime.run_calls, [])
                 self.assertTrue(outcome.reason.startswith("params_invalid"))
@@ -223,7 +265,7 @@ class RunOnceTests(unittest.TestCase):
         jobs = FakeJobPort(params_by_job={"j6": params})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(runtime.run_calls, [])
         self.assertTrue(outcome.reason.startswith("params_invalid"))
@@ -234,7 +276,7 @@ class RunOnceTests(unittest.TestCase):
         jobs = FakeJobPort(params_by_job={"j7": params})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(runtime.run_calls, [])
         self.assertFalse(outcome.ran)
@@ -247,11 +289,11 @@ class RunOnceTests(unittest.TestCase):
         jobs = FakeJobPort(params_by_job={"j8": params})
         runtime = FakeRuntime(idle=False, result=RuntimeResult(ok=True, evidence={"x": 1}))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(runtime.run_calls, [])
         self.assertEqual(
-            outcome, Outcome(ran=False, passed=False, reason="device_busy", evidence=None)
+            outcome, Outcome(ran=False, passed=False, reason="device_busy", evidence=None, completion_accepted=True)
         )
         self.assertEqual(jobs.complete_calls, [("j8", False, "device_busy")])
 
@@ -261,13 +303,13 @@ class RunOnceTests(unittest.TestCase):
         jobs = FakeJobPort(params_by_job={"j9": params})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence=None))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         # The device WAS touched (ran=True) -- it's the evidence that's
         # missing, and we refuse to fabricate it.
         self.assertEqual(len(runtime.run_calls), 1)
         self.assertEqual(
-            outcome, Outcome(ran=True, passed=False, reason="no_evidence", evidence=None)
+            outcome, Outcome(ran=True, passed=False, reason="no_evidence", evidence=None, completion_accepted=True)
         )
         self.assertEqual(jobs.report_calls, [])  # nothing real to report
         self.assertEqual(jobs.complete_calls, [("j9", False, "no_evidence")])
@@ -280,7 +322,7 @@ class RunOnceTests(unittest.TestCase):
             idle=True, result=RuntimeResult(ok=False, error="adapter_timeout")
         )
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(len(runtime.run_calls), 1)
         self.assertTrue(outcome.ran)
@@ -298,7 +340,7 @@ class RunOnceTests(unittest.TestCase):
             result=RuntimeResult(ok=False, evidence=partial_evidence, error="short_circuit"),
         )
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertTrue(outcome.ran)
         self.assertFalse(outcome.passed)
@@ -314,7 +356,7 @@ class RunOnceTests(unittest.TestCase):
             idle=False, result=RuntimeResult(ok=True, evidence={"x": 1})
         )  # ALSO busy
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(runtime.run_calls, [])
         self.assertTrue(outcome.reason.startswith("params_invalid"))
@@ -325,7 +367,7 @@ class RunOnceTests(unittest.TestCase):
         jobs = FakeJobPort(params_by_job={"j12": valid_params()})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
 
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
 
         self.assertEqual(runtime.run_calls, [])
         self.assertTrue(outcome.reason.startswith("params_invalid"))
@@ -415,7 +457,7 @@ class RunLoopTests(unittest.TestCase):
             idle=True, result=RuntimeResult(ok=True, evidence={"readings": {}})
         )
 
-        run_loop(profile, runtime, jobs, gate=OPEN, stop_event=stop_event, idle_sleep=0.001)
+        run_loop(profile, runtime, jobs, gate=OPEN, lock=FakeLock(), stop_event=stop_event, idle_sleep=0.001)
 
         self.assertEqual([c["operation"] for c in runtime.run_calls], [op, op, op])
         self.assertEqual([c[0] for c in jobs.complete_calls], ["a", "b", "c"])
@@ -431,7 +473,7 @@ class RunLoopTests(unittest.TestCase):
         jobs = FakeJobPort(claim_queue=[Job(job_id="never", operation="runPlate")])
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
 
-        run_loop(profile, runtime, jobs, gate=OPEN, stop_event=stop_event, idle_sleep=0.001)
+        run_loop(profile, runtime, jobs, gate=OPEN, lock=FakeLock(), stop_event=stop_event, idle_sleep=0.001)
 
         self.assertEqual(runtime.run_calls, [])
         self.assertEqual(jobs.claim_calls, [])
@@ -445,7 +487,7 @@ class GatewayAckTests(unittest.TestCase):
         job = Job(job_id="ack", operation="runPlate")
         jobs = FakeJobPort(params_by_job={"ack": valid_params()}, **port_kwargs)
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"readings": {"A1": 0.1}}))
-        return run_once(profile, runtime, jobs, job, gate=OPEN), jobs, runtime
+        return run_once(profile, runtime, jobs, job, gate=OPEN, lock=FakeLock()), jobs, runtime
 
     def test_both_acks_good_is_a_pass(self):
         outcome, jobs, _ = self._run()
@@ -497,7 +539,7 @@ class DeviceStateUnknownTests(unittest.TestCase):
         job = Job(job_id="t", operation="runPlate")
         jobs = FakeJobPort(params_by_job={"t": valid_params()})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=False, error="timeout:device_state_unknown"))
-        outcome = run_once(profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
         self.assertFalse(outcome.passed)
         self.assertTrue(outcome.device_state_unknown)
         self.assertEqual(jobs.complete_calls, [("t", False, "timeout:device_state_unknown")])
@@ -506,7 +548,7 @@ class DeviceStateUnknownTests(unittest.TestCase):
         profile = build_r0_plate_reader_profile()
         jobs = FakeJobPort(params_by_job={"f": valid_params()})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=False, error="bad_run_id"))
-        outcome = run_once(profile, runtime, jobs, Job(job_id="f", operation="runPlate"), gate=OPEN)
+        outcome = run_once(profile, runtime, jobs, Job(job_id="f", operation="runPlate"), gate=OPEN, lock=FakeLock())
         self.assertFalse(outcome.device_state_unknown)
 
     def test_run_loop_never_claims_while_the_device_is_not_idle(self):
@@ -525,7 +567,7 @@ class DeviceStateUnknownTests(unittest.TestCase):
         stop = StopAfterWaits(3)
         jobs = FakeJobPort(claim_queue=[Job(job_id="later", operation="runPlate")])
         runtime = FakeRuntime(idle=False, result=RuntimeResult(ok=True, evidence={"x": 1}))
-        run_loop(profile, runtime, jobs, gate=OPEN, stop_event=stop, idle_sleep=0.001)
+        run_loop(profile, runtime, jobs, gate=OPEN, lock=FakeLock(), stop_event=stop, idle_sleep=0.001)
         self.assertEqual(jobs.claim_calls, [])
         self.assertEqual(runtime.run_calls, [])
         self.assertEqual(jobs.complete_calls, [])
@@ -551,14 +593,14 @@ class GateAndSeamTests(unittest.TestCase):
 
         jobs = FakeJobPort(claim_queue=[Job(job_id="g", operation=self.op)], params_by_job={"g": valid_params()})
         runtime = runtime or FakeRuntime(idle=idle, result=RuntimeResult(ok=True, evidence={"x": 1}))
-        run_loop(self.profile, runtime, jobs, gate=gate, stop_event=StopAfterWaits(waits), idle_sleep=0.001)
+        run_loop(self.profile, runtime, jobs, gate=gate, lock=FakeLock(), stop_event=StopAfterWaits(waits), idle_sleep=0.001)
         return jobs, runtime
 
     def test_run_passes_the_claimed_job_to_the_runtime_as_its_claim(self):
         job = Job(job_id="c1", operation=self.op)
         jobs = FakeJobPort(params_by_job={"c1": valid_params()})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
-        run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
         self.assertIs(runtime.run_calls[0]["claim"], job)
 
     def test_a_closed_gate_claims_nothing(self):
@@ -585,8 +627,8 @@ class GateAndSeamTests(unittest.TestCase):
         job = Job(job_id="s1", operation=self.op)
         jobs = FakeJobPort(params_by_job={"s1": valid_params()})
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
-        outcome = run_once(self.profile, runtime, jobs, job, gate=FakeGate(RuntimeError("down")))
-        self.assertEqual(outcome, Outcome(ran=False, passed=False, reason="emergency_stop", evidence=None))
+        outcome = run_once(self.profile, runtime, jobs, job, gate=FakeGate(RuntimeError("down")), lock=FakeLock())
+        self.assertEqual(outcome, Outcome(ran=False, passed=False, reason="emergency_stop", evidence=None, completion_accepted=True))
         self.assertEqual(runtime.run_calls, [])
         self.assertEqual(jobs.complete_calls, [("s1", False, "emergency_stop")])
 
@@ -599,10 +641,10 @@ class GateAndSeamTests(unittest.TestCase):
         job = Job(job_id="r1", operation=self.op)
         jobs = FakeJobPort(params_by_job={"r1": valid_params()})
         runtime = RaisingRuntime(idle=True)
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
         self.assertEqual(len(runtime.run_calls), 1)
         self.assertEqual(outcome, Outcome(ran=True, passed=False, reason="runtime_error:device_state_unknown",
-                                          evidence=None, device_state_unknown=True))
+                                          evidence=None, device_state_unknown=True, completion_accepted=True))
         self.assertEqual(jobs.complete_calls, [("r1", False, "runtime_error:device_state_unknown")])
         self.assertEqual(jobs.report_calls, [])
 
@@ -610,7 +652,7 @@ class GateAndSeamTests(unittest.TestCase):
         job = Job(job_id="r2", operation=self.op)
         jobs = FakeJobPort(params_by_job={"r2": valid_params()})
         runtime = FakeRuntime(idle=True, result=None)
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
         self.assertTrue(outcome.ran)
         self.assertFalse(outcome.passed)
         self.assertTrue(outcome.device_state_unknown)
@@ -624,7 +666,7 @@ class GateAndSeamTests(unittest.TestCase):
         job = Job(job_id="i1", operation=self.op)
         jobs = FakeJobPort(params_by_job={"i1": valid_params()})
         runtime = Unreachable(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
         self.assertEqual(outcome.reason, "device_busy")
         self.assertEqual(runtime.run_calls, [])
         looped_jobs, looped_runtime = self._loop(OPEN, runtime=Unreachable(idle=True))
@@ -638,9 +680,332 @@ class GateAndSeamTests(unittest.TestCase):
         job = Job(job_id="p1", operation=self.op)
         jobs = Flaky()
         runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
-        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN)
+        outcome = run_once(self.profile, runtime, jobs, job, gate=OPEN, lock=FakeLock())
         self.assertEqual(outcome.reason, "params_unresolved")
         self.assertEqual(runtime.run_calls, [])
+
+
+
+class StopAfterWaits:
+    """A stop_event that stops after n waits, so loop tests end on their own."""
+
+    def __init__(self, n):
+        self.n, self.waits = n, 0
+
+    def is_set(self):
+        return self.waits >= self.n
+
+    def wait(self, _seconds):
+        self.waits += 1
+        return self.is_set()
+
+
+class SharedDevice:
+    """One physical device: counts runs and the most that were ever in progress at once."""
+
+    def __init__(self):
+        self.mutex = threading.Lock()
+        self.active = self.max_active = self.runs = 0
+
+
+class SlowRuntime:
+    """A runtime instance over a SharedDevice. is_idle takes a while, so without a hold two
+    loops would both see the device idle and then both run it."""
+
+    def __init__(self, device, *, idle_delay=0.15, run_delay=0.2):
+        self.device, self.idle_delay, self.run_delay = device, idle_delay, run_delay
+
+    def is_idle(self):
+        time.sleep(self.idle_delay)
+        return True
+
+    def run(self, operation, params, *, claim):
+        with self.device.mutex:
+            self.device.active += 1
+            self.device.runs += 1
+            self.device.max_active = max(self.device.max_active, self.device.active)
+        time.sleep(self.run_delay)
+        with self.device.mutex:
+            self.device.active -= 1
+        return RuntimeResult(ok=True, evidence={"x": 1})
+
+
+class OneDeviceOneRunTests(unittest.TestCase):
+    """astra 554 F1: one device runs one job at a time across loops, and each job runs once."""
+
+    def setUp(self):
+        self.profile = build_r0_plate_reader_profile()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lock_dir = os.path.join(self.tmp.name, "device-locks")
+
+    def _lock(self):
+        lock = HostDeviceLock("http://127.0.0.1:8765", self.lock_dir)
+        self.addCleanup(lock.close)
+        return lock
+
+    def test_two_loops_with_their_own_runtimes_never_drive_one_device_at_once(self):
+        device = SharedDevice()
+        outcomes = {}
+
+        def one(job_id):
+            jobs = FakeJobPort(params_by_job={job_id: valid_params()})
+            outcomes[job_id] = run_once(self.profile, SlowRuntime(device), jobs, Job(job_id, "runPlate"),
+                                        gate=OPEN, lock=self._lock())
+
+        threads = [threading.Thread(target=one, args=(j,)) for j in ("j1", "j2")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        self.assertEqual(device.max_active, 1)
+        self.assertEqual(device.runs, 1)
+        reasons = sorted(str(o.reason) for o in outcomes.values())
+        self.assertEqual(reasons, ["None", "device_locked"])
+
+    def test_the_same_job_runs_once_even_after_a_restart(self):
+        device = SharedDevice()
+        job = Job("again", "runPlate")
+        first = run_once(self.profile, SlowRuntime(device, idle_delay=0, run_delay=0),
+                         FakeJobPort(params_by_job={"again": valid_params()}), job, gate=OPEN, lock=self._lock())
+        # A new lock object on the same directory is what a restarted node would build.
+        jobs = FakeJobPort(params_by_job={"again": valid_params()})
+        second = run_once(self.profile, SlowRuntime(device, idle_delay=0, run_delay=0), jobs, job,
+                          gate=OPEN, lock=self._lock())
+        self.assertTrue(first.passed)
+        self.assertEqual((second.ran, second.reason), (False, "job_already_run"))
+        self.assertEqual(device.runs, 1)
+        self.assertEqual(jobs.complete_calls, [("again", False, "job_already_run")])
+
+    def test_a_new_claim_of_the_same_job_is_a_new_run(self):
+        device = SharedDevice()
+        lock = self._lock()
+        for token in ("claim-1", "claim-2"):
+            job = SimpleNamespace(job_id="requeued", operation="runPlate", claim_token=token)
+            outcome = run_once(self.profile, SlowRuntime(device, idle_delay=0, run_delay=0),
+                               FakeJobPort(params_by_job={"requeued": valid_params()}), job, gate=OPEN, lock=lock)
+            self.assertTrue(outcome.passed, outcome.reason)
+        self.assertEqual(device.runs, 2)
+
+    def test_a_device_held_elsewhere_is_refused_untouched(self):
+        jobs = FakeJobPort(params_by_job={"h": valid_params()})
+        runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+        outcome = run_once(self.profile, runtime, jobs, Job("h", "runPlate"), gate=OPEN, lock=FakeLock(holds=False))
+        self.assertEqual((outcome.ran, outcome.reason), (False, "device_locked"))
+        self.assertEqual(runtime.run_calls, [])
+        self.assertEqual(jobs.complete_calls, [("h", False, "device_locked")])
+
+    def test_a_lock_that_fails_refuses_and_lets_go(self):
+        for raise_on, reason in (("acquire", "device_lock_unavailable"), ("consume", "run_record_unavailable")):
+            lock = FakeLock(raise_on=raise_on)
+            runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+            outcome = run_once(self.profile, runtime, FakeJobPort(params_by_job={"f": valid_params()}),
+                               Job("f", "runPlate"), gate=OPEN, lock=lock)
+            self.assertEqual((outcome.ran, outcome.reason), (False, reason))
+            self.assertEqual(runtime.run_calls, [])
+            self.assertFalse(lock.held)
+
+    def test_the_hold_spans_the_idle_check_the_stop_the_record_and_the_run(self):
+        log = []
+
+        class LoggingLock(FakeLock):
+            def acquire(self):
+                log.append("acquire")
+                return super().acquire()
+
+            def release(self):
+                log.append("release")
+                super().release()
+
+            def consume(self, key):
+                log.append("consume")
+                return super().consume(key)
+
+        class LoggingRuntime(FakeRuntime):
+            def is_idle(self):
+                log.append("is_idle")
+                return True
+
+            def run(self, operation, params, *, claim):
+                log.append("run")
+                return super().run(operation, params, claim=claim)
+
+        gate = SimpleNamespace(allows_jobs=lambda: log.append("gate") or True)
+        run_once(self.profile, LoggingRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1})),
+                 FakeJobPort(params_by_job={"o": valid_params()}), Job("o", "runPlate"), gate=gate, lock=LoggingLock())
+        self.assertEqual(log, ["acquire", "is_idle", "gate", "consume", "run", "release"])
+
+    def test_run_loop_claims_nothing_while_another_loop_holds_the_device(self):
+        jobs = FakeJobPort(claim_queue=[Job("w", "runPlate")], params_by_job={"w": valid_params()})
+        runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+        run_loop(self.profile, runtime, jobs, gate=OPEN, lock=FakeLock(holds=False),
+                 stop_event=StopAfterWaits(3), idle_sleep=0.001)
+        self.assertEqual((jobs.claim_calls, runtime.run_calls), ([], []))
+
+
+class ReportAndCompletionTests(unittest.TestCase):
+    """astra 554 F2 and F3: a report that raises, a completion that raises or is refused."""
+
+    def setUp(self):
+        self.profile = build_r0_plate_reader_profile()
+
+    def test_a_report_that_raises_completes_the_job_as_failed(self):
+        class Raising(FakeJobPort):
+            def report(self, job, evidence):
+                self.report_calls.append((job.job_id, evidence))
+                raise ConnectionError("reset")
+
+        jobs = Raising(params_by_job={"r": valid_params()})
+        runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+        outcome = run_once(self.profile, runtime, jobs, Job("r", "runPlate"), gate=OPEN, lock=FakeLock())
+        self.assertEqual((outcome.ran, outcome.passed, outcome.reason),
+                         (True, False, "evidence_not_stored:report_error"))
+        self.assertEqual(jobs.complete_calls, [("r", False, "evidence_not_stored:report_error")])
+
+    def test_a_failed_runs_report_that_raises_still_completes_the_job(self):
+        class Raising(FakeJobPort):
+            def report(self, job, evidence):
+                raise ConnectionError("reset")
+
+        jobs = Raising(params_by_job={"rf": valid_params()})
+        runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=False, evidence={"partial": 1}, error="device_failed"))
+        outcome = run_once(self.profile, runtime, jobs, Job("rf", "runPlate"), gate=OPEN, lock=FakeLock())
+        self.assertEqual(outcome.reason, "device_failed")
+        self.assertEqual(jobs.complete_calls, [("rf", False, "device_failed")])
+
+    def test_a_completion_that_raises_ends_the_claims_lease_and_stops_the_loop(self):
+        released = []
+        job = SimpleNamespace(job_id="c", operation="runPlate", claim_token="t",
+                              lease=SimpleNamespace(release=lambda: released.append(True)))
+
+        class Raising(FakeJobPort):
+            def complete(self, job, *, passed, reason):
+                raise ConnectionError("gateway down")
+
+        jobs = Raising(params_by_job={"c": valid_params()})
+        with self.assertRaises(ConnectionError):
+            run_once(self.profile, FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1})), jobs, job,
+                     gate=OPEN, lock=FakeLock())
+        self.assertEqual(released, [True])
+
+    def test_an_unaccepted_failed_completion_shows_in_the_outcome(self):
+        jobs = FakeJobPort(params_by_job={}, complete_ack=CompleteAck(status="in_progress", accepted=False))
+        outcome = run_once(self.profile, FakeRuntime(idle=True), jobs, Job("u", "runPlate"), gate=OPEN, lock=FakeLock())
+        self.assertEqual((outcome.reason, outcome.completion_accepted), ("params_unresolved", False))
+
+    def test_an_accepted_failed_completion_shows_in_the_outcome(self):
+        outcome = run_once(self.profile, FakeRuntime(idle=True), FakeJobPort(params_by_job={}), Job("a", "runPlate"),
+                           gate=OPEN, lock=FakeLock())
+        self.assertEqual((outcome.reason, outcome.completion_accepted), ("params_unresolved", True))
+
+    def test_run_loop_stops_at_an_unaccepted_completion_before_claiming_again(self):
+        jobs = FakeJobPort(claim_queue=[Job("bad", "runPlate"), Job("next", "runPlate")],
+                           params_by_job={"next": valid_params()},
+                           complete_ack=CompleteAck(status="in_progress", accepted=False))
+        runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+        with self.assertRaises(CompletionNotAccepted) as stopped:
+            run_loop(self.profile, runtime, jobs, gate=OPEN, lock=FakeLock(), stop_event=StopAfterWaits(5),
+                     idle_sleep=0.001)
+        self.assertEqual(stopped.exception.outcome.reason, "params_unresolved")
+        self.assertEqual(len(jobs.claim_calls), 1)
+        self.assertEqual(runtime.run_calls, [])
+
+    def test_a_claim_next_that_raises_stops_the_loop_with_nothing_run(self):
+        class Raising(FakeJobPort):
+            def claim_next(self, kernel_id):
+                raise ConnectionError("gateway down")
+
+        runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+        with self.assertRaises(ConnectionError):
+            run_loop(self.profile, runtime, Raising(), gate=OPEN, lock=FakeLock(), stop_event=StopAfterWaits(5),
+                     idle_sleep=0.001)
+        self.assertEqual(runtime.run_calls, [])
+
+
+class InputMatrixTests(unittest.TestCase):
+    """astra 554 F4 and F5: inputs that must never reach the device, and seams that answer oddly."""
+
+    def setUp(self):
+        self.profile = build_r0_plate_reader_profile()
+
+    def _refused(self, params):
+        jobs = FakeJobPort(params_by_job={"m": params})
+        runtime = FakeRuntime(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+        outcome = run_once(self.profile, runtime, jobs, Job("m", "runPlate"), gate=OPEN, lock=FakeLock())
+        self.assertEqual(runtime.run_calls, [], params)
+        self.assertFalse(outcome.ran)
+        return outcome.reason
+
+    def test_a_wavelength_that_is_not_an_int_is_refused(self):
+        for value in (True, 450.0, float("nan"), "450"):
+            self.assertTrue(self._refused(valid_params(wavelength_nm=value)).startswith("params_invalid:"), value)
+
+    def test_malformed_wells_are_refused(self):
+        for wells in ([], ["a1"], [1], ["A1", "A1"], ["Z9"], "ALL", None):
+            self.assertTrue(self._refused(valid_params(wells=wells)).startswith("params_invalid:"), wells)
+
+    def test_an_unexpected_parameter_is_refused_not_ignored(self):
+        reason = self._refused({**valid_params(), "lamp": "on"})
+        self.assertIn("unexpected_params:['lamp']", reason)
+
+    def test_keys_of_mixed_types_are_refused_without_raising(self):
+        reason = self._refused({**valid_params(), 1: "x", "extra": "x"})
+        self.assertTrue(reason.startswith("params_invalid:unexpected_params:"), reason)
+
+    def test_a_check_that_raises_is_a_refusal(self):
+        with mock.patch("pcc_node.operating.loop.check_params", side_effect=RuntimeError("boom")):
+            self.assertEqual(self._refused(valid_params()), "params_invalid:unchecked")
+        with mock.patch("pcc_node.operating.loop.check_envelope", side_effect=RuntimeError("boom")):
+            self.assertEqual(self._refused(valid_params()), "envelope_violation:unchecked")
+
+    def test_an_idle_answer_that_is_not_exactly_true_is_busy(self):
+        for answer in ("yes", 1):
+            class Odd(FakeRuntime):
+                def is_idle(self):
+                    return answer
+
+            runtime = Odd(idle=True, result=RuntimeResult(ok=True, evidence={"x": 1}))
+            outcome = run_once(self.profile, runtime, FakeJobPort(params_by_job={"i": valid_params()}),
+                               Job("i", "runPlate"), gate=OPEN, lock=FakeLock())
+            self.assertEqual(outcome.reason, "device_busy", answer)
+            self.assertEqual(runtime.run_calls, [])
+
+    def test_a_result_whose_ok_is_not_a_bool_is_device_state_unknown(self):
+        for ok in (1, "yes"):
+            runtime = FakeRuntime(idle=True, result=SimpleNamespace(ok=ok, evidence={"x": 1}, error=None))
+            jobs = FakeJobPort(params_by_job={"k": valid_params()})
+            outcome = run_once(self.profile, runtime, jobs, Job("k", "runPlate"), gate=OPEN, lock=FakeLock())
+            self.assertEqual((outcome.passed, outcome.reason, outcome.device_state_unknown),
+                             (False, "runtime_bad_result:device_state_unknown", True), ok)
+            self.assertEqual(jobs.report_calls, [])
+
+    def test_the_loop_recovers_once_a_device_in_an_unknown_state_reports_idle(self):
+        class Recovering(FakeRuntime):
+            def __init__(self):
+                super().__init__(idle=True)
+                self.idle_answers = []
+
+            def is_idle(self):
+                answer = not self.run_calls or len(self.idle_answers) >= 4  # busy for a while after the first run
+                if self.run_calls:
+                    self.idle_answers.append(answer)
+                return answer
+
+            def run(self, operation, params, *, claim):
+                super().run(operation, params, claim=claim)
+                if len(self.run_calls) == 1:
+                    return RuntimeResult(ok=False, error="timeout:device_state_unknown")
+                return RuntimeResult(ok=True, evidence={"x": 1})
+
+        stop = threading.Event()
+        jobs = FakeJobPort(claim_queue=[Job("t1", "runPlate"), Job("t2", "runPlate")],
+                           params_by_job={"t1": valid_params(), "t2": valid_params()}, stop_event=stop)
+        runtime = Recovering()
+        run_loop(self.profile, runtime, jobs, gate=OPEN, lock=FakeLock(), stop_event=stop, idle_sleep=0.001)
+        self.assertEqual([c[0] for c in jobs.complete_calls], ["t1", "t2"])
+        self.assertEqual(jobs.complete_calls[0], ("t1", False, "timeout:device_state_unknown"))
+        self.assertEqual(jobs.complete_calls[1], ("t2", True, None))
+        self.assertIn(False, runtime.idle_answers)  # it waited while the device was not idle
 
 
 if __name__ == "__main__":

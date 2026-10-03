@@ -51,9 +51,10 @@ def check_params(op_spec: Any, params: Any) -> List[str]:
         else:
             problems.append(f"{spec_field.name}:unknown_param_kind:{spec_field.kind}")
 
-    extra = sorted(set(params) - declared_names)
+    # Sorted by repr, so keys of mixed types (1 and "x") can never make this raise (astra 554 F4).
+    extra = sorted((repr(k) for k in params if k not in declared_names))
     if extra:
-        problems.append(f"unexpected_params:{extra}")
+        problems.append(f"unexpected_params:[{', '.join(extra)}]")
 
     return problems
 

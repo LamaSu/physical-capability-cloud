@@ -191,6 +191,25 @@ class _OpenGate:
 OPEN = _OpenGate()
 
 
+class _FreeLock:
+    """A device hold that is always free, with a one-shot record (the e2e device is private to this test)."""
+
+    def __init__(self):
+        self.consumed = set()
+
+    def acquire(self):
+        return True
+
+    def release(self):
+        pass
+
+    def consume(self, key):
+        if key in self.consumed:
+            return False
+        self.consumed.add(key)
+        return True
+
+
 def _get(base, path):
     u = urlparse(base)
     c = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
@@ -245,7 +264,7 @@ class OperatingLoopE2ETest(unittest.TestCase):
         profile = build_r0_plate_reader_profile()
         runtime = SimRuntime(self.base)
         jobs = OneJobPort({"plateFormat": "96-well", "wavelengthNm": 450, "wells": ["A1", "H12"]})
-        outcome = run_once(profile, runtime, jobs, Job("job-ok", "runPlate"), gate=OPEN)
+        outcome = run_once(profile, runtime, jobs, Job("job-ok", "runPlate"), gate=OPEN, lock=_FreeLock())
         self.assertTrue(outcome.ran)
         self.assertTrue(outcome.passed, outcome.reason)
         # Real readings came back from the (fake) instrument.
@@ -264,7 +283,7 @@ class OperatingLoopE2ETest(unittest.TestCase):
         runtime = SimRuntime(self.base)
         # wavelength 500 fails the envelope check -> the loop must never POST /runs.
         jobs = OneJobPort({"plateFormat": "96-well", "wavelengthNm": 500, "wells": "all"})
-        outcome = run_once(profile, runtime, jobs, Job("job-bad", "runPlate"), gate=OPEN)
+        outcome = run_once(profile, runtime, jobs, Job("job-bad", "runPlate"), gate=OPEN, lock=_FreeLock())
         self.assertFalse(outcome.ran)
         self.assertFalse(outcome.passed)
         self.assertTrue(outcome.reason.startswith("envelope_violation"), outcome.reason)
