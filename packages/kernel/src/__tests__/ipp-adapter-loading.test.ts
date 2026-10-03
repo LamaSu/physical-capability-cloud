@@ -215,6 +215,40 @@ describe("IppAdapter while its optional `ipp` import loads (astra pack 467)", ()
     expect.soft(quiet, "quiesceEvidence(), once that start settled").toBe(true);
   });
 
+  it("a cancel while `ipp` loads, then dispose: once `ipp` loads, that cancel sends nothing (astra pack 201)", async () => {
+    const requests: string[] = [];
+    const g = await gatedIpp(fakePrinter(requests));
+    const ipp = new g.IppAdapter("ipp-load-cancel-dispose", { uri: URI, kernelId: KERNEL_ID, mockMode: false });
+
+    const cancel = settle(ipp.cancelJob(7));
+    await pause();
+    await ipp.dispose();
+    g.resolve();
+    const result = await cancel;
+    expect.soft(result.error ?? "resolved", "the cancel").toMatch(/disposed/);
+    expect.soft(requests, "printer requests").toEqual([]);
+  });
+
+  it("once disposed, a loaded real adapter sends nothing: a start or a cancel asked after dispose is refused (astra pack 201)", async () => {
+    const requests: string[] = [];
+    const g = await gatedIpp(fakePrinter(requests, { "Print-Job": () => [null, { "job-attributes-tag": { "job-id": 45 } }] }));
+    const ipp = new g.IppAdapter("ipp-disposed-loaded", { uri: URI, kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 60_000 });
+    const events = record(ipp);
+    g.resolve();
+    await vi.dynamicImportSettled();
+    await pause();
+    await ipp.dispose();
+
+    const started = await settle(ipp.execute({ type: "start", payload: { documentData: "%PDF-1.4", jobName: "doc" } }));
+    const cancelled = await settle(ipp.cancelJob(45));
+    expect.soft(started.value?.success, "the start").toBe(false);
+    expect.soft(started.value?.message ?? "", "why").toMatch(/disposed/);
+    expect.soft(cancelled.error ?? "resolved", "the cancel").toMatch(/disposed/);
+    expect.soft(requests, "printer requests").toEqual([]);
+    expect.soft(events, "events").toEqual([]);
+    await ipp.dispose();
+  });
+
   it("a loaded real adapter whose printer query fails rejects getCapabilities(): it never answers with the mock printer's capabilities", async () => {
     const requests: string[] = [];
     const g = await gatedIpp(fakePrinter(requests, { "Get-Printer-Attributes": () => [new Error("connect ECONNREFUSED 192.0.2.10:631"), {}] }));

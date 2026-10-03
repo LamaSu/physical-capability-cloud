@@ -111,7 +111,10 @@ export class IppAdapter implements MachineAdapter {
    * import is a local module load, so it settles.
    */
   private ippLoading: Promise<void> | null = null;
-  /** Set by dispose: a command that waited for `ipp` and finds it set runs nothing. */
+  /**
+   * Set by dispose, and final: from then on execute and cancelJob send nothing, real or mock,
+   * including a call that was waiting for `ipp` to load (astra pack 201). Reads still answer.
+   */
   private disposed = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private activeRealJobId: number | null = null;
@@ -201,6 +204,10 @@ export class IppAdapter implements MachineAdapter {
   }
 
   async execute(command: MachineCommand): Promise<MachineCommandResult> {
+    // Disposed is final: a command runs nothing, real or mock (astra pack 201).
+    if (this.disposed) {
+      return { success: false, message: `IPP adapter "${this.id}" is disposed: ${command.type} not run` };
+    }
     // While `ipp` loads the adapter cannot route: the command waits for the import, as
     // outstanding work (it may still emit), then takes the real or the mock path. A
     // dispose meanwhile ends it there: it was accepted before, but runs nothing after.
@@ -267,8 +274,19 @@ export class IppAdapter implements MachineAdapter {
     }
   }
 
+  /**
+   * Cancels `jobId` on the printer, or the mock job. Refused once disposed, including a cancel
+   * that was waiting for `ipp` to load: a disposed adapter sends nothing (astra pack 201). Its
+   * owner cancels before it disposes.
+   */
   async cancelJob(jobId: number): Promise<void> {
-    if (this.ippLoading) await this.ippLoading;
+    if (this.disposed) throw new Error(`IPP adapter "${this.id}" is disposed: cancel of job ${jobId} not sent`);
+    if (this.ippLoading) {
+      await this.ippLoading;
+      if (this.disposed) {
+        throw new Error(`IPP adapter "${this.id}" was disposed while the 'ipp' package loaded: cancel of job ${jobId} not sent`);
+      }
+    }
     if (this.config.mockMode || !this.ippAvailable) {
       this.cancelMockJob();
       return;
