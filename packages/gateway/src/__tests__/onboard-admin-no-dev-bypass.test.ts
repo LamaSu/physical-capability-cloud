@@ -90,7 +90,7 @@ describe("onboarding admin transitions have no development bypass (astra pack 89
     const id = await registerAsA("A's lathe (approve)");
     const before = getRepos().registrations.findById(id)?.status;
     const res = await inj("POST", `/api/onboard/registrations/${id}/approve`, keyB, { expectedEvidenceDigest: "none" });
-    expect([401, 403, 503], res.body).toContain(res.statusCode);
+    expect(res.statusCode, res.body).toBe(503); // admin_key_unconfigured, in development too
     expect(res.body).not.toContain(SERIAL);
     expect(res.body).not.toContain(A);
     expect(getRepos().registrations.findById(id)?.status).toBe(before);
@@ -100,7 +100,7 @@ describe("onboarding admin transitions have no development bypass (astra pack 89
     const id = await registerAsA("A's lathe (reject)");
     const before = getRepos().registrations.findById(id)?.status;
     const res = await inj("POST", `/api/onboard/registrations/${id}/reject`, keyB, {});
-    expect([401, 403, 503], res.body).toContain(res.statusCode);
+    expect(res.statusCode, res.body).toBe(503); // admin_key_unconfigured, in development too
     expect(res.body).not.toContain(SERIAL);
     expect(getRepos().registrations.findById(id)?.status).toBe(before);
   });
@@ -109,7 +109,7 @@ describe("onboarding admin transitions have no development bypass (astra pack 89
     const id = await registerAsA("A's lathe (activate)");
     const before = getRepos().registrations.findById(id)?.status;
     const res = await inj("POST", `/api/onboard/registrations/${id}/activate`, keyB, {});
-    expect([401, 403, 503], res.body).toContain(res.statusCode);
+    expect(res.statusCode, res.body).toBe(503); // admin_key_unconfigured, in development too
     expect(res.body).not.toContain(SERIAL);
     expect(getRepos().registrations.findById(id)?.status).toBe(before);
   });
@@ -117,6 +117,6 @@ describe("onboarding admin transitions have no development bypass (astra pack 89
   it("[neg] even the owner A cannot approve its own registration without the admin secret", async () => {
     const id = await registerAsA("A's lathe (self-approve)");
     const res = await inj("POST", `/api/onboard/registrations/${id}/approve`, keyA, { expectedEvidenceDigest: "none" });
-    expect([401, 403, 503], res.body).toContain(res.statusCode);
+    expect(res.statusCode, res.body).toBe(503); // admin_key_unconfigured, in development too
   });
 });

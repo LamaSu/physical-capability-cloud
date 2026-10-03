@@ -745,8 +745,9 @@ describe("Prove Endpoint", () => {
       expect(prove.json().evidenceTierClaim).toBe(2);
       expect(prove.json().activated).toBe(false);
 
-      expect((await post(`/api/onboard/registrations/${regId}/approve`)).statusCode).toBe(403);
-      expect((await post(`/api/onboard/registrations/${regId}/activate`)).statusCode).toBe(403);
+      // No X-Admin-Key: 401 from the shared requireAdminSecret (astra pack 89b).
+      expect((await post(`/api/onboard/registrations/${regId}/approve`)).statusCode).toBe(401);
+      expect((await post(`/api/onboard/registrations/${regId}/activate`)).statusCode).toBe(401);
       expect(getRepos().registrations.findById(regId)!.status).toBe("reviewing");
     });
 
@@ -776,7 +777,7 @@ describe("Prove Endpoint", () => {
 
       // Keys can be provisioned for any email or wallet, so no identity may stand in for the key.
       for (const operatorId of ["admin@example.com", "0x0000000000000000000000000000000000000000", OPERATOR]) {
-        expect((await post(`/api/onboard/registrations/${regId}/approve`, { operatorId })).statusCode).toBe(403);
+        expect((await post(`/api/onboard/registrations/${regId}/approve`, { operatorId })).statusCode).toBe(401);
       }
       expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
     });
@@ -786,7 +787,8 @@ describe("Prove Endpoint", () => {
       const regId = await registerOwned();
 
       for (const adminKey of ["", "x", ADMIN_KEY.slice(0, -1) + "X", ADMIN_KEY + "-extra"]) {
-        expect((await post(`/api/onboard/registrations/${regId}/approve`, { adminKey })).statusCode).toBe(403);
+        // A blank header is "no key" (401); any other wrong value is 403.
+        expect((await post(`/api/onboard/registrations/${regId}/approve`, { adminKey })).statusCode).toBe(adminKey === "" ? 401 : 403);
       }
       expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
     });
@@ -797,13 +799,13 @@ describe("Prove Endpoint", () => {
       getRepos().registrations.updateStatus(regId, "approved", { approvedAt: new Date().toISOString() });
 
       for (const adminKey of [undefined, "wrong-key", ADMIN_KEY + "x"]) {
-        expect((await post(`/api/onboard/registrations/${regId}/activate`, { adminKey })).statusCode).toBe(403);
+        expect((await post(`/api/onboard/registrations/${regId}/activate`, { adminKey })).statusCode).toBe(adminKey === undefined ? 401 : 403);
       }
       expect(getRepos().registrations.findById(regId)!.status).toBe("approved");
 
-      // With the key unset in production, even an approved registration stays put.
+      // With the key unset, even an approved registration stays put: 503 admin_key_unconfigured.
       delete process.env.PCC_ADMIN_KEY;
-      expect((await post(`/api/onboard/registrations/${regId}/activate`, { adminKey: ADMIN_KEY })).statusCode).toBe(403);
+      expect((await post(`/api/onboard/registrations/${regId}/activate`, { adminKey: ADMIN_KEY })).statusCode).toBe(503);
       expect(getRepos().registrations.findById(regId)!.status).toBe("approved");
     });
 
@@ -827,7 +829,7 @@ describe("Prove Endpoint", () => {
         operatorId: "someone-else@example.com",
         payload: { reason: "test" },
       });
-      expect(res.statusCode).toBe(403);
+      expect(res.statusCode).toBe(401);
       expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
     });
 
@@ -836,16 +838,17 @@ describe("Prove Endpoint", () => {
 
       for (const action of ["approve", "activate", "reject"]) {
         const res = await post(`/api/onboard/registrations/${regId}/${action}`, { adminKey: "anything" });
-        expect(res.statusCode).toBe(403);
+        expect(res.statusCode).toBe(503);
+        expect(res.json().error).toBe("admin_key_unconfigured");
       }
       expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
     });
 
-    it("answers 403, not 404, for an unknown id without the key", async () => {
+    it("answers 401, not 404, for an unknown id without the key", async () => {
       process.env.PCC_ADMIN_KEY = ADMIN_KEY;
 
       const res = await post("/api/onboard/registrations/nonexistent-reg-id/approve");
-      expect(res.statusCode).toBe(403);
+      expect(res.statusCode).toBe(401);
     });
 
     it.each([undefined, "staging", "prod", ""])(
@@ -855,19 +858,24 @@ describe("Prove Endpoint", () => {
         else process.env.NODE_ENV = nodeEnv;
         const regId = await registerOwned();
 
-        expect((await post(`/api/onboard/registrations/${regId}/approve`)).statusCode).toBe(403);
+        expect((await post(`/api/onboard/registrations/${regId}/approve`)).statusCode).toBe(503);
         expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
       },
     );
 
+    // These two cases pinned the fail-open that astra pack 89b found (CRITICAL): with
+    // PCC_ADMIN_KEY unset, development and test were open to any caller. They now
+    // fail closed like every other environment.
     it.each(["test", "development"])(
-      "stays open when PCC_ADMIN_KEY is unset and NODE_ENV is %s",
+      "fails closed when PCC_ADMIN_KEY is unset even when NODE_ENV is %s (no development bypass)",
       async (nodeEnv) => {
         process.env.NODE_ENV = nodeEnv;
         const regId = await registerOwned();
 
         const res = await post(`/api/onboard/registrations/${regId}/approve`, { payload: { expectedEvidenceDigest: "none" } });
-        expect(res.statusCode).toBe(200);
+        expect(res.statusCode).toBe(503);
+        expect(res.body).not.toContain("serialNumber");
+        expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
       },
     );
   });

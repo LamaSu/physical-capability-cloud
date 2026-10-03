@@ -194,7 +194,7 @@ describe("/prove hardening (WP-B)", () => {
     const regId = await register(app);
     expect((await admin(app, regId, "approve", { key: ADMIN_KEY })).statusCode).toBe(200);
     for (const operator of [OTHER, OWNER]) {
-      expect((await admin(app, regId, "activate", { operator })).statusCode).toBe(403);
+      expect((await admin(app, regId, "activate", { operator })).statusCode).toBe(401);
       expect((await admin(app, regId, "activate", { operator, key: "not-the-key" })).statusCode).toBe(403);
     }
     expect(stored(regId).status).toBe("approved");
@@ -221,8 +221,8 @@ describe("/prove hardening (WP-B)", () => {
     expect(stored(regId).approvedAt ?? null).toBeNull();
 
     // The owner cannot finish the job through any review route.
-    expect((await admin(app, regId, "approve", { operator: OWNER })).statusCode).toBe(403);
-    expect((await admin(app, regId, "activate", { operator: OWNER })).statusCode).toBe(403);
+    expect((await admin(app, regId, "approve", { operator: OWNER })).statusCode).toBe(401);
+    expect((await admin(app, regId, "activate", { operator: OWNER })).statusCode).toBe(401);
     expect((await admin(app, regId, "activate", { operator: OWNER, key: ADMIN_KEY + "x" })).statusCode).toBe(403);
     expect(stored(regId).status).toBe("reviewing");
   });
