@@ -4,7 +4,7 @@
  *   GET /api/operator/work    OperatorWorkDTO: the caller's work across job offers, kernel
  *                             jobs and approvals, every field server-assigned
  *   GET /api/operator/income  OperatorIncomeDTO: what the escrow records show for the
- *                             caller's kernel jobs; totals are sums of rows only
+ *                             caller's kernel jobs; totals sum every row across all pages
  *
  * Both are scoped to the caller's kernels: kernels whose recorded operatorAddress is the
  * caller's PROVEN wallet (SIWE: WP-A's req.provenWallet), compared as addresses. An API
@@ -55,6 +55,23 @@ function pageFrom(q: { limit?: unknown; offset?: unknown }):
   }
   return { ok: true, page };
 }
+
+/**
+ * `?snapshot=`: the snapshot of the list a client is paging through (review r2 of #389, MEDIUM).
+ * Absent, the page is served as read. Present, it must be one string, and it must equal the
+ * current list's snapshot, or the route answers 409 list_changed.
+ */
+function snapshotFrom(q: { snapshot?: unknown }):
+  | { ok: true; snapshot: string | null }
+  | { ok: false; body: { error: string; message: string } } {
+  if (q.snapshot === undefined) return { ok: true, snapshot: null };
+  if (typeof q.snapshot !== "string" || q.snapshot.trim() === "") {
+    return { ok: false, body: { error: "invalid_snapshot", message: "snapshot must be the snapshot of an earlier page." } };
+  }
+  return { ok: true, snapshot: q.snapshot };
+}
+
+const LIST_CHANGED = "The list changed since that snapshot, so this page could repeat or skip rows. Start again at offset 0.";
 
 function offersReader(): OffersReader | null {
   try {
@@ -117,27 +134,39 @@ function load(req: FastifyRequest): Load {
 }
 
 export async function operatorWorkRoutes(app: FastifyInstance) {
-  app.get<{ Querystring: { limit?: string | string[]; offset?: string | string[] } }>("/api/operator/work", async (req, reply) => {
+  app.get<{ Querystring: { limit?: string | string[]; offset?: string | string[]; snapshot?: string | string[] } }>("/api/operator/work", async (req, reply) => {
     const asOf = new Date().toISOString();
     const refused = identityRefusal(req);
     if (refused) return reply.code(refused.status).send(refused.body);
     const p = pageFrom(req.query);
     if (!p.ok) return reply.code(400).send(p.body);
+    const snap = snapshotFrom(req.query);
+    if (!snap.ok) return reply.code(400).send(snap.body);
     const loaded = load(req);
     if (!loaded.ok) return reply.code(loaded.status).send(loaded.body);
     reply.header("cache-control", "no-store");
-    return buildOperatorWorkDTO(loaded.sources, asOf, { ...p.page, nowMs: Date.parse(asOf) });
+    const dto = buildOperatorWorkDTO(loaded.sources, asOf, { ...p.page, nowMs: Date.parse(asOf) });
+    if (snap.snapshot !== null && snap.snapshot !== dto.snapshot) {
+      return reply.code(409).send({ error: "list_changed", message: LIST_CHANGED, snapshot: dto.snapshot });
+    }
+    return dto;
   });
 
-  app.get<{ Querystring: { limit?: string | string[]; offset?: string | string[] } }>("/api/operator/income", async (req, reply) => {
+  app.get<{ Querystring: { limit?: string | string[]; offset?: string | string[]; snapshot?: string | string[] } }>("/api/operator/income", async (req, reply) => {
     const asOf = new Date().toISOString();
     const refused = identityRefusal(req);
     if (refused) return reply.code(refused.status).send(refused.body);
     const p = pageFrom(req.query);
     if (!p.ok) return reply.code(400).send(p.body);
+    const snap = snapshotFrom(req.query);
+    if (!snap.ok) return reply.code(400).send(snap.body);
     const loaded = load(req);
     if (!loaded.ok) return reply.code(loaded.status).send(loaded.body);
     reply.header("cache-control", "no-store");
-    return buildOperatorIncomeDTO(loaded.sources, asOf, p.page);
+    const dto = buildOperatorIncomeDTO(loaded.sources, asOf, p.page);
+    if (snap.snapshot !== null && snap.snapshot !== dto.snapshot) {
+      return reply.code(409).send({ error: "list_changed", message: LIST_CHANGED, snapshot: dto.snapshot });
+    }
+    return dto;
   });
 }
