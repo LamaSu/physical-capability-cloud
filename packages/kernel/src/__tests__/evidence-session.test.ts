@@ -211,3 +211,137 @@ describe("JobRunner over shared adapters", () => {
     expect(camera.onEvidence).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("quiesce, the handoff guard and the device lock (#502 round 3)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    // The injected evidence clock reads the fake Date, so quiet periods run on the fake clock.
+    setEvidenceClock(() => Date.now());
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** session.quiesce(), plus its result once it has one. */
+  function quiescing(session: ReturnType<typeof mustOpen>, quietMs: number, timeoutMs: number): { readonly result: boolean | undefined } {
+    const tracked: { result: boolean | undefined } = { result: undefined };
+    void session.quiesce(quietMs, timeoutMs).then((result) => {
+      tracked.result = result;
+    });
+    return tracked;
+  }
+
+  it("quiesce resolves true once every device has been quiet for quietMs, and still delivers what arrives meanwhile", async () => {
+    const a = fakeAdapter("adapter-a");
+    const b = fakeAdapter("adapter-b");
+    const deliver = vi.fn();
+    const session = mustOpen([a, b], owner("job-1"), deliver);
+    a.emit(evidence("execution_started", "adapter-a")); // t = 0
+
+    const quiet = quiescing(session, 1_000, 10_000);
+    await vi.advanceTimersByTimeAsync(600);
+    b.emit(evidence("execution_progress", "adapter-b")); // t = 600: b's device is quiet from t = 1600
+    await vi.advanceTimersByTimeAsync(999);
+    expect(quiet.result, "at t = 1599").toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(quiet.result, "at t = 1600").toBe(true);
+    expect(deliver.mock.calls.map(([e]) => e.type)).toEqual(["execution_started", "execution_progress"]);
+    expect(vi.getTimerCount(), "timers left pending").toBe(0);
+  });
+
+  it("quiesce waits until every device is quiet at the same moment", async () => {
+    const a = fakeAdapter("adapter-a");
+    const b = fakeAdapter("adapter-b");
+    const session = mustOpen([a, b], owner("job-1"), vi.fn());
+    a.emit(evidence("execution_started", "adapter-a")); // t = 0: a quiet from 1000
+    b.emit(evidence("execution_started", "adapter-b")); // t = 0
+
+    const quiet = quiescing(session, 1_000, 10_000);
+    await vi.advanceTimersByTimeAsync(900);
+    b.emit(evidence("execution_progress", "adapter-b")); // t = 900: b quiet from 1900
+    await vi.advanceTimersByTimeAsync(600);
+    a.emit(evidence("execution_progress", "adapter-a")); // t = 1500, after a was quiet: a quiet from 2500
+    await vi.advanceTimersByTimeAsync(999);
+    expect(quiet.result, "at t = 2499").toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(quiet.result, "at t = 2500").toBe(true);
+  });
+
+  it("quiesce resolves false at timeoutMs for a device that never goes quiet, and leaves no timer", async () => {
+    const a = fakeAdapter("adapter-a");
+    const session = mustOpen([a], owner("job-1"), vi.fn());
+    a.emit(evidence("execution_started", "adapter-a")); // t = 0 (a device that never emitted is quiet at once)
+    const noise = setInterval(() => a.emit(evidence("execution_progress", "adapter-a")), 100);
+
+    const quiet = quiescing(session, 1_000, 3_000);
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(quiet.result).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(quiet.result).toBe(false);
+    clearInterval(noise);
+    expect(vi.getTimerCount(), "timers left pending").toBe(0);
+  });
+
+  it("quiesce awaits quiesceEvidence instead of a quiet period, for an adapter that has one", async () => {
+    let finish!: () => void;
+    const a = Object.assign(fakeAdapter("adapter-a"), {
+      quiesceEvidence: vi.fn(() => new Promise<void>((resolve) => (finish = resolve))),
+    });
+    const session = mustOpen([a], owner("job-1"), vi.fn());
+
+    const quiet = quiescing(session, 1_000, 10_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(quiet.result, "before quiesceEvidence resolves").toBeUndefined();
+    a.emit(evidence("execution_completed", "adapter-a"));
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(quiet.result, "as soon as it resolves, with no quiet period after its last event").toBe(true);
+    expect(a.quiesceEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it("quiesce rejects with the error of a quiesceEvidence that rejects", async () => {
+    const a = Object.assign(fakeAdapter("adapter-a"), { quiesceEvidence: () => Promise.reject(new Error("camera offline")) });
+    const session = mustOpen([a], owner("job-1"), vi.fn());
+    await expect(session.quiesce(1_000, 10_000)).rejects.toThrow("camera offline");
+    expect(vi.getTimerCount(), "timers left pending").toBe(0);
+  });
+
+  it("after close, an event is dropped and restarts its device's quiet clock: another adapter object on that device is refused, quiescing, until quiet", async () => {
+    const a = fakeAdapter("adapter-a");
+    const sameDevice = fakeAdapter("adapter-a2", a.source.deviceId);
+    const session = mustOpen([a], owner("job-1"), vi.fn(), { quietMs: 300 });
+    a.emit(evidence("execution_started", "adapter-a")); // t = 0, delivered
+    await vi.advanceTimersByTimeAsync(5_000);
+    session.close(); // its device has been quiet for 5 s
+    a.emit(evidence("execution_completed", "adapter-a")); // t = 5000, dropped
+    expect(warn).toHaveBeenCalledWith("[evidence-session] dropped a execution_completed event from adapter adapter-a: no job is recording it");
+
+    expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn())).toEqual({ ok: false, busy: { reason: "quiescing", adapterId: "adapter-a2", jobId: "job-1" } });
+    await vi.advanceTimersByTimeAsync(299);
+    expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn()).ok, "299 ms after the dropped event").toBe(false);
+    expect(sameDevice.onEvidence, "listeners registered by a refused session").not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn()).ok, "300 ms after it: the closed session's quiet period").toBe(true);
+  });
+
+  it("a device already quiet for the quiet period is free as soon as its session closes", () => {
+    const a = fakeAdapter("adapter-a");
+    const session = mustOpen([a], owner("job-1"), vi.fn(), { quietMs: 300 });
+    a.emit(evidence("execution_started", "adapter-a"));
+    vi.setSystemTime(Date.now() + 300);
+    session.close();
+    expect(openEvidenceSession([a], owner("job-2"), vi.fn()).ok).toBe(true);
+  });
+
+  it("locks the device, not the object: a second object on a held device is refused; the same deviceId under another kernelId is another device", () => {
+    const a = fakeAdapter("adapter-a");
+    const sameDevice = fakeAdapter("adapter-a2", a.source.deviceId);
+    const otherKernel = Object.assign(fakeAdapter("adapter-a3", a.source.deviceId), { source: { deviceId: a.source.deviceId, kernelId: "another-kernel" } });
+    mustOpen([a], owner("job-1"), vi.fn());
+
+    expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn())).toEqual({ ok: false, busy: { reason: "adapter", adapterId: "adapter-a2", jobId: "job-1" } });
+    expect(openEvidenceSession([otherKernel], owner("job-3"), vi.fn()).ok).toBe(true);
+  });
+});
