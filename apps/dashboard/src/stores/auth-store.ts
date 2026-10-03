@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { beginAccountChange } from "../lib/account-generation.js";
 
 const API = import.meta.env.VITE_PCC_URL ?? "";
 const STORAGE_KEY = "pcc-api-key";
@@ -26,7 +27,7 @@ interface AuthState {
   setError: (e: string | null) => void;
 }
 
-export const useAuthStore = create<AuthState>((set) => {
+export const useAuthStore = create<AuthState>((set, get) => {
   // Hydrate API key from localStorage on store creation
   const storedKey = localStorage.getItem(STORAGE_KEY);
 
@@ -41,6 +42,9 @@ export const useAuthStore = create<AuthState>((set) => {
           headers: { Authorization: `Bearer ${key}` },
         });
         if (res.ok) {
+          // The generation moves first, so a tab that sees this key sees the change pending (astra 19g).
+          // If it can't move, no tab would know: store nothing (fail closed).
+          if (key !== get().apiKey && !beginAccountChange()) return false;
           localStorage.setItem(STORAGE_KEY, key);
           set({ apiKey: key, isAuthenticated: true });
           return true;
@@ -53,6 +57,7 @@ export const useAuthStore = create<AuthState>((set) => {
 
     logout: () => {
       localStorage.removeItem(STORAGE_KEY);
+      if (get().apiKey !== null) beginAccountChange();
       set({ apiKey: null, isAuthenticated: false, address: null, sessionToken: null, error: null });
     },
 
@@ -69,6 +74,20 @@ export const useAuthStore = create<AuthState>((set) => {
   };
 });
 
+// The key is the browser's, not one tab's: every tab reads the same
+// localStorage, and shares the gateway's SIWE cookie. When another tab signs
+// in, out or as someone else, this tab follows, so its own account boundary
+// runs (App.tsx). A tab left as the previous account could otherwise start a
+// SIWE sign-in whose cookie the new account's tabs would carry.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== STORAGE_KEY && event.key !== null) return; // null: another tab cleared storage
+    const key = localStorage.getItem(STORAGE_KEY);
+    if (key === useAuthStore.getState().apiKey) return;
+    useAuthStore.setState({ apiKey: key, isAuthenticated: !!key });
+  });
+}
+
 /**
  * Calls `onChange` whenever the signed-in identity changes: a key signed in or out, a
  * different key, wallet or SIWE session. A cached read must not outlive the identity that
@@ -77,6 +96,21 @@ export const useAuthStore = create<AuthState>((set) => {
 export function onIdentityChange(onChange: () => void): () => void {
   return useAuthStore.subscribe((s, prev) => {
     if (s.apiKey !== prev.apiKey || s.address !== prev.address || s.sessionToken !== prev.sessionToken) onChange();
+  });
+}
+
+/**
+ * Calls `onChange` whenever the signed-in account changes: a key signed in or
+ * out, or a different key, including login() with another key while signed
+ * in. App resets every account-scoped store on it and remounts the signed-in
+ * shell (astra 19c). The account follows the key, not isAuthenticated: a key
+ * replaced while signed in is a different account. Zustand calls this inside
+ * the set() that changed the key, so it runs before anything renders for the
+ * next account.
+ */
+export function onAccountChange(onChange: () => void): () => void {
+  return useAuthStore.subscribe((s, prev) => {
+    if (s.apiKey !== prev.apiKey) onChange();
   });
 }
 

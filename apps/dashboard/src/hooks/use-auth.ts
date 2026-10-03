@@ -9,6 +9,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { useAccount, useSignMessage } from "wagmi";
 import { useAuthStore } from "../stores/auth-store.js";
+import { beginSignIn, signInCurrent, verifySignIn } from "../lib/wallet-session.js";
 
 /**
  * Build an EIP-4361 SIWE message string.
@@ -79,8 +80,11 @@ export function useAuth() {
       .finally(() => setIsChecking(false));
   }, [setAddress, setSession]);
 
+  // An account change aborts a sign-in in progress, as in ConnectWallet
+  // (lib/wallet-session.ts, astra 19e).
   const login = useCallback(async () => {
     if (!address || !chainId) return;
+    const signIn = beginSignIn();
     setVerifying(true);
     setError(null);
 
@@ -88,6 +92,7 @@ export function useAuth() {
       // 1. Get nonce from gateway
       const nonceRes = await fetch("/api/auth/nonce", {
         credentials: "include",
+        signal: signIn.signal,
       });
       if (!nonceRes.ok) throw new Error("Failed to get nonce");
       const { nonce } = await nonceRes.json();
@@ -108,12 +113,7 @@ export function useAuth() {
       const signature = await signMessageAsync({ message });
 
       // 4. Verify with gateway
-      const verifyRes = await fetch("/api/auth/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ message, signature }),
-      });
+      const verifyRes = await verifySignIn(JSON.stringify({ message, signature }), signIn);
 
       if (!verifyRes.ok) {
         const err = await verifyRes.json().catch(() => ({}));
@@ -121,10 +121,13 @@ export function useAuth() {
       }
 
       const data = await verifyRes.json();
+      if (!signInCurrent(signIn)) return;
       // Session cookie is set automatically; also store the bearer token
       setSession(data.token ?? "cookie");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sign-in failed");
+      if (!signIn.signal.aborted) setError(err instanceof Error ? err.message : "Sign-in failed");
+    } finally {
+      signIn.finish();
     }
   }, [address, chainId, signMessageAsync, setVerifying, setError, setSession]);
 

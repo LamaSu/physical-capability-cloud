@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type { SensorChannelDescriptor, SensorReading, SensorAnomaly } from "@pcc/spec";
 
 interface SensorStreamState {
@@ -56,3 +57,6 @@ export const useSensorStreamStore = create<SensorStreamState>((set, get) => ({
 
   clearReadings: () => set({ recentReadings: {}, anomalies: [] }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useSensorStreamStore);

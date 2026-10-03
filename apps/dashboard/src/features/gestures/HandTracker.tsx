@@ -52,6 +52,12 @@ export function HandTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const cameraRef = useRef<any>(null);
   const handsRef = useRef<any>(null);
+  // Whether this tracker is still mounted. A start still loading MediaPipe
+  // when it unmounts (the account changed, or the page did) builds nothing:
+  // no camera, and no results callback to drive the stores (astra 19e).
+  // A callback built before then reaches the stores through useGestures,
+  // which drops it once the account has changed.
+  const mountedRef = useRef(true);
   const { handleGesture } = useGestures();
 
   const startTracking = useCallback(async () => {
@@ -60,6 +66,7 @@ export function HandTracker() {
 
     try {
       await loadMediaPipe();
+      if (!mountedRef.current) return;
 
       // Access the global Hands class
       const HandsClass = (window as any).Hands;
@@ -136,7 +143,9 @@ export function HandTracker() {
 
   // Cleanup on unmount
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (cameraRef.current) {
         cameraRef.current.stop();
       }

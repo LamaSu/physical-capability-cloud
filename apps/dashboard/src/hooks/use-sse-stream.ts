@@ -17,11 +17,18 @@ export function useSSEStream({ url, onEvent, enabled = true }: UseSSEStreamOptio
   const lastEventIdRef = useRef<string | undefined>(undefined);
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
+  // The open stream and a pending reconnect, so unmounting can end both. A
+  // reconnect that fired after unmount used to reopen the stream, and its
+  // events reached the next account's stores (astra 19d).
+  const sourceRef = useRef<EventSource | null>(null);
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disposedRef = useRef(false);
 
   const connect = useCallback(() => {
-    if (!url || !enabled) return undefined;
+    if (!url || !enabled || disposedRef.current) return undefined;
 
     const eventSource = new EventSource(url);
+    sourceRef.current = eventSource;
 
     eventSource.onmessage = (e) => {
       try {
@@ -60,15 +67,26 @@ export function useSSEStream({ url, onEvent, enabled = true }: UseSSEStreamOptio
 
     eventSource.onerror = () => {
       eventSource.close();
-      // Auto-reconnect after 3 seconds
-      setTimeout(() => connect(), 3000);
+      if (disposedRef.current) return;
+      // Auto-reconnect after 3 seconds, unless the component unmounts first.
+      reconnectRef.current = setTimeout(() => {
+        reconnectRef.current = null;
+        connect();
+      }, 3000);
     };
 
     return eventSource;
   }, [url, enabled]);
 
   useEffect(() => {
-    const es = connect();
-    return () => es?.close();
+    disposedRef.current = false;
+    connect();
+    return () => {
+      disposedRef.current = true;
+      if (reconnectRef.current !== null) clearTimeout(reconnectRef.current);
+      reconnectRef.current = null;
+      sourceRef.current?.close(); // the latest stream, which a reconnect may have replaced
+      sourceRef.current = null;
+    };
   }, [connect]);
 }

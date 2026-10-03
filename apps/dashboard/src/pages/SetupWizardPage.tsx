@@ -469,14 +469,14 @@ function StepComplete() {
     { label: "Explore Capabilities", path: "/discover", icon: "\u2692" },
     { label: "Build a Contract", path: "/build", icon: "\u2696" },
     { label: "Add a Machine", path: "/onboard/wizard", icon: "\u2699" },
-    { label: "View Dashboard", path: "/", icon: "\u25A3" },
+    { label: "View Dashboard", path: "/dashboard", icon: "\u25A3" },
   ];
 
   return (
     <WizardStepContent
       title="Setup Complete"
       subtitle="Your PCCP instance is configured and ready to go."
-      onNext={() => navigate("/")}
+      onNext={() => navigate("/dashboard")}
       nextLabel="Go to Dashboard"
     >
       <div className="space-y-8 max-w-2xl">

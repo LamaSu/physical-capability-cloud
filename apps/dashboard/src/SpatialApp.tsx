@@ -16,27 +16,6 @@ import { trackEvent } from "./lib/telemetry.js";
 // ---------------------------------------------------------------------------
 
 /**
- * Agent prompt banner — tells users this is the limited fallback,
- * and the real product is the agent context pack.
- */
-function AgentPromptBanner() {
-  return (
-    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[10000] bg-amber-500/10 border border-amber-500/30 rounded-xl px-6 py-3 backdrop-blur-md flex items-center gap-4 max-w-2xl">
-      <span className="text-amber-400 text-sm whitespace-nowrap">You are using the limited web interface.</span>
-      <a
-        href="/"
-        className="text-amber-300 underline text-sm font-medium whitespace-nowrap hover:text-amber-200 transition-colors"
-      >
-        Get the agent pack
-      </a>
-      <span className="text-amber-400/60 text-xs hidden sm:inline whitespace-nowrap">
-        Your AI builds a better interface than this.
-      </span>
-    </div>
-  );
-}
-
-/**
  * useSpatialTelemetry — tracks panel opens, chat commands, and gesture usage
  * in the spatial interface so we know what users WANT (to improve the context pack).
  */
@@ -72,7 +51,7 @@ export function SpatialApp() {
   useSpatialTelemetry();
 
   return (
-    <div className="fixed inset-0 bg-black overflow-hidden">
+    <div data-shell="spatial" className="fixed inset-0 bg-black overflow-hidden">
       {/* Particle background */}
       <ParticleBackground />
 
@@ -87,7 +66,6 @@ export function SpatialApp() {
       />
 
       {/* Agent prompt banner */}
-      <AgentPromptBanner />
 
       {/* Top bar — minimal, just wallet + mode toggle */}
       <div className="absolute top-0 left-0 right-0 z-[9999] flex items-center justify-between px-4 py-2">
