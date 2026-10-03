@@ -127,11 +127,11 @@
             ]
           },
           "inputs": {
-            "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
-            "pages": 2,
             "copies": 1,
+            "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
             "duplex": false,
-            "notes": null
+            "notes": null,
+            "pages": 2
           },
           "constraints": {
             "deadline": "2026-09-30T00:00:00.000Z",
@@ -178,11 +178,11 @@
           },
           "inputs": {
             "recipient": {
-              "name": "Clerk of Court",
               "city": "Zürich — 東京 ✓",
               "lines": [
                 "60 Centre St"
-              ]
+              ],
+              "name": "Clerk of Court"
             }
           },
           "constraints": {}
@@ -309,11 +309,11 @@
               ]
             },
             "inputs": {
-              "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
-              "pages": 2,
               "copies": 1,
+              "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
               "duplex": false,
-              "notes": null
+              "notes": null,
+              "pages": 2
             },
             "constraints": {
               "deadline": "2026-09-30T00:00:00.000Z",
@@ -368,11 +368,11 @@
             },
             "inputs": {
               "recipient": {
-                "name": "Clerk of Court",
                 "city": "Zürich — 東京 ✓",
                 "lines": [
                   "60 Centre St"
-                ]
+                ],
+                "name": "Clerk of Court"
               }
             },
             "constraints": {}
@@ -383,6 +383,23 @@
       "acceptedDealDigest": "0xa466e01c743d78de550ffc3cbababe7f8e0d2bf1fccbc972ffd64f8aa557708b"
     }
   },
+  "refusals": [
+    {
+      "name": "print-inputs-unsafe-integer",
+      "change": "print.inputs.orderId = 2**53 (number policy D5: VCR, the oracle and #359 refuse to hash it)",
+      "expected": {
+        "ok": false,
+        "violations": [
+          {
+            "code": "invalid-execution-json",
+            "nodeId": "print",
+            "field": "inputs",
+            "reason": "unsafe-integer"
+          }
+        ]
+      }
+    }
+  ],
   "mutations": [
     {
       "name": "print-pages-2-to-3",
@@ -409,6 +426,68 @@
       "expected": {
         "planHash": "sha256:dd5f7fd1bf93305766cc53c4a59a4568a232c4cd0255a3cccd6c399341f5b4a0",
         "acceptedDealDigest": "0x06ec227378a59e6a5fd871dd74eb3e18aabd1d813f2c5329572fecad09c7ea46"
+      }
+    }
+  ],
+  "edgeCases": [
+    {
+      "name": "print-inputs-unicode-keys-and-number-forms",
+      "node": "print",
+      "change": "print.inputs = {documentHash, pages: 2, U+FF01: 1, U+1F600: 2, U+00E9: U+1D11E, small: 1.5e-7, tiny: 1e-7, negZero: -0, tab: 'a<TAB>b'}. Keys sort by UTF-16 code unit, so U+1F600 (a surrogate pair) sorts BEFORE U+FF01 (code-point order differs). Numbers take JavaScript's shortest form (1.5e-7, 1e-7; not 1.5e-07). -0 is 0.",
+      "canonicalPlan": {
+        "schema": "pcc.canonical-plan/v2",
+        "planId": "plan.resv-1",
+        "planNodeId": "print",
+        "capability": {
+          "type": "document-printing",
+          "id": "cap-print",
+          "csd": "document-print-and-mail",
+          "matchedCapabilityDigest": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+        },
+        "operator": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "payTo": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "amount": {
+          "baseUnits": "6500000",
+          "currency": "USDC",
+          "decimals": 6
+        },
+        "job": {
+          "jobId": "plan.resv-1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "milestoneIndex": 0,
+          "stepId": "print"
+        },
+        "assurance": {
+          "tier": 2,
+          "tierKey": "tier2",
+          "committedProgramHash": "0xd2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
+          "evidence": [
+            {
+              "requirementId": "print.kernel-log",
+              "evidenceTypeId": "execution_completed",
+              "tier": 2
+            }
+          ]
+        },
+        "inputs": {
+          "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
+          "negZero": 0,
+          "pages": 2,
+          "small": 1.5e-7,
+          "tab": "a\tb",
+          "tiny": 1e-7,
+          "é": "𝄞",
+          "😀": 2,
+          "！": 1
+        },
+        "constraints": {
+          "deadline": "2026-09-30T00:00:00.000Z",
+          "maxRetries": 2
+        }
+      },
+      "canonicalText": "{\"amount\":{\"baseUnits\":\"6500000\",\"currency\":\"USDC\",\"decimals\":6},\"assurance\":{\"committedProgramHash\":\"0xd2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2\",\"evidence\":[{\"evidenceTypeId\":\"execution_completed\",\"requirementId\":\"print.kernel-log\",\"tier\":2}],\"tier\":2,\"tierKey\":\"tier2\"},\"capability\":{\"csd\":\"document-print-and-mail\",\"id\":\"cap-print\",\"matchedCapabilityDigest\":\"0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c\",\"type\":\"document-printing\"},\"constraints\":{\"deadline\":\"2026-09-30T00:00:00.000Z\",\"maxRetries\":2},\"inputs\":{\"documentHash\":\"e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3\",\"negZero\":0,\"pages\":2,\"small\":1.5e-7,\"tab\":\"a\\tb\",\"tiny\":1e-7,\"é\":\"𝄞\",\"😀\":2,\"！\":1},\"job\":{\"jobId\":\"plan.resv-1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"milestoneIndex\":0,\"stepId\":\"print\"},\"operator\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"payTo\":\"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\"planId\":\"plan.resv-1\",\"planNodeId\":\"print\",\"schema\":\"pcc.canonical-plan/v2\"}",
+      "expected": {
+        "planHash": "sha256:f55b231be545e9fd1062ff5de941d6b61e64185b181c5241ec67ee8680f3b976",
+        "acceptedDealDigest": "0x7e28c53832aada6ab1f94abd1b26342b478d08d0f997f303aa169909ee319d96"
       }
     }
   ]

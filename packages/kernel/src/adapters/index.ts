@@ -6,6 +6,7 @@ export { MockChromatograph } from "./mock-chromatograph.js";
 
 // Real camera adapter (uses PhotoCaptureService + GeminiComparisonService)
 export { PhotoCameraAdapter } from "./photo-camera-adapter.js";
+export { PullCameraAdapter, ffmpegFrameGrabber, type CameraDeviceSpec, type FrameGrabber } from "./pull-camera-adapter.js";
 
 // Real device adapters (with built-in mock mode)
 export { OctoPrintAdapter, type OctoPrintConfig } from "./octoprint-adapter.js";

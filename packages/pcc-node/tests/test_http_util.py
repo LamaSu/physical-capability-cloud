@@ -90,7 +90,7 @@ class TestHttp:
 
 class TestPccRequest:
     def test_adds_auth_header(self):
-        with mock.patch("pcc_node.http_util.http") as mock_http:
+        with mock.patch("pcc_node.http_util.gateway_request") as mock_http:
             mock_http.return_value = (200, {})
             pcc_request("GET", "/api/test", base_url="http://pcc", api_key="mykey")
 
@@ -99,7 +99,7 @@ class TestPccRequest:
         assert headers["Authorization"] == "Bearer mykey"
 
     def test_builds_full_url(self):
-        with mock.patch("pcc_node.http_util.http") as mock_http:
+        with mock.patch("pcc_node.http_util.gateway_request") as mock_http:
             mock_http.return_value = (200, {})
             pcc_request("GET", "/api/test", base_url="http://pcc:3000")
 
@@ -107,7 +107,7 @@ class TestPccRequest:
         assert call_args[0][1] == "http://pcc:3000/api/test"
 
     def test_strips_trailing_slash(self):
-        with mock.patch("pcc_node.http_util.http") as mock_http:
+        with mock.patch("pcc_node.http_util.gateway_request") as mock_http:
             mock_http.return_value = (200, {})
             pcc_request("GET", "/api/test", base_url="http://pcc/")
 
