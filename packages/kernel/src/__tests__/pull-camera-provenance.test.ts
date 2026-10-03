@@ -332,6 +332,25 @@ describe("Fix A: checkTierRequirements counts a camera event only as an LO-SE-1 
     expect(trapsRun).toEqual([]);
   });
 
+  it("an accessor source.deviceId: refused, named as an unknown device, and its getter never runs", () => {
+    const e = lose1();
+    let ran = false;
+    const src = { ...e.source } as Record<string, unknown>;
+    Object.defineProperty(src, "deviceId", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        ran = true;
+        return "cam-spoofed";
+      },
+    });
+    e.source = src as unknown as EvidenceSource;
+    const r = tier2(e, { jobId: JOB });
+    expect(r.met).toBe(false);
+    expect(refusal(r.missing, "camera_snapshot", "an unknown device")).toMatch(/source\.deviceId is an accessor/);
+    expect(ran).toBe(false);
+  });
+
   it("a refused camera event does not count toward the minimum-event floor", () => {
     const e = lose1();
     e.payload.extra = 1;
@@ -534,6 +553,12 @@ describe("Fix C, Linux: linuxV4l2Identity binds the serial to the node that is o
 
   it("an rdev that is not a bigint (lstat without { bigint: true }) is refused", async () => {
     expect(await linuxV4l2Identity("/dev/video0", fakeLinuxFs({ rdev: 0x5100 }))).toBeNull();
+  });
+
+  it("an rdev that is a boxed BigInt object, not a bigint primitive, is refused (it would decode through valueOf)", async () => {
+    const boxed = Object(makedev(81, 0)) as unknown;
+    expect(typeof boxed).toBe("object");
+    expect(await linuxV4l2Identity("/dev/video0", fakeLinuxFs({ rdev: boxed }))).toBeNull();
   });
 
   it.each([
