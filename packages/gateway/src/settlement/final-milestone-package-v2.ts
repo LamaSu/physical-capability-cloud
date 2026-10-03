@@ -598,33 +598,22 @@ export class PackageNotMintableError extends Error {
  * and then hands the validated unitBinding, packageBodyHash,
  * operatorPrincipalId and the claimed D1 signer/signature to the verifier.
  *
- * NO PRODUCTION VERIFIER EXISTS YET (2026-10-03): the EIP-712 domain +
- * typed-data struct the operator signs is not pinned anywhere in public PCC,
- * so every real caller has nothing to inject and `assertMintablePackage`
- * REFUSES every package until one is wired in — fails closed by construction,
- * not merely by convention. fixer-tango searched public PCC for the struct
- * (2026-10-02) and did not find a byte-exact one (full trail in
- * triage-E9-358-fixer-tango.md, shortened here):
- *   - evidence schema docs (`~/.claude/shared/vnext-finalmilestonepackage-v2-body-schema.md`
- *     §2) name the domain and the struct NAME in PROSE, with no per-field
- *     Solidity/ABI type and no encodeType order — not enough to compute a
- *     correct struct hash;
- *   - the V-next escrow Solidity defines `JOB_POLICY_TYPEHASH` for
- *     `PolicyIdentity`, but no typehash for a package/release struct;
- *   - escrow's #367 TS ABI freeze has no TYPEHASH, FinalMilestone, PackageV2,
- *     EIP712 or packageBodyHash reference at all;
- *   - the #270 mirror only computes `packageBodyHash`; no operator-signature
- *     verification.
- * Per the operator's standing rule, a struct guessed from prose would verify
- * against a type space ONLY this file invented — not what the real operator
- * signer or the private Oracle use — which is worse than the honest gap this
- * injected-verifier seam now documents IN CODE, not just in a doc: a caller
- * with no verifier, or any verifier that does not answer exactly `true`,
- * mints nothing. The follow-up is to pin the struct (types and encodeType
- * order) in the schema doc, then implement EIP-712 recovery AS the
- * `OperatorSignatureVerifier` — a one-parameter change at the call site, not
- * a guard rewrite — with high-s and invalid-`v` negatives added then, as the
- * lane originally asked for.
+ * D1 IS PINNED (2026-10-03): the struct and domain were RATIFIED by the oracle
+ * (bus #5773) and escrow (#5785) in evidence's
+ * `returns/pcc-evidence-work/d1-eip712-struct-proposal.md`:
+ *   FinalMilestonePackageV2(uint256 chainId,address escrow,bytes32 settlementUnitId,
+ *     bytes32 jobIdHash,uint256 milestoneIndex,bytes32 stepId,bytes32 compositionRoot,
+ *     bytes32 acceptedEnvelopeHash,bytes32 packageBodyHash)
+ *   in the domain {name "PCC FinalMilestonePackage", version "2", chainId, verifyingContract = escrow}.
+ * Its golden vectors (1 positive, 15 negatives) are #270 @59f6c45f. The
+ * production verifier is `createEip712OperatorVerifier`
+ * (operator-signature-verifier.ts): a 65-byte low-s ECDSA recovery checked
+ * against the D1 signer label, the AUTHORITATIVE unit operator and the pinned
+ * `operatorPrincipalId`. The authoritative operator is the bound escrow clone's
+ * `operator()`, read at one pinned block, and it comes from the caller's injected
+ * `operatorForUnit`. This guard still refuses every package whose caller
+ * injects no verifier, or any verifier that does not answer exactly `true`: it
+ * fails closed by construction, not merely by convention.
  */
 const D1_SCHEME = "secp256k1-eip712";
 const D2_SCHEME = "ed25519-raw32";
@@ -761,9 +750,8 @@ export interface OperatorSignatureVerifierInput {
  * cryptographic verification, F2's registry binding and F4's challenge
  * freshness) has already passed, and trusts it for EXACTLY ONE outcome:
  *
- *   - absent (the caller passes `undefined` or `null`): REFUSED. D1 cannot
- *     be verified until the FinalMilestonePackageV2 EIP-712 struct is pinned
- *     (evidence's schema doc §2), so the guard fails closed instead of
+ *   - absent (the caller passes `undefined` or `null`): REFUSED. With no
+ *     verifier D1 is unverified, so the guard fails closed instead of
  *     minting on shape-only self-consistency;
  *   - the method returns anything other than exactly `true` (`false`, a
  *     falsy or a TRUTHY non-boolean such as `1` or `"true"`, a promise that
@@ -773,13 +761,11 @@ export interface OperatorSignatureVerifierInput {
  *     never escapes this guard as something else;
  *   - only `=== true`, with every other check already passing, mints.
  *
- * NO PRODUCTION IMPLEMENTATION EXISTS YET: the EIP-712 domain + typed-data
- * struct FinalMilestonePackageV2 signs is not pinned anywhere in public PCC
- * (see the STOP note above `MINT_SIGNER_PROFILE`), so every real caller today
- * has nothing to inject and every package is refused — which is the correct
- * state for an unverifiable signature, not a bug in this guard. This
- * interface exists so that the day the struct IS pinned, implementing EIP-712
- * recovery as the verifier is a one-parameter change, not a guard rewrite.
+ * The production implementation is `createEip712OperatorVerifier`
+ * (operator-signature-verifier.ts), over the RATIFIED D1 struct (see the D1
+ * STATUS note above `MINT_SIGNER_PROFILE`). Implementing it changed nothing in
+ * this guard: a caller injects it, with an `operatorForUnit` that reads the bound
+ * clone's `operator()` at one pinned block.
  */
 export interface OperatorSignatureVerifier {
   verifyOperatorSignature(
@@ -938,9 +924,8 @@ export class MintablePackage {
    *  - D2's ed25519 signature verifies over raw32(packageBodyHash) (F1 D2
    *    half), AND the operator's D1 signature is verified by the injected
    *    `OperatorSignatureVerifier`, which must answer exactly `true` (F1 D1
-   *    half) — no production verifier exists yet, so every package is
-   *    refused until one is wired in; see the STOP note above
-   *    MINT_SIGNER_PROFILE and `OperatorSignatureVerifier`'s own doc.
+   *    half) — a caller that injects none is refused; see the D1 STATUS
+   *    note above MINT_SIGNER_PROFILE and `OperatorSignatureVerifier`'s own doc.
    *
    * FROZEN IMMEDIATELY, BEFORE ANY AWAIT (evidence-lane round 3, cross-family
    * E9, finding 3): `valid` is deep-frozen (see `deepFreeze` above) the
@@ -1025,7 +1010,7 @@ export class MintablePackage {
     // bytes of packageBodyHash — not the hex string, and not packageDigestV2
     // (which would be circular: it embeds this very signature). D1 (below,
     // after F2/F4) is verified by the injected OperatorSignatureVerifier, not
-    // here; see the STOP note above MINT_SIGNER_PROFILE.
+    // here; see the D1 STATUS note above MINT_SIGNER_PROFILE.
     const packageBodyHash = computePackageBodyHash(valid);
     const bodyHashRaw32 = Buffer.from(toBytes(packageBodyHash));
     if (!verifyEd25519Signature(d2.signer, bodyHashRaw32, d2.sig)) {
@@ -1082,16 +1067,16 @@ export class MintablePackage {
 
     // F1 (D1 half), cross-family E9 round 2: the operator's EIP-712 signature
     // is verified ONLY by the injected OperatorSignatureVerifier — see its
-    // doc for the exact fail-closed rules. No production verifier exists yet
-    // (see the STOP note above MINT_SIGNER_PROFILE), so every package is
-    // refused until one is wired in. Runs last, after every other check, so a
+    // doc for the exact fail-closed rules. The production verifier is
+    // createEip712OperatorVerifier; a caller that injects none is refused.
+    // Runs last, after every other check, so a
     // package that is wrong in any other way is refused for THAT reason first.
     const d1Path = `$signatures[${entries.indexOf(d1)}].sig`;
     if (operatorVerifier === null || operatorVerifier === undefined) {
       throw new PackageNotMintableError(
         d1Path,
-        "D1 cannot be verified until the FinalMilestonePackageV2 EIP-712 struct is pinned " +
-          "(evidence's schema doc §2), so the guard fails closed",
+        "no operator signature verifier is injected, so D1 cannot be verified and the guard " +
+          "fails closed (the production verifier is createEip712OperatorVerifier)",
       );
     }
     let d1Verified: boolean;
