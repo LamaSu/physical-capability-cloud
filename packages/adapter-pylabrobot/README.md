@@ -96,8 +96,8 @@ Per-device overrides via `config.pythonPath`, `config.rpcTimeoutMs`,
 
 | Backend       | Config keys                          | Notes |
 |---------------|--------------------------------------|-------|
-| `chatterbox`  | `deckLayout` or `deckLayoutPath` (required), `numChannels?` (1–96), `maxVolumeUL?`, `initialLiquids?`, `tracking?` | PLR's `LiquidHandlerChatterboxBackend`: an in-memory digital twin of the declared deck. Dry-run only: `executionMode: "simulator"`, and its evidence is marked `mock: true`. |
-| `ot2`         | `ot2Url`, `deckLayout` or `deckLayoutPath` (an `OTDeck`, required), `maxVolumeUL?`, `initialLiquids?` | Opentrons OT-2 via PLR's `OpentronsOT2Backend(host, port)`: `executionMode: "hardware"`. Requires the `[ot2]` extra (PLR's own `opentrons` extra). Tip and volume tracking are always on. |
+| `chatterbox`  | `deckLayout` or `deckLayoutPath` (required), `numChannels?` (1–96), `maxVolumeUL?`, `initialLiquids?`, `tracking?` | PLR's `LiquidHandlerChatterboxBackend`: an in-memory digital twin of the declared deck. Dry-run only: `executionMode: "simulated"`, and its evidence is marked `mock: true`. |
+| `ot2`         | `ot2Url`, `deckLayout` or `deckLayoutPath` (an `OTDeck`, required), `maxVolumeUL?`, `initialLiquids?` | Opentrons OT-2 via PLR's `OpentronsOT2Backend(host, port)`: `executionMode: "unverified"` — the backend name alone never proves physical execution (R39 CRIT1); no hardware-identity provenance check exists yet (D1, queue item 19), so `ot2` evidence stays marked `mock: true` too, same as a simulator. Requires the `[ot2]` extra (PLR's own `opentrons` extra). Tip and volume tracking are always on. |
 | `stub`        | (none)                               | Pure-stdlib test backend, used only when `plrBackend` is `"stub"`; nothing falls back to it. `executionMode: "stub"`, evidence marked `mock: true`. |
 
 Phase 2 extends with `flex`, `star`, `vantage`, `evo`, `hamilton-hhs`, `inheco-thermoshake`. Phase 3 adds `clariostar`, `cytation5`, `inheco-odtc`, `vspin`. Phase 4 adds `cytomat-2`, `cytomat-6`, `liconic-stx`.
@@ -185,8 +185,14 @@ the backend's channel count, and deck resources: a tip op must name a tip spot, 
 liquid op a well or container) before anything moves, so a protocol with one bad
 op runs no op at all. Then the ops run in order, and each op's evidence event is
 emitted only after its call returns. Every run result and every op event carries
-`executionMode` (`hardware`, `simulator` or `stub`); anything but `hardware` is also
-marked `mock: true`, and the TypeScript adapter marks the run's
+`executionMode` (`hardware`, `simulated`, `unverified` or `stub`). **The
+backend's declared name never proves physical
+execution** (R39 CRIT1): `hardware` is never asserted by Phase 1's sidecar — no
+hardware-identity provenance check exists yet (D1, queue item 19) — so `ot2`
+reports `unverified`, the same bucket as a simulator. Anything but an exact
+`hardware` is also marked `mock: true` (the TypeScript adapter normalizes any
+value it doesn't recognize to `unverified` and applies the same marker — see
+`normalizeExecutionMode` in `src/adapter.ts`), and it marks the run's
 `execution_completed` event the same way.
 
 Failures are loud and typed. A missing resource or well is `-32002`

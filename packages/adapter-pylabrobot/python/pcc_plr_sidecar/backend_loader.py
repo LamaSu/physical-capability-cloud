@@ -50,7 +50,14 @@ from typing import Any, Optional
 
 log = logging.getLogger("pcc_plr_sidecar.backend_loader")
 
-EXECUTION_MODES = {"chatterbox": "simulator", "chatter": "simulator", "ot2": "hardware", "stub": "stub"}
+# R39 CRIT1: the backend NAME never establishes physical execution. "simulated"
+# covers chatterbox and every known simulator backend. Every hardware-capable
+# backend (ot2, and any future one) is "unverified" — never "hardware" — until a
+# hardware-identity provenance check exists (D1, queue item 19, out of scope
+# here). ``.get(..., "unverified")`` in :meth:`BackendLoader.load` is the same
+# fail-safe default: a backend added to ``_create_machine`` without an entry
+# here is "unverified", never a silent ``None`` that could read as "hardware".
+EXECUTION_MODES = {"chatterbox": "simulated", "chatter": "simulated", "ot2": "unverified", "stub": "stub"}
 DEFAULT_MAX_VOLUME_UL = 1000.0  # the OT-2's largest pipette; backendConfig.maxVolumeUL may lower it
 
 # Every object with a "type" in a deck layout must be one of these PLR resource
@@ -85,8 +92,10 @@ class BackendHandle:
     backend_config: dict[str, Any] = field(default_factory=dict)
     setup_done: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
-    # "hardware" (a real instrument), "simulator" (PLR's chatterbox) or "stub".
-    # Every run result and every evidence record carries it.
+    # "simulated" (PLR's chatterbox), "unverified" (ot2 or any other
+    # hardware-capable backend — R39 CRIT1: never "hardware" without a
+    # hardware-identity provenance check) or "stub". Every run result and
+    # every evidence record carries it.
     execution_mode: str = "stub"
     # The largest volume one aspirate or dispense may move, in uL.
     max_volume_ul: float = DEFAULT_MAX_VOLUME_UL
@@ -131,7 +140,7 @@ class BackendLoader:
             return existing
 
         log.info("loading backend %s for device %s", plr_backend, device_id)
-        mode = EXECUTION_MODES.get(plr_backend.strip().lower())
+        mode = EXECUTION_MODES.get(plr_backend.strip().lower(), "unverified")
         machine, metadata = await _create_machine(plr_backend, backend_config)
         handle = BackendHandle(
             plr_backend=plr_backend,

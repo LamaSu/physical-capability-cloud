@@ -64,6 +64,25 @@ export type PlrBackend =
   | "liconic-stx"
   | (string & {});
 
+/**
+ * R39 CRIT1: the sidecar's declared backend NAME never proves physical
+ * execution — only an exact "hardware" `executionMode` does, and Phase 1's
+ * sidecar never asserts it (see `backend_loader.EXECUTION_MODES`). Every
+ * other value — "simulated", "unverified", "stub", or any string this
+ * adapter doesn't recognize yet (a future sidecar, a typo, a stale client) —
+ * is simulation-or-unverified and normalizes to "unverified" for reporting.
+ * `mock: true` is the single marker this adapter uses for "not proven
+ * physical" (chosen over a second `unverified: true` flag — one marker, one
+ * meaning, see `handleStart` below).
+ */
+const KNOWN_NON_HARDWARE_EXECUTION_MODES = new Set(["simulated", "simulator", "stub", "unverified"]);
+
+function normalizeExecutionMode(mode: string | undefined): string {
+  if (mode === "hardware") return "hardware";
+  if (mode && KNOWN_NON_HARDWARE_EXECUTION_MODES.has(mode)) return mode;
+  return "unverified";
+}
+
 export interface PyLabRobotConfig {
   /** Unique device id on this kernel */
   deviceId: string;
@@ -293,13 +312,15 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         this.config.runTimeoutMs ?? 3_600_000,
       );
       // Only a run the sidecar says ran on hardware may read as physical evidence;
-      // a simulator, a stub or an older sidecar that doesn't say is marked mock.
-      const onHardware = result.executionMode === "hardware";
+      // a simulator, a stub, an unverified hardware-capable backend, or an older/
+      // unrecognized sidecar reply is normalized to "unverified" and marked mock.
+      const executionMode = normalizeExecutionMode(result.executionMode);
+      const onHardware = executionMode === "hardware";
       const bufferedEvents = collector.stopRecording(jobId, {
         opCount: result.opCount,
         durationMs: result.durationMs,
         summary: result.summary,
-        executionMode: result.executionMode ?? "unknown",
+        executionMode,
         ...(onHardware ? {} : { mock: true }),
       });
       this.completedJobs += 1;
@@ -325,7 +346,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
           jobId,
           opCount: result.opCount,
           durationMs: result.durationMs,
-          executionMode: result.executionMode ?? "unknown",
+          executionMode,
           bufferedEvents: bufferedEvents.length,
         },
       };

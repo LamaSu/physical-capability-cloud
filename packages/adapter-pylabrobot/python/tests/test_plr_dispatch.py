@@ -330,26 +330,36 @@ async def test_the_operator_can_lower_the_volume_bound_and_the_channel_count(fak
 
 
 async def test_every_result_and_event_says_how_the_ops_were_executed(fake_plr):
+    # R39 CRIT1: the backend type never establishes physical execution. Only a
+    # known simulator reports "simulated"; a hardware-capable backend (ot2) is
+    # "unverified" until a hardware-identity provenance check exists (D1 #19) —
+    # never "hardware".
     s, out = _server()
     init_resp = await init(s, out, deckLayout=DECK)
-    assert init_resp["result"]["metadata"]["executionMode"] == "simulator"
+    assert init_resp["result"]["metadata"]["executionMode"] == "simulated"
     await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-1"}, "2")
     resp = await call(s, out, "backend.run", {
         "deviceId": "lh1", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": TRANSFER,
     }, "3")
-    assert resp["result"]["executionMode"] == "simulator"
+    assert resp["result"]["executionMode"] == "simulated"
     await asyncio_sleep_for_notifications()
     events = [m["params"] for m in out.messages() if m.get("method") == "evidence"]
     op_events = [e for e in events if e["type"] in ("pickUpTips", "aspirate", "dispense", "dropTips")]
-    assert len(op_events) == 4 and all(e["payload"]["executionMode"] == "simulator" for e in op_events)
+    assert len(op_events) == 4 and all(e["payload"]["executionMode"] == "simulated" for e in op_events)
     assert all(e["payload"]["mock"] is True for e in op_events)  # simulated, never physical evidence
 
     s, out = _server()
     await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
         "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}})
+    await call(s, out, "evidence.startRecording", {"deviceId": "ot", "jobId": "j"}, "3b")
     run = await call(s, out, "backend.run", {
         "deviceId": "ot", "jobId": "j", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]]}, "4")
-    assert run["result"]["executionMode"] == "hardware"
+    # never "hardware": no hardware-identity provenance check exists yet (D1 #19).
+    assert run["result"]["executionMode"] == "unverified"
+    await asyncio_sleep_for_notifications()
+    ot_events = [m["params"] for m in out.messages() if m.get("method") == "evidence" and m["params"]["type"] == "pickUpTips"]
+    assert len(ot_events) == 1 and ot_events[0]["payload"]["executionMode"] == "unverified"
+    assert ot_events[0]["payload"]["mock"] is True  # unverified is never physical evidence either
 
     s, out = _server()
     await call(s, out, "backend.init", {"deviceId": "st", "plrBackend": "stub", "backendConfig": {}})

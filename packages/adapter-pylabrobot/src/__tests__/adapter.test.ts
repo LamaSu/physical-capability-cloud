@@ -231,10 +231,21 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     const hardware = await completion({ executionMode: "hardware" });
     expect(hardware.executionMode).toBe("hardware");
     expect(hardware.mock).toBeUndefined();
-    const simulator = await completion({ executionMode: "simulator" });
-    expect(simulator.mock).toBe(true);
+    const simulated = await completion({ executionMode: "simulated" });
+    expect(simulated.mock).toBe(true);
+    expect(simulated.executionMode).toBe("simulated");
+    // R39 CRIT1: a hardware-capable backend (ot2) the sidecar hasn't proven is
+    // physical reports "unverified" — never "hardware" — and still keeps mock.
+    const unverified = await completion({ executionMode: "unverified" });
+    expect(unverified.mock).toBe(true);
+    expect(unverified.executionMode).toBe("unverified");
+    // Anything this adapter doesn't recognize is treated as unverified too —
+    // only an exact "hardware" string is ever physical-execution evidence.
+    const mystery = await completion({ executionMode: "something-a-future-sidecar-invented" });
+    expect(mystery.mock).toBe(true);
+    expect(mystery.executionMode).toBe("unverified");
     const unsaid = await completion({});
-    expect(unsaid.executionMode).toBe("unknown");
+    expect(unsaid.executionMode).toBe("unverified");
     expect(unsaid.mock).toBe(true);
   });
 
