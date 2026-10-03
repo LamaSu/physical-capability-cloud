@@ -111,7 +111,9 @@ import {
   hasOwn,
   includesValue,
   inSet,
+  isHex256Digest,
   isProxy,
+  isTaggedSha256,
   joinStrings,
   JSONParse,
   JSONStringify,
@@ -127,7 +129,6 @@ import {
   ObjectKeys,
   ObjectPrototype,
   quoted,
-  regexMatches,
   sha256Hex,
   stringSet,
   text,
@@ -143,10 +144,22 @@ export const SAFETY_ENVELOPE_REGISTRATION_DOMAIN = "PCC:safety-envelope-registra
 
 /** A confirmed envelope's digest: `0x` + 64 lowercase hex (SHA-256), the commitment family. */
 export type SafetyEnvelopeDigest = `0x${string}`;
-const DIGEST_PATTERN = /^0x[0-9a-f]{64}$/;
 
-/** An adapter's manifest digest: `sha256:` + 64 lowercase hex of its reviewed release manifest. */
-export const ADAPTER_MANIFEST_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+/** Whether `value` is a confirmed envelope's digest: `0x` + 64 lowercase hex. */
+export function isSafetyEnvelopeDigest(value: unknown): value is SafetyEnvelopeDigest {
+  return isHex256Digest(value);
+}
+
+/**
+ * Whether `value` is an adapter's manifest digest: `sha256:` + 64 lowercase hex
+ * of its reviewed release manifest. This is a function, not an exported RegExp:
+ * RegExp.prototype.compile rewrites a RegExp's matcher in place after load,
+ * frozen or not, and draft, confirm and compile then accepted any adapter
+ * version (astra pack 167).
+ */
+export function isAdapterManifestDigest(value: unknown): value is string {
+  return isTaggedSha256(value);
+}
 
 const UNITS = stringSet(KNOWN_UNITS);
 /** Units a job deadline can be stated in. */
@@ -837,7 +850,7 @@ function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate
   if (!template) append(reasons, `unknown deviceClass ${quoted(input?.deviceClass)}`);
   if (!nonEmpty(input?.device?.deviceId)) append(reasons, "device.deviceId is required");
   if (!nonEmpty(input?.device?.adapterType)) append(reasons, "device.adapterType is required");
-  if (typeof input?.device?.adapterVersion !== "string" || !regexMatches(ADAPTER_MANIFEST_DIGEST_PATTERN, input.device.adapterVersion)) {
+  if (!isAdapterManifestDigest(input?.device?.adapterVersion)) {
     append(reasons, "device.adapterVersion must be the adapter's manifest digest, sha256: + 64 lowercase hex");
   }
   if (!ArrayIsArray(input?.intake?.limits)) append(reasons, "intake.limits must be an array");
@@ -1251,7 +1264,7 @@ export function confirmedBodyProblems(envelope: SafetyEnvelopeBody): string[] {
   const device = (isRecord(envelope.device) ? envelope.device : ObjectCreate(null)) as Record<string, unknown>;
   if (!nonEmpty(device.deviceId)) append(problems, "device.deviceId is required");
   if (!nonEmpty(device.adapterType)) append(problems, "device.adapterType is required");
-  if (typeof device.adapterVersion !== "string" || !regexMatches(ADAPTER_MANIFEST_DIGEST_PATTERN, device.adapterVersion)) {
+  if (!isAdapterManifestDigest(device.adapterVersion)) {
     append(problems, "device.adapterVersion must be the adapter's manifest digest, sha256: + 64 lowercase hex");
   }
   if (device.vendor !== undefined && !nonEmpty(device.vendor)) append(problems, "device.vendor, when given, must not be blank");
@@ -1469,13 +1482,10 @@ export interface SafetyEnvelopeRegistration extends SafetyEnvelopeRegistrationSt
  */
 export type RegistrationVerifier = (preimage: Uint8Array, signature: Uint8Array) => boolean;
 
-/** LO-EV-1's tagged digest form, `sha256:` + 64 lowercase hex. */
-const TAGGED_DIGEST = /^sha256:[0-9a-f]{64}$/;
-
 function registrationStatementProblems(statement: Record<string, unknown>): string[] {
   const problems = newList<string>(0);
   if (!nonEmpty(statement.deviceId)) append(problems, "the registration needs the deviceId");
-  if (typeof statement.envelopeDigest !== "string" || !regexMatches(DIGEST_PATTERN, statement.envelopeDigest)) {
+  if (!isSafetyEnvelopeDigest(statement.envelopeDigest)) {
     append(problems, "the registration's envelopeDigest must be 0x + 64 lowercase hex");
   }
   if (!nonEmpty(statement.registeredAt) || !NumberIsFinite(DateParse(statement.registeredAt))) {
@@ -1500,7 +1510,7 @@ function statementDigestOf(statement: Record<string, unknown>): SHA256 {
  * built from intrinsics captured at load.
  */
 function taggedDigestPreimage(tagged: string): Uint8Array {
-  const bytes = regexMatches(TAGGED_DIGEST, tagged) ? asciiBytes(tagged) : null;
+  const bytes = isTaggedSha256(tagged) ? asciiBytes(tagged) : null;
   if (bytes === null) throw new EnvelopeRefused([`not a tagged sha256 digest: ${quoted(tagged)}`]);
   return bytes;
 }

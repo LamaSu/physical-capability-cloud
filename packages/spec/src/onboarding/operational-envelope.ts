@@ -39,23 +39,34 @@
  *
  * Like safety-envelope.ts, compile and the schema's refinements call only
  * intrinsics `primordials.ts` captured at load, so a prototype method
- * replaced after load cannot change what is emitted (astra pack 164). The
- * candidate is frozen before zod sees it: zod is third-party code that calls
- * ambient methods, so it only gates success or failure, and what is returned
- * is the frozen object compile built.
+ * replaced after load cannot change what is emitted (astra pack 164), and no
+ * format is checked with a RegExp (astra pack 167). The candidate is frozen
+ * before zod sees it: zod is third-party code that calls ambient methods, so
+ * it only gates success or failure, and what is returned is the frozen object
+ * compile built.
+ *
+ * `OperationalEnvelopeV1Schema` describes the contract and gates compile. It
+ * is a zod schema: an object graph anyone holding it can change (its checks
+ * live in `_def`), and its parse calls ambient methods. Compile is safe with
+ * it, because a changed schema can only refuse, or pass the candidate compile
+ * built from the checked snapshot. A runtime that validates an envelope in a
+ * process where untrusted code ran after load must not take the schema as
+ * its authority. That runtime check is structural and is built from the same
+ * captured intrinsics.
  */
 
 import { z } from "zod";
 
 import { UnitSchema } from "../csd/composition.js";
 import {
-  ADAPTER_MANIFEST_DIGEST_PATTERN,
   DEVICE_CLASS_TEMPLATES,
   EnvelopeRefused,
   HAZARDS,
   SUPERVISION_MODES,
   checkCommittedEnvelope,
   commandMapIssue,
+  isAdapterManifestDigest,
+  isSafetyEnvelopeDigest,
   isTimeUnit,
   supervisionPolicy,
   type ConfirmedSafetyEnvelope,
@@ -149,12 +160,14 @@ function templateOf(deviceClass: string) {
 export const OperationalEnvelopeV1Schema = z
   .object({
     envelopeVersion: z.literal(1),
-    envelopeDigest: z.string().regex(/^0x[0-9a-f]{64}$/, { message: "must be 0x + 64 lowercase hex" }),
+    envelopeDigest: z.string().refine((s): boolean => isSafetyEnvelopeDigest(s), { message: "must be 0x + 64 lowercase hex" }),
     deviceClass: NonBlank,
     deviceId: NonBlank,
     adapterType: NonBlank,
     /** The adapter release manifest digest the envelope commits; a runtime refuses any other adapter. */
-    adapterVersion: z.string().regex(ADAPTER_MANIFEST_DIGEST_PATTERN, { message: "must be sha256: + 64 lowercase hex (the adapter's manifest digest)" }),
+    adapterVersion: z
+      .string()
+      .refine((s): boolean => isAdapterManifestDigest(s), { message: "must be sha256: + 64 lowercase hex (the adapter's manifest digest)" }),
     strict: z.literal(true),
     limits: z.array(OperationalLimitSchema).min(1),
     commands: z.array(OperationalCommandSchema).min(1),
