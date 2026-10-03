@@ -29,6 +29,7 @@ import {
   registrationSigningPreimage,
   type CommandMapV1,
   type ConfirmedSafetyEnvelope,
+  type EnvelopeDecision,
   type RegistrationVerifier,
   type SafetyEnvelopeInput,
   type SafetyEnvelopeRegistration,
@@ -46,8 +47,8 @@ function register(c: ConfirmedSafetyEnvelope): SafetyEnvelopeRegistration {
   return { ...statement, signature: Buffer.from(sign(null, registrationSigningPreimage(statement), REGISTRY.privateKey)).toString("hex") };
 }
 
-function compile(input: SafetyEnvelopeInput): OperationalEnvelopeV1 {
-  const confirmed = confirmSafetyEnvelope(input, { confirmedBy: "operator:fixture", confirmedAt: AT });
+function compile(input: SafetyEnvelopeInput, decision: Partial<EnvelopeDecision> = {}): OperationalEnvelopeV1 {
+  const confirmed = confirmSafetyEnvelope(input, { confirmedBy: "operator:fixture", confirmedAt: AT, ...decision });
   return compileOperationalEnvelope(confirmed, register(confirmed), verifyRegistry);
 }
 
@@ -148,6 +149,33 @@ const OT2 = compile(ot2Input({ min: 4, max: 95 }));
 /** A cold block: 0 is the upper bound of module_temperature. */
 const OT2_COLD = compile(ot2Input({ min: -20, max: 0 }));
 const PLATE = compile(plateInput());
+/**
+ * R8 template fit round 2 (Addendum 6): a heated reader whose firmware runs the
+ * incubator. No command sets the temperature, so it is device-controlled
+ * (telemetry) and keeps its limit.
+ */
+const HEATED = compile(
+  {
+    ...plateInput(),
+    commandMap: { commands: [{ name: "run", params: [] }, { name: "stop", params: [] }] },
+    intake: { ...plateInput().intake, eStop: { mechanism: "adapter-stop", stopCommand: "stop" } },
+  },
+  {
+    deviceControlled: [
+      { quantity: "incubation_temperature", enforcement: "telemetry", detail: "chamber thermistor, GET /status" },
+      { quantity: "read_duration", enforcement: "cutoff", detail: "firmware read timing" },
+    ],
+  },
+);
+const RUN = { name: "run", params: {} };
+/** An enumerated physical parameter: a module-temperature preset whose every value is inside the 4..95 limit. */
+const OT2_PRESET = compile(
+  ot2Input(
+    { min: 4, max: 95 },
+    { commands: OT2_MAP.commands.map((c) => (c.name === "setModuleTemp" ? { ...c, params: [{ name: "celsius", quantity: "module_temperature", unit: "degC", allowed: [4, 37, 95] }] } : c)) },
+  ),
+);
+const presetIndex = OT2_MAP.commands.findIndex((c) => c.name === "setModuleTemp");
 /** No command parameter sets run_duration: the deadline is elapsed time only. */
 const OT2_ELAPSED_ONLY = compile(ot2Input({ min: 4, max: 95 }, OT2_ELAPSED_ONLY_MAP));
 
@@ -197,7 +225,25 @@ const VECTORS: Vector[] = [
   ["allowed/ot2-elapsed-zero", OT2, ASPIRATE, stateOf(OT2, { nowMs: T0 }), "allowed"],
   ["allowed/ot2-59-sent-in-window", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(59, NOW - 1000) }), "allowed"],
   ["allowed/ot2-send-at-window-start-is-outside", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW - 60_000) }), "allowed"],
-  ["allowed/ot2-send-after-now-is-outside", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW + 1) }), "allowed"],
+  // astra pack 174 CRITICAL 1: a send time after now (a clock stepped back) is invalid state, never ignored.
+  ["state-invalid/send-after-now", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW + 1) }), "state-invalid"],
+  // astra pack 174 MEDIUM 3: times are epoch milliseconds, safe integers, so no difference overflows.
+  ["state-invalid/fractional-now", OT2, ASPIRATE, stateOf(OT2, { nowMs: NOW + 0.5 }), "state-invalid"],
+  ["state-invalid/fractional-send", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: [NOW - 0.5] }), "state-invalid"],
+  ["state-invalid/unsafe-start-would-overflow", OT2, ASPIRATE, stateOf(OT2, { jobStartedAtMs: -Number.MAX_VALUE }), "state-invalid"],
+  ["state-invalid/unsafe-now-past-the-safe-range", OT2, ASPIRATE, stateOf(OT2, { nowMs: 2 ** 60 }), "state-invalid"],
+  // R8 template fit round 2: device-controlled quantities keep their limits; enumerated physical parameters.
+  ["allowed/heated-run-device-controlled", HEATED, RUN, stateOf(HEATED), "allowed"],
+  ["envelope-invalid/device-controlled-limit-removed", changed(HEATED, (e) => e.limits.shift()), RUN, stateOf(HEATED), "envelope-invalid"],
+  ["envelope-invalid/device-controlled-dropped", changed(HEATED, (e) => (e.deviceControlled = [])), RUN, stateOf(HEATED), "envelope-invalid"],
+  ["envelope-invalid/device-controlled-missing", changed(OT2, (e) => delete e.deviceControlled), ASPIRATE, stateOf(OT2), "envelope-invalid"],
+  ["envelope-invalid/device-controlled-the-deadline", changed(OT2, (e) => (e.deviceControlled = [{ quantity: "run_duration", enforcement: "cutoff", detail: "x" }])), ASPIRATE, stateOf(OT2), "envelope-invalid"],
+  ["envelope-invalid/device-controlled-settable", changed(OT2, (e) => (e.deviceControlled = [{ quantity: "module_temperature", enforcement: "telemetry", detail: "x" }])), ASPIRATE, stateOf(OT2), "envelope-invalid"],
+  ["envelope-invalid/device-controlled-unknown-enforcement", changed(HEATED, (e) => (e.deviceControlled[0].enforcement = "trust")), RUN, stateOf(HEATED), "envelope-invalid"],
+  ["allowed/preset-listed-value", OT2_PRESET, { name: "setModuleTemp", params: { celsius: 37 } }, stateOf(OT2_PRESET), "allowed"],
+  ["value-not-allowed/preset-unlisted-value-in-range", OT2_PRESET, { name: "setModuleTemp", params: { celsius: 50 } }, stateOf(OT2_PRESET), "value-not-allowed"],
+  ["out-of-range/preset-value-outside-the-limit", OT2_PRESET, { name: "setModuleTemp", params: { celsius: 120 } }, stateOf(OT2_PRESET), "out-of-range"],
+  ["envelope-invalid/preset-allows-a-value-outside-the-limit", changed(OT2_PRESET, (e) => (e.commands[presetIndex].params[0].allowed = [4, 120])), ASPIRATE, stateOf(OT2_PRESET), "envelope-invalid"],
   ["allowed/ot2-old-sends-not-counted", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: [...sends(300, NOW - 3_600_000), ...sends(59, NOW)] }), "allowed"],
   ["allowed/state-extra-key-ignored", OT2, ASPIRATE, stateOf(OT2, { deviceId: "ot2-sim-1" }), "allowed"],
   ["allowed/plate-read-the-single-value", PLATE, read({}), stateOf(PLATE), "allowed"],
@@ -293,7 +339,7 @@ const VECTORS: Vector[] = [
 
   // ── 7. past-deadline ──
   ["past-deadline/1-ms-past", OT2, ASPIRATE, late(OT2), "past-deadline"],
-  ["past-deadline/half-a-ms-past", OT2, ASPIRATE, stateOf(OT2, { jobStartedAtMs: 0, nowMs: DEADLINE_MS + 0.5 }), "past-deadline"],
+  ["state-invalid/half-a-ms-is-not-an-epoch-ms", OT2, ASPIRATE, stateOf(OT2, { jobStartedAtMs: 0, nowMs: DEADLINE_MS + 0.5 }), "state-invalid"],
   ["past-deadline/plate-1-ms-past", PLATE, read({}), late(PLATE), "past-deadline"],
   ["past-deadline/hardware-stop-not-exempt", PLATE, STOP, late(PLATE), "past-deadline"],
   ["past-deadline/a-fractional-max", changed(OT2, (e) => (e.limits[3].max = 1.5)), ASPIRATE, stateOf(OT2, { nowMs: T0 + 90_001 }), "past-deadline"],
@@ -311,7 +357,7 @@ const VECTORS: Vector[] = [
   ["rate-limited/60-sent", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW - 1000) }), "rate-limited"],
   ["rate-limited/send-at-now-minus-59999-is-inside", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW - 59_999) }), "rate-limited"],
   ["rate-limited/send-at-now-is-inside", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW) }), "rate-limited"],
-  ["rate-limited/fractional-edge-inside", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW - 59_999.5) }), "rate-limited"],
+  ["state-invalid/fractional-send-at-the-edge", OT2, ASPIRATE, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW - 59_999.5) }), "state-invalid"],
   ["rate-limited/plate-30-sent", PLATE, read({}), stateOf(PLATE, { recentCommandsAtMs: sends(30, NOW) }), "rate-limited"],
   ["rate-limited/hardware-stop-not-exempt", PLATE, STOP, stateOf(PLATE, { recentCommandsAtMs: sends(30, NOW) }), "rate-limited"],
   ["rate-limited/before-the-params", OT2, { name: "aspirate", params: { volumeUl: 150, extra: 1 } }, stateOf(OT2, { recentCommandsAtMs: sends(60, NOW) }), "rate-limited"],
@@ -390,6 +436,9 @@ function buildFixtures() {
       "Parity notes for a non-JavaScript runtime. Numbers: read every JSON number as an IEEE-754 double; a boolean is never a number (Python's bool is an int, and True == 1); a numeric string is never a number. Blank: JavaScript's String.prototype.trim, which strips U+FEFF but not U+001C..U+001F or U+0085 (Python's str.strip differs on all of these). Digests: exact length and characters, no trailing newline (a regex $ in Python matches before one).",
       "Plain data: NaN and Infinity (which Python's json.loads accepts by default) are not JSON data and make the input they appear in invalid (envelope-invalid, state-invalid or command-malformed); so does a key named __proto__ anywhere. An undefined member is absent. List items are distinct by their JSON text as JavaScript writes it (1 and 1.0 are one item).",
       "Time: elapsed = nowMs - jobStartedAtMs, refused when strictly greater than the deadline limit's max times 1000 (s), 60000 (min) or 3600000 (h). The rate window is (nowMs - 60000, nowMs]: a send time equal to nowMs - 60000, or after nowMs, is outside it; refused when the count is >= maxCommandsPerMinute.",
+      "astra pack 174: every time in the state is an epoch millisecond, a safe integer (|t| <= 9007199254740991), so no difference overflows; a fractional or unsafe time is state-invalid. A send time after nowMs means the clock stepped back: state-invalid, never ignored.",
+      "astra pack 174: a stop sent through this ordinary check is still held to rules 1-5 and 9-12. A genuine EMERGENCY stop never comes through it: the governor calls the adapter's pre-wired stop directly (emergencyStopOf returns it from the envelope alone), and escalates to the hardware stop when the adapter's identity cannot be trusted.",
+      "R8 template fit round 2 (astra pack 173): every template quantity keeps a limit. deviceControlled lists the ones no command sets, each {quantity, enforcement: telemetry | cutoff, detail}, in template order, never the deadline; the envelope's limits still hold all of them. A parameter that sets a quantity may list its only values (allowed): a value must be one of them (value-not-allowed), and every listed value lies inside the limit (else envelope-invalid).",
     ],
     codes: CODES,
     vectors,

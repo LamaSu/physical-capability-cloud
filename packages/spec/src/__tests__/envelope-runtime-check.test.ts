@@ -567,7 +567,8 @@ describe("rule 7, past-deadline: elapsed time against the deadline limit's max",
     expect(at(OT2, DEADLINE_MS)).toBe("allowed");
     expect(at(OT2, DEADLINE_MS + 1)).toBe("past-deadline");
     expect(at(OT2, DEADLINE_MS - 1)).toBe("allowed");
-    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { jobStartedAtMs: 0, nowMs: DEADLINE_MS + 0.5 })))).toBe("past-deadline");
+    // A fractional epoch millisecond is not a time: state-invalid, before the deadline is computed (astra pack 174).
+    expect(codeOf(checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2, { jobStartedAtMs: 0, nowMs: DEADLINE_MS + 0.5 })))).toBe("state-invalid");
     expect(at(OT2, 0)).toBe("allowed");
     expect(at(OT2, 1e12)).toBe("past-deadline");
   });
@@ -613,16 +614,17 @@ describe("rule 8, rate-limited: commands sent in (now - 60 s, now]", () => {
     expect(with_(OT2, sends(60, NOW - 60_000))).toBe("allowed");
     expect(with_(OT2, sends(60, NOW - 59_999))).toBe("rate-limited");
     expect(with_(OT2, sends(60, NOW))).toBe("rate-limited");
-    expect(with_(OT2, sends(60, NOW - 60_000.5))).toBe("allowed");
-    expect(with_(OT2, sends(60, NOW - 59_999.5))).toBe("rate-limited");
-    // A send time after now (a clock step) is outside the window.
-    expect(with_(OT2, sends(60, NOW + 1))).toBe("allowed");
+    // Send times are epoch milliseconds (safe integers), and one after now means the clock stepped back:
+    // both are state-invalid, never ignored (astra pack 174).
+    expect(with_(OT2, sends(60, NOW - 60_000.5))).toBe("state-invalid");
+    expect(with_(OT2, sends(60, NOW + 1))).toBe("state-invalid");
   });
 
   it("counts only the window, in any order and at any length", () => {
-    const mixed = [...sends(1000, NOW - 3_600_000), ...sends(59, NOW - 30_000), ...sends(5, NOW + 5), NOW - 60_000];
+    const mixed = [...sends(1000, NOW - 3_600_000), ...sends(59, NOW - 30_000), NOW - 60_000];
     expect(with_(OT2, mixed.reverse())).toBe("allowed");
     expect(with_(OT2, [...mixed, NOW - 1])).toBe("rate-limited");
+    expect(with_(OT2, [...mixed, NOW + 5])).toBe("state-invalid");
   });
 
   it("comes before the params", () => {
@@ -1157,8 +1159,8 @@ describe("RegExps reachable after load cannot change a decision (astra pack 167)
     expect(JSON.stringify(decisions)).toBe(CLEAN_DECISIONS);
   });
 
-  it("the module exports exactly the check, and holds no RegExp itself", () => {
-    expect(Object.keys(runtimeCheckModule)).toEqual(["checkRuntimeCommand"]);
+  it("the module exports exactly the check and the emergency-stop lookup, and holds no RegExp itself", () => {
+    expect(Object.keys(runtimeCheckModule).sort()).toEqual(["checkRuntimeCommand", "emergencyStopOf"]);
     expect(regexpsReachableFrom([runtimeCheckModule]).regexps).toEqual([]);
   });
 });

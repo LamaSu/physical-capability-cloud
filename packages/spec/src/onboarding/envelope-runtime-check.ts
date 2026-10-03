@@ -14,13 +14,18 @@
  *   3. adapter-mismatch: the running adapter is not the one the envelope commits.
  *   4. command-malformed: the command is not plain data exactly {name, params}.
  *   5. unknown-command: the command is not in `envelope.commands`.
- *   6. The stop (`eStop.stopCommand` of an adapter stop) skips 7 and 8: a stop
- *      is always sendable. Its parameters are still checked by 9 to 12.
+ *   6. The stop (`eStop.stopCommand` of an adapter stop), sent through THIS
+ *      ordinary dispatch check, skips 7 and 8 (the deadline and the rate). It is
+ *      still held to 1 to 5 and 9 to 12, so a stop to an unverified adapter, or
+ *      under unreadable time, is refused here. A genuine EMERGENCY stop never
+ *      comes through this check: see `emergencyStopOf` (astra pack 174).
  *   7. past-deadline: the job has run longer than the deadline limit's max.
  *   8. rate-limited: `maxCommandsPerMinute` were already sent in (now - 60 s, now].
  *   9. undeclared-param, 10. missing-param: the params are exactly the declared ones.
- *  11. not-a-number, out-of-range: a bounded parameter carries a finite number
- *      inside its limit's [min, max], 0 a real bound; no unit conversion.
+ *  11. not-a-number, out-of-range, value-not-allowed: a parameter that sets a
+ *      quantity carries a finite number inside its limit's [min, max], 0 a real
+ *      bound, no unit conversion; an enumerated physical parameter (`allowed`)
+ *      carries one of its listed values.
  *  12. value-not-allowed: an unbounded parameter carries one of `allowed`, or a
  *      non-empty list of distinct items from `allowedItems`.
  *
@@ -30,8 +35,11 @@
  * retained mutable object reachable after load:
  *   - zod is not consulted. It is third-party code that calls ambient methods,
  *     and a schema is a mutable object reachable after load. Rule 1 checks the
- *     envelope structurally, field by field, and the tests prove it accepts and
- *     refuses exactly what OperationalEnvelopeV1Schema does.
+ *     envelope structurally, field by field. On plain JSON data the tests show
+ *     it accepts and refuses exactly what OperationalEnvelopeV1Schema does.
+ *     Beyond plain JSON it reads the plain copy: a proxy or an accessor is
+ *     refused, and a member whose value is undefined is dropped, as JSON would
+ *     drop it (astra pack 174).
  *   - No RegExp: one can be recompiled in place, even frozen
  *     (RegExp.prototype.compile, Annex B). Digests are checked by R8's
  *     structural predicates, code unit by code unit.
@@ -47,6 +55,19 @@
  * realm whose intrinsics were replaced BEFORE `primordials.ts` loaded is
  * beyond any in-process check.
  *
+ * Time (astra pack 174). Every time in the state is an epoch millisecond: a
+ * safe integer, so no subtraction overflows. A send time after `nowMs` is
+ * refused as state-invalid, never ignored: a clock that stepped back must not
+ * open the rate window.
+ *
+ * The emergency stop is not this check. A genuine emergency stop must never be
+ * refused because the clock is wrong, the rate is spent, or ordinary
+ * authorization state is unavailable. The governor keeps a dedicated stop path
+ * that invokes the active adapter's pre-wired stop primitive directly, and that
+ * escalates to the hardware stop or watchdog when the adapter's identity cannot
+ * be trusted, instead of sending an envelope command through an unknown adapter.
+ * `emergencyStopOf(envelope)` tells it which primitive the envelope pre-wired.
+ *
  * Pure: it never reads a clock (the runtime passes the times in), performs no
  * I/O, and never throws for any input.
  */
@@ -54,6 +75,8 @@
 import type { OperationalEnvelopeV1 } from "./operational-envelope.js";
 import {
   commandMapIssue,
+  deviceControlledIssue,
+  enumeratedLimitIssues,
   DEVICE_CLASS_TEMPLATES,
   HAZARDS,
   isAdapterManifestDigest,
@@ -293,6 +316,7 @@ const ENVELOPE_KEYS: readonly string[] = deepFreeze([
   "adapterVersion",
   "strict",
   "limits",
+  "deviceControlled",
   "commands",
   "deadlineQuantity",
   "maxCommandsPerMinute",
@@ -385,10 +409,15 @@ function envelopeProblem(e: unknown): string | null {
   if (template === undefined) return `unknown deviceClass ${quoted(e.deviceClass)}`;
   const limits = limitsProblem(e.limits, template);
   if (limits !== null) return limits;
+  const controlledIssue = deviceControlledIssue(e.deviceControlled, template.id);
+  if (controlledIssue !== null) return controlledIssue;
+  const controlled = mapList(e.deviceControlled as readonly { quantity: string }[], (d) => d.quantity);
   const map = ObjectCreate(null) as { commands: unknown };
   map.commands = e.commands;
-  const commands = commandMapIssue(map, template.id);
+  const commands = commandMapIssue(map, template.id, controlled);
   if (commands !== null) return `commands: ${commands}`;
+  const enumerated = enumeratedLimitIssues(map as { commands: CommandSpec[] }, e.limits as readonly unknown[]);
+  if (enumerated.length > 0) return `commands: ${enumerated[0]!}`;
   const stop = eStopProblem(e.eStop, e.commands as readonly CommandSpec[], template);
   if (stop !== null) return stop;
   const policy = supervisionPolicy(e.supervision, e.eStop as EStopDeclaration, template.id);
@@ -403,17 +432,28 @@ function envelopeProblem(e: unknown): string | null {
 
 // ── Rule 2: the runtime's state ─────────────────────────────────────
 
+/** The largest integer a double holds exactly; epoch times stay inside it, so no difference of two overflows. */
+const MAX_SAFE_MS = 9007199254740991;
+
+/** An epoch millisecond: an integer within the safe range (astra pack 174: finite inputs must not overflow). */
+function epochMs(v: unknown): v is number {
+  return typeof v === "number" && NumberIsInteger(v) && v <= MAX_SAFE_MS && v >= -MAX_SAFE_MS;
+}
+
 function stateProblem(s: unknown): string | null {
   if (!isRecord(s)) return "the state must be an object";
   if (!isAdapterManifestDigest(s.adapterManifestDigest)) {
     return "adapterManifestDigest must be sha256: + 64 lowercase hex (the running adapter's manifest digest)";
   }
-  if (!finite(s.jobStartedAtMs) || !finite(s.nowMs)) return "jobStartedAtMs and nowMs must be finite numbers (epoch milliseconds)";
+  if (!epochMs(s.jobStartedAtMs) || !epochMs(s.nowMs)) return "jobStartedAtMs and nowMs must be epoch milliseconds: safe integers";
   if (s.jobStartedAtMs > s.nowMs) return "jobStartedAtMs is after nowMs";
   const recent = s.recentCommandsAtMs;
   if (!ArrayIsArray(recent)) return "recentCommandsAtMs must be a list of epoch milliseconds";
   for (let i = 0; i < recent.length; i++) {
-    if (!finite(recent[i])) return `recentCommandsAtMs[${i}] must be a finite number`;
+    const at: unknown = recent[i];
+    if (!epochMs(at)) return `recentCommandsAtMs[${i}] must be an epoch millisecond: a safe integer`;
+    // Refused, never ignored: a clock that stepped back would otherwise open the rate window (astra pack 174).
+    if (at > s.nowMs) return `recentCommandsAtMs[${i}] is after nowMs: a send time in the future means the clock stepped back`;
   }
   return null;
 }
@@ -502,7 +542,8 @@ export function checkRuntimeCommand(envelope: unknown, command: unknown, state: 
   const spec = commandOf(env.commands, cmd.name);
   if (spec === undefined) return refuse("unknown-command", `${quoted(cmd.name)} is not one of the envelope's commands`);
 
-  // 6. The stop is always sendable: it skips the deadline and the rate (7 and 8), not 9 to 12.
+  // 6. The stop, through this ordinary dispatch, skips the deadline and the rate (7 and 8). It has
+  //    already passed 1 to 5, and 9 to 12 still apply. The EMERGENCY stop is a separate path (emergencyStopOf).
   const eStop = env.eStop;
   const isStop = eStop.mechanism === "adapter-stop" && cmd.name === eStop.stopCommand;
   if (!isStop) {
@@ -558,6 +599,10 @@ export function checkRuntimeCommand(envelope: unknown, command: unknown, state: 
     if (!(value >= limit.min && value <= limit.max)) {
       return refuse("out-of-range", `${quoted(p.name)} = ${value} ${limit.unit} is outside the confirmed ${p.quantity} [${limit.min}, ${limit.max}] ${limit.unit}`);
     }
+    // An enumerated physical parameter carries one of its listed values (each already inside the limit).
+    if (p.allowed !== undefined && !includesValue(p.allowed, value)) {
+      return refuse("value-not-allowed", `${quoted(p.name)} = ${value} ${limit.unit} is not one of its listed ${p.quantity} values`);
+    }
   }
 
   // 12. Unbounded parameters: only an allowed value, or a list of allowed items.
@@ -571,4 +616,34 @@ export function checkRuntimeCommand(envelope: unknown, command: unknown, state: 
 
   // 13.
   return ALLOWED;
+}
+
+// ── The emergency stop: a separate path ─────────────────────────────
+
+/** The stop primitive an envelope pre-wired: the device's own hardware stop, its adapter's stop command, or none. */
+export type EmergencyStop = { mechanism: "hardware" } | { mechanism: "adapter-stop"; stopCommand: string } | { mechanism: "none" };
+
+/**
+ * Which stop primitive `envelope` pre-wired, for the governor's dedicated
+ * emergency-stop path (astra pack 174). It depends on the envelope alone: no
+ * clock, no rate, no command, and no authorization state. It returns null when
+ * the envelope is not a valid OperationalEnvelopeV1; the governor must then use
+ * the hardware stop or watchdog. "none" is only valid for a class that neither
+ * moves nor heats: there is nothing to stop beyond ending the job.
+ *
+ * It decides nothing about the adapter. When the running adapter's identity
+ * cannot be trusted, the governor escalates to the hardware stop instead of
+ * sending this command through it.
+ */
+export function emergencyStopOf(envelope: unknown): EmergencyStop | null {
+  let env: Envelope;
+  try {
+    env = frozenCopy(envelope, "envelope") as Envelope;
+  } catch {
+    return null;
+  }
+  if (envelopeProblem(env) !== null) return null;
+  const eStop = env.eStop;
+  if (eStop.mechanism === "adapter-stop") return ObjectFreeze({ mechanism: "adapter-stop" as const, stopCommand: eStop.stopCommand });
+  return ObjectFreeze({ mechanism: eStop.mechanism });
 }
