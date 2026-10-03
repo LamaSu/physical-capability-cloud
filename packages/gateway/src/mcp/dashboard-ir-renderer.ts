@@ -506,7 +506,20 @@ export function listWindow(node: IrNode, data: unknown, returned: number): ListW
   const filterKeys = q ? Object.keys(q).filter((k) => k !== "offset" && k !== "limit").sort() : [];
   const offset = windowOffset(q);
   const limit = windowLimit(q);
-  const empty: "none" | "no rows in this window" = filterKeys.length === 0 && offset === 0 ? "none" : "no rows in this window";
+  const prof = path !== undefined ? LIST_PROFILES[path] : undefined;
+  // "none" is decided by the SAME paging evidence the note uses (astra n110 r1). It is claimed only
+  // when the window vouches for the WHOLE collection:
+  // - no filters, an offset of exactly 0, and an absent or valid positive limit; AND
+  // - the route's own paging evidence: it is unpaginated; or it reports a total that is a valid 0;
+  //   or it is paged without a total, where an empty FIRST page of a positive limit can only come
+  //   from an empty collection.
+  // Missing, mistyped, inconsistent or off-grammar paging evidence gives "no rows in this window".
+  let vouches = filterKeys.length === 0 && offset === 0 && limit !== "unknown";
+  if (vouches && prof?.paged?.total !== undefined) {
+    const t = readOwnPath(data, prof.paged.total);
+    vouches = isSafeIntValue(t) && t === 0;
+  }
+  const empty: "none" | "no rows in this window" = vouches ? "none" : "no rows in this window";
 
   const parts: string[] = [];
   if (filterKeys.length > 0) {
@@ -516,7 +529,6 @@ export function listWindow(node: IrNode, data: unknown, returned: number): ListW
   if (offset === "unknown") parts.push("offset not shown");
   else if (offset > 0) parts.push("from row " + String(offset + 1));
 
-  const prof = path !== undefined ? LIST_PROFILES[path] : undefined;
   if (prof?.paged) {
     const paged = prof.paged;
     if (paged.total !== undefined) {

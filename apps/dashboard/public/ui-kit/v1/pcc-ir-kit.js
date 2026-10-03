@@ -1432,7 +1432,13 @@
     const filterKeys = q ? Object.keys(q).filter((k) => k !== "offset" && k !== "limit").sort() : [];
     const offset = windowOffset(q);
     const limit = windowLimit(q);
-    const empty = filterKeys.length === 0 && offset === 0 ? "none" : "no rows in this window";
+    const prof = path !== void 0 ? LIST_PROFILES[path] : void 0;
+    let vouches = filterKeys.length === 0 && offset === 0 && limit !== "unknown";
+    if (vouches && prof?.paged?.total !== void 0) {
+      const t = readOwnPath(data, prof.paged.total);
+      vouches = isSafeIntValue(t) && t === 0;
+    }
+    const empty = vouches ? "none" : "no rows in this window";
     const parts = [];
     if (filterKeys.length > 0) {
       const qq = q;
@@ -1440,7 +1446,6 @@
     }
     if (offset === "unknown") parts.push("offset not shown");
     else if (offset > 0) parts.push("from row " + String(offset + 1));
-    const prof = path !== void 0 ? LIST_PROFILES[path] : void 0;
     if (prof?.paged) {
       const paged = prof.paged;
       if (paged.total !== void 0) {
