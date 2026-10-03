@@ -134,6 +134,38 @@ describe("PrinterLogAdapter polling (astra pack 190)", () => {
     expect.soft(events.length, "events after the second stop").toBe(once);
   });
 
+  it("a failed poll refuses only its own recording's summary: the next recording stops with one", async () => {
+    let calls = 0;
+    const logProvider = async (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 2) throw new Error("log source unreachable"); // the first recording's timer poll
+      return calls === 1 ? "line 1" : calls === 4 ? "line A" : null;
+    };
+    const log = new PrinterLogAdapter("log-next", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 1_000, logProvider });
+    const events = record(log);
+
+    await log.startRecording("job-1");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(log.stopRecording()).rejects.toThrow(/a log poll failed/);
+    await log.startRecording("job-2"); // its first poll reads "line A"
+    const summary = await log.stopRecording();
+    expect.soft(summary.payload, "the next recording's summary").toMatchObject({ jobId: "job-2", chainLength: 1 });
+    expect.soft(summaries(events).length, "summaries").toBe(1);
+  });
+
+  it("after a first poll that failed, there is no recording: a stop refuses and emits nothing", async () => {
+    const log = new PrinterLogAdapter("log-failed-start", KERNEL_ID, memoryLogCapture(), {
+      pollIntervalMs: 1_000,
+      logProvider: async () => {
+        throw new Error("log source unreachable");
+      },
+    });
+    const events = record(log);
+    await expect(log.startRecording("job-s")).rejects.toThrow("log source unreachable");
+    await expect.soft(log.stopRecording(), "the stop").rejects.toThrow(/no recording to stop/);
+    expect.soft(events, "events").toEqual([]);
+  });
+
   it("two stops at once are one stop: one summary, the same result", async () => {
     let calls = 0;
     const finalPoll = deferred();
