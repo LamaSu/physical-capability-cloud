@@ -1,5 +1,5 @@
 import React from "react";
-import { demoModeHref } from "../lib/demo-mode.js";
+import { demoModeHref, isDemoBuild } from "../lib/demo-mode.js";
 
 /**
  * The two states a page with no live data source can be in.
@@ -52,9 +52,12 @@ export function DemoBanner({ what }: { what: string }) {
     >
       <span className="font-semibold uppercase tracking-wider text-violet-300">Demo data</span>
       <span>{what}: sample values, not live PCC state.</span>
-      <a href={demoModeHref(false)} className="ml-auto text-violet-300/80 hover:text-violet-200 underline underline-offset-4">
-        Leave demo mode
-      </a>
+      {/* A demo deployment can't leave demo mode (lib/demo-mode.ts), so it offers no way out it can't honour (astra 408a). */}
+      {!isDemoBuild() && (
+        <a href={demoModeHref(false)} className="ml-auto text-violet-300/80 hover:text-violet-200 underline underline-offset-4">
+          Leave demo mode
+        </a>
+      )}
     </div>
   );
 }

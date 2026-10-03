@@ -35,13 +35,14 @@ function writeSession(on: boolean): void {
   }
 }
 
-function buildFlag(): boolean {
+/** A dedicated demo deployment (VITE_PCC_DEMO=1): demo mode is always on, and ?demo=0 can't turn it off. */
+export function isDemoBuild(): boolean {
   const env = (import.meta as { env?: Record<string, string | undefined> }).env;
   return env?.VITE_PCC_DEMO === "1";
 }
 
 export function isDemoMode(): boolean {
-  if (buildFlag()) return true;
+  if (isDemoBuild()) return true;
   if (typeof window === "undefined") return false;
   const param = new URLSearchParams(window.location.search).get("demo");
   if (param === "1") {
