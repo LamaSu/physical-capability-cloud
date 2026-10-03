@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getJobFacade } from "../facades/index.js";
+import { JOB_PAGE_MAX_LIMIT } from "../facades/job.facade.js";
 import { getRepos, getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
@@ -51,7 +52,7 @@ export async function jobRoutes(app: FastifyInstance) {
             status: { type: "string" },
             offset: { type: "integer", minimum: 0, default: 0 },
             // 50 matches the facade's pre-existing default (job.facade.ts list()).
-            limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+            limit: { type: "integer", minimum: 1, maximum: JOB_PAGE_MAX_LIMIT, default: 50 },
           },
         },
       },
