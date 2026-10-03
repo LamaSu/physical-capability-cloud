@@ -13,8 +13,11 @@
  *         tier≥2 human floor the oracle already enforces, and
  *     (e) for k ≥ 1 includes ≥1 primitive that is NOT decl.self_attested (the
  *         typed tier-0 floor grants only tier 0).
- *   Anything else — unknown ids, reserved primitives, free-text-only required[]
- *   — CAPS at tier 0, and stays listable (tier 0 is the permissionless on-ramp).
+ *   Anything else (an unknown id, a reserved primitive, a free-text-only
+ *   required[]) makes THAT tier ineligible, so the CSD caps below it: at
+ *   tier 0 when it sits in tier 1, at tier k-1 when it sits in tier k. Tiers
+ *   below it do not depend on it, and the ascent is monotone. The CSD stays
+ *   listable (tier 0 is the permissionless on-ramp).
  *
  * This is REPORT-ONLY by default: it returns an ELIGIBLE/CAPPED(reason) verdict;
  * callers do not (yet) reject registration on it. Pass
@@ -88,7 +91,7 @@ function evaluateTier(
   if (refs.length === 0) {
     if (k >= 1) {
       reasons.push(
-        `tier${k}: no structured primitives[] — legacy free-text required[] caps at tier 0`,
+        `tier${k}: no structured primitives[] — legacy free-text required[] caps the CSD below tier ${k}`,
       );
     }
     return { tier: k, eligible: reasons.length === 0, reasons, stubVerifierPrimitives };
@@ -104,12 +107,12 @@ function evaluateTier(
   for (const ref of refs) {
     const def = index.get(ref.id);
     if (!def) {
-      reasons.push(`tier${k}: unknown primitive "${ref.id}" — caps at tier 0`);
+      reasons.push(`tier${k}: unknown primitive "${ref.id}" — caps the CSD below tier ${k}`);
       continue;
     }
     if (def.status !== "active") {
       reasons.push(
-        `tier${k}: primitive "${ref.id}" is status:${def.status} — caps at tier 0`,
+        `tier${k}: primitive "${ref.id}" is status:${def.status} — caps the CSD below tier ${k}`,
       );
       continue;
     }

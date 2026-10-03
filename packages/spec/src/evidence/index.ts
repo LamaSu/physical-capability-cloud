@@ -26,6 +26,9 @@ export * from "./is-fabricated.js";
 // contract every Ed25519 producer and consumer of evidence builds its message from.
 export * from "./signing-preimage.js";
 export * from "./eligibility.js";
+// compileTierLadder — a CSD's own per-tier event requirements, the ladder the
+// oracle's /settle tier recompute reads (N19/N33).
+export * from "./tier-ladder.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
 export * from "./emitter-manifest.js";
