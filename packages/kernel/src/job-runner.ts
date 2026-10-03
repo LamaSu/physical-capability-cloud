@@ -9,6 +9,7 @@
 import type { AssuranceTier, SHA256 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
+import { failureText } from "./failure-text.js";
 import { openEvidenceSession } from "./evidence-session.js";
 import * as Sentry from "@sentry/node";
 
@@ -161,7 +162,7 @@ export class JobRunner {
           try {
             await this.evidenceEmitter.addEvent(jobId, stepId, event);
           } catch (err) {
-            unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
+            unrecorded.first ??= { type: event.type, error: failureText(err) };
             console.error(err);
           }
         });
@@ -362,8 +363,7 @@ export class JobRunner {
       succeeded = result.success;
       return result;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { success: false, error: message, durationMs: Date.now() - startTime };
+      return { success: false, error: failureText(err), durationMs: Date.now() - startTime };
     } finally {
       // Every exit quiesces before it releases. A run that ended before step 8 first stops
       // the sensors it started (else a recording never ends and its device never frees),
