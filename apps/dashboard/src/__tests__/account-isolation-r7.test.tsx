@@ -295,6 +295,19 @@ describe("19f CRITICAL X2: a tab can't clear the teardown another tab hasn't fin
 });
 
 describe("19f, the parts of the protocol", () => {
+  it("this tab's own switch cancels its verification, so the switch doesn't wait for the gateway's answer", async () => {
+    const a = await openTab("A");
+    await act(async () => click(a, "Sign In"));
+    await settle(5);
+    expect(gateway.verifyWaiting, "A's verification is on the wire, unanswered").toHaveLength(1);
+    await act(async () => {
+      expect(await a.store.getState().login(KEY_B)).toBe(true);
+    });
+    await settle();
+    expect(transitioning(a), "the switch finished without the gateway answering the cancelled verification").toBe(false);
+    expect(gateway.siweCookie).toBe(false);
+  }, 30_000);
+
   it("signing out moves the account generation too: the change is pending until a teardown confirms it", async () => {
     vi.resetModules();
     const { useAuthStore } = await import("../stores/auth-store.js");
