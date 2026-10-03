@@ -183,10 +183,12 @@ describe("createEip712OperatorVerifier — golden vectors (#270 @59f6c45f: 1 pos
     const vector = VECTORS.negatives.find((n) => n.name === "wrong-domain-chainId");
     expect(vector).toBeDefined();
     const verifier = createEip712OperatorVerifier({ operatorForUnit: operatorForUnitAlways(OPERATOR_ADDRESS_LOWER) });
+    // The principal id names the OTHER chain too, so rule 6 holds and only the digest's chain id
+    // binding can refuse (with the vector's own eip155:8453 principal id, rule 6 alone would).
     const input: OperatorSignatureVerifierInput = {
       unitBinding: { ...unitBindingFromMessage(vector!.message), chainId: vector!.domain.chainId },
       packageBodyHash: vector!.message.packageBodyHash as Hex,
-      operatorPrincipalId: vector!.claimedOperatorPrincipalId,
+      operatorPrincipalId: `eip155:${vector!.domain.chainId}:${OPERATOR_ADDRESS_LOWER}`,
       signer: OPERATOR_ADDRESS_LOWER,
       sig: vector!.signature.full as Hex,
     };
