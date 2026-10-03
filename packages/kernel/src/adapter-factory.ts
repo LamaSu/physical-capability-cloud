@@ -55,6 +55,9 @@ import { SiLAAdapter } from "./adapters/sila/sila-adapter.js";
 import { IppAdapter } from "./adapters/ipp-adapter.js";
 import { OpentronsMachineAdapter } from "./opentrons/adapter.js";
 import { HamiltonAdapter } from "./adapters/hamilton-adapter.js";
+import { PhotoCameraAdapter } from "./adapters/photo-camera-adapter.js";
+import { PhotoCaptureService } from "./photo-capture-service.js";
+import { GeminiComparisonService } from "./gemini-comparison-service.js";
 
 // ---------------------------------------------------------------------------
 // Factory function types
@@ -356,6 +359,95 @@ function buildMockCamera(
   );
 }
 
+/**
+ * Real photo-evidence camera.
+ *
+ * PhotoCameraAdapter is PUSH-FED: a caller must supply raw image bytes via
+ * `setNextCapture(bytes)` before `captureSnapshot()`, which otherwise throws.
+ * That throw is the point — a tier-2 job whose photo never arrived fails
+ * closed instead of settling on a fabricated hash.
+ *
+ * Recognised `config` keys (all optional):
+ *   - `gemini`: `true` to enable Gemini CV inspection (API key read from
+ *     `config.geminiApiKey` or the GEMINI_API_KEY env var — one MUST be set),
+ *     or an already-constructed GeminiComparisonService for in-process wiring.
+ *   - `geminiApiKey`: string API key, only meaningful with `gemini: true`.
+ *
+ * Anything else in those fields is a configuration error and throws. There is
+ * no mock fallback: an operator who declared a real camera never silently gets
+ * a simulator (use adapterType "mock" / KernelConfig.mockMode for simulation).
+ *
+ * Evidence storage: the adapter is built with a storage-less PhotoCaptureService,
+ * so `storageRef` is the hash-derived `photo:sha256:...` — the same choice the
+ * gateway makes in routes/photo-verification.ts. Wiring durable storage here is
+ * not possible without a signature change (createEvidenceStorage() is async;
+ * CameraAdapterFactory is sync), and PhotoCaptureService's current byte-upload
+ * path would label a hash-derived id `storacha://`, which misstates provenance.
+ */
+function buildPhotoCamera(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): CameraAdapter {
+  return new PhotoCameraAdapter(
+    device.id,
+    kernelId,
+    // No storage service: CID-by-hash only (see doc comment above).
+    new PhotoCaptureService(),
+    resolvePhotoGeminiService(device, cfg),
+  );
+}
+
+/**
+ * Resolve the optional GeminiComparisonService for a "photo" device.
+ *
+ * Never constructs a Gemini client "from nothing": without a key the service
+ * silently degrades to local pHash+SSIM while PhotoCameraAdapter still stamps
+ * `model: "gemini-2.0-flash"` on the emitted cv_inspection_result — fabricated
+ * provenance inside a signed bundle. So `gemini: true` with no key available
+ * is a configuration error, not a downgrade.
+ */
+function resolvePhotoGeminiService(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+): GeminiComparisonService | undefined {
+  const gemini = cfg.gemini;
+  if (gemini === undefined || gemini === null || gemini === false) return undefined;
+
+  const configErr = (detail: string): Error =>
+    new Error(
+      `[adapter-factory] adapterType "photo" (device "${device.id}"): ${detail} ` +
+        `Set config.gemini to true (with config.geminiApiKey or the GEMINI_API_KEY env var), ` +
+        `pass a GeminiComparisonService instance, or omit config.gemini to run the adapter ` +
+        `without CV comparison. Refusing to fall back to a mock camera.`,
+    );
+
+  // In-process wiring: an already-constructed comparison service.
+  if (typeof gemini === "object" && typeof (gemini as { compare?: unknown }).compare === "function") {
+    return gemini as GeminiComparisonService;
+  }
+
+  if (gemini !== true) {
+    throw configErr(
+      `config.gemini must be true or a GeminiComparisonService, got ${typeof gemini === "object" ? "an object without a compare() method" : `type "${typeof gemini}"`}.`,
+    );
+  }
+
+  const rawKey = cfg.geminiApiKey;
+  if (rawKey !== undefined && typeof rawKey !== "string") {
+    throw configErr(`config.geminiApiKey must be a string, got type "${typeof rawKey}".`);
+  }
+  const apiKey = rawKey ?? process.env["GEMINI_API_KEY"];
+  if (!apiKey) {
+    throw configErr(
+      `config.gemini is true but no API key is available — without one the service falls back ` +
+        `to local pHash+SSIM while the adapter still reports model "gemini-2.0-flash" in evidence.`,
+    );
+  }
+
+  return new GeminiComparisonService(apiKey);
+}
+
 function buildOctoPrint(
   device: DeviceConfig,
   cfg: Record<string, unknown>,
@@ -503,6 +595,7 @@ registerSensorAdapter("sila", buildSiLA);
 // Camera adapters
 registerCameraAdapter("mock", buildMockCamera);
 registerCameraAdapter("generic-http", buildGenericHttpRefusal<CameraAdapter>("camera"));
+registerCameraAdapter("photo", buildPhotoCamera);
 
 // ---------------------------------------------------------------------------
 // Internal helpers
