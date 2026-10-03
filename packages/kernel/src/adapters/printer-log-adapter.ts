@@ -95,8 +95,11 @@ function makeSimulatedLogProvider(): LogProvider {
  *                             failed-poll latch are reset; a stopFailed recording is
  *                             discarded unsummarized. The start, its first poll included, is
  *                             outstanding work until it settles. Then:
- *                               first poll succeeds -> recording: the timer is installed;
+ *                               first poll succeeds -> recording: the timer is installed, unless
+ *                                                      a stop was accepted meanwhile, which then
+ *                                                      takes over (see stopRecording);
  *                               first poll fails    -> idle: startRecording rejects with its error.
+ *                             A dispose meanwhile overrides both (see dispose).
  *     starting, same job   -> that start: the same promise.
  *     recording, same job  -> resolves at once: idempotent.
  *     starting or recording another job -> refused: the adapter is busy with a job.
@@ -119,7 +122,7 @@ function makeSimulatedLogProvider(): LogProvider {
  *                             flight stays outstanding work until it settles. Each sees
  *                             disposed when it resumes: a poll captures and emits nothing, a
  *                             start installs no timer and rejects, and a stop makes no final
- *                             poll, emits no summary and rejects.
+ *                             poll it has not yet made, emits no summary and rejects.
  *
  * A start while a stop is in flight is refused rather than made to wait for the stop:
  *   - JobRunner never makes one: a device is free for a new job only once its adapter's
@@ -154,8 +157,9 @@ export class PrinterLogAdapter implements SensorAdapter {
   private latestEntryHash: string | null = null;
   /**
    * What can still emit, for quiesceEvidence(): a start in flight, its first poll included;
-   * the recording, from its first poll's success until its stop has emitted the summary or
-   * failed, or dispose; each timer poll in flight; and each stop in flight.
+   * the recording, from the timer its start installs until its stop has emitted the summary
+   * or failed, or dispose; each timer poll in flight; and each stop in flight, including one
+   * waiting for a start.
    */
   private readonly work = new OutstandingWork();
   /** Ends the recording's own piece of `work`. */
@@ -448,10 +452,11 @@ export class PrinterLogAdapter implements SensorAdapter {
 
   /**
    * Resolves once nothing that can emit is outstanding (`work`): no start in flight, its
-   * first poll included; no recording, which lasts from its first poll's success until its
-   * stop has emitted the summary or failed, or dispose; no timer poll in flight; and no stop
-   * in flight, including one waiting for a start. So nothing is emitted after it resolves
-   * until the next start. At once when nothing is outstanding.
+   * first poll included; no recording, which lasts from the timer its start installs until
+   * its stop has emitted the summary or failed, or dispose; no timer poll in flight; and no
+   * stop in flight, including one waiting for a start. So nothing is emitted after it
+   * resolves until the adapter is given new work: a start, or a retried stop. At once when
+   * nothing is outstanding.
    */
   quiesceEvidence(): Promise<void> {
     return this.work.idle();
