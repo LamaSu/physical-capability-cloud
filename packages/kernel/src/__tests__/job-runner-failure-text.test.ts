@@ -246,6 +246,7 @@ describe("JobRunner's setup, and the latch's event label, whatever a collaborato
     const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-ft-hook", stepId: STEP, gcodeHash: gcode(53), assuranceTier: 1 }));
     expect.soft(out.rejected, "run() rejected").toBeUndefined();
     expect.soft(out.value?.success, "success").toBe(false);
+    expect.soft(out.value?.error, "why").toBe("the run's adapters could not be checked: a reason with no text form");
     expect.soft(out.unhandled.length, "unhandled rejections").toBe(0);
   });
 
@@ -422,7 +423,8 @@ describe("run() is total, and what it takes is released even when a release thro
     });
     const out = await catchingUnhandled(() => new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-cleanup", stepId: STEP, gcodeHash: gcode(85), assuranceTier: 1 }));
     expect.soft(out.rejected, "run() rejected").toBeUndefined();
-    expect.soft(out.value?.success, "success").toBe(false);
+    expect.soft(out.value?.error, "why: the run's own failure").toBe("Failed to start: start refused");
+    expect.soft(console.error, "the failed release, logged").toHaveBeenCalledWith(expect.stringMatching(/job job-212-cleanup: detaching the step failed: a reason with no text form/));
     machine.failing = null;
     const again = await new JobRunner(machine, [], null, emitter).run({ jobId: "job-212-cleanup", stepId: STEP, gcodeHash: gcode(85), assuranceTier: 1 });
     expect.soft(again.success, "the same step, run again").toBe(true);
