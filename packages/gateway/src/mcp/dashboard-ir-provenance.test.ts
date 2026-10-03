@@ -682,11 +682,33 @@ describe("astra r4 (#348 @3e615620): reproduced findings (verify before fix)", (
       expect(s.lineOf(host).textContent).toBe("unavailable · " + why);
       expect(host.className).toContain("pcc-unavail");
       expect(s.q(".pcc-list .pcc-empty")).toBeNull();
-      expect(host.querySelectorAll(".pcc-row").length).toBe(0);
+      // A list clears its rows. A card keeps its PCC-owned label rows (paintSchemaCard paints them
+      // once, before any fetch) and clears every value slot, which the loop below checks.
+      if (manifest === listManifest) expect(host.querySelectorAll(".pcc-row").length).toBe(0);
       for (const v of Array.from(host.querySelectorAll(".pcc-value")) as any[]) expect(v.textContent).toBe("");
       s.close();
     });
   }
+
+  // Closes the round-5 mutation survivor ("card prepare writes the real slots directly"): no test
+  // covered card ORDERING. An OLDER valid card snapshot must never paint over a newer one; the card's
+  // prepare stages into throwaway slots, and only a commit that ordering accepted writes the real ones.
+  it("card ordering: an OLDER valid card snapshot never overwrites a newer one", async () => {
+    const s = scene([
+      { status: 200, json: { name: "Beta", type: "t", asOf: iso(T0 - 1_000) } },
+      { status: 200, json: { name: "Alpha", type: "t", asOf: iso(T0 - 60_000) } }, // valid, but OLDER
+    ], T0);
+    s.deliver(cardManifest); await s.settle();
+    const card = s.q(".pcc-schema-card");
+    const texts = () => (Array.from(card.querySelectorAll(".pcc-value")) as any[]).map((v) => v.textContent as string);
+    const before = texts();
+    expect(before.join(" ")).toContain("Beta");
+    await s.nextPoll();
+    expect(texts()).toEqual(before);
+    expect(texts().join(" ")).not.toContain("Alpha");
+    expect(card.getAttribute("data-as-of")).toBe(iso(T0 - 1_000));
+    s.close();
+  });
 
   // Positive control: validate-first does not fail closed forever. Once an invalid refresh has
   // cleared a list to unavailable, a LATER valid response with a newer asOf still repaints it
