@@ -34,6 +34,10 @@ const RULE_VALUE_PATTERN = /^-?(0|[1-9][0-9]{0,8})(\.[0-9]{1,6})?$/;
 
 // ── Plain-data helpers ───────────────────────────────────────────────────
 
+/** HH:MM, 24h (ScheduleWindow's documented format). */
+const HH_MM = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+const isHhMm = (x: unknown): boolean => typeof x === "string" && HH_MM.test(x);
+
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   if (typeof x !== "object" || x === null || Array.isArray(x)) return false;
   const proto = Object.getPrototypeOf(x);
@@ -186,7 +190,9 @@ export function validatePricingRules(rules: unknown): PricingRulesValidation {
       } else if (key === "maxLeadTimeMs") {
         if (!(typeof v === "number" && Number.isFinite(v) && v >= 0)) return fail("invalid-condition-maxLeadTimeMs");
       } else if (key === "timeWindow") {
-        if (!isPlainObject(v)) return fail("invalid-condition-timeWindow");
+        // The ScheduleWindow contract: {start, end} as HH:MM 24h strings (#498 r3). Such a rule never
+        // applies on this route, but a malformed one is still malformed policy data.
+        if (!isPlainObject(v) || !isHhMm(v.start) || !isHhMm(v.end)) return fail("invalid-condition-timeWindow");
       }
       // Unknown keys are ALLOWED unvalidated: pricingRulesThatApply's default case
       // means such a rule never applies on this route, which keeps current semantics.

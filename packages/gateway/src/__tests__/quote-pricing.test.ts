@@ -128,6 +128,11 @@ describe("quote-pricing: validatePricingRules — F4", () => {
     ["condition.material empty string", [{ ...okRule, condition: { material: "" } }], "invalid-condition-material"],
     ["condition.maxLeadTimeMs negative", [{ ...okRule, condition: { maxLeadTimeMs: -1 } }], "invalid-condition-maxLeadTimeMs"],
     ["condition.timeWindow not an object", [{ ...okRule, condition: { timeWindow: "always" } }], "invalid-condition-timeWindow"],
+    // #498 r3: the ScheduleWindow contract is {start, end} as HH:MM 24h strings.
+    ["condition.timeWindow start not HH:MM", [{ ...okRule, condition: { timeWindow: { start: 5, end: "06:00" } } }], "invalid-condition-timeWindow"],
+    ["condition.timeWindow end missing", [{ ...okRule, condition: { timeWindow: { start: "05:00" } } }], "invalid-condition-timeWindow"],
+    ["condition.timeWindow hour 24", [{ ...okRule, condition: { timeWindow: { start: "24:00", end: "06:00" } } }], "invalid-condition-timeWindow"],
+    ["condition.timeWindow minute 60", [{ ...okRule, condition: { timeWindow: { start: "05:60", end: "06:00" } } }], "invalid-condition-timeWindow"],
     ["impact not a plain object", [{ ...okRule, impact: "percent:10" }], "invalid-impact"],
     ["impact.mode invalid", [{ ...okRule, impact: { mode: "percentage", value: "10" } }], "invalid-impact-mode"],
     ["impact.value NaN-ish", [{ ...okRule, impact: { mode: "percent", value: "abc" } }], "invalid-impact-value"],
@@ -149,6 +154,11 @@ describe("quote-pricing: validatePricingRules — F4", () => {
     expect(validatePricingRules([reviewer])).toEqual({ ok: false, ruleIndex: 0, ruleId: "missing-type", reason: "invalid-type" });
     const typed = validatePricingRules([{ ...reviewer, type: "custom" }]);
     expect(typed.ok && typed.rules[0]!.type).toBe("custom");
+  });
+
+  it("a contract-shaped timeWindow passes validation (and still never applies on this route)", () => {
+    const r = validatePricingRules([{ ...okRule, condition: { timeWindow: { start: "22:00", end: "06:00" } } }]);
+    expect(r.ok).toBe(true);
   });
 
   it("an unknown condition key is ALLOWED (not a validation error)", () => {
