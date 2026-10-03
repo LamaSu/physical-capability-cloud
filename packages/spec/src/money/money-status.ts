@@ -199,15 +199,18 @@ function isLegacyEscrowRecord(o: Record<string, unknown>): boolean {
 }
 
 /**
- * Classify a record by its SOURCE SCHEMA (steward #2490 / #2688; product-qa #2594; escrow #2580):
- *  - V-next /lifecycle ({unitState, finalState, isAllocated, isTerminal}): unitState must be 1..9
- *    and every present field must agree with it. A FINAL state (8, 9) additionally needs all three
- *    corroborating fields present: absence is not corroboration.
- *  - V-next /receipt ({finalState, isAllocated}, no unitState): finalState counts only when it is
- *    terminal (8 or 9) and isAllocated is present and true; finalState null + isAllocated means
- *    "decided, not paid out"; anything else fails closed.
+ * Classify a record's FIELDS by the settlement read routes' own semantics (steward #2490 / #2688;
+ * product-qa #2594; escrow #2580, #3163; gateway settlement/unit-state-mapper):
+ *  - with `unitState` (1..9; 0 is a read error): every present field must agree with it. A FINAL
+ *    state (8, 9) needs finalState, isAllocated and phase present (isTerminal is cross-checked when
+ *    present; /receipt, which gains unitState per #3163, carries no isTerminal).
+ *  - /receipt without unitState ({finalState, phase, isAllocated}): final only with isAllocated FALSE
+ *    and phase "settled"; finalState null + isAllocated true is "decided, not paid out", + false is
+ *    "in progress"; anything else fails closed.
  *  - A legacy escrow record: the flat word table on `status` (never green).
  *  - Anything else (a job, an A2A task, a bare value): "not a settlement record" (unknown).
+ * This classifies FIELDS only; field shape is not provenance. To DISPLAY a settlement state use
+ * classifySettlementRead(), which also needs to know where the record came from.
  */
 export function classifySettlementRecord(record: unknown): MoneyStatusClassification {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return NOT_A_SETTLEMENT_RECORD();
@@ -258,6 +261,29 @@ export function classifySettlementRecord(record: unknown): MoneyStatusClassifica
 
   if (isLegacyEscrowRecord(o)) return classifyMoneyStatus(o.status);
   return NOT_A_SETTLEMENT_RECORD();
+}
+
+/** The only routes whose LIVE reads may present a FINAL settlement state (settlement-read.ts UNIT_ID_RE). */
+export const SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
+
+/**
+ * Display classification of a settlement record, given WHERE it came from (astra r2 on #313, F1: field
+ * shape is not provenance). A FINAL V-next presentation (settled 8, refunded 9) is shown only for a LIVE
+ * read of an exact per-unit settlement route. A baked snapshot, a fallback, a stream event, or a
+ * settled-shaped body from any other route is unknown. Every other classification passes through
+ * unchanged: non-final states claim nothing final, and the flat table has no green.
+ */
+export function classifySettlementRead(
+  record: unknown,
+  source: { path?: unknown; live?: unknown } | null | undefined,
+): MoneyStatusClassification {
+  const c = classifySettlementRecord(record);
+  const vnext = record !== null && typeof record === "object" && !Array.isArray(record)
+    && (has(record as Record<string, unknown>, "unitState") || has(record as Record<string, unknown>, "finalState"));
+  if (!vnext || (c.tone !== "settled" && c.tone !== "refunded")) return c;
+  const path = source && typeof source.path === "string" ? source.path.split("?")[0]! : "";
+  if (source && source.live === true && SETTLEMENT_READ_ROUTE.test(path)) return c;
+  return UNKNOWN("", "final state not shown - not a live read of a settlement route");
 }
 
 // ── Coverage ───────────────────────────────────────────────────────────────
