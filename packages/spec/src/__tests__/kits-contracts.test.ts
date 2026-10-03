@@ -6,7 +6,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
 import * as kit from "../types/capability-kit.js";
 import {
@@ -52,7 +52,24 @@ import type { SHA256 } from "../types/common.js";
 import type { CsdEvidencePrimitiveRef } from "../csd/schema.js";
 import { loadBuiltinCsds } from "../csd/registry.js";
 import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
+import { computeCsdEligibility } from "../evidence/eligibility.js";
 import { canonicalize } from "../util/canonical.js";
+
+/**
+ * Run `fn` with the named primitives' verifiers marked live, then restore them. No tier 1-3 set is
+ * executable with today's registry (ident.registered_key, which every live tier-1 primitive depends
+ * on, is a stub), so the positive tier 1-3 cases need this to exist at all.
+ */
+function withLiveVerifiers<T>(ids: string[], fn: () => T): T {
+  const touched = EVIDENCE_PRIMITIVES.filter((p) => ids.includes(p.id));
+  const before = touched.map((p) => p.verifierStatus);
+  try {
+    for (const p of touched) (p as { verifierStatus: string }).verifierStatus = "live";
+    return fn();
+  } finally {
+    touched.forEach((p, i) => ((p as { verifierStatus: string }).verifierStatus = before[i]!));
+  }
+}
 
 const H = (c: string) => `sha256:${c.repeat(64)}` as const;
 const T = (c: string) => `0x${c.repeat(64)}`;
@@ -614,7 +631,11 @@ describe("pack 112 reproductions", () => {
     expect(parses(aggregate({ asOf: "2026-08-15T00:00:00Z" }))).toBe(false); // the period is still open
     expect(parses(aggregate({ asOf: "2026-08-31T23:59:59Z" }))).toBe(false); // its last second
     expect(parses(aggregate({ asOf: "2026-09-01T00:00:00+02:00" }))).toBe(false); // 22:00Z on the 31st
-    expect(parses(aggregate({ asOf: "2026-09-01T00:00:00Z" }))).toBe(true); // the first instant after it
+    // #365 releases a period only 24 hours after it ends (astra pack 112c), and a DTO read earlier cannot exist.
+    expect(parses(aggregate({ asOf: "2026-09-01T00:00:00Z" }))).toBe(false); // the first instant after it: grace
+    expect(parses(aggregate({ asOf: "2026-09-01T23:59:59Z" }))).toBe(false); // the grace's last second
+    expect(parses(aggregate({ asOf: "2026-09-02T00:00:00+02:00" }))).toBe(false); // 22:00Z on the 1st
+    expect(parses(aggregate({ asOf: "2026-09-02T00:00:00Z" }))).toBe(true); // the first instant after the grace
     expect(parses(aggregate({ releasePeriod: "2099-12" }))).toBe(false); // a future period
     expect(parses(kitRequest({ asOf: "2026-09-24" }))).toBe(false);
     expect(parses(kitRequest({ deadline: "next week" }))).toBe(false);
@@ -812,7 +833,7 @@ describe("astra pack 112b", () => {
       schema: "pcc.public-opportunity-aggregate.v1" as const,
       capabilityType,
       demandBand,
-      countedEvidence: "authenticated_order",
+      countedEvidence: "authenticated_order" as const,
       period: p,
     });
     /** A release built the way #365's buildPublicRelease builds one, with both digests computed independently. */
@@ -824,7 +845,7 @@ describe("astra pack 112b", () => {
       const body = {
         schema: "pcc.public-opportunity-release.v1" as const,
         period: p,
-        policy: { k: 5, evidenceFloor: "authenticated_order" },
+        policy: { k: 5, evidenceFloor: "authenticated_order" as const },
         approvedSetDigest: digestOf([...new Set(approvedUrls.filter((u) => isPublicCapabilityUrl(u)))].sort(byCodeUnit)),
         aggregates,
       };
@@ -882,6 +903,42 @@ describe("astra pack 112b", () => {
       refused({ ...release, digest: H("0") }).toThrow(/digest does not match/);
       refused({ ...release, aggregates: [aggregateRecord(cnc, "100+")] }).toThrow(/digest does not match/);
       refused({ ...release, period: "2026-07", aggregates: [aggregateRecord(cnc, "5-9", "2026-07")] }).toThrow(/digest does not match/);
+    });
+
+    /** A self-consistent record with ANY policy: both digests computed the documented way. */
+    const craftedRelease = (policy: { k: number; evidenceFloor: string }, countedEvidence: string, p = period) => {
+      const body = {
+        schema: "pcc.public-opportunity-release.v1" as const,
+        period: p,
+        policy,
+        approvedSetDigest: digestOf([...new Set(approved.filter((u) => isPublicCapabilityUrl(u)))].sort(byCodeUnit)),
+        aggregates: [{ ...aggregateRecord(cnc, "5-9", p), countedEvidence }],
+      };
+      return { ...body, digest: digestOf(body) };
+    };
+
+    it("astra pack 112c CRITICAL 1: only #365's one fixed policy is accepted (k 5, counted at authenticated_order)", () => {
+      expect(demandAggregatesFromRelease(craftedRelease({ k: 5, evidenceFloor: "authenticated_order" }, "authenticated_order") as never, approved, asOf)).toHaveLength(1);
+      // The verdict's case: a self-consistent record with k 0 and the query floor.
+      refused(craftedRelease({ k: 0, evidenceFloor: "query" }, "query")).toThrow(/not a pcc.public-opportunity-release.v1 record/);
+      refused(craftedRelease({ k: 4, evidenceFloor: "authenticated_order" }, "authenticated_order")).toThrow(/not a pcc.public-opportunity-release.v1 record/);
+      refused(craftedRelease({ k: 5, evidenceFloor: "funded" }, "funded")).toThrow(/not a pcc.public-opportunity-release.v1 record/);
+      // An aggregate counted at another class than the policy's floor.
+      refused(craftedRelease({ k: 5, evidenceFloor: "authenticated_order" }, "query")).toThrow(/not a pcc.public-opportunity-release.v1 record/);
+    });
+
+    it("astra pack 112c CRITICAL 1: a period is releasable only after #365's 24-hour grace, by this clock", () => {
+      vi.useFakeTimers({ now: new Date("2026-10-01T12:00:00Z") });
+      try {
+        const september = craftedRelease({ k: 5, evidenceFloor: "authenticated_order" }, "authenticated_order", "2026-09");
+        refused(september, approved, "2026-10-01T11:00:00Z").toThrow(/not releasable yet/);
+        vi.setSystemTime(new Date("2026-10-01T23:59:59Z"));
+        refused(september, approved, "2026-10-01T23:59:00Z").toThrow(/not releasable yet/);
+        vi.setSystemTime(new Date("2026-10-02T00:00:00Z"));
+        expect(demandAggregatesFromRelease(september as never, approved, "2026-10-02T00:00:00Z")).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("throws when the release was built with a different approved set", () => {
@@ -953,48 +1010,80 @@ describe("astra pack 112b", () => {
     expect(validatePrimitiveParams({ type: "string", pattern: "^a$" }, "a")).toBe(false);
   });
 
-  it("executable means tier-eligible with live verifiers: the tier 0 floor, a tier 2 and 3 positive case, and the rules behind them", () => {
+  it("executable means CUMULATIVELY tier-eligible with live verifiers (112c): the tier 0 floor, payer alone is not tier 2 or 3", () => {
     const decl = { id: "decl.self_attested" };
     const payer = { id: "approval.payer" };
     // Tier 0 is the permissionless floor, with or without the declaration primitive.
     expect(evidenceIsExecutable(0, [])).toBe(true);
     expect(evidenceIsExecutable(0, [decl])).toBe(true);
-    // approval.payer is live, Family G, supports tiers 2 and 3 and has no dependency: a complete set there.
-    expect(evidenceIsExecutable(2, [payer])).toBe(true);
-    expect(evidenceIsExecutable(3, [payer])).toBe(true);
-    expect(evidenceIsExecutable(3, [payer, payer])).toBe(true);
-    // Only at the tiers it supports.
-    expect(evidenceIsExecutable(0, [payer])).toBe(false);
-    expect(evidenceIsExecutable(1, [payer])).toBe(false);
+    // approval.payer supports tiers 2 and 3 only, so its tier 1 set is empty and the program caps at tier 0.
+    for (const tier of [0, 1, 2, 3] as const) expect(evidenceIsExecutable(tier, [payer]), `payer at ${tier}`).toBe(false);
+    expect(evidenceIsExecutable(3, [payer, payer])).toBe(false);
     // From tier 1 up the set is non-empty, and the declaration primitive alone is a tier 0 floor.
     for (const tier of [1, 2, 3] as const) {
       expect(evidenceIsExecutable(tier, []), `empty at tier ${tier}`).toBe(false);
       expect(evidenceIsExecutable(tier, [decl]), `decl at tier ${tier}`).toBe(false);
     }
-    // Dependency closure: confirm.execution_mode is live and supports tier 2, but needs receipt.kernel_signed in the set.
-    expect(evidenceIsExecutable(2, [payer, { id: "confirm.execution_mode" }])).toBe(false);
     // A stub verifier (even a Family-G one), an unknown id and a stub dependency are not executable.
     expect(evidenceIsExecutable(2, [{ id: "approval.expert" }])).toBe(false);
     expect(evidenceIsExecutable(2, [payer, { id: "capture.photo_nonced" }])).toBe(false);
     expect(evidenceIsExecutable(2, [payer, { id: "made.up_primitive" }])).toBe(false);
-    // At the time of writing no tier 1 set is executable: the live tier 1 primitives (receipt.kernel_signed,
-    // confirm.execution_mode) depend on ident.registered_key, whose verifier is a stub.
+    // Today no tier 1 set is executable: receipt.kernel_signed and confirm.execution_mode depend on the stub
+    // ident.registered_key.
+    const chain = [{ id: "ident.registered_key" }, { id: "receipt.kernel_signed" }, { id: "confirm.execution_mode" }];
+    expect(evidenceIsExecutable(1, chain)).toBe(false);
+  });
+
+  it("astra pack 112c HIGH 4: the cumulative report caps payer-only evidence at tier 0, and so does evidenceIsExecutable", () => {
+    const refs = [{ id: "approval.payer" }];
+    const report = computeCsdEligibility(
+      { url: "pcc://opportunity/evidence-requirement", evidence: { tier3: { description: "x", required: [], primitives: refs } } },
+      { requireImplementedVerifier: true },
+    );
+    expect(report.eligibleTier).toBe(0);
+    expect(evidenceIsExecutable(3, refs)).toBe(false);
+  });
+
+  it("with the chain's verifier live, tiers 1-3 become executable exactly when every tier through the target is eligible", () => {
+    const chain = [{ id: "ident.registered_key" }, { id: "receipt.kernel_signed" }, { id: "confirm.execution_mode" }];
+    const payer = { id: "approval.payer" };
+    withLiveVerifiers(["ident.registered_key"], () => {
+      // confirm.execution_mode supports tier 0 but its dependency cannot sit there, so tier 0 stays empty (the floor).
+      expect(evidenceIsExecutable(1, chain)).toBe(true);
+      // Tier 2 needs the human floor: payer approval completes it, the chain alone does not.
+      expect(evidenceIsExecutable(2, chain)).toBe(false);
+      expect(evidenceIsExecutable(2, [...chain, payer])).toBe(true);
+      // Tier 3: receipt.kernel_signed supports only tiers 1-2, but it already sits in a lower tier for its dependants.
+      expect(evidenceIsExecutable(3, [...chain, payer])).toBe(true);
+      // A ref that cannot contribute at any tier up to the target makes the requirement not executable.
+      expect(evidenceIsExecutable(1, [...chain, payer])).toBe(false);
+      // Dependency closure still holds: without receipt.kernel_signed, confirm.execution_mode has nothing to stand on.
+      expect(evidenceIsExecutable(1, [{ id: "ident.registered_key" }, { id: "confirm.execution_mode" }])).toBe(true);
+      expect(evidenceIsExecutable(1, [{ id: "confirm.execution_mode" }])).toBe(false);
+    });
+    // Restored: the stub is a stub again.
+    expect(evidenceIsExecutable(1, chain)).toBe(false);
   });
 
   it("the executable flag must equal evidenceIsExecutable, in both directions, and funded kinds need it true", () => {
     const payer = { id: "approval.payer" };
     const truthful = "executable must be true exactly when requiredPrimitives is a complete tier-eligible set with live verifiers (evidenceIsExecutable)";
-    // A funded offer with an executable tier 2 requirement (params checked against the primitive) and a tier 0 floor.
-    expect(parses({ ...fundedOffer(), evidence: evidence(2, [payer]) })).toBe(true);
-    expect(parses({ ...fundedOffer(), evidence: evidence(2, [{ id: "approval.payer", params: { approverRole: "payer", claimIds: ["c-1"] } }]) })).toBe(true);
+    // A funded offer with an executable requirement: the tier 0 floor (no tier 1-3 set is executable today).
     expect(parses({ ...fundedOffer(), evidence: evidence(0, []) })).toBe(true);
     expect(parses({ ...fundedOffer(), evidence: evidence(0, [{ id: "decl.self_attested" }]) })).toBe(true);
+    // Payer approval alone at tier 2 is not executable, so a funded offer cannot carry it.
+    expect(messagesOf({ ...fundedOffer(), evidence: evidence(2, [payer]) })).toEqual([
+      "a funded_offer's evidence must be executable (see evidenceIsExecutable)",
+    ]);
+    // Params are still checked against the primitive, executable or not.
+    expect(parses({ ...kitRequest(), evidence: evidence(2, [{ id: "approval.payer", params: { approverRole: "payer", claimIds: ["c-1"] } }]) })).toBe(true);
     // Claiming executable for a set that is not, and claiming non-executable for one that is, are both refused.
-    expect(messagesOf({ ...kitRequest(), evidence: { tier: 2, requiredPrimitives: [payer], executable: false } })).toEqual([truthful]);
+    expect(messagesOf({ ...kitRequest(), evidence: { tier: 2, requiredPrimitives: [payer], executable: true } })).toEqual([truthful]);
     expect(messagesOf({ ...kitRequest(), evidence: { tier: 1, requiredPrimitives: [], executable: true } })).toEqual([truthful]);
+    expect(messagesOf({ ...kitRequest(), evidence: { tier: 0, requiredPrimitives: [], executable: false } })).toEqual([truthful]);
     // A funded kit_build_request is held to the same standard as a funded offer.
     const funded = { reward: { amount: "1", currency: "USDC", fundingStatus: "funded" }, authority: "authoritative", fundingRef: { kind: "escrow", id: "esc-9" } } as const;
-    expect(parses({ ...kitRequest(), ...funded, evidence: evidence(2, [payer]) })).toBe(true);
+    expect(parses({ ...kitRequest(), ...funded, evidence: evidence(0, []) })).toBe(true);
     expect(messagesOf({ ...kitRequest(), ...funded, evidence: evidence(1, []) })).toEqual([
       "a funded kit_build_request's evidence must be executable (see evidenceIsExecutable)",
     ]);
@@ -1296,9 +1385,9 @@ describe("astra pack 112b", () => {
   };
 
   it("MEDIUM 7: a future period with a forged future asOf is refused", () => {
-    const forged = aggregate({ capabilityType: "pcc://capabilities/fdm/v2", releasePeriod: "2099-12", asOf: "2100-01-01T00:00:00Z" });
+    const forged = aggregate({ capabilityType: "pcc://capabilities/fdm/v2", releasePeriod: "2099-12", asOf: "2100-01-02T00:00:00Z" });
     expect(parses(forged)).toBe(false);
-    // The period really did close before this asOf, so the future asOf is the only reason.
+    // The period (and its 24-hour grace) really did end before this asOf, so the future asOf is the only reason.
     expect(messagesOf(forged)).toEqual([futureAsOf]);
   });
 
@@ -1428,31 +1517,43 @@ const loadCorpus = (file: string): Corpus =>
 /** First 16 hex of sha256 over the parsed corpus file, re-serialised: blind to whitespace, not to order or content. */
 const corpusDigest = (file: string) => createHash("sha256").update(JSON.stringify(loadCorpus(file))).digest("hex").slice(0, 16);
 
-const CONTRACTS: Array<{ literal: string; file: string; schema: z.ZodTypeAny }> = [
-  { literal: OPPORTUNITY_SCHEMA, file: "pcc.opportunity.v0.json", schema: OpportunityDTOSchema },
-  { literal: OPERATOR_BINDING_SCHEMA, file: "pcc.operator-binding.v0.json", schema: OperatorBindingDTOSchema },
-  { literal: KIT_MANIFEST_SCHEMA, file: "pcc.capability-kit-v1.json", schema: CapabilityKitManifestV1Schema },
+/**
+ * First 16 hex of sha256 over the bytes of the module that defines a literal (astra 112c MEDIUM 8): it moves on
+ * ANY edit there, so a refinement whose effect lies outside the finite corpus cannot change the module unnoticed.
+ */
+const sourceDigest = (module: string) =>
+  createHash("sha256").update(readFileSync(new URL(module, import.meta.url))).digest("hex").slice(0, 16);
+
+const CONTRACTS: Array<{ literal: string; file: string; module: string; schema: z.ZodTypeAny }> = [
+  { literal: OPPORTUNITY_SCHEMA, file: "pcc.opportunity.v0.json", module: "../types/opportunity.ts", schema: OpportunityDTOSchema },
+  { literal: OPERATOR_BINDING_SCHEMA, file: "pcc.operator-binding.v0.json", module: "../types/operator-binding.ts", schema: OperatorBindingDTOSchema },
+  { literal: KIT_MANIFEST_SCHEMA, file: "pcc.capability-kit-v1.json", module: "../types/capability-kit.ts", schema: CapabilityKitManifestV1Schema },
 ];
 
 const verdictOf = (schema: z.ZodTypeAny, value: unknown) => (schema.safeParse(value).success ? "accept" : "reject");
 
 describe("pack 112 MEDIUM 8 and 112b: every shape, enum or accepted-value change bumps the schema literal", () => {
-  // The lock table pins, per literal, the schema's structural fingerprint AND its semantic corpus (the accept and
-  // reject cases in kits-corpus/, which cover every refinement rule). The fingerprint cannot see a refinement
-  // (ZodEffects is unwrapped); the corpus can. Consumers parse strictly, so any change to what a literal accepts
+  // The lock table pins, per literal, the schema's structural fingerprint, its semantic corpus (the accept and
+  // reject cases in kits-corpus/, which cover every refinement rule) AND the digest of the module that defines it.
+  // The fingerprint cannot see a refinement (ZodEffects is unwrapped); the corpus sees every refinement that moves
+  // one of its cases; the module digest moves on any edit at all, so a refinement whose effect lies outside the
+  // corpus still fails here (astra 112c MEDIUM 8). Consumers parse strictly, so any change to what a literal accepts
   // breaks an old reader: when this fails, bump the literal (a new version) and re-pin ALL of its values in the
   // same commit. Changing a pinned entry under an UNCHANGED literal is the review-blocking act. No in-repo test can
   // stop a PR from rewriting its own pins; the merge-gate review is the control. The one exception is the
   // pre-release window before the first merge, when no producer or consumer is deployed.
-  const LOCK: Record<string, { literal: string; shape: string; corpus: string }> = {
-    "pcc.opportunity.v0": { literal: "pcc.opportunity.v0", shape: "91d25641c69b4970", corpus: "18fb5161dae6817a" },
-    "pcc.operator-binding.v0": { literal: "pcc.operator-binding.v0", shape: "ca2f94ba7aa72ade", corpus: "8e2aa2dd88af2f74" },
-    "pcc.capability-kit/v1": { literal: "pcc.capability-kit/v1", shape: "0ade760b67d57c08", corpus: "99a0669d56f0e163" },
+  const LOCK: Record<string, { literal: string; shape: string; corpus: string; source: string }> = {
+    "pcc.opportunity.v0": { literal: "pcc.opportunity.v0", shape: "91d25641c69b4970", corpus: "da093e433fef5264", source: "26c4224554829be7" },
+    "pcc.operator-binding.v0": { literal: "pcc.operator-binding.v0", shape: "ca2f94ba7aa72ade", corpus: "8e2aa2dd88af2f74", source: "4dbcbaa125103737" },
+    "pcc.capability-kit/v1": { literal: "pcc.capability-kit/v1", shape: "0ade760b67d57c08", corpus: "99a0669d56f0e163", source: "5c97266f279b1ced" },
   };
 
-  it("each contract literal is pinned to its exact shape and its exact corpus", () => {
+  it("each contract literal is pinned to its exact shape, its exact corpus and its module's exact bytes", () => {
     const actual = Object.fromEntries(
-      CONTRACTS.map((c) => [c.literal, { literal: c.literal, shape: fingerprint(c.schema), corpus: corpusDigest(c.file) }]),
+      CONTRACTS.map((c) => [
+        c.literal,
+        { literal: c.literal, shape: fingerprint(c.schema), corpus: corpusDigest(c.file), source: sourceDigest(c.module) },
+      ]),
     );
     expect(actual).toEqual(LOCK);
   });
@@ -1514,7 +1615,8 @@ describe("pack 112 MEDIUM 8 and 112b: every shape, enum or accepted-value change
         "params do not match telemetry.envelope_conformance's paramsSchema",
       ],
       ["reject: executable claimed for an empty tier 3 set", EXECUTABLE],
-      ["reject: executable denied for an executable tier 2 set", EXECUTABLE],
+      ["reject: executable denied for an executable tier 0 set", EXECUTABLE],
+      ["reject: executable claimed for payer approval alone at tier 3 (112c HIGH 4: its tier 1 is empty)", EXECUTABLE],
       ["reject: asOf in the future on a funded_offer", FUTURE_AS_OF],
       ["reject: asOf in the future on a kit_build_request", FUTURE_AS_OF],
       ["reject: asOf in the future on a demand_aggregate", FUTURE_AS_OF],
@@ -1536,7 +1638,14 @@ describe("pack 112 MEDIUM 8 and 112b: every shape, enum or accepted-value change
         "reject: a demand_aggregate whose title is not derived",
         "a demand_aggregate's title is derived: demandAggregateTitle(capabilityType, demandBand, releasePeriod)",
       ],
-      ["reject: a demand_aggregate read in the last second of its period", "a demand_aggregate's release period must have closed before its asOf"],
+      [
+        "reject: a demand_aggregate read in the last second of its period",
+        "a demand_aggregate's release period must have closed, plus #365's release grace, before its asOf",
+      ],
+      [
+        "reject: a demand_aggregate read at the first instant after its period closed, inside #365's 24-hour grace",
+        "a demand_aggregate's release period must have closed, plus #365's release grace, before its asOf",
+      ],
     ],
     "pcc.operator-binding.v0": [
       ["reject: a claim right for a type with no binding", "claim right for unbound type pcc://capabilities/hplc/v1"],

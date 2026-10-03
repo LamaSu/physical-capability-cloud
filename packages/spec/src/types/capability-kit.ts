@@ -46,11 +46,13 @@
  * Versioning: pre-release until first merge (no deployed producer or consumer
  * yet), so amendment 1 and the pack-112 and 112b fixes land under the same
  * literal. After the first merge, EVERY shape, enum or accepted-value change
- * bumps KIT_MANIFEST_SCHEMA. kits-contracts.test.ts pins two things for it: the
- * structural fingerprint of the schema, and a semantic corpus of accept and
- * reject cases (__tests__/kits-corpus/pcc.capability-kit-v1.json) with a case for
- * each refinement rule. The fingerprint cannot see a refinement; the corpus can.
- * Both fail until the bump is done deliberately (astra pack 112 MEDIUM 8, 112b).
+ * bumps KIT_MANIFEST_SCHEMA. kits-contracts.test.ts pins three things for it: the
+ * structural fingerprint of the schema; a semantic corpus of accept and reject
+ * cases (__tests__/kits-corpus/pcc.capability-kit-v1.json) with a case for each
+ * refinement rule; and the digest of THIS file, which moves on any edit here,
+ * including a refinement whose effect lies outside the corpus. All three fail
+ * until the bump is done deliberately (astra pack 112 MEDIUM 8, 112b, 112c). The
+ * kit digest also reads util/canonical.ts, which its golden vectors pin.
  */
 
 import { z } from "zod";

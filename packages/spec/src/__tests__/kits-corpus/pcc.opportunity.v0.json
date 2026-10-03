@@ -32,14 +32,14 @@
       "value": {"schema": "pcc.opportunity.v0", "id": "offer-2", "kind": "funded_offer", "capabilityType": "pcc://capabilities/hplc/v1", "capabilityContractDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "title": "Run an HPLC purity assay", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "fundingRef": {"kind": "escrow", "id": "esc-1"}, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "kitRef": {"kitDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "name": "HPLC kit"}, "location": {"country": "DE"}}
     },
     {
-      "name": "accept: a funded_offer with an executable tier 2 requirement (approval.payer, params checked)",
+      "name": "accept: a kit_build_request with payer approval at tier 2, params checked, said honestly not executable (112c: its tier 1 is empty)",
       "expect": "accept",
-      "value": {"schema": "pcc.opportunity.v0", "id": "offer-2", "kind": "funded_offer", "capabilityType": "pcc://capabilities/hplc/v1", "capabilityContractDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "title": "Run an HPLC purity assay", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "fundingRef": {"kind": "escrow", "id": "esc-1"}, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 2, "requiredPrimitives": [{"id": "approval.payer", "params": {"approverRole": "payer", "claimIds": ["c-1"]}}], "executable": true}}
+      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 2, "requiredPrimitives": [{"id": "approval.payer", "params": {"approverRole": "payer", "claimIds": ["c-1"]}}], "executable": false}}
     },
     {
-      "name": "accept: a funded_offer with an executable tier 3 requirement",
+      "name": "accept: a kit_build_request with payer approval alone at tier 3, said honestly not executable",
       "expect": "accept",
-      "value": {"schema": "pcc.opportunity.v0", "id": "offer-2", "kind": "funded_offer", "capabilityType": "pcc://capabilities/hplc/v1", "capabilityContractDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "title": "Run an HPLC purity assay", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "fundingRef": {"kind": "escrow", "id": "esc-1"}, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 3, "requiredPrimitives": [{"id": "approval.payer"}], "executable": true}}
+      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 3, "requiredPrimitives": [{"id": "approval.payer"}], "executable": false}}
     },
     {
       "name": "accept: a funded_offer with the tier 0 floor (an empty set is executable at tier 0)",
@@ -52,9 +52,9 @@
       "value": {"schema": "pcc.opportunity.v0", "id": "offer-2", "kind": "funded_offer", "capabilityType": "pcc://capabilities/hplc/v1", "capabilityContractDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "title": "Run an HPLC purity assay", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "fundingRef": {"kind": "escrow", "id": "esc-1"}, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 0, "requiredPrimitives": [{"id": "decl.self_attested"}], "executable": true}}
     },
     {
-      "name": "accept: a funded kit_build_request: authoritative, with its funding record and executable evidence",
+      "name": "accept: a funded kit_build_request: authoritative, with its funding record and executable evidence (the tier 0 floor)",
       "expect": "accept",
-      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "kitRef": null, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "fundingRef": {"kind": "escrow", "id": "esc-1"}, "evidence": {"tier": 2, "requiredPrimitives": [{"id": "approval.payer"}], "executable": true}}
+      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "40000000", "currency": "USDC", "fundingStatus": "funded"}, "kitRef": null, "authority": "authoritative", "asOf": "2026-09-24T12:00:00Z", "fundingRef": {"kind": "escrow", "id": "esc-1"}, "evidence": {"tier": 0, "requiredPrimitives": [], "executable": true}}
     },
     {
       "name": "accept: asOf with fractional seconds",
@@ -82,14 +82,14 @@
       "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2026-08:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 25-99 verified requesters (2026-08)", "demandBand": "25-99", "releasePeriod": "2026-08", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2026-09-02T00:00:00Z"}
     },
     {
-      "name": "accept: a demand_aggregate read at the first instant after its period closed, given with an offset",
+      "name": "accept: a demand_aggregate read at the first instant after its period's 24-hour release grace, given with an offset",
       "expect": "accept",
-      "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2026-08:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 5-9 verified requesters (2026-08)", "demandBand": "5-9", "releasePeriod": "2026-08", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2026-09-01T02:00:00+02:00"}
+      "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2026-08:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 5-9 verified requesters (2026-08)", "demandBand": "5-9", "releasePeriod": "2026-08", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2026-09-02T02:00:00+02:00"}
     },
     {
-      "name": "accept: a demand_aggregate for December closes on January 1st of the next year",
+      "name": "accept: a demand_aggregate for December is releasable on January 2nd of the next year (24-hour grace)",
       "expect": "accept",
-      "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2025-12:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 5-9 verified requesters (2025-12)", "demandBand": "5-9", "releasePeriod": "2025-12", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2026-01-01T00:00:00Z"}
+      "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2025-12:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 5-9 verified requesters (2025-12)", "demandBand": "5-9", "releasePeriod": "2025-12", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2026-01-02T00:00:00Z"}
     },
     {
       "name": "reject: wrong schema literal",
@@ -337,9 +337,19 @@
       "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 1, "requiredPrimitives": [{"id": "approval.payer"}], "executable": true}}
     },
     {
-      "name": "reject: executable denied for an executable tier 2 set",
+      "name": "reject: executable denied for an executable tier 0 set",
       "expect": "reject",
-      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 2, "requiredPrimitives": [{"id": "approval.payer"}], "executable": false}}
+      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 0, "requiredPrimitives": [], "executable": false}}
+    },
+    {
+      "name": "reject: executable claimed for payer approval alone at tier 3 (112c HIGH 4: its tier 1 is empty)",
+      "expect": "reject",
+      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 3, "requiredPrimitives": [{"id": "approval.payer"}], "executable": true}}
+    },
+    {
+      "name": "reject: executable claimed for payer approval alone at tier 2",
+      "expect": "reject",
+      "value": {"schema": "pcc.opportunity.v0", "id": "offer-1", "kind": "kit_build_request", "capabilityType": "pcc://capabilities/hplc/v1", "title": "Build a reusable HPLC kit", "reward": {"amount": "250000000", "currency": "USDC", "fundingStatus": "unfunded"}, "kitRef": null, "authority": "derived_signal", "asOf": "2026-09-24T12:00:00Z", "evidence": {"tier": 2, "requiredPrimitives": [{"id": "approval.payer"}], "executable": true}}
     },
     {
       "name": "reject: asOf in the future on a funded_offer",
@@ -359,7 +369,7 @@
     {
       "name": "reject: the verdict case: a future period with a forged future asOf",
       "expect": "reject",
-      "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2099-12:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 5-9 verified requesters (2099-12)", "demandBand": "5-9", "releasePeriod": "2099-12", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2100-01-01T00:00:00Z"}
+      "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2099-12:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 5-9 verified requesters (2099-12)", "demandBand": "5-9", "releasePeriod": "2099-12", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2100-01-02T00:00:00Z"}
     },
     {
       "name": "reject: a funded_offer whose evidence is truthfully not executable",
@@ -435,6 +445,16 @@
       "name": "reject: a demand_aggregate read in the last second of its period",
       "expect": "reject",
       "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2026-08:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 5-9 verified requesters (2026-08)", "demandBand": "5-9", "releasePeriod": "2026-08", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2026-08-31T23:59:59Z"}
+    },
+    {
+      "name": "reject: a demand_aggregate read at the first instant after its period closed, inside #365's 24-hour grace",
+      "expect": "reject",
+      "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2026-08:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 5-9 verified requesters (2026-08)", "demandBand": "5-9", "releasePeriod": "2026-08", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2026-09-01T00:00:00Z"}
+    },
+    {
+      "name": "reject: a demand_aggregate read in the last second of its 24-hour grace",
+      "expect": "reject",
+      "value": {"schema": "pcc.opportunity.v0", "kind": "demand_aggregate", "id": "demand:2026-08:cnc-3axis:v2", "capabilityType": "pcc://capabilities/cnc-3axis/v2", "title": "Demand for cnc-3axis v2: 5-9 verified requesters (2026-08)", "demandBand": "5-9", "releasePeriod": "2026-08", "releaseDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "authority": "derived_signal", "asOf": "2026-09-01T23:59:59Z"}
     },
     {
       "name": "reject: a demand_aggregate read mid-period",

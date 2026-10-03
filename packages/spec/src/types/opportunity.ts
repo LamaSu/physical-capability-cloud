@@ -29,7 +29,8 @@
  *
  * `asOf` is the READ time for every kind (an ISO timestamp); it never says when
  * an intent happened (#365 F4). A demand_aggregate's release period must have
- * closed before its asOf, and no asOf may run more than MAX_AS_OF_SKEW_MS ahead
+ * closed, plus #365's release grace (PUBLIC_RELEASE_POLICY.graceMs), before its
+ * asOf, and no asOf may run more than MAX_AS_OF_SKEW_MS ahead
  * of the clock that parses it (astra pack 112b). That bounds a forged future
  * asOf; it cannot prove the time is true, so the trusted producer must assign
  * asOf from its own clock. `deadline` is not restricted.
@@ -37,12 +38,17 @@
  * Versioning: pre-release until first merge. These shapes have no deployed
  * producer or consumer yet, so amendment 1 and the pack-112 and 112b fixes land
  * under the same literal. After the first merge, EVERY shape, enum or
- * accepted-value change bumps OPPORTUNITY_SCHEMA. kits-contracts.test.ts pins two
- * things for it: the structural fingerprint of the schema, and a semantic corpus
- * of accept and reject cases (__tests__/kits-corpus/pcc.opportunity.v0.json) with
- * a case for each refinement rule. The fingerprint cannot see a refinement; the
- * corpus can. Both fail until the bump is done deliberately (pack 112 MEDIUM 8,
- * 112b).
+ * accepted-value change bumps OPPORTUNITY_SCHEMA. kits-contracts.test.ts pins three
+ * things for it: the structural fingerprint of the schema; a semantic corpus of
+ * accept and reject cases (__tests__/kits-corpus/pcc.opportunity.v0.json) with a
+ * case for each refinement rule; and the digest of THIS file. The fingerprint
+ * cannot see a refinement, and a finite corpus cannot see a refinement whose
+ * effect lies outside it; the file digest moves on any edit here (pack 112 MEDIUM
+ * 8, 112b, 112c). What this literal accepts also reads inputs this file does not
+ * hold: the evidence primitive registry and evidence/eligibility.ts (executable),
+ * the built-in CSD list (the approved public set), types/kit-demand.ts (#365's
+ * release policy) and util/canonical.ts. Their owners version them; a change
+ * there that alters what this literal accepts needs the same bump.
  */
 
 import { z } from "zod";
@@ -55,6 +61,7 @@ import { computeCsdEligibility } from "../evidence/eligibility.js";
 import { EVIDENCE_PRIMITIVES, type EvidencePrimitiveDef } from "../evidence/primitives.js";
 import { canonicalize } from "../util/canonical.js";
 import { CSD_CAPABILITY_URL_PATTERN } from "./capability-kit.js";
+import { PUBLIC_RELEASE_POLICY, isReleasePeriodClosed, type PublicOpportunityRelease } from "./kit-demand.js";
 
 export const OPPORTUNITY_SCHEMA = "pcc.opportunity.v0" as const;
 
@@ -195,25 +202,49 @@ export function primitivesAreExecutable(refs: readonly CsdEvidencePrimitiveRef[]
 const EVIDENCE_REQUIREMENT_URL = "pcc://opportunity/evidence-requirement";
 
 /**
- * Whether an evidence requirement is EXECUTABLE: a tier-eligible set whose
- * verifiers are all live. `refs` is the COMPLETE set for that tier, dependencies
- * included. It runs computeCsdEligibility with requireImplementedVerifier on a CSD
- * whose only evidence tier is `tier`, so the rule is the evidence lane's: a
- * non-empty set from tier 1 up, only active primitives whose tierSupport includes
- * the tier, every dependsOn present in the set, a Family-G (human attestation)
+ * Whether an evidence requirement is EXECUTABLE at `tier`: CUMULATIVELY eligible
+ * through that tier, with every verifier live (astra pack 112c). `refs` is the
+ * COMPLETE set of primitives the requirement names, dependencies included.
+ *
+ * It builds the whole program, tier 0 through `tier`: tier k holds every ref
+ * that supports k and whose dependsOn are all satisfiable at k (in a lower tier
+ * or in tier k itself), found by removing unsatisfiable refs until none is left
+ * to remove. That is the largest dependency-closed set these refs can give each
+ * tier, so no assignment of them to tiers does better. It then runs the evidence
+ * lane's computeCsdEligibility on that
+ * program with requireImplementedVerifier, and requires the CUMULATIVE
+ * `eligibleTier` to reach `tier`. That rule needs, for EVERY k up to the tier: a
+ * non-empty set from tier 1 up, only active primitives that support k, every
+ * dependsOn present in the same or a lower tier, a Family-G (human attestation)
  * primitive from tier 2 up, a primitive other than decl.self_attested from tier 1
- * up, and a live verifier for every primitive. Tier 0 with no primitives is the
- * permissionless floor, and is executable.
+ * up, and a live verifier for every primitive. A ref that supports no tier up to
+ * `tier` cannot contribute, and makes the requirement not executable. Tier 0 with
+ * no primitives is the permissionless floor, and is executable.
+ *
+ * So payer approval alone (tiers 2-3) is not executable at tier 2 or 3: its tier-1
+ * set is empty. This checks the requirement as data; resolving the CSD a funded
+ * offer pins (capabilityContractDigest) to its committed program is the
+ * producer's job.
  */
 export function evidenceIsExecutable(tier: 0 | 1 | 2 | 3, refs: readonly CsdEvidencePrimitiveRef[]): boolean {
-  const report = computeCsdEligibility(
-    {
-      url: EVIDENCE_REQUIREMENT_URL,
-      evidence: { [`tier${tier}`]: { description: "opportunity requirement", required: [], primitives: [...refs] } },
-    },
-    { requireImplementedVerifier: true },
-  );
-  return report.perTier.find((p) => p.tier === tier)?.eligible === true;
+  const supports = (r: CsdEvidencePrimitiveRef, k: number) =>
+    PRIMITIVES.get(r.id)?.tierSupport.some((t) => t.tier === k) === true;
+  if (!refs.every((r) => Array.from({ length: tier + 1 }, (_, k) => k).some((k) => supports(r, k)))) return false;
+  const evidence: Record<string, { description: string; required: string[]; primitives: CsdEvidencePrimitiveRef[] }> = {};
+  const lower = new Set<string>();
+  for (let k = 0; k <= tier; k++) {
+    let atK = refs.filter((r) => supports(r, k));
+    for (let changed = true; changed; ) {
+      const here = new Set(atK.map((r) => r.id));
+      const kept = atK.filter((r) => (PRIMITIVES.get(r.id)?.dependsOn ?? []).every((d) => lower.has(d) || here.has(d)));
+      changed = kept.length !== atK.length;
+      atK = kept;
+    }
+    evidence[`tier${k}`] = { description: `opportunity requirement, tier ${k}`, required: [], primitives: atK };
+    for (const r of atK) lower.add(r.id);
+  }
+  const report = computeCsdEligibility({ url: EVIDENCE_REQUIREMENT_URL, evidence }, { requireImplementedVerifier: true });
+  return report.eligibleTier >= tier && report.perTier.every((p) => p.eligible);
 }
 
 const EvidenceRequirementSchema = z
@@ -547,8 +578,8 @@ export function opportunityDTOSchemaFor(publicUrls: Iterable<string>) {
       if (o.title !== demandAggregateTitle(o.capabilityType, o.demandBand, o.releasePeriod)) {
         fail("a demand_aggregate's title is derived: demandAggregateTitle(capabilityType, demandBand, releasePeriod)");
       }
-      if (!(Date.parse(o.asOf) >= periodCloseMs(o.releasePeriod))) {
-        fail("a demand_aggregate's release period must have closed before its asOf");
+      if (!(Date.parse(o.asOf) >= periodCloseMs(o.releasePeriod) + PUBLIC_RELEASE_POLICY.graceMs)) {
+        fail("a demand_aggregate's release period must have closed, plus #365's release grace, before its asOf");
       }
     });
 }
@@ -559,32 +590,19 @@ export const OpportunityDTOSchema = opportunityDTOSchemaFor(BUILTIN_PUBLIC_CAPAB
 // ── Public release records ──────────────────────────────────────────
 
 /**
- * One period's public release, as painpoints' buildPublicRelease records it. It
- * mirrors #365's PublicOpportunityRelease field for field; a type-level link
- * lands when this branch next merges master.
+ * One period's public release: painpoints' PublicOpportunityRelease (#365,
+ * types/kit-demand.ts), the record buildPublicRelease writes once to the ledger.
  */
-export interface PublicOpportunityReleaseRecord {
-  schema: "pcc.public-opportunity-release.v1";
-  period: string;
-  policy: { k: number; evidenceFloor: string };
-  /** approvedSetDigest of the approved set the release was built with. */
-  approvedSetDigest: SHA256;
-  aggregates: Array<{
-    schema: "pcc.public-opportunity-aggregate.v1";
-    capabilityType: string;
-    demandBand: OpportunityDemandBand;
-    countedEvidence: string;
-    period: string;
-  }>;
-  /** `sha256:<hex>` over the canonical JSON of every field above. */
-  digest: SHA256;
-}
+export type PublicOpportunityReleaseRecord = PublicOpportunityRelease;
 
 const PublicOpportunityReleaseRecordSchema = z
   .object({
     schema: z.literal("pcc.public-opportunity-release.v1"),
     period: z.string().regex(OPPORTUNITY_RELEASE_PERIOD_PATTERN),
-    policy: z.object({ k: z.number().int().nonnegative(), evidenceFloor: z.string().min(1) }).strict(),
+    // #365's one server-owned policy, exactly: no caller-chosen k or evidence floor (astra pack 112c).
+    policy: z
+      .object({ k: z.literal(PUBLIC_RELEASE_POLICY.k), evidenceFloor: z.literal(PUBLIC_RELEASE_POLICY.evidenceFloor) })
+      .strict(),
     approvedSetDigest: Sha256Schema,
     aggregates: z.array(
       z
@@ -592,7 +610,7 @@ const PublicOpportunityReleaseRecordSchema = z
           schema: z.literal("pcc.public-opportunity-aggregate.v1"),
           capabilityType: z.string(),
           demandBand: DemandBandSchema,
-          countedEvidence: z.string().min(1),
+          countedEvidence: z.literal(PUBLIC_RELEASE_POLICY.evidenceFloor),
           period: z.string(),
         })
         .strict(),
@@ -603,9 +621,12 @@ const PublicOpportunityReleaseRecordSchema = z
 
 /**
  * The demand_aggregate DTOs for one release record, or a THROW. It throws unless
- * every one of these holds: the record has exactly the shape of
- * PublicOpportunityReleaseRecord; its `digest` equals the digest of its other
- * fields (the construction #365 uses); its approvedSetDigest equals
+ * every one of these holds: the record has exactly the shape of #365's
+ * PublicOpportunityRelease, with #365's one fixed policy (PUBLIC_RELEASE_POLICY's
+ * k and evidence floor, and every aggregate counted at that floor); its period
+ * is releasable under #365's rule (ended at least the policy's grace ago, by
+ * this clock); its `digest` equals the digest of its other fields (the
+ * construction #365 uses); its approvedSetDigest equals
  * approvedSetDigest(approvedUrls); every aggregate's period equals the record's
  * period and no capabilityType repeats; every capabilityType is in the approved
  * set; and every DTO passes opportunityDTOSchemaFor(approvedUrls). Each DTO
@@ -626,6 +647,10 @@ export function demandAggregatesFromRelease(
   const parsed = PublicOpportunityReleaseRecordSchema.safeParse(release);
   if (!parsed.success) throw new Error("demandAggregatesFromRelease: not a pcc.public-opportunity-release.v1 record");
   const { digest, ...body } = parsed.data;
+  // #365 releases a period only once it ended at least PUBLIC_RELEASE_POLICY.graceMs ago (server clock).
+  if (!isReleasePeriodClosed(body.period)) {
+    throw new Error("demandAggregatesFromRelease: the record's period is not releasable yet (#365's grace after month end)");
+  }
   if (canonicalDigest(body) !== digest) {
     throw new Error("demandAggregatesFromRelease: the record's digest does not match its contents");
   }

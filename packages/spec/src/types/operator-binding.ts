@@ -33,11 +33,13 @@
  *
  * Versioning: pre-release until first merge; afterwards EVERY shape, enum or
  * accepted-value change bumps OPERATOR_BINDING_SCHEMA. kits-contracts.test.ts
- * pins two things for it: the structural fingerprint of the schema, and a
- * semantic corpus of accept and reject cases
+ * pins three things for it: the structural fingerprint of the schema; a semantic
+ * corpus of accept and reject cases
  * (__tests__/kits-corpus/pcc.operator-binding.v0.json) with a case for each
- * refinement rule. The fingerprint cannot see a refinement; the corpus can
- * (astra pack 112 MEDIUM 8, 112b).
+ * refinement rule; and the digest of THIS file, which moves on any edit here,
+ * including a refinement whose effect lies outside the corpus (astra pack 112
+ * MEDIUM 8, 112b, 112c). The read-time bound it imports from opportunity.ts is
+ * pinned with that file.
  */
 
 import { z } from "zod";
