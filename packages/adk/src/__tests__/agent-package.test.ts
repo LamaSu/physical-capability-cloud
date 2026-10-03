@@ -62,9 +62,9 @@ describe("resolveToolRequest", () => {
     });
   });
 
-  it("encodes path parameters so a value cannot change the route", () => {
-    const req = resolveToolRequest("get_kernel", { kernelId: "a/b?c#d" }, { baseUrl: GW });
-    expect(req.url).toBe("https://capability.network/api/kernels/a%2Fb%3Fc%23d");
+  it("refuses a path parameter that could change the route", () => {
+    // 101b: refused outright, not encoded, so no intermediary that decodes the path can change the route.
+    expect(errorCode(() => resolveToolRequest("get_kernel", { kernelId: "a/b?c#d" }, { baseUrl: GW }))).toBe("bad_path_param");
     for (const kernelId of ["..", ".", ""]) {
       expect(errorCode(() => resolveToolRequest("get_kernel_jobs", { kernelId }, { baseUrl: GW }))).toBe("bad_path_param");
     }

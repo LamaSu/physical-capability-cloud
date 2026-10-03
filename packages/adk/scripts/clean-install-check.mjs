@@ -12,16 +12,18 @@
  *      package it installs, `npm:` aliases included, and none of them an @pcc/*
  *      package outside the packed set or private in the workspace, or a chain
  *      client; only package.json, README, LICENSE and dist/ output that has a
- *      src/ source in the payload; no payload file whose text looks like a
- *      secret;
+ *      src/ source and is in the package's publication manifest
+ *      (scripts/publication-manifest.json) in the payload; no payload file
+ *      whose text looks like a secret;
  *   4. create a temp project outside the workspace that depends on the adk
  *      tarball, with pnpm.overrides pointing @pcc/spec and @pcc/kernel-sdk at
  *      their tarballs, and install it OFFLINE from the local pnpm store (no
  *      network; the third-party dependencies are the ones the workspace
  *      already resolved);
  *   5. gate the complete installed graph: every package in the consumer's
- *      pnpm store, by its real name, is checked for chain clients and for
- *      @pcc/* packages outside the kit;
+ *      pnpm store, and every package bundled inside one at any depth, by its
+ *      real name, is checked for chain clients and for @pcc/* packages outside
+ *      the kit, and a bundled package is refused;
  *   6. import it from plain Node ESM (the kit's surface, and no registration
  *      client or kernel handler), and type-check a TypeScript consumer
  *      against the installed declarations.
@@ -36,7 +38,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import { contentProblems, installedProblems, manifestProblems, payloadProblems } from "./boundary-policy.mjs";
+import { contentProblems, installedPackages, installedProblems, manifestProblems, payloadProblems } from "./boundary-policy.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../..");
@@ -69,30 +71,6 @@ function workspacePrivateNames() {
   return names;
 }
 
-/** Every package in the consumer's pnpm store, by the name in its own package.json. */
-function installedPackages(project) {
-  const store = join(project, "node_modules", ".pnpm");
-  if (!existsSync(store)) throw new Error(`${store} is missing; the consumer was not installed by pnpm`);
-  const found = [];
-  for (const entry of readdirSync(store, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name === "node_modules") continue;
-    const modules = join(store, entry.name, "node_modules");
-    if (!existsSync(modules)) continue;
-    for (const child of readdirSync(modules, { withFileTypes: true })) {
-      const candidates = child.isDirectory() && child.name.startsWith("@")
-        ? readdirSync(join(modules, child.name), { withFileTypes: true }).map((c) => [c, join(modules, child.name, c.name)])
-        : [[child, join(modules, child.name)]];
-      // The package itself is a real directory; its dependencies are symlinks.
-      for (const [dirent, dir] of candidates) {
-        if (!dirent.isDirectory() || !existsSync(join(dir, "package.json"))) continue;
-        const { name, version } = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-        found.push({ name, version, dir: relative(project, dir) });
-      }
-    }
-  }
-  return found;
-}
-
 function main() {
   const work = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "adk-clean-install-"));
   const rel = relative(repo, work);
@@ -118,6 +96,7 @@ function main() {
     }
 
     // 3. Boundary gate.
+    const publication = JSON.parse(readFileSync(join(here, "publication-manifest.json"), "utf8"));
     const privateNames = workspacePrivateNames();
     const packedNames = new Set(Object.keys(packed));
     for (const p of PACKED) {
@@ -127,7 +106,9 @@ function main() {
       for (const f of outside) fail(`${p.name}: tarball entry outside package/: ${f}`);
       const files = listed.filter((f) => f.startsWith("package/") && !f.endsWith("/")).map((f) => f.slice("package/".length));
       const hasSource = (path) => existsSync(join(repo, p.dir, path));
-      for (const problem of payloadProblems(p.name, files, { hasSource })) fail(problem);
+      const allowed = publication[p.name];
+      if (!Array.isArray(allowed)) fail(`${p.name}: no entry in scripts/publication-manifest.json`);
+      for (const problem of payloadProblems(p.name, files, { hasSource, allowed: allowed ?? [] })) fail(problem);
       const unpacked = join(work, "unpacked", p.name.replace("/", "+"));
       mkdirSync(unpacked, { recursive: true });
       run("tar", ["-xzf", tgz, "-C", unpacked], work);

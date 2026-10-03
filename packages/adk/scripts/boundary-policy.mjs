@@ -1,3 +1,6 @@
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
+
 /**
  * The boundary policy of the clean external install check (ledger R4 D1;
  * verdict 101 F6). Pure functions with no side effects on import, so the unit
@@ -6,11 +9,17 @@
  * - manifestProblems: one packed package.json. Every dependency spec is
  *   resolved to the registry package it installs (an `npm:` alias counts as
  *   its target), and anything that is not a registry range is refused.
- * - installedProblems: every package actually installed in the consumer
- *   project, by its real name, so a transitive dependency is checked too.
- * - payloadProblems: the tarball's file list against an allowlist. Only
- *   package.json, README, LICENSE and build output under dist/ that has a
- *   source file under src/ may ship, so a stale or stray file fails.
+ * - installedPackages: every package installed in the consumer project, by
+ *   the name in its own package.json, including any package bundled inside
+ *   another (a nested node_modules), at any depth (verdict 101b).
+ * - installedProblems: every installed package, so a transitive dependency
+ *   is checked too, and a bundled one is refused: it is in no dependency list.
+ * - payloadProblems: the tarball's file list. Only package.json, README,
+ *   LICENSE and build output under dist/ may ship; each dist/ file needs a
+ *   source under src/ (so stale output fails) AND a pattern in the package's
+ *   publication manifest (scripts/publication-manifest.json), so a file
+ *   ships because the package chose to publish it, not because a source
+ *   happens to exist (verdict 101b).
  * - contentProblems: each payload file's text against secret patterns.
  */
 
@@ -100,14 +109,74 @@ export function manifestProblems(name, pj, { packed, privateNames }) {
   return problems;
 }
 
-/** Problems with the packages installed in the consumer project: `[{ name, version, dir }]`, by real name. */
+/** The package directories in one node_modules directory, scopes included: `[[dirent, dir]]`. */
+function packageDirs(modules) {
+  const out = [];
+  for (const child of readdirSync(modules, { withFileTypes: true })) {
+    if (child.name.startsWith(".")) continue; // .bin, .pnpm, .modules.yaml
+    const dir = join(modules, child.name);
+    if (child.name.startsWith("@") && child.isDirectory()) {
+      for (const scoped of readdirSync(dir, { withFileTypes: true })) out.push([scoped, join(dir, scoped.name)]);
+    } else {
+      out.push([child, dir]);
+    }
+  }
+  return out;
+}
+
+function readPackage(dir, project) {
+  const pj = join(dir, "package.json");
+  if (!existsSync(pj)) return null;
+  const { name, version } = JSON.parse(readFileSync(pj, "utf8"));
+  return { name, version, dir: relative(project, dir) };
+}
+
+/** Packages bundled inside `dir` (its own node_modules), at any depth up to 16. */
+function bundledPackages(dir, owner, project, found, depth) {
+  const modules = join(dir, "node_modules");
+  if (depth > 16 || !existsSync(modules)) return;
+  for (const [, child] of packageDirs(modules)) {
+    const pkg = readPackage(child, project);
+    if (!pkg) continue;
+    found.push({ ...pkg, bundledIn: owner });
+    bundledPackages(child, owner, project, found, depth + 1);
+  }
+}
+
+/**
+ * Every package installed in a pnpm consumer project, by the name in its own package.json:
+ * `[{ name, version, dir, bundledIn? }]`. A package's own directory is a real directory under
+ * .pnpm/<id>/node_modules (its dependencies there are symlinks); anything inside the package's
+ * own node_modules was bundled with it, and carries `bundledIn`.
+ */
+export function installedPackages(project) {
+  const store = join(project, "node_modules", ".pnpm");
+  if (!existsSync(store)) throw new Error(`${store} is missing; the consumer was not installed by pnpm`);
+  const found = [];
+  for (const entry of readdirSync(store, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === "node_modules") continue;
+    const modules = join(store, entry.name, "node_modules");
+    if (!existsSync(modules)) continue;
+    for (const [dirent, dir] of packageDirs(modules)) {
+      if (!dirent.isDirectory()) continue; // a dependency, linked from its own .pnpm entry
+      const pkg = readPackage(dir, project);
+      if (!pkg) continue;
+      found.push(pkg);
+      bundledPackages(dir, pkg.name, project, found, 0);
+    }
+  }
+  return found;
+}
+
+/** Problems with the packages installed in the consumer project: `[{ name, version, dir, bundledIn? }]`. */
 export function installedProblems(installed, { packed }) {
   const problems = [];
-  for (const { name, version, dir } of installed) {
+  for (const { name, version, dir, bundledIn } of installed) {
     const where = `${name}@${version} (${dir})`;
     if (typeof name !== "string" || name === "") problems.push(`installed package without a name at ${dir}`);
     else if (isChainClient(name)) problems.push(`installed graph contains chain client ${where}`);
     else if (name.startsWith("@pcc/") && !packed.has(name)) problems.push(`installed graph contains ${where}, which is not part of the public kit`);
+    if (bundledIn) problems.push(`installed graph contains ${where}, bundled inside ${bundledIn}: a bundled package is in no dependency list`);
   }
   return problems;
 }
@@ -123,12 +192,31 @@ const OUTPUTS = [
 ];
 const SAFE_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
 
+/** A glob as a RegExp: `**` spans directories, `*` stays within one segment. */
+function globRegExp(glob) {
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") {
+      out += glob[i + 2] === "/" ? "(?:[^/]+/)*" : ".*";
+      i += glob[i + 2] === "/" ? 2 : 1;
+    } else if (c === "*") {
+      out += "[^/]*";
+    } else {
+      out += /[\\^$.|?+()[\]{}]/.test(c) ? `\\${c}` : c;
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
 /**
  * Problems with one tarball's file list (paths inside the tarball, without
  * the leading "package/"). `hasSource(path)` says whether the package's own
- * directory has that file.
+ * directory has that file; `allowed` is the package's publication manifest
+ * (globs). A dist/ file must have both.
  */
-export function payloadProblems(name, files, { hasSource }) {
+export function payloadProblems(name, files, { hasSource, allowed = [] }) {
+  const published = allowed.map(globRegExp);
   const problems = [];
   for (const file of files) {
     if (TOP_LEVEL_FILES.test(file)) continue;
@@ -148,6 +236,7 @@ export function payloadProblems(name, files, { hasSource }) {
     }
     const source = `src/${file.slice("dist/".length, file.length - output[0].length)}${output[1]}`;
     if (!hasSource(source)) problems.push(`${name}: ${file} has no source ${source}; stale build output?`);
+    else if (!published.some((re) => re.test(file))) problems.push(`${name}: ${file} is not in the package's publication manifest`);
   }
   return problems;
 }

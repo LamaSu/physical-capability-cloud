@@ -86,7 +86,9 @@ describe("verdict 101 F6: the complete installed graph is checked", () => {
 
 describe("verdict 101 F6: the payload is an allowlist of fresh build output", () => {
   const sources = new Set(["src/index.ts", "src/a/b.ts", "src/csds/x.csd.json"]);
-  const check = (files: string[]) => payloadProblems("@pcc/x", files, { hasSource: (p: string) => sources.has(p) });
+  // 101b: every dist/ file also needs a pattern in the package's publication manifest.
+  const allowed = ["dist/**/*.js", "dist/**/*.d.ts", "dist/**/*.js.map", "dist/**/*.d.ts.map", "dist/csds/*.csd.json"];
+  const check = (files: string[]) => payloadProblems("@pcc/x", files, { hasSource: (p: string) => sources.has(p), allowed });
 
   it("passes package.json, README, LICENSE and dist output that has a source", () => {
     expect(

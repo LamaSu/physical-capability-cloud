@@ -103,6 +103,11 @@ function baseOrigin(baseUrl: string): string {
   return parsed.origin + parsed.pathname.replace(/\/+$/, "");
 }
 
+// A path parameter's characters (verdict 101b): ASCII letters and digits and - . _ ~ : @ + = , only. No /, \, %,
+// ;, ?, #, space, control or non-ASCII character can reach the path, so no intermediary that decodes the
+// path (or folds a lookalike solidus) can turn the value into a separator or a dot segment.
+const PATH_PARAM = /^[A-Za-z0-9._~:@+=,-]+$/;
+
 function pathParam(name: string, value: Json | undefined): string {
   if (typeof value !== "string" && typeof value !== "number") {
     throw new AdkToolError("missing_input", `path parameter "${name}" is required`);
@@ -112,6 +117,12 @@ function pathParam(name: string, value: Json | undefined): string {
   // to another route; an empty segment would do the same.
   if (text === "" || text === "." || text === "..") {
     throw new AdkToolError("bad_path_param", `path parameter "${name}" cannot be "${text}"`);
+  }
+  if (!PATH_PARAM.test(text)) {
+    throw new AdkToolError(
+      "bad_path_param",
+      `path parameter "${name}" may hold only ASCII letters, digits and - . _ ~ : @ + = ,`,
+    );
   }
   return encodeURIComponent(text);
 }
@@ -123,6 +134,57 @@ function pathParam(name: string, value: Json | undefined): string {
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 const MAX_DEPTH = 64;
+// Bounds on one input (verdict 101b): values at all levels, items in one array, UTF-16 units in one string
+// and in all strings together, UTF-8 bytes in the body, and characters in the URL.
+const MAX_NODES = 100_000;
+const MAX_ARRAY_LENGTH = 10_000;
+const MAX_STRING_LENGTH = 1 << 20;
+const MAX_TOTAL_CHARS = 4 << 20;
+const MAX_BODY_BYTES = 1 << 20;
+const MAX_URL_LENGTH = 8_192;
+
+interface Budget {
+  nodes: number;
+  chars: number;
+}
+
+/** True when every surrogate in `text` is part of a pair: the string is valid Unicode. */
+function wellFormed(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** UTF-8 byte length of valid Unicode text. */
+function utf8Length(text: string): number {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x80) bytes += 1;
+    else if (c < 0x800) bytes += 2;
+    else if (c >= 0xd800 && c <= 0xdbff) {
+      bytes += 4;
+      i++;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+/** A string or key as the snapshot keeps it: valid Unicode, and within the bounds. */
+function checkText(text: string, where: string, budget: Budget): void {
+  if (text.length > MAX_STRING_LENGTH) bad(where, "is too long");
+  if (!wellFormed(text)) bad(where, "is not valid Unicode (it has an unpaired surrogate)");
+  budget.chars += text.length;
+  if (budget.chars > MAX_TOTAL_CHARS) bad(where, "makes the input too large");
+}
 
 function bad(where: string, why: string): never {
   throw new AdkToolError("bad_input", `input${where} ${why}; only plain JSON data is sent`);
@@ -137,17 +199,18 @@ function dataProperty(target: object, key: string, where: string): unknown {
   return descriptor.value;
 }
 
-function plainObject(value: object, where: string, depth: number, open: Set<object>): { [key: string]: Json } {
+function plainObject(value: object, where: string, depth: number, open: Set<object>, budget: Budget): { [key: string]: Json } {
   const proto = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) bad(where, "is not a plain object");
   const out: { [key: string]: Json } = Object.create(null);
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string") bad(where, "has a symbol key");
+    checkText(key, `${where} (a key)`, budget);
     const at = `${where}.${key}`;
     const item = dataProperty(value, key, at);
     if (item === undefined) continue; // dropped, as JSON.stringify drops it
     Object.defineProperty(out, key, {
-      value: plain(item, at, depth + 1, open),
+      value: plain(item, at, depth + 1, open, budget),
       enumerable: true,
       writable: true,
       configurable: true,
@@ -156,11 +219,13 @@ function plainObject(value: object, where: string, depth: number, open: Set<obje
   return out;
 }
 
-function plainArray(value: unknown[], where: string, depth: number, open: Set<object>): Json[] {
+function plainArray(value: unknown[], where: string, depth: number, open: Set<object>, budget: Budget): Json[] {
   if (Object.getPrototypeOf(value) !== Array.prototype) bad(where, "is not a plain array");
   // "length" is the one own property of an array that is not enumerable.
   const length: unknown = Object.getOwnPropertyDescriptor(value, "length")?.value;
   if (typeof length !== "number" || !Number.isInteger(length)) bad(where, "has no length");
+  // Checked before anything is listed or copied, so a huge array costs nothing (verdict 101b).
+  if (length > MAX_ARRAY_LENGTH) bad(where, `has more than ${MAX_ARRAY_LENGTH} items`);
   // Exactly the indexes and "length": no holes and no extra properties.
   if (Reflect.ownKeys(value).length !== length + 1) bad(where, "has holes or extra properties");
   const out: Json[] = [];
@@ -168,13 +233,19 @@ function plainArray(value: unknown[], where: string, depth: number, open: Set<ob
     const at = `${where}[${i}]`;
     const item = dataProperty(value, String(i), at);
     if (item === undefined) bad(at, "is undefined");
-    out.push(plain(item, at, depth + 1, open));
+    out.push(plain(item, at, depth + 1, open, budget));
   }
   return out;
 }
 
-function plain(value: unknown, where: string, depth: number, open: Set<object>): Json {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+function plain(value: unknown, where: string, depth: number, open: Set<object>, budget: Budget): Json {
+  budget.nodes += 1;
+  if (budget.nodes > MAX_NODES) bad(where, "makes the input too large");
+  if (typeof value === "string") {
+    checkText(value, where, budget);
+    return value;
+  }
+  if (value === null || typeof value === "boolean") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) bad(where, "is not a finite number");
     return value;
@@ -184,7 +255,7 @@ function plain(value: unknown, where: string, depth: number, open: Set<object>):
   if (open.has(value)) bad(where, "contains itself");
   open.add(value);
   try {
-    return Array.isArray(value) ? plainArray(value, where, depth, open) : plainObject(value, where, depth, open);
+    return Array.isArray(value) ? plainArray(value, where, depth, open, budget) : plainObject(value, where, depth, open, budget);
   } finally {
     open.delete(value);
   }
@@ -192,7 +263,7 @@ function plain(value: unknown, where: string, depth: number, open: Set<object>):
 
 function snapshotInput(input: unknown): { [key: string]: Json } {
   if (input === null || typeof input !== "object" || Array.isArray(input)) bad("", "must be a plain object");
-  return plainObject(input, "", 0, new Set([input]));
+  return plainObject(input, "", 0, new Set([input]), { nodes: 0, chars: 0 });
 }
 
 /** JSON text for a snapshot. It never consults toJSON, so the text is the snapshot. */
@@ -264,11 +335,15 @@ export function resolveToolRequest(
   const origin = baseOrigin(options.baseUrl);
   const read = tool.method === "GET" || tool.method === "DELETE";
   const url = read ? `${origin}${path}${queryString(data)}` : `${origin}${path}`;
+  if (url.length > MAX_URL_LENGTH) bad("", `would make a URL longer than ${MAX_URL_LENGTH} characters`);
   // Belt and braces: the URL a client would send is the one built here.
   if (new URL(url).href !== url) {
     throw new AdkToolError("bad_tool_endpoint", `tool "${name}" would not be sent to ${url} as built`);
   }
-  return read ? { method: tool.method, url } : { method: tool.method, url, body: jsonText(data) };
+  if (read) return { method: tool.method, url };
+  const body = jsonText(data);
+  if (utf8Length(body) > MAX_BODY_BYTES) bad("", `would make a body larger than ${MAX_BODY_BYTES} bytes`);
+  return { method: tool.method, url, body };
 }
 
 export interface AgentPackageCheck {
