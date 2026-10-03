@@ -1,0 +1,101 @@
+/**
+ * FC-8 round 2 (astra pack 61b, CRITICAL): behavioral tests for the three
+ * helpers added to close the e2e scripts' remaining raw-print sites (see
+ * fc8-e2e-script-redaction.test.ts for the source-text guards that pin each
+ * script's call site to these helpers). Companion to redact-log.test.ts,
+ * which covers safeLogJson/redactLogValue/isSensitiveLogKey directly.
+ *
+ * At 85c9d5bf these three exports do not exist yet — this file fails to
+ * resolve its import, which is this test's RED state (see
+ * returns/pcc-gateway-work/61c-fc8-repro-85c9d5bf.log for the captured run).
+ */
+import { describe, it, expect } from "vitest";
+import { safeLogResponseText, safeLogErrorName, safeLogId } from "../util/redact-log.js";
+
+const SENTINEL = "SENTINEL-ORACLE-KEY-5f1e";
+
+describe("FC-8 round 2 (astra pack 61b) — safeLogResponseText", () => {
+  it("[neg] withholds a sentinel reflected in a JSON header field (astra pack 61b's own repro shape)", () => {
+    const out = safeLogResponseText(JSON.stringify({ headers: { "x-oracle-key": SENTINEL } }), 600);
+    expect(out).not.toContain(SENTINEL);
+  });
+
+  it("[neg] withholds a sentinel in a non-JSON (plain text / error page) response entirely", () => {
+    const out = safeLogResponseText(`upstream error: x-oracle-key: ${SENTINEL}`, 500);
+    expect(out).not.toContain(SENTINEL);
+    expect(out).toBe("[non-JSON response withheld]");
+  });
+
+  it("[neg] withholds a Bearer-shaped secret under an innocuous key (shape layer, second line of defense)", () => {
+    const out = safeLogResponseText(JSON.stringify({ note: `Bearer ${SENTINEL}` }), 600);
+    expect(out).not.toContain(SENTINEL);
+  });
+
+  it("keeps an ordinary JSON status/id field readable", () => {
+    const out = safeLogResponseText(JSON.stringify({ valid: true, jobId: "job-abc-1" }), 600);
+    expect(out).toContain("job-abc-1");
+    expect(out).toContain("true");
+  });
+
+  it("never throws on malformed or empty input", () => {
+    expect(() => safeLogResponseText("{not json", 500)).not.toThrow();
+    expect(() => safeLogResponseText("", 500)).not.toThrow();
+  });
+});
+
+describe("FC-8 round 2 (astra pack 61b) — safeLogErrorName", () => {
+  it("[neg] drops an Error's message even when the message carries the sentinel", () => {
+    const out = safeLogErrorName(new Error(`x-oracle-key: ${SENTINEL}`));
+    expect(out).not.toContain(SENTINEL);
+    expect(out).toBe("Error");
+  });
+
+  it("[neg] drops a caught non-Error value (string/plain object) wholesale", () => {
+    expect(safeLogErrorName(`leaked ${SENTINEL}`)).not.toContain(SENTINEL);
+    expect(safeLogErrorName({ message: SENTINEL })).not.toContain(SENTINEL);
+    expect(safeLogErrorName(null)).toBe("Error");
+    expect(safeLogErrorName(undefined)).toBe("Error");
+  });
+
+  it("[neg] rejects a hostile .name that is itself secret-shaped free text", () => {
+    const out = safeLogErrorName({ name: `x-oracle-key: ${SENTINEL}` });
+    expect(out).not.toContain(SENTINEL);
+    expect(out).toBe("Error");
+  });
+
+  it("[neg] rejects a hostile .name that smuggles a secret using only id-safe characters", () => {
+    const out = safeLogErrorName({ name: `secret-${SENTINEL}` });
+    expect(out).not.toContain(SENTINEL);
+    expect(out).toBe("Error");
+  });
+
+  it("keeps a normal, identifier-shaped custom error name (useful for debugging)", () => {
+    class HttpRequestError extends Error {
+      constructor(m: string) {
+        super(m);
+        this.name = "HttpRequestError";
+      }
+    }
+    expect(safeLogErrorName(new HttpRequestError("connection refused"))).toBe("HttpRequestError");
+    expect(safeLogErrorName(new TypeError("x"))).toBe("TypeError");
+  });
+});
+
+describe("FC-8 round 2 (astra pack 61b) — safeLogId", () => {
+  it("[neg] falls back instead of printing a free-text / credential-shaped value", () => {
+    expect(safeLogId(`Bearer ${SENTINEL}`)).not.toContain(SENTINEL);
+    expect(safeLogId(`token=${SENTINEL}`)).not.toContain(SENTINEL);
+    expect(safeLogId(`error: ${SENTINEL}`)).not.toContain(SENTINEL);
+  });
+
+  it("keeps an ordinary bounded id", () => {
+    expect(safeLogId("job_hp-printer-fullchain.1")).toBe("job_hp-printer-fullchain.1");
+    expect(safeLogId("job-real-e2e")).toBe("job-real-e2e");
+  });
+
+  it("falls back on a non-string or missing value", () => {
+    expect(safeLogId(undefined)).toBe("(none)");
+    expect(safeLogId(null)).toBe("(none)");
+    expect(safeLogId(42)).toBe("(none)");
+  });
+});
