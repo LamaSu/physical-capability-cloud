@@ -376,8 +376,13 @@
     return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : REPORTED_PREFIX + value;
   }
   var LIST_PROFILES = {
-    // job.facade.ts:128 `const limit = pagination?.limit ?? 50;`. routes/jobs.ts:43 answers only
-    // `{ jobs }` — no cross-page total in the envelope, so no `paged.total`.
+    // job.facade.ts:128 `const limit = pagination?.limit ?? 50;`. On master, routes/jobs.ts also
+    // returns `total`, `offset`, `limit` and `hasMore` beside `jobs`. But the route has no
+    // querystring schema, so `offset` and `limit` reach the facade as strings and the page can be
+    // wrong (row N111). The view therefore does NOT declare the jobs total yet: it keeps the
+    // conservative path ("N returned; more may exist" for a full page; "none" only for an empty
+    // first page of a positive limit), which stays true either way. Declaring `total: "total"` is
+    // a follow-up once N111 makes the paging correct.
     "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], paged: { defaultLimit: 50 } },
     // routes/kernels.ts:61 answers `{ kernels }`, unpaginated — no `paged` entry at all.
     "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount"], status: ["status"] },
