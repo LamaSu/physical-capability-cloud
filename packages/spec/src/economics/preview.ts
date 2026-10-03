@@ -96,25 +96,31 @@ export type ScenarioView =
   | {
       scenarioId: string;
       label: string;
-      fundable: true;
+      compiles: true;
       paid: Array<{ partyId: string; label: string; amount: Money }>;
       payer: { spent: Money; refunded: Money; reserved: Money };
       fee: Money;
     }
-  | { scenarioId: string; label: string; fundable: false; reasons: string[] };
+  | { scenarioId: string; label: string; compiles: false; reasons: string[] };
 
 export interface EconomicPreviewDTO {
   schema: "pcc.economic-preview.v1";
   /** A prediction (Layer C). Accepting binds `agreement.agreementHash`; nothing here is a deal. */
   layer: "C";
   /**
-   * fundable: it compiles, and (when the server's clock was given) it can be accepted now.
+   * compiles: it compiles AS PROPOSED, and (when the server's clock was given) its timing holds now. That is
+   * not acceptance: accepting re-checks everything in `checks.atAcceptance` against PCC's own records (the
+   * accepted-plan seam) and refuses on any difference (astra EC3 M1).
    * not-acceptable-now: it compiles, but the seam would refuse it at this moment: its offer deadline has
    * passed, or it was priced too long ago or for a moment still to come (`terms.timing` says which).
    * refused: it does not compile.
    */
-  status: "fundable" | "not-acceptable-now" | "refused";
+  status: "compiles" | "not-acceptable-now" | "refused";
   headline: string;
+  /** Set when the agreement is a template's: an example to start from, with illustrative parties and prices. */
+  example: { templateId: string; note: string } | null;
+  /** What this preview checked from server state, and what only acceptance checks (astra EC3 M1). */
+  checks: { byPreview: string[]; atAcceptance: string[] };
   agreement: {
     agreementId: string | null;
     version: number | null;
@@ -131,15 +137,19 @@ export interface EconomicPreviewDTO {
   payees: Array<{ partyId: string; label: string; kind: string; total: Money; lines: PreviewLine[] }>;
   obligations: Array<{ license: string; licensor: string; clause: string; amount: Money }>;
   rights: Array<{ license: string; licensor: string; class: string; attributionRequired: boolean; validUntil: string | null; authority: string }>;
-  rates: Array<{ clause: string; percent: string; verified: boolean; note: string }>;
+  /** scheduleSource: where the schedule a verified rate was checked against came from (astra EC3 M2). */
+  rates: Array<{ clause: string; percent: string; verified: boolean; scheduleSource: ScheduleSource | null; note: string }>;
   notOwed: Array<{ clause: string; why: string }>;
   terms: {
     asOf: string;
     acceptBy: string | null;
     /** The deadline in words, in the right tense for the server's clock. */
     deadline: string;
-    /** Whether it can be accepted at the server's clock; null when no clock was given. */
-    acceptableNow: boolean | null;
+    /**
+     * Whether the seam's two timing rules hold at the server's clock; null when no clock was given. Timing
+     * only: acceptance also re-checks everything in `checks.atAcceptance`.
+     */
+    timingHoldsNow: boolean | null;
     /** Why it cannot be accepted now, or null. */
     timing: string | null;
     changePolicy: string;
@@ -187,7 +197,19 @@ export function explainRefusal(r: Refusal): string {
   return `${REFUSAL_TITLES[r.code]}. ${r.message}`;
 }
 
+/**
+ * The last second a JavaScript Date can hold (8.64e15 ms after the epoch, +275760-09-13). The agreement
+ * schema allows any safe integer, so a later time is written exactly, as its unix seconds, rather than
+ * thrown on (astra EC3 M3).
+ */
+const LAST_DATE_SECONDS = 8_640_000_000_000;
+
+function beyondCalendar(unixSeconds: number): string {
+  return `unix time ${unixSeconds}, beyond the last date this preview can write (+275760-09-13)`;
+}
+
 function isoTime(unixSeconds: number): string {
+  if (Math.abs(unixSeconds) > LAST_DATE_SECONDS) return beyondCalendar(unixSeconds);
   return new Date(unixSeconds * 1000).toISOString();
 }
 
@@ -286,10 +308,33 @@ export interface PreviewOptions {
   now?: number;
   /** The oldest pricing the seam accepts; default DEFAULT_MAX_AGREEMENT_AGE_SECONDS (one day). */
   maxAgreementAgeSeconds?: number;
+  /**
+   * Where each schedule body supplied to the compile came from, by lowercase hash: PCC's registry, or a
+   * template's bundled example. A verified rate says which (astra EC3 M2).
+   */
+  scheduleSources?: Readonly<Record<string, ScheduleSource>>;
+  /** Set when the agreement is a template's, so the preview says it is an example. */
+  exampleTemplateId?: string;
 }
 
+export type ScheduleSource = "registry" | "example";
+
+const EXAMPLE_NOTE = "An example to start from: its parties, payout addresses and prices are illustrative, not anyone's offer.";
+
+/** What acceptance re-checks against PCC's own records (the accepted-plan seam, netSplitterFor), whatever the preview said. */
+const CHECKED_AT_ACCEPTANCE: readonly string[] = [
+  "Each party's payout address, against PCC's registry",
+  "Each license, against PCC's registry copy, including its authority",
+  "Each step's price, against the operator's live quote",
+  "What runs in each step, its components and measures, against what PCC recorded",
+  "The intended use, as PCC states it from the plan",
+  "The fee and currency, against the plan PCC priced",
+  "That the payer accepts exactly this version, by its hashes",
+];
+
 function utc(unixSeconds: number): string {
-  return `${isoTime(unixSeconds).slice(0, 16).replace("T", " ")} UTC`;
+  if (Math.abs(unixSeconds) > LAST_DATE_SECONDS) return beyondCalendar(unixSeconds);
+  return `${isoTime(unixSeconds).replace(/:\d\d\.\d\d\dZ$/, "").replace("T", " ")} UTC`;
 }
 
 function duration(seconds: number): string {
@@ -299,11 +344,11 @@ function duration(seconds: number): string {
 }
 
 /** The seam's timing rules at the server's clock, in its order: the pricing window, then the deadline. */
-function timingAt(ag: EconomicAgreement, options: PreviewOptions): { deadline: string; acceptableNow: boolean | null; timing: string | null } {
+function timingAt(ag: EconomicAgreement, options: PreviewOptions): { deadline: string; timingHoldsNow: boolean | null; timing: string | null } {
   const acceptBy = ag.terms.acceptBy;
   const now = options.now;
   if (now === undefined) {
-    return { deadline: acceptBy === null ? "The offer has no deadline." : `The offer's deadline is ${utc(acceptBy)}.`, acceptableNow: null, timing: null };
+    return { deadline: acceptBy === null ? "The offer has no deadline." : `The offer's deadline is ${utc(acceptBy)}.`, timingHoldsNow: null, timing: null };
   }
   const deadline =
     acceptBy === null ? "The offer has no deadline." : now > acceptBy ? `The offer expired at ${utc(acceptBy)}.` : `The offer expires at ${utc(acceptBy)}.`;
@@ -312,7 +357,18 @@ function timingAt(ag: EconomicAgreement, options: PreviewOptions): { deadline: s
   if (ag.asOf > now) timing = `It is priced for ${utc(ag.asOf)}, which has not come yet, so it cannot be accepted before then.`;
   else if (ag.asOf < now - maxAge) timing = `It was priced at ${utc(ag.asOf)}, more than ${duration(maxAge)} ago, so it must be quoted again before it can be accepted.`;
   else if (acceptBy !== null && now > acceptBy) timing = `This offer expired at ${utc(acceptBy)}, so it can no longer be accepted.`;
-  return { deadline, acceptableNow: timing === null, timing };
+  return { deadline, timingHoldsNow: timing === null, timing };
+}
+
+/** What this preview itself checked from server state (astra EC3 M1). Everything else waits for acceptance. */
+function checkedByPreview(c: CompiledEconomics, options: PreviewOptions, sourceOf: (h: string) => ScheduleSource | null): string[] {
+  const out = ["It compiles: every rule, split and license requirement holds, and the payments add up to each step's price"];
+  if (options.feeVerified) out.push("PCC's protocol fee is the fee PCC charges");
+  const verified = c.rates.filter((r) => r.verified).map((r) => sourceOf(r.scheduleHash));
+  if (verified.includes("registry")) out.push("Pinned royalty rates, against the schedules published in PCC's registry");
+  if (verified.includes("example")) out.push("Pinned royalty rates, against the template's example schedules, which are not published in PCC's registry");
+  if (options.now !== undefined) out.push("Its timing, at the server's clock: priced recently enough, and before its deadline");
+  return out;
 }
 
 /**
@@ -332,6 +388,8 @@ export function buildEconomicPreview(input: unknown, result: CompileResult, opti
       layer: "C",
       status: "refused",
       headline: `This agreement cannot be funded as written. ${refusals[0]?.explanation ?? ""}`.trim(),
+      example: options.exampleTemplateId !== undefined ? { templateId: options.exampleTemplateId, note: EXAMPLE_NOTE } : null,
+      checks: { byPreview: [], atAcceptance: [...CHECKED_AT_ACCEPTANCE] },
       agreement: { agreementId: ag?.agreementId ?? null, version: ag?.version ?? null, agreementHash: null, economicTermsHash: null, rightsTermsHash: null },
       currency: ag?.currency ?? null,
       payer: null,
@@ -350,10 +408,10 @@ export function buildEconomicPreview(input: unknown, result: CompileResult, opti
       refusals,
     };
   }
-  return fundablePreview(ag, result, options, scenarios);
+  return compiledPreview(ag, result, options, scenarios);
 }
 
-function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: PreviewOptions, scenarios: ScenarioView[]): EconomicPreviewDTO {
+function compiledPreview(ag: EconomicAgreement, c: CompiledEconomics, options: PreviewOptions, scenarios: ScenarioView[]): EconomicPreviewDTO {
   const cur = c.currency;
   const partyById = new Map(ag.parties.map((p) => [p.partyId, p] as const));
   const unitById = new Map(ag.units.map((u) => [u.unitRef, u] as const));
@@ -431,11 +489,14 @@ function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: P
   const deal = (you: string) =>
     `${you} pay at most ${money(gross, cur).display}.${feeText} The rest, ${money(net, cur).display}, goes to ${partiesPaid} ${partiesPaid === 1 ? "party" : "parties"}, step by step, only as each step is released.`;
   const timing = timingAt(ag, options);
+  const sourceOf = (scheduleHash: string): ScheduleSource | null => options.scheduleSources?.[scheduleHash.toLowerCase()] ?? null;
   return {
     schema: "pcc.economic-preview.v1",
     layer: "C",
-    status: timing.timing === null ? "fundable" : "not-acceptable-now",
-    headline: timing.timing === null ? deal("You") : `${timing.timing} As written, ${deal("you")}`,
+    status: timing.timing === null ? "compiles" : "not-acceptable-now",
+    headline: timing.timing === null ? `As proposed, ${deal("you")}` : `${timing.timing} As proposed, ${deal("you")}`,
+    example: options.exampleTemplateId !== undefined ? { templateId: options.exampleTemplateId, note: EXAMPLE_NOTE } : null,
+    checks: { byPreview: checkedByPreview(c, options, sourceOf), atAcceptance: [...CHECKED_AT_ACCEPTANCE] },
     agreement: {
       agreementId: c.agreementId,
       version: c.version,
@@ -483,17 +544,26 @@ function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: P
         authority: r.authority,
       };
     }),
-    rates: c.rates.map((r) => ({
-      clause: clauseById.get(r.clauseId)?.label ?? r.clauseId,
-      percent: percentText(r.bps),
-      verified: r.verified,
-      // A compiled deal checks every rate that pays out, so an unchecked one is a clause that pays nothing here.
-      note: r.verified
-        ? "Checked against the published rate schedule at the time of this agreement."
-        : paysNowhere.has(r.clauseId)
-          ? "Not checked, because this clause pays nothing in this agreement."
-          : "Not checked against the published rate schedule.",
-    })),
+    rates: c.rates.map((r) => {
+      const source = r.verified ? sourceOf(r.scheduleHash) : null;
+      return {
+        clause: clauseById.get(r.clauseId)?.label ?? r.clauseId,
+        percent: percentText(r.bps),
+        verified: r.verified,
+        scheduleSource: source,
+        // A compiled deal checks every rate that pays out, so an unchecked one is a clause that pays nothing here.
+        // A verified rate says where its schedule came from: only the registry's is a published one (astra EC3 M2).
+        note: r.verified
+          ? source === "registry"
+            ? "Checked against the rate schedule published in PCC's registry, at the time of this agreement."
+            : source === "example"
+              ? "Checked against the template's example schedule, which is not published in PCC's registry."
+              : "Checked against the rate schedule supplied with this preview."
+          : paysNowhere.has(r.clauseId)
+            ? "Not checked, because this clause pays nothing in this agreement."
+            : "Not checked against a published rate schedule.",
+      };
+    }),
     notOwed: c.notEligible.map((n) => {
       const clause = clauseById.get(n.clauseId)!;
       const a = clause.appliesTo;
@@ -524,13 +594,13 @@ function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: P
 }
 
 function scenarioView(s: ScenarioResult, ag: EconomicAgreement | null): ScenarioView {
-  if (!s.ok) return { scenarioId: s.scenarioId, label: s.label, fundable: false, reasons: s.refusals.map(explainRefusal) };
+  if (!s.ok) return { scenarioId: s.scenarioId, label: s.label, compiles: false, reasons: s.refusals.map(explainRefusal) };
   const cur = ag?.currency ?? { code: "", decimals: 0 };
   const label = (partyId: string) => ag?.parties.find((p) => p.partyId === partyId)?.label ?? partyId;
   return {
     scenarioId: s.scenarioId,
     label: s.label,
-    fundable: true,
+    compiles: true,
     paid: s.paid.map((p) => ({ partyId: p.partyId, label: label(p.partyId), amount: money(p.amount, cur) })),
     payer: { spent: money(s.payer.spent, cur), refunded: money(s.payer.refunded, cur), reserved: money(s.payer.reserved, cur) },
     fee: money(s.fee.paid, cur),

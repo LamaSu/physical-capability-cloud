@@ -73,23 +73,23 @@ describe("PX-12 economics routes", () => {
   it("previews a template with the server's fee checked, and default what-if scenarios", async () => {
     const { status, preview: p } = await preview({ templateId: "deck-milestones" });
     expect(status).toBe(200);
-    expect(p.status).toBe("fundable");
+    expect(p.status).toBe("compiles");
     expect(p.protocolFee!.verified).toBe(true);
     expect(p.totals!.maxSpend.display).toBe("8000.00 USDC");
     expect(p.scenarios.map((s) => s.scenarioId)).toEqual(["all-released", "step-1-fails", "step-2-fails", "step-3-fails", "price-20-lower"]);
     const buildFails = p.scenarios.find((s) => s.scenarioId === "step-2-fails")!;
-    if (!buildFails.fundable) throw new Error("fixture");
+    if (!buildFails.compiles) throw new Error("fixture");
     expect(buildFails.payer.refunded.display).toBe("6500.00 USDC");
     // 20% lower still covers the deck's fixed costs: the homeowner would spend 6,400.
     const cheaper = p.scenarios.find((s) => s.scenarioId === "price-20-lower")!;
-    if (!cheaper.fundable) throw new Error("fixture");
+    if (!cheaper.compiles) throw new Error("fixture");
     expect(cheaper.payer.spent.display).toBe("6400.00 USDC");
   });
 
-  it("a price that no longer covers a fixed upstream cost is shown as unfundable, with the reason", async () => {
+  it("a price that no longer covers a fixed upstream cost is shown as not compiling, with the reason", async () => {
     const { preview: p } = await preview({ templateId: "print-and-mail" });
     const cheaper = p.scenarios.find((s) => s.scenarioId === "price-20-lower")!;
-    if (cheaper.fundable) throw new Error("expected the print step to be under water");
+    if (cheaper.compiles) throw new Error("expected the print step to be under water");
     expect(cheaper.reasons[0]).toContain("The payments add up to more than the price");
   });
 
@@ -111,7 +111,7 @@ describe("PX-12 economics routes", () => {
   it("without a configured fee, the preview says the fee is unchecked instead of vouching for it", async () => {
     delete process.env.PCC_PROTOCOL_FEE_BPS;
     const { preview: p } = await preview({ agreement: economics.examplePrintAndMail() });
-    expect(p.status).toBe("fundable");
+    expect(p.status).toBe("compiles");
     expect(p.protocolFee!.verified).toBe(false);
     expect(p.headline).toContain("not yet checked");
   });
@@ -132,8 +132,9 @@ describe("PX-12 economics routes", () => {
       publishedAt: s.publishedAt,
     });
     const after = await preview({ agreement: ag });
-    expect(after.preview.status).toBe("fundable");
-    expect(after.preview.rates[0]!.verified).toBe(true);
+    expect(after.preview.status).toBe("compiles");
+    expect(after.preview.rates[0]).toMatchObject({ verified: true, scheduleSource: "registry" });
+    expect(after.preview.rates[0]!.note).toBe("Checked against the rate schedule published in PCC's registry, at the time of this agreement.");
   });
 
   it("a registry body the compiler cannot use is left out, so the refusal names the clause, not the agreement", async () => {
@@ -162,10 +163,10 @@ describe("PX-12 economics routes", () => {
       at(AS_OF + 2 * 86_400);
       const { preview: p } = await preview({ agreement: economics.examplePrintAndMail() });
       expect(p.status).toBe("not-acceptable-now");
-      expect(p.terms!.acceptableNow).toBe(false);
+      expect(p.terms!.timingHoldsNow).toBe(false);
       expect(p.terms!.timing).toBe("It was priced at 2026-09-21 14:13 UTC, more than a day ago, so it must be quoted again before it can be accepted.");
       expect(p.headline.startsWith("It was priced at")).toBe(true);
-      expect(p.headline).toContain("As written, you pay at most ");
+      expect(p.headline).toContain("As proposed, you pay at most ");
       expect(p.moneyState.note).toContain("cannot be accepted now");
       expect(p.refusals).toEqual([]);
     });
@@ -192,10 +193,10 @@ describe("PX-12 economics routes", () => {
       at(later);
       for (const t of economics.AGREEMENT_TEMPLATES) {
         const { preview: p } = await preview({ templateId: t.templateId });
-        expect([t.templateId, p.status]).toEqual([t.templateId, "fundable"]);
+        expect([t.templateId, p.status]).toEqual([t.templateId, "compiles"]);
         expect(p.terms!.asOf).toBe(new Date(later * 1000).toISOString());
         expect(p.terms!.deadline).toMatch(/^The offer expires at /);
-        expect(p.terms!.acceptableNow).toBe(true);
+        expect(p.terms!.timingHoldsNow).toBe(true);
       }
     });
   });
@@ -205,6 +206,24 @@ describe("PX-12 economics routes", () => {
     process.env.PCC_FORBIDDEN_RECIPIENTS = ag.parties.find((x) => x.partyId === "courier")!.payTo!;
     const { preview: p } = await preview({ agreement: ag });
     expect(p.refusals.map((r) => r.code)).toContain("FORBIDDEN_RECIPIENT");
+  });
+
+  it("astra EC3 M2: a template's bundled schedule is called an example, not a published one, and the preview says it is an example", async () => {
+    const { status, preview: p } = await preview({ templateId: "spare-printer" }); // the registry is empty
+    expect(status).toBe(200);
+    expect(p.rates[0]!.note).toBe("Checked against the template's example schedule, which is not published in PCC's registry.");
+    expect(p.rates[0]).toMatchObject({ verified: true, scheduleSource: "example" });
+    expect(p.example).toMatchObject({ templateId: "spare-printer" });
+  });
+
+  it("astra EC3 M3: an agreement whose deadline is beyond the calendar's range is previewed, never a 500", async () => {
+    const ag = economics.examplePrintAndMail();
+    ag.terms.acceptBy = Number.MAX_SAFE_INTEGER;
+    ag.fee = { feeBps: 235, feeRecipient: TREASURY };
+    at(ag.asOf + 60);
+    const res = await app.inject({ method: "POST", url: "/api/economics/preview", payload: { agreement: ag, scenarios: [] } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ preview: Preview }>().preview.terms!.acceptBy).toContain(String(Number.MAX_SAFE_INTEGER));
   });
 
   it("a missing agreement is 400 and an unknown template 404", async () => {

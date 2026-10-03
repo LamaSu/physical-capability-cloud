@@ -13,7 +13,7 @@ import type { economics } from "@pcc/spec";
 type Preview = economics.EconomicPreviewDTO;
 
 const STATUS_BADGE: Record<Preview["status"], { color: "green" | "gold" | "red"; label: string }> = {
-  fundable: { color: "green", label: "Fundable" },
+  compiles: { color: "green", label: "Compiles as proposed" },
   "not-acceptable-now": { color: "gold", label: "Cannot be accepted now" },
   refused: { color: "red", label: "Refused" },
 };
@@ -24,6 +24,11 @@ const CATEGORY_COLOR: Record<string, "green" | "cyan" | "gold" | "teal"> = {
   fee: "gold",
   margin: "teal",
 };
+
+/** A server time as written: an ISO time is shortened to its minute, anything else is shown whole. */
+function shortTime(t: string, length: 10 | 16): string {
+  return /^\d{4}-\d{2}-\d{2}T/.test(t) ? t.slice(0, length).replace("T", " ") : t;
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -42,13 +47,30 @@ export function EconomicAgreementView({ preview }: { preview: Preview }) {
         <div className="flex items-center gap-2 mb-2">
           <GlowBadge color={STATUS_BADGE[p.status].color}>{STATUS_BADGE[p.status].label}</GlowBadge>
           <GlowBadge color="gray">Preview, not a deal</GlowBadge>
+          {p.example ? <GlowBadge color="gold">Example</GlowBadge> : null}
           {p.protocolFee && !p.protocolFee.verified ? <GlowBadge color="gold">Fee not checked</GlowBadge> : null}
         </div>
         <p className="text-sm text-white/80" data-testid="headline">{p.headline}</p>
+        {p.example ? <p className="mt-2 text-xs text-amber-200/80" data-testid="example-note">{p.example.note}</p> : null}
         {p.agreement.agreementHash ? (
           <p className="mt-2 text-[10px] font-mono text-white/40">Accepting binds {p.agreement.agreementHash}</p>
         ) : null}
       </GlassPanel>
+
+      {p.checks.byPreview.length > 0 || p.checks.atAcceptance.length > 0 ? (
+        <Section title="What this preview checked, and what accepting checks">
+          <ul className="space-y-1 text-xs text-white/60" data-testid="checked-here">
+            {p.checks.byPreview.map((c, i) => (
+              <li key={`b${i}`}>Checked here: {c}.</li>
+            ))}
+          </ul>
+          <ul className="mt-2 space-y-1 text-xs text-white/50" data-testid="checked-at-acceptance">
+            {p.checks.atAcceptance.map((c, i) => (
+              <li key={`a${i}`}>Checked when you accept: {c}.</li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
 
       {p.refusals.length > 0 ? (
         <Section title="Why this cannot be funded">
@@ -130,7 +152,7 @@ export function EconomicAgreementView({ preview }: { preview: Preview }) {
               <li key={`r${i}`}>
                 {r.license}, from {r.licensor} ({r.class}
                 {r.attributionRequired ? ", credit required" : ""}
-                {r.validUntil ? `, valid until ${r.validUntil.slice(0, 10)}` : ""})
+                {r.validUntil ? `, valid until ${shortTime(r.validUntil, 10)}` : ""})
               </li>
             ))}
             {p.obligations.map((o, i) => (
@@ -168,10 +190,10 @@ export function EconomicAgreementView({ preview }: { preview: Preview }) {
               {p.scenarios.map((s) => (
                 <tr key={s.scenarioId} className="border-t border-white/[0.04] align-top">
                   <td className="py-1.5 pr-3 text-white/80">{s.label}</td>
-                  <td className="py-1.5 pr-3 text-right font-mono">{s.fundable ? s.payer.spent.display : "-"}</td>
-                  <td className="py-1.5 pr-3 text-right font-mono">{s.fundable ? s.payer.refunded.display : "-"}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono">{s.compiles ? s.payer.spent.display : "-"}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono">{s.compiles ? s.payer.refunded.display : "-"}</td>
                   <td className="py-1.5 text-white/50">
-                    {s.fundable ? s.paid.map((x) => `${x.label} ${x.amount.display}`).join("; ") || "Nobody is paid" : s.reasons.join(" ")}
+                    {s.compiles ? s.paid.map((x) => `${x.label} ${x.amount.display}`).join("; ") || "Nobody is paid" : s.reasons.join(" ")}
                   </td>
                 </tr>
               ))}
@@ -183,7 +205,7 @@ export function EconomicAgreementView({ preview }: { preview: Preview }) {
       {p.terms ? (
         <Section title="Expiry and changes">
           <ul className="space-y-1 text-xs text-white/60">
-            <li>Priced as of {p.terms.asOf.slice(0, 16).replace("T", " ")} UTC.</li>
+            <li>Priced as of {shortTime(p.terms.asOf, 16)}{/^\d{4}-/.test(p.terms.asOf) ? " UTC" : ""}.</li>
             <li>{p.terms.deadline}</li>
             {p.terms.timing ? <li className="text-amber-300" data-testid="timing">{p.terms.timing}</li> : null}
             <li>{p.terms.changePolicy}</li>

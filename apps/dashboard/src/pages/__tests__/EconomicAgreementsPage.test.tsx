@@ -28,21 +28,22 @@ function templatePreview(templateId: string, withScenarios = false) {
 }
 
 describe("EconomicAgreementView", () => {
-  it("an offer the seam would refuse now says so, with the reason in words, not a green Fundable", () => {
+  it("an offer the seam would refuse now says so, with the reason in words, not a green Compiles", () => {
     const ag = economics.examplePrintAndMail();
     const compiled = economics.compileEconomics(ag);
     const html = renderToStaticMarkup(
       <EconomicAgreementView preview={economics.buildEconomicPreview(ag, compiled, { feeVerified: true, now: ag.asOf + 3 * 86_400 })} />,
     );
     expect(html).toContain("Cannot be accepted now");
-    expect(html).not.toContain(">Fundable<");
+    expect(html).not.toContain(">Compiles as proposed<");
     expect(html).toContain("The offer expired at 2026-09-22 14:13 UTC.");
     expect(html).toContain("more than a day ago, so it must be quoted again before it can be accepted.");
   });
 
   it("shows who gets paid what, when and why, in the server's own words and amounts", () => {
     const html = renderToStaticMarkup(<EconomicAgreementView preview={templatePreview("print-and-mail", true)} />);
-    expect(html).toContain("You pay at most 22.00 USDC.");
+    expect(html).toContain("As proposed, you pay at most 22.00 USDC.");
+    expect(html).toContain("Checked when you accept: Each party&#x27;s payout address, against PCC&#x27;s registry.");
     expect(html).toContain("Mei (invented the address check)");
     expect(html).toContain("Address check: $0.25 each time it runs");
     expect(html).toContain("Composer&#x27;s margin");

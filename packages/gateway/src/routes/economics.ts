@@ -164,6 +164,7 @@ export async function economicsRoutes(app: FastifyInstance) {
     const fee = configuredProtocolFee();
     const now = Math.floor(Date.now() / 1000);
     let agreement: unknown;
+    let exampleTemplateId: string | undefined;
     const extraSchedules: RateSchedule[] = [];
     if (typeof body.templateId === "string") {
       const t = AGREEMENT_TEMPLATES.find((x) => x.templateId === body.templateId);
@@ -172,6 +173,7 @@ export async function economicsRoutes(app: FastifyInstance) {
       // A template is a starting point: PCC fills in the fee it actually charges.
       if (fee !== null) built.fee = { feeBps: fee.feeBps, feeRecipient: fee.feeRecipient };
       agreement = built;
+      exampleTemplateId = t.templateId;
       extraSchedules.push(...t.compileOptions.schedules); // content-addressed demo bodies, re-verified by hash
     } else if (body.agreement !== undefined) {
       agreement = body.agreement;
@@ -179,8 +181,14 @@ export async function economicsRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "agreement_required", message: "Send an agreement, or a templateId from GET /api/economics/templates." });
     }
 
+    // Where each schedule body came from, so a verified rate says which (astra EC3 M2): only the registry's
+    // bodies are published; a template's bundled bodies are examples, even when they hash correctly.
+    const registered = sealedSchedules(namedScheduleHashes(agreement));
+    const scheduleSources: Record<string, "registry" | "example"> = {};
+    for (const x of extraSchedules) scheduleSources[x.scheduleHash.toLowerCase()] = "example";
+    for (const x of registered) scheduleSources[x.scheduleHash.toLowerCase()] = "registry";
     const options: CompileOptions = {
-      schedules: [...sealedSchedules(namedScheduleHashes(agreement)), ...extraSchedules],
+      schedules: [...registered, ...extraSchedules],
       forbiddenRecipients: configuredForbiddenRecipients(),
       ...(fee !== null ? { fee } : {}),
     };
@@ -191,6 +199,14 @@ export async function economicsRoutes(app: FastifyInstance) {
         : result.ok
           ? simulateEconomics(agreement, defaultScenarios(agreement as EconomicAgreement), options)
           : [];
-    return { preview: buildEconomicPreview(agreement, result, { feeVerified: fee !== null, scenarios, now }) };
+    return {
+      preview: buildEconomicPreview(agreement, result, {
+        feeVerified: fee !== null,
+        scenarios,
+        now,
+        scheduleSources,
+        ...(exampleTemplateId !== undefined ? { exampleTemplateId } : {}),
+      }),
+    };
   });
 }

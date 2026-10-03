@@ -34,7 +34,7 @@ describe("buildEconomicPreview", () => {
     const compiled = compileEconomics(ag, t.compileOptions);
     if (!compiled.ok) throw new Error("fixture");
     const p = buildEconomicPreview(ag, compiled, { feeVerified: true });
-    expect(p.status).toBe("fundable");
+    expect(p.status).toBe("compiles");
     expect(p.layer).toBe("C");
     const sum = (xs: Array<{ amount: string }>) => xs.reduce((s, x) => s + BigInt(x.amount), 0n);
     // Every category, plus PCC's fee, is exactly the most the payer can spend.
@@ -58,7 +58,7 @@ describe("buildEconomicPreview", () => {
     if (!compiled.ok) throw new Error("fixture");
     const p = buildEconomicPreview(ag, compiled, { feeVerified: true });
     expect(p.headline).toBe(
-      "You pay at most 25.00 USDC. 0.5875 USDC of that is PCC's protocol fee (2.35%). The rest, 24.4125 USDC, goes to 2 parties, step by step, only as each step is released.",
+      "As proposed, you pay at most 25.00 USDC. 0.5875 USDC of that is PCC's protocol fee (2.35%). The rest, 24.4125 USDC, goes to 2 parties, step by step, only as each step is released.",
     );
     const priya = p.payees.find((x) => x.partyId === "priya")!;
     expect(priya.total.display).toBe("0.10 USDC");
@@ -70,7 +70,8 @@ describe("buildEconomicPreview", () => {
       ["fee", "0.00 USDC"],
       ["margin", "0.00 USDC"],
     ]);
-    expect(p.rates).toEqual([{ clause: "Kit royalty: 0.40% of the job", percent: "0.40%", verified: true, note: "Checked against the published rate schedule at the time of this agreement." }]);
+    // Called from the library with no provenance, a verified rate says only that it was checked against the schedule supplied (astra EC3 M2).
+    expect(p.rates).toEqual([{ clause: "Kit royalty: 0.40% of the job", percent: "0.40%", verified: true, scheduleSource: null, note: "Checked against the rate schedule supplied with this preview." }]);
     expect(p.rights[0]).toMatchObject({ licensor: "Priya (wrote the printer kit)", attributionRequired: true });
     expect(p.moneyState.reserved!.amount).toBe("0");
     expect(p.moneyState.paid!.amount).toBe("0");
@@ -87,6 +88,7 @@ describe("buildEconomicPreview", () => {
       clause: "Royalty if the kit ran",
       percent: "0.40%",
       verified: false,
+      scheduleSource: null,
       note: "Not checked, because this clause pays nothing in this agreement.",
     });
   });
@@ -121,7 +123,7 @@ describe("buildEconomicPreview", () => {
     expect(p.headline).toContain("cannot be funded");
   });
 
-  it("scenarios are shown as the simulator computed them, fundable or not", () => {
+  it("scenarios are shown as the simulator computed them, compiling or not", () => {
     const ag = examplePrintAndMail();
     const compiled = compileEconomics(ag);
     if (!compiled.ok) throw new Error("fixture");
@@ -131,7 +133,7 @@ describe("buildEconomicPreview", () => {
     ]);
     const p = buildEconomicPreview(ag, compiled, { feeVerified: true, scenarios });
     const [fails, cheap] = p.scenarios;
-    if (!fails!.fundable || cheap!.fundable) throw new Error("fixture");
+    if (!fails!.compiles || cheap!.compiles) throw new Error("fixture");
     expect(fails!.payer.refunded.display).toBe("8.00 USDC");
     expect(fails!.paid.find((x) => x.partyId === "courier")).toBeUndefined();
     expect(cheap!.reasons[0]).toContain("The payments add up to more than the price");
@@ -220,15 +222,15 @@ describe("the seam's timing rules, when the server's clock is given", () => {
 
   it("without a clock, the deadline is shown but not judged", () => {
     const p = at();
-    expect(p.status).toBe("fundable");
-    expect(p.terms!).toMatchObject({ acceptableNow: null, timing: null, deadline: "The offer's deadline is 2026-09-22 14:13 UTC." });
+    expect(p.status).toBe("compiles");
+    expect(p.terms!).toMatchObject({ timingHoldsNow: null, timing: null, deadline: "The offer's deadline is 2026-09-22 14:13 UTC." });
   });
 
   it("inside the pricing window and before the deadline, it can be accepted", () => {
     const p = at(ag.asOf + 60);
-    expect(p.status).toBe("fundable");
-    expect(p.terms!).toMatchObject({ acceptableNow: true, timing: null, deadline: "The offer expires at 2026-09-22 14:13 UTC." });
-    expect(p.headline.startsWith("You pay at most")).toBe(true);
+    expect(p.status).toBe("compiles");
+    expect(p.terms!).toMatchObject({ timingHoldsNow: true, timing: null, deadline: "The offer expires at 2026-09-22 14:13 UTC." });
+    expect(p.headline.startsWith("As proposed, you pay at most")).toBe(true);
   });
 
   it("the pricing window is checked before the deadline, as the seam does, and its length is the seam's", () => {
@@ -243,5 +245,34 @@ describe("the seam's timing rules, when the server's clock is given", () => {
     bad.units[0]!.gross = "1";
     const r = compileEconomics(bad);
     expect(buildEconomicPreview(bad, r, { feeVerified: true, now: bad.asOf + 60 }).status).toBe("refused");
+  });
+});
+
+describe("astra EC3 (#394 round 1 at 7e084634)", () => {
+  it("M1: a compiling agreement 'compiles' as proposed, never 'fundable': acceptance re-checks its parties, licenses, prices and units", () => {
+    const ag = examplePrintAndMail();
+    // Another permitted address for the courier, same label: it compiles, and acceptance would refuse it (PARTY_MISMATCH).
+    ag.parties.find((x) => x.partyId === "courier")!.payTo = "0x00000000000000000000000000000000000000c1";
+    const compiled = compileEconomics(ag);
+    if (!compiled.ok) throw new Error("fixture");
+    const p = buildEconomicPreview(ag, compiled, { feeVerified: true, now: ag.asOf + 60 });
+    expect(p.status).toBe("compiles");
+    expect(p.headline.startsWith("As proposed, you pay at most")).toBe(true);
+    expect(p.checks.atAcceptance.join(" ")).toMatch(/payout address/);
+    expect(p.terms!.timingHoldsNow).toBe(true);
+    expect(JSON.stringify(p)).not.toMatch(/"fundable"|acceptableNow/);
+  });
+
+  it("M3: a schema-valid time beyond the calendar's range is written exactly, never thrown", () => {
+    const ag = examplePrintAndMail();
+    ag.terms.acceptBy = Number.MAX_SAFE_INTEGER;
+    const compiled = compileEconomics(ag);
+    if (!compiled.ok) throw new Error(`fixture: ${JSON.stringify(compiled.refusals)}`);
+    let p: ReturnType<typeof buildEconomicPreview> | undefined;
+    expect(() => {
+      p = buildEconomicPreview(ag, compiled, { feeVerified: true, now: ag.asOf + 60 });
+    }).not.toThrow();
+    expect(p!.terms!.acceptBy).toContain(String(Number.MAX_SAFE_INTEGER));
+    expect(p!.terms!.deadline).toContain(String(Number.MAX_SAFE_INTEGER));
   });
 });
