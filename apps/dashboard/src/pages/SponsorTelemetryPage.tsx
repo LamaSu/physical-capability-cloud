@@ -1,5 +1,5 @@
 import React from "react";
-import { GlassPanel, EmptyState } from "@pcc/ui";
+import { GlassPanel } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../lib/api.js";
@@ -44,6 +44,20 @@ interface IntegrationsPayload {
 }
 
 const INTEGRATIONS = ["storacha", "starknet", "litProtocol", "flow", "near", "protocol"] as const;
+
+/**
+ * A 200 body that isn't an object (astra 408b F3's `200 null`), or doesn't
+ * name any of the six integrations, is a failed read — never a confident
+ * "none configured." The real route (routes/status.ts) always sends all
+ * six, so a body missing every one of them isn't a valid empty answer.
+ */
+async function fetchIntegrations(): Promise<IntegrationsPayload> {
+  const body = await apiGet<unknown>("/status/integrations");
+  if (!isRecord(body) || !INTEGRATIONS.some((key) => isRecord(body[key]))) {
+    throw new Error("The gateway's integrations response didn't include any integration's status.");
+  }
+  return body as IntegrationsPayload;
+}
 
 type IntegrationStatus = "configured" | "not-configured" | "unknown";
 
@@ -453,16 +467,16 @@ export function SponsorTelemetryPage() {
 
   const query = useQuery({
     queryKey: ["sponsors", "telemetry"],
-    queryFn: () => apiGet<IntegrationsPayload>("/status/integrations"),
+    queryFn: fetchIntegrations,
     refetchInterval: 15_000,
     staleTime: 10_000,
     retry: 2,
   });
 
-  // react-query never stores undefined, so any stored data means the gateway answered.
-  const answered = query.data !== undefined;
-  const data = isRecord(query.data) ? (query.data as IntegrationsPayload) : undefined;
-  const anyReported = data !== undefined && INTEGRATIONS.some((key) => isRecord(data[key]));
+  // react-query never stores undefined, so any stored data means fetchIntegrations
+  // resolved — a shape naming at least one of the six integrations.
+  const data = query.data;
+  const answered = data !== undefined;
   const retry = () => void query.refetch();
 
   return (
@@ -501,7 +515,7 @@ export function SponsorTelemetryPage() {
         <StaleNotice what="integration status" updatedAt={query.dataUpdatedAt} onRetry={retry} />
       )}
 
-      {data && anyReported ? (
+      {data ? (
         <>
           <SummaryStats data={data} />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -513,13 +527,6 @@ export function SponsorTelemetryPage() {
             <ProtocolCard data={data.protocol} />
           </div>
         </>
-      ) : answered ? (
-        <GlassPanel padding="lg">
-          <EmptyState
-            title="No integrations reported"
-            description="The gateway answered, but its response named none of the six integrations."
-          />
-        </GlassPanel>
       ) : query.isError ? (
         <GlassPanel padding="lg">
           <UnavailableState what="integration status" error={query.error} onRetry={retry} />
