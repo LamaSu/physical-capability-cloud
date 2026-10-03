@@ -24,3 +24,4 @@ export * from "./money/money-status.js";
 // inferring meaning. JobExecutionDTO first (PX-6).
 export * from "./readmodels/job-execution.js";
 export * from "./readmodels/operator-work.js";
+export * from "./readmodels/product-home.js";

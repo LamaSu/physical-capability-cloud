@@ -151,6 +151,16 @@ const READ_FAILED = (what: string): ReadError => ({
 /** Mock-settlement escrows are created with this address prefix (paid-job-flow.ts). */
 export const MOCK_ESCROW_ADDRESS_PREFIX = "mock-escrow-";
 
+/**
+ * A mock-settlement escrow: the paid-job flow's `mock-escrow-` address, or any contract address that
+ * is not a 20-byte hex address, such as the seed's `0xESCROW_CONTRACT_001`. No contract can hold
+ * money at such an address (astra r1 on #409, MEDIUM: seeded mock escrows were counted as held).
+ */
+export function isSimulatedEscrowAddress(contractAddress: unknown): boolean {
+  const a = String(contractAddress ?? "");
+  return a.startsWith(MOCK_ESCROW_ADDRESS_PREFIX) || !/^0x[0-9a-fA-F]{40}$/.test(a);
+}
+
 export function buildJobExecutionDTO(src: JobExecutionSources, asOf: string): JobExecutionDTO {
   const execution = buildExecution(src.job);
   const evidence = buildEvidence(src.evidence);
@@ -394,7 +404,7 @@ function buildSettlement(job: JobRow, read: SourceRead<SettlementSource>): Settl
   if (s.link !== "linked") return { ...empty, link: s.link };
 
   const escrow = s.escrow;
-  const simulated = String(escrow.contractAddress ?? "").startsWith(MOCK_ESCROW_ADDRESS_PREFIX);
+  const simulated = isSimulatedEscrowAddress(escrow.contractAddress);
   const mine = s.milestones.filter((m) => m.stepId === job.stepId);
   // One milestone for this step is this job's only when no other job could claim it: a
   // milestone records no job, so a shared CWM and step (a re-run, a duplicate) is not
