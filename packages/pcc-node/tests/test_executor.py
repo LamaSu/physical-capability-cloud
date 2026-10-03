@@ -544,6 +544,56 @@ class TestExecutionLeaseGuard:
         assert result is False
         assert posts[-1][2] == {"callId": "c-pause-ot2_shell", "error": "not_executed:lease_expired"}
 
+    def test_the_deadline_check_is_the_last_step_before_each_send_and_a_later_pause_is_the_residual(self):
+        """r9 F3, astra's regression: the suspension comes AFTER may_emit_device_command() says
+        yes. This documents the stated residual (operator item 127). The check is the last step
+        before the send, nothing runs between them, the decision was taken before the deadline,
+        and a pause after it delays the send. It does not prevent the send."""
+        import pcc_node.http_util as hu
+
+        clock = [1000.0]
+        steps = []
+        real_guard = hu.may_emit_device_command
+
+        def guard_then_pause():
+            allowed = real_guard()
+            steps.append(("check", clock[0], allowed))
+            clock[0] += 6.0  # suspended after the check said yes
+            return allowed
+
+        def send(*_args, **_kwargs):
+            steps.append(("send", clock[0], None))
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = b"{}"
+            response.__enter__.return_value.status = 200
+            return response
+
+        with mock.patch("pcc_node.http_util.time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("pcc_node.http_util.may_emit_device_command", side_effect=guard_then_pause), \
+                mock.patch("pcc_node.http_util.urlopen", side_effect=send):
+            with hu.actuation_deadline(1005.0):
+                hu.http("POST", "http://device.invalid/move", {})
+        assert [step[0] for step in steps] == ["check", "send"]  # the check is the last step
+        assert steps[0][1] < 1005.0 and steps[0][2] is True  # decided before the deadline
+        assert steps[1][1] > 1005.0  # the residual: the pause made the send late
+
+    def test_a_check_after_the_deadline_never_sends_on_either_path(self):
+        import pcc_node.http_util as hu
+        from pcc_node.executor import OpentronAdapter
+
+        clock = [1006.0]
+        with mock.patch("pcc_node.http_util.time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("pcc_node.http_util.urlopen") as sent, \
+                mock.patch("pcc_node.executor.subprocess.run") as ran:
+            with hu.actuation_deadline(1005.0) as guard:
+                status, body = hu.http("POST", "http://device.invalid/move", {})
+                shell = OpentronAdapter(base_url="http://ot2.invalid")._shell({"command": "true"})
+        sent.assert_not_called()
+        ran.assert_not_called()
+        assert (status, body) == (0, {"error": "not_executed:lease_expired"})
+        assert json.loads(shell) == {"error": "not_executed:lease_expired"}
+        assert guard["refused"] is True and guard["sent"] == 0
+
     def test_200_started_true_runs_adapter_once_and_reports_result(self):
         adapter = mock.Mock()
         adapter.device_type = "test"

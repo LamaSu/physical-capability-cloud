@@ -341,14 +341,22 @@ and fails closed at every step:
    - If one did, and a later one was held back, the device may have moved. The
      node reports `lease_lapsed_mid_command`, a device outcome.
 
-**What the lease guarantees.** No device command for a relayed call leaves the
-node after the call's lease deadline. The gateway's last check of the stop, the
-scope, the budget and the breaker is at the grant: a stop that lands after a
-call's grant can't reach that call, but nothing of a granted call is sent more
-than 5 s after its start request. So no relayed device command is sent more than
-5 s after a stop, and stopping a command already sent is the operator node's
-job. The one interval left is inside `may_emit_device_command()` and the send
-that follows it, with no other I/O between them.
+**What the lease guarantees, and its one residual.** The node checks the call's
+lease deadline immediately before each device command is sent. Inside the
+call's `actuation_deadline` block, `may_emit_device_command()` is the last step
+before `urlopen()` or `subprocess.run()`, with no other work between them. A
+command checked before its deadline is sent; one checked after it never is.
+
+The residual: if the node process is suspended between that check and the send
+syscall (a scheduler pause, SIGSTOP, a VM freeze), the command leaves late, by
+the length of the suspension. No check in user space can be made atomic with a
+send to a device that doesn't enforce deadlines itself, and an HTTP robot
+doesn't. This residual is the operator's decision (item 127).
+
+The gateway's last check of the stop, the scope, the budget and the breaker is
+at the grant, so a stop that lands after a call's grant can't reach that call.
+Apart from the residual, no relayed device command is sent more than 5 s after
+its start request. Stopping a command already sent is the operator node's job.
 
 **`RELAY_LEASE_ENFORCE=off` must never be used on an armed (physically
 actuating) deployment:** it serves executors that take no lease at all.
