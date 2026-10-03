@@ -3428,6 +3428,53 @@ describe("astra pack 120b", () => {
 // verifierStatus does not change readiness" (the stub-primitive gate is
 // removed, item 4).
 
+describe("astra pack 120h (MEDIUM) and steward #5308: the boundary", () => {
+  const notPlain = [expect.stringMatching(/^\(root\): not plain JSON data/)];
+
+  it("scanIntakeStrings reads its argument as given and is documented as NOT a boundary; validateIntake is, and refuses an accessor", () => {
+    let reads = 0;
+    const secret = "sk-" + "proj-" + "I".repeat(40);
+    const raw = {
+      get description() {
+        return ++reads <= 2 ? "clean" : secret;
+      },
+    };
+    const report = validateIntake(
+      { schema: "pcc.device-intake.v1", answers: { "device.description": { provenance: "human", get value() { return raw.description; } } } },
+      "register",
+    );
+    expect(report.structuralErrors).toEqual(notPlain);
+    expect(reads).toBe(0);
+  });
+
+  it("states the boundary in the module header, in the steward's words", () => {
+    const header = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../onboarding/intake/index.ts"), "utf8");
+    expect(header).toContain("hostile data in, hostile in-process code out");
+    expect(header).toContain("can already read the");
+  });
+
+  it("MEDIUM: the secret-scan header says scanIntakeStrings is NOT a boundary for untrusted input", () => {
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../onboarding/intake/secret-scan.ts"), "utf8");
+    expect(source).toContain("NOT a boundary for untrusted input");
+  });
+
+  it("hostile data cannot exhaust token derivation: a key whose first 64 tokens are all raw keys still gets the next one", () => {
+    const raw = "bogus-id";
+    const nth = (n: number): string =>
+      `#${createHash("sha256").update(n === 0 ? raw : raw + String.fromCharCode(0) + String(n), "utf8").digest("hex").slice(0, 12)}`;
+    expect(nth(0)).toBe(unknownKeyToken(raw));
+    const taken = Array.from({ length: 64 }, (_, n) => nth(n));
+    const value: Record<string, string> = {};
+    for (const key of taken) value[key] = "x";
+    const input = { schema: "pcc.device-intake.v1", answers: { [raw]: { value, provenance: "human" } } };
+    const report = validateIntake(input, "register");
+    expect(report.structuralErrors).not.toContain("(root): input could not be read");
+    expect(report.unknownFields).toEqual([nth(64)]);
+    const out = redactIntakeSecrets(input) as { answers: Record<string, unknown> };
+    expect(Object.keys(out.answers)).toEqual([nth(64)]);
+  });
+});
+
 describe("astra pack 120g and steward #5225: one exact plain-data copy at the boundary", () => {
   const tokenKey = unknownKeyToken("bogus-id");
   const notPlain = [expect.stringMatching(/^\(root\): not plain JSON data/)];

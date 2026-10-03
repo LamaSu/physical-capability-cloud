@@ -17,6 +17,13 @@
  *
  * Source spec: returns/pcc-kits-work/intake-spec-item6-20260929.md, R2 rules 1-6
  * and the "Addendum, 16:40 PDT".
+ *
+ * The boundary: hostile data in, hostile in-process code out. Every entry point
+ * reads one exact plain-data copy of its input (plain-input.ts), so any shape of
+ * hostile DATA is refused or validated as copied. Code that can replace the
+ * realm's built-ins after load is outside the contract: it can already read the
+ * raw input, so the display guarantee adds nothing against it (steward ruling
+ * #5308, DECISIONS 10/03).
  */
 
 import { z } from "zod";
@@ -33,7 +40,7 @@ import type { CsdRegistry } from "../../csd/registry.js";
 import { contentHashSchema, httpsUrl, nonBlankText } from "../citation-rules.js";
 import { intakeValueHash, isConfirmationRequired } from "./confirmation.js";
 import { plainIntakeCopy } from "./plain-input.js";
-import { joinPath, pathSegment, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
+import { joinPath, pathSegment, scanIntakeStrings, type IntakeSecretHit, type KeyReservation } from "./secret-scan.js";
 import {
   ESTOP_NONE_APPROVED_CAPABILITIES,
   checkSafetyLimits,
@@ -416,7 +423,7 @@ function hasNonAscii(key: string): boolean {
  *  type names are used — never `issue.message` for built-in issues, because
  *  zod's own messages can quote the offending value. `reserved` is every key of
  *  the original input, so no path token reproduces one (astra packs 120e, 120f). */
-function describeIssue(issue: z.ZodIssue, reserved: ReadonlySet<string>): string {
+function describeIssue(issue: z.ZodIssue, reserved: KeyReservation): string {
   const where = issue.path.length === 0 ? "(root)" : joinPath(issue.path.map(String), reserved);
   switch (issue.code) {
     case z.ZodIssueCode.invalid_type:
@@ -432,7 +439,7 @@ function describeIssue(issue: z.ZodIssue, reserved: ReadonlySet<string>): string
 
 /** Checks that read the RAW input, so they hold whether or not it parses (and
  *  see what a parse would drop, e.g. an `answers["__proto__"]` entry). */
-function scanRawInput(input: unknown, report: IntakeValidationReport, reserved: ReadonlySet<string>): void {
+function scanRawInput(input: unknown, report: IntakeValidationReport, reserved: KeyReservation): void {
   report.secretsInText.push(...scanIntakeStrings(input, reserved));
 
   const answers = isRecordObject(input) && isRecordObject(input.answers) ? input.answers : {};
@@ -701,7 +708,7 @@ export function validateIntake(
     if (!plain) {
       report.structuralErrors.push(NOT_PLAIN_DATA);
     } else {
-      validatePlainRecord(plain.value, plain.keys, milestone, milestoneKnown, authority, report);
+      validatePlainRecord(plain.value, plain.reserved, milestone, milestoneKnown, authority, report);
     }
   } catch {
     // An input that cannot be read fails closed instead of throwing.
@@ -715,10 +722,10 @@ export function validateIntake(
 const NOT_PLAIN_DATA =
   "(root): not plain JSON data (a proxy, an accessor, a cycle, a non-plain object, a key named __proto__, a hole, a symbol key, a non-enumerable or array-named property, an undefined or another non-JSON value)";
 
-/** validateIntake's checks, on the plain-data copy; `reserved` is every key of the original input. */
+/** validateIntake's checks, on the plain-data copy; `reserved` accepts every key of the original input. */
 function validatePlainRecord(
   input: unknown,
-  reserved: ReadonlySet<string>,
+  reserved: KeyReservation,
   milestone: IntakeMilestone,
   milestoneKnown: boolean,
   authority: IntakeAuthority | undefined,

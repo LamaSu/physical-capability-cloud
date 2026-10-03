@@ -10,13 +10,19 @@
  * logged or thrown. Object KEYS are not scanned here; `validateIntake` checks
  * keys separately.
  *
- * Policy for producers: call `validateIntake` — or at least
- * `scanIntakeStrings` — BEFORE logging or persisting a record, and again before
- * any public projection of it. Rejecting is the rule: a record with a hit is
- * not ok and its value belongs in the authoritative private store (the payout
- * destination and street address are `{set: true}` in the record; the real
- * values go to their own stores). `redactIntakeSecrets` is for log output
- * only; it is not a way to keep a record that has a hit.
+ * Policy for producers: call `validateIntake` BEFORE logging or persisting a
+ * record, and again before any public projection of it. validateIntake (and
+ * redactIntakeSecrets, for logs) first take ONE exact plain-data copy of the
+ * input (plain-input.ts), so what is checked is what is stored. Rejecting is
+ * the rule: a record with a hit is not ok and its value belongs in the
+ * authoritative private store (the payout destination and street address are
+ * `{set: true}` in the record; the real values go to their own stores).
+ * `redactIntakeSecrets` is for log output only; it is not a way to keep a
+ * record that has a hit. `scanIntakeStrings` is a helper over data the caller
+ * already holds as plain JSON (for example JSON.parse output): it reads its
+ * argument as given, so it is NOT a boundary for untrusted input (astra pack
+ * 120h); an object with accessors could show it one value and a later reader
+ * another.
  *
  * These are heuristic detectors, not proof of absence: a string that matches
  * none of them is not thereby known to be safe. Each string is matched as
@@ -294,10 +300,75 @@ export function secretKindsOf(text: string): IntakeSecretKind[] {
 
 // ── Path formatting ──────────────────────────────────────────────────────
 
-const MAX_SEGMENT_LENGTH = 80;
 
-const NO_KEYS: ReadonlySet<string> = new Set();
+// ── Key display (astra packs 120c-120h) ──────────────────────────────────
+//
+// The boundary: hostile data in, hostile in-process code out. The intake defends
+// against any shape of hostile DATA (plain-input.ts copies every input exactly);
+// code that can replace the realm's built-ins after load is outside the contract,
+// because it can already read the raw input, so the display guarantee adds
+// nothing against it (steward ruling #5308). The helpers below happen to use
+// load-time maps and a captured Reflect.apply; that is implementation, not a
+// guarantee against such code.
+
+/** A membership test for raw keys: a token must never equal a key it accepts. */
+export type KeyReservation = (key: string) => boolean;
+
+const ReflectApply = Reflect.apply;
+const ArrayIsArray = Array.isArray;
+const NumberIsSafeInteger = Number.isSafeInteger;
+const StringCtor = String;
+const ObjectCreate = Object.create;
+const ObjectKeys = Object.keys;
+const ObjectGetOwnPropertyNames = Object.getOwnPropertyNames;
+const ObjectDefineProperty = Object.defineProperty;
+const ObjectHasOwn = Object.prototype.hasOwnProperty;
+const StringCharCodeAt = String.prototype.charCodeAt;
+const TextEncoderEncode = TextEncoder.prototype.encode;
+const ENCODER = new TextEncoder();
+const hasOwnKey = (o: object, key: string): boolean => ReflectApply(ObjectHasOwn, o, [key]) as boolean;
+
+/** Byte -> two lowercase hex digits, built at load. */
+const HEX: Record<number, string> = (() => {
+  const table = ObjectCreate(null) as Record<number, string>;
+  const digits = "0123456789abcdef";
+  for (let i = 0; i < 256; i++) table[i] = digits[i >> 4]! + digits[i & 15]!;
+  return table;
+})();
+
+/** The vocabulary as a null-prototype map, built at load. Only plain [A-Za-z0-9._-] keys are shown verbatim, so none needs escaping. */
+const VOCABULARY: Record<string, true> = (() => {
+  const map = ObjectCreate(null) as Record<string, true>;
+  for (const key of INTAKE_KEY_VOCABULARY) if (/^[A-Za-z0-9._-]{1,80}$/.test(key)) map[key] = true;
+  return map;
+})();
+
+/** Is `key` in the closed intake vocabulary? Decided on the load-time map. */
+export function isVocabularyKey(key: string): boolean {
+  return typeof key === "string" && hasOwnKey(VOCABULARY, key);
+}
+
+/** The reservation over a null-prototype map of keys. */
+export function reservationOver(keys: Record<string, true>): KeyReservation {
+  return (key) => typeof key === "string" && hasOwnKey(keys, key);
+}
+
+const NO_KEYS: KeyReservation = () => false;
 const TOKEN_SEPARATOR = String.fromCharCode(0);
+
+/** An index of an array this long: a canonical decimal below the length, checked by char codes. */
+function isArrayIndexName(name: string, length: number): boolean {
+  const n = name.length;
+  if (n === 0 || n > 10) return false;
+  if ((ReflectApply(StringCharCodeAt, name, [0]) as number) === 48) return n === 1 && length > 0;
+  let value = 0;
+  for (let i = 0; i < n; i++) {
+    const c = ReflectApply(StringCharCodeAt, name, [i]) as number;
+    if (c < 48 || c > 57) return false;
+    value = value * 10 + (c - 48);
+  }
+  return value < length;
+}
 
 /**
  * Every own string property name of every object or array reached in `value`:
@@ -307,55 +378,63 @@ const TOKEN_SEPARATOR = String.fromCharCode(0);
  * pack 120e). The intake entry points reserve the keys of their exact
  * plain-data copy (plain-input.ts); this is for direct calls on raw values.
  */
-export function rawKeysOf(value: unknown): ReadonlySet<string> {
-  const keys = new Set<string>();
+export function rawKeysOf(value: unknown): KeyReservation {
+  const keys = ObjectCreate(null) as Record<string, true>;
   walkValue(value, {
     node: (node) => {
-      const isArray = Array.isArray(node);
-      for (const name of Object.getOwnPropertyNames(node)) {
-        if (isArray && (name === "length" || (/^(?:0|[1-9][0-9]*)$/.test(name) && Number(name) < (node as unknown[]).length))) continue;
-        keys.add(name);
+      const isArray = ArrayIsArray(node);
+      const names = ObjectGetOwnPropertyNames(node);
+      for (let i = 0; i < names.length; i++) {
+        const name = names[i]!;
+        if (isArray && (name === "length" || isArrayIndexName(name, (node as unknown[]).length))) continue;
+        keys[name] = true;
       }
     },
   });
-  return keys;
+  return reservationOver(keys);
 }
 
-/** `#` plus 12 hex of sha256(raw); re-derived (sha256 of raw, NUL, n) until `taken` refuses it no longer. */
-function tokenOf(raw: string, taken: (candidate: string) => boolean): string {
+/**
+ * `#` plus 12 hex of sha256(raw), re-derived (sha256 of raw, NUL, n) while
+ * `taken` accepts the candidate. It ends on any data: `taken` accepts only
+ * finitely many strings (the input's keys, and tokens already used in the same
+ * object), so some n is free, and no input can make it throw.
+ */
+function tokenOf(raw: string, taken: KeyReservation): string {
   for (let n = 0; ; n++) {
-    const material = n === 0 ? raw : `${raw}${TOKEN_SEPARATOR}${n}`;
-    const candidate = `#${bytesToHex(sha256(new TextEncoder().encode(material))).slice(0, 12)}`;
+    const material = n === 0 ? raw : raw + TOKEN_SEPARATOR + StringCtor(n);
+    const digest = sha256(ReflectApply(TextEncoderEncode, ENCODER, [material]) as Uint8Array);
+    let candidate = "#";
+    for (let i = 0; i < 6; i++) candidate += HEX[digest[i]!]!;
     if (!taken(candidate)) return candidate;
   }
 }
 
 /**
  * One path segment, safe to put in a report or a log line. Only a real array
- * index (a NUMBER, as the walker records one) or an object key in the closed
- * intake vocabulary (INTAKE_KEY_VOCABULARY) is shown verbatim, with `~` and `/`
- * escaped (RFC 6901) and anything outside printable ASCII written as `\u{hex}`.
- * Every other object key, including a numeric-looking one such as "123456", is
- * written as a one-way token: `#` plus the first 12 hex digits of its SHA-256,
- * so a credential or PIN pasted as a key, in a format no detector knows, is
- * never echoed (astra packs 120c and 120d). `reserved` holds every raw key of
- * the input being reported (rawKeysOf); a token equal to one of them is
- * re-derived, so no token ever reproduces a key the caller wrote (astra pack
- * 120e). Without collisions, the same key always gets the same token.
- * Internal: shared with validateIntake's reports.
+ * index (a NUMBER, as the walker records one) or a key in the closed intake
+ * vocabulary is shown verbatim; vocabulary keys are plain [A-Za-z0-9._-], so
+ * nothing needs escaping. Every other key, including a numeric-looking one such
+ * as "123456", is a one-way token: `#` plus the first 12 hex digits of its
+ * SHA-256, so a credential or PIN pasted as a key is never echoed (astra packs
+ * 120c, 120d). `reserved` accepts every raw key of the input being reported; a
+ * token it accepts is re-derived, so no token reproduces a key the caller wrote
+ * (120e). Without collisions, a key always gets the same token. Internal:
+ * shared with validateIntake's reports.
  */
-export function pathSegment(raw: WalkPathSegment, reserved: ReadonlySet<string> = NO_KEYS): string {
-  if (typeof raw === "number") return Number.isSafeInteger(raw) && raw >= 0 ? String(raw) : "#index";
-  if (!INTAKE_KEY_VOCABULARY.has(raw)) return tokenOf(raw, (candidate) => reserved.has(candidate));
-  const escaped = raw
-    .replace(/~/g, "~0")
-    .replace(/\//g, "~1")
-    .replace(/[^\x20-\x7e]/gu, (ch) => `\\u{${(ch.codePointAt(0) ?? 0).toString(16)}}`);
-  return escaped.length > MAX_SEGMENT_LENGTH ? `${escaped.slice(0, MAX_SEGMENT_LENGTH)}...` : escaped;
+export function pathSegment(raw: WalkPathSegment, reserved: KeyReservation = NO_KEYS): string {
+  if (typeof raw === "number") return NumberIsSafeInteger(raw) && raw >= 0 ? StringCtor(raw) : "#index";
+  if (isVocabularyKey(raw)) return raw;
+  return tokenOf(raw, reserved);
 }
 
-export function joinPath(segments: readonly WalkPathSegment[], reserved: ReadonlySet<string> = NO_KEYS): string {
-  return segments.map((segment) => pathSegment(segment, reserved)).join("/");
+export function joinPath(segments: readonly WalkPathSegment[], reserved: KeyReservation = NO_KEYS): string {
+  let out = "";
+  for (let i = 0; i < segments.length; i++) {
+    if (i > 0) out += "/";
+    out += pathSegment(segments[i]!, reserved);
+  }
+  return out;
 }
 
 // ── Scanning ─────────────────────────────────────────────────────────────
@@ -377,9 +456,11 @@ function isSourceContentHash(text: string, path: readonly WalkPathSegment[]): bo
  * Scan every string in `value` (arrays and objects, recursively) with every
  * detector. Returns one `{path, kind}` per (string, kind) in document order;
  * empty when nothing matches. It never returns or logs the matched text, and
- * object keys are not scanned.
+ * object keys are not scanned. It reads `value` as given: pass plain JSON data.
+ * For untrusted input, call validateIntake, which scans its exact plain-data
+ * copy (astra pack 120h).
  */
-export function scanIntakeStrings(value: unknown, reserved: ReadonlySet<string> = rawKeysOf(value)): IntakeSecretHit[] {
+export function scanIntakeStrings(value: unknown, reserved: KeyReservation = rawKeysOf(value)): IntakeSecretHit[] {
   const hits: IntakeSecretHit[] = [];
   walkValue(value, {
     string: (text, path) => {
@@ -407,9 +488,9 @@ function redactText(text: string): string {
   return out + text.slice(cursor);
 }
 
-function setOwn(target: object, key: string, value: unknown): void {
-  // defineProperty, not assignment: a key named "__proto__" must stay data.
-  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+function setOwn(target: object, key: PropertyKey, value: unknown): void {
+  // defineProperty, not assignment: a key named "__proto__" stays an own data property.
+  ObjectDefineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
 /**
@@ -423,12 +504,10 @@ function setOwn(target: object, key: string, value: unknown): void {
  * pack 120e); a numeric-looking key ("123456") is a key,
  * not an array index, and is renamed too (astra pack 120d). The typed digest at
  * answers/<field>/source/contentHash is kept as it is, exactly as the scan
- * exempts it. Arrays and objects are copied (an object that is not a plain
- * object becomes a plain object of its own enumerable properties); an object
- * reachable twice is copied once, at the first path it is reached by. Numbers,
- * booleans, null and undefined are returned as they are. The input is not
- * modified. Named properties on an array (JSON has none) are dropped from the
- * copy; their keys are still reserved, so no token reproduces one.
+ * exempts it. It copies the exact plain-data copy of `record` (plain-input.ts):
+ * a record that is not plain JSON data is not logged at all, and
+ * NOT_PLAIN_DATA_PLACEHOLDER stands in for it. Numbers, booleans and null are
+ * returned as they are. The input is not modified.
  *
  * For safe LOGGING only. A record that has a hit must be rejected (see the
  * file header), not stored in redacted form.
@@ -438,46 +517,75 @@ export function redactIntakeSecrets<T>(record: T): T {
   // that is not plain JSON data is not logged at all; a fixed placeholder stands in for it.
   const plain = plainIntakeCopy(record);
   if (!plain) return NOT_PLAIN_DATA_PLACEHOLDER as unknown as T;
-  return redactPlain(plain.value, plain.keys) as T;
+  return redactPlain(plain.value, plain.reserved) as T;
 }
 
 /** What redactIntakeSecrets returns for an input that is not plain JSON data. */
 export const NOT_PLAIN_DATA_PLACEHOLDER = "[redacted: not plain JSON data]";
 
-function redactPlain(record: unknown, reserved: ReadonlySet<string>): unknown {
-  const copies = new Map<object, unknown>();
-  const pending: { source: object; target: object; path: WalkPathSegment[] }[] = [];
+/** Where a string sits, as far as the contentHash exemption needs: its depth and first four segments. */
+interface RedactAt {
+  depth: number;
+  s0?: WalkPathSegment;
+  s1?: WalkPathSegment;
+  s2?: WalkPathSegment;
+  s3?: WalkPathSegment;
+}
 
-  const copyOf = (node: unknown, path: WalkPathSegment[]): unknown => {
-    if (typeof node === "string") return isSourceContentHash(node, path) ? node : redactText(node);
+function childAt(at: RedactAt, segment: WalkPathSegment): RedactAt {
+  const next: RedactAt = { depth: at.depth + 1, s0: at.s0, s1: at.s1, s2: at.s2, s3: at.s3 };
+  if (at.depth === 0) next.s0 = segment;
+  else if (at.depth === 1) next.s1 = segment;
+  else if (at.depth === 2) next.s2 = segment;
+  else if (at.depth === 3) next.s3 = segment;
+  return next;
+}
+
+function isContentHashAt(text: string, at: RedactAt): boolean {
+  return (
+    at.depth === 4 &&
+    at.s0 === "answers" &&
+    typeof at.s1 === "string" &&
+    at.s2 === "source" &&
+    at.s3 === "contentHash" &&
+    CONTENT_HASH_PATTERN.test(text)
+  );
+}
+
+/** Redact the plain-data copy, a tree of null-prototype objects and dense arrays. */
+function redactPlain(record: unknown, reserved: KeyReservation): unknown {
+  // The work stack is a null-prototype object: an index assignment reaches no prototype setter.
+  const stack = ObjectCreate(null) as Record<number, { source: object; target: object; at: RedactAt }>;
+  let top = 0;
+
+  const copyOf = (node: unknown, at: RedactAt): unknown => {
+    if (typeof node === "string") return isContentHashAt(node, at) ? node : redactText(node);
     if (node === null || typeof node !== "object") return node;
-    const known = copies.get(node);
-    if (known !== undefined) return known;
-    const target: object = Array.isArray(node) ? [] : {};
-    copies.set(node, target);
-    pending.push({ source: node, target, path });
+    const target: object = ArrayIsArray(node) ? [] : {};
+    stack[top++] = { source: node, target, at };
     return target;
   };
 
-  const root = copyOf(record, []);
-  while (pending.length > 0) {
-    const { source, target, path } = pending.pop()!;
-    if (Array.isArray(source)) {
-      for (let i = 0; i < source.length; i++) (target as unknown[])[i] = copyOf(source[i], [...path, i]);
+  const root = copyOf(record, { depth: 0 });
+  while (top > 0) {
+    const { source, target, at } = stack[--top]!;
+    if (ArrayIsArray(source)) {
+      for (let i = 0; i < source.length; i++) setOwn(target, i, copyOf(source[i], childAt(at, i)));
       continue;
     }
-    // Keys that are kept as they are claim their names first, so a renamed key
-    // can never take (and then be overwritten by) one of them.
-    // Kept means IN THE VOCABULARY, decided directly; never by comparing a key with its own token (astra pack 120f).
-    const entries = Object.entries(source).map(([key, value]) => ({ key, value, kept: INTAKE_KEY_VOCABULARY.has(key) }));
-    const usedKeys = new Set(entries.filter((e) => e.kept).map((e) => e.key));
-    for (const { key, value, kept } of entries) {
+    // Vocabulary keys are kept, and claim their names first, so a renamed key can never take one.
+    const keys = ObjectKeys(source);
+    const used = ObjectCreate(null) as Record<string, true>;
+    for (let i = 0; i < keys.length; i++) if (isVocabularyKey(keys[i]!)) used[keys[i]!] = true;
+    const notTaken: KeyReservation = (candidate) => reserved(candidate) || hasOwnKey(used, candidate);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i]!;
       let outKey = key;
-      if (!kept) {
-        outKey = tokenOf(key, (candidate) => reserved.has(candidate) || usedKeys.has(candidate));
-        usedKeys.add(outKey);
+      if (!isVocabularyKey(key)) {
+        outKey = tokenOf(key, notTaken);
+        used[outKey] = true;
       }
-      setOwn(target, outKey, copyOf(value, [...path, key]));
+      setOwn(target, outKey, copyOf((source as Record<string, unknown>)[key], childAt(at, key)));
     }
   }
   return root;

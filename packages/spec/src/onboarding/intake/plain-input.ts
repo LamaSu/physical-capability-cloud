@@ -15,39 +15,52 @@
  * is walked once more, and any of those refuses the input: plain JSON data,
  * exactly as an HTTP body carries it, is what the intake accepts. That walk is
  * trap-free: plainDataCopy already refused proxies, and this walk reads only
- * descriptors, never a getter. The returned `keys` are every object key of the
- * input (all of them are in the copy too).
+ * descriptors, never a getter. The returned `reserved` accepts exactly the
+ * object keys of the input (all of them are in the copy too).
  *
- * Like plain-data.ts, the walk calls only intrinsics captured when this module
- * loads, keeps its stack in a null-prototype object (an assignment can't reach
- * a setter on Array.prototype) and iterates by index (no iterator protocol). A
- * realm whose intrinsics were replaced before this module loaded was
- * compromised before load. Internal to the intake module.
+ * The boundary: hostile data in, hostile in-process code out. The intake
+ * defends against any shape of hostile DATA; code that can replace the realm's
+ * built-ins after load is outside the contract, because it can already read
+ * the raw input, so the display guarantee adds nothing against it (steward
+ * ruling #5308). The walk's style (captured intrinsics, a null-prototype stack,
+ * char-code index checks) follows util/plain-data.ts for consistency only; it
+ * is not a guarantee against such code. Internal to the intake module.
  */
 
 import { plainDataCopy } from "../../util/plain-data.js";
+import type { KeyReservation } from "./secret-scan.js";
 
+// Written in util/plain-data.ts's style for consistency; not a guarantee against code that
+// rewrites built-ins (out of contract: see the header).
+const ReflectApply = Reflect.apply;
 const ArrayIsArray = Array.isArray;
-const NumberCtor = Number;
 const ObjectCreate = Object.create;
 const ObjectGetOwnPropertyNames = Object.getOwnPropertyNames;
 const ObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
 const ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-const FunctionCall = Function.prototype.call;
 const ObjectHasOwn = Object.prototype.hasOwnProperty;
-const RegExpTest = RegExp.prototype.test;
-const hasOwn = (o: object, key: PropertyKey): boolean => FunctionCall.call(ObjectHasOwn, o, key) as boolean;
-const CANONICAL_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
+const StringCharCodeAt = String.prototype.charCodeAt;
+const hasOwn = (o: object, key: PropertyKey): boolean => ReflectApply(ObjectHasOwn, o, [key]) as boolean;
 
-/** The exact plain-data copy of an intake input, and every object key of the original. */
+/** The exact plain-data copy of an intake input, and the reservation of every object key of the original. */
 export interface PlainIntakeCopy {
   value: unknown;
-  keys: ReadonlySet<string>;
+  /** Accepts exactly the object keys of the input. */
+  reserved: KeyReservation;
 }
 
-/** An index of an array this long: a canonical decimal below the length. */
+/** An index of an array this long: a canonical decimal below the length, checked by char codes (no RegExp). */
 function isIndex(name: string, length: number): boolean {
-  return (FunctionCall.call(RegExpTest, CANONICAL_DECIMAL, name) as boolean) && NumberCtor(name) < length;
+  const n = name.length;
+  if (n === 0 || n > 10) return false;
+  if ((ReflectApply(StringCharCodeAt, name, [0]) as number) === 48) return n === 1 && length > 0;
+  let value = 0;
+  for (let i = 0; i < n; i++) {
+    const c = ReflectApply(StringCharCodeAt, name, [i]) as number;
+    if (c < 48 || c > 57) return false;
+    value = value * 10 + (c - 48);
+  }
+  return value < length;
 }
 
 /** The exact copy, or null when the input is not plain JSON data. Never throws. */
@@ -83,8 +96,6 @@ export function plainIntakeCopy(input: unknown): PlainIntakeCopy | null {
   } catch {
     return null;
   }
-  const keys = new Set<string>();
-  const names = ObjectGetOwnPropertyNames(found);
-  for (let i = 0; i < names.length; i++) keys.add(names[i]!);
-  return { value: copy.value, keys };
+  const value = copy.value;
+  return { value, reserved: (key) => typeof key === "string" && hasOwn(found, key) };
 }
