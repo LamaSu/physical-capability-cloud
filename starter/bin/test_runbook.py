@@ -340,7 +340,7 @@ class TestRound5(unittest.TestCase):
     def test_no_summary_says_a_test_job_ran(self):
         # C2 follow-through: the runbook no longer ends with a test job, so no summary may say it does.
         for path, text in text_files():
-            self.assertNotRegex(text, r"(?i)exercised by one test job|one test job on the device|takes test jobs only|one test run|session ok", path.name)
+            self.assertNotRegex(text, r"(?i)exercised by one test job|one test job on the device|(takes|runs) test jobs only|one test run|session ok|phase 6 exercises", path.name)
 
     def test_phase_7_points_at_the_envelope_check_where_it_is(self):
         # LOW: phase 6's sections were renumbered in round 4.

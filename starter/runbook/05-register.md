@@ -86,6 +86,6 @@ bin/pcc-report register ok "kernel, signing key, lab.absorbance capability, devi
 - `pcc-node start`: from 0.1.1 its daemon takes no jobs, and its heartbeat tells the gateway so (`acceptingJobs: false`), which lets your listing age out.
 - `onboard_machine` and `prove_registration` are self-attestation, not verification (board S3).
 
-Phase 6 exercises the device. Its evidence stays unverified until the operating agent signs it.
+Phase 6 drills the emergency stop. No job runs there yet: the test job waits for a queue-only submission. When jobs run, their evidence stays unverified until the operating agent signs it.
 
 **Next:** [verify](06-verify.md).
