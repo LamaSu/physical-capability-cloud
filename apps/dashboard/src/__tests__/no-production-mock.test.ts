@@ -210,17 +210,33 @@ function calleeName(call: ts.CallExpression): string {
   return ts.isIdentifier(c) ? c.text : ts.isPropertyAccessExpression(c) ? c.name.text : "";
 }
 
-/** A test that runs: the callback of it() or test(), with .each, .only or .concurrent, but not .skip or .todo. */
-function testCallback(call: ts.CallExpression): ts.Node | null {
+/** A runner call's base name (it, test, describe…) and its modifiers (each, only, skip…): it.skip.each(table)(name, fn) is "it" with ["each", "skip"]. */
+function runnerOf(call: ts.CallExpression): { name: string; modifiers: string[] } | null {
   let callee: ts.Expression = call.expression;
-  if (ts.isCallExpression(callee)) callee = callee.expression; // it.each(table)(name, fn)
+  if (ts.isCallExpression(callee)) callee = callee.expression; // x.each(table)(name, fn)
   const modifiers: string[] = [];
   while (ts.isPropertyAccessExpression(callee)) {
     modifiers.push(callee.name.text);
     callee = callee.expression;
   }
-  if (!ts.isIdentifier(callee) || (callee.text !== "it" && callee.text !== "test")) return null;
-  if (modifiers.some((m) => m === "skip" || m === "todo")) return null;
+  return ts.isIdentifier(callee) ? { name: callee.text, modifiers } : null;
+}
+
+const SKIPPED = (modifiers: string[]) => modifiers.some((m) => m === "skip" || m === "todo");
+
+/**
+ * A test that runs: the callback of it() or test(), with .each, .only or
+ * .concurrent, but not .skip or .todo, and not inside a suite that is
+ * skipped (describe.skip, describe.todo, xdescribe) at any depth (astra 408i).
+ */
+function testCallback(call: ts.CallExpression): ts.Node | null {
+  const runner = runnerOf(call);
+  if (!runner || (runner.name !== "it" && runner.name !== "test") || SKIPPED(runner.modifiers)) return null;
+  for (let p: ts.Node | undefined = call.parent; p; p = p.parent) {
+    if (!ts.isCallExpression(p)) continue;
+    const suite = runnerOf(p);
+    if (suite && (suite.name === "xdescribe" || (suite.name === "describe" && SKIPPED(suite.modifiers)))) return null;
+  }
   const fn = [...call.arguments].reverse().find((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a));
   return fn ?? null;
 }
@@ -295,27 +311,33 @@ function pagesRenderedBy(test: TestSource): string[] {
       add(m.name.text, m.initializer.body);
     }
   });
-  /** What a test's body renders: its own renderer calls, and those of the helpers it calls, transitively. */
-  const renders = (body: ts.Node): Set<string> => {
-    const out = new Set<string>();
+  /** A test's body and every helper it calls, transitively: where its renders and its assertions can be. */
+  const reached = (body: ts.Node): ts.Node[] => {
+    const out = [body];
     const seen = new Set<string>();
-    const queue = [body];
-    while (queue.length) {
-      const n = queue.pop()!;
-      rendersIn(n, out);
-      for (const called of callsIn(n)) {
+    for (let i = 0; i < out.length; i++) {
+      for (const called of callsIn(out[i]!)) {
         if (seen.has(called) || !helpers.has(called)) continue;
         seen.add(called);
-        queue.push(...helpers.get(called)!);
+        out.push(...helpers.get(called)!);
       }
     }
     return out;
   };
+  /** What a test's body renders: its own renderer calls, and those of the helpers it calls. */
+  const renders = (body: ts.Node): Set<string> => {
+    const out = new Set<string>();
+    for (const n of reached(body)) rendersIn(n, out);
+    return out;
+  };
+  /** Whether a test's body calls expect(), itself or in a helper it calls (astra 408i). */
   const asserts = (body: ts.Node): boolean => {
     let found = false;
-    each(body, (m) => {
-      if (ts.isCallExpression(m) && ts.isIdentifier(m.expression) && m.expression.text === "expect") found = true;
-    });
+    for (const n of reached(body)) {
+      each(n, (m) => {
+        if (ts.isCallExpression(m) && ts.isIdentifier(m.expression) && m.expression.text === "expect") found = true;
+      });
+    }
     return found;
   };
   const covered = new Set<string>();
@@ -471,6 +493,26 @@ describe("no production mock (ratchet)", () => {
     ["a skipped test", 'import { ProbePage } from "../ProbePage.js";\nit.skip("x", () => {\n  render(<ProbePage />);\n  expect(text()).toContain("unavailable");\n});'],
   ])("the ratchet doesn't count %s (astra 408g MEDIUM)", (_what, test) => {
     expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test])).toEqual(["pages/ProbePage.tsx"]);
+  });
+
+  it.each([
+    ["describe.skip", "describe.skip"],
+    ["describe.todo", "describe.todo"],
+    ["a skipped suite inside a running one", 'describe("outer", () => {\n  describe.skip'],
+  ])("a test inside %s doesn't count (astra 408i MEDIUM)", (_what, opener) => {
+    const nested = opener.includes("outer");
+    const test =
+      'import { ProbePage } from "../ProbePage.js";\n' +
+      `${opener}("suite", () => {\n  it("x", () => {\n    render(<ProbePage />);\n    expect(text()).toContain("unavailable");\n  });\n});` +
+      (nested ? "\n});" : "");
+    expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test])).toEqual(["pages/ProbePage.tsx"]);
+  });
+
+  it("an assertion in a helper the test calls counts, as a render there does (astra 408i MEDIUM)", () => {
+    const test =
+      'import { ProbePage } from "../ProbePage.js";\nfunction assertUnavailable() {\n  expect(text()).toContain("unavailable");\n}\n' +
+      'it("x", () => {\n  render(<ProbePage />);\n  assertUnavailable();\n});';
+    expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test])).toEqual([]);
   });
 
   it("a namespace import's own page component, or a helper the test calls, counts (self-test)", () => {
