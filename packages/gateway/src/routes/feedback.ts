@@ -417,16 +417,16 @@ export async function feedbackRoutes(app: FastifyInstance) {
     }
     //  2) A PostHog event for aggregate dashboards.
     try {
-      trackServerEvent("feedback_filed", {
-        feedback_id: rec.id,
-        type: rec.type,
-        endpoint: rec.endpoint,
-        http_status: rec.httpStatus,
-        error_code: rec.errorCode,
-        trace_id: rec.traceId,
-        agent_kind: rec.agentId,
-        severity: rec.severity,
-        log_count: rec.logs?.length ?? 0,
+      trackServerEvent(lit("feedback_filed"), {
+        feedback_id: declare.id(rec.id),
+        type: declare.code(rec.type, FEEDBACK_TYPES),
+        endpoint: declare.id(rec.endpoint),
+        http_status: declare.id(rec.httpStatus),
+        error_code: declare.id(rec.errorCode),
+        trace_id: declare.id(rec.traceId),
+        agent_kind: declare.id(rec.agentId),
+        severity: declare.code(rec.severity, SEVERITIES),
+        log_count: declare.id(rec.logs?.length ?? 0),
       });
     } catch {
       /* best-effort telemetry */
