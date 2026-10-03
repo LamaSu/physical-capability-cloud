@@ -2,6 +2,12 @@ import React from "react";
 import { GlassPanel, GlowBadge, DataCell, EmptyState } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { getAuthHeaders } from "../stores/auth-store.js";
+import {
+  claimRequestBody,
+  formatSlotPrice,
+  toSharedBatchViews,
+  type SharedBatchView,
+} from "./batch-board-logic.js";
 
 const API = import.meta.env.VITE_PCC_URL ?? "";
 
@@ -9,18 +15,8 @@ const API = import.meta.env.VITE_PCC_URL ?? "";
 // Types
 // ---------------------------------------------------------------------------
 
-interface SharedBatch {
-  id: string;
-  kernelId: string;
-  kernelName?: string;
-  capabilityType: string;
-  protocolType?: string;
-  totalSlots: number;
-  claimedSlots: number;
-  pricePerSlot: number;
-  status: string;
-  claims?: Array<{ agentId: string; slotCount: number }>;
-}
+// The server sends claims as an array; batch-board-logic.ts turns them into a count.
+type SharedBatch = SharedBatchView;
 
 // ---------------------------------------------------------------------------
 // Slot Grid — 96-well plate visualization (8 rows x 12 cols)
@@ -218,7 +214,7 @@ export function BatchBoardPage() {
         return r.json();
       })
       .then((data) => {
-        setBatches(data.batches ?? data ?? []);
+        setBatches(toSharedBatchViews(data));
       })
       .catch((err) => {
         setError(err.message);
@@ -263,7 +259,8 @@ export function BatchBoardPage() {
     fetch(`${API}/api/batches/shared/${batchId}/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-      body: JSON.stringify({ agentId: "demo-user", slotCount: claimCount }),
+      // N49: no identity in the body. The gateway takes the claimant from the caller.
+      body: JSON.stringify(claimRequestBody(claimCount)),
     })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -388,7 +385,7 @@ export function BatchBoardPage() {
                 </div>
               </div>
               <div className="text-right flex-shrink-0">
-                <div className="text-lg font-mono text-green-400">${batch.pricePerSlot.toFixed(2)}</div>
+                <div className="text-lg font-mono text-green-400">{formatSlotPrice(batch.pricePerSlot)}</div>
                 <div className="text-[10px] text-white/25">per slot</div>
               </div>
             </div>
@@ -431,7 +428,7 @@ export function BatchBoardPage() {
                       className="w-20 bg-white/[0.04] border border-white/[0.10] rounded px-2 py-1 text-sm font-mono text-white/80 outline-none focus:border-green-500/30"
                     />
                     <span className="text-[10px] text-white/25">
-                      = ${(claimCount * batch.pricePerSlot).toFixed(2)}
+                      = {formatSlotPrice(claimCount * batch.pricePerSlot)}
                     </span>
                     <button
                       onClick={() => handleClaim(batch.id)}

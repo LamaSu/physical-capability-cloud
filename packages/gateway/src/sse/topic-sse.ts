@@ -97,6 +97,19 @@ const ALLOWED_SSE_ORIGINS = new Set([
   "http://127.0.0.1:3200",
 ]);
 
+/** The longest id or event name a frame carries (N49 round 6). */
+const MAX_SSE_FIELD_LENGTH = 256;
+
+/**
+ * Whether a value can go on an SSE `id:` or `event:` line as it is (N49 round 6).
+ * Those lines end at the first CR or LF, so a publisher's id or type holding
+ * one could add lines or whole frames to the stream; a NUL is refused too.
+ * Data is always JSON.stringify'd, which escapes all three, so data needs no guard.
+ */
+function isSafeSseField(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_SSE_FIELD_LENGTH && !/[\r\n\0]/.test(value);
+}
+
 export async function topicSSE(app: FastifyInstance) {
   // Connection limit gate for all SSE topic streams (auth is checked per-route)
   app.addHook("onRequest", async (req, reply) => {
@@ -107,13 +120,24 @@ export async function topicSSE(app: FastifyInstance) {
     trackSSEOpen(req.ip);
   });
 
-  /** Helper to set up an SSE connection for given topics */
+  /**
+   * Helper to set up an SSE connection for given topics.
+   *
+   * Every frame is guarded (N49 round 6): an event whose type is not a safe
+   * line is dropped, and a publisher id that is not one is left out of the
+   * frame. A stream that passes `cursorIds` (the shared batch stream) writes
+   * nothing the publisher wrote: each frame is the view the hub decided once,
+   * at publish, and froze with the event's cursor (rounds 7 and 8). Its id is
+   * that cursor, and Last-Event-ID is read back as one. An event without a view
+   * is never written there. Other streams write events as published.
+   */
   function setupSSE(
     req: { raw: { on: (event: string, cb: () => void) => void }; ip?: string },
     reply: { raw: { writeHead: (status: number, headers: Record<string, string>) => void; write: (data: string) => void } },
     topics: StreamTopic[],
     lastEventId?: string,
     origin?: string,
+    cursorIds = false,
   ) {
     // Strict origin validation — reject unknown origins with default
     const allowOrigin = origin && ALLOWED_SSE_ORIGINS.has(origin)
@@ -131,8 +155,30 @@ export async function topicSSE(app: FastifyInstance) {
 
     const unsubscribe = streamHub.subscribe(
       topics,
-      (event) => {
-        const payload = `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`;
+      (event, cursor) => {
+        let type: unknown;
+        let data: unknown;
+        if (cursorIds) {
+          // The view the hub froze with the cursor at publish: the one
+          // judgment that decided both whether the event is numbered and what
+          // the stream shows (rounds 7 and 8). The event itself is not read again.
+          if (!cursor?.view) return;
+          type = cursor.view.type;
+          data = cursor.view.payload;
+        } else {
+          type = event.type;
+          data = event.payload;
+        }
+        // A type that could end its line early would let the event write
+        // lines of its own choosing: drop the event.
+        if (!isSafeSseField(type)) return;
+        // The frame's id: the hub's cursor on a cursor stream (no cursor, no
+        // id), else the publisher's id when it is a safe line.
+        const id = cursorIds
+          ? (cursor ? String(cursor.seq) : undefined)
+          : (isSafeSseField(event.id) ? event.id : undefined);
+        const idLine = id === undefined ? "" : `id: ${id}\n`;
+        const payload = `${idLine}event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
         try {
           reply.raw.write(payload);
         } catch {
@@ -140,6 +186,7 @@ export async function topicSSE(app: FastifyInstance) {
         }
       },
       lastEventId,
+      cursorIds ? { cursor: "seq" } : undefined,
     );
 
     const heartbeat = setInterval(() => {
@@ -208,7 +255,20 @@ export async function topicSSE(app: FastifyInstance) {
     await new Promise(() => {});
   });
 
-  // Per-batch streaming
+  // Per-batch streaming. The batch topic is SHARED: every authenticated
+  // subscriber of a batchId receives the same events, and there is no ownership
+  // check. So per-sample data must never be on it. The projection therefore
+  // applies to every event on the topic, whoever published it (the sensor
+  // pipeline, the BatchTracker, a mock producer, a future producer), not inside
+  // any one producer: the hub runs it ONCE per event at publish
+  // (sse/stream-hub.ts, batchStreamView) and freezes the result with the
+  // event's cursor, and this stream writes only that view (rounds 7 and 8).
+  // Only the aggregate batch-level events pass; per-sample events stay on the
+  // authenticated, owner-projected HTTP surface (routes/batches.ts viewEvents).
+  // The whole frame is the stream's, not the publisher's (round 6): its id is
+  // the hub's cursor on this topic, so no publisher id (which could name a
+  // sample, a job or a result) reaches a subscriber, and Last-Event-ID resumes
+  // from that cursor. Anything else as Last-Event-ID replays nothing.
   app.get("/sse/stream/batch/:batchId", async (req, reply) => {
     const auth = await resolveSSEAuth(req);
     if (!auth.authenticated) {
@@ -217,7 +277,7 @@ export async function topicSSE(app: FastifyInstance) {
     const { batchId } = req.params as { batchId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
     const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin);
+    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin, true);
     await new Promise(() => {});
   });
 }

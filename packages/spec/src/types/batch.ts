@@ -83,12 +83,24 @@ export interface BatchSlotClaim {
   sampleLabels: string[];
   /** Status of this claim */
   status: "claimed" | "paid" | "completed" | "refunded";
-  /** Amount owed for this claim */
-  amount: Amount;
+  /**
+   * Display-only estimate: the batch's posted `pricePerSlot` times the number of
+   * slots in this claim, worked out when the claim is filed. It is NOT an amount
+   * owed and not an accepted price. Settlement decides what is owed; this field
+   * must never be the basis of a payment, an escrow or a refund.
+   */
+  displayAmount: Amount;
   /** Escrow address for this user's portion */
   escrowAddress?: Address;
   claimedAt: Timestamp;
 }
+
+// Compile-time guard (N49 round 5): a claim's only price field is the display-only
+// estimate. Putting an `amount` ("amount owed") back on BatchSlotClaim, or dropping
+// displayAmount, stops this package compiling. Types only: nothing is emitted.
+type AssertTrue<T extends true> = T;
+type _ClaimHasDisplayAmount = AssertTrue<"displayAmount" extends keyof BatchSlotClaim ? true : false>;
+type _ClaimHasNoAmount = AssertTrue<"amount" extends keyof BatchSlotClaim ? false : true>;
 
 /** Batch lifecycle event */
 export interface BatchEvent {
