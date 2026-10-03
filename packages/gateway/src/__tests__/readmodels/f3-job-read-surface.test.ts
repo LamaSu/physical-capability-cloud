@@ -261,8 +261,9 @@ describe("the live streams: a stranger receives no line or event of a job it may
     const party = await stream("/api/telemetry/logs/stream", PARTY, emit);
     expect(party.body).toContain("f3 r2 job-001 line");
     expect(party.body.match(/event: telemetry_event/g)?.length ?? 0).toBeGreaterThan(0);
-    const anonymous = await stream("/api/telemetry/logs/stream", ANON, emit); // lines naming no job only
-    expect([anonymous.status, anonymous.body.includes("job-001")]).toEqual([200, false]);
+    // Identity first (F3 round 3): a line naming no job is an admin's, so no credential is 401.
+    const anonymous = await stream("/api/telemetry/logs/stream", ANON, emit);
+    expect([anonymous.status, anonymous.body.includes("job-001")]).toEqual([401, false]);
   });
 
   it("GET /sse/stream/job/:jobId opens for the job's party and streams its events", async () => {

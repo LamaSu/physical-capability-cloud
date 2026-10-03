@@ -416,6 +416,34 @@ describe("the legacy settlement routes on a real store", () => {
         delete process.env.PCC_ADMIN_KEY;
       }
     });
+
+    it("NEGATIVE (astra r2 on #382, MEDIUM): a failed job or authorization read is the generic 503 on both routes, for a party, a stranger and a missing job alike", async () => {
+      const GENERIC = { error: "read_model_unavailable", message: "The job record could not be read. Try again shortly." };
+      const cases: Array<[string, string]> = [
+        ["job-004", OPERATOR_NYC],
+        ["job-004", STRANGER],
+        ["no-such-job-f1", STRANGER],
+      ];
+      const repos = getStore().repos;
+      for (const [target, method] of [
+        [repos.kernels, "findAll"],
+        [repos.jobs, "findById"],
+      ] as const) {
+        const spy = vi.spyOn(target as any, method).mockImplementation(() => {
+          throw new Error("store unreadable: internal detail");
+        });
+        try {
+          for (const [jobId, wallet] of cases) {
+            const { jobs, settlement } = await both(jobId, { "x-test-principal": wallet, "x-test-proven-wallet": wallet });
+            expect([jobs.statusCode, settlement.statusCode], `${method} ${jobId} ${wallet}`).toEqual([503, 503]);
+            expect(jobs.json()).toEqual(GENERIC);
+            expect(settlement.json()).toEqual(GENERIC);
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      }
+    });
   });
 
   it("NEGATIVE (F1, the reproduced lie): a mock-settled job is simulated on both routes, never settled or paid", async () => {

@@ -96,9 +96,9 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/kernels` | List all kernels. Optional `?status=` filter. Returns `{kernels: KernelDTO[]}`. |
-| GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. |
+| GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. Its `recentJobs` hold only the jobs you may read; `recentJobsScope` says so (`all`, `readable_by_caller` or `unavailable`). |
 | GET | `/api/kernels/:kernelId/devices` | List devices. Returns `{devices: DeviceStatusDTO[]}`. |
-| GET | `/api/kernels/:kernelId/jobs` | List jobs for kernel. Returns `{jobs: JobDTO[]}`. |
+| GET | `/api/kernels/:kernelId/jobs` | List the kernel's jobs you may read (its operator and an admin: all of them; a buyer: its own). Returns `{jobs: JobDTO[]}`. No credential: 401; no proven wallet: 403. |
 | POST | `/api/kernels` | Register/upsert a kernel. Body: `CreateKernelInput`. |
 | POST | `/api/kernels/:kernelId/heartbeat` | Send heartbeat. |
 | POST | `/api/kernels/:kernelId/announce` | Announce capabilities to the network. |
@@ -804,6 +804,8 @@ Subscribe to Server-Sent Events for real-time updates. Connect with `EventSource
 | Batch updates | `GET /sse/stream/batch/:batchId` | Batch job progress |
 | Notifications | `GET /sse/notifications` | Global notification stream |
 | Camera stream | `GET /api/ot2/camera/stream` | Live camera frames from equipment |
+
+The job stream follows the job read rule above. The kernel, device and batch streams carry job-bound sensor readings, so only an admin or the kernel's operator (a SIWE-proven wallet) may subscribe; anyone else gets the 404 an unknown kernel, device or batch gets, and a caller with no credential gets 401.
 
 Example:
 ```bash
