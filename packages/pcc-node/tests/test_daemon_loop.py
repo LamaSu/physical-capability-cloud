@@ -328,3 +328,36 @@ class TestRunDaemonLoop:
                 pass
 
         mock_register.assert_called_once_with("http://pcc-test", "key", config)
+
+
+class TestDaemonRefusesToRunWithoutItsKey:
+    """N35b (cross-family A02): a refused key (compromised, inside a checkout,
+    not this user's own, or PyNaCl missing) stops the daemon. It must never run
+    on unsigned with an empty secret."""
+
+    def test_a_refused_key_stops_the_daemon_and_leaves_no_pid_file(self, monkeypatch, tmp_path):
+        import pcc_node.daemon as daemon_mod
+        from pcc_node.config import NodeConfig
+        from pcc_node.crypto import KeyFileError
+
+        pid_file = tmp_path / "daemon.pid"
+        monkeypatch.setattr(daemon_mod, "PID_FILE", str(pid_file))
+        monkeypatch.setattr(daemon_mod, "STATE_FILE", str(tmp_path / "state.json"))
+
+        def refused():
+            raise KeyFileError("refusing to use a key file inside a source checkout")
+
+        monkeypatch.setattr(daemon_mod, "load_or_create_keys", refused)
+
+        # Should a regression let the daemon run on, it must stop at once and
+        # never reach the network. SystemExit(99) escapes every `except Exception`.
+        def must_not_run(*args, **kwargs):
+            raise SystemExit(99)
+
+        for name in ("register_kernel", "announce_capabilities", "PCCGatewayClient", "discover_network"):
+            monkeypatch.setattr(daemon_mod, name, must_not_run)
+        monkeypatch.setattr(daemon_mod.time, "sleep", must_not_run)
+        with pytest.raises(SystemExit) as exc:
+            daemon_mod.run_daemon(NodeConfig())
+        assert exc.value.code == 2
+        assert not pid_file.exists()

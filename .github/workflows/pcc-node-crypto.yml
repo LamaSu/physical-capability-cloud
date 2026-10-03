@@ -1,0 +1,231 @@
+# N35b (board row; cross-family review A02): pcc-node's key handling must
+# fail closed both with and without PyNaCl, and the Ed25519 tests must never
+# pass by skipping.
+#   1. Without PyNaCl, every key operation is refused, and that test must RUN.
+#   2. A negative control: with PCC_REQUIRE_PYNACL=1 and no PyNaCl, the suite
+#      must FAIL on the PyNaCl requirement.
+#   3. With pinned PyNaCl and PCC_REQUIRE_PYNACL=1, the whole suite passes
+#      with nothing skipped.
+#   4. The daemon stops when its key is refused, instead of running on
+#      unsigned (A02b F4). That test lives in tests/test_daemon_loop.py, so
+#      steps 1 and 3 run it by node id.
+name: pcc-node-crypto
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Installs pinned PyPI packages, so the token gets read-only access.
+permissions:
+  contents: read
+
+jobs:
+  pcc-node-crypto-fail-closed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/pcc-node
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Without PyNaCl, every key operation is refused (the refusal test must run)
+        run: |
+          python -m venv "$RUNNER_TEMP/no-nacl"
+          "$RUNNER_TEMP/no-nacl/bin/python" -m pip install --quiet "pytest==8.3.5"
+          if "$RUNNER_TEMP/no-nacl/bin/python" -c "import nacl" 2>/dev/null; then
+            echo "invalid run: PyNaCl is importable in the venv without it"
+            exit 1
+          fi
+          out=$(PYTHONPATH=. "$RUNNER_TEMP/no-nacl/bin/python" -m pytest -q -p no:cacheprovider -rA tests/test_crypto.py "tests/test_daemon_loop.py::TestDaemonRefusesToRunWithoutItsKey::test_a_refused_key_stops_the_daemon_and_leaves_no_pid_file" 2>&1)
+          echo "$out" | tail -8
+          echo "$out" | grep -q "PASSED tests/test_crypto.py::TestWithoutPyNaClNoKeyIsUsed::test_no_key_is_created_loaded_or_used" \
+            || { echo "the no-PyNaCl refusal test did not run and pass"; exit 1; }
+          echo "$out" | grep -q "PASSED tests/test_daemon_loop.py::TestDaemonRefusesToRunWithoutItsKey::test_a_refused_key_stops_the_daemon_and_leaves_no_pid_file" \
+            || { echo "the daemon refusal test did not run and pass"; exit 1; }
+
+      - name: Negative control - PCC_REQUIRE_PYNACL=1 without PyNaCl must fail on the PyNaCl check
+        run: |
+          set +e
+          out=$(PCC_REQUIRE_PYNACL=1 PYTHONPATH=. "$RUNNER_TEMP/no-nacl/bin/python" -m pytest -q -p no:cacheprovider tests/test_crypto.py 2>&1)
+          rc=$?
+          set -e
+          echo "$out" | tail -5
+          if [ "$rc" -eq 0 ]; then
+            echo "PCC_REQUIRE_PYNACL=1 passed without PyNaCl: the Ed25519 tests can hide behind a skip"
+            exit 1
+          fi
+          echo "$out" | grep -q "PCC_REQUIRE_PYNACL=1 but PyNaCl is not importable" \
+            || { echo "the run failed, but not on the PyNaCl requirement"; exit 1; }
+          echo "ok: without PyNaCl the required run fails on the PyNaCl check"
+
+      - name: With PyNaCl (required, nothing may skip)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          python -m pip install --quiet "pynacl==1.5.0" "pytest==8.3.5"
+          set +e
+          out=$(PYTHONPATH=. python -m pytest -q -p no:cacheprovider -rs tests/test_crypto.py "tests/test_daemon_loop.py::TestDaemonRefusesToRunWithoutItsKey::test_a_refused_key_stops_the_daemon_and_leaves_no_pid_file" 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          if echo "$out" | grep -q "skipped"; then
+            echo "a test skipped in the required run"
+            exit 1
+          fi
+
+      - name: A real bind mount cannot end the checkout walk early (review A02c)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          # repo/keys bind-mounted onto its own child repo/keys/loop: at the mount root,
+          # ".." reports the same device and inode as the directory itself.
+          T=$(mktemp -d)
+          mkdir -p "$T/repo/.git" "$T/repo/keys/loop"
+          chmod 700 "$T/repo/keys" "$T/repo/keys/loop"
+          sudo -n mount --bind "$T/repo/keys" "$T/repo/keys/loop"
+          set +e
+          PYTHONPATH=. python - "$T/repo/keys/loop/keys.json" <<'PY'
+          import sys
+          from pcc_node.crypto import KeyFileError, load_or_create_keys
+          try:
+              load_or_create_keys(sys.argv[1])
+          except KeyFileError as err:
+              print("ok: refused:", err)
+              sys.exit(0)
+          print("a key was accepted inside a checkout reached through a bind mount")
+          sys.exit(1)
+          PY
+          rc=$?
+          set -e
+          leftover=$(ls -A "$T/repo/keys" | grep -v '^loop$' || true)
+          sudo -n umount "$T/repo/keys/loop"
+          if [ -n "$leftover" ]; then
+            echo "a key file was left inside the checkout: $leftover"
+            exit 1
+          fi
+          exit "$rc"
+
+      - name: Bind-mount aliases are refused or walked through (review A02d)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          # (1) a checkout's subtree bind-mounted onto an outside directory: the key would
+          #     have a second name inside the checkout, so it must be refused;
+          # (2) "/" bind-mounted below a checkout: that alias has the root's device and
+          #     inode on another mount, so the walk must go on and find the .git above it.
+          T=$(mktemp -d)
+          mkdir -p "$T/repo/.git" "$T/repo/keys" "$T/outside"
+          chmod 700 "$T/repo/keys" "$T/outside"
+          sudo -n mount --bind "$T/repo/keys" "$T/outside"
+          H="$HOME/pcc-node-a02d-$$"
+          mkdir -p "$H/keys"
+          chmod 700 "$H/keys"
+          mkdir -p "$T/repo/rootalias"
+          sudo -n mount --bind / "$T/repo/rootalias"
+          set +e
+          PYTHONPATH=. python - "$T/outside/keys.json" "$T/repo/rootalias$H/keys/keys.json" <<'PY'
+          import sys
+          from pcc_node.crypto import KeyFileError, load_or_create_keys
+          failed = False
+          for path in sys.argv[1:]:
+              try:
+                  load_or_create_keys(path)
+              except KeyFileError as err:
+                  print("ok: refused %s: %s" % (path, err))
+                  continue
+              print("ACCEPTED %s" % path)
+              failed = True
+          sys.exit(1 if failed else 0)
+          PY
+          rc=$?
+          set -e
+          left_bind=$(ls -A "$T/repo/keys")
+          left_alias=$(ls -A "$H/keys")
+          sudo -n umount "$T/outside"
+          sudo -n umount "$T/repo/rootalias"
+          rm -rf "$H"
+          if [ -n "$left_bind$left_alias" ]; then
+            echo "a key file was left behind: [$left_bind] [$left_alias]"
+            exit 1
+          fi
+          exit "$rc"
+
+      - name: Whole-filesystem aliases and union mounts are refused (review A02e)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          # (1) a tmpfs mounted inside a checkout, its whole root bound onto an outside
+          #     directory: the key would also be repo/storage/keys.json;
+          # (2) an overlay mounted outside whose upper directory is inside a checkout.
+          T=$(mktemp -d)
+          mkdir -p "$T/repo/.git" "$T/repo/storage" "$T/outside" "$T/lower" "$T/repo/upper" "$T/repo/work" "$T/merged"
+          sudo -n mount -t tmpfs -o mode=0700,uid=$(id -u),gid=$(id -g) tmpfs "$T/repo/storage"
+          sudo -n mount --bind "$T/repo/storage" "$T/outside"
+          sudo -n mount -t overlay overlay -o "lowerdir=$T/lower,upperdir=$T/repo/upper,workdir=$T/repo/work" "$T/merged"
+          sudo -n chown "$(id -u):$(id -g)" "$T/merged"
+          sudo -n chmod 700 "$T/merged"
+          set +e
+          PYTHONPATH=. python - "$T/outside/keys.json" "$T/merged/keys.json" <<'PY'
+          import sys
+          from pcc_node.crypto import KeyFileError, load_or_create_keys
+          failed = False
+          for path in sys.argv[1:]:
+              try:
+                  load_or_create_keys(path)
+              except KeyFileError as err:
+                  print("ok: refused %s: %s" % (path, err))
+                  continue
+              print("ACCEPTED %s" % path)
+              failed = True
+          sys.exit(1 if failed else 0)
+          PY
+          rc=$?
+          set -e
+          left=$(sudo -n ls -A "$T/repo/storage" "$T/repo/upper" | grep -v ':$' | grep -v '^$' | grep -v '^work$' || true)
+          sudo -n umount "$T/merged"
+          sudo -n umount "$T/outside"
+          sudo -n umount "$T/repo/storage"
+          if [ -n "$left" ]; then
+            echo "a key file was left inside the checkout: $left"
+            exit 1
+          fi
+          exit "$rc"
+
+      - name: A bind mount of the key file itself is walked too (review A02f)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          # The key is created outside any checkout, then the FILE is bind-mounted into a
+          # checkout: no extra hard link, a second visible name. Loading it again must refuse.
+          T=$(mktemp -d)
+          mkdir -p "$T/outside/keys" "$T/repo/.git"
+          chmod 700 "$T/outside/keys"
+          PYTHONPATH=. python -c "import sys; from pcc_node.crypto import load_or_create_keys; load_or_create_keys(sys.argv[1])" "$T/outside/keys/keys.json"
+          touch "$T/repo/keys.json"
+          sudo -n mount --bind "$T/outside/keys/keys.json" "$T/repo/keys.json"
+          set +e
+          PYTHONPATH=. python - "$T/outside/keys/keys.json" <<'PY'
+          import sys
+          from pcc_node.crypto import KeyFileError, load_or_create_keys
+          try:
+              load_or_create_keys(sys.argv[1])
+          except KeyFileError as err:
+              print("ok: refused:", err)
+              sys.exit(0)
+          print("ACCEPTED a key whose file is bind-mounted into a checkout")
+          sys.exit(1)
+          PY
+          rc=$?
+          set -e
+          sudo -n umount "$T/repo/keys.json"
+          exit "$rc"
