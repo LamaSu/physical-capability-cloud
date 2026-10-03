@@ -519,14 +519,16 @@ export class IppAdapter implements MachineAdapter {
 
         try {
           const jobId = await this.realPrintJob(jobName, documentData);
-          // Disposed while the printer answered: the job was sent, but a disposed adapter
-          // follows nothing (astra pack 203). It records no job and starts no polling, and
-          // names the job, so its owner can cancel it explicitly if it must not print.
+          // Disposed while the printer answered: the printer accepted the job, so the start
+          // succeeded, and a failure here would invite a retry that prints it twice (astra
+          // pack 205). But a disposed adapter follows nothing (astra pack 203): it records no
+          // job and starts no polling, and says so (monitored: false) with the job's id, so its
+          // owner can cancel it explicitly if it must not print.
           if (this.disposed) {
             return {
-              success: false,
+              success: true,
               message: `IPP job ${jobId} was submitted, but adapter "${this.id}" was disposed meanwhile, so the job is not monitored`,
-              data: { jobId },
+              data: { jobId, monitored: false },
             };
           }
           this.activeRealJobId = jobId;

@@ -249,7 +249,7 @@ describe("IppAdapter while its optional `ipp` import loads (astra pack 467)", ()
     await ipp.dispose();
   });
 
-  it("a real start whose Print-Job answer arrives after dispose: the job is named but not followed, nothing polls, and quiesceEvidence() resolves (astra pack 203)", async () => {
+  it("a real start whose Print-Job answer arrives after dispose: it succeeded, but the job is not followed (monitored: false), nothing polls, and quiesceEvidence() resolves (astra packs 203 and 205)", async () => {
     const requests: string[] = [];
     let answerPrint!: () => void;
     const Printer = class {
@@ -279,9 +279,11 @@ describe("IppAdapter while its optional `ipp` import loads (astra pack 467)", ()
     void ipp.quiesceEvidence().then(() => (quiet = true));
     await pause();
 
-    expect.soft(result.value?.success, "the start").toBe(false);
+    // The printer accepted the job: the start succeeded, so no caller retries it into a second
+    // print (astra pack 205). It is not monitored, and says so.
+    expect.soft(result.value?.success, "the start").toBe(true);
     expect.soft(result.value?.message ?? "", "why").toMatch(/IPP job 46 was submitted, but .* was disposed meanwhile, so the job is not monitored/);
-    expect.soft(result.value?.data, "the job it names").toEqual({ jobId: 46 });
+    expect.soft(result.value?.data, "the job it names, unmonitored").toEqual({ jobId: 46, monitored: false });
     expect.soft(requests, "printer requests").toEqual(["Print-Job"]);
     expect.soft(quiet, "quiesceEvidence() after dispose").toBe(true);
   });
