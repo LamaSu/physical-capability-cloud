@@ -13,7 +13,6 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { classifyMoneyStatus, type SettlementAxis } from "@pcc/spec";
 import {
   FUNDING_WORDS,
-  UPDATE_STATUS_UNRECOGNIZED,
   buildOperatorIncomeDTO,
   buildOperatorWorkDTO,
   INCOME_HISTORY_REASON,
@@ -46,6 +45,7 @@ const linked = (e = escrow(), ms: unknown[] = [milestone()]): SettlementSource =
 const kj = (j: JobRow, s: SettlementSource | null = { link: "not_linked" }): KernelJobSource => ({
   job: j,
   settlement: buildSettlementAxis(j, s ? { ok: true, value: s } : { ok: false }),
+  disputes: { ok: true, value: [] },
 });
 function offer(over: Partial<JobOffer> = {}): JobOffer {
   return {
@@ -139,10 +139,15 @@ describe("kernel jobs", () => {
     ]) {
       expect(fundingOf(e!, m!), `${e}/${m}`).toBe("not_held");
     }
-    // Contested, conflicting or unrecognized: unknown, never escrowed.
+    // A disputed escrow or milestone that still holds the funds: contested, never escrowed (r2).
     for (const [e, m] of [
       ["disputed", "funded"],
       ["funded", "disputed"],
+    ]) {
+      expect(fundingOf(e!, m!), `${e}/${m}`).toBe("contested");
+    }
+    // Conflicting or unrecognized: unknown, never escrowed.
+    for (const [e, m] of [
       ["funded", "slashed"],
       ["completed", "funded"],
       ["funded", "on_hold"],
@@ -180,7 +185,6 @@ describe("kernel jobs", () => {
     expect(item.actions.map((a) => [a.op, a.allowed, a.route.path])).toEqual([
       ["approve", true, "/api/operator/approvals/appr-1/approve"],
       ["reject", true, "/api/operator/approvals/appr-1/reject"],
-      ["update_status", false, "/api/jobs/job-x/status"],
     ]);
   });
 
@@ -192,20 +196,16 @@ describe("kernel jobs", () => {
     expect(dto.items[0]!.refs).toEqual({ approvalId: "appr-1" });
   });
 
-  it("NEGATIVE (r1 MEDIUM): a status update the route would refuse is not offered as allowed, and says why", () => {
-    // PATCH /api/jobs/:jobId/status recognizes the submitter or a kernel `operatorId` that kernels
-    // do not record, never the kernel operator's proven wallet: an open job's update is not allowed.
+  it("NEGATIVE (r1 and r2 MEDIUM): no status update is offered, since the read model cannot decide the route's rule", () => {
+    // PATCH /api/jobs/:jobId/status authorizes ids it does not prove; this read model knows only the
+    // proven wallet. Offering the action as refused was false for a submitter the route accepts (r2).
     const [item] = work({ kernelJobs: { ok: true, value: [kj(job({ status: "executing" }))] } }).items;
-    expect(item!.actions).toEqual([
-      { op: "update_status", allowed: false, reasonIfNot: UPDATE_STATUS_UNRECOGNIZED, route: { method: "PATCH", path: "/api/jobs/job-x/status" } },
-    ]);
+    expect(item!.actions).toEqual([]);
   });
 
-  it("NEGATIVE: a finished job offers no status update, and says why", () => {
+  it("NEGATIVE: a finished job offers no action, and keeps its completion time", () => {
     const [item] = work({ kernelJobs: { ok: true, value: [kj(job({ status: "completed", completedAt: "2026-09-23T00:00:00.000Z" }))] } }).items;
-    expect(item!.actions).toEqual([
-      { op: "update_status", allowed: false, reasonIfNot: "The job is finished.", route: { method: "PATCH", path: "/api/jobs/job-x/status" } },
-    ]);
+    expect(item!.actions).toEqual([]);
     expect(item!.changedAt).toBe("2026-09-23T00:00:00.000Z");
   });
 });

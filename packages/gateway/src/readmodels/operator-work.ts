@@ -34,6 +34,7 @@ import {
   type PayoutState,
   type SettlementAxis,
 } from "@pcc/spec";
+import { createHash } from "node:crypto";
 import { schema, eq, and } from "@pcc/store";
 import type { JobOffer, JobOfferEvent } from "../services/job-offers-store.js";
 import { extractRequirementsCoords } from "../services/job-offers-store.js";
@@ -76,6 +77,18 @@ export interface KernelJobSource {
   job: JobRow;
   /** This job's settlement axis, from the same resolver as the execution read model. */
   settlement: SettlementAxis;
+  /**
+   * The disputes recorded on this job's milestone in its linked escrow (review r2 of #389,
+   * HIGH): an open one contests the money. Empty when the job has no linked escrow record.
+   */
+  disputes: SourceRead<DisputeLite[]>;
+}
+
+/** A dispute row (disputes table), as the funding decision reads it. */
+export interface DisputeLite {
+  escrowId: string;
+  milestoneStepId: string;
+  status: string;
 }
 
 export interface OperatorWorkSources {
@@ -153,13 +166,21 @@ export function loadOperatorWorkSources(
   );
 
   const kernelJobs = attempt("kernel_jobs", () =>
-    kernelIds.flatMap((id) => repos.jobs.findByKernel(id, opts.tenant) as JobRow[]).map((job) => ({
-      job,
-      settlement: buildSettlementAxis(
+    kernelIds.flatMap((id) => repos.jobs.findByKernel(id, opts.tenant) as JobRow[]).map((job): KernelJobSource => {
+      const settlement = buildSettlementAxis(
         job,
         attempt(`settlement:${job.id}`, () => resolveSettlement(job, repos, db)),
-      ),
-    })),
+      );
+      // A linked record's money can be contested by a dispute on this job's milestone: read them.
+      // A linked record without an escrow id cannot be checked, so it reads as a failed read.
+      const linkedRecord = settlement.link === "linked" ? settlement.record : undefined;
+      const disputes: SourceRead<DisputeLite[]> = !linkedRecord
+        ? { ok: true, value: [] }
+        : linkedRecord.escrowId
+          ? attempt(`disputes:${job.id}`, () => disputesOnMilestone(db, linkedRecord.escrowId!, job.stepId))
+          : { ok: false };
+      return { job, settlement, disputes };
+    }),
   );
 
   const approvals = attempt("approvals", () =>
@@ -184,6 +205,12 @@ export function loadOperatorWorkSources(
   });
 
   return { kernels, capabilities, kernelJobs, approvals, claimedOffers, openOffers };
+}
+
+/** The disputes filed against one milestone (by its step) of one escrow. */
+function disputesOnMilestone(db: JobExecutionDb, escrowId: string, stepId: string): DisputeLite[] {
+  const rows = db.select().from(schema.disputes).where(eq(schema.disputes.escrowId, escrowId)).all() as DisputeLite[];
+  return rows.filter((d) => d.milestoneStepId === stepId);
 }
 
 // ── Builders (pure) ───────────────────────────────────────────────────────────
@@ -228,51 +255,90 @@ function kernelSite(kernel: KernelLite | undefined, kernelId: string): OperatorW
 
 /**
  * Escrow-record words (escrows.status, or a V-next unit name) under which the escrow holds its
- * funds, uncontested, with nothing yet returned to the payer or paid out.
+ * funds, uncontested, with nothing yet returned to the payer or paid out. RELEASE_ALLOCATED (the
+ * release is decided, the payout outstanding) still holds the funds.
  */
-const ESCROW_HOLDS = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEASING", "MILESTONE_MET", "FUNDED_ACTIVE", "PRIMARY_ASSERTED", "RELEASE_ALLOCATED"]);
+const ESCROW_HOLDS = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEASING", "MILESTONE_MET", "FUNDED_ACTIVE", "RELEASE_ALLOCATED"]);
+/**
+ * Escrow-record words under which the escrow still holds the funds while the outcome is contested
+ * (review r2 of #389, HIGH): the V-next contest and escalation states (canonical phases `contest`
+ * and `escalation`), and a disputed escrow.
+ */
+const ESCROW_CONTESTED = new Set(["PRIMARY_ASSERTED", "CHALLENGED", "BACKUP_PENDING", "BACKUP_ASSERTED", "DISPUTED"]);
 /** Milestone words (escrow_milestones.status) under which this job's milestone is funded and still open. */
 const MILESTONE_HOLDS = new Set(["FUNDED", "LOCKED", "RELEASING"]);
+/** Milestone words under which this job's milestone is held but contested. */
+const MILESTONE_CONTESTED = new Set(["DISPUTED"]);
+/** Words under which a refund to the payer is decided but not yet made (review r2 of #389, MEDIUM). */
+const REFUND_PENDING = new Set(["REFUND_ALLOCATED"]);
 /** Words, in either record, that say the money is not or no longer held: never funded, refunded, or released. */
-const NOT_HELD = new Set(["CREATED", "UNFUNDED", "PENDING", "REFUNDED", "SETTLED_REFUNDED", "REFUND_ALLOCATED", "RELEASED", "SETTLED_RELEASED"]);
+const NOT_HELD = new Set(["CREATED", "UNFUNDED", "PENDING", "REFUNDED", "SETTLED_REFUNDED", "RELEASED", "SETTLED_RELEASED"]);
+/** Dispute statuses (disputes.status) that contest the money, and those that leave it the operator's. */
+const DISPUTE_OPEN = new Set(["filed", "under_review"]);
+const DISPUTE_SETTLED_FOR_OPERATOR = new Set(["resolved_for_operator", "dismissed"]);
 
 /** Every word the funding decision reads, for the test that each one is in the canonical money map. */
-export const FUNDING_WORDS: readonly string[] = Object.freeze([...new Set([...ESCROW_HOLDS, ...MILESTONE_HOLDS, ...NOT_HELD])]);
+export const FUNDING_WORDS: readonly string[] = Object.freeze([
+  ...new Set([...ESCROW_HOLDS, ...ESCROW_CONTESTED, ...MILESTONE_HOLDS, ...MILESTONE_CONTESTED, ...REFUND_PENDING, ...NOT_HELD]),
+]);
+
+/** What can contest a job's money besides its escrow and milestone words (review r2 of #389, HIGH). */
+export interface FundingContest {
+  /** The job row's own status is disputed (the item's phase says so too). */
+  jobDisputed: boolean;
+  /** The disputes recorded on this job's milestone. */
+  disputes: SourceRead<DisputeLite[]>;
+}
 
 /**
- * Whether a REAL escrow record holds this job's milestone (astra r1 on #389, HIGH: a linked
- * record was called escrowed without reading its status). Read from the exact words of both
- * records, after the payout reconciliation:
- *   the payout is unknown (conflicting, unrecognized or ambiguous records)  -> unknown
- *   either word says never funded, refunded or released                     -> not_held
- *   the escrow holds its funds and the milestone is funded and open         -> escrowed
- *   anything else (disputed, challenged, slashed, expired)                  -> unknown
+ * Whether a REAL escrow record holds this job's milestone, and whether anything contests it
+ * (astra r1 on #389: a linked record was called escrowed without reading its status; r2: nor
+ * reading what contests it). Read from the exact words of both records, after the payout
+ * reconciliation, and from every other record that can contest the money: the job's own status
+ * and the disputes on its milestone.
+ *   the payout is unknown (conflicting, unrecognized or ambiguous records)    -> unknown
+ *   either word says never funded, refunded or released                       -> not_held
+ *   a refund to the payer is decided but not made                             -> refund_pending
+ *   the words do not say the escrow holds the funds and the milestone is open -> unknown
+ *   the disputes cannot be read, or one went to the challenger, or has a
+ *   status this rule does not know                                            -> unknown
+ *   held, and a contest or escalation word, the job's disputed status or an
+ *   open dispute contests it                                                  -> contested
+ *   held, and nothing contests it                                             -> escrowed
  */
-function recordFunding(s: SettlementAxis): OperatorWorkPay["funding"] {
+function recordFunding(s: SettlementAxis, contest: FundingContest): OperatorWorkPay["funding"] {
   const record = s.record!;
   const ms = record.milestone!;
   if (s.payout === "unknown" || !record.escrow.known || !ms.status.known) return "unknown";
   const e = normalizeMoneyStatus(record.escrow.sourceStatus);
   const m = normalizeMoneyStatus(ms.status.sourceStatus);
   if (NOT_HELD.has(e) || NOT_HELD.has(m)) return "not_held";
-  return ESCROW_HOLDS.has(e) && MILESTONE_HOLDS.has(m) ? "escrowed" : "unknown";
+  if (REFUND_PENDING.has(e) || REFUND_PENDING.has(m)) return "refund_pending";
+  const held = (ESCROW_HOLDS.has(e) || ESCROW_CONTESTED.has(e)) && (MILESTONE_HOLDS.has(m) || MILESTONE_CONTESTED.has(m));
+  if (!held) return "unknown";
+  const disputes = contest.disputes;
+  if (!disputes || !disputes.ok) return "unknown";
+  const statuses = disputes.value.map((d) => (typeof d.status === "string" ? d.status.trim().toLowerCase() : ""));
+  if (statuses.some((st) => !DISPUTE_OPEN.has(st) && !DISPUTE_SETTLED_FOR_OPERATOR.has(st))) return "unknown";
+  const contested =
+    ESCROW_CONTESTED.has(e) || MILESTONE_CONTESTED.has(m) || contest.jobDisputed || statuses.some((st) => DISPUTE_OPEN.has(st));
+  return contested ? "contested" : "escrowed";
 }
 
-/**
- * Why an open kernel job's status update is not offered (astra r1 on #389, MEDIUM). PATCH
- * /api/jobs/:jobId/status recognizes the job's submitter, or a kernel `operatorId`, which kernels
- * do not record (they record operatorAddress), so it never recognizes the kernel operator's proven
- * wallet, the identity this read model uses. That route's authorization is gateway's to fix.
+/*
+ * No kernel job offers update_status (review r2 of #389, MEDIUM). PATCH /api/jobs/:jobId/status
+ * authorizes a caller by an operator or user id it does not prove, and by a kernel field kernels do
+ * not record. This read model knows the caller only by its proven wallet, so it cannot say whether
+ * that route would accept the caller: offering the action as refused was false for a submitter the
+ * route accepts, and offering it as allowed would be false for everyone else. It returns when the
+ * route authorizes proven identities (routed to gateway).
  */
 /** The kernel-job source's reason when the jobs were read but the capabilities they name were not. */
 export const CAPABILITY_NAMES_UNREAD =
   "The capability records could not be read, so each job's capabilityType and title are null (not known), not absent.";
 
-export const UPDATE_STATUS_UNRECOGNIZED =
-  "The status route cannot recognize a kernel's operator yet: it checks an operator id that kernels do not record.";
-
 /** Pay for a kernel job: only from this job's own milestone in its linked escrow record. */
-export function kernelJobPay(s: SettlementAxis): OperatorWorkPay {
+export function kernelJobPay(s: SettlementAxis, contest: FundingContest): OperatorWorkPay {
   if (s.link !== "linked" || !s.record) return { ...NO_PAY };
   const ms = s.record.milestone;
   if (!ms) return { ...NO_PAY, fundingRef: s.record.escrowId };
@@ -285,7 +351,7 @@ export function kernelJobPay(s: SettlementAxis): OperatorWorkPay {
     decimals,
     model: "escrow_milestone",
     unit: null,
-    funding: s.record.simulated ? "simulated" : recordFunding(s),
+    funding: s.record.simulated ? "simulated" : recordFunding(s, contest),
     fundingRef: s.record.escrowId,
     basis: "escrow_milestone_record",
   };
@@ -365,7 +431,7 @@ function kernelJobItem(
   capability: CapabilityLite | undefined,
   approval: ApprovalRow | undefined,
 ): OperatorWorkItem {
-  const { job, settlement } = src;
+  const { job, settlement, disputes } = src;
   const execPhase = executionPhaseOf(job.status);
   const raw = normalizeJobRowStatus(job.status);
   let phase: OperatorWorkPhase;
@@ -383,12 +449,6 @@ function kernelJobItem(
   }
   const terminal = isTerminalExecutionPhase(execPhase) || raw === "disputed";
   const actions: OperatorWorkAction[] = approval ? approveActions(approval.id) : [];
-  actions.push({
-    op: "update_status",
-    allowed: false,
-    reasonIfNot: terminal ? "The job is finished." : UPDATE_STATUS_UNRECOGNIZED,
-    route: { method: "PATCH", path: `/api/jobs/${job.id}/status` },
-  });
   const tier = tierOf(job.assuranceTier);
   return {
     id: `kernel_job:${job.id}`,
@@ -399,7 +459,7 @@ function kernelJobItem(
     phase,
     phaseSource,
     sourceStatus: String(job.status ?? ""),
-    pay: kernelJobPay(settlement),
+    pay: kernelJobPay(settlement, { jobDisputed: raw === "disputed", disputes }),
     payout: settlement.payout,
     deadline: null,
     acceptBy: approval ? nonEmpty(approval.expiresAt) : null,
@@ -524,8 +584,18 @@ export interface OperatorPage {
   offset: number;
 }
 
-/** One page of a sorted list, and where the next one starts. */
-function pageOf<T>(all: readonly T[], page: OperatorPage) {
+/**
+ * A snapshot of a whole sorted list (review r2 of #389, MEDIUM): a digest of its keys, in order.
+ * Two reads give the same snapshot only when they list the same items in the same order, so a
+ * client that sends the first page's snapshot with each next page is told (409 list_changed) when
+ * the list moved, instead of being given a page that repeats or skips rows.
+ */
+export function listSnapshot(keys: readonly string[]): string {
+  return createHash("sha256").update(JSON.stringify(keys)).digest("hex").slice(0, 32);
+}
+
+/** One page of a sorted list, where the next one starts, and the whole list's snapshot. */
+function pageOf<T>(all: readonly T[], page: OperatorPage, keyOf: (item: T) => string) {
   const end = page.offset + page.limit;
   return {
     page: all.slice(page.offset, end),
@@ -533,6 +603,7 @@ function pageOf<T>(all: readonly T[], page: OperatorPage) {
     offset: page.offset,
     truncated: end < all.length,
     nextOffset: end < all.length ? end : null,
+    snapshot: listSnapshot(all.map(keyOf)),
   };
 }
 
@@ -604,7 +675,7 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
 
-  const shown = pageOf(items, { limit: opts.limit, offset: opts.offset ?? 0 });
+  const shown = pageOf(items, { limit: opts.limit, offset: opts.offset ?? 0 }, (item) => item.id);
   const offersRead: SourceRead<unknown[]> = offersOk ? { ok: true, value: [] } : { ok: false };
   const kernelJobCount = src.kernelJobs.ok ? src.kernelJobs.value.length : 0;
   const approvalOnlyCount = approvals.filter((a) => !jobIds.has(a.jobId)).length;
@@ -619,6 +690,7 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
     offset: shown.offset,
     truncated: shown.truncated,
     nextOffset: shown.nextOffset,
+    snapshot: shown.snapshot,
     sources: {
       kernel_job: {
         ...sourceState(src.kernelJobs, "durable", "The gateway's job records could not be read.", kernelJobCount),
@@ -647,10 +719,10 @@ export function buildOperatorIncomeDTO(
   const rows: OperatorIncomeRow[] = [];
   let unreadableJobs = 0;
   if (src.kernelJobs.ok) {
-    for (const { job, settlement } of src.kernelJobs.value) {
+    for (const { job, settlement, disputes } of src.kernelJobs.value) {
       if (settlement.link === "not_linked") continue;
       if (settlement.link === "unavailable") unreadableJobs++;
-      const pay = kernelJobPay(settlement);
+      const pay = kernelJobPay(settlement, { jobDisputed: normalizeJobRowStatus(job.status) === "disputed", disputes });
       rows.push({
         workRef: `kernel_job:${job.id}`,
         jobId: job.id,
@@ -685,7 +757,7 @@ export function buildOperatorIncomeDTO(
     t.rows++;
     totals.set(key, t);
   }
-  const shown = pageOf(rows, page);
+  const shown = pageOf(rows, page, (row) => row.workRef);
   const totalsByStatus: OperatorIncomeTotal[] = [...totals.values()]
     .map(({ sum, ...t }) => ({ ...t, amountBaseUnits: sum.toString() }))
     .sort((a, b) => (a.status + a.currency < b.status + b.currency ? -1 : 1));
@@ -699,6 +771,7 @@ export function buildOperatorIncomeDTO(
     offset: shown.offset,
     truncated: shown.truncated,
     nextOffset: shown.nextOffset,
+    snapshot: shown.snapshot,
     totalsByStatus,
     uncountedRows,
     historyAvailable: false,
