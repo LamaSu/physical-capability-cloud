@@ -926,6 +926,29 @@ describe("the rules catch each known way around them (self-test)", () => {
     expect(caught(code)).toContain("global-write");
   });
 
+  // astra A03i: a class field binds only within its own class, and a constructor's name may be read, never written.
+  it("A03i: one class's protected field doesn't taint an ordinary field of the same name in another class", () => {
+    const code = [
+      "class Patch {",
+      "  clip = navigator.clipboard;",
+      "}",
+      "class Notes {",
+      '  clip = { text: "" };',
+      '  edit() { this.clip.text = "x"; }',
+      "}",
+    ].join("\n");
+    expect(caught(code)).toEqual([]);
+  });
+
+  it.each([
+    'ordinary["constructor"]["name"]++;',
+    "ordinary.constructor.name--;",
+    '++ordinary["constructor"]["name"];',
+    "delete ordinary.constructor.name;",
+  ])("A03i: a constructor's name written with ++, -- or delete still fails: %s", (code) => {
+    expect(caught(code)).toContain("global-write");
+  });
+
   it.each([
     "const name = ordinary.constructor.name;",
     "if (value.constructor === Rows) merge(value);",
