@@ -310,13 +310,17 @@ describe("R2: overlapping Tier 2 jobs on one machine and one camera", () => {
 
 /** An emitter whose addEvent never settles for one event type. */
 class StuckEmitter extends EvidenceEmitter {
+  /** How many calls are stuck. */
+  stuckCalls = 0;
+
   constructor(private readonly stuckType: Emitted["type"]) {
     super(KERNEL_ID);
   }
 
   override addEvent(jobId: string, stepId: string, rawEvent: Emitted): Promise<EvidenceEvent> {
-    if (rawEvent.type === this.stuckType) return new Promise<EvidenceEvent>(() => {});
-    return super.addEvent(jobId, stepId, rawEvent);
+    if (rawEvent.type !== this.stuckType) return super.addEvent(jobId, stepId, rawEvent);
+    this.stuckCalls += 1;
+    return new Promise<EvidenceEvent>(() => {});
   }
 }
 
@@ -335,6 +339,7 @@ describe("R3: an addEvent that never settles", () => {
     const outcome = await withinGuard(runner.run({ jobId: "job-r3", stepId: STEP, gcodeHash: gcode(3), assuranceTier: 2 }));
 
     expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 200 ms", durationMs: expect.any(Number) });
+    expect(emitter.stuckCalls, "addEvent calls still stuck when the run returned").toBe(1);
     expect(bundles).toEqual([]);
   });
 });
@@ -673,14 +678,16 @@ describe("the settle timer", () => {
     try {
       const camera = testCamera("camera-default");
       camera.afterInspection = () => camera.emit(evidence("camera_snapshot", camera.id, "camera"));
+      const emitter = new StuckEmitter("camera_snapshot");
       let outcome: JobResult | undefined;
-      void new JobRunner(testMachine("machine-default"), [], camera, new StuckEmitter("camera_snapshot"))
+      void new JobRunner(testMachine("machine-default"), [], camera, emitter)
         .run({ jobId: "job-default", stepId: STEP, gcodeHash: gcode(18), assuranceTier: 2 })
         .then((result) => {
           outcome = result;
         });
-      // The settle's timer is the run's first and only timer.
-      while (vi.getTimerCount() === 0) await turn();
+      // Advance only once the settle's timer (the run's only timer) is set and the
+      // stuck addEvent is in flight; earlier, the queued events would just be sealed.
+      while (vi.getTimerCount() === 0 || emitter.stuckCalls === 0) await turn();
 
       await vi.advanceTimersByTimeAsync(29_999);
       await turn();
