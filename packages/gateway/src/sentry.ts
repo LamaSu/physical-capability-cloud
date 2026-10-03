@@ -40,10 +40,13 @@ export function initSentry(): void {
 
 /**
  * The gateway's Sentry options: no default PII, and every record redacted as a whole before it is
- * sent (observability-redact.ts; cross-family reviews r3 and r4 of #441). The installed SDK copies
+ * sent (observability-redact.ts; cross-family reviews r3 to r5 of #441). The installed SDK copies
  * every request header and the request body into an error event, records the request's URL and
  * headers as span attributes on a transaction, and keeps outgoing URLs in breadcrumbs; so error
  * events, transactions, each span and each breadcrumb go through the same redaction.
+ * Request bodies, cookies and query strings are not collected at all: the HTTP integration reads
+ * no incoming body, and the request-data integration attaches no body, cookie or query string. The
+ * redaction drops them again as a second line.
  */
 export function sentryOptions(dsn: string): Sentry.NodeOptions {
   return {
@@ -57,6 +60,11 @@ export function sentryOptions(dsn: string): Sentry.NodeOptions {
       tags: { service: "pcc-gateway" },
     },
     sendDefaultPii: false,
+    integrations: (defaults) => [
+      ...defaults.filter((integration) => integration.name !== "Http" && integration.name !== "RequestData"),
+      Sentry.httpIntegration({ maxIncomingRequestBodySize: "none" }),
+      Sentry.requestDataIntegration({ include: { data: false, cookies: false, query_string: false } }),
+    ],
     beforeSend: (event) => redactCredentials(event),
     beforeSendTransaction: (event) => redactCredentials(event),
     beforeSendSpan: (span) => redactCredentials(span),

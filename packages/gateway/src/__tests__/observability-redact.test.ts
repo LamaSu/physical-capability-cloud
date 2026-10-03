@@ -53,11 +53,14 @@ describe("redactCredentials: the whole record", () => {
     expect(out.extra.nested.page).toBe(2);
   });
 
-  it("a JSON body is parsed, redacted and written back; its other fields are kept", () => {
+  it("a request body is dropped whole, whatever it holds (value-free rule, review r5 of #441)", () => {
     const s = secret("b");
-    const out = redactCredentials({ request: { data: JSON.stringify({ email: "r5@example.test", password: s, next: `/x?token=${s}` }) } });
-    expect(out.request.data).not.toContain(s);
-    expect(JSON.parse(out.request.data)).toEqual({ email: "r5@example.test", password: REDACTED, next: `/x?token=${REDACTED}` });
+    const out = redactCredentials({
+      request: { url: "/x", data: JSON.stringify({ email: "r5@example.test", zq1: s, next: `/x?token=${s}` }), cookies: { sid: s } },
+      extra: { body: { zq1: s } },
+    });
+    expect(JSON.stringify(out)).not.toContain(s);
+    expect(out).toMatchObject({ request: { url: "/x", data: REDACTED, cookies: REDACTED }, extra: { body: REDACTED } });
   });
 
   it("leaves the record it was given unaltered, and an Error keeps its name with its message redacted", () => {

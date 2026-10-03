@@ -4,7 +4,12 @@
  * Only active when POSTHOG_API_KEY (or VITE_POSTHOG_KEY) is set in the
  * environment. Uses dynamic ESM import() so the gateway starts cleanly even if
  * posthog-node is not installed.
+ *
+ * Every event's and every person's properties go through the observability
+ * redaction before they leave (cross-family review r5 of #441): whoever calls,
+ * no URL, form or body value and no header outside the allowlist reaches PostHog.
  */
+import { redactCredentials } from "../observability-redact.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let posthog: any = null;
@@ -35,11 +40,11 @@ export function trackServerEvent(
     posthog.capture({
       distinctId: distinctId || "pcc-gateway",
       event,
-      properties: {
+      properties: redactCredentials({
         ...properties,
         source: "gateway",
         environment: process.env.NODE_ENV,
-      },
+      }),
     });
   } catch {
     /* never crash on analytics */
@@ -64,12 +69,12 @@ export function identifyAgent(
   try {
     posthog.identify({
       distinctId,
-      properties: {
+      properties: redactCredentials({
         ...properties,
         kind: "agent_journey",
         source: "gateway",
         environment: process.env.NODE_ENV,
-      },
+      }),
     });
   } catch {
     /* never crash on analytics */

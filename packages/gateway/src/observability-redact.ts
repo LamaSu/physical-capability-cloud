@@ -1,17 +1,20 @@
 /**
- * One redaction for every observability sink (cross-family reviews r3 and r4 of #441): Sentry error
- * events, transactions, spans and breadcrumbs, the Fastify request log, and the audit log's request
- * URL. Each sink sends its WHOLE record through here, so no field is left to a field-local rule:
+ * One redaction for every observability sink (cross-family reviews r3 to r5 of #441): Sentry error
+ * events, transactions, spans and breadcrumbs, the Fastify request log, the audit log's request URL
+ * and every PostHog event. Each sink sends its WHOLE record through here. The rule is VALUE-FREE by
+ * default (the PR steward's rule for round 6): no name list decides what a sink keeps.
  *
+ *   - URLs. In every string, every URL-like token (a URL, a path, or a bare query or fragment) keeps
+ *     its path and its parameter NAMES, and drops every query and fragment VALUE, whatever the name.
+ *   - Form-encoded strings (a query string, a form body) drop every value.
+ *   - Bodies. A request body (Sentry's request.data, any "body" field) and Sentry's request cookies
+ *     are dropped whole. The SDK is also told not to collect them (sentry.ts).
  *   - Headers. Anywhere a value sits under a key named "headers", and in every span attribute
  *     http.request.header.* or http.response.header.*, a header keeps its value only when its name is
- *     on SAFE_HEADERS. The allowlist decides, not a name pattern, so a signature, HMAC or vendor
- *     credential header of any name (payment-signature, x-hmac-signature, lob-signature) is redacted.
- *   - Credential-named keys. Anywhere, a key whose name is credential-like has its value redacted.
- *   - Strings. In every string, each query, fragment or form parameter whose (decoded) name is
- *     credential-like has its value redacted, wherever the string sits: a URL, a query string, a log
- *     message, an error message or stack. A string that holds a JSON object or array (a captured
- *     request body) is parsed, redacted the same way, and written back.
+ *     on SAFE_HEADERS: the allowlist decides.
+ *   - A second line, for prose: a key, or a name=value pair in text, whose name is credential-like
+ *     has its value redacted too. Nothing above depends on it.
+ *   - A string that holds a JSON object or array is parsed, redacted the same way, and written back.
  * Nothing is changed in place: a record is copied as it is redacted, so an object the application
  * still holds (a console breadcrumb's arguments) is never altered.
  */
@@ -56,6 +59,10 @@ const SAFE_HEADERS: ReadonlySet<string> = new Set([
 ]);
 
 const HEADERS_KEY = /^headers$/i;
+/** A request body under any of the names records give it: dropped whole, whatever it holds. */
+const BODY_KEY = /^(?:body|raw_?body|req_?body|request_?body)$/i;
+/** Under a Sentry event's `request`: the body and the cookies, dropped whole. */
+const REQUEST_DROPPED: ReadonlySet<string> = new Set(["data", "cookies"]);
 const HEADER_ATTRIBUTE = /^http\.(?:request|response)\.header\.(.+)$/i;
 const QUERY_STRING_KEY = /^query_string$/i;
 /** The SDK's own processing state: read after beforeSend to build the envelope, never sent as event data. */
@@ -67,6 +74,12 @@ const MAX_JSON_STRING = 256 * 1024;
 
 /** A query, fragment or form parameter: its separator (or the start), its name, and its value. */
 const PARAM = /(^|[?&;#\s])([^=&;#?\s]+)=([^&;#\s]*)/g;
+/** A token of text up to whitespace or a quote: a candidate URL. */
+const TOKEN = /[^\s"'`<>\\]+/g;
+/** A token that is a URL: a scheme, a path from the root, or a bare query or fragment. */
+const URL_START = /^(?:[a-z][a-z0-9+.-]*:\/\/|\/|[?#])/i;
+/** A whole string that is form-encoded: name=value pairs joined by "&", nothing else. */
+const FORM = /^[^\s=&?#]+=[^\s&]*(?:&[^\s=&?#]*(?:=[^\s&]*)?)*$/;
 
 const decodedName = (name: string) => {
   try {
@@ -85,25 +98,42 @@ export function redactUrl(text: string): string {
   );
 }
 
-/**
- * A request URL with the value of every query parameter dropped, whatever its name: the path and
- * the parameter names stay. For the request's own URL in a log line or an error report, where no
- * value is needed and a name list could miss one (an OAuth code, a one-time link's token).
- */
-export function withoutQueryValues(url: string): string {
-  const q = url.indexOf("?");
-  if (q === -1) return url;
-  const hash = url.indexOf("#", q);
-  const query = url.slice(q + 1, hash === -1 ? undefined : hash);
-  const dropped = query
+/** Every value of a query, fragment or form dropped, whatever its name: the names stay. */
+function dropValues(params: string): string {
+  return params
     .split("&")
     .map((pair) => {
+      if (pair === "") return pair;
       const eq = pair.indexOf("=");
-      if (eq !== -1) return `${pair.slice(0, eq)}=${REDACTED}`;
-      return pair === "" ? pair : REDACTED; // a bare value has no name to keep
+      return eq === -1 ? REDACTED : `${pair.slice(0, eq)}=${REDACTED}`; // a bare value has no name to keep
     })
     .join("&");
-  return url.slice(0, q + 1) + dropped + (hash === -1 ? "" : redactUrl(url.slice(hash)));
+}
+
+/**
+ * A URL with the value of every query and fragment parameter dropped, whatever its name: the path
+ * and the parameter names stay. A fragment is treated as a query (an OAuth implicit grant puts its
+ * token there), and a URL with a fragment and no query is covered too.
+ */
+export function withoutQueryValues(url: string): string {
+  const cut = url.search(/[?#]/);
+  if (cut === -1) return url;
+  const hash = url.indexOf("#", cut);
+  let out = url.slice(0, cut);
+  if (url[cut] === "?") out += `?${dropValues(url.slice(cut + 1, hash === -1 ? undefined : hash))}`;
+  if (hash !== -1) out += `#${dropValues(url.slice(hash + 1))}`;
+  return out;
+}
+
+/** Text with every URL-like token's query and fragment values dropped; a form-encoded string drops every value. */
+function withoutUrlValues(text: string): string {
+  if (FORM.test(text.trim())) return dropValues(text);
+  return text.replace(TOKEN, (token) => {
+    const cut = token.search(/[?#]/);
+    if (cut === -1) return token;
+    // A URL, or any token whose query or fragment holds a name=value pair ("callback?code=...").
+    return URL_START.test(token) || token.slice(cut).includes("=") ? withoutQueryValues(token) : token;
+  });
 }
 
 function redactString(text: string, depth: number, onPath: WeakSet<object>): string {
@@ -117,7 +147,7 @@ function redactString(text: string, depth: number, onPath: WeakSet<object>): str
     }
     if (parsed !== undefined) return JSON.stringify(redactValue(parsed, undefined, depth + 1, onPath));
   }
-  return redactUrl(text);
+  return redactUrl(withoutUrlValues(text));
 }
 
 /** Headers in any shape a record carries them: an object, [name, value] pairs, or raw header lines. */
@@ -166,6 +196,7 @@ function redactValue(value: unknown, key: string | undefined, depth: number, onP
     for (const [name, child] of Object.entries(value)) {
       const attribute = HEADER_ATTRIBUTE.exec(name);
       if (UNTOUCHED_KEYS.has(name)) out[name] = child;
+      else if (BODY_KEY.test(name) || (key === "request" && REQUEST_DROPPED.has(name))) out[name] = child === undefined ? child : REDACTED;
       else if (HEADERS_KEY.test(name)) out[name] = redactHeaders(child, depth + 1, onPath);
       else if (attribute) out[name] = isSafeHeader(attribute[1]!) ? redactValue(child, name, depth + 1, onPath) : REDACTED;
       else if (CREDENTIAL_NAME.test(name)) out[name] = REDACTED;
@@ -183,13 +214,13 @@ export function redactCredentials<T>(record: T): T {
   return redactValue(record, undefined, 0, new WeakSet()) as T;
 }
 
-/** One serialized log line, redacted as a whole: parsed when it is JSON, its parameters otherwise. */
+/** One serialized log line, redacted as a whole: parsed when it is JSON, as text otherwise. */
 export function redactLogLine(line: string): string {
   const newline = line.endsWith("\n") ? "\n" : "";
   try {
     return JSON.stringify(redactCredentials(JSON.parse(line))) + newline;
   } catch {
-    return redactUrl(line);
+    return redactUrl(withoutUrlValues(line));
   }
 }
 

@@ -134,9 +134,14 @@ beforeAll(async () => {
   // the gateway's own capture of an error (with its extra.url) behind the SDK's Fastify capture of
   // the same error. In production the two are separate events whenever another error comes between.
   const { sentryOptions } = await import("../sentry.js");
+  const options = sentryOptions(DSN);
   Sentry.init({
-    ...sentryOptions(DSN),
-    integrations: (defaults) => defaults.filter((integration) => integration.name !== "Dedupe"),
+    ...options,
+    // The gateway's own integrations (no request body collected), with Dedupe off.
+    integrations: (defaults) =>
+      (typeof options.integrations === "function" ? options.integrations(defaults) : defaults).filter(
+        (integration) => integration.name !== "Dedupe",
+      ),
     transport: (transportOptions) =>
       Sentry.createTransport(transportOptions, async (req) => {
         sentryBodies.push(typeof req.body === "string" ? req.body : Buffer.from(req.body).toString("utf8"));

@@ -155,8 +155,9 @@ describe("MEDIUM 2 (review r4 of #441): transactions, breadcrumbs, signature hea
     expect(sent).toContain("lob webhook failed");
     expect(sent).toContain("GET /api/evidence/:hash");
     for (const secret of [PAYMENT_SIG, HMAC_SIG, LOB_SIG, URL_TOKEN, BODY_SECRET]) expect(sent, secret).not.toContain(secret);
-    // What is not a credential stays: the hosts, the paths and the non-secret body field.
+    // The hosts and the paths stay. The body goes whole (value-free rule, review r5 of #441), so
+    // even its non-secret field is not sent.
     expect(sent).toContain("carrier.test/v1/track");
-    expect(sent).toContain("r5@example.test");
+    expect(sent).not.toContain("r5@example.test");
   });
 });

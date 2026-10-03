@@ -1,6 +1,6 @@
 import { initSentry, Sentry } from "./sentry.js";
 import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
-import { gatewayLoggerOptions, redactUrl, withoutQueryValues } from "./observability-redact.js";
+import { gatewayLoggerOptions, withoutQueryValues } from "./observability-redact.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
 
@@ -406,7 +406,7 @@ export async function createGateway(port = 3200) {
         action: method.toLowerCase(),
         metadata: {
           method,
-          url: redactUrl(request.url),
+          url: withoutQueryValues(request.url),
           statusCode: reply.statusCode,
           duration_ms: Math.round(reply.elapsedTime ?? 0),
         },
