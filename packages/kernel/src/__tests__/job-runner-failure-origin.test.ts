@@ -446,6 +446,9 @@ describe("a runner's timeouts are timer delays, refused before anything is held 
     ["evidenceQuiesceTimeoutMs", -1],
     ["evidenceSettleTimeoutMs", "30000"],
     ["evidenceSettleTimeoutMs", 2_147_483_648],
+    // An explicit null is not "omitted": only undefined takes the default (astra pack 219).
+    ["evidenceQuiesceTimeoutMs", null],
+    ["evidenceSettleTimeoutMs", null],
   ] as const)("%s = %s is refused before anything is held", async (name, ms) => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const machine = testMachine(`m-216-${name}-${String(ms)}`);

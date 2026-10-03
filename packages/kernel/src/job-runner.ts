@@ -183,8 +183,12 @@ export class JobRunner {
     this.sensors = sensors;
     this.camera = camera;
     this.evidenceEmitter = evidenceEmitter;
-    this.evidenceSettleTimeoutMs = options?.evidenceSettleTimeoutMs ?? 30_000;
-    this.evidenceQuiesceTimeoutMs = options?.evidenceQuiesceTimeoutMs ?? 15_000;
+    // Only an omitted option (undefined) takes its default: null, like any other value that is not
+    // a timer delay, is refused when a run starts (astra pack 219).
+    const settle = options?.evidenceSettleTimeoutMs;
+    const quiesce = options?.evidenceQuiesceTimeoutMs;
+    this.evidenceSettleTimeoutMs = settle === undefined ? 30_000 : settle;
+    this.evidenceQuiesceTimeoutMs = quiesce === undefined ? 15_000 : quiesce;
   }
 
   /**

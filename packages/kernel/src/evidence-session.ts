@@ -187,6 +187,16 @@ function ask(adapter: EvidenceAdapter, tap: Tap): Promise<void> {
   );
 }
 
+/** An adapter's id for a log line, read without throwing. */
+function idOf(adapter: EvidenceAdapter): string {
+  try {
+    const id: unknown = adapter.id;
+    return typeof id === "string" ? id : "(unreadable id)";
+  } catch {
+    return "(unreadable id)";
+  }
+}
+
 const logUnanswered = (adapterId: string) => (err: unknown) => {
   console.error(`[evidence-session] adapter ${adapterId} could not confirm its evidence is complete: ${failureText(err)}`);
 };
@@ -212,7 +222,9 @@ export function openEvidenceSession(
     if (device.unsettled > 0) {
       // A hook of this adapter that rejected is asked again, so the device can recover.
       const tap = taps.get(adapter);
-      if (tap?.hook === "rejected") ask(adapter, tap).catch(logUnanswered(adapter.id));
+      // The handler is attached before any id is read, and reads ids without throwing: a hook that
+      // rejects is never left unhandled (tracked from astra pack 212).
+      if (tap?.hook === "rejected") ask(adapter, tap).catch((err: unknown) => logUnanswered(idOf(adapter))(err));
       return { ok: false, busy: { reason: "quiescing", adapterId: adapter.id, jobId: holder?.owner.jobId ?? "unknown" } };
     }
   }
@@ -237,7 +249,7 @@ export function openEvidenceSession(
         session.closed = true;
         if (session.answers === null) {
           session.answers = askAll();
-          session.answers.catch(logUnanswered(claimed.map(({ adapter }) => adapter.id).join(", ")));
+          session.answers.catch((err: unknown) => logUnanswered(claimed.map(({ adapter }) => idOf(adapter)).join(", "))(err));
         }
       },
     },
