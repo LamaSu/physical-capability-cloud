@@ -87,7 +87,7 @@ operator onboarding docs).
 |-----|---------|-------------|
 | `PCC_PLR_PYTHON_PATH` | `python3` (`python` on Windows) | Python interpreter the sidecar runs under |
 | `PCC_PLR_SIDECAR_TIMEOUT_MS` | `60000` | Default per-RPC timeout |
-| `PCC_PLR_LAYOUT_DIR` | (unset) | The directory the operator keeps deck layouts in. Required for `deckLayoutPath`, which must name a `.json` file inside it (symlinks are resolved first). The sidecar inherits it from the kernel's environment. |
+| `PCC_PLR_LAYOUT_DIR` | (unset) | The directory the operator keeps deck layouts in. Required for `deckLayoutPath`, which must name a `.json` file inside it (symlinks are resolved first, and the file is then opened once with `O_NOFOLLOW` and identity-checked before it's read — R39 MED8 — so a symlink swapped in between the check and the read is refused, not followed). The sidecar inherits it from the kernel's environment. |
 
 Per-device overrides via `config.pythonPath`, `config.rpcTimeoutMs`,
 `config.runTimeoutMs`, `config.restartAfterJobs`.
@@ -313,7 +313,7 @@ events.
 # TypeScript side (38 tests, runs without Python or PLR):
 pnpm --filter @pcc/adapter-pylabrobot test
 
-# Python side (105 tests on tests/fake_plr, a small fake of the PLR API; no pylabrobot required):
+# Python side (132 tests on tests/fake_plr, a small fake of the PLR API; no pylabrobot required):
 cd packages/adapter-pylabrobot/python
 PYTHONPATH=. python3 -m pytest tests/   # pytest-asyncio optional; test_plr_real.py skips without pylabrobot
 ```

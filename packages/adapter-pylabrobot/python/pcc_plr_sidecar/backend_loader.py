@@ -263,7 +263,16 @@ def _max_volume(config: dict[str, Any]) -> float:
 
 
 def _read_layout_file(path: Any) -> Any:
-    """Read ``deckLayoutPath``: a .json file inside PCC_PLR_LAYOUT_DIR, at most 5 MB."""
+    """Read ``deckLayoutPath``: a .json file inside PCC_PLR_LAYOUT_DIR, at most 5 MB.
+
+    R39 MED8: the path is resolved, boundary-checked, and then opened exactly
+    once with ``O_NOFOLLOW`` -- a symlink swapped in at that path after the
+    check (but before the read) is refused rather than silently followed
+    outside ``PCC_PLR_LAYOUT_DIR``. The opened fd's identity (an open fd is
+    immutable once obtained) is then verified against an ``lstat`` of the
+    checked path before anything is read from it. Everything is read from
+    that one fd — never a second, separate open of the path.
+    """
     if not isinstance(path, str) or not path:
         raise ValueError("deckLayoutPath must be a non-empty string")
     root = os.environ.get("PCC_PLR_LAYOUT_DIR")
@@ -275,10 +284,37 @@ def _read_layout_file(path: Any) -> Any:
     real = os.path.realpath(path if os.path.isabs(path) else os.path.join(base, path))
     if os.path.commonpath([base, real]) != base:
         raise ValueError("deckLayoutPath must name a file inside PCC_PLR_LAYOUT_DIR")
-    if not real.endswith(".json") or not os.path.isfile(real):
+    if not real.endswith(".json"):
         raise ValueError("deckLayoutPath must name an existing .json file")
-    with open(real, "rb") as f:
-        raw = f.read(MAX_LAYOUT_BYTES + 1)
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)  # unavailable on Windows; best-effort there
+    try:
+        fd = os.open(real, os.O_RDONLY | nofollow)
+    except OSError as e:
+        raise ValueError("deckLayoutPath must name an existing .json file") from e
+    try:
+        fd_stat = os.fstat(fd)
+        if not stat.S_ISREG(fd_stat.st_mode):
+            raise ValueError("deckLayoutPath must name a regular file")
+        try:
+            path_stat = os.lstat(real)
+        except OSError as e:
+            raise ValueError("deckLayoutPath must name an existing .json file") from e
+        if (fd_stat.st_dev, fd_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+            # The path changed identity between the check and the open -- refuse
+            # rather than trust whatever is sitting there now.
+            raise ValueError("deckLayoutPath changed between check and read; refusing")
+        chunks: list[bytes] = []
+        remaining = MAX_LAYOUT_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    finally:
+        os.close(fd)
     if len(raw) > MAX_LAYOUT_BYTES:
         raise ValueError(f"deck layout file is larger than {MAX_LAYOUT_BYTES} bytes")
     try:

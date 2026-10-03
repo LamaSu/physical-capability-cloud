@@ -729,6 +729,45 @@ async def test_layout_files_must_come_from_the_layout_directory(fake_plr, tmp_pa
     assert _deserialized(fake_plr) == []
 
 
+# ── R39 MED8: a TOCTOU gap in the layout-file check ─────────────────────────
+
+async def test_a_symlink_swapped_in_after_the_boundary_check_is_refused_not_read(fake_plr, tmp_path, monkeypatch):
+    layouts = tmp_path / "layouts"
+    layouts.mkdir()
+    inside = layouts / "deck.json"
+    inside.write_text(json.dumps(DECK))
+    # A distinctly-named, otherwise-valid deck "outside" the allowed directory
+    # -- if the TOCTOU gap is open, this is what gets read and loaded, with NO
+    # error at all (it's a perfectly valid Deck, just not the checked one).
+    outside = tmp_path / "secret.json"
+    outside.write_text(json.dumps(dict(DECK, name="leaked-outside-deck", children=[])))
+
+    import os as os_module
+
+    monkeypatch.setenv("PCC_PLR_LAYOUT_DIR", str(layouts))
+    expected_real = os_module.path.realpath(str(inside))
+    original_realpath = os_module.path.realpath
+    state = {"swapped": False}
+
+    def racy_realpath(p, *a, **kw):
+        # Resolve exactly as before, then -- as a side effect, simulating a
+        # racing process -- swap the checked file for a symlink pointing
+        # outside PCC_PLR_LAYOUT_DIR, AFTER the boundary check has already
+        # computed its (pre-swap) answer but BEFORE the file is read.
+        result = original_realpath(p, *a, **kw)
+        if not state["swapped"] and result == expected_real:
+            state["swapped"] = True
+            inside.unlink()
+            inside.symlink_to(outside)
+        return result
+
+    monkeypatch.setattr(os_module.path, "realpath", racy_realpath)
+    s, out = _server()
+    resp = await init(s, out, deckLayoutPath="deck.json")
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert _deserialized(fake_plr) == []  # the outside content never reached the deserializer
+
+
 # ── astra r1 on #378: PLR's own tracking is on, and liquids are declared ─────
 
 async def test_tip_and_volume_tracking_are_on_by_default(fake_plr):
