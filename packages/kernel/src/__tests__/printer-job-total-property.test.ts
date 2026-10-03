@@ -124,8 +124,8 @@ function rig(caseId: string, inj: Injector) {
     async execute(command: MachineCommand): Promise<MachineCommandResult> {
       if (command.type !== "start") return { success: true, message: "ok" };
       const job = nextJob++;
-      emit("execution_started", { jobId: job });
-      emit("execution_completed", { jobId: job, totalPages: 1 });
+      emit("execution_started", { ippJobId: job });
+      emit("execution_completed", { ippJobId: job, totalPages: 1 });
       return { success: true, message: `job ${job} accepted`, data: { jobId: job } };
     },
     onEvidence(callback) {
@@ -194,7 +194,7 @@ describe("runPrintJob: whatever one collaborator throws, wherever, the print res
       if (typeof result.success !== "boolean" || typeof result.durationMs !== "number" || !Array.isArray(result.events)) failures.push(`${label}: not a PrintJobResult`);
       if (!result.success && typeof result.error !== "string") failures.push(`${label}: a failure with no text`);
       if (!result.success && result.events.length > 0) failures.push(`${label}: a failure with events`);
-      if (result.success && !result.events.some((e) => e.type === "execution_completed" && e.payload.jobId === result.completion?.printerJobId)) {
+      if (result.success && !result.events.some((e) => e.type === "execution_completed" && e.payload.ippJobId === result.completion?.printerJobId)) {
         failures.push(`${label}: success without its device job's completion`);
       }
     }

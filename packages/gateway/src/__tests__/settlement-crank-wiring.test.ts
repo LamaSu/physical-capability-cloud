@@ -78,6 +78,8 @@ vi.mock("../services/settlement-crank.js", () => ({
 
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { createHash } from "node:crypto";
 import { schema, eq } from "@pcc/store";
 import { verifyWithOracle } from "../services/oracle-client.js";
 
@@ -135,16 +137,19 @@ async function makeJobWithRealEscrow(agent: string): Promise<{ jobId: string }> 
 function trap(jobId: string, agent: string): void {
   const repos = getRepos();
   const job = repos.jobs.findById(jobId)!;
-  repos.evidence.insert({
+  // A genuine gateway anchor: bundleHash = sha256 of its canonical envelope,
+  // which recovery re-verifies before driving the chain.
+  const meta = {
     id: `bundle-${agent}`,
     jobId,
     stepId: job.stepId,
     kernelId: job.kernelId,
     assuranceTier: 0,
-    bundleHash: ("0x" + "cd".repeat(32)),
-    kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519", value: "t" },
     createdAt: new Date().toISOString(),
-  } as any);
+    kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519", value: "gateway-auto-sign" },
+  };
+  const bundleHash = `sha256:${createHash("sha256").update(buildCanonicalEvidenceEnvelope(meta as any, [])).digest("hex")}`;
+  repos.evidence.insert({ ...meta, bundleHash } as any);
   repos.jobs.update(jobId, { evidenceBundleId: `bundle-${agent}`, status: "evidence_submitted" });
 }
 

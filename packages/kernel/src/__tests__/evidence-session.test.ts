@@ -13,6 +13,7 @@ import { EvidenceEmitter } from "../evidence-emitter.js";
 import { openEvidenceSession } from "../evidence-session.js";
 import type { EmittedEvidence } from "../evidence-session.js";
 import { JobRunner } from "../job-runner.js";
+import { lose1Capture } from "./lose1-capture-fixture.js";
 
 vi.mock("@sentry/node", () => ({
   startSpan: (_opts: unknown, fn: () => unknown) => fn(),
@@ -214,8 +215,9 @@ describe("JobRunner over shared adapters", () => {
       id: "camera-3runs",
       source: { deviceId: "camera-3runs", deviceType: "camera", kernelId: KERNEL_ID },
       captureSnapshot: async () => ({ imageHash: "sha256:none", storageRef: "none" }),
-      runInspection: async () => {
-        emitTo(cameraListeners, evidence("cv_inspection_result", "camera-3runs"));
+      runInspection: async (_referenceHash?: string, context?: { jobId?: string }) => {
+        // A complete LO-SE-1 capture for the job it was asked for: since #489 only one counts.
+        emitTo(cameraListeners, lose1Capture("cv_inspection_result", "camera-3runs", KERNEL_ID, String(context?.jobId)));
         return { passed: true, confidence: 100, findings: [], imageHash: "sha256:none" };
       },
       onEvidence: vi.fn((cb) => void cameraListeners.push(cb)),

@@ -82,9 +82,9 @@ function recordingEmitter(): { emitter: EvidenceEmitter; bundles: EvidenceBundle
   return { emitter, bundles };
 }
 
-/** "type#jobId" for each event: which device job each recorded event belongs to. */
+/** "type#ippJobId" for each event: which device job each recorded event belongs to (payload.jobId is the PCC job's, LO-EV-9). */
 function tags(events: readonly Emitted[]): string[] {
-  return events.map((e) => `${e.type}#${String(e.payload.jobId)}`);
+  return events.map((e) => `${e.type}#${String(e.payload.ippJobId)}`);
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -129,7 +129,7 @@ interface TestPrinter extends MachineAdapter {
 /** What an accepting printer does on start: name the next device job and report it started. */
 function accept(printer: TestPrinter, job: number): MachineCommandResult {
   printer.jobs.push(job);
-  printer.emit(printer.event("execution_started", { jobId: job }));
+  printer.emit(printer.event("execution_started", { ippJobId: job }));
   return { success: true, message: `job ${job} accepted`, data: { jobId: job } };
 }
 
@@ -185,7 +185,7 @@ function testPrinter(
       return { type, timestamp: new Date().toISOString(), source: printer.source, payload };
     },
     complete(job = printer.jobs[printer.jobs.length - 1]) {
-      printer.emit(printer.event("execution_completed", { jobId: job, totalPages: 1 }));
+      printer.emit(printer.event("execution_completed", { ippJobId: job, totalPages: 1 }));
     },
     started(n) {
       return new Promise((resolve) => {
@@ -442,7 +442,7 @@ describe("D3: a print quiesces before it finalizes", () => {
     // hook answers only once it has reported that count.
     owed = new Promise<void>((resolve) =>
       setTimeout(() => {
-        printer.emit(printer.event("execution_progress", { jobId: 100, completedSheets: 1 }));
+        printer.emit(printer.event("execution_progress", { ippJobId: 100, completedSheets: 1 }));
         resolve();
       }, LATE_MS),
     );
@@ -525,13 +525,13 @@ describe("D4: a failed print's step is detached", () => {
     const { emitter, bundles } = recordingEmitter();
     const run = runPrintJob({ adapter: printer, emitter, jobId: "print-d4", jobName: "a.pdf", totalPages: 1 });
     await drive(printer.started(1));
-    printer.emit(printer.event("execution_failed", { jobId: 100, state: "aborted" }));
+    printer.emit(printer.event("execution_failed", { ippJobId: 100, state: "aborted" }));
     const result = await drive(run);
 
     expect.soft(result, "the print's result").toEqual({
       success: false,
       events: [],
-      error: 'printer reported failure: {"jobId":100,"state":"aborted"}',
+      error: 'printer reported failure: {"ippJobId":100,"state":"aborted"}',
       durationMs: expect.any(Number),
     });
     expect.soft(bundles, "bundles finalized").toEqual([]);
@@ -546,7 +546,7 @@ describe("D5: a print that timed out records nothing after it returned", () => {
     const { emitter } = recordingEmitter();
     const result = await drive(runPrintJob({ adapter: printer, emitter, jobId: "print-d5", jobName: "a.pdf", totalPages: 1, timeoutMs: 1_000 }));
     const atReturn = tags(emitter.getEvents("print-d5", "print-d5"));
-    printer.emit(printer.event("execution_progress", { jobId: 100, completedSheets: 1 }));
+    printer.emit(printer.event("execution_progress", { ippJobId: 100, completedSheets: 1 }));
     printer.complete(100);
     await vi.advanceTimersByTimeAsync(0);
 
@@ -584,7 +584,7 @@ describe("B1 (P2's cause): another device job inside the print's window fails it
     const printer = testPrinter("stale-b1b", {
       start: (p, _n, job) => {
         // A stale report of the printer's previous job, then this job's start.
-        p.emit(p.event("execution_completed", { jobId: 99, totalPages: 4 }));
+        p.emit(p.event("execution_completed", { ippJobId: 99, totalPages: 4 }));
         return accept(p, job);
       },
     });
@@ -606,7 +606,7 @@ describe("B1 (P2's cause): another device job inside the print's window fails it
     await drive(printer.started(1));
     printer.complete(100);
     await vi.advanceTimersByTimeAsync(100); // the print waits for its printer's word
-    printer.emit(printer.event("execution_started", { jobId: 101 })); // something else's job
+    printer.emit(printer.event("execution_started", { ippJobId: 101 })); // something else's job
     answer.resolve();
     const result = await drive(run);
 
@@ -688,7 +688,7 @@ describe("B2 (P2's cause): only the print's own device job ends it", () => {
     const printer = testPrinter("anon-b2d", {
       start: (p, _n, job) => {
         p.jobs.push(job);
-        p.emit(p.event("execution_started", { jobId: job }));
+        p.emit(p.event("execution_started", { ippJobId: job }));
         return { success: true, message: "accepted" };
       },
     });
@@ -765,7 +765,7 @@ describe("astra pack 192 HIGH 1: an event the print bound but could not record f
     const { emitter, bundles } = recordingEmitter();
     const run = runPrintJob({ adapter: printer, emitter, jobId: "print-h1b", jobName: "a.pdf", totalPages: 1 });
     await drive(printer.started(1));
-    printer.emit(printer.event("execution_progress", { jobId: 100, completedSheets: 1 })); // recorded
+    printer.emit(printer.event("execution_progress", { ippJobId: 100, completedSheets: 1 })); // recorded
     printer.complete(100);
     const result = await drive(run);
 
@@ -819,7 +819,7 @@ describe("astra pack 192 HIGH 2: only events bound to the print's device job are
       start: (p, _n, job) => {
         const accepted = accept(p, job); // the job's execution_started
         p.emit(p.event("execution_progress", { state: "warming-up" })); // a device-level report: no job
-        p.emit(p.event("execution_progress", { jobId: job, completedSheets: 0 }));
+        p.emit(p.event("execution_progress", { ippJobId: job, completedSheets: 0 }));
         return accepted;
       },
     });
@@ -836,11 +836,11 @@ describe("astra pack 192 HIGH 2: only events bound to the print's device job are
   });
 
   const FOREIGN: Array<{ when: string; start: (printer: TestPrinter, job: number) => MachineCommandResult; then: (printer: TestPrinter) => void; job: number }> = [
-    { when: "after the print started", start: accept, then: (p) => p.emit(p.event("execution_progress", { jobId: 555 })), job: 555 },
+    { when: "after the print started", start: accept, then: (p) => p.emit(p.event("execution_progress", { ippJobId: 555 })), job: 555 },
     {
       when: "inside start, before the print knows its job",
       start: (p, job) => {
-        p.emit(p.event("execution_completed", { jobId: 99, totalPages: 4 })); // a stale report of the printer's previous job
+        p.emit(p.event("execution_completed", { ippJobId: 99, totalPages: 4 })); // a stale report of the printer's previous job
         return accept(p, job);
       },
       then: () => {},
@@ -868,12 +868,12 @@ describe("astra pack 192 HIGH 2: only events bound to the print's device job are
     const addEvent = vi.spyOn(emitter, "addEvent");
     const run = runPrintJob({ adapter: printer, emitter, jobId: "print-h2d", jobName: "a.pdf", totalPages: 1 });
     await drive(printer.started(1));
-    printer.emit(printer.event("execution_completed", { jobId: "100", totalPages: 1 }));
+    printer.emit(printer.event("execution_completed", { ippJobId: "100", totalPages: 1 }));
     const result = await drive(run);
 
     expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: expect.stringContaining("something else is driving the printer"), durationMs: expect.any(Number) });
     expect.soft(bundles, "bundles finalized").toEqual([]);
-    expect(addEvent.mock.calls.map((call) => call[2].payload.jobId), "the device jobs of the events the print recorded").toEqual([100]);
+    expect(addEvent.mock.calls.map((call) => call[2].payload.ippJobId), "the device jobs of the events the print recorded").toEqual([100]);
   });
 });
 
@@ -921,7 +921,7 @@ describe("IppAdapter names its device job on every event, so a print excludes no
     const result = await drive(runPrintJob({ adapter, emitter, jobId: "print-real-aborted", jobName: "a.pdf", totalPages: 1, documentData: "%PDF-1.4" }));
     await adapter.dispose();
 
-    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: 'printer reported failure: {"jobId":43,"state":"aborted"}', durationMs: expect.any(Number) });
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: 'printer reported failure: {"ippJobId":43,"state":"aborted"}', durationMs: expect.any(Number) });
     expect(bundles, "bundles finalized").toEqual([]);
   });
 
@@ -962,14 +962,14 @@ describe("every exit releases the printer, the step key and the step", () => {
     {
       exit: "the printer reports the job failed",
       first: accept,
-      then: (p) => p.emit(p.event("execution_failed", { jobId: 100, state: "aborted" })),
-      error: 'printer reported failure: {"jobId":100,"state":"aborted"}',
+      then: (p) => p.emit(p.event("execution_failed", { ippJobId: 100, state: "aborted" })),
+      error: 'printer reported failure: {"ippJobId":100,"state":"aborted"}',
     },
     { exit: "the print times out", first: accept, options: { timeoutMs: 1_000 }, error: "print job print-exit timed out after 1000ms" },
     {
       exit: "another device job drives the printer",
       first: accept,
-      then: (p) => p.emit(p.event("execution_progress", { jobId: 555 })),
+      then: (p) => p.emit(p.event("execution_progress", { ippJobId: 555 })),
       error: expect.stringContaining("device job 555"),
     },
     {
@@ -979,7 +979,7 @@ describe("every exit releases the printer, the step key and the step", () => {
         // Only device job 100's completion: the retry's job records normally.
         hashing.gate = (event) => {
           const e = event as Emitted;
-          return e.type === "execution_completed" && e.payload.jobId === 100 ? Promise.reject(new Error("hashEvent rejected")) : undefined;
+          return e.type === "execution_completed" && e.payload.ippJobId === 100 ? Promise.reject(new Error("hashEvent rejected")) : undefined;
         };
         p.complete(100);
       },
@@ -1020,7 +1020,7 @@ describe("the step lease", () => {
     await drive(printer.started(1));
     // Hold the hashing of the printer's failure report: the failed print is still settling.
     hashing.gate = (event) => ((event as Emitted).type === "execution_failed" ? gate.promise : undefined);
-    printer.emit(printer.event("execution_failed", { jobId: 100, state: "aborted" }));
+    printer.emit(printer.event("execution_failed", { ippJobId: 100, state: "aborted" }));
     await vi.advanceTimersByTimeAsync(0);
     const whileSettling = runPrintJob({ adapter: other, emitter, jobId: "print-lease", jobName: "a.pdf", totalPages: 1 });
     if (other.jobs.length > 0) other.complete(); // at the base it started: let it end
@@ -1032,7 +1032,7 @@ describe("the step lease", () => {
       refused("step print-lease of job print-lease is already running", { reason: "step", jobId: "print-lease", stepId: "print-lease" }),
     );
     expect.soft(other.commands, "commands sent to the other printer").toEqual([]);
-    expect(failed.error, "the failed print's error").toBe('printer reported failure: {"jobId":100,"state":"aborted"}');
+    expect(failed.error, "the failed print's error").toBe('printer reported failure: {"ippJobId":100,"state":"aborted"}');
   });
 });
 
@@ -1072,7 +1072,7 @@ describe("closed before it settles", () => {
     hashing.gate = (event) => ((event as Emitted).type === "execution_completed" ? gate.promise : undefined);
     printer.complete(100);
     await vi.advanceTimersByTimeAsync(0);
-    printer.emit(printer.event("execution_progress", { jobId: 100, completedSheets: 1 }));
+    printer.emit(printer.event("execution_progress", { ippJobId: 100, completedSheets: 1 }));
     gate.resolve();
     const result = await drive(run);
 
@@ -1088,10 +1088,10 @@ describe("sealed: a failed print never writes an event still queued", () => {
     const { emitter } = recordingEmitter();
     const gate = deferred();
     // The print's first event hashes slowly; the printer reports progress behind it, then nothing.
-    hashing.gate = (event) => ((event as Emitted).type === "execution_started" && (event as Emitted).payload.jobId === 100 ? gate.promise : undefined);
+    hashing.gate = (event) => ((event as Emitted).type === "execution_started" && (event as Emitted).payload.ippJobId === 100 ? gate.promise : undefined);
     const run = runPrintJob({ adapter: printer, emitter, jobId: "print-sealed", jobName: "a.pdf", totalPages: 1, timeoutMs: 1_000, evidenceSettleTimeoutMs: 500 } as PrintJobOptions);
     await drive(printer.started(1));
-    printer.emit(printer.event("execution_progress", { jobId: 100, completedSheets: 1 }));
+    printer.emit(printer.event("execution_progress", { ippJobId: 100, completedSheets: 1 }));
     const failed = await drive(run);
     // A later print of the step, on another printer, registers a fresh record.
     const other = testPrinter("sealed-other", { firstJob: 700 });
@@ -1128,7 +1128,7 @@ describe("an adapter without quiesceEvidence", () => {
 });
 
 describe("invariants kept", () => {
-  it("mock events are still labelled simulated, and every event is bundled exactly as the printer emitted it", async () => {
+  it("mock events are still labelled simulated, and every event is bundled exactly as the printer emitted it, plus its PCC job", async () => {
     const kernel = createIppPrintKernel({ kernelId: KERNEL_ID, deviceId: "ipp-inv", mockMode: true, seed: SEED });
     const emitted: Array<{ event: Emitted; snapshot: string }> = [];
     kernel.adapter.onEvidence((event) => emitted.push({ event, snapshot: JSON.stringify(event) }));
@@ -1139,7 +1139,10 @@ describe("invariants kept", () => {
     expect.soft(result.completion?.simulated, "the completion is labelled simulated").toBe(true);
     expect.soft(bundled.map((e) => [e.source.simulated, e.payload.mock]), "every bundled event is labelled simulated and mock").toEqual(bundled.map(() => [true, true]));
     expect.soft(emitted.map(({ event, snapshot }) => JSON.stringify(event) === snapshot), "emitted events left unmutated").toEqual(emitted.map(() => true));
-    expect(bundled.map(({ id: _id, hash: _hash, ...rest }) => rest), "bundled events are the emitted ones").toEqual(emitted.map(({ event }) => event));
+    // The emitter commits the PCC job into every event's payload (LO-EV-9), and changes nothing else.
+    expect(bundled.map(({ id: _id, hash: _hash, ...rest }) => rest), "bundled events are the emitted ones, plus their PCC job").toEqual(
+      emitted.map(({ event }) => ({ ...event, payload: { ...event.payload, jobId: "print-inv" } })),
+    );
   });
 });
 
@@ -1280,7 +1283,7 @@ describe("the print's setup, its latch's event label and the recovery log, whate
     const run = runPrintJob({ adapter: printer, emitter, jobId: "print-type", jobName: "a.pdf", totalPages: 1 });
     await drive(printer.started(1));
     // Its type answers admit()'s read, and throws at every later one: the latch's.
-    const progress = printer.event("execution_progress", { jobId: printer.jobs[0], completedSheets: 1 }) as Record<string, unknown>;
+    const progress = printer.event("execution_progress", { ippJobId: printer.jobs[0], completedSheets: 1 }) as Record<string, unknown>;
     let reads = 0;
     Object.defineProperty(progress, "type", {
       get: () => {
