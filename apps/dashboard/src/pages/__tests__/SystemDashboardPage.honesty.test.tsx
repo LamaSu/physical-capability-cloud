@@ -380,6 +380,9 @@ describe("gateway answering", () => {
     stubFetch({ [ROUTE]: { status: 200, body: { ...REPORT, db: { ...REPORT.db, kernels: [{}] } } } });
     const t = (await renderPage()).text();
     expect(t).toContain("couldn't be read");
+    // The gateway reported no failure here: the page found the rows malformed itself, and says so.
+    expect(t).not.toContain("the gateway reported this section's read failed");
+    expect(t).toContain("rows that aren't records");
     expect(valueIn("Kernels", "Registered")).toBeNull();
     // Other sections, whose rows are still well-formed, are unaffected.
     expect(valueIn("Jobs", "Jobs")).toBe("5");

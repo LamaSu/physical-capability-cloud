@@ -205,7 +205,8 @@ function hasId(row: unknown): boolean {
   return isRecord(row) && typeof row.id === "string" && row.id !== "";
 }
 
-type ReadState = "available" | "unavailable" | "unreported";
+/** available and unavailable are the handler's word; malformed is this page's, about rows that aren't records. */
+type ReadState = "available" | "unavailable" | "unreported" | "malformed";
 
 /** What the handler itself said about this db.* section (astra 408b F1). */
 function serverReadState(report: SystemReport, key: string): ReadState {
@@ -223,7 +224,7 @@ function serverReadState(report: SystemReport, key: string): ReadState {
 function sectionState(report: SystemReport, key: string, rows: unknown[] | null): ReadState {
   const server = serverReadState(report, key);
   if (server !== "available") return server;
-  if (rows !== null && rows.length > 0 && !rows.every(hasId)) return "unavailable";
+  if (rows !== null && rows.length > 0 && !rows.every(hasId)) return "malformed";
   return server;
 }
 
@@ -505,10 +506,13 @@ function NotInReport({ what }: { what: string }) {
 }
 
 /** The handler named this section as a failed read (astra 408b F1), or its rows don't look like real records (F6). Never "lists no ...". */
-function SectionUnavailable({ what }: { what: string }) {
+function SectionUnavailable({ what, state }: { what: string; state: ReadState }) {
   return (
     <p data-live-state="unavailable" className="text-xs text-red-400/70 leading-relaxed">
-      {capitalize(what)} couldn't be read: the gateway reported this section's read failed.
+      {capitalize(what)} couldn't be read:{" "}
+      {state === "malformed"
+        ? "the gateway sent rows that aren't records, so nothing here is counted."
+        : "the gateway reported this section's read failed."}
     </p>
   );
 }
@@ -526,8 +530,8 @@ function KernelsCard({ kernels, state }: { kernels: unknown[] | null; state: Rea
   let body: React.ReactNode;
   if (kernels === null) {
     body = <NotInReport what="the kernel list" />;
-  } else if (state === "unavailable") {
-    body = <SectionUnavailable what="kernels" />;
+  } else if (state === "unavailable" || state === "malformed") {
+    body = <SectionUnavailable what="kernels" state={state} />;
   } else if (kernels.length === 0) {
     body = state === "unreported" ? <SectionUnreported what="kernels" /> : <ListsNone what="kernels" />;
   } else {
@@ -572,8 +576,8 @@ function JobsCard({ jobs, state }: { jobs: unknown[] | null; state: ReadState })
   let note = "Active means pending, queued, in progress or paused.";
   if (jobs === null) {
     body = <NotInReport what="the job list" />;
-  } else if (state === "unavailable") {
-    body = <SectionUnavailable what="jobs" />;
+  } else if (state === "unavailable" || state === "malformed") {
+    body = <SectionUnavailable what="jobs" state={state} />;
   } else if (jobs.length === 0) {
     body = state === "unreported" ? <SectionUnreported what="jobs" /> : <ListsNone what="jobs" />;
   } else {
@@ -627,8 +631,8 @@ function CapabilitiesCard({ capabilities, state }: { capabilities: unknown[] | n
   let body: React.ReactNode;
   if (capabilities === null) {
     body = <NotInReport what="the capability list" />;
-  } else if (state === "unavailable") {
-    body = <SectionUnavailable what="capabilities" />;
+  } else if (state === "unavailable" || state === "malformed") {
+    body = <SectionUnavailable what="capabilities" state={state} />;
   } else if (capabilities.length === 0) {
     body = state === "unreported" ? <SectionUnreported what="capabilities" /> : <ListsNone what="capabilities" />;
   } else {
@@ -655,8 +659,8 @@ function RegistrationsCard({ registrations, state }: { registrations: unknown[] 
   let body: React.ReactNode;
   if (registrations === null) {
     body = <NotInReport what="the registration list" />;
-  } else if (state === "unavailable") {
-    body = <SectionUnavailable what="machine registrations" />;
+  } else if (state === "unavailable" || state === "malformed") {
+    body = <SectionUnavailable what="machine registrations" state={state} />;
   } else if (registrations.length === 0) {
     body = state === "unreported" ? <SectionUnreported what="machine registrations" /> : <ListsNone what="machine registrations" />;
   } else {
@@ -682,8 +686,8 @@ function EvidenceCard({ evidence, state }: { evidence: unknown[] | null; state: 
   let body: React.ReactNode;
   if (evidence === null) {
     body = <NotInReport what="the evidence list" />;
-  } else if (state === "unavailable") {
-    body = <SectionUnavailable what="evidence bundles" />;
+  } else if (state === "unavailable" || state === "malformed") {
+    body = <SectionUnavailable what="evidence bundles" state={state} />;
   } else if (evidence.length === 0) {
     body = state === "unreported" ? <SectionUnreported what="evidence bundles" /> : <ListsNone what="evidence bundles" />;
   } else {
