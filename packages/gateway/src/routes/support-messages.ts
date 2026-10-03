@@ -15,6 +15,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // Discord webhook for #bug-reports notifications
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
@@ -50,11 +51,11 @@ async function notifyDiscord(thread: SupportThread, msg: Message): Promise<void>
       body: JSON.stringify({ content, username: "PCC Support" }),
     });
     if (!res.ok) {
-      console.error(`Discord webhook failed: ${res.status}`);
+      console.error(lit("Discord webhook failed"), declare.metric(res.status));
     }
   } catch (err) {
     // Non-fatal — don't break support flow if Discord is down
-    console.error(`Discord webhook error: ${err}`);
+    console.error(lit("Discord webhook error"), err);
   }
 }
 
