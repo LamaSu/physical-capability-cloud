@@ -17,7 +17,10 @@ import {
 // time so once the flag flips, scoped listing yields correct rows without a
 // data backfill.
 import { tenantOpts } from "../config/tenant-enforce.js";
-import { lit } from "../observability/closed-schema.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** analyzeOnboardingText's `mode` (routes/onboard-analysis.ts) — a type-enforced closed set. */
+const ONBOARD_ANALYSIS_MODES: readonly string[] = ["llm", "heuristic"];
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
@@ -45,9 +48,9 @@ export async function onboardRoutes(app: FastifyInstance) {
     try {
       const sourceDocumentId = coalesceSourceDocumentId(req.body);
       const { analysis, mode, warning } = await analyzeOnboardingText(text, { sourceDocumentId });
-      trackServerEvent("document_analyzed", {
-        mode,
-        type: analysis.suggestedCapabilities[0]?.type ?? "unknown",
+      trackServerEvent(lit("document_analyzed"), {
+        mode: declare.code(mode, ONBOARD_ANALYSIS_MODES),
+        type: declare.id(analysis.suggestedCapabilities[0]?.type ?? "unknown"),
       });
       return { status: "ok", analysis, mode, ...(warning ? { warning } : {}) };
     } catch (e) {
@@ -125,7 +128,7 @@ export async function onboardRoutes(app: FastifyInstance) {
       });
     } catch (e) { console.warn(lit("[onboard] DB insert failed, continuing:"), e); }
     pipelineTelemetry.emit(registration.id, "operator_register", "completed", { metadata: { name: registration.name, category: registration.category } });
-    trackServerEvent("operator_registered", { name: registration.name, category: registration.category });
+    trackServerEvent(lit("operator_registered"), { name: declare.id(registration.name), category: declare.id(registration.category) });
     auditService.log({
       eventType: "operator.registered",
       actor: (req as any).operatorId ?? (req as any).apiKeyId ?? registration.operator?.walletAddress,
@@ -528,7 +531,9 @@ export async function onboardRoutes(app: FastifyInstance) {
         repos.registrations.updateStatus(req.params.id, "active", { approvedAt: now, description: `PROVED: ${proveMetadata}` });
 
         pipelineTelemetry.emit(reg.id, "operator_verify", "completed", { metadata: { proofCount: proofs.length, autoApproved: true, assuranceTier } });
-        trackServerEvent("operator_proved", { proofCount: proofs.length, assuranceTier });
+        // proofs.length reflects which evidence fields the caller chose to submit, and
+        // assuranceTier is derived from that same caller-controlled shape — declare.id, not metric.
+        trackServerEvent(lit("operator_proved"), { proofCount: declare.id(proofs.length), assuranceTier: declare.id(assuranceTier) });
         auditService.log({
           eventType: "operator.proved",
           actor: (req as any).operatorId ?? (req as any).apiKeyId ?? reg.operator?.walletAddress,
