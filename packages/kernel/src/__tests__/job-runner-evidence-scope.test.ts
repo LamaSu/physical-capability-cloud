@@ -518,7 +518,7 @@ describe("Busy: an adapter serves one job at a time", () => {
     const commandsBeforeB = [...machine.commands];
     const b = await new JobRunner(machine, [], camera, emitter).run({ jobId: "job-busy-B", stepId: STEP, gcodeHash: gcode(8), assuranceTier: 2 });
 
-    expect(b).toEqual({ success: false, error: "adapter machine-busy is in use by job job-busy-A", durationMs: expect.any(Number) });
+    expect(b).toEqual({ success: false, error: "adapter machine-busy is in use by job job-busy-A", busy: { adapterId: "machine-busy", jobId: "job-busy-A" }, durationMs: expect.any(Number) });
     expect(machine.commands, "commands sent once job B was refused").toEqual(commandsBeforeB);
     expect(registerStep.mock.calls.map(([jobId]) => jobId), "steps registered").toEqual(["job-busy-A"]);
 
@@ -552,7 +552,7 @@ describe("Busy: an adapter serves one job at a time", () => {
     const b = await new JobRunner(machineB, sensorsOf(false), cameraOf(false), emitter).run({ jobId: "job-share-B", stepId: STEP, gcodeHash: gcode(12), assuranceTier: 2 });
 
     const sharedId = shared === "camera" ? camera.id : sensor.id;
-    expect(b).toEqual({ success: false, error: `adapter ${sharedId} is in use by job job-share-A`, durationMs: expect.any(Number) });
+    expect(b).toEqual({ success: false, error: `adapter ${sharedId} is in use by job job-share-A`, busy: { adapterId: sharedId, jobId: "job-share-A" }, durationMs: expect.any(Number) });
     expect(machineB.commands, "commands sent to job B's own machine").toEqual([]);
 
     release.resolve();
@@ -574,7 +574,7 @@ describe("Busy: an adapter serves one job at a time", () => {
     await machine.started(1);
     await until(() => emitter.getEvents("job-dup", STEP).length === 3); // job A's load events are recorded
     const b = await new JobRunner(machine, [], camera, emitter).run(job);
-    expect(b).toEqual({ success: false, error: "adapter machine-dup is in use by job job-dup", durationMs: expect.any(Number) });
+    expect(b).toEqual({ success: false, error: "adapter machine-dup is in use by job job-dup", busy: { adapterId: "machine-dup", jobId: "job-dup" }, durationMs: expect.any(Number) });
 
     release.resolve();
     expect(await runA).toMatchObject({ success: true });

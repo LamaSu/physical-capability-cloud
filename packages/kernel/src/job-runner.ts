@@ -41,6 +41,12 @@ export interface JobResult {
   bundleId?: string;
   bundleHash?: string;
   error?: string;
+  /**
+   * Set when the run was refused because an adapter it needs is recording another
+   * job's evidence. Nothing ran and no step was registered: the device is not at
+   * fault, so a caller should queue or retry the job, never count a device failure.
+   */
+  busy?: { adapterId: string; jobId: string };
   durationMs: number;
 }
 
@@ -109,6 +115,7 @@ export class JobRunner {
       return {
         success: false,
         error: `adapter ${opened.busy.adapterId} is in use by job ${opened.busy.jobId}`,
+        busy: { adapterId: opened.busy.adapterId, jobId: opened.busy.jobId },
         durationMs: Date.now() - startTime,
       };
     }
