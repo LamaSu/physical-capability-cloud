@@ -11,7 +11,9 @@
  * In development: built-in mock mode simulating a Canon PIXMA TR8620a.
  *
  * IMPORTANT: The `ipp` package is an optional dependency. This adapter falls
- * back to mock mode automatically when the package is not available.
+ * back to mock mode automatically when the package is not available. It decides
+ * only once the import has settled: until then every call waits for it, and the
+ * adapter is marked simulated (see ippLoading).
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
@@ -100,13 +102,24 @@ export class IppAdapter implements MachineAdapter {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private ippClient: any = null;
   private ippAvailable = false;
+  /**
+   * The import of the optional `ipp` package, from construction until it settles; null once
+   * it has, and in declared mock mode, which imports nothing. Until it settles the adapter
+   * cannot tell real IPP from the mock fallback, so every call that routes on `ippAvailable`
+   * waits for it, and the source stays marked simulated (astra pack 467): no call takes the
+   * mock path unmarked, and nothing reads the adapter as real before `ipp` has loaded. The
+   * import is a local module load, so it settles.
+   */
+  private ippLoading: Promise<void> | null = null;
+  /** Set by dispose: a command that waited for `ipp` and finds it set runs nothing. */
+  private disposed = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private activeRealJobId: number | null = null;
 
   /**
    * What can still emit: a mock print job (from its start until it completes or is
    * cancelled; a paused one can be resumed), the real-mode poll loop, each poll and each
-   * real command in flight.
+   * real command in flight, and each command waiting for `ipp` to load.
    */
   private readonly work = new OutstandingWork();
   private endMockJob: (() => void) | null = null;
@@ -120,24 +133,25 @@ export class IppAdapter implements MachineAdapter {
       deviceType: "controller",
       kernelId: config.kernelId,
       firmwareVersion: "IPP-Adapter-1.0.0",
-      // Honesty marker: declared mock mode is simulation. (The real->mock
-      // auto-downgrade also sets this at the moment it is detected — see
-      // tryLoadIpp / noteMockRouting.)
-      ...(config.mockMode ? { simulated: true } : {}),
+      // Honesty marker: simulation until real IPP is proven. Declared mock mode is
+      // simulation. So is a real-configured adapter until its import of `ipp`
+      // succeeds, which alone sets simulated:false; an import that fails leaves it
+      // true (tryLoadIpp, noteMockRouting).
+      simulated: true,
     };
 
     // Attempt to load real IPP library unless mockMode is forced
     if (!config.mockMode) {
-      this.tryLoadIpp();
+      this.ippLoading = this.tryLoadIpp();
     }
   }
 
   /**
    * Surface the real->mock downgrade. An operator who set mockMode:false
-   * expects real IPP traffic; when the optional `ipp` package is missing (or
-   * still loading) every method silently routes to the mock branch. The
-   * events are payload-tagged mock:true, but the downgrade itself must be
-   * visible in logs and on the source marker — not discovered from bundles.
+   * expects real IPP traffic; when the optional `ipp` package is missing every
+   * method routes to the mock branch. The events are payload-tagged mock:true,
+   * but the downgrade itself must be visible in logs and on the source marker —
+   * not discovered from bundles.
    */
   private warnedMockRouting = false;
   private noteMockRouting(context: string): void {
@@ -157,6 +171,7 @@ export class IppAdapter implements MachineAdapter {
   // ---------------------------------------------------------------------------
 
   async getStatus(): Promise<MachineStatus> {
+    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       return this.mockStatus;
     }
@@ -170,6 +185,7 @@ export class IppAdapter implements MachineAdapter {
   }
 
   async getProgress(): Promise<number> {
+    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       return this.mockProgress;
     }
@@ -185,6 +201,24 @@ export class IppAdapter implements MachineAdapter {
   }
 
   async execute(command: MachineCommand): Promise<MachineCommandResult> {
+    // While `ipp` loads the adapter cannot route: the command waits for the import, as
+    // outstanding work (it may still emit), then takes the real or the mock path. A
+    // dispose meanwhile ends it there: it was accepted before, but runs nothing after.
+    const loading = this.ippLoading;
+    if (loading) {
+      return this.work.track(
+        loading.then(() =>
+          this.disposed
+            ? { success: false, message: `IPP adapter "${this.id}" was disposed while the 'ipp' package loaded: ${command.type} not run` }
+            : this.route(command),
+        ),
+      );
+    }
+    return this.route(command);
+  }
+
+  /** Runs `command` on real IPP once `ipp` has loaded, or on the mock, marked simulated, otherwise. */
+  private route(command: MachineCommand): MachineCommandResult | Promise<MachineCommandResult> {
     if (this.config.mockMode || !this.ippAvailable) {
       return this.executeMock(command);
     }
@@ -199,14 +233,16 @@ export class IppAdapter implements MachineAdapter {
    * Resolves once every print job has reported how it ended and nothing more can emit: a
    * mock job has emitted execution_completed or was cancelled; the real-mode poll loop has
    * reported execution_completed or execution_failed and stopped (or "stop" stopped it); and
-   * no poll or command is in flight. At once when none is. A paused mock job keeps it
-   * pending until it is resumed and completes, or is cancelled.
+   * no poll or command is in flight, including one waiting for `ipp` to load. At once when
+   * none is. A paused mock job keeps it pending until it is resumed and completes, or is
+   * cancelled.
    */
   quiesceEvidence(): Promise<void> {
     return this.work.idle();
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
     this.stopPolling();
     this.cancelMockJob();
     this.listeners = [];
@@ -217,18 +253,22 @@ export class IppAdapter implements MachineAdapter {
   // ---------------------------------------------------------------------------
 
   async getCapabilities(): Promise<IppCapabilities> {
+    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       return { ...this.mockCapabilities };
     }
 
     try {
       return await this.realGetPrinterAttributes();
-    } catch {
-      return { ...this.mockCapabilities };
+    } catch (err) {
+      // Refused, never answered with the mock printer's capabilities: an adapter marked
+      // real would pass a simulator's answer off as this printer's (astra pack 467).
+      throw new Error(`IPP Get-Printer-Attributes failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   async cancelJob(jobId: number): Promise<void> {
+    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       this.cancelMockJob();
       return;
@@ -427,17 +467,26 @@ export class IppAdapter implements MachineAdapter {
   // Real IPP implementation (via optional `ipp` package)
   // ---------------------------------------------------------------------------
 
-  private tryLoadIpp(): void {
-    // Dynamic import — if the `ipp` package isn't installed this is a no-op
-    import("ipp").then((mod) => {
-      this.ippClient = mod;
-      this.ippAvailable = true;
-    }).catch(() => {
-      // ipp not available — fall back to mock, LOUDLY: the operator asked for
-      // real mode and is getting a simulator instead.
-      this.ippAvailable = false;
-      this.noteMockRouting("optional 'ipp' package failed to import");
-    });
+  /** Loads the optional `ipp` package. Settles once it is decided; every call waits for that (see ippLoading). */
+  private tryLoadIpp(): Promise<void> {
+    return import("ipp")
+      .then(
+        (mod) => {
+          this.ippClient = mod;
+          this.ippAvailable = true;
+          // Real IPP from here on: the one place the marker says real.
+          this.source.simulated = false;
+        },
+        () => {
+          // ipp not available — fall back to mock, LOUDLY: the operator asked for
+          // real mode and is getting a simulator instead. The marker stays simulated.
+          this.ippAvailable = false;
+          this.noteMockRouting("optional 'ipp' package failed to import");
+        },
+      )
+      .finally(() => {
+        this.ippLoading = null;
+      });
   }
 
   private async executeReal(command: MachineCommand): Promise<MachineCommandResult> {
