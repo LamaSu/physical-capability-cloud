@@ -264,7 +264,10 @@ const ROWS: Row[] = [
     route: "PUT /api/operator/policy/:kernelId",
     method: "PUT",
     url: (s) => `/api/operator/policy/${s.kernelId}`,
-    body: () => ({ version: 1, emergencyStop: true, approvalMode: "auto" }),
+    // emergencyStop is no longer settable via a policy write (refvertical
+    // #4850) -- this body only needs to exercise the owner guard, not the
+    // (now-separate) e-stop routes, so it omits the field entirely.
+    body: () => ({ version: 1, approvalMode: "auto" }),
     refused: 401,
     ok: 200,
   },

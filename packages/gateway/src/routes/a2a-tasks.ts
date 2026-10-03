@@ -56,6 +56,7 @@ import { createJobFromSession } from "./paid-job-flow.js";
 import {
   KernelNotAcceptingJobsError,
   assertKernelAcceptsJobs,
+  readOperatorPolicy,
 } from "../services/kernel-emergency-stop.js";
 import { assertSessionLive } from "./session-liveness.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
@@ -264,12 +265,17 @@ export async function createPccQuote(
   const { db } = getStore();
   const now = new Date();
 
-  const policyRow = db
-    .select()
-    .from(operatorPolicies)
-    .where(eq(operatorPolicies.kernelId, params.kernelId))
-    .get();
-  const policy = (policyRow?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
+  // astra pack 150 HIGH: one of the "legacy" direct policy checks (grouped
+  // with negotiate session-create and fast-track entry in the pack's own
+  // narrative of what was deliberately left on this throw-based shape).
+  // readOperatorPolicy closes the malformed-value gap (an array in
+  // particular) without changing that shape: an unreadable/invalid row
+  // throws here, exactly as it already did for unparseable JSON.
+  const read = readOperatorPolicy(params.kernelId);
+  if (read.kind === "unavailable") {
+    throw new Error("Operator policy could not be read");
+  }
+  const policy = (read.kind === "ok" ? read.policy : DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
   if (policy.emergencyStop) {
     throw new Error("Operator has activated emergency stop");
   }

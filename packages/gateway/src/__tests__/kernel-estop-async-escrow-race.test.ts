@@ -218,18 +218,22 @@ describe("createJobFromSession: emergency stop during asynchronous escrow creati
           status: 409,
         });
 
-        // The escrow IS recorded (an explicit, recoverable row)...
+        // The escrow IS recorded (an explicit, recoverable row) -- seed data
+        // pre-populates unrelated escrows, so filter to this session's cwmId.
         const { db } = getStore();
-        const escrowRows = db.select().from(schema.escrows).all();
+        const escrowRows = db.select().from(schema.escrows).where(eq(schema.escrows.cwmId, "cwm-race")).all();
         expect(escrowRows).toHaveLength(1);
         expect(escrowRows[0].contractAddress.toLowerCase()).toBe(NEW_ESCROW.toLowerCase());
-        // ...but no job and no execution scope were published for it.
-        const jobRows = db.select().from(schema.jobs).where(eq(schema.jobs.kernelId, KERNEL_ID)).all();
+        // ...but no job and no execution scope were published for it. The
+        // seeded kernel already has unrelated jobs/scopes of its own, so
+        // filter to THIS session's own job id (its fixed value, not a
+        // generated one, since the session row already carries a jobId).
+        const jobRows = db.select().from(schema.jobs).where(eq(schema.jobs.id, "job-race")).all();
         expect(jobRows).toHaveLength(0);
         const scopeRows = db
           .select()
           .from(schema.executionScopes)
-          .where(eq(schema.executionScopes.kernelId, KERNEL_ID))
+          .where(eq(schema.executionScopes.jobId, "job-race"))
           .all();
         expect(scopeRows).toHaveLength(0);
       } finally {

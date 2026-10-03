@@ -40,7 +40,7 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
-import { assertKernelAcceptsJobs } from "../services/kernel-emergency-stop.js";
+import { assertKernelAcceptsJobs, readOperatorPolicy } from "../services/kernel-emergency-stop.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
@@ -371,6 +371,13 @@ export async function createJobFromSession(
       }
 
       escrowAddress = await withSignerLock(async () => {
+        // astra pack 150 MEDIUM: re-check the instant the signer is actually
+        // granted. A request that had to WAIT here (another job's sequence
+        // was already in flight) may have queued for a while; a stop that
+        // landed during that wait must be caught BEFORE spending the signer
+        // (and real gas, on a real chain) on a write we already know is
+        // doomed to be discarded by the recheck after escrow creation below.
+        assertKernelAcceptsJobs(session.kernelId);
         // createEscrowV3 handles the factory write + EscrowCreated decode.
         const addr = await createEscrowV3(
           account.address, // payer  = gateway signer
@@ -478,6 +485,11 @@ export async function createJobFromSession(
     //        tx (vs a drop) is a real contract error and throws immediately.
     const MAX_CREATE_ATTEMPTS = 3;
     escrowAddress = await withSignerLock(async () => {
+      // astra pack 150 MEDIUM: same recheck as the V3 Mode-A branch above --
+      // a request that waited for the signer re-verifies the instant it is
+      // granted, before spending it on a write the post-escrow recheck below
+      // would only have to discard anyway.
+      assertKernelAcceptsJobs(session.kernelId);
       let lastAddr = "";
       for (let attempt = 1; attempt <= MAX_CREATE_ATTEMPTS; attempt++) {
         let nonce = await publicClient.getTransactionCount({
@@ -609,6 +621,21 @@ export async function createJobFromSession(
       bondAmount: ms.bondAmount,
     });
   }
+
+  // astra pack 150 MEDIUM: the FIRST assertKernelAcceptsJobs call above (the
+  // function's opening statement) ran before any of the escrow work -- which,
+  // outside MOCK_SETTLEMENT, is genuinely asynchronous (on-chain writes). A
+  // stop activated anywhere during that work was never asked again, so once
+  // the chain write landed the job and its 1-hour execution scope were
+  // published regardless. Re-check here, AFTER the escrow (and its milestones)
+  // are durably recorded above but BEFORE either is created: a throw here
+  // leaves the escrow row as an explicit, recoverable state (a real escrow
+  // with no job attached) instead of granting new execution authority for a
+  // kernel that is now stopped. Callers already handle this throw the same
+  // way they handle every other failure from this function (e.g. the
+  // negotiation /commit and /retry-settlement routes move the session to
+  // 'settlement_failed' rather than leaving it falsely 'committed').
+  assertKernelAcceptsJobs(session.kernelId);
 
   // ── 2. Create the job ──────────────────────────────────────────────
   // (jobId was computed above, before escrow creation, so V2 milestones could
@@ -773,11 +800,19 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       const { db } = getStore();
       const now = new Date();
 
-      // Load operator policy
-      const policyRow = db.select().from(operatorPolicies)
-        .where(eq(operatorPolicies.kernelId, kernelId))
-        .get();
-      const policy = (policyRow?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
+      // Load operator policy. astra pack 150 HIGH: this fast-track entry is one
+      // of the "legacy 503" direct checks (verdict Q1, routes/paid-job-flow.ts:780)
+      // deliberately left on its own 503 message/status in an earlier round, so
+      // existing tests pinning that shape still stand. readOperatorPolicy closes
+      // the malformed-value gap (an array in particular) without changing that
+      // shape: an unreadable/invalid row throws, landing in the catch below as
+      // the existing generic 500 (fast_track_failed) -- same as unparseable JSON
+      // already did.
+      const read = readOperatorPolicy(kernelId);
+      if (read.kind === "unavailable") {
+        throw new Error("Operator policy could not be read");
+      }
+      const policy = (read.kind === "ok" ? read.policy : DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
 
       if (policy.emergencyStop) {
         return reply.status(503).send({ error: "Operator has activated emergency stop" });

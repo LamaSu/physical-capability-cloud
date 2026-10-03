@@ -13,7 +13,18 @@ import {
   requireOwnerOf,
 } from "../auth/kernel-owner-guard.js";
 import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
-import { checkKernelAcceptsJobs, replyKernelNotAccepting } from "../services/kernel-emergency-stop.js";
+import {
+  checkKernelAcceptsJobs,
+  readOperatorPolicy,
+  replyKernelNotAccepting,
+} from "../services/kernel-emergency-stop.js";
+
+/** 400 error code for a policy PUT/PATCH that tries to change emergencyStop.
+ *  Stopping and resuming go ONLY through the dedicated routes below -- see
+ *  their doc comments for why (the stop's side effects, like rejecting
+ *  pending approvals, only run there). Shared between PUT and PATCH so the
+ *  two can never drift to different codes for the same refusal. */
+const EMERGENCY_STOP_IMMUTABLE_VIA_POLICY_WRITE = "emergency_stop_immutable_via_policy_write";
 
 const { operatorPolicies, pendingApprovals } = schema;
 
@@ -110,24 +121,18 @@ export async function operatorRoutes(app: FastifyInstance) {
         if (!actor) return reply;
         if (!(await requireOwnerOf(actor, reply, req.params.kernelId))) return reply;
       }
-      let row: typeof operatorPolicies.$inferSelect | undefined;
-      try {
-        const { db } = getStore();
-        row = db.select().from(operatorPolicies)
-          .where(eq(operatorPolicies.kernelId, req.params.kernelId))
-          .get();
-      } catch (err) {
+      const read = readOperatorPolicy(req.params.kernelId);
+      if (read.kind === "unavailable") {
         req.log.error(
-          { err, kernelId: req.params.kernelId },
-          "operator policy read failed; answering 503 policy_unavailable",
+          { kernelId: req.params.kernelId },
+          "operator policy read failed or unreadable; answering 503 policy_unavailable",
         );
         return reply.status(503).send({ error: "policy_unavailable" });
       }
-
-      if (!row) {
+      if (read.kind === "missing") {
         return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };
       }
-      return { policy: row.policy, updatedAt: row.updatedAt };
+      return { policy: read.policy, updatedAt: read.updatedAt };
     },
   );
 
@@ -149,6 +154,31 @@ export async function operatorRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: "Invalid policy: version must be 1" });
       }
       if (!(await requireOwnerOf(actor, reply, req.params.kernelId))) return reply;
+
+      // refvertical #4850: emergencyStop may change ONLY through
+      // POST /emergency-stop or /emergency-resume (see their doc comments),
+      // never through a policy write. Checked against the CURRENT value,
+      // whether or not the body includes the field: this is a full REPLACE,
+      // so a body that simply omits emergencyStop would otherwise silently
+      // CLEAR a real stop the instant it landed (the new row reads back with
+      // no emergencyStop key at all -> falsy -> not stopped). An invalid
+      // existing row answers 503 here rather than guessing at a comparison.
+      const read = readOperatorPolicy(req.params.kernelId);
+      if (read.kind === "unavailable") {
+        return reply.status(503).send({ error: "policy_unavailable" });
+      }
+      const currentlyStopped = Boolean(
+        read.kind === "ok" ? read.policy.emergencyStop : DEFAULT_OPERATOR_POLICY.emergencyStop,
+      );
+      const requestedStopped = Boolean((policy as unknown as Record<string, unknown>).emergencyStop);
+      if (requestedStopped !== currentlyStopped) {
+        return reply.status(400).send({
+          error: EMERGENCY_STOP_IMMUTABLE_VIA_POLICY_WRITE,
+          message:
+            "emergencyStop can only be changed via POST /api/operator/emergency-stop or " +
+            "/api/operator/emergency-resume, not PUT /api/operator/policy/:kernelId.",
+        });
+      }
 
       try {
         const { db } = getStore();
@@ -187,14 +217,39 @@ export async function operatorRoutes(app: FastifyInstance) {
       if (!(await requireKernelOwner(req, reply, req.params.kernelId))) return reply;
 
       try {
-        const { db } = getStore();
-        const row = db.select().from(operatorPolicies)
-          .where(eq(operatorPolicies.kernelId, req.params.kernelId))
-          .get();
+        const read = readOperatorPolicy(req.params.kernelId);
+        if (read.kind === "unavailable") {
+          // Same effect as the read itself throwing (the pre-existing
+          // behavior for a stored value that cannot be parsed at all): caught
+          // below as a generic failure. Never merge a patch over a policy we
+          // could not verify, and never write a default over it.
+          throw new Error("Operator policy could not be read");
+        }
+        const existing = (read.kind === "ok" ? read.policy : DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
 
-        const existing = (row?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
+        // refvertical #4850: emergencyStop may change ONLY through
+        // POST /emergency-stop or /emergency-resume -- a PATCH that flips it
+        // skips the stop's side effects (rejecting pending approvals), and a
+        // PATCH-stop followed immediately by a PATCH-resume would leave
+        // queued work completely undisturbed, as if the stop never ran.
+        // Merge semantics mean an OMITTED field never changes the existing
+        // value, so only a patch that explicitly NAMES the key is checked.
+        if (Object.prototype.hasOwnProperty.call(patch ?? {}, "emergencyStop")) {
+          const currentlyStopped = Boolean((existing as unknown as Record<string, unknown>).emergencyStop);
+          const requestedStopped = Boolean((patch as unknown as Record<string, unknown>).emergencyStop);
+          if (requestedStopped !== currentlyStopped) {
+            return reply.status(400).send({
+              error: EMERGENCY_STOP_IMMUTABLE_VIA_POLICY_WRITE,
+              message:
+                "emergencyStop can only be changed via POST /api/operator/emergency-stop or " +
+                "/api/operator/emergency-resume, not PATCH /api/operator/policy/:kernelId.",
+            });
+          }
+        }
+
         const merged = { ...existing, ...patch, version: 1 } as OperatorPolicy;
         const now = new Date().toISOString();
+        const { db } = getStore();
 
         db.insert(operatorPolicies)
           .values({
@@ -241,15 +296,21 @@ export async function operatorRoutes(app: FastifyInstance) {
     if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
 
     try {
-      const { db } = getStore();
-      const row = db.select().from(operatorPolicies)
-        .where(eq(operatorPolicies.kernelId, kernelId))
-        .get();
-
-      const policy = (row?.policy ?? { ...DEFAULT_OPERATOR_POLICY }) as unknown as OperatorPolicy;
+      const read = readOperatorPolicy(kernelId);
+      if (read.kind === "unavailable") {
+        // astra pack 150 HIGH: a parseable-but-wrong-shaped row (an array, in
+        // particular -- typeof [] === "object", and setting a named property
+        // on an array "succeeds" in memory but vanishes on the next JSON
+        // serialization) must never let this route answer 200 {stopped:true}
+        // while persisting nothing. Fail the same way a read that throws
+        // outright already does: 500, no write at all.
+        throw new Error("Operator policy could not be read");
+      }
+      const policy = (read.kind === "ok" ? read.policy : { ...DEFAULT_OPERATOR_POLICY }) as unknown as OperatorPolicy;
       policy.emergencyStop = true;
       const now = new Date().toISOString();
 
+      const { db } = getStore();
       db.insert(operatorPolicies)
         .values({ kernelId, policy: policy as any, updatedAt: now, updatedBy: "emergency-stop" })
         .onConflictDoUpdate({
@@ -290,17 +351,19 @@ export async function operatorRoutes(app: FastifyInstance) {
     if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
 
     try {
-      const { db } = getStore();
-      const row = db.select().from(operatorPolicies)
-        .where(eq(operatorPolicies.kernelId, kernelId))
-        .get();
+      const read = readOperatorPolicy(kernelId);
+      if (read.kind === "missing") return reply.status(404).send({ error: "No policy found for kernel" });
+      if (read.kind === "unavailable") {
+        // Same reasoning as emergency-stop above: never guess at a row we
+        // cannot trust. 500, no write.
+        throw new Error("Operator policy could not be read");
+      }
 
-      if (!row) return reply.status(404).send({ error: "No policy found for kernel" });
-
-      const policy = row.policy as unknown as OperatorPolicy;
+      const policy = read.policy as unknown as OperatorPolicy;
       policy.emergencyStop = false;
       const now = new Date().toISOString();
 
+      const { db } = getStore();
       db.update(operatorPolicies)
         .set({ policy: policy as any, updatedAt: now, updatedBy: "emergency-resume" })
         .where(eq(operatorPolicies.kernelId, kernelId))
@@ -353,14 +416,18 @@ export async function operatorRoutes(app: FastifyInstance) {
     }
     const isOwner = verdict.ok;
     try {
-      const { db } = getStore();
-      const policyRow = db.select().from(operatorPolicies)
-        .where(eq(operatorPolicies.kernelId, kernelId))
-        .get();
-      const policy = (policyRow?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
+      const read = readOperatorPolicy(kernelId);
+      if (read.kind === "unavailable") {
+        // astra pack 150 HIGH: never decide this on a row we cannot trust
+        // (an array included -- see kernel-emergency-stop.ts). Same effect
+        // as the read throwing outright: caught below as a generic failure.
+        throw new Error("Operator policy could not be read");
+      }
+      const policy = (read.kind === "ok" ? read.policy : DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
       if (policy.emergencyStop) {
         return reply.status(503).send({ error: "Operator has activated emergency stop", kernelId });
       }
+      const { db } = getStore();
       const approved = isOwner && policy.approvalMode === "auto";
 
       const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

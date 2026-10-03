@@ -34,7 +34,11 @@ import type {
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { createJobFromSession, isMockSettlement } from "./paid-job-flow.js";
-import { checkKernelAcceptsJobs, replyKernelNotAccepting } from "../services/kernel-emergency-stop.js";
+import {
+  checkKernelAcceptsJobs,
+  readOperatorPolicy,
+  replyKernelNotAccepting,
+} from "../services/kernel-emergency-stop.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
   getCapabilityDescriptor,
@@ -191,11 +195,20 @@ export async function negotiationRoutes(app: FastifyInstance) {
       const { db } = getStore();
       const now = new Date();
 
-      // Load operator policy (snapshot constraints)
-      const policyRow = db.select().from(operatorPolicies)
-        .where(eq(operatorPolicies.kernelId, body.kernelId))
-        .get();
-      const policy = (policyRow?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
+      // Load operator policy (snapshot constraints). astra pack 150 HIGH: this
+      // route is one of the "legacy 503" direct checks (verdict Q1,
+      // routes/negotiation.ts:198) that predate the shared checkKernelAcceptsJobs
+      // helper and were deliberately left on their own 503 message/status in an
+      // earlier round, so existing tests pinning that shape still stand. Reading
+      // through readOperatorPolicy closes the malformed-value gap (an array, in
+      // particular) WITHOUT changing that pinned shape: an unreadable/invalid row
+      // throws here, same as it already did for unparseable JSON, landing in the
+      // catch below as the existing generic 500.
+      const read = readOperatorPolicy(body.kernelId);
+      if (read.kind === "unavailable") {
+        throw new Error("Operator policy could not be read");
+      }
+      const policy = (read.kind === "ok" ? read.policy : DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
 
       // Check emergency stop
       if (policy.emergencyStop) {

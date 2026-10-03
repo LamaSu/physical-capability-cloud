@@ -264,7 +264,7 @@ describe("JobFacade.submit (POST /api/jobs/submit, the composition executor)", (
     expect(jobsFor(kernelId)).toBe(0);
   });
 
-  it("[repro] a policy that sets emergencyStop another way (a PUT, not the stop route) is a stop too", async () => {
+  it("a policy PUT can no longer act as a side-door stop (refvertical #4850): refused 400, the kernel still takes jobs", async () => {
     const { kernelId, capabilityId } = await ownedKernel("facade-put");
     const put = await app.inject({
       method: "PUT",
@@ -272,12 +272,12 @@ describe("JobFacade.submit (POST /api/jobs/submit, the composition executor)", (
       headers: asOwner(),
       payload: { version: 1, approvalMode: "manual", emergencyStop: true },
     });
-    expect(put.statusCode, put.body).toBe(200);
+    expect(put.statusCode, put.body).toBe(400);
+    expect(put.json().error).toBe("emergency_stop_immutable_via_policy_write");
+    // The refused PUT changed nothing: the kernel is NOT stopped as a side effect.
     const result = await submit(kernelId, capabilityId);
-    expect(result.success).toBe(false);
-    if (result.success) return;
-    expect(result.error.code).toBe(STOPPED);
-    expect(jobsFor(kernelId)).toBe(0);
+    expect(result.success).toBe(true);
+    expect(jobsFor(kernelId)).toBe(1);
   });
 
   it("control: a policy with emergencyStop false takes jobs", async () => {

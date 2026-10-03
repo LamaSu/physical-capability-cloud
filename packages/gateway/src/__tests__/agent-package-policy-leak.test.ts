@@ -49,14 +49,24 @@ beforeAll(async () => {
   const { getKernelFacade } = await import("../facades/index.js");
   const reg = await getKernelFacade().register({ id: KERNEL, name: "Owner's kernel" }, OWNER);
   expect(reg.success).toBe(true);
-  // The owner sets a distinctive policy (via the owner-only write path).
+  // The owner sets a distinctive policy (via the owner-only write path), then
+  // activates the e-stop through the dedicated route: PUT/PATCH can no longer
+  // set emergencyStop directly (refvertical #4850), so a fixture that needs
+  // BOTH composes the two calls, the same way an operator actually would.
   const put = await app.inject({
     method: "PUT",
     url: `/api/operator/policy/${KERNEL}`,
     headers: { authorization: `Bearer ${ownerKey}` },
-    payload: { version: 1, approvalMode: "manual", emergencyStop: true },
+    payload: { version: 1, approvalMode: "manual" },
   });
   expect(put.statusCode, put.body).toBeLessThan(300);
+  const stopRes = await app.inject({
+    method: "POST",
+    url: "/api/operator/emergency-stop",
+    headers: { authorization: `Bearer ${ownerKey}` },
+    payload: { kernelId: KERNEL, reason: "fixture" },
+  });
+  expect(stopRes.statusCode, stopRes.body).toBe(200);
 });
 
 afterAll(async () => {

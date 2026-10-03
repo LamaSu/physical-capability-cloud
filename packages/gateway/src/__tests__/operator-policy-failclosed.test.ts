@@ -114,6 +114,24 @@ async function putPolicy(kernelId: string, policy: Record<string, unknown>): Pro
   expect(res.statusCode, res.body).toBe(200);
 }
 
+/**
+ * PUT the given fields, then flip emergencyStop:true through the dedicated
+ * route. A policy write can no longer set emergencyStop directly (refvertical
+ * #4850 -- see operator-policy-estop-immutable.test.ts), so a fixture that
+ * needs "stopped AND these other fields" composes the two calls, the same
+ * way an operator actually would. `policy` must not itself set emergencyStop.
+ */
+async function putPolicyThenStop(kernelId: string, policy: Record<string, unknown>): Promise<void> {
+  await putPolicy(kernelId, policy);
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/operator/emergency-stop",
+    headers: asOwner(),
+    payload: { kernelId, reason: "test fixture" },
+  });
+  expect(res.statusCode, res.body).toBe(200);
+}
+
 /** Overwrite the stored policy with garbage: the row exists but cannot be read. */
 function makeUnreadable(kernelId: string): void {
   getStore().db.run(
@@ -236,7 +254,7 @@ describe("GET /api/operator/policy/:kernelId: a failed read is never a policy", 
 
     it("[repro] a kernel in e-stop never reads as clear: no policy, no emergencyStop field", async () => {
       const kernelId = await ownedKernel("get-estop");
-      await putPolicy(kernelId, { approvalMode: "manual", emergencyStop: true });
+      await putPolicyThenStop(kernelId, { approvalMode: "manual" });
       let res!: Awaited<ReturnType<typeof read>>;
       await during(kernelId, async () => {
         res = await read(asOwner(), kernelId);
@@ -288,7 +306,7 @@ describe("GET /api/operator/policy/:kernelId: a failed read is never a policy", 
 
   it("control: a stored row is returned as stored, with its e-stop, and is not marked default", async () => {
     const kernelId = await ownedKernel("get-stored");
-    await putPolicy(kernelId, { approvalMode: "manual", emergencyStop: true });
+    await putPolicyThenStop(kernelId, { approvalMode: "manual" });
     const res = await read(asOwner(), kernelId);
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().policy.emergencyStop).toBe(true);
@@ -299,7 +317,7 @@ describe("GET /api/operator/policy/:kernelId: a failed read is never a policy", 
 
   it("[repro] the failure is not remembered: 503 while the store is down, the stored policy once it is back", async () => {
     const kernelId = await ownedKernel("get-recover");
-    await putPolicy(kernelId, { approvalMode: "manual", emergencyStop: true });
+    await putPolicyThenStop(kernelId, { approvalMode: "manual" });
     const during503 = await whileTableUnavailable(() => read(asOwner(), kernelId));
     expect(during503.statusCode).toBe(503);
     const after = await read(asOwner(), kernelId);
@@ -414,7 +432,7 @@ describe("POST /api/operator/emergency-stop: a bare-array policy row must not pr
 describe("operator.ts: POST /api/operator/approvals does not decide on a default when the policy cannot be read", () => {
   it("refuses (not 2xx) and stores no approval, for the owner and for anyone else", async () => {
     const kernelId = await ownedKernel("approvals");
-    await putPolicy(kernelId, { approvalMode: "auto", emergencyStop: true });
+    await putPolicyThenStop(kernelId, { approvalMode: "auto" });
     makeUnreadable(kernelId);
     for (const headers of [asOwner(), asStranger()]) {
       const res = await app.inject({
@@ -498,7 +516,7 @@ describe("POST /api/jobs/submit: a policy that cannot be read refuses the job", 
 describe("negotiation / fast-track / A2A: a policy that cannot be read creates no session", () => {
   it("POST /api/negotiate/session: refused (500), no session stored", async () => {
     const kernelId = await ownedKernel("neg-create");
-    await putPolicy(kernelId, { approvalMode: "manual", emergencyStop: true });
+    await putPolicyThenStop(kernelId, { approvalMode: "manual" });
     makeUnreadable(kernelId);
     const res = await negotiationApp.inject({
       method: "POST",
@@ -528,7 +546,7 @@ describe("negotiation / fast-track / A2A: a policy that cannot be read creates n
 
   it("POST /api/jobs/submit-from-discovery: refused (500), no session stored", async () => {
     const kernelId = await ownedKernel("fast-track");
-    await putPolicy(kernelId, { approvalMode: "manual", emergencyStop: true });
+    await putPolicyThenStop(kernelId, { approvalMode: "manual" });
     makeUnreadable(kernelId);
     const res = await paidJobApp.inject({
       method: "POST",
@@ -542,7 +560,7 @@ describe("negotiation / fast-track / A2A: a policy that cannot be read creates n
 
   it("A2A pcc-quote (createPccQuote): rejects, and the error is not an e-stop-clear quote; no session stored", async () => {
     const kernelId = await ownedKernel("a2a-quote");
-    await putPolicy(kernelId, { approvalMode: "manual", emergencyStop: true });
+    await putPolicyThenStop(kernelId, { approvalMode: "manual" });
     makeUnreadable(kernelId);
     await expect(
       createPccQuote({ userAgentId: "agent-failclosed", kernelId, capabilityType: "fdm" }),
@@ -558,7 +576,7 @@ describe("negotiation / fast-track / A2A: a policy that cannot be read creates n
 describe("kernel-agent-package.ts: a policy that cannot be read is not described as the default", () => {
   it("GET /api/kernels/:id/agent-package: owner gets 500, never a package carrying a default operator_policy", async () => {
     const kernelId = await ownedKernel("pkg-get");
-    await putPolicy(kernelId, { approvalMode: "manual", emergencyStop: true });
+    await putPolicyThenStop(kernelId, { approvalMode: "manual" });
     makeUnreadable(kernelId);
     const res = await app.inject({
       method: "GET",

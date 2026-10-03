@@ -64,24 +64,70 @@ function unavailable(kernelId: string): KernelAcceptsJobs {
 }
 
 /**
- * Whether `kernelId` may be given work now. Never throws. One read of the stored
- * policy; see the file comment for the three outcomes.
+ * A plain policy object: not null, not an array, and `typeof === "object"`.
+ * The ONLY shape a stored policy row may safely be read as.
+ *
+ * astra pack 150 HIGH: `typeof [] === "object"`, so a bare JSON array used to
+ * slip past a `policy === null || typeof policy !== "object"` guard. Its
+ * `.emergencyStop` then read as `undefined` (not stopped) -- and, in routes
+ * that read-modify-write the policy, setting `.emergencyStop = true` on the
+ * array itself "succeeded" in memory but vanished on the next JSON
+ * serialization (arrays serialize only their indexed elements, never named
+ * properties), so the write silently persisted nothing.
  */
-export function checkKernelAcceptsJobs(kernelId: string): KernelAcceptsJobs {
-  let policy: unknown;
+function isPolicyObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The result of reading a kernel's stored operator policy: see `readOperatorPolicy`. */
+export type PolicyRead =
+  | { kind: "missing" }
+  | { kind: "ok"; policy: Record<string, unknown>; updatedAt: string }
+  | { kind: "unavailable" };
+
+/**
+ * Read a kernel's stored operator policy, telling a MISSING row (the kernel
+ * never set one) apart from an INVALID one (the stored value parsed fine but
+ * is not a usable policy object: an array, a JSON `null`, or a primitive) and
+ * from a read that failed outright (the store could not be opened, or the
+ * query/JSON parse threw). The latter two collapse to the SAME "unavailable"
+ * outcome on purpose: every caller must treat them identically (refuse --
+ * never read either one as "no policy"), because the default policy has
+ * `emergencyStop: false` and silently falling back to it on any kind of
+ * unreadable row would hand a stopped kernel's work out again.
+ *
+ * This is the one place that decides whether a stored value may be trusted.
+ * `checkKernelAcceptsJobs` below and every other consumer (GET, the
+ * read-modify-write policy routes, the emergency-stop/resume routes,
+ * approval creation, session creation, the A2A quote path) all read through
+ * this function rather than re-deriving their own `row?.policy ?? DEFAULT`
+ * check, so the validation can never drift between them again.
+ */
+export function readOperatorPolicy(kernelId: string): PolicyRead {
+  let row: { policy: unknown; updatedAt: string } | undefined;
   try {
-    const row = getStore()
+    row = getStore()
       .db.select()
       .from(operatorPolicies)
       .where(eq(operatorPolicies.kernelId, kernelId))
       .get();
-    if (!row) return { ok: true };
-    policy = row.policy;
   } catch {
-    return unavailable(kernelId);
+    return { kind: "unavailable" };
   }
-  if (policy === null || typeof policy !== "object") return unavailable(kernelId);
-  if ((policy as { emergencyStop?: unknown }).emergencyStop) return stopped(kernelId);
+  if (!row) return { kind: "missing" };
+  if (!isPolicyObject(row.policy)) return { kind: "unavailable" };
+  return { kind: "ok", policy: row.policy, updatedAt: row.updatedAt };
+}
+
+/**
+ * Whether `kernelId` may be given work now. Never throws. One read of the stored
+ * policy; see the file comment for the three outcomes.
+ */
+export function checkKernelAcceptsJobs(kernelId: string): KernelAcceptsJobs {
+  const read = readOperatorPolicy(kernelId);
+  if (read.kind === "unavailable") return unavailable(kernelId);
+  if (read.kind === "missing") return { ok: true };
+  if (read.policy.emergencyStop) return stopped(kernelId);
   return { ok: true };
 }
 

@@ -495,12 +495,15 @@ describe("R2 approval submission and listing: no side door", () => {
 describe("N31 policy READ: owner-or-admin (adk #3972)", () => {
   it("[neg] a non-owner cannot read another kernel's operator policy", async () => {
     const kernelId = await ownedKernel("n31-policy-victim");
-    // Give it a distinctive policy so a leak would be visible.
+    // Give it a distinctive policy so a leak would be visible. approvalMode
+    // alone is enough to differ from DEFAULT_OPERATOR_POLICY ("manual"); this
+    // PUT no longer touches emergencyStop (refvertical #4850 -- that field is
+    // settable only via the dedicated stop/resume routes).
     const put = await app.inject({
       method: "PUT",
       url: `/api/operator/policy/${kernelId}`,
       headers: asOwner(),
-      payload: { version: 1, approvalMode: "manual", emergencyStop: true },
+      payload: { version: 1, approvalMode: "auto" },
     });
     expect(put.statusCode, put.body).toBeLessThan(300);
     const res = await app.inject({ method: "GET", url: `/api/operator/policy/${kernelId}`, headers: asAttacker() });
