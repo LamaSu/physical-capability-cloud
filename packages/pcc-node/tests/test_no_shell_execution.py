@@ -270,16 +270,37 @@ def chains_used(source):
 
 
 def executables_started(source):
-    """The fixed executables a source starts, as written."""
+    """The fixed executables a source starts, as written.
+
+    A call counts only when it resolves, through the source's imports, to an allowed starter,
+    as violations() resolves it: a local function or method that happens to be named call or
+    run is not a starter (runtime.py's call("GET", path) is an HTTP request).
+    """
+    tree = ast.parse(source)
+    modules = {}  # local name -> module, for `import subprocess as sp`
+    names = {}    # local name -> (module, attr), for `from subprocess import run`
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in MODULES:
+                    modules[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module in MODULES:
+            for alias in node.names:
+                names[alias.asname or alias.name] = (node.module, alias.name)
     started = set()
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-        if name not in {a for _, a in ALLOWED_STARTS}:
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in modules:
+            resolved = (modules[func.value.id], func.attr)
+        elif isinstance(func, ast.Name):
+            resolved = names.get(func.id)
+        else:
+            resolved = None
+        if resolved not in ALLOWED_STARTS:
             continue
-        argv = node.args[0] if node.args else None
+        argv = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "args"), None)
         first = argv.elts[0] if isinstance(argv, (ast.List, ast.Tuple)) and argv.elts else argv
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
             started.add(first.value)
@@ -434,3 +455,24 @@ def test_the_guard_catches(label):
 @pytest.mark.parametrize("label", sorted(SAFE))
 def test_the_guard_allows(label):
     assert violations(SAFE[label]) == [], label
+
+
+# The allowlist check's own proof: a start counts when it resolves to an allowed starter
+# through any import form, and a call that only shares a starter's name does not count.
+STARTS = {
+    "subprocess.run": ("import subprocess\nsubprocess.run(['arp', '-a'])", {"arp"}),
+    "an aliased module": ("import subprocess as sp\nsp.Popen(('dd', 'if=x'))", {"dd"}),
+    "an imported starter": ("from subprocess import check_output\ncheck_output(['sysctl', '-n', 'x'])", {"sysctl"}),
+    "an aliased starter": ("from subprocess import call as c\nc(['journalctl'])", {"journalctl"}),
+    "args= keyword": ("import subprocess\nsubprocess.run(args=['v4l2-ctl', '--all'])", {"v4l2-ctl"}),
+    "create_subprocess_exec": ("import asyncio\nasyncio.create_subprocess_exec('ffmpeg', '-i', dev)", {"ffmpeg"}),
+    "a local function named call": ("def call(method, path):\n    return method\ncall('GET', '/status')", set()),
+    "a method named run": ("client.run(['GET', '/x'])", set()),
+    "a starter name from another module": ("from helpers import run\nrun(['GET'])", set()),
+}
+
+
+@pytest.mark.parametrize("label", sorted(STARTS))
+def test_the_allowlist_check_counts_only_real_starts(label):
+    source, expected = STARTS[label]
+    assert executables_started(source) == expected, label
