@@ -80,7 +80,8 @@ robot, a "public" host and a proxy:
 `GET /api/operator/approvals?status=approved` lists every approval whose status is
 `approved`, and no gateway route moves one out of that status on its own, so
 `ot2-agent.py daemon` sees the same record on every poll, every `POLL_INTERVAL` seconds.
-Two layers keep it from running twice (steward P0 #4698, readmodels #4558):
+Two layers keep it from running twice (steward P0 #4698, readmodels #4558). The second, the
+gateway's consume, is the one that decides:
 
 1. **A local marker, written before anything is dispatched.** `claim_job_once()` writes
    one file per approval -- named by the SHA-256 hex of its `id` (or, if it has none, its
@@ -92,32 +93,21 @@ Two layers keep it from running twice (steward P0 #4698, readmodels #4558):
    directory, a full disk) fails closed -- the job is not run, and it is picked up again
    once the problem is fixed.
 
-   **Durability.** A marker only survives a power cut if its directory entry, and the entry
-   of every directory on the state path, reach the disk. So after each marker is written,
-   every directory from `OT2_AGENT_STATE_DIR` up to the filesystem root is fsynced, on
-   every claim. That includes directories an earlier, failed attempt created and never
-   synced. When that can't be done
+   **Durability, as a best effort.** After each marker is written, every directory from
+   `OT2_AGENT_STATE_DIR` up to the filesystem root is fsynced, on every claim, including
+   directories an earlier, failed attempt created and never synced. When that can't be done
    (an I/O error; or Windows, where a directory can't be fsynced this way), the marker is
-   kept, and:
-   - with `OT2_AGENT_SERVER_CONSUME=off`, where the marker is the ONLY record, the job is
-     **not run**: after a power cut the marker could be gone and the approval run again.
-     Fix the state directory and approve the job again;
-   - with the default `required`, the job still runs once the gateway consumes the
-     approval, because the gateway's consume is then the durable record: a consumed
-     approval never appears in the approved listing again. A WARNING says the local
-     marks aren't durable.
+   kept, the job still runs once the gateway consumes it, and a WARNING says the local marks
+   aren't durable.
 
-   **No symlinks on the state path with `OT2_AGENT_SERVER_CONSUME=off`.** A marker reached
-   through a symlink lives in the directories the link points into, which a sync of the
-   path as written would miss. So with `off`, the agent walks the state path one directory
-   at a time without following symlinks, creates the marker from the last one, and syncs
-   exactly the directories it walked. If any component of `OT2_AGENT_STATE_DIR` (or of the
-   default `~/.pcc/ot2-agent/handled`, home directory included) is a symlink, every job is
-   **refused**, and the error names the resolved path; set `OT2_AGENT_STATE_DIR` to it. The
-   default `required` mode still follows symlinks (its marks are best-effort there).
-2. **The gateway's consume route, for every other machine.** A marker on this machine
-   cannot stop a *different* machine from running the same approval. So, with the default
-   `OT2_AGENT_SERVER_CONSUME=required`, winning the local claim is necessary but not
+   **Why a marker is never enough on its own.** A marker can vanish. A power cut can lose
+   it. And any process that can rename or remove the state directory takes the markers off
+   the configured path, during a claim or between polls, so the next poll finds no marker
+   and claims the approval again (#499 r4). So no job runs on the strength of a marker:
+   every job must also be consumed on the gateway.
+2. **The gateway's consume route, for every machine, this one included.** A marker on this
+   machine cannot stop a *different* machine from running the same approval, and it cannot
+   stop a repeat here once it is gone. So winning the local claim is necessary but not
    sufficient: this process must also ask the gateway to consume the approval,
    `POST /api/operator/approvals/<id>/consume` (gateway WP-C, PR #445) -- a compare-and-set
    on the approval itself, `approved -> consumed`, that answers 200 to exactly one caller
@@ -132,28 +122,27 @@ Two layers keep it from running twice (steward P0 #4698, readmodels #4558):
 | anything else -- 401/403/404/5xx, a 200 without `"consumed": true`, a transport error | "retry" | no | released -- a later poll claims the approval again and asks again |
 
 A gateway that predates WP-C has no consume route and answers 404, which is the last row
-above: under the default, **no job runs** against such a gateway -- every approval is
-claimed, asked, refused by the 404, and released, over and over, until either the route
-is deployed or the operator sets `OT2_AGENT_SERVER_CONSUME=off` knowingly.
+above: **no job runs** against such a gateway -- every approval is claimed, asked, refused
+by the 404, and released, over and over, until the route is deployed.
+`OT2_AGENT_SERVER_CONSUME=off` does not change that: it runs no job at all.
 
 `OT2_AGENT_SERVER_CONSUME` (case-insensitive, surrounding whitespace ignored):
 
 - `required` -- the default; also what an unset or empty value means.
-- `off` -- skips the gateway consume call entirely, for a gateway that predates the
-  route. The local marker is then the only protection, and only on this machine;
-  `daemon_mode()` logs a WARNING at start that cross-machine at-most-once is **not**
-  enforced in this mode.
+- `off` -- **runs no job.** Each approved job is logged once at ERROR and left alone: no
+  marker, no gateway call. `daemon_mode()` logs an ERROR at start too. Chat and the camera
+  work as usual. (It used to skip the gateway and let the marker alone protect, but no
+  marker can, as above: #499 r4.)
 - anything else is logged once at ERROR and treated as `required`.
 
 **Running a refused approval again.** A "retry" outcome already asks again on the next
 poll, with nothing to do. For a "refused" approval (any 409, or a record with no usable
-id) there are two ways: approve the job again, which is a new approval with a new `id`
-and so runs once more; or delete its marker file -- named by the SHA-256 hex of the
-approval's `id` (or `jobId`) -- from `OT2_AGENT_STATE_DIR`. Only do the latter when no
-other agent might still be running that approval, since the marker is the only thing
-stopping a second run on this machine. An approval refused because the kernel's
-emergency stop was engaged does not start on its own once the stop is cleared -- approve
-it again to run it.
+id), approve the job again: a new approval has a new `id`, and runs once. Deleting its
+marker file (named by the SHA-256 hex of the approval's `id`, or `jobId`, in
+`OT2_AGENT_STATE_DIR`) only makes this machine ask the gateway again on the next poll, and
+the gateway decides: a consumed approval gets 409 and still does not run. An approval
+refused because the kernel's emergency stop was engaged does not start on its own once
+the stop is cleared -- approve it again to run it.
 
 ## What serving PCC from an OT-2 will look like
 

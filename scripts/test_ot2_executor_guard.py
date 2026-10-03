@@ -767,9 +767,7 @@ class DaemonLoopTestCase(FixtureCase):
 
     def setUp(self):
         super().setUp()
-        # Resolved, so the state path has no symlink in it even where the temp root has one (macOS's
-        # /var): with OT2_AGENT_SERVER_CONSUME=off a symlinked state path is refused (#499 r3).
-        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         # Four levels down, so an id that climbed out of the state dir would still land inside self.tmp.
         self.state = os.path.join(self.tmp, "one", "two", "three", "handled")
@@ -872,17 +870,12 @@ class DaemonLoopTestCase(FixtureCase):
         return sent
 
     def fail_open(self, make_error):
-        """Make os.open raise make_error() for the state dir and the files in it, whether it is named by
-        path or relative to a directory fd (as with OT2_AGENT_SERVER_CONSUME=off); every other open is
-        real."""
+        """Make os.open raise make_error() for files in the state dir; every other open is real."""
         real_open = os.open
         state = self.state
 
         def open_or_fail(path, flags, *args, **kwargs):
-            target = os.fspath(path)
-            if kwargs.get("dir_fd") is not None:
-                target = os.path.join(os.readlink("/proc/self/fd/%d" % kwargs["dir_fd"]), target)
-            if target.startswith(state):
+            if os.fspath(path).startswith(state):
                 raise make_error()
             return real_open(path, flags, *args, **kwargs)
 
@@ -995,15 +988,15 @@ class ApprovalRunsOnceTests(DaemonLoopTestCase):
         self.assertTrue(self.error_lines(), "refusals must be logged as errors")
         self.assertFalse(any("Error in poll loop" in line for line in self.logs), self.logs)
 
-    def test_with_server_consume_off_the_key_is_the_approval_id_then_the_job_id(self):
+    def test_with_server_consume_off_no_approval_is_claimed_or_run_and_each_is_logged_once(self):
         records = [without(approval(1), "id"), approval(2, id=""), approval(3, id=42)]
         with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}):
             sent = self.drive([records] * 3)
-        self.assertEqual(len(sent), 3, sent)
-        self.assertEqual(
-            self.markers(),
-            sorted(hashlib.sha256(key).hexdigest() for key in (b"job-1", b"job-2", b"42")),
-        )
+        self.assertEqual(sent, [])
+        self.assertEqual(self.markers(), [], "nothing is claimed with OFF")
+        self.assertEqual([c for c in self.calls if c[0] == "consume"], [])
+        refusals = [line for line in self.error_lines() if "runs no job" in line]
+        self.assertEqual(len(refusals), 3, self.logs)  # once per approval, not once per poll
 
     def test_under_the_default_a_jobid_only_record_is_refused_but_an_integer_id_is_consumed(self):
         records = [without(approval(1), "id"), approval(2, id=""), approval(3, id=42)]
@@ -1016,7 +1009,7 @@ class ApprovalRunsOnceTests(DaemonLoopTestCase):
         self.assertEqual(len(consumed), 1, consumed)
         self.assertEqual(consumed[0][2], "42")  # consume_on_gateway sends str(id)
         # All three are claimed on this machine, and a "refused" outcome keeps the mark, so none
-        # of the three is retried either -- same marker set as under OT2_AGENT_SERVER_CONSUME=off.
+        # of the three is retried either. The key is the approval id, then the job id.
         self.assertEqual(
             self.markers(),
             sorted(hashlib.sha256(key).hexdigest() for key in (b"job-1", b"job-2", b"42")),
@@ -1269,19 +1262,18 @@ class GatewayConsumeTests(DaemonLoopTestCase):
                 self.assertEqual(sent, [])
                 self.assertEqual(self.markers(), [], "a 200 without consumed:true must release the mark")
 
-    def test_server_consume_off_never_calls_the_gateway_and_warns_at_start(self):
+    def test_server_consume_off_never_calls_the_gateway_never_runs_a_job_and_says_so_at_start(self):
         with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}):
             sent = self.drive([[approval(8, id="gw-off")]] * 2)
-        self.assertEqual(len(sent), 1, sent)
+        self.assertEqual(sent, [])
         self.assertEqual([c for c in self.calls if c[0] == "consume"], [])
-        self.assertTrue(
-            any("NOT enforced" in line for line in self.logs if line.startswith("WARNING")), self.logs,
-        )
+        self.assertEqual(self.markers(), [])
+        self.assertTrue(any("NOT run in this mode" in line for line in self.error_lines()), self.logs)
 
     def test_server_consume_off_is_case_and_whitespace_insensitive(self):
         with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": " OFF "}):
             sent = self.drive([[approval(9, id="gw-off-padded")]] * 2)
-        self.assertEqual(len(sent), 1, sent)
+        self.assertEqual(sent, [])
         self.assertEqual([c for c in self.calls if c[0] == "consume"], [])
 
     def test_an_invalid_server_consume_value_behaves_as_required_and_logs_once(self):
@@ -1347,9 +1339,9 @@ print("CLAIM", m.claim_job_once({{"id": "race-1", "jobId": "job-race"}}))
 
 
 class MarkDurabilityTests(DaemonLoopTestCase):
-    """#499 r1 CRITICAL: a mark that cannot be made durable must not let a job run when the mark is
-    the only record (OT2_AGENT_SERVER_CONSUME=off). File fsync alone does not make the directory
-    entry durable, and new state directories must be synced into their parents."""
+    """#499 r1-r2: marks are synced (file, and every directory on the state path), as a best effort.
+    Since r4 no job runs with OT2_AGENT_SERVER_CONSUME=off, so a mark is never the only record: a
+    mark lost in a power cut cannot repeat a run, because the gateway consumed the approval."""
 
     @staticmethod
     def _directory_fsync_fails():
@@ -1363,22 +1355,22 @@ class MarkDurabilityTests(DaemonLoopTestCase):
 
         return mock.patch("os.fsync", fsync)
 
-    def test_with_consume_off_a_mark_that_cannot_be_made_durable_is_not_dispatched(self):
-        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}), self._directory_fsync_fails():
-            sent = self.drive([[approval(20, id="dur-1")]] * 2)
-        self.assertEqual(sent, [])
-        self.assertEqual(len(self.markers()), 1, "the mark is kept: it still blocks this machine")
-        self.assertTrue(any("durable" in line for line in self.logs if line.startswith("ERROR")), self.logs)
+    def test_a_mark_lost_in_a_power_cut_does_not_run_the_approval_again(self):
+        consumed = set()
 
-    def test_with_consume_off_a_lost_mark_after_a_power_cut_still_runs_the_approval_at_most_once(self):
-        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}):
-            with self._directory_fsync_fails():
-                first = self.drive([[approval(21, id="dur-2")]])
-            # The power cut: the mark's directory entry never reached the disk.
-            for name in self.markers():
-                os.remove(os.path.join(self.state, name))
-            restarted = fresh_agent()
-            second = self.drive([[approval(21, id="dur-2")]] * 2, module=restarted)
+        def gateway(approval_id, _n):  # one gateway across both processes
+            if approval_id in consumed:
+                return 409, {"error": "approval_not_consumable", "status": "consumed"}
+            consumed.add(approval_id)
+            return 200, {"consumed": True, "approvalId": approval_id}
+
+        with self._directory_fsync_fails():
+            first = self.drive([[approval(21, id="dur-2")]], consume=gateway)
+        # The power cut: the mark's directory entry never reached the disk.
+        for name in self.markers():
+            os.remove(os.path.join(self.state, name))
+        restarted = fresh_agent()
+        second = self.drive([[approval(21, id="dur-2")]] * 2, module=restarted, consume=gateway)
         self.assertEqual(len(first) + len(second), 1, (first, second))
 
     def test_with_consume_required_a_non_durable_mark_still_runs_once_because_the_gateway_is_the_record(self):
@@ -1400,7 +1392,7 @@ class MarkDurabilityTests(DaemonLoopTestCase):
             return real_fsync(fd)
 
         self.assertFalse(os.path.exists(self.state))
-        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}), mock.patch("os.fsync", fsync):
+        with mock.patch("os.fsync", fsync):
             sent = self.drive([[approval(23, id="dur-4")]])
         self.assertEqual(len(sent), 1, sent)
         state = os.path.realpath(self.state)
@@ -1432,9 +1424,8 @@ class MarkDurabilityTests(DaemonLoopTestCase):
 
 
 class MarkChainDurabilityTests(DaemonLoopTestCase):
-    """#499 r2 CRITICAL: under OFF, every claim must make the WHOLE state-directory path durable,
-    not just the directories that call created. A failed attempt can leave the chain created but
-    never synced; a later approval must not dispatch on top of it."""
+    """#499 r2: every claim syncs the WHOLE state-directory path, not just the directories that call
+    created. A failed attempt can leave the chain created but never synced; the next claim syncs it."""
 
     @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc/self/fd to name a directory fd")
     def test_a_later_approval_after_a_failed_one_syncs_every_directory_on_the_state_path(self):
@@ -1449,16 +1440,17 @@ class MarkChainDurabilityTests(DaemonLoopTestCase):
                 synced.append(os.path.realpath(os.readlink("/proc/self/fd/%d" % fd)))
             return real_fsync(fd)
 
-        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}), mock.patch("os.fsync", fsync):
-            # Approval A: the chain is created, its syncs fail, A is refused (the mark is kept).
+        with mock.patch("os.fsync", fsync):
+            # Approval A: the chain is created and its syncs fail. A still runs: the gateway
+            # consumed it, and that is the record (a WARNING says the marks aren't durable).
             first = self.drive([[approval(30, id="chain-a")]])
-            self.assertEqual(first, [])
-            # The operator fixes the disk and approves B.
+            self.assertEqual(len(first), 1, first)
+            # The disk is fixed and B is approved.
             failing["on"] = False
             second = self.drive([[approval(31, id="chain-b")]])
         self.assertEqual(len(second), 1, second)
         # Before B ran, every directory from the state dir up to the temp root was synced
-        # (each one persists its children's entries), so B's mark survives a power cut.
+        # (each one persists its children's entries), including the ones A's claim created.
         state = os.path.realpath(self.state)
         expected = []
         walk = state
@@ -1471,86 +1463,72 @@ class MarkChainDurabilityTests(DaemonLoopTestCase):
         self.assertEqual(missing, [], "B dispatched while these directories were never synced: {}".format(missing))
 
 
-class SymlinkedStatePathTests(DaemonLoopTestCase):
-    """#499 r3 CRITICAL: under OFF, a state path through a symlink must not dispatch on the strength of
-    syncing only the lexical path; the physical directories the mark lives in might never be synced."""
+class StateNamespaceTests(DaemonLoopTestCase):
+    """#499 r4 CRITICAL: a directory fd pins a directory, not its name. Another process that renames
+    the state directory (during a claim, or at any time between polls) takes the marks off the
+    configured path; the next poll recreates the path, finds no mark, and claims the approval again.
+    No local mark can prevent that, so a mark is never the record that a job may run: with OFF no
+    job runs at all, and with "required" the gateway's consume refuses the repeat."""
 
-    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc/self/fd to name a directory fd")
-    def test_with_consume_off_nothing_dispatches_before_every_physical_directory_of_the_mark_is_synced(self):
-        # The verdict's reproduction: record each directory fsync and each dispatch, in order.
-        link, physical = self._symlinked_state()
-        events = []
-        real_fsync = os.fsync
+    def _moving_the_state_dir_just_before_the_marker_is_created(self):
+        """os.open: just before the first O_CREAT | O_EXCL open (the marker), move the state dir into
+        another parent, as another process could. Every other open is real."""
+        real_open = os.open
+        destination = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(destination)
+        moved = []
 
-        def fsync(fd):
-            if stat.S_ISDIR(os.fstat(fd).st_mode):
-                events.append(("sync", os.path.realpath(os.readlink("/proc/self/fd/%d" % fd))))
-            return real_fsync(fd)
+        def open_after_moving(path, flags, *args, **kwargs):
+            if not moved and flags & os.O_CREAT and flags & os.O_EXCL:
+                os.rename(self.state, os.path.join(destination, "handled"))
+                moved.append(destination)
+            return real_open(path, flags, *args, **kwargs)
 
-        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": link, "OT2_AGENT_SERVER_CONSUME": "off"}), \
-                mock.patch("os.fsync", fsync):
-            self.drive([[approval(43, id="sym-4")]], on_turn=lambda messages: events.append(("dispatch", None)))
-        physical_chain = []
-        walk = os.path.realpath(physical)
-        while True:
-            physical_chain.append(walk)
-            if walk == self.tmp:
-                break
-            walk = os.path.dirname(walk)
-        synced = set()
-        for kind, target in events:
-            if kind == "sync":
-                synced.add(target)
-                continue
-            missing = [d for d in physical_chain if d not in synced]
-            self.assertEqual(missing, [], "dispatched while these directories were never synced: {}".format(missing))
+        return mock.patch.object(os, "open", open_after_moving), destination
 
-    def _symlinked_state(self):
+    def test_with_consume_off_a_rename_during_the_claim_does_not_run_the_approval_twice(self):
+        os.makedirs(self.state)
+        patch, destination = self._moving_the_state_dir_just_before_the_marker_is_created()
+        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}), patch:
+            sent = self.drive([[approval(50, id="ns-1")]] * 2)
+        self.assertLessEqual(len(sent), 1, sent)
+
+    def test_with_consume_off_a_rename_between_polls_does_not_run_the_approval_twice(self):
+        destination = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(destination)
+
+        def move_state_away(messages):
+            os.rename(self.state, os.path.join(destination, "handled"))
+
+        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}):
+            sent = self.drive([[approval(51, id="ns-2")]] * 2, on_turn=move_state_away)
+        self.assertLessEqual(len(sent), 1, sent)
+
+    def test_with_consume_required_a_rename_during_the_claim_runs_the_approval_at_most_once(self):
+        os.makedirs(self.state)
+        patch, _destination = self._moving_the_state_dir_just_before_the_marker_is_created()
+        with patch:
+            sent = self.drive([[approval(53, id="ns-4")]] * 3)
+        self.assertLessEqual(len(sent), 1, sent)
+
+    def test_with_consume_required_a_symlinked_state_path_still_runs_the_approval_once(self):
         physical = os.path.join(self.tmp, "volatile", "a", "b", "handled")
         os.makedirs(physical)
         link = os.path.join(self.tmp, "stable", "handled-link")
         os.makedirs(os.path.dirname(link))
         os.symlink(physical, link)
-        return link, physical
-
-    def test_with_consume_off_a_symlinked_state_path_is_refused(self):
-        link, physical = self._symlinked_state()
-        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": link, "OT2_AGENT_SERVER_CONSUME": "off"}):
-            sent = self.drive([[approval(40, id="sym-1")]] * 2)
-        self.assertEqual(sent, [])
-        self.assertTrue(any("symlink" in line for line in self.logs if line.startswith("ERROR")), self.logs)
-
-    def test_with_consume_off_a_symlinked_ancestor_is_refused_too(self):
-        real_parent = os.path.join(self.tmp, "volatile2", "deep")
-        os.makedirs(real_parent)
-        link_parent = os.path.join(self.tmp, "stable2")
-        os.symlink(real_parent, link_parent)
-        state = os.path.join(link_parent, "handled")
-        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": state, "OT2_AGENT_SERVER_CONSUME": "off"}):
-            sent = self.drive([[approval(41, id="sym-2")]])
-        self.assertEqual(sent, [])
-
-    def test_with_consume_off_the_physical_path_the_error_names_runs_the_approval_once(self):
-        link, physical = self._symlinked_state()
-        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": link, "OT2_AGENT_SERVER_CONSUME": "off"}):
-            self.assertEqual(self.drive([[approval(44, id="sym-5")]]), [])
-            self.assertTrue(any(physical in line for line in self.error_lines()), self.logs)
-        with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": physical, "OT2_AGENT_SERVER_CONSUME": "off"}):
-            sent = self.drive([[approval(44, id="sym-5")]] * 2)
-        self.assertEqual(len(sent), 1, sent)
-        self.assertEqual(os.listdir(physical), [hashlib.sha256(b"sym-5").hexdigest()])
-
-    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc/self/fd to name a directory fd")
-    def test_with_consume_off_a_marker_that_cannot_be_created_means_the_job_does_not_run(self):
-        with mock.patch.dict(os.environ, {"OT2_AGENT_SERVER_CONSUME": "off"}):
-            with self.fail_open(lambda: OSError(errno.ENOSPC, "No space left on device")):
-                self.assertEqual(self.drive([[approval(45, id="nospace")]] * 2), [])
-            self.assertEqual(self.markers(), [])
-            self.assertTrue(self.error_lines(), self.logs)
-            self.assertEqual(len(self.drive([[approval(45, id="nospace")]] * 2)), 1)
-
-    def test_with_consume_required_a_symlinked_state_path_still_runs_once(self):
-        link, _ = self._symlinked_state()
         with mock.patch.dict(os.environ, {"OT2_AGENT_STATE_DIR": link}):
-            sent = self.drive([[approval(42, id="sym-3")]] * 2)
+            sent = self.drive([[approval(54, id="ns-5")]] * 2)
         self.assertEqual(len(sent), 1, sent)
+
+    def test_with_consume_required_a_rename_between_polls_still_runs_the_approval_once(self):
+        destination = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(destination)
+
+        def move_state_away(messages):
+            os.rename(self.state, os.path.join(destination, "handled"))
+
+        sent = self.drive([[approval(52, id="ns-3")]] * 2, on_turn=move_state_away)
+        self.assertEqual(len(sent), 1, sent)
+        consumes = [c for c in self.calls if c[0] == "consume"]
+        self.assertEqual([c[3] for c in consumes], [200, 409], consumes)
