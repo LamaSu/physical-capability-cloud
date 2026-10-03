@@ -473,6 +473,26 @@ describe("no production mock (ratchet)", () => {
     expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test])).toEqual(["pages/ProbePage.tsx"]);
   });
 
+  it.each([
+    ["describe.skip", "describe.skip"],
+    ["describe.todo", "describe.todo"],
+    ["a skipped suite inside a running one", 'describe("outer", () => {\n  describe.skip'],
+  ])("a test inside %s doesn't count (astra 408i MEDIUM)", (_what, opener) => {
+    const nested = opener.includes("outer");
+    const test =
+      'import { ProbePage } from "../ProbePage.js";\n' +
+      `${opener}("suite", () => {\n  it("x", () => {\n    render(<ProbePage />);\n    expect(text()).toContain("unavailable");\n  });\n});` +
+      (nested ? "\n});" : "");
+    expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test])).toEqual(["pages/ProbePage.tsx"]);
+  });
+
+  it("an assertion in a helper the test calls counts, as a render there does (astra 408i MEDIUM)", () => {
+    const test =
+      'import { ProbePage } from "../ProbePage.js";\nfunction assertUnavailable() {\n  expect(text()).toContain("unavailable");\n}\n' +
+      'it("x", () => {\n  render(<ProbePage />);\n  assertUnavailable();\n});';
+    expect(pagesWithoutHonestyTest(["pages/ProbePage.tsx"], [test])).toEqual([]);
+  });
+
   it("a namespace import's own page component, or a helper the test calls, counts (self-test)", () => {
     const viaNamespace = 'import * as page from "../ProbePage.js";\nit("x", () => {\n  render(<page.ProbePage />);\n  expect(text()).toContain("unavailable");\n});';
     const viaHelper = 'import { ProbePage } from "../ProbePage.js";\nfunction renderPage() {\n  root.render(<ProbePage />);\n}\nit("x", async () => {\n  renderPage();\n  expect(text()).toContain("unavailable");\n});';
