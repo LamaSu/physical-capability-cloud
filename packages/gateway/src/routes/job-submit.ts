@@ -14,6 +14,7 @@ import { getJobFacade } from "../facades/index.js";
 import type { SubmitJobInput, RegisterDeviceInput } from "../facades/index.js";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { declare, lit } from "../observability/closed-schema.js";
 
 const { operatorPolicies, captureVerdicts, captureAnchors } = schema;
 
@@ -222,8 +223,8 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
           // don't actually require CVP. The facade and subsequent gates
           // will still run. Log for observability.
           req.log.warn(
-            { err, kernelId },
-            "capture policy gate read failed; proceeding without CVP check",
+            { err, kernelId: declare.id(kernelId) },
+            lit("capture policy gate read failed; proceeding without CVP check"),
           );
         }
       }
