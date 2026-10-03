@@ -444,12 +444,12 @@ export class KernelFacade extends BaseFacade {
         actorId,
       );
       auditService.log({
-        eventType: "kernel.created",
+        eventType: lit("kernel.created"),
         actor: actorId ?? kernelData.operatorAddress,
-        resourceType: "kernel",
-        resourceId: id,
-        action: "create",
-        metadata: { name: kernelData.name, operatorAddress: kernelData.operatorAddress },
+        resourceType: lit("kernel"),
+        resourceId: declare.id(id),
+        action: lit("create"),
+        metadata: { name: declare.id(kernelData.name), operatorAddress: declare.id(kernelData.operatorAddress) },
         ip,
         userAgent,
       });
