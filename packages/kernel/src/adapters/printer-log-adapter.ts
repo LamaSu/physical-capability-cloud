@@ -13,6 +13,8 @@
  *   - Resets the LogCaptureService chain so the service is ready for a new job.
  *   - Returns a `printer_job_verified` summary evidence event with chain stats.
  *
+ * Start, stop and dispose form one serialized lifecycle: see Lifecycle below.
+ *
  * Log providers are swappable:
  *   - Default: generates simulated printer log lines (useful in tests / CI).
  *   - Real: pass a `logProvider` in config that reads from CUPS / IPP spool / OS.
@@ -73,6 +75,64 @@ function makeSimulatedLogProvider(): LogProvider {
 // PrinterLogAdapter
 // ---------------------------------------------------------------------------
 
+/**
+ * Where the adapter's recording is (astra pack 196). One state at a time:
+ *
+ *   idle        No recording: none was started, its start failed, or its stop succeeded.
+ *   starting    startRecording's first poll is in flight.
+ *   recording   The first poll succeeded, and the timer polls the log, one poll at a time.
+ *   stopping    A stop is in flight, from the moment it is accepted, including a stop
+ *               accepted while starting, which first waits for the start to settle.
+ *   stopFailed  A stop failed and emitted no summary. Nothing polls. A retried stop can
+ *               still emit the job's last entry and its summary, unless a timer poll
+ *               failed: then the retry refuses too.
+ *   disposed    Final: nothing leaves it.
+ *
+ * Transitions. Each is single-flight, so one recording's polls and summary never overlap
+ * another's:
+ *   startRecording(jobId)
+ *     idle, stopFailed     -> starting: a new recording. The chain, the counters and the
+ *                             failed-poll latch are reset; a stopFailed recording is
+ *                             discarded unsummarized. The start, its first poll included, is
+ *                             outstanding work until it settles. Then:
+ *                               first poll succeeds -> recording: the timer is installed;
+ *                               first poll fails    -> idle: startRecording rejects with its error.
+ *     starting, same job   -> that start: the same promise.
+ *     recording, same job  -> resolves at once: idempotent.
+ *     starting or recording another job -> refused: the adapter is busy with a job.
+ *     stopping             -> refused, not queued (why below).
+ *     disposed             -> refused.
+ *   stopRecording()
+ *     stopping             -> that stop.
+ *     starting             -> stopping: the stop waits for the start to settle. If the
+ *                             first poll succeeded, the start installs no timer and the stop
+ *                             goes on as from recording; if it failed, the stop refuses
+ *                             ("no recording to stop") and the state is idle.
+ *     recording, stopFailed -> stopping: it waits for the timer's poll in flight, checks the
+ *                             latch, makes the final poll and emits the summary -> idle; or
+ *                             fails, emitting no summary -> stopFailed.
+ *     idle                 -> refused: there is no summary without a recording.
+ *     disposed             -> refused.
+ *   dispose()
+ *     any state            -> disposed. The timer and the listeners are cleared, and the
+ *                             recording's own work ends. A start, poll or stop still in
+ *                             flight stays outstanding work until it settles. Each sees
+ *                             disposed when it resumes: a poll captures and emits nothing, a
+ *                             start installs no timer and rejects, and a stop makes no final
+ *                             poll, emits no summary and rejects.
+ *
+ * A start while a stop is in flight is refused rather than made to wait for the stop:
+ *   - JobRunner never makes one: a device is free for a new job only once its adapter's
+ *     quiesceEvidence() has resolved (evidence-session.ts), and a stop in flight is this
+ *     adapter's outstanding work. Its own calls (start at step 2, stop at step 6, and the
+ *     stop its failure path retries) never overlap on one adapter;
+ *   - a start that waited would discard a recording whose stop failed, which a retried stop
+ *     could still summarize;
+ *   - a stop waits on the log source for as long as its final poll takes, and a waiting
+ *     start would hang with it.
+ */
+type Lifecycle = "idle" | "starting" | "recording" | "stopping" | "stopFailed" | "disposed";
+
 export class PrinterLogAdapter implements SensorAdapter {
   readonly id: string;
   /** Use "power_monitor" as the closest existing SensorAdapter type. */
@@ -84,21 +144,28 @@ export class PrinterLogAdapter implements SensorAdapter {
   private readonly pollIntervalMs: number;
   private readonly logProvider: LogProvider;
 
-  private recording = false;
+  /** Where the recording is: see Lifecycle. */
+  private state: Lifecycle = "idle";
+  /** The job being recorded, from its start until its stop emits the summary or its first poll fails. */
   private jobId: string | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private chainLength = 0;
   private latestEntryHash: string | null = null;
-  /** The recording, from startRecording until stopRecording has emitted its summary, and each poll in flight. */
+  /**
+   * What can still emit, for quiesceEvidence(): a start in flight, its first poll included;
+   * the recording, from its first poll's success until its stop has emitted the summary or
+   * failed, or dispose; each timer poll in flight; and each stop in flight.
+   */
   private readonly work = new OutstandingWork();
+  /** Ends the recording's own piece of `work`. */
   private endRecording: (() => void) | null = null;
   /** Polls the timer started that have not finished: stopRecording waits for them. At most one. */
   private readonly polls = new Set<Promise<void>>();
-  /** From startRecording until a stop succeeds: there is no summary without a recording. */
-  private active = false;
   /** The first timer poll of this recording that failed: its chain may lack lines. */
   private pollFailure: string | null = null;
+  /** The start in flight: a start of the same job meanwhile is the same start, and a stop waits for it. */
+  private starting: Promise<void> | null = null;
   /** The stop in flight: a second stop meanwhile is the same stop. */
   private stopping: Promise<Omit<EvidenceEvent, "id" | "hash">> | null = null;
 
@@ -144,41 +211,71 @@ export class PrinterLogAdapter implements SensorAdapter {
   // SensorAdapter implementation
   // ---------------------------------------------------------------------------
 
-  /** Start polling the log provider and emitting hash-chained evidence events. */
-  async startRecording(jobId: string): Promise<void> {
-    if (this.recording) {
-      return; // already started — idempotent
+  /**
+   * Start polling the log provider and emitting hash-chained evidence events for `jobId`.
+   * Resolves once the first poll has succeeded. Refused, starting nothing, while a stop is in
+   * flight, while another job is starting or recording, and after dispose (see Lifecycle).
+   */
+  startRecording(jobId: string): Promise<void> {
+    if (this.state === "disposed") {
+      return Promise.reject(new Error(`[printer-log-adapter] ${this.id}: disposed, so job ${jobId} cannot start`));
     }
+    if (this.state === "stopping") {
+      return Promise.reject(new Error(`[printer-log-adapter] ${this.id}: a stop is in flight, so job ${jobId} cannot start`));
+    }
+    if (this.state === "starting" || this.state === "recording") {
+      if (jobId !== this.jobId) {
+        return Promise.reject(
+          new Error(`[printer-log-adapter] ${this.id}: busy with job ${this.jobId ?? "unknown"}, so job ${jobId} cannot start`),
+        );
+      }
+      return this.starting ?? Promise.resolve(); // the same job: idempotent
+    }
+    // idle or stopFailed: a new recording, outstanding work until the start settles.
+    const start = this.work.track(this.startOnce(jobId));
+    this.starting = start;
+    const clear = () => {
+      if (this.starting === start) this.starting = null;
+    };
+    start.then(clear, clear);
+    return start;
+  }
 
-    this.recording = true;
-    this.active = true;
-    this.pollFailure = null;
+  private async startOnce(jobId: string): Promise<void> {
+    this.state = "starting";
     this.jobId = jobId;
+    this.pollFailure = null;
     this.chainLength = 0;
     this.latestEntryHash = null;
 
     // Reset the chain so each job starts fresh
     this.logCaptureService.reset();
-    this.endRecording = this.work.begin();
 
-    // Poll immediately, then on interval. A first poll that fails starts nothing: the
-    // recording ends here, so nothing is left outstanding (astra pack 186).
+    // Poll immediately, then on interval. A first poll that fails starts nothing (astra
+    // pack 186); a stop that waited for it refuses, and leaves the state idle itself.
     try {
-      await this.poll();
+      await this.poll(jobId);
     } catch (err) {
-      this.recording = false;
-      this.active = false;
-      this.jobId = null;
-      this.endRecording?.();
-      this.endRecording = null;
+      if (this.now() === "starting") {
+        this.state = "idle";
+        this.jobId = null;
+      }
       throw err;
     }
+    // Disposed while the first poll was in flight: nothing is installed (astra pack 196).
+    if (this.now() === "disposed") {
+      throw new Error(`[printer-log-adapter] ${this.id}: disposed while job ${jobId} was starting`);
+    }
+    // A stop accepted while starting takes over now: it stops this recording, so no timer.
+    if (this.now() === "stopping") return;
 
+    this.state = "recording";
+    this.endRecording = this.work.begin();
     this.pollTimer = setInterval(() => {
       // One poll at a time: a tick that finds one in flight is skipped, so a slow poll is
       // never overtaken and the chain keeps the log's order (astra pack 190).
       if (this.polls.size > 0) return;
-      const poll = this.poll().catch((err: unknown) => {
+      const poll = this.poll(jobId).catch((err: unknown) => {
         // The chain may now lack the lines this poll would have read: latched, so the
         // stop refuses to vouch for it (astra pack 190).
         this.pollFailure ??= err instanceof Error ? err.message : String(err);
@@ -192,18 +289,34 @@ export class PrinterLogAdapter implements SensorAdapter {
    * Stop polling, finalize the chain, and return a summary evidence event.
    * The summary event type is `printer_job_verified`.
    *
-   * Refused, emitting nothing, with no recording to stop (none started, or its stop already
-   * succeeded): a summary needs a recording (astra pack 190). Single-flight: a stop while one
-   * is in flight is that stop. Each stop is the adapter's outstanding work, so
-   * quiesceEvidence() waits for one in flight, including a retry after a failed stop, which
-   * still emits the job's last entry and its summary.
+   * Refused, emitting nothing, with no recording to stop (none started, its start failed, or
+   * its stop already succeeded), and after dispose: a summary needs a recording (astra pack
+   * 190). A stop while the recording is starting waits for the start to settle, its first
+   * poll included, then stops the recording, or refuses if the start failed (astra pack 196).
+   * Single-flight: a stop while one is in flight is that stop. Each stop is the adapter's
+   * outstanding work, so quiesceEvidence() waits for one in flight, including a retry after a
+   * failed stop, which still emits the job's last entry and its summary.
    */
   stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
     if (this.stopping !== null) return this.stopping;
-    if (!this.active) {
-      return Promise.reject(new Error(`[printer-log-adapter] ${this.id}: no recording to stop`));
+    let stopped: Promise<Omit<EvidenceEvent, "id" | "hash">>;
+    if (this.state === "starting" && this.starting !== null) {
+      const start = this.starting;
+      this.state = "stopping";
+      stopped = this.stopAfterStart(start);
+    } else if (this.state === "recording" || this.state === "stopFailed") {
+      this.state = "stopping";
+      stopped = this.stopOnce();
+    } else {
+      return Promise.reject(
+        new Error(
+          this.state === "disposed"
+            ? `[printer-log-adapter] ${this.id}: disposed, so there is no recording to stop`
+            : `[printer-log-adapter] ${this.id}: no recording to stop`,
+        ),
+      );
     }
-    const stop = this.work.track(this.stopOnce());
+    const stop = this.work.track(stopped);
     this.stopping = stop;
     const clear = () => {
       if (this.stopping === stop) this.stopping = null;
@@ -212,11 +325,34 @@ export class PrinterLogAdapter implements SensorAdapter {
     return stop;
   }
 
+  /** A stop accepted while starting: it waits for the start, its first poll included, to settle. */
+  private async stopAfterStart(start: Promise<void>): Promise<Omit<EvidenceEvent, "id" | "hash">> {
+    try {
+      await start;
+    } catch {
+      // The first poll failed, or dispose came first: there is no recording to stop.
+      if (this.now() === "stopping") {
+        this.state = "idle";
+        this.jobId = null;
+      }
+      throw new Error(
+        this.now() === "disposed"
+          ? `[printer-log-adapter] ${this.id}: disposed, so there is no recording to stop`
+          : `[printer-log-adapter] ${this.id}: no recording to stop: its start failed`,
+      );
+    }
+    return this.stopOnce();
+  }
+
+  /** The stop, in state stopping: to idle once the summary is emitted, or to stopFailed. */
   private async stopOnce(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
     try {
       const summary = await this.finishRecording();
-      this.active = false;
+      if (this.now() === "stopping") this.state = "idle";
       return summary;
+    } catch (err) {
+      if (this.now() === "stopping") this.state = "stopFailed";
+      throw err;
     } finally {
       // Ended once the summary is emitted, or once stopping failed: nothing more is
       // scheduled either way. A poll still in flight is counted on its own, and so is a
@@ -227,8 +363,6 @@ export class PrinterLogAdapter implements SensorAdapter {
   }
 
   private async finishRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
-    this.recording = false;
-
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -238,6 +372,11 @@ export class PrinterLogAdapter implements SensorAdapter {
     // entry is captured under this job, in the log's order, and the summary covers it
     // (astra pack 186). Like the final poll, it waits on the log source.
     await Promise.all([...this.polls]);
+
+    // Disposed meanwhile: the recording is over, with no final poll and no summary.
+    if (this.now() === "disposed") {
+      throw new Error(`[printer-log-adapter] ${this.id}: disposed while job ${this.jobId ?? "unknown"} was stopping, so it has no summary`);
+    }
 
     // A timer poll that failed may have lost lines, so a summary would vouch for a chain that
     // could be incomplete: refused, emitting nothing (astra pack 190). A retry refuses too.
@@ -249,7 +388,12 @@ export class PrinterLogAdapter implements SensorAdapter {
 
     // Do a final poll to capture any remaining lines
     if (this.jobId) {
-      await this.poll();
+      await this.poll(this.jobId);
+    }
+
+    // Disposed during the final poll: no summary (astra pack 196).
+    if (this.now() === "disposed") {
+      throw new Error(`[printer-log-adapter] ${this.id}: disposed while job ${this.jobId ?? "unknown"} was stopping, so it has no summary`);
     }
 
     const chain = this.logCaptureService.getChain();
@@ -292,7 +436,7 @@ export class PrinterLogAdapter implements SensorAdapter {
     return {
       latestEntryHash: this.latestEntryHash,
       chainLength: this.chainLength,
-      recording: this.recording,
+      recording: this.state === "starting" || this.state === "recording",
       jobId: this.jobId,
       logSource: this.logSource,
     };
@@ -303,22 +447,27 @@ export class PrinterLogAdapter implements SensorAdapter {
   }
 
   /**
-   * Resolves once no recording is running (stopRecording has made its final poll and
-   * emitted printer_job_verified) and no poll is in flight. A poll the timer started just
-   * before stopRecording can still emit a log_hash_chain_entry after stopRecording returns;
-   * this waits for it. At once when nothing is outstanding.
+   * Resolves once nothing that can emit is outstanding (`work`): no start in flight, its
+   * first poll included; no recording, which lasts from its first poll's success until its
+   * stop has emitted the summary or failed, or dispose; no timer poll in flight; and no stop
+   * in flight, including one waiting for a start. So nothing is emitted after it resolves
+   * until the next start. At once when nothing is outstanding.
    */
   quiesceEvidence(): Promise<void> {
     return this.work.idle();
   }
 
+  /**
+   * Final (see Lifecycle). Clears the timer and the listeners, and ends the recording's own
+   * work. A start, poll or stop still in flight stays outstanding work until it settles; when
+   * it resumes it sees the adapter disposed, and captures, installs and emits nothing.
+   */
   async dispose(): Promise<void> {
+    this.state = "disposed";
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
-    this.recording = false;
-    this.active = false;
     this.listeners = [];
     this.endRecording?.();
     this.endRecording = null;
@@ -328,14 +477,18 @@ export class PrinterLogAdapter implements SensorAdapter {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  /** Single poll cycle — fetch one log line and, if present, capture + emit it. */
-  private async poll(): Promise<void> {
-    if (!this.jobId) return;
-
-    const line = await this.logProvider(this.jobId);
+  /**
+   * Single poll cycle of `jobId`'s recording: fetch one log line and, if present, capture it
+   * and emit it, labelled with that job. A poll that resumes after dispose captures and
+   * emits nothing (astra pack 196).
+   */
+  private async poll(jobId: string): Promise<void> {
+    const line = await this.logProvider(jobId);
     if (line === null) return; // nothing new
+    if (this.now() === "disposed") return;
 
     const entry = await this.logCaptureService.captureEntry(line, this.logSource);
+    if (this.now() === "disposed") return;
 
     this.chainLength++;
     this.latestEntryHash = entry.entryHash;
@@ -351,7 +504,7 @@ export class PrinterLogAdapter implements SensorAdapter {
         ...(this.usingSimulatedProvider ? { simulated: true } : {}),
       },
       payload: {
-        jobId: this.jobId,
+        jobId,
         entryId: entry.entryId,
         entryHash: entry.entryHash,
         previousHash: entry.previousHash,
@@ -363,6 +516,15 @@ export class PrinterLogAdapter implements SensorAdapter {
     };
 
     this.emit(event);
+  }
+
+  /**
+   * The state as it is now: every read after an await goes through here. Dispose or a stop
+   * may have changed it meanwhile, though TypeScript keeps `this.state` narrowed to what the
+   * same function last saw.
+   */
+  private now(): Lifecycle {
+    return this.state;
   }
 
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
