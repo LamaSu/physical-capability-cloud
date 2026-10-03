@@ -20,8 +20,15 @@
  *     through inheritance (a polluted `Object.prototype`, changed after the
  *     check, would otherwise supply terms the hash never covered);
  *   - `-0` becomes `0`, as `canonicalize` writes both as "0";
- *   - a key named `__proto__` is refused.
+ *   - a key named `__proto__` is refused;
+ *   - no code supplied with the data runs: a proxy, an accessor (a getter or
+ *     setter), an array with a nonstandard prototype, and an array index that
+ *     is not the array's own data (a hole, or one served by a prototype) are
+ *     refused through property descriptors, never by reading them.
  */
+
+import { types } from "node:util";
+
 
 class NotPlainData extends Error {}
 
@@ -37,15 +44,19 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
       return Object.is(v, -0) ? 0 : v;
     }
     if (typeof v !== "object") throw new NotPlainData(`${at}: a ${typeof v} is not JSON data`);
+    if (types.isProxy(v)) throw new NotPlainData(`${at}: a proxy`);
     if (ancestors.has(v)) throw new NotPlainData(`${at}: a cycle`);
     ancestors.add(v);
     try {
       if (Array.isArray(v)) {
+        if (Object.getPrototypeOf(v) !== Array.prototype) throw new NotPlainData(`${at}: an array with a nonstandard prototype`);
         const length = v.length;
         const out: unknown[] = new Array(length);
         for (let i = 0; i < length; i++) {
-          if (!(i in v)) throw new NotPlainData(`${at}[${i}]: a hole in a sparse array`);
-          const item: unknown = v[i];
+          const element = Object.getOwnPropertyDescriptor(v, i);
+          if (element === undefined) throw new NotPlainData(`${at}[${i}]: a hole in a sparse array`);
+          if (!("value" in element)) throw new NotPlainData(`${at}[${i}]: an accessor (a getter or setter)`);
+          const item: unknown = element.value;
           if (item === undefined) throw new NotPlainData(`${at}[${i}]: undefined in an array`);
           out[i] = walk(item, `${path}[${i}]`);
         }
@@ -59,7 +70,10 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
         // value would be read through inheritance but never hashed. JSON.parse makes
         // it an ordinary own key, so it reaches here; no PCC document uses it.
         if (key === "__proto__") throw new NotPlainData(`${at}: a key named __proto__ is refused`);
-        const item: unknown = (v as Record<string, unknown>)[key];
+        const member = Object.getOwnPropertyDescriptor(v, key);
+        if (member === undefined) continue;
+        if (!("value" in member)) throw new NotPlainData(`${path ? `${path}.${key}` : key}: an accessor (a getter or setter)`);
+        const item: unknown = member.value;
         if (item === undefined) continue;
         out[key] = walk(item, path ? `${path}.${key}` : key);
       }

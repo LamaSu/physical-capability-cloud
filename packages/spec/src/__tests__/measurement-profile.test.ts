@@ -17,6 +17,7 @@ import {
   profileGoverns,
   acceptsInspectedOutput,
   InvalidMeasurementProfileError,
+  plainDataCopy,
   type MeasurementProfileV1,
 } from "../evidence/measurement-profile.js";
 import { canonicalize } from "../util/canonical.js";
@@ -458,7 +459,8 @@ describe("round 2 (astra pack 40)", () => {
     });
   });
 
-  it("a lying measurement.sampling getter: first read wins, in both the digest and the returned snapshot", () => {
+  // Since astra pack 154: a getter is refused without ever being read, which is stronger than "first read wins".
+  it("a lying measurement.sampling getter is refused, never read: the profile does not govern", () => {
     const p = printPilotProfile();
     let reads = 0;
     Object.defineProperty(p.measurement, "sampling", {
@@ -475,11 +477,13 @@ describe("round 2 (astra pack 40)", () => {
     const expectedDigestValue = computeMeasurementProfileDigest(firstReadProfile);
 
     const res = profileGoverns(expectedDigestValue, p);
-    expect(res.presentedDigest).toBe(expectedDigestValue);
-    expect(res.profile!.measurement.sampling.minSamples).toBe(2);
+    expect(res.governs).toBe(false);
+    expect(res.code).toBe("profile-invalid");
+    expect(res.reasons.join(" ")).toMatch(/measurement\.sampling: an accessor/);
+    expect(reads).toBe(0);
   });
 
-  it("computeMeasurementProfileDigest reads a lying getter once: the first read is what is validated and digested (lane mutation check)", () => {
+  it("computeMeasurementProfileDigest refuses a getter without reading it (astra pack 154)", () => {
     const p = printPilotProfile();
     let reads = 0;
     Object.defineProperty(p.measurement, "sampling", {
@@ -494,10 +498,9 @@ describe("round 2 (astra pack 40)", () => {
     firstRead.measurement.sampling = { minSamples: 2 };
     const secondRead = printPilotProfile();
     secondRead.measurement.sampling = { minSamples: 1 };
-    const digest = computeMeasurementProfileDigest(p);
-    expect(digest).toBe(computeMeasurementProfileDigest(firstRead));
-    expect(digest).not.toBe(computeMeasurementProfileDigest(secondRead));
-    expect(reads).toBe(1);
+    expect(() => computeMeasurementProfileDigest(p)).toThrow(/measurement\.sampling: an accessor/);
+    expect(reads).toBe(0);
+    expect(computeMeasurementProfileDigest(firstRead)).not.toBe(computeMeasurementProfileDigest(secondRead));
   });
 
   describe("key order: a real reversal (not a JSON round-trip of a spread), via reversed()", () => {
@@ -602,5 +605,57 @@ describe("plain-data boundary: no inherited values, and -0 is 0 (astra packs 124
     expect(g.governs).toBe(true);
     expect(Object.is(g.profile?.measurement.tolerance?.target, 0)).toBe(true);
     expect(Object.getPrototypeOf(g.profile)).toBeNull();
+  });
+});
+
+// ── astra (pack 154, gpt-5.6-sol): no code supplied with the data runs during the copy ──
+describe("plain-data boundary: accessors, proxies and nonstandard arrays never run (astra pack 154)", () => {
+  it("an inherited index getter on a sparse array with a custom prototype never runs", () => {
+    let ran = false;
+    const proto = Object.create(Array.prototype);
+    Object.defineProperty(proto, "0", { get() { ran = true; return "evidence"; } });
+    const list = [] as string[];
+    Object.setPrototypeOf(list, proto);
+    list.length = 1;
+    const copy = plainDataCopy({ list });
+    expect(ran).toBe(false);
+    expect(copy.ok).toBe(false);
+  });
+  it("an own accessor is refused without its getter running", () => {
+    let ran = false;
+    const data: Record<string, unknown> = { a: 1 };
+    Object.defineProperty(data, "b", { enumerable: true, get() { ran = true; return 2; } });
+    const copy = plainDataCopy(data);
+    expect(ran).toBe(false);
+    expect(copy.ok ? "" : copy.reason).toMatch(/b: an accessor/);
+  });
+  it("a proxy is refused before any trap runs", () => {
+    let trapped = 0;
+    const proxied = new Proxy({ a: 1 }, { ownKeys: (t) => (trapped++, Reflect.ownKeys(t)), get: (t, k) => (trapped++, Reflect.get(t, k)) });
+    const copy = plainDataCopy({ inner: proxied });
+    expect(trapped).toBe(0);
+    expect(copy.ok ? "" : copy.reason).toMatch(/a proxy/);
+  });
+  it("an array with a nonstandard prototype is refused even when every element is its own data", () => {
+    const list = [1, 2];
+    Object.setPrototypeOf(list, Object.create(Array.prototype));
+    const copy = plainDataCopy({ list });
+    expect(copy.ok ? "" : copy.reason).toMatch(/nonstandard prototype/);
+  });
+  it("a hole in a standard array is refused even when Array.prototype serves that index, and the getter never runs", () => {
+    let ran = false;
+    Object.defineProperty(Array.prototype, "0", { configurable: true, get() { ran = true; return "served"; } });
+    try {
+      const list: unknown[] = [];
+      list.length = 1;
+      const copy = plainDataCopy({ list });
+      expect(ran).toBe(false);
+      expect(copy.ok ? "" : copy.reason).toMatch(/a hole/);
+    } finally {
+      delete (Array.prototype as unknown as Record<string, unknown>)["0"];
+    }
+  });
+  it("an array index that is its own data is still copied", () => {
+    expect(plainDataCopy({ list: [1, "two", { three: 3 }] })).toEqual({ ok: true, value: { list: [1, "two", { three: 3 }] } });
   });
 });
