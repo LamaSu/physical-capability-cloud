@@ -27,21 +27,28 @@ export interface CapabilityBounty {
   demandCount: number;
   /** Total estimated annual value (sum of all demand signals) */
   estimatedAnnualValue: number;
-  /** Bounty reward amount (funded by treasury or requesters) */
+  /** Proposed reward amount. Nothing is escrowed for it: see `fundingStatus`. */
   bountyReward: number;
   currency: "USDC" | "CREDITS";
-  /** Who funded it */
-  fundedBy: "treasury" | "requesters" | "mixed";
+  /** Who is PROPOSED to fund it. A proposal only, never a funding fact: see fundingStatus. */
+  proposedFundingSource?: "treasury" | "requesters" | "mixed";
+  /**
+   * Whether real funds back the reward. This in-memory service has no escrow
+   * binding, so every bounty it creates is "unfunded". A durable, escrow-backed
+   * kit-build offer replaces it (ledger R7/R45).
+   */
+  fundingStatus: "unfunded";
   /** Requirements to claim */
   requirements: BountyRequirements;
-  status: "open" | "claimed" | "verified" | "paid" | "expired";
+  /**
+   * "verified" and "paid" are retired (astra pack 36/36b): verification is
+   * server-derived from job evidence and payment runs only through escrow, so
+   * this unfunded in-memory record can never reach either.
+   */
+  status: "open" | "claimed" | "expired";
   /** Who claimed it (operator onboarding the capability) */
   claimedBy?: string;
   claimedAt?: string;
-  /** Verification: first job evidence */
-  verificationJobId?: string;
-  verificationScore?: number;
-  paidAt?: string;
   createdAt: string;
   expiresAt: string;
 }

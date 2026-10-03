@@ -7,6 +7,11 @@ import "../src/ReceiptAnchorRegistry.sol";
 
 /**
  * @title DeployReceiptAnchorRegistry
+ * @dev RETIRED (steward ruling #3434, 2026-09-28): kept, never run. It came with #49 (2026-05-28); no lane owns or
+ *      runs it. The default fs_permissions grant (foundry.toml) deliberately does not reach deployments/<network>/:
+ *      with PCC_NETWORK=base-sepolia or base a run stops at its record write, before anything is broadcast; without
+ *      PCC_NETWORK it would still deploy and record nothing. Do not run it, and do not widen the grant to revive it:
+ *      a revival needs a new ruling and a profile of its own.
  * @notice Deploys ReceiptAnchorRegistry — on-chain anchor for Phase-2
  *         InvocationReceipts (aggregator gateway).
  *

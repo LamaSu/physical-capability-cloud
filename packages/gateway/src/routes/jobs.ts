@@ -32,9 +32,30 @@ export async function jobRoutes(app: FastifyInstance) {
    * Only the jobs the caller may read (jobReadScopeOf, F3 round 2): an admin lists every job
    * in its tenant; a proven wallet lists the jobs of the kernels it operates and the jobs it
    * is the recorded buyer of. No credential is 401, an unproven one 403.
+   *
+   * N111 — offset/limit carry a querystring schema so Fastify's ajv coerces
+   * "10" -> 10 (coerceTypes is on by default) before the handler ever sees
+   * them. Without this, both arrive as strings and the facade's
+   * `offset + limit` becomes string concatenation, not addition. The schema
+   * also bounds limit to [1, 200] and offset to >= 0; an unparsable or
+   * out-of-bounds value is a 400 from Fastify before this handler runs.
    */
   app.get<{ Querystring: { kernelId?: string; status?: string; offset?: number; limit?: number } }>(
     "/api/jobs",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          properties: {
+            kernelId: { type: "string" },
+            status: { type: "string" },
+            offset: { type: "integer", minimum: 0, default: 0 },
+            // 50 matches the facade's pre-existing default (job.facade.ts list()).
+            limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+          },
+        },
+      },
+    },
     async (req, reply) => {
       const asOf = new Date().toISOString();
       const scope = jobReadScopeOf(req);

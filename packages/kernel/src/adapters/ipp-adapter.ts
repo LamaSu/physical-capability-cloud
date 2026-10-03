@@ -254,7 +254,9 @@ export class IppAdapter implements MachineAdapter {
           type: "execution_started",
           timestamp: new Date().toISOString(),
           source: this.source,
-          payload: { jobId, jobName, totalPages, mock: true },
+          // ippJobId is the printer's own job number. payload.jobId is reserved for
+          // the PCC job, which the kernel's emitter commits on every event (LO-EV-9).
+          payload: { ippJobId: jobId, jobName, totalPages, mock: true },
         });
 
         // Simulate print job: each page takes ~1200ms, job completes in 3-5 seconds
@@ -336,7 +338,7 @@ export class IppAdapter implements MachineAdapter {
         timestamp: new Date().toISOString(),
         source: this.source,
         payload: {
-          jobId,
+          ippJobId: jobId,
           jobName,
           currentPage,
           totalPages: totalJobPages,
@@ -359,7 +361,7 @@ export class IppAdapter implements MachineAdapter {
           timestamp: new Date().toISOString(),
           source: this.source,
           payload: {
-            jobId,
+            ippJobId: jobId,
             jobName,
             totalPages: totalJobPages,
             durationMs: Date.now() - (this.mockJobState?.startedAt ?? Date.now()),
@@ -426,7 +428,7 @@ export class IppAdapter implements MachineAdapter {
             type: "execution_started",
             timestamp: new Date().toISOString(),
             source: this.source,
-            payload: { jobId, jobName },
+            payload: { ippJobId: jobId, jobName },
           });
 
           this.startPolling();
@@ -667,7 +669,7 @@ export class IppAdapter implements MachineAdapter {
             type: "execution_completed",
             timestamp: new Date().toISOString(),
             source: this.source,
-            payload: { jobId: this.activeRealJobId },
+            payload: { ippJobId: this.activeRealJobId },
           });
           this.activeRealJobId = null;
           this.stopPolling();
@@ -676,7 +678,7 @@ export class IppAdapter implements MachineAdapter {
             type: "execution_failed",
             timestamp: new Date().toISOString(),
             source: this.source,
-            payload: { jobId: this.activeRealJobId, state: attrs.jobState },
+            payload: { ippJobId: this.activeRealJobId, state: attrs.jobState },
           });
           this.activeRealJobId = null;
           this.stopPolling();

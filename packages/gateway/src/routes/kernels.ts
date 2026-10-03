@@ -3,6 +3,7 @@ import type { Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
 import { jobReadScopeOf, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -156,6 +157,15 @@ export async function kernelRoutes(app: FastifyInstance) {
     if (!result.success) return sendResult(reply, result);
     const { kernel, created } = result.data;
     if (created) {
+      // Operator-onboarding funnel (ADK track item 4): kernel_created.
+      // Telemetry must never break kernel registration.
+      try {
+        recordOperatorStage(kernel.id, "kernel_created", {
+          operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
+        });
+      } catch {
+        /* funnel tracking must never break kernel registration */
+      }
       return reply.code(201).send({
         kernel,
         created: true,
