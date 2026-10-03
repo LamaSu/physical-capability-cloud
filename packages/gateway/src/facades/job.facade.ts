@@ -281,12 +281,17 @@ export class JobFacade extends BaseFacade {
           actorId,
         );
         auditService.log({
-          eventType: "job.submitted",
+          eventType: lit("job.submitted"),
           actor: actorId,
-          resourceType: "job",
-          resourceId: jobId,
-          action: "create",
-          metadata: { kernelId, stepId, external: true, assuranceTier },
+          resourceType: lit("job"),
+          resourceId: declare.id(jobId),
+          action: lit("create"),
+          metadata: {
+            kernelId: declare.id(kernelId),
+            stepId: declare.id(stepId),
+            external: declare.flag(true),
+            assuranceTier: declare.id(assuranceTier),
+          },
           ip,
           userAgent,
         });
@@ -301,12 +306,17 @@ export class JobFacade extends BaseFacade {
         });
         trackServerEvent(lit("job_submitted"), { kernelId: declare.id(kernelId), capabilityType: declare.id(body.capabilityId) }, actorId);
         auditService.log({
-          eventType: "job.submitted",
+          eventType: lit("job.submitted"),
           actor: actorId,
-          resourceType: "job",
-          resourceId: result.jobId,
-          action: "create",
-          metadata: { kernelId, stepId, deviceId: result.deviceId, assuranceTier },
+          resourceType: lit("job"),
+          resourceId: declare.id(result.jobId),
+          action: lit("create"),
+          metadata: {
+            kernelId: declare.id(kernelId),
+            stepId: declare.id(stepId),
+            deviceId: declare.id(result.deviceId),
+            assuranceTier: declare.id(assuranceTier),
+          },
           ip,
           userAgent,
         });
