@@ -1,0 +1,60 @@
+[Unit]
+Description=pcc-node -- Physical Capability Cloud operator node
+Documentation=https://capability.network
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# -I (isolated mode): ignore PYTHONPATH and user site-packages, so nothing on them can run before the
+# in-process guards install. `-m pcc_node` routes through the guarded entry (pcc_node._entry.run),
+# which applies the mandatory Landlock execute restriction (L2) and installs the spawn hook (L3) BEFORE
+# importing the CLI. --yes makes the bootstrap non-interactive (no click.confirm/prompt) so the service
+# starts unattended. --config-file is an ABSOLUTE path under StateDirectory: the node persists its
+# config there, since ProtectSystem=strict makes the working directory (/) read-only and the CLI
+# default ./pcc-node.json would fail to write. The operator supplies PCC_API_KEY via the env file below.
+ExecStart=/usr/bin/python3 -I -m pcc_node start --yes --config-file /var/lib/pcc-node/pcc-node.json
+Restart=on-failure
+RestartSec=5
+
+# === Layer 1 of the hard exec allowlist: AppArmor (steward ruling 10/03, verdict 105n) =============
+# The hard guarantee "pcc-node executes only its pinned device utilities" is AppArmor (here, profile
+# deploy/apparmor/pcc-node, loaded by install.sh) PLUS the mandatory in-process Landlock (L2) together
+# -- neither alone suffices. AppArmor has SEPARATE permissions for execute-as-program (x) and
+# executable memory-map (m): it grants the ELF loader map-only (never x), so `execve(ld.so, [ld,
+# /bin/sh])` is refused -- the loader gadget Landlock cannot close. But AppArmor must grant python3
+# execute (pcc-node IS python), so alone it cannot stop `python3 -c ...`; Landlock closes THAT (python3
+# is not a pinned grant), which is why pcc-node refuses to run without Landlock. NO dash prefix: if the
+# profile cannot be applied the unit FAILS, so a host never silently loses L1. On a SELinux host use the
+# equivalent policy; on neither, pcc-node still refuses to arm unless PCC_ALLOW_NO_LANDLOCK=1 (README).
+AppArmorProfile=pcc-node
+
+# === Service hygiene (NOT an exec allowlist -- that is L1 above) ====================================
+# A dedicated, ephemeral user; persistent key/state under /var/lib/pcc-node; config under /etc/pcc-node.
+# These replace the retired, unsound NoExecPaths=/ + ExecPaths= directives (verdict 105m: systemd
+# cannot split mmap from execve, so it could never be the exact allowlist).
+DynamicUser=yes
+StateDirectory=pcc-node
+ConfigurationDirectory=pcc-node
+# Absolute key/state paths under the StateDirectory, so ~/.pcc-node resolves somewhere writable by the
+# dynamic user (keys.json, logs/). The operator may override these in the env file.
+Environment=HOME=/var/lib/pcc-node
+Environment=PCC_NODE_KEYS_FILE=/var/lib/pcc-node/keys.json
+Environment=PCC_BASE=https://capability.network
+# Secrets (PCC_API_KEY) live here, not in the unit. The leading '-' makes it optional so first boot
+# does not fail before the operator writes it. (KERNEL_CONFIG_FILE is NOT used -- `start` reads
+# --config-file; the config path is the absolute one in ExecStart above.)
+EnvironmentFile=-/etc/pcc-node/pcc-node.env
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -550,6 +550,12 @@ def _sources():
     return sorted(p for p in PACKAGE.rglob("*.py") if "__pycache__" not in p.parts)
 
 
+# The one module granted ctypes -- there is no stdlib Landlock API, and the hard execve allowlist is
+# applied with Landlock syscalls (steward ruling 10/03, verdict 105m). The no-shell and import-census
+# checks skip it; test_landlock_module_uses_ctypes_only_for_landlock bounds the exemption.
+LANDLOCK_SOURCE = PACKAGE / "_landlock.py"
+
+
 def test_the_package_sources_are_scanned():
     names = {p.name for p in _sources()}
     assert "job_executor.py" in names and "daemon.py" in names and "camera.py" in names
@@ -558,6 +564,8 @@ def test_the_package_sources_are_scanned():
 def test_no_module_starts_a_shell_or_runs_code_it_was_sent():
     hits = []
     for path in _sources():
+        if path == LANDLOCK_SOURCE:
+            continue  # ctypes-based Landlock bootstrap; bounded by its own test (exemption, 10/03)
         source = path.read_text(encoding="utf-8")
         for v in violations(source, str(path)) + import_violations(source):
             hits.append(f"{path.relative_to(PACKAGE)}:{v}")
@@ -569,8 +577,65 @@ def test_the_package_imports_only_what_it_lists():
     # A new import is a reviewed change to ALLOWED_IMPORTS; an unused entry is removed (verdict 105g).
     used = set()
     for path in _sources():
+        if path == LANDLOCK_SOURCE:
+            continue  # exempt: it alone may import ctypes (bounded by its own test)
         used |= imported_modules(path.read_text(encoding="utf-8"))
     assert used == ALLOWED_IMPORTS
+
+
+# The reviewed Landlock surface in _landlock.py: the only ctypes names it may use, and the only
+# attributes it may call on the libc handle. Anything else fails the bounding test (verdict 105n MED2).
+LANDLOCK_CTYPES_NAMES = {"CDLL", "Structure", "byref", "c_int", "c_int32", "c_long", "c_size_t",
+                         "c_uint32", "c_uint64", "get_errno", "set_errno"}
+LANDLOCK_LIBC_ATTRS = {"syscall", "prctl", "restype", "argtypes"}
+
+
+def test_landlock_module_uses_ctypes_only_for_landlock():
+    # _landlock.py is the ONE module allowed ctypes (no stdlib Landlock API; steward ruling 10/03). The
+    # exemption is scoped AND bounded: the normal no-shell scan still runs over the module -- only the
+    # `import ctypes` refusal is waived -- and the ctypes surface is pinned. So os.system, a named
+    # dlopen, or `CDLL(None).system(...)` added to this file are all still caught (verdict 105n MED2).
+    source = LANDLOCK_SOURCE.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    # (1) imports: only ALLOWED_IMPORTS plus ctypes; the ONLY waived import-violation is ctypes.
+    assert imported_modules(source) <= ALLOWED_IMPORTS | {"ctypes"}, imported_modules(source)
+    assert import_violations(source) == ["imports ctypes, which ALLOWED_IMPORTS does not list"]
+
+    # (2) the FULL no-shell scan runs over the module; the only violation it may report is that same
+    #     `import ctypes`. os.system / eval / exec / subprocess / a shell start are still flagged,
+    #     because only the import line is exempt -- not the whole module.
+    extra = [v for v in violations(source, str(LANDLOCK_SOURCE)) if not v.endswith(": import ctypes")]
+    assert extra == [], f"_landlock.py has violations beyond the ctypes import: {extra}"
+
+    # (3) ctypes is reached only via the reviewed Landlock names (no ctypes.util, no ctypes.pythonapi).
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "ctypes":
+            assert node.attr in LANDLOCK_CTYPES_NAMES, f"ctypes.{node.attr} is outside the Landlock surface"
+
+    # (4) the only shared library loaded is CDLL(None) (libc already present) -- never a named dlopen.
+    cdll_calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                  and isinstance(n.func.value, ast.Name) and n.func.value.id == "ctypes" and n.func.attr == "CDLL"]
+    for call in cdll_calls:
+        arg = call.args[0] if call.args else None
+        assert isinstance(arg, ast.Constant) and arg.value is None, "ctypes.CDLL must be CDLL(None) only"
+
+    # (5) the only attributes invoked on the libc handle (a CDLL(None) result, bound or direct) are the
+    #     pinned syscall surface -- so CDLL(None).system(...) is refused even though its argument is None.
+    libc_names = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                  and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute)
+                  and n.value.func.attr == "CDLL" and isinstance(n.value.func.value, ast.Name)
+                  and n.value.func.value.id == "ctypes"
+                  for t in n.targets if isinstance(t, ast.Name)}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        v = node.value
+        on_handle = (isinstance(v, ast.Name) and v.id in libc_names) or (
+            isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr == "CDLL"
+            and isinstance(v.func.value, ast.Name) and v.func.value.id == "ctypes")
+        if on_handle:
+            assert node.attr in LANDLOCK_LIBC_ATTRS, f"libc.{node.attr} is outside the pinned syscall surface"
 
 
 def test_the_allowlist_is_what_the_package_runs():
@@ -579,6 +644,15 @@ def test_the_allowlist_is_what_the_package_runs():
     for path in _sources():
         started |= executables_started(path.read_text(encoding="utf-8"))
     assert started == EXECUTABLES
+
+
+def test_the_runtime_guard_allows_exactly_what_the_static_guard_allows():
+    # The runtime spawn guard (pcc_node.spawn_guard, verdict 105i / steward #5194) refuses every
+    # process start except a subprocess.Popen of these same bare executables, so the two guards
+    # cannot drift apart: one more name here is one more name there, reviewed in both places.
+    from pcc_node import spawn_guard
+
+    assert set(spawn_guard.EXECUTABLES) == EXECUTABLES
 
 
 def test_the_safe_chains_are_what_the_package_uses():

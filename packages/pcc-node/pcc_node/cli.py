@@ -8,6 +8,16 @@ Commands:
   pcc-node ui      -- Dynamic UI server (serve, open, list, submissions)
 """
 
+# `python -m pcc_node.cli` runs this module as __main__, which would execute the CLI's imports and
+# dispatch with NO spawn guard installed (verdicts 105k/105l HIGH 3). Refuse here, ABOVE the imports,
+# so not even an import-time spawn in a dependency runs. The guarded entries are the `pcc-node`
+# console script and `python -m pcc_node` (both go through pcc_node._entry.run).
+if __name__ == "__main__":
+    raise SystemExit(
+        "Refused: run pcc-node via the 'pcc-node' command or 'python -m pcc_node', which install the "
+        "runtime spawn guard first. 'python -m pcc_node.cli' does not and is not a supported entry."
+    )
+
 import json
 import logging
 import os
@@ -1292,7 +1302,3 @@ def support_cmd(message, config_file, pcc_base, api_key, attach_logs, check):
         click.echo(f"Failed to send message (HTTP {status})")
         if isinstance(body, dict):
             click.echo(f"  {body.get('error', body)}")
-
-
-if __name__ == "__main__":
-    main()
