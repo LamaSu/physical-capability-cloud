@@ -40,6 +40,7 @@ import { operatorStatusRoutes } from "./routes/operator-status.js";
 import { capabilityAvailabilityRoutes } from "./routes/capability-availability.js";
 import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
+import { kitRoutes } from "./routes/kits.js";
 import { composeRoutes } from "./routes/compose.js";
 import { registrySnapshotRoutes } from "./routes/registry-snapshot.js";
 import { skillsRoutes } from "./routes/skills.js";
@@ -671,6 +672,8 @@ export async function createGateway(port = 3200) {
   await app.register(startRoutes);
   await app.register(marketplaceRoutes);
   await app.register(toolCatalogRoutes);
+  // Capability Kit registry (kits K1 slice 1): write-once, verified, durable-volume backed.
+  await app.register(kitRoutes);
   await app.register(composeRoutes);
   // D2 compiler-ABI: GET /api/compose/registry-snapshot(/:registryDigest). Static
   // path so find-my-way prefers it over composeRoutes' parametric /api/compose/:id.
