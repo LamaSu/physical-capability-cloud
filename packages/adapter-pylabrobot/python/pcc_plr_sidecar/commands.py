@@ -16,6 +16,7 @@ from collections import OrderedDict
 from typing import Any, TYPE_CHECKING
 
 from .dispatcher import RPC_ERROR_CODES, RpcException
+from .evidence import RecordingWindowBusy
 
 if TYPE_CHECKING:
     from .backend_loader import BackendLoader
@@ -40,6 +41,8 @@ class Commands:
         # Windows this process closed, by (deviceId, jobId): the drain's watermark and the op
         # count, so a retried evidence.stopRecording answers as the first did. The last 64.
         self._closed: "OrderedDict[tuple[str, str], tuple[int, int]]" = OrderedDict()
+        # Devices with a backend.run in flight: one run per device (astra pack 473).
+        self._running: set[str] = set()
 
     def register_all(self, dispatcher: Any) -> None:
         dispatcher.register("backend.init", self.backend_init)
@@ -127,6 +130,16 @@ class Commands:
                 {"generation": self.evidence.generation},
             )
 
+        # One run per device (astra pack 473): a second run while one is in flight would drive
+        # the same machine at the same time. Nothing awaits between the check and the mark.
+        if device_id in self._running:
+            raise RpcException(
+                RPC_ERROR_CODES["DEVICE_BUSY"],
+                f"device {device_id} is already running a protocol, so job {job_id} does not run",
+                {"jobId": job_id},
+            )
+        self._running.add(device_id)
+
         started_at = time.monotonic()
         try:
             ops = _normalise_ops(protocol_source, protocol_payload, protocol_inline, run_params)
@@ -168,9 +181,9 @@ class Commands:
                 "summary": summary,
             }
         finally:
-            # Recording window is closed explicitly by the TS adapter via
-            # evidence.stopRecording — leave it open here.
-            pass
+            # The run is over: the device takes another. Its recording window is closed
+            # explicitly by the TS adapter via evidence.stopRecording, so it stays open here.
+            self._running.discard(device_id)
 
     async def backend_status(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
@@ -238,7 +251,14 @@ class Commands:
     async def evidence_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
-        window = self.evidence.start_recording(device_id, job_id)
+        try:
+            window = self.evidence.start_recording(device_id, job_id)
+        except RecordingWindowBusy as busy:
+            raise RpcException(
+                RPC_ERROR_CODES["DEVICE_BUSY"],
+                f"device {device_id} is recording job {busy.job_id}, so job {job_id} cannot open a window",
+                {"jobId": busy.job_id, "generation": self.evidence.generation},
+            ) from busy
         return {
             "ok": True,
             "jobId": window.job_id,

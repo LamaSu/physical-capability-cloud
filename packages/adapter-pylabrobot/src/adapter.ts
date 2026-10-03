@@ -145,6 +145,14 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   private evidenceListeners: EvidenceCallback[] = [];
   private currentCollector: EvidenceCollector | null = null;
   private currentJobId: string | null = null;
+  /**
+   * The job whose start is in flight, from the moment it is accepted until it returns. The
+   * adapter records one job at a time: its collector and currentJobId are single, and the
+   * sidecar keeps one window per device. So a start while this is set is refused, before
+   * anything reaches the sidecar (astra pack 473). It is set before the first await, so two
+   * starts in the same tick cannot both pass.
+   */
+  private running: string | null = null;
   private mockStatus: MachineStatus = "idle";
   private completedJobs = 0;
   /** Lazy-init guard so we only initialise the sidecar+backend once */
@@ -247,8 +255,18 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     }
     // A start needs its job's id before anything reaches the sidecar: not even backend.init,
     // which can run a backend's setup() on the device (astra pack 197).
-    if (command.type === "start" && this.startJobId(command.payload) === null) {
+    const startJob = command.type === "start" ? this.startJobId(command.payload) : null;
+    if (command.type === "start" && startJob === null) {
       return { success: false, message: START_NEEDS_JOB_ID };
+    }
+    // One run per device (astra pack 473): a second start would take over the collector and
+    // the job the sidecar's notifications are bound to, so the first job's evidence would be
+    // dropped while it still completed. Reserved here, before the first await.
+    if (startJob !== null) {
+      if (this.running !== null) {
+        return { success: false, message: `busy with job ${this.running}: a run is in flight on this device, so job ${startJob} does not start` };
+      }
+      this.running = startJob;
     }
     try {
       await this.ensureInitialized();
@@ -279,6 +297,10 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         success: false,
         message: err instanceof Error ? err.message : "PyLabRobot adapter error",
       };
+    } finally {
+      // The start has returned: its run has ended, or never began. A held job's evidence still
+      // refuses new starts on its own (unproven).
+      if (startJob !== null && this.running === startJob) this.running = null;
     }
   }
 

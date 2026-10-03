@@ -346,3 +346,70 @@ def test_a_restarted_sidecar_attests_nothing_of_the_old_job():
     assert old_gen != new_gen
     assert answer["error"]["code"] == RPC_ERROR_CODES["NO_RECORDING_WINDOW"]
     assert answer["error"]["data"]["generation"] == new_gen
+
+
+# ── one run per device (astra pack 473 (a)) ──────────────────────────────────
+
+
+def test_a_second_jobs_window_is_refused_while_one_is_open_and_the_open_job_keeps_its_ops():
+    """A device has one recording window. Opening another job's while one is open used to replace
+    it: the first job's later ops were bound to the second job, and its barrier found no window."""
+
+    async def scenario():
+        out = CapturingStdout()
+        s = Server(stdout=out)
+        await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        await _call(s, out, "2", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        second = await _call(s, out, "3", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-B"})
+        ops = [{"op": "aspirate", "well": "A1"}]
+        await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "4", "method": "backend.run", "params": {"deviceId": "dev-1", "jobId": "job-A", "protocolSource": "inline-ops", "protocolInline": ops}}))
+        await asyncio.sleep(0.05)
+        notes = [m["params"] for m in out.pop_messages() if m.get("method") == "evidence"]
+        closed = await _call(s, out, "5", "evidence.stopRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        return second, notes, closed
+
+    second, notes, closed = asyncio.run(scenario())
+    assert second["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"]
+    assert second["error"]["data"]["jobId"] == "job-A"
+    assert [(n["type"], n["jobId"]) for n in notes] == [("aspirate", "job-A")]
+    assert closed["result"]["jobId"] == "job-A" and closed["result"]["opCount"] == 1
+
+
+def test_opening_the_same_jobs_window_again_answers_with_that_window():
+    async def scenario():
+        out = CapturingStdout()
+        s = Server(stdout=out)
+        await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        first = await _call(s, out, "2", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        await asyncio.sleep(0.01)
+        again = await _call(s, out, "3", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        return first, again
+
+    first, again = asyncio.run(scenario())
+    assert again["result"] == first["result"]
+
+
+def test_a_run_while_another_run_is_in_flight_on_the_device_is_refused():
+    """Nothing serialized runs on a device: a second backend.run while one was in flight ran
+    at the same time, on the same machine."""
+
+    async def scenario():
+        out = CapturingStdout()
+        s = Server(stdout=out)
+        await _call(s, out, "1", "backend.init", {"deviceId": "dev-1", "plrBackend": "stub", "backendConfig": {}})
+        await _call(s, out, "2", "evidence.startRecording", {"deviceId": "dev-1", "jobId": "job-A"})
+        slow = [{"__delay_ms": 200}, {"op": "aspirate", "well": "A1"}]
+        first = asyncio.ensure_future(s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "3", "method": "backend.run", "params": {"deviceId": "dev-1", "jobId": "job-A", "protocolSource": "inline-ops", "protocolInline": slow}})))
+        await asyncio.sleep(0.05)
+        second = await _call(s, out, "4", "backend.run", {"deviceId": "dev-1", "jobId": "job-A", "protocolSource": "inline-ops", "protocolInline": [{"op": "dispense", "well": "B1"}]})
+        await first
+        await asyncio.sleep(0.05)
+        rest = out.pop_messages()
+        after = await _call(s, out, "5", "backend.run", {"deviceId": "dev-1", "jobId": "job-A", "protocolSource": "inline-ops", "protocolInline": [{"op": "mix", "well": "C1"}]})
+        return second, rest, after
+
+    second, rest, after = asyncio.run(scenario())
+    assert second["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"]
+    assert [m["params"]["type"] for m in rest if m.get("method") == "evidence"] == ["aspirate"]
+    assert [m["result"]["ok"] for m in rest if m.get("id") == "3"] == [True]
+    assert after["result"]["ok"] is True
