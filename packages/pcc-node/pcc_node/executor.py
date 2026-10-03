@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from .http_util import http, pcc_request
+from .http_util import actuation_deadline, http, may_emit_device_command, pcc_request
 
 log = logging.getLogger("pcc-node.executor")
 
@@ -124,6 +124,9 @@ class OpentronAdapter:
     def _shell(self, args):
         cmd = args.get("command", "")
         timeout = args.get("timeout", 30)
+        # The last check before the command leaves the node (#400 r9, F3).
+        if not may_emit_device_command():
+            return json.dumps({"error": "not_executed:lease_expired"})
         try:
             r = subprocess.run(
                 cmd, shell=True, capture_output=True, text=True, timeout=timeout,
@@ -355,6 +358,18 @@ def _report_error(kernel, call_id, error, pcc_base, api_key):
         log.error(f"Failed to report {error} for {call_id}: HTTP {status}")
 
 
+def _report_lapse(kernel, call_id, refusal, may_have_run, pcc_base, api_key):
+    """The lease lapsed before the call finished. If no device command left the node,
+    the call was not executed; if one did, the device may have moved, and that is a
+    device outcome (lease_lapsed_mid_command), never a not_executed refusal."""
+    if may_have_run:
+        log.warning(f"Lease for {call_id} lapsed mid-command; stopping")
+        _report_error(kernel, call_id, "lease_lapsed_mid_command", pcc_base, api_key)
+    else:
+        log.warning(f"Lease for {call_id} lapsed before any device command ({refusal}); refusing")
+        _report_error(kernel, call_id, refusal, pcc_base, api_key)
+
+
 def _resolve_fence_dir(fence_dir=None):
     if fence_dir:
         return fence_dir
@@ -530,32 +545,32 @@ def execute_and_report(call, adapters, pcc_base, api_key, kernel_id):
 
     log.info(f"Executing {tool_name}({json.dumps(tool_args)[:100]}) [call={call_id}]")
 
-    # Try each adapter until one handles it. The lease is re-checked right before
-    # each adapter is entered (r8, F3): a grant that has lapsed runs nothing.
+    # Try each adapter until one handles it. The lease is checked right before each
+    # adapter is entered, and again where each device command leaves the node
+    # (http_util.actuation_deadline, r9): a lapsed lease sends nothing more.
     result = json.dumps({"error": f"No adapter for tool: {tool_name}"})
     may_have_run = False
     for adapter in adapters:
         refusal = lease_refusal_at_entry(call, deadline)
         if refusal:
-            if may_have_run:
-                # An earlier adapter raised after it was entered and may have moved
-                # the device: that is a device outcome, not a refusal.
-                log.warning(f"Lease for {call_id} lapsed after an adapter error; stopping")
-                _report_error(kernel, call_id, "lease_lapsed_after_adapter_error", pcc_base, api_key)
-            else:
-                log.warning(f"Lease for {call_id} lapsed before actuation ({refusal}); refusing")
-                _report_error(kernel, call_id, refusal, pcc_base, api_key)
+            _report_lapse(kernel, call_id, refusal, may_have_run, pcc_base, api_key)
             return False
-        try:
-            r = adapter.execute(tool_name, tool_args)
-            parsed = json.loads(r)
-            if "error" not in parsed or not parsed["error"].startswith("Unknown tool"):
-                result = r
-                break
-        except Exception as e:
-            may_have_run = True
-            log.warning(f"Adapter {adapter.device_type} error: {e}")
-            continue
+        handled = False
+        with actuation_deadline(deadline) as guard:
+            try:
+                r = adapter.execute(tool_name, tool_args)
+                parsed = json.loads(r)
+                handled = "error" not in parsed or not parsed["error"].startswith("Unknown tool")
+            except Exception as e:
+                log.warning(f"Adapter {adapter.device_type} error: {e}")
+        if guard["sent"]:
+            may_have_run = True  # a device command left the node
+        if guard["refused"]:
+            _report_lapse(kernel, call_id, "not_executed:lease_expired", may_have_run, pcc_base, api_key)
+            return False
+        if handled:
+            result = r
+            break
 
     log.info(f"Result: {result[:200]}")
 

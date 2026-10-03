@@ -325,23 +325,31 @@ and fails closed at every step:
    reported. A fence that can't be created reports `not_executed:fence_unavailable`.
 4. **The lease**, as above, with a 10 s timeout. The call runs only on 200 with
    `"started": true` exactly.
-5. **At adapter entry** (r8). The grant is an expiring authority. The node may
-   BEGIN actuating only within the lease window, counted from just before it sent
-   the start request, so a slow answer can only shorten it. The window is the
-   gateway's `leaseMs`, capped at the node's own 5 s. Right before EACH adapter
-   is entered, the node re-checks the window and the poll's freshness:
-   - The window has lapsed: it reports `not_executed:lease_expired` and runs
-     nothing.
-   - The poll answer is stale: it reports `not_executed:stale`.
-   - An earlier adapter raised after it was entered: that adapter may have moved
-     the device, so the node stops and reports `lease_lapsed_after_adapter_error`,
-     a device outcome.
+5. **At adapter entry, and at the device boundary** (r8, r9). The grant is an
+   expiring authority. The node may send a device command for the call only
+   within the lease window, counted from just before it sent the start request,
+   so a slow answer can only shorten it. The window is the gateway's `leaseMs`,
+   capped at the node's own 5 s.
+   - Right before each adapter is entered, the node re-checks the window and the
+     poll's freshness.
+   - The window is also checked where each command leaves the node. Inside the
+     call's `actuation_deadline` block, `http_util.http()` and the shell path call
+     `may_emit_device_command()` immediately before they send. A command whose
+     deadline has passed never leaves.
+   - If no device command left, the node reports `not_executed:lease_expired`
+     (or `not_executed:stale`), and nothing ran.
+   - If one did, and a later one was held back, the device may have moved. The
+     node reports `lease_lapsed_mid_command`, a device outcome.
 
-**What the lease can't do.** The gateway's last check of the stop, the scope,
-the budget and the breaker is at the grant. A stop, revoke or breaker trip that
-lands after a call's grant can't reach that call, but a granted call that hasn't
-begun within 5 s never begins. So no relayed call can start more than 5 s after
-a stop, and one that is already running is the operator node's to stop.
+**What the lease guarantees.** No device command for a relayed call leaves the
+node after the call's lease deadline. The gateway's last check of the stop, the
+scope, the budget and the breaker is at the grant: a stop that lands after a
+call's grant can't reach that call, but nothing of a granted call is sent more
+than 5 s after its start request. So no relayed device command is sent more than
+5 s after a stop, and stopping a command already sent is the operator node's
+job. The one interval left is inside `may_emit_device_command()` and the send
+that follows it, with no other I/O between them.
+
 **`RELAY_LEASE_ENFORCE=off` must never be used on an armed (physically
 actuating) deployment:** it serves executors that take no lease at all.
 
@@ -374,8 +382,10 @@ ALLOW → safety governor admission check
     → emergency stop read once more, right before the insert (engaged → 409,
       unreadable → 503; the read and the insert share one synchronous step)
     → queue for the executor; a scoped non-safe call's commandCount is charged
-      here, in the same synchronous step as the insert (a refusal anywhere above
-      spends no budget)
+      here, in ONE transaction with the insert (an insert that fails rolls the
+      charge back), and only if the scope, read again, is still active, unexpired,
+      allows the tool and has a command left (else REJECTED, 403, no charge);
+      a refusal anywhere above spends no budget either
 
 Executor polls GET /api/relay/:kernelId/tool-call/pending (operator only)
     │

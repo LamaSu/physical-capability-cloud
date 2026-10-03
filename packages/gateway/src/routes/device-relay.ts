@@ -802,23 +802,54 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const id = generateId("tc");
     const now = new Date().toISOString();
 
-    // The budget is charged with the insert, in the same synchronous section, as an
-    // increment in SQL (no lost update between two submits).
-    if (chargesBudget && scopeId) {
-      db.update(executionScopes)
-        .set({ commandCount: sql`${executionScopes.commandCount} + 1` })
-        .where(eq(executionScopes.id, scopeId))
-        .run();
+    // The budget is charged and the call queued in ONE transaction (r8 MEDIUM): an
+    // insert that fails rolls the charge back. The charge is conditional: the scope
+    // is read again here (the governor was awaited since the early check) and must
+    // still be active, unexpired, allow the tool and have a command left, and the
+    // increment itself only applies below maxCommands, so two submits that both
+    // passed the early check can't both spend the last command.
+    let scopeRefusal: string | null = null;
+    db.transaction((tx) => {
+      if (chargesBudget && scopeId) {
+        const current = tx.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get();
+        scopeRefusal = !current
+          ? "scope_not_found"
+          : (scopeWriteRefusal(current, toolName) ??
+            (current.commandCount >= current.maxCommands ? "max_commands_reached" : null));
+        if (!scopeRefusal) {
+          const charged = tx
+            .update(executionScopes)
+            .set({ commandCount: sql`${executionScopes.commandCount} + 1` })
+            .where(
+              and(
+                eq(executionScopes.id, scopeId),
+                sql`${executionScopes.commandCount} < ${executionScopes.maxCommands}`,
+              ),
+            )
+            .run();
+          if ((charged as { changes?: number }).changes !== 1) scopeRefusal = "max_commands_reached";
+        }
+      }
+      tx.insert(toolCallRelay).values({
+        id,
+        scopeId: scopeId ?? null,
+        kernelId,
+        toolName,
+        toolArgs: args ?? {},
+        status: scopeRefusal ? "rejected" : "pending",
+        ...(scopeRefusal ? { error: scopeRefusal } : {}),
+        createdAt: now,
+      }).run();
+    });
+    if (scopeRefusal) {
+      return reply.status(403).send({
+        error: "Tool call rejected by execution scope",
+        reason: scopeRefusal,
+        callId: id,
+        toolName,
+        scopeId,
+      });
     }
-    db.insert(toolCallRelay).values({
-      id,
-      scopeId: scopeId ?? null,
-      kernelId,
-      toolName,
-      toolArgs: args ?? {},
-      status: "pending",
-      createdAt: now,
-    }).run();
 
     return reply.status(201).send({
       id,

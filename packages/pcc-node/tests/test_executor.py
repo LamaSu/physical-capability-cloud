@@ -438,6 +438,112 @@ class TestExecutionLeaseGuard:
         second.execute.assert_not_called()
         assert posts[-1][2] == {"callId": "c-two", "error": "not_executed:lease_expired"}
 
+    def _paused_after_final_check(self, adapter, tool_name, args, advance_s=6.0, extra_patches=()):
+        """r8 F3 (CRITICAL): the real final check passes, then the process is suspended for
+        `advance_s` before the adapter emits its device command. Returns (result, posts, sent)
+        where `sent` is the mocked urlopen (the device boundary)."""
+        import pcc_node.executor as ex
+
+        clock = [1000.0]
+        real_check = ex.lease_refusal_at_entry
+
+        def check_then_pause(call, deadline):
+            refusal = real_check(call, deadline)
+            clock[0] += advance_s
+            return refusal
+
+        call = {
+            "id": "c-pause-" + tool_name, "kernelId": "k1", "toolName": tool_name, "args": args,
+            "claimToken": "tok-pause", "_receivedAt": 1000.0,
+        }
+        posts = []
+
+        def fake_pcc(method, path, body=None, **_kwargs):
+            if path.endswith("/start"):
+                return 200, {"started": True, "leaseMs": 5000}
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("pcc_node.executor.lease_refusal_at_entry", side_effect=check_then_pause), \
+                mock.patch("pcc_node.executor.pcc_request", side_effect=fake_pcc), \
+                mock.patch("pcc_node.http_util.urlopen") as sent:
+            sent.return_value.__enter__.return_value.read.return_value = b'{"ok": true}'
+            sent.return_value.__enter__.return_value.status = 200
+            for patcher in extra_patches:
+                patcher.start()
+            try:
+                result = execute_and_report(call, [adapter], "http://pcc", "key", "k1")
+            finally:
+                for patcher in extra_patches:
+                    patcher.stop()
+        return result, posts, sent
+
+    def test_a_pause_after_the_final_check_still_sends_no_device_command(self):
+        """r8 F3 (CRITICAL) reproduction, astra's cheapest: the check passes, the process
+        pauses six seconds, and the adapter's device request must not leave the node."""
+        from pcc_node.executor import GenericHTTPAdapter
+
+        result, posts, sent = self._paused_after_final_check(
+            GenericHTTPAdapter(base_url="http://device.invalid"), "move", {"method": "POST", "path": "/move"},
+        )
+        sent.assert_not_called()
+        assert result is False
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": "c-pause-move", "error": "not_executed:lease_expired"}),
+        ]
+
+    def test_a_deadline_that_passes_between_two_device_requests_stops_the_second(self):
+        """The first request leaves before the deadline, the second would leave after it: the
+        second is never sent, and the report is a device outcome (it may have moved)."""
+        import pcc_node.executor as ex
+        from pcc_node.http_util import http
+
+        clock = [1000.0]
+
+        class TwoStep(object):
+            device_type = "two-step"
+
+            def execute(self, tool_name, tool_args):
+                first = http("POST", "http://device.invalid/a", {})
+                clock[0] += 6.0  # the first move took long
+                second = http("POST", "http://device.invalid/b", {})
+                return json.dumps({"first": first[0], "second": second[0]})
+
+        call = {"id": "c-two-step", "kernelId": "k1", "toolName": "t", "args": {},
+                "claimToken": "tok-ts", "_receivedAt": 1000.0}
+        posts = []
+
+        def fake_pcc(method, path, body=None, **_kwargs):
+            if path.endswith("/start"):
+                return 200, {"started": True, "leaseMs": 5000}
+            posts.append((method, path, body))
+            return 200, {}
+
+        with mock.patch("pcc_node.executor.time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("pcc_node.executor.pcc_request", side_effect=fake_pcc), \
+                mock.patch("pcc_node.http_util.urlopen") as sent:
+            sent.return_value.__enter__.return_value.read.return_value = b'{"ok": true}'
+            sent.return_value.__enter__.return_value.status = 200
+            result = ex.execute_and_report(call, [TwoStep()], "http://pcc", "key", "k1")
+        assert sent.call_count == 1
+        assert result is False
+        assert posts == [
+            ("POST", "/api/relay/k1/tool-result", {"callId": "c-two-step", "error": "lease_lapsed_mid_command"}),
+        ]
+
+    def test_a_pause_after_the_final_check_runs_no_shell_command(self):
+        from pcc_node.executor import OpentronAdapter
+
+        with mock.patch("pcc_node.executor.subprocess.run") as run:
+            result, posts, sent = self._paused_after_final_check(
+                OpentronAdapter(base_url="http://ot2.invalid"), "ot2_shell", {"command": "true"},
+            )
+        run.assert_not_called()
+        sent.assert_not_called()
+        assert result is False
+        assert posts[-1][2] == {"callId": "c-pause-ot2_shell", "error": "not_executed:lease_expired"}
+
     def test_200_started_true_runs_adapter_once_and_reports_result(self):
         adapter = mock.Mock()
         adapter.device_type = "test"

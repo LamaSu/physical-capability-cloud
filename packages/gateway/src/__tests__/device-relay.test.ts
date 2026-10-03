@@ -1942,6 +1942,43 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       expect(scopeRows()[0].commandCount).toBe(1);
     });
 
+    it("r8 MEDIUM: a queue insert that fails spends no budget (the charge and the insert are one transaction)", async () => {
+      const scopeId = await mintScope(HOLDER, ["run_create"]);
+      getStore().db.run(sql`CREATE TRIGGER r8_no_insert BEFORE INSERT ON tool_call_relay BEGIN SELECT RAISE(ABORT, 'r8 test'); END`);
+      try {
+        const res = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+        expect(res.statusCode).toBeGreaterThanOrEqual(500);
+      } finally {
+        getStore().db.run(sql`DROP TRIGGER IF EXISTS r8_no_insert`);
+      }
+      expect(scopeRows()[0].commandCount).toBe(0);
+    });
+
+    it("r8 MEDIUM: two submits that both passed the early budget check can't exceed maxCommands", async () => {
+      const minted = await mint({ createdBy: HOLDER, allowedTools: ["run_create"], maxCommands: 1 });
+      const scopeId = minted.json().id as string;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let consulted = 0;
+      const spy = vi.spyOn(getSafetyGateway(), "validateOnly").mockImplementation(async () => {
+        consulted++;
+        await gate;
+        return { allowed: true, executed: false } as never;
+      });
+      try {
+        const a = submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+        const b = submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+        while (consulted < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+        release();
+        const codes = [(await a).statusCode, (await b).statusCode].sort();
+        expect(codes).toEqual([201, 403]);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(scopeRows()[0].commandCount).toBe(1);
+      expect(relayRows().filter((r) => r.status === "pending")).toHaveLength(1);
+    });
+
     it("a policy that turns unreadable while the safety governor is consulted refuses the call 503", async () => {
       const spy = governorThatRuns(() => setPolicyText("{not json"));
       try {

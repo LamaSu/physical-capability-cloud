@@ -6,6 +6,9 @@ SSL verification is relaxed for local-network device probing.
 
 import json
 import ssl
+import threading
+import time
+from contextlib import contextmanager
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -15,6 +18,47 @@ USER_AGENT = "PCC-Node/0.1.0 (https://capability.network)"
 _relaxed_ctx = ssl.create_default_context()
 _relaxed_ctx.check_hostname = False
 _relaxed_ctx.verify_mode = ssl.CERT_NONE
+
+
+# ---------------------------------------------------------------------------
+# The actuation boundary (#400 r9, F3)
+# ---------------------------------------------------------------------------
+
+_actuation = threading.local()
+
+
+@contextmanager
+def actuation_deadline(deadline):
+    """Bind every device command this thread emits inside the block to a lease deadline.
+
+    A relayed call may run only while its lease holds. The executor's own check before an
+    adapter is advisory: the process can be suspended after it. So the deadline is checked
+    again where a command leaves the node: http() and the shell path call
+    may_emit_device_command() immediately before they send. Yields a dict: "sent", the
+    commands that left; "refused", whether one was held back because the deadline had passed.
+    """
+    previous = getattr(_actuation, "guard", None)
+    guard = {"deadline": deadline, "sent": 0, "refused": False}
+    _actuation.guard = guard
+    try:
+        yield guard
+    finally:
+        _actuation.guard = previous
+
+
+def may_emit_device_command():
+    """True if a device command may leave the node now. Outside an actuation_deadline block
+    (health probes, detection, gateway calls) it always may; inside one, only before the
+    deadline. A refusal is recorded, and every command allowed out is counted."""
+    guard = getattr(_actuation, "guard", None)
+    if guard is None:
+        return True
+    deadline = guard["deadline"]
+    if deadline is None or time.monotonic() > deadline:
+        guard["refused"] = True
+        return False
+    guard["sent"] += 1
+    return True
 
 
 def http(method, url, body=None, headers=None, timeout=30, verify_ssl=True):
@@ -50,6 +94,9 @@ def http(method, url, body=None, headers=None, timeout=30, verify_ssl=True):
         hdrs.setdefault("Content-Type", "application/json")
     req = Request(url, data=data, headers=hdrs, method=method)
     ctx = None if verify_ssl else _relaxed_ctx
+    # The last check before the request leaves the node (#400 r9, F3).
+    if not may_emit_device_command():
+        return 0, {"error": "not_executed:lease_expired"}
     try:
         with urlopen(req, timeout=timeout, context=ctx) as resp:
             raw = resp.read().decode("utf-8")
