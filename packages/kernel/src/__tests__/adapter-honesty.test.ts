@@ -167,7 +167,7 @@ describe("mock adapters tag every emitted event (payload.mock + source.simulated
     await cam.dispose();
   });
 
-  it("Opentrons mock mode tags run_started / run_progress / run_completed", async () => {
+  it("Opentrons mock mode tags execution_started / execution_progress / execution_completed", async () => {
     vi.useFakeTimers();
     const ot = new OpentronsMachineAdapter("otkernel-h1", {
       url: "http://localhost:31950",
@@ -180,9 +180,10 @@ describe("mock adapters tag every emitted event (payload.mock + source.simulated
     await vi.advanceTimersByTimeAsync(10_500); // progress ticks to completion
 
     const types = events.map((e) => e.type);
-    expect(types).toContain("run_started");
-    expect(types).toContain("run_progress");
-    expect(types).toContain("run_completed");
+    expect(types).toContain("method_loaded");
+    expect(types).toContain("execution_started");
+    expect(types).toContain("execution_progress");
+    expect(types).toContain("execution_completed");
     for (const e of events) {
       expect(e.payload.mock, `payload.mock missing on ${e.type}`).toBe(true);
       expect(e.source.simulated, `source.simulated missing on ${e.type}`).toBe(true);
