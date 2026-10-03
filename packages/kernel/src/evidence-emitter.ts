@@ -16,11 +16,28 @@ import type {
   TierEvidenceRequirements,
   Address,
 } from "@pcc/spec";
-import { DEFAULT_TIER_REQUIREMENTS, isFabricated } from "@pcc/spec";
+import { DEFAULT_TIER_REQUIREMENTS, KERNEL_PULL_CAPTURE_TYPES, isFabricated, kernelPullCaptureIssue } from "@pcc/spec";
 import { hashEvent, hashBundle } from "@pcc/spec";
 import { ids } from "@pcc/spec";
+import { types } from "node:util";
 import type { EvidenceStorageService, ArchiveResult } from "./evidence-storage.js";
 import * as Sentry from "@sentry/node";
+
+/** The camera event types; each counts toward a tier only as a closed LO-SE-1 capture for the job. */
+const CAMERA_TYPES: readonly string[] = KERNEL_PULL_CAPTURE_TYPES;
+
+/** An own data property's value, read without running a getter or a Proxy trap; otherwise undefined. */
+function ownDataValue(target: unknown, key: string): unknown {
+  if (target === null || typeof target !== "object" || types.isProxy(target)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(target, key);
+  return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
+}
+
+/** The device that emitted `event`, named for a `missing` entry without running a getter or a trap. */
+function deviceLabel(event: unknown): string {
+  const deviceId = ownDataValue(ownDataValue(event, "source"), "deviceId");
+  return typeof deviceId === "string" ? deviceId : "an unknown device";
+}
 
 /** In-memory store for evidence events per job step */
 interface StepEvidence {
@@ -28,7 +45,17 @@ interface StepEvidence {
   stepId: string;
   events: EvidenceEvent[];
   assuranceTier: AssuranceTier;
+  /** The escrow unit (milestone) and its challenge nonce, when the job names one. */
+  unit?: StepUnitContext;
 }
+
+/** `0x` + 64 lowercase hex each (LO-EV-9 unit binding). */
+export interface StepUnitContext {
+  settlementUnitId: string;
+  challengeNonce: string;
+}
+
+const UNIT_FIELD = /^0x[0-9a-f]{64}$/;
 
 export class EvidenceEmitter {
   private kernelId: string;
@@ -88,14 +115,22 @@ export class EvidenceEmitter {
     return this.lastIpfsResult;
   }
 
-  /** Register a job step to collect evidence for */
-  registerStep(jobId: string, stepId: string, assuranceTier: AssuranceTier): void {
+  /**
+   * Register a job step to collect evidence for. `unit` names the escrow
+   * settlement unit and its challenge nonce when the job has one; every event
+   * of the step then commits both (LO-EV-9).
+   */
+  registerStep(jobId: string, stepId: string, assuranceTier: AssuranceTier, unit?: StepUnitContext): void {
+    if (unit && !(UNIT_FIELD.test(unit.settlementUnitId) && UNIT_FIELD.test(unit.challengeNonce))) {
+      throw new Error("registerStep: settlementUnitId and challengeNonce must be 0x + 64 lowercase hex");
+    }
     const key = `${jobId}:${stepId}`;
     this.stepEvidence.set(key, {
       jobId,
       stepId,
       events: [],
       assuranceTier,
+      ...(unit ? { unit } : {}),
     });
   }
 
@@ -111,11 +146,36 @@ export class EvidenceEmitter {
       throw new Error(`No step registered for ${key}`);
     }
 
+    // Every event names its job, and its unit when the step has one, inside the
+    // hashed payload: LO-EV-9 and the oracle bind each event, not the bundle.
+    // An adapter may pre-fill a field, but never with another job or unit, and
+    // never with a unit the step was not given: the unit fields are reserved
+    // for the binding.
+    const payload: Record<string, unknown> = { ...((rawEvent.payload ?? {}) as Record<string, unknown>) };
+    const commit: Record<string, string> = {
+      jobId,
+      ...(stepEv.unit ? { settlementUnitId: stepEv.unit.settlementUnitId, challengeNonce: stepEv.unit.challengeNonce } : {}),
+    };
+    if (!stepEv.unit) {
+      for (const field of ["settlementUnitId", "challengeNonce"]) {
+        if (payload[field] !== undefined) {
+          throw new Error(`event payload.${field} is reserved for the step's unit, and this step has none`);
+        }
+      }
+    }
+    for (const [field, value] of Object.entries(commit)) {
+      if (payload[field] !== undefined && payload[field] !== value) {
+        throw new Error(`event payload.${field} ${String(payload[field])} does not match the step's ${value}`);
+      }
+      payload[field] = value;
+    }
+    const bound = { ...rawEvent, payload } as Omit<EvidenceEvent, "id" | "hash">;
+
     const id = ids.evidence();
-    const hash = await hashEvent(rawEvent);
+    const hash = await hashEvent(bound);
 
     const event: EvidenceEvent = {
-      ...rawEvent,
+      ...bound,
       id,
       hash,
     };
@@ -185,36 +245,60 @@ export class EvidenceEmitter {
     return bundle;
   }
 
-  /** Check if evidence meets the requirements for a tier */
+  /**
+   * Check whether evidence meets the requirements for a tier.
+   *
+   * An event counts, both toward its required-type group and toward the
+   * minimum-event floor, only when it is authentic:
+   *   - A fabricated (mock/simulated) event never counts, so a bundle of
+   *     all-fabricated events meets no tier (coord #312/#316).
+   *   - A camera event (camera_snapshot, cv_inspection_result) counts only
+   *     when it is a closed LO-SE-1 kernel-pull capture for `options.jobId`:
+   *     kernelPullCaptureIssue(event, jobId) in @pcc/spec returns null (astra
+   *     pack 155 HIGH 1). Its type alone never counts, and neither does a
+   *     legacy, careless, empty or push-fed payload. With no `options.jobId`,
+   *     no camera event counts: fail closed.
+   *   - Each camera event that does not count adds a `missing` entry naming
+   *     why. A bundle carrying one therefore does not meet the tier, even
+   *     when another capture does count.
+   * Other event types count by their type, as before.
+   */
   checkTierRequirements(
     events: EvidenceEvent[],
     tier: AssuranceTier,
     requirements: TierEvidenceRequirements[] = DEFAULT_TIER_REQUIREMENTS,
+    options: { jobId?: string } = {},
   ): { met: boolean; missing: string[] } {
     const tierReq = requirements.find((r) => r.tier === tier);
     if (!tierReq) {
       return { met: false, missing: [`No requirements defined for tier ${tier}`] };
     }
 
-    // Fabricated (mock/simulated) events do NOT count toward tier requirements:
-    // a simulated event must not satisfy a real tier's required event-types, nor
-    // count toward the minimum-event floor. A bundle of all-fabricated events
-    // therefore meets no tier (its authentic-event set is empty). (coord #312/#316)
-    const authenticEvents = events.filter((e) => !isFabricated(e));
-    const eventTypes = new Set(authenticEvents.map((e) => e.type));
-    const missing: string[] = [];
+    // Each event's type is read once, and the same value is used to classify it
+    // and to count it. A camera event gets the reason it does not count (null
+    // when it does). These arrays are built by map/filter/flatMap and literals,
+    // never by [[Set]], so no Array.prototype setter runs (astra pack 158).
+    const jobId = options?.jobId ?? "";
+    const assessed = events.map((event) => {
+      const type = event.type;
+      const cameraIssue = CAMERA_TYPES.includes(type) ? kernelPullCaptureIssue(event, jobId) : null;
+      return { event, type, cameraIssue };
+    });
+    const counted = assessed.filter(({ event, cameraIssue }) => cameraIssue === null && !isFabricated(event));
+    const countedTypes = new Set(counted.map(({ type }) => type));
 
-    for (const group of tierReq.requiredEventTypes) {
-      // At least one event type from each group must be present
-      const found = group.some((t) => eventTypes.has(t));
-      if (!found) {
-        missing.push(`Missing one of: ${group.join(" | ")}`);
-      }
-    }
-
-    if (authenticEvents.length < tierReq.minimumEvents) {
-      missing.push(`Need at least ${tierReq.minimumEvents} events, have ${authenticEvents.length}`);
-    }
+    const missing = [
+      // At least one event type from each group must be present.
+      ...tierReq.requiredEventTypes.flatMap((group) =>
+        group.some((t) => countedTypes.has(t)) ? [] : [`Missing one of: ${group.join(" | ")}`],
+      ),
+      ...assessed.flatMap(({ event, type, cameraIssue }) =>
+        cameraIssue === null ? [] : [`${type} from ${deviceLabel(event)}: not an LO-SE-1 capture for this job (${cameraIssue})`],
+      ),
+      ...(counted.length < tierReq.minimumEvents
+        ? [`Need at least ${tierReq.minimumEvents} events, have ${counted.length}`]
+        : []),
+    ];
 
     return { met: missing.length === 0, missing };
   }

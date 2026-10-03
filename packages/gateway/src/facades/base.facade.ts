@@ -82,7 +82,8 @@ export abstract class BaseFacade {
               return err("FORBIDDEN", message, 403) as Result<T>;
             }
             if (error.name === "ConflictError") {
-              return err("SIGNER_ALREADY_BOUND", message, 409) as Result<T>;
+              // Preserve an attached code (e.g. "settlement_owned_status"); the default is the signer-bind conflict.
+              return err((error as any).code ?? "SIGNER_ALREADY_BOUND", message, 409) as Result<T>;
             }
             if (error.name === "WriteDisabledError") {
               span.setAttribute("facade.error_code", "WRITE_DISABLED");

@@ -1,64 +1,74 @@
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { MaintenanceEvent, OperatorCertification, OperatorPolicy } from "@pcc/spec";
+import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 
 const { operatorPolicies, pendingApprovals, toolCallRelay } = schema;
 
-const mockMachines = [
-  { id: "reg-001", name: "Prusa MK4 Workshop", type: "fdm", status: "active", utilization: 72, jobsCompleted: 98, uptime: 99.2 },
-  { id: "reg-002", name: "Epilog Fusion Pro", type: "laser-cut", status: "active", utilization: 58, jobsCompleted: 44, uptime: 97.8 },
-];
+/**
+ * An operator read the gateway has no real source for yet. It answers 501 with a
+ * reason and pointers to the reads that ARE real, instead of inventing data.
+ *
+ * These four routes used to return hard-coded machines, certifications and
+ * maintenance rows, and a freshly randomized daily earnings series on every call. The public
+ * agent package advertises them as an operator's earnings, so an agent acting for an
+ * operator read invented income. A missing fact is not a plausible number.
+ */
+function notAvailable(what: string, why: string, see: string[]) {
+  return { error: "not_available", message: `${what} ${why} Nothing is returned rather than an estimate.`, see };
+}
 
-const mockCerts: OperatorCertification[] = [
-  { id: "cert-1", name: "OSHA 10-Hour General Industry", issuer: "OSHA", issuedAt: "2025-06-15T00:00:00Z", expiresAt: "2028-06-15T00:00:00Z", status: "valid" },
-  { id: "cert-2", name: "3D Printing Safety Training", issuer: "PCC Network", issuedAt: "2025-09-01T00:00:00Z", expiresAt: "2026-09-01T00:00:00Z", status: "valid" },
-];
-
-const mockMaintenance: MaintenanceEvent[] = [
-  { id: "maint-1", machineId: "reg-001", type: "scheduled", description: "Replace nozzle and clean heatbreak", scheduledAt: "2026-03-10T09:00:00Z", status: "upcoming" },
-  { id: "maint-2", machineId: "reg-001", type: "inspection", description: "Quarterly belt tension check", scheduledAt: "2026-03-20T14:00:00Z", status: "upcoming" },
-  { id: "maint-3", machineId: "reg-001", type: "scheduled", description: "Firmware update v5.2.0", scheduledAt: "2026-03-01T10:00:00Z", completedAt: "2026-03-01T10:30:00Z", status: "completed" },
-];
+/**
+ * The 409 body for an approve/reject that changed nothing because the approval had already
+ * left "pending". It carries the record's current status and never says this request
+ * decided it (no `approved: true` / `rejected: true`).
+ */
+function alreadyDecided(status: string) {
+  return { error: "already_decided", status, message: `This approval is already ${status}; this request changed nothing.` };
+}
 
 export async function operatorRoutes(app: FastifyInstance) {
-  // List operator's machines
-  app.get("/api/operator/machines", async () => {
-    return { machines: mockMachines };
+  // Machines: the operator's real kernels, devices and in-flight jobs are at
+  // /api/agent/me. There is no per-operator machine registry with utilization or
+  // uptime to serve here.
+  app.get("/api/operator/machines", async (_req, reply) => {
+    return reply.code(501).send(
+      notAvailable(
+        "Operator machines with utilization and uptime are not recorded.",
+        "Your kernels, devices and in-flight jobs are real and available at /api/agent/me.",
+        ["/api/agent/me", "/api/kernels/:kernelId", "/api/kernels/:kernelId/devices"],
+      ),
+    );
   });
 
-  // Earnings data with period filter
-  app.get("/api/operator/earnings", async (req) => {
-    const query = req.query as Record<string, string>;
-    const days = query.period === "7d" ? 7 : query.period === "90d" ? 90 : query.period === "1y" ? 365 : 30;
-
-    const earnings = Array.from({ length: days }, (_, i) => {
-      const daily = 15 + Math.random() * 40;
-      return {
-        date: new Date(Date.now() - (days - i) * 86400000).toISOString().split("T")[0],
-        earnings: Math.round(daily * 100) / 100,
-      };
-    });
-
-    let cumulative = 0;
-    const withCumulative = earnings.map((e) => {
-      cumulative += e.earnings;
-      return { ...e, cumulative: Math.round(cumulative * 100) / 100 };
-    });
-
-    return { earnings: withCumulative, total: Math.round(cumulative * 100) / 100 };
+  // Earnings: escrow records carry no per-operator payout history or release time,
+  // so a daily series cannot be reported. Per-job payout state is at
+  // /api/jobs/:jobId/execution (settlement axis, from the escrow record).
+  app.get("/api/operator/earnings", async (_req, reply) => {
+    return reply.code(501).send(
+      notAvailable(
+        "Operator earnings history is not recorded yet.",
+        "Per-job payment state is available at /api/jobs/:jobId/execution.",
+        ["/api/jobs", "/api/jobs/:jobId/execution"],
+      ),
+    );
   });
 
-  // Certification list
-  app.get("/api/operator/certifications", async () => {
-    return { certifications: mockCerts };
+  // Certifications: there is no certification store.
+  app.get("/api/operator/certifications", async (_req, reply) => {
+    return reply.code(501).send(
+      notAvailable("Operator certifications are not recorded.", "There is no certification store yet.", []),
+    );
   });
 
-  // Maintenance events
-  app.get("/api/operator/maintenance", async () => {
-    return { events: mockMaintenance };
+  // Maintenance: nothing writes maintenance events yet, so an empty list would read
+  // as "no maintenance scheduled" (absence is not evidence).
+  app.get("/api/operator/maintenance", async (_req, reply) => {
+    return reply.code(501).send(
+      notAvailable("Operator maintenance windows are not recorded.", "Nothing records maintenance events yet.", []),
+    );
   });
 
   // ═════════════════════════════════════════════════════════════════
@@ -68,20 +78,23 @@ export async function operatorRoutes(app: FastifyInstance) {
   /** GET /api/operator/policy/:kernelId — Get operator policy */
   app.get<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
-    async (req) => {
+    async (req, reply) => {
+      let row;
       try {
         const { db } = getStore();
-        const row = db.select().from(operatorPolicies)
+        row = db.select().from(operatorPolicies)
           .where(eq(operatorPolicies.kernelId, req.params.kernelId))
           .get();
-
-        if (!row) {
-          return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };
-        }
-        return { policy: row.policy, updatedAt: row.updatedAt };
-      } catch {
+      } catch (err) {
+        // A failed read is not "no policy set": answering the default here would show
+        // an operator's real guardrails as the defaults.
+        req.log.warn({ kernelId: req.params.kernelId, err }, "operator policy read failed");
+        return reply.code(503).send({ error: "read_failed", message: "The operator policy could not be read. Try again shortly." });
+      }
+      if (!row) {
         return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };
       }
+      return { policy: row.policy, updatedAt: row.updatedAt };
     },
   );
 
@@ -265,7 +278,13 @@ export async function operatorRoutes(app: FastifyInstance) {
         kernelId,
         jobId,
         submittedBy: agentId,
-        jobSummary: { capabilityType: capabilityType ?? "liquid-handler", parameters: parameters ?? {} },
+        // capabilityType is unknown unless the caller says so. The spec declares it optional
+        // (PendingApproval.jobSummary.capabilityType?: string), so an absent value is left out;
+        // it used to be stored as "liquid-handler", a type nobody asserted.
+        jobSummary: {
+          ...(capabilityType !== undefined && capabilityType !== null ? { capabilityType } : {}),
+          parameters: parameters ?? {},
+        },
         status: autoApprove ? "approved" : "pending",
         createdAt: now,
         decidedAt: autoApprove ? now : null,
@@ -280,8 +299,16 @@ export async function operatorRoutes(app: FastifyInstance) {
   });
 
   /** GET /api/operator/approvals — List pending approvals */
-  app.get("/api/operator/approvals", async (req) => {
-    const { kernelId, status } = req.query as { kernelId?: string; status?: string };
+  app.get("/api/operator/approvals", async (req, reply) => {
+    const query = req.query as { kernelId?: unknown; status?: unknown };
+    // A repeated parameter arrives as a list: a client error (400), not a failed read (503).
+    for (const [name, value] of [["kernelId", query.kernelId], ["status", query.status]] as const) {
+      if (value !== undefined && typeof value !== "string") {
+        return reply.code(400).send({ error: "invalid_query", message: `${name} must be given once, as a single value.` });
+      }
+    }
+    const kernelId = query.kernelId as string | undefined;
+    const status = query.status as string | undefined;
 
     try {
       const { db } = getStore();
@@ -304,8 +331,11 @@ export async function operatorRoutes(app: FastifyInstance) {
       }
 
       return { approvals: rows };
-    } catch {
-      return { approvals: [] };
+    } catch (err) {
+      // A failed read is not "no approvals": an empty list here would hide recorded
+      // approvals during an outage. Same refusal as the operator policy read above.
+      req.log.warn({ kernelId, status, err }, "operator approvals read failed");
+      return reply.code(503).send({ error: "read_failed", message: "The approvals could not be read. Try again shortly." });
     }
   });
 
@@ -317,7 +347,10 @@ export async function operatorRoutes(app: FastifyInstance) {
         const { db } = getStore();
         const now = new Date().toISOString();
 
-        db.update(pendingApprovals)
+        // The update only matches a "pending" row, so its changed-row count is what says
+        // whether THIS request made the decision. Accepting any row that reads back as
+        // "approved" reported an earlier decision as this request's.
+        const { changes } = db.update(pendingApprovals)
           .set({ status: "approved", decidedAt: now })
           .where(and(eq(pendingApprovals.id, req.params.id), eq(pendingApprovals.status, "pending")))
           .run();
@@ -326,8 +359,11 @@ export async function operatorRoutes(app: FastifyInstance) {
           .where(eq(pendingApprovals.id, req.params.id))
           .get();
 
-        if (!row || row.status !== "approved") {
-          return reply.status(404).send({ error: "Approval not found or already decided" });
+        if (!row) {
+          return reply.status(404).send({ error: "Approval not found" });
+        }
+        if (changes === 0) {
+          return reply.status(409).send(alreadyDecided(row.status));
         }
 
         return { approval: row, approved: true };
@@ -347,7 +383,8 @@ export async function operatorRoutes(app: FastifyInstance) {
         const { db } = getStore();
         const now = new Date().toISOString();
 
-        db.update(pendingApprovals)
+        // Same rule as approve: only a changed row means THIS request rejected it.
+        const { changes } = db.update(pendingApprovals)
           .set({ status: "rejected", decidedAt: now, rejectionReason: reason ?? null })
           .where(and(eq(pendingApprovals.id, req.params.id), eq(pendingApprovals.status, "pending")))
           .run();
@@ -356,8 +393,11 @@ export async function operatorRoutes(app: FastifyInstance) {
           .where(eq(pendingApprovals.id, req.params.id))
           .get();
 
-        if (!row || row.status !== "rejected") {
-          return reply.status(404).send({ error: "Approval not found or already decided" });
+        if (!row) {
+          return reply.status(404).send({ error: "Approval not found" });
+        }
+        if (changes === 0) {
+          return reply.status(409).send(alreadyDecided(row.status));
         }
 
         return { approval: row, rejected: true };

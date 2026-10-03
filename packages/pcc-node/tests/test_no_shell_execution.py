@@ -33,6 +33,10 @@ computed argv and ``/usr/bin/env sh``). The rules:
    rebinds it (a def, an assignment, a parameter, an import, ``globals()``,
    ``setattr``, an attribute store), and nothing imports ``builtins``
    (verdict 68e, finding 2).
+6. A module is never reached through another module's attribute
+   (``subprocess.os``), and an attribute chain goes past a tracked module's
+   first attribute only through the few the package uses (``SAFE_CHAINS``:
+   ``os.path``, ``os.environ``, ``sys.stdin``) (verdict 68f).
 """
 
 import ast
@@ -69,6 +73,11 @@ REFUSED_BUILTINS = {"eval", "exec", "compile", "__import__"}
 # this list exactly that). A path, or any other executable, is refused.
 EXECUTABLES = {"arp", "dd", "ffmpeg", "journalctl", "sysctl", "v4l2-ctl"}
 MODULES = set(REFUSED) | {m for m, _ in ALLOWED_STARTS}
+# Names of modules that must not be reached through another module (subprocess.os).
+MODULE_NAMES = MODULES | REFUSED_IMPORTS
+# The only chains past a tracked module's first attribute (test_the_safe_chains_are_what_the_package_uses
+# keeps this list exactly what the package uses).
+SAFE_CHAINS = {("os", "path"), ("os", "environ"), ("sys", "stdin")}
 LOOKUPS = {"getattr", "hasattr"}
 # Calls that rebind names behind the syntax tree's back.
 REBINDERS = {"globals", "locals", "vars", "setattr", "delattr"}
@@ -172,6 +181,18 @@ def violations(source, filename="<src>"):
                 bad(node, f"{module}.{node.attr}")
             elif node.attr.startswith("__"):
                 bad(node, f"{module}.{node.attr}")
+        # Any attribute path from a tracked module: never to another module, and past the
+        # first attribute only through SAFE_CHAINS, one step deep.
+        path = _attribute_path(node, modules)
+        if path is not None:
+            module, attrs = path
+            dotted = ".".join([module, *attrs])
+            if attrs[-1] in MODULE_NAMES:
+                bad(node, f"{dotted} reaches another module")
+            elif len(attrs) == 2 and (module, attrs[0]) not in SAFE_CHAINS:
+                bad(node, f"{dotted} reaches past the module")
+            elif len(attrs) > 2:
+                bad(node, f"{dotted} reaches too deep")
         # An allowed starter bound to another name, or passed as a value, escapes the call checks.
         if id(node) not in call_funcs:
             ref = None
@@ -220,6 +241,34 @@ def violations(source, filename="<src>"):
     return found
 
 
+def _attribute_path(node, modules):
+    """(module, [attr, ...]) when *node* is an attribute path from a tracked module name."""
+    attrs = []
+    while isinstance(node, ast.Attribute):
+        attrs.append(node.attr)
+        node = node.value
+    if attrs and isinstance(node, ast.Name) and node.id in modules:
+        return modules[node.id], attrs[::-1]
+    return None
+
+
+def chains_used(source):
+    """The (module, attr) pairs a source reaches past: os.path in os.path.join."""
+    tree = ast.parse(source)
+    modules = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in MODULES:
+                    modules[alias.asname or alias.name] = alias.name
+    used = set()
+    for node in ast.walk(tree):
+        path = _attribute_path(node, modules)
+        if path is not None and len(path[1]) >= 2:
+            used.add((path[0], path[1][0]))
+    return used
+
+
 def executables_started(source):
     """The fixed executables a source starts, as written."""
     started = set()
@@ -260,6 +309,14 @@ def test_the_allowlist_is_what_the_package_runs():
     for path in _sources():
         started |= executables_started(path.read_text(encoding="utf-8"))
     assert started == EXECUTABLES
+
+
+def test_the_safe_chains_are_what_the_package_uses():
+    # A new chain is a reviewed change to SAFE_CHAINS; an unused entry is removed.
+    used = set()
+    for path in _sources():
+        used |= chains_used(path.read_text(encoding="utf-8"))
+    assert used == SAFE_CHAINS
 
 
 def test_the_relay_shell_executor_is_gone():
@@ -337,6 +394,14 @@ EVASIONS = {
     "getattr imported": "import subprocess\nfrom helpers import picker as getattr\ngetattr(subprocess, 'x')(['ls'])",
     "getattr through globals()": "import subprocess\nglobals()['getattr'] = f\ngetattr(subprocess, 'x')(['ls'])",
     "getattr rebound on another module": "import pcc_node.camera as cam\ncam.getattr = lambda o, n: o.run",
+    # Verdict 68f (on #442): a module reached through another module's attribute.
+    "nested module attribute": "import subprocess\nsubprocess.os.system('id')",
+    "nested module as a value": "import subprocess\nposix = subprocess.os\nposix.system('id')",
+    "refused module through another": "import subprocess\nsubprocess._posixsubprocess.fork_exec(a)",
+    "sys through os": "import os\nos.sys.modules['os'].system('id')",
+    "a module through a safe chain": "import os\nos.path.os.system('id')",
+    "an unlisted chain": "import subprocess\nsignal_number = subprocess.signal.SIGKILL",
+    "too deep through a safe chain": "import os\nos.path.sep.join(parts)",
     "import builtins": "import builtins\nprint_ = builtins.print",
     "builtins rebound": "import builtins, subprocess\nbuiltins.getattr = f\ngetattr(subprocess, 'x')(['ls'])",
     "perl -e": "import subprocess\nsubprocess.run(['perl', '-e', payload])",
@@ -354,6 +419,9 @@ SAFE = {
     # A constant, harmless attribute through getattr: #447's ui_server.py and #454 use these.
     "constant getattr": "import os\nflags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0)",
     "constant hasattr": "import os\nsupported = hasattr(os, 'O_CLOEXEC')",
+    "os.path chain": "import os\nfull = os.path.join('a', 'b')",
+    "os.environ chain": "import os\nvalue = os.environ.get('X')",
+    "sys.stdin chain": "import sys\ninteractive = sys.stdin.isatty()",
     "an unrelated name that contains getattr": "import os\nmy_getattr = 1\nflags = getattr(os, 'O_NOFOLLOW', 0)",
 }
 

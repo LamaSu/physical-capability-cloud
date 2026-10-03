@@ -120,10 +120,10 @@ All endpoints are relative to the base URL above. Most return JSON.
 ### Operator Management
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /api/operator/machines | List operator machines |
-| GET | /api/operator/earnings | Operator earnings summary |
-| GET | /api/operator/certifications | Operator certifications |
-| GET | /api/operator/maintenance | Maintenance schedule |
+| GET | /api/operator/machines | Not available yet (501): use /api/agent/me for your kernels, devices and in-flight jobs |
+| GET | /api/operator/earnings | Not available yet (501): per-job payment state is at /api/jobs/:jobId/execution |
+| GET | /api/operator/certifications | Not available yet (501): no certification store |
+| GET | /api/operator/maintenance | Not available yet (501): nothing records maintenance events |
 | GET | /api/operator/approvals | Pending operator approvals |
 | POST | /api/operator/emergency-stop | Emergency stop a machine |
 | POST | /api/operator/emergency-resume | Resume after emergency stop |
@@ -291,9 +291,9 @@ All endpoints are relative to the base URL above. Most return JSON.
 ### Bounties & Pools
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /api/bounty/demand | Create a demand bounty |
-| POST | /api/bounty/claim | Claim a bounty |
-| POST | /api/bounty/verify | Verify a bounty claim |
+| POST | /api/bounty/demand | Record a demand signal (unfunded; no bounty is auto-created) |
+| POST | /api/bounty/claim | Claim an open bounty (in-memory, unfunded) |
+| POST | /api/bounty/verify | Retired (410): verification is server-derived, never caller-supplied |
 | POST | /api/pool/create | Create a capability pool |
 | POST | /api/pool/stake | Stake into a pool |
 

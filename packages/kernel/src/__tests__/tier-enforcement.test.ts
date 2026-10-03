@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as Sentry from "@sentry/node";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
-import type { MachineAdapter, SensorAdapter, CameraAdapter } from "../adapters/types.js";
+import type { MachineAdapter, SensorAdapter, CameraAdapter, CaptureContext } from "../adapters/types.js";
 import type { EvidenceEvent, EvidenceSource, SHA256 } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
@@ -43,6 +43,43 @@ function makeEvent(type: string, overrides: Partial<Omit<EvidenceEvent, "id" | "
     source: makeSource(),
     payload: {},
     ...overrides,
+  };
+}
+
+// astra pack 155 HIGH 1: a camera event counts toward a tier only as a closed
+// LO-SE-1 kernel-pull capture for the job (kernelPullCaptureIssue in @pcc/spec).
+// A bare makeEvent("camera_snapshot") with payload {} no longer counts, so the
+// Tier 2 fixtures that expect a camera event to count build a valid capture and
+// pass { jobId }.
+const CAMERA_JOB = "job-tier2-camera";
+
+/** A complete LO-SE-1 camera event for `jobId`: a camera_snapshot, or a cv_inspection_result with the inspection fields. */
+function makeCameraEvent(
+  type: "camera_snapshot" | "cv_inspection_result",
+  jobId: string,
+): Omit<EvidenceEvent, "id" | "hash"> {
+  const timestamp = new Date().toISOString();
+  const imageHash = `sha256:${"ab".repeat(32)}`;
+  const capture = {
+    jobId,
+    acquiredAt: timestamp,
+    imageHash,
+    storageRef: `photo:${imageHash}`,
+    frameStored: false,
+    rawSizeBytes: 15_000,
+    captureMode: "kernel-pull",
+    captureClass: "CC0",
+    device: { path: "/dev/video0", identity: "SER-TIER-1" },
+    declaredChallengeId: null,
+    declaredChallengeAnchor: null,
+    antiSpoofScore: 1,
+  };
+  const inspection = { passed: true, confidence: 100, findings: [], referenceHash: null, model: "anti-spoof-heuristic" };
+  return {
+    type,
+    timestamp,
+    source: { deviceId: "camera-001", deviceType: "camera", kernelId: KERNEL_ID },
+    payload: type === "camera_snapshot" ? capture : { ...capture, ...inspection },
   };
 }
 
@@ -114,28 +151,21 @@ function makeMockSensor(eventsToEmit: Array<Omit<EvidenceEvent, "id" | "hash">> 
 
 function makeMockCamera(): CameraAdapter {
   const listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
+  // astra pack 155 HIGH 1: only a closed LO-SE-1 capture for the job counts at
+  // Tier 2, so this camera emits one for the job the runner names (it used to
+  // emit { imageHash } from a controller source, which no longer counts).
   return {
     id: "camera-mock-001",
-    source: makeSource("camera-001"),
-    captureSnapshot: vi.fn().mockImplementation(async () => {
+    source: { deviceId: "camera-001", deviceType: "camera", kernelId: KERNEL_ID },
+    captureSnapshot: vi.fn().mockImplementation(async (context?: CaptureContext) => {
       for (const cb of listeners) {
-        cb({
-          type: "camera_snapshot",
-          timestamp: new Date().toISOString(),
-          source: makeSource("camera-001"),
-          payload: { imageHash: "sha256:cam001" },
-        });
+        cb(makeCameraEvent("camera_snapshot", context?.jobId ?? ""));
       }
       return { imageHash: "sha256:cam001", storageRef: "mock://cam001" };
     }),
-    runInspection: vi.fn().mockImplementation(async () => {
+    runInspection: vi.fn().mockImplementation(async (_referenceHash?: string, context?: CaptureContext) => {
       for (const cb of listeners) {
-        cb({
-          type: "camera_snapshot",
-          timestamp: new Date().toISOString(),
-          source: makeSource("camera-001"),
-          payload: { imageHash: "sha256:cam_inspect" },
-        });
+        cb(makeCameraEvent("camera_snapshot", context?.jobId ?? ""));
       }
       return { passed: true, confidence: 0.95, findings: [], imageHash: "sha256:cam_inspect" };
     }),
@@ -216,27 +246,29 @@ describe("EvidenceEmitter — checkTierRequirements", () => {
 
   describe("Tier 2", () => {
     it("meets tier 2 with camera_snapshot + gcode_hash_verified + execution_completed + power_profile_summary", () => {
-      // Tier 2: all tier 1 events + camera_snapshot or cv_inspection_result, min 4 events
+      // Tier 2: all tier 1 events + camera_snapshot or cv_inspection_result, min 4 events.
+      // astra pack 155 HIGH 1: the camera_snapshot is a valid LO-SE-1 capture for the job, and the job is passed.
       const events = [
         makeEvent("gcode_hash_verified"),
         makeEvent("execution_completed"),
         makeEvent("power_profile_summary"),
-        makeEvent("camera_snapshot"),
+        makeCameraEvent("camera_snapshot", CAMERA_JOB),
       ] as unknown as EvidenceEvent[];
 
-      const result = emitter.checkTierRequirements(events, 2);
+      const result = emitter.checkTierRequirements(events, 2, undefined, { jobId: CAMERA_JOB });
       expect(result.met).toBe(true);
     });
 
     it("meets tier 2 with cv_inspection_result instead of camera_snapshot", () => {
+      // astra pack 155 HIGH 1: a valid LO-SE-1 cv_inspection_result for the job, and the job is passed.
       const events = [
         makeEvent("gcode_hash_verified"),
         makeEvent("execution_completed"),
         makeEvent("power_profile_summary"),
-        makeEvent("cv_inspection_result"),
+        makeCameraEvent("cv_inspection_result", CAMERA_JOB),
       ] as unknown as EvidenceEvent[];
 
-      const result = emitter.checkTierRequirements(events, 2);
+      const result = emitter.checkTierRequirements(events, 2, undefined, { jobId: CAMERA_JOB });
       expect(result.met).toBe(true);
     });
 
@@ -323,13 +355,15 @@ describe("EvidenceEmitter — checkTierRequirements rejects fabricated events", 
   });
 
   it("meets tier 2 when the same CV event is HONEST", () => {
+    // astra pack 155 HIGH 1: an honest CV event must also be a valid LO-SE-1
+    // capture for the job to count, and the job is passed.
     const events = [
       makeEvent("gcode_hash_verified"),
       makeEvent("execution_completed"),
       makeEvent("power_profile_summary"),
-      makeEvent("cv_inspection_result"),
+      makeCameraEvent("cv_inspection_result", CAMERA_JOB),
     ] as unknown as EvidenceEvent[];
-    expect(emitter.checkTierRequirements(events, 2).met).toBe(true);
+    expect(emitter.checkTierRequirements(events, 2, undefined, { jobId: CAMERA_JOB }).met).toBe(true);
   });
 
   it("does NOT count a fabricated event toward the minimum-event floor", () => {
@@ -449,11 +483,13 @@ describe("JobRunner — tier gating", () => {
 
   describe("Tier 2 job", () => {
     it("succeeds with CV inspection + sensor data (all tier 2 events)", async () => {
+      // astra pack 155 HIGH 1: every camera event is a valid LO-SE-1 capture for
+      // this job (here and from makeMockCamera); the runner passes the jobId.
       const machineEvents = [
         makeEvent("gcode_hash_verified"),
         makeEvent("execution_completed"),
         makeEvent("power_profile_summary"),
-        makeEvent("camera_snapshot"),
+        makeCameraEvent("camera_snapshot", "job-tier2-001"),
       ];
 
       const machine = makeMockMachine(machineEvents);
