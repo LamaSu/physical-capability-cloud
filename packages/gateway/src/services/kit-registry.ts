@@ -394,8 +394,8 @@ export class KitRegistry {
     } catch {
       throw new KitIntegrityError(kitDigest, "the stored manifest is not a valid kit");
     }
+    // With the hash check above, this also proves computeKitDigest(manifest) === kitDigest.
     if (canonicalize(manifest) !== text) throw new KitIntegrityError(kitDigest, "the stored bytes are not the canonical manifest");
-    if ((await computeKitDigest(manifest)) !== kitDigest) throw new KitIntegrityError(kitDigest, "the manifest's digest differs");
     return { record, manifest };
   }
 

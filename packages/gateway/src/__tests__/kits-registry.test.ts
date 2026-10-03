@@ -304,6 +304,20 @@ describe("integrity", () => {
     await app.close();
   });
 
+  it("refuses another kit's valid, canonical manifest stored under this digest (kits K1, own review)", async () => {
+    const { registry, rootDir } = await mkRegistry();
+    const a = await registry.publish(kit({ version: "7.0.0" }), "alice@kits.test");
+    const b = await registry.publish(kit({ version: "7.0.1" }), "alice@kits.test");
+    // B's bytes are a valid canonical manifest, just not the one A's digest names.
+    await fs.writeFile(manifestFilePath(rootDir, a.kitDigest), await fs.readFile(manifestFilePath(rootDir, b.kitDigest)));
+    await expect(registry.get(a.kitDigest)).rejects.toBeInstanceOf(KitIntegrityError);
+    const app = await buildApp(registry, "alice@kits.test");
+    const res = await app.inject({ method: "GET", url: `/api/kits/${a.kitDigest}` });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe("kit_integrity_failure");
+    await app.close();
+  });
+
   it("refuses a publication record naming another digest", async () => {
     const { registry, rootDir } = await mkRegistry();
     const app = await buildApp(registry, "alice@kits.test");
@@ -608,6 +622,15 @@ describe("quota", () => {
     // very digest alice was refused (it was never actually written).
     const rBob = await appBob.inject({ method: "POST", url: "/api/kits", payload: k3 });
     expect(rBob.statusCode).toBe(201);
+
+    // Re-publishing an existing digest never counts against the re-publisher either:
+    // bob is now at his cap of 2 (k3 above plus one more), yet re-publishing alice's k1 is 200.
+    const rBob2 = await appBob.inject({ method: "POST", url: "/api/kits", payload: kit({ version: "2.0.9" }) });
+    expect(rBob2.statusCode).toBe(201);
+    const rBobRepublish = await appBob.inject({ method: "POST", url: "/api/kits", payload: k1 });
+    expect(rBobRepublish.statusCode).toBe(200);
+    expect(rBobRepublish.json().created).toBe(false);
+    expect(await registry.publisherOf(r1.json().kitDigest)).toBe("alice@kits.test");
 
     // Advance the injected clock 24h + 1ms: alice's first two publishes roll
     // out of the rolling window, freeing her to publish again.
