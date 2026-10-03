@@ -559,6 +559,15 @@ describe("the rules catch each known way around them (self-test)", () => {
     }
   });
 
+  it("astra round 6: the protected target through a local alias", () => {
+    for (const code of [
+      'const headersPrototype = Headers.prototype;\nObject.defineProperty(headersPrototype, "set", { value: observe });',
+      'const nav = navigator;\nObject.defineProperty(nav, "sendBeacon", { value: observe });',
+    ]) {
+      expect(caught(code), code).toContain("global-write");
+    }
+  });
+
   it("the syntax rules let through what the app does", () => {
     for (const [code, rel] of [
       ['window.location.href = "/";', "pages/Probe.ts"],

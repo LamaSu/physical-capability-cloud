@@ -50,4 +50,26 @@ describe("astra A03e N1: one listener can't stop the identity change", () => {
     }
     expect(auth.useAuthStore.getState().isAuthenticated).toBe(false);
   });
+
+  it("at the round cap no committed change goes untold: the store and the key agree, one epoch per change (astra A03f N1)", async () => {
+    vi.resetModules();
+    const keys = await import("../authorized-fetch.js");
+    const auth = await import("../../stores/auth-store.js"); // the store registers first
+    const before = auth.useAuthStore.getState().keyEpoch;
+    let n = 0;
+    let committed = 1; // the call below
+    const stop = keys.onStoredKeyChange(() => {
+      n += 1;
+      keys.setStoredApiKey(n % 2 === 1 ? KEY_B : null);
+      committed += 1; // not reached when the change is refused
+    });
+    try {
+      expect(() => keys.setStoredApiKey(KEY_B)).toThrow("kept changing the key");
+      expect(auth.useAuthStore.getState().isAuthenticated, "the store follows the key it ended on").toBe(keys.hasStoredApiKey());
+      expect(auth.useAuthStore.getState().keyEpoch - before, "every committed change was told, once").toBe(committed);
+    } finally {
+      stop();
+      keys.setStoredApiKey(null);
+    }
+  });
 });
