@@ -16,6 +16,7 @@ import { streamHub } from "../sse/stream-hub.js";
 import { auditService } from "../services/audit-service.js";
 import type { TelemetryStatus, PipelinePhase } from "../telemetry.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
+import { keyedHash } from "../observability/closed-schema.js";
 
 // Active SSE clients for the live log stream
 const logStreamClients = new Set<FastifyReply>();
@@ -268,10 +269,17 @@ export async function telemetryRoutes(app: FastifyInstance) {
       source,
     });
 
-    logger.info(`Telemetry event emitted: ${phase} → ${status}`, {
-      source: source ?? "api",
-      jobId,
-      metadata: { phase, status, duration_ms },
+    // N107b codemod: this route takes phase/status/jobId/source straight from the request
+    // body with no schema validation (their PipelinePhase/TelemetryStatus TS types are not
+    // runtime-checked here), and structured-logger (this file's `logger`) is a bespoke
+    // in-memory sink with no closed-schema chokepoint of its own — world-readable via
+    // GET /api/telemetry/logs — so every dynamic value is hashed inline (keyedHash) before
+    // it ever reaches an entry; LogEntry.source is also typed `string`, not `unknown`, so a
+    // Declared wrapper would not type-check here even if the sink understood it.
+    logger.info(`Telemetry event emitted: ${keyedHash(phase)} → ${keyedHash(status)}`, {
+      source: keyedHash(source ?? "api"),
+      jobId: keyedHash(jobId),
+      metadata: { phase: keyedHash(phase), status: keyedHash(status), duration_ms },
     });
 
     return { event };
