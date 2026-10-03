@@ -281,4 +281,36 @@ describe("N107b: a marker in every request position reaches no sink and no conso
     const failures = traced.filter((e) => e.type === "event" && e.item.exception?.values?.[0]?.value === keyedHash("n107b forced failure"));
     expect(new Set(failures.map((e) => e.item.contexts.trace.trace_id)).size, "the two forced 500s, sent with the same sentry-trace, are two traces").toBeGreaterThanOrEqual(2);
   });
+
+  // N107b codemod regression (orchestrator review, round 3): declare.metric emits its number
+  // RAW — it must never wrap a caller-controlled value. routes/diagnostic-logs.ts's bundleSize
+  // and logLineCount come straight from the POST body; this pins them to declare.id (hashed),
+  // never declare.metric, so a caller-chosen magnitude can never appear in the log in the clear.
+  it("N107b regression: a caller-chosen bundleSize never reaches the log in the clear", async () => {
+    const provisioned = await request(
+      "POST", "/api/auth/provision", { "content-type": "application/json" },
+      JSON.stringify({ email: "n107b-diag@x.test" }),
+    );
+    expect(provisioned.status).toBe(201);
+    const apiKey = (JSON.parse(provisioned.body) as { api_key: string }).api_key;
+
+    const before = captured.logs.join("").length;
+    const CALLER_BUNDLE_SIZE = 8675309;
+    const res = await request(
+      "POST", "/api/operator/diagnostics",
+      { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+      JSON.stringify({
+        kernelId: "n107b-diag-kernel",
+        encrypted: { ciphertext_b64: "AAAA", iv_b64: "AAAA", salt_b64: "AAAA", tag_b64: "AAAA" },
+        bundleHash: "deadbeef",
+        bundleSize: CALLER_BUNDLE_SIZE,
+        logLineCount: 42,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const newLogText = captured.logs.join("").slice(before);
+    expect(newLogText.length, "the bundle-received line was logged").toBeGreaterThan(0);
+    expect(newLogText).not.toContain(String(CALLER_BUNDLE_SIZE));
+  });
 });

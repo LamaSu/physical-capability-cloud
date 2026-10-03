@@ -140,12 +140,14 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
 
     uploads.push(upload);
 
+    // bundleSize/logLineCount are caller-reported (req.body), not server-measured —
+    // declare.metric would emit a caller-chosen number raw. declare.id hashes them.
     app.log.info(
       {
         uploadId: declare.id(uploadId),
         kernelId: declare.id(kernelId ?? "?"),
-        bundleSize: declare.metric(bundleSize ?? 0),
-        logLineCount: declare.metric(logLineCount ?? 0),
+        bundleSize: declare.id(bundleSize ?? 0),
+        logLineCount: declare.id(logLineCount ?? 0),
       },
       lit("diagnostic-logs: received bundle"),
     );

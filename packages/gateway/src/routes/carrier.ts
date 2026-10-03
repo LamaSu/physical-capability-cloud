@@ -941,7 +941,10 @@ export async function carrierRoutes(app: FastifyInstance) {
     const rawBody = req.rawBody ?? Buffer.alloc(0);
     if (!client.verifyWebhookSignature(rawBody, headerValue)) {
       req.log.warn(
-        { hasHeader: declare.flag(!!headerValue), bytes: declare.metric(rawBody.length) },
+        // rawBody.length is the size of request input (the webhook POST body), not a
+        // server-measured quantity — declare.metric would emit a caller-controlled
+        // magnitude raw. declare.id hashes it instead.
+        { hasHeader: declare.flag(!!headerValue), bytes: declare.id(rawBody.length) },
         lit("carrier webhook: signature verification failed"),
       );
       return reply.code(401).send({ error: "invalid_signature" });
