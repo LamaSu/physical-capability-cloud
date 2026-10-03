@@ -7,6 +7,10 @@ import { trackServerEvent } from "../services/posthog-service.js";
 import type { LitAuthSig } from "@pcc/kernel";
 import { kernelKeyStore, generateDecryptAction, executeDecryptAction, isRealLitEnabled } from "@pcc/kernel";
 import { getRepos } from "../db.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** executeDecryptAction's `role` echoes this file's own `authProof` (packages/kernel/src/lit-action-decrypt.ts JSDoc: "buyer" | "verifier"). */
+const LIT_DECRYPT_ROLES: readonly string[] = ["buyer", "verifier"];
 
 /**
  * Helper: fetch an encrypted bundle row from DB and attach its capsules,
@@ -254,7 +258,7 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       // Path 1: Try Lit Action decrypt via Chipotle REST API
       if (useRealLit) {
         try {
-          console.log(`[LIT] attempting Lit Action decrypt for bundleId=${req.params.bundleId}`);
+          console.log(lit("[LIT] attempting Lit Action decrypt"), declare.id(req.params.bundleId));
           const storedKey = kernelKeyStore.retrieve(req.params.bundleId);
           const keyB64 = storedKey ? Buffer.from(storedKey).toString("base64") : "";
 
@@ -274,7 +278,11 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
           });
 
           if (result.authorized && result.key) {
-            console.log(`[LIT] Lit Action decrypt authorized (${result.role}) for bundleId=${req.params.bundleId}`);
+            console.log(
+              lit("[LIT] Lit Action decrypt authorized"),
+              declare.code(result.role, LIT_DECRYPT_ROLES),
+              declare.id(req.params.bundleId),
+            );
             pipelineTelemetry.emit(req.params.bundleId, "evidence_encrypt", "completed", {
               metadata: { path: "lit_action", role: result.role, operation: "decrypt" },
             });
@@ -288,7 +296,7 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
           }
 
           if (!result.authorized) {
-            console.log(`[LIT] Lit Action decrypt denied: ${result.reason}`);
+            console.log(lit("[LIT] Lit Action decrypt denied"), declare.id(result.reason));
             // Do NOT fall back to local — the on-chain check said no
             return reply.code(403).send({
               error: "access_denied",
@@ -298,14 +306,13 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
           }
         } catch (litErr) {
           // Lit network failure — fall through to local decrypt
-          const litMsg = litErr instanceof Error ? litErr.message : "Lit Action failed";
-          console.log(`[LIT] Lit Action decrypt failed, falling back to local: ${litMsg}`);
+          console.log(lit("[LIT] Lit Action decrypt failed, falling back to local"), litErr);
         }
       }
 
       // Path 2: Local decrypt (mock Lit or real Lit unavailable)
       try {
-        console.log(`[LIT] using local decrypt for bundleId=${req.params.bundleId}`);
+        console.log(lit("[LIT] using local decrypt"), declare.id(req.params.bundleId));
         const decrypted = await litEncryptionService.decryptBundle(bundle as any, body.authSig);
         pipelineTelemetry.emit(req.params.bundleId, "evidence_encrypt", "completed", {
           metadata: { path: "local", operation: "decrypt" },
