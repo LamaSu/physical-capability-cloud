@@ -127,7 +127,7 @@ async function openTab(label: string): Promise<string> {
 
 // The old page's sample fund, as it rendered it.
 const SAMPLE_VALUES =
-  /48250\.00|124780\.50|38250\.00|10000\.00|swf_epoch_001[012]|#1[12]|2500\.00|1200\.00|5000\.00|68\.25|52\.10|Increase dividend allocation to 70%|Escrow Release/;
+  /48,?250\.00|124,?780\.50|38,?250\.00|10,?000\.00|swf_epoch_001[012]|#1[12]|2,?500\.00|1,?200\.00|5,?000\.00|68\.25|52\.10|Increase dividend allocation to 70%|Escrow Release/;
 
 // The ledger money GET /api/swf/summary returns; the page must never show it.
 const LEDGER_MONEY = /\$40\.00|\$12\.00|\$28\.00|\$52\.00|Fund Balance|Total Distributed|Chain Balances/;
@@ -278,10 +278,10 @@ describe("in demo mode", () => {
     const t = await renderPage();
     expect(container.querySelector('[data-live-state="demo"]')).not.toBeNull();
     expect(t).toContain("Sovereign Wealth Fund: sample values, not live PCC state.");
-    expect(t).toContain("48250.00");
-    expect(t).toContain("38250.00");
+    expect(t).toMatch(/48,?250\.00/);
+    expect(t).toMatch(/38,?250\.00/);
     expect(t).toContain("#12");
-    expect(await openTab("Accruals")).toContain("2500.00");
+    expect(await openTab("Accruals")).toMatch(/2,?500\.00/);
     expect(await openTab("Claims")).toContain("68.25");
     const governance = await openTab("Governance");
     expect(governance).toContain("Increase dividend allocation to 70%");

@@ -188,7 +188,7 @@ describe("demo mode (?demo=1)", () => {
     const t = await renderPage();
     expect(t).toContain("Demo data");
     expect(t).toContain("Wallet & Funding: sample values, not live PCC state.");
-    expect(t).toContain("1234.56");
+    expect(t).toMatch(/1,?234\.56/);
     expect(t).toContain("14,150");
     await click(button("Activity"));
     expect(text()).toContain("fr_001");

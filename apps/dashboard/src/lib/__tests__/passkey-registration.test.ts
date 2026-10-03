@@ -57,6 +57,20 @@ describe("assembleCreationOptions", () => {
 });
 
 describe("runPasskeyRegistration", () => {
+  it("an operator binding without the authorized fetch fails closed, before any request (astra A03c F2)", async () => {
+    const fetchFn = vi.fn();
+    const startRegistration = vi.fn();
+    await expect(
+      runPasskeyRegistration(
+        { apiBase: "", operatorId: "op@example.com", fetchFn: fetchFn as any, startRegistration },
+        "rand1234",
+      ),
+    ).rejects.toThrow(/authorized fetch/i);
+    // Silently falling back to an anonymous challenge would register an unbound passkey.
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(startRegistration).not.toHaveBeenCalled();
+  });
+
   it("runs challenge -> ceremony -> verify and returns the credential", async () => {
     const fetchFn = vi
       .fn()
@@ -133,21 +147,24 @@ describe("runPasskeyRegistration", () => {
   });
 
   it("throws the gateway message when the challenge is rejected (e.g. 401)", async () => {
-    const fetchFn = vi.fn().mockResolvedValueOnce(
+    // Operator-bound, so the challenge goes through the authorized fetch (astra A03c F2).
+    const authorizedFetchFn = vi.fn().mockResolvedValueOnce(
       jsonResponse(
         { error: "authentication_required_to_bind_operator", message: "need a key" },
         false,
         401,
       ),
     );
+    const fetchFn = vi.fn();
     const startRegistration = vi.fn();
 
     await expect(
       runPasskeyRegistration(
-        { apiBase: "", operatorId: "x", fetchFn: fetchFn as any, startRegistration },
+        { apiBase: "", operatorId: "x", authorizedFetchFn, fetchFn: fetchFn as any, startRegistration },
         "rand1234",
       ),
     ).rejects.toThrow("need a key");
+    expect(fetchFn).not.toHaveBeenCalled();
     // ceremony never runs if the challenge failed
     expect(startRegistration).not.toHaveBeenCalled();
   });

@@ -66,7 +66,6 @@ const IGNORED_IDENTIFIERS = new Set([
 /** Files that still contain fixtures, each keyed to the lane that owns the fix. */
 const KNOWN_OFFENDERS: Record<string, string> = {
   // readmodels c255d7dc (PX-6 / PX-7)
-  "pages/JobDetailPage.tsx": "readmodels c255d7dc: JobExecutionDTO (PX-6)",
   "pages/EvidenceExplorerPage.tsx": "readmodels c255d7dc: EvidenceSummary read model",
   "pages/SettlementPage.tsx": "readmodels c255d7dc: settlement read model, no mock fallback",
   // economics df42dbe5 (product s9: older IP/royalty pages)

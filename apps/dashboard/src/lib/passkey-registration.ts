@@ -131,6 +131,13 @@ export async function runPasskeyRegistration(
 ): Promise<PasskeyRegistrationResult> {
   const { apiBase, operatorId, authorizedFetchFn, fetchFn, startRegistration } = deps;
 
+  // Binding an operator needs the signed-in key, which only the authorized
+  // fetch attaches. Without it, refuse before any request. An anonymous
+  // challenge would silently register an unbound passkey (astra A03c F2).
+  if (operatorId && !authorizedFetchFn) {
+    throw new Error("Binding a passkey to an operator needs the authorized fetch; no request was sent.");
+  }
+
   // 1. Challenge. Binding an operator needs the signed-in key, which only the
   //    authorized fetch attaches; an anonymous challenge goes out without one.
   const challengeInit: RequestInit = {

@@ -15,7 +15,12 @@
 
 import { describe, it, expect } from "vitest";
 import nacl from "tweetnacl";
-import { getPrimitive } from "@pcc/spec";
+import {
+  getPrimitive,
+  sessionKeyDelegationPreimage,
+  signingPreimage,
+  type SessionKeyAuthorization,
+} from "@pcc/spec";
 import { createKernelHandler } from "@pcc/kernel-sdk";
 import {
   isDeviceSignedSignature,
@@ -231,6 +236,50 @@ describe("verifyDeviceSignedEvidence — registered-signer → Ed25519 verify (r
     expect(result).toMatchObject({ ok: true });
   });
 
+  it("NEGATIVE (adk #4322, rule 5): a session bundle is checked against the job being SETTLED, not the job it was signed for", async () => {
+    // /complete builds the slot with contractId = the route's jobId (paid-job-flow.ts), so a
+    // bundle whose delegation names only job A cannot anchor job B.
+    const principal = nacl.sign.keyPair();
+    const handler = createKernelHandler({
+      manifest: {
+        manifestVersion: "1.0.0",
+        kernelId: "kernel-delegated-4322",
+        name: "Delegated Kernel",
+        description: "test",
+        builder: { agentId: "agent:test" },
+        capabilityType: "test.transform",
+        workflowSteps: [],
+        pricing: { currency: "USDC", baseUSD: 0 },
+        maxAssuranceTier: 0,
+        endpointURL: "https://example.test/run",
+        sessionKeyPolicy: { maxTTLSeconds: 300, allowedActions: ["evidence_submit"] },
+        status: "pending",
+      } as any,
+      principalKey: {
+        agentId: "eip155:1:0x0000000000000000000000000000000000000001",
+        walletAddress: "0x0000000000000000000000000000000000000001",
+        publicKey: principal.publicKey,
+      },
+      principalPrivateKey: principal.secretKey,
+      execute: async () => ({ ok: true }),
+    });
+    const { evidenceBundle } = await handler({ jobId: "job-A-4322", input: { value: 1 } });
+    const registeredSigner = { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` };
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: {
+        bundleHash: evidenceBundle.bundleHash,
+        kernelSignature: evidenceBundle.kernelSignature,
+        assuranceTier: 0,
+        sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization,
+        contractId: "job-B-4322",
+      },
+      registeredSigner,
+      fallback: { bundleHash: `sha256:${"aa".repeat(32)}`, kernelSignature: { signer: "gateway", algorithm: "sha256", value: "x" }, assuranceTier: 0 },
+      gateOpen: true,
+    });
+    expect(decision).toMatchObject({ source: "gateway-fallback", reason: "contract_not_allowed" });
+  });
+
   it("naclEd25519Verify round-trips a genuine tweetnacl signature", () => {
     const dev = realDeviceEvidence();
     expect(naclEd25519Verify(dev.bundleHash, dev.signature.value, dev.publicKeyHex)).toBe(true);
@@ -369,5 +418,152 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
     });
     expect(decision.source).toBe("gateway-fallback");
     expect(decision.reason).toBe("no-device-bundle");
+  });
+});
+
+// ── LO-EV-1 signing byte contract at the real consumer ───────────────────────
+
+describe("verifyDeviceSignedEvidence — LO-EV-1 signing preimage (negative controls)", () => {
+  it("rejects a registration-challenge signature replayed as a bundle signature", async () => {
+    const dev = realDeviceEvidence();
+    const challenge = "pcc-kernel-signing-key:kernel-replay";
+    const challengeSig = toHex(nacl.sign.detached(new TextEncoder().encode(challenge), dev.keyPair.secretKey));
+    // The bare verify accepts it — the signature is genuine over those bytes —
+    // so the digest guard is what stops the cross-protocol replay.
+    expect(naclEd25519Verify(challenge, challengeSig, dev.publicKeyHex)).toBe(true);
+    const res = await verifyDeviceSignedEvidence({
+      signature: { ...dev.signature, value: challengeSig },
+      bundleHash: challenge,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+    });
+    expect(res).toMatchObject({ ok: false, reason: "malformed-bundle-hash" });
+  });
+
+  it("rejects a signature over the 32 raw digest bytes", async () => {
+    const dev = realDeviceEvidence();
+    const raw32 = Uint8Array.from(Buffer.from(BUNDLE_HASH.slice("sha256:".length), "hex"));
+    const raw32Sig = toHex(nacl.sign.detached(raw32, dev.keyPair.secretKey));
+    const res = await verifyDeviceSignedEvidence({
+      signature: { ...dev.signature, value: raw32Sig },
+      bundleHash: BUNDLE_HASH,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+    });
+    expect(res).toMatchObject({ ok: false, reason: "signature-invalid" });
+  });
+
+  it("rejects non-canonical digest forms even when the signature covers that exact string", async () => {
+    const hex = BUNDLE_HASH.slice("sha256:".length);
+    for (const form of [`0x${hex}`, hex, `sha256:${hex.toUpperCase()}`, `${BUNDLE_HASH}\n`]) {
+      const dev = realDeviceEvidence(form);
+      const res = await verifyDeviceSignedEvidence({
+        signature: dev.signature,
+        bundleHash: form,
+        registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      });
+      expect(res, form).toMatchObject({ ok: false, reason: "malformed-bundle-hash" });
+    }
+  });
+
+  it("still accepts the canonical tagged digest (positive control)", async () => {
+    const dev = realDeviceEvidence();
+    const res = await verifyDeviceSignedEvidence({
+      signature: dev.signature,
+      bundleHash: dev.bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+    });
+    expect(res).toMatchObject({ ok: true });
+  });
+});
+
+// ── Strict transport decoding + conditional-field preservation (R20 review) ──
+//
+// Pre-existing gaps the LO-EV-1 review found in this module: Buffer.from(hex)
+// silently truncated malformed signature and key suffixes, and derivationPath was
+// kept only when truthy. Defined fields are now reproduced as signed, and an empty
+// path is refused by the contract (R20 round 2), so neither change widens.
+
+describe("device evidence — strict transport decoding (no truncation)", () => {
+  it("a signature or key with a trailing nibble or junk is rejected, not truncated", () => {
+    const dev = realDeviceEvidence();
+    const sig = dev.signature.value;
+    // What the old decoder did: the odd nibble / junk was dropped silently.
+    expect(Buffer.from(sig + "0", "hex").length).toBe(64);
+    expect(Buffer.from(sig + "zz", "hex").length).toBe(64);
+    for (const bad of [sig + "0", sig + "zz", sig.slice(0, -1)]) {
+      expect(naclEd25519Verify(dev.bundleHash, bad, dev.publicKeyHex), bad.length.toString()).toBe(false);
+    }
+    expect(naclEd25519Verify(dev.bundleHash, sig, dev.publicKeyHex + "0")).toBe(false);
+    // The exact-length forms the gateway always accepted still verify.
+    expect(naclEd25519Verify(dev.bundleHash, sig, dev.publicKeyHex)).toBe(true);
+    expect(naclEd25519Verify(dev.bundleHash, `0x${sig.toUpperCase()}`, dev.publicKeyHex.toUpperCase().replace("0X", "0x"))).toBe(true);
+  });
+});
+
+describe("device evidence — derivationPath absent, empty and non-empty, against the old gateway (R20 round 2)", () => {
+  // The pre-LO-EV-1 gateway rebuilt the delegation keeping derivationPath only when
+  // truthy, so a principal who signed an explicitly empty path never verified there.
+  // The contract now refuses an empty path before any signature check: a labelled
+  // tightening, so nothing the old gateway rejected is accepted now.
+  const principal = nacl.sign.keyPair();
+  const session = nacl.sign.keyPair();
+  const now = Math.floor(Date.now() / 1000);
+  const base = {
+    sessionId: "session-path",
+    parentAgentId: "eip155:1:0x0000000000000000000000000000000000000001",
+    issuedAt: now,
+    expiresAt: now + 300,
+    scope: { allowedActions: ["evidence_submit"], contractIds: ["job-path"], maxSignatures: 10 },
+  };
+  // What a principal signs: the contract's key order, the path kept whenever defined
+  // (the incumbent producer rule), built by hand so an empty path can be signed at all.
+  const signedBytes = (path: string | undefined) =>
+    new TextEncoder().encode(
+      JSON.stringify({
+        sessionId: base.sessionId,
+        parentAgentId: base.parentAgentId,
+        publicKey: toHex(session.publicKey),
+        issuedAt: base.issuedAt,
+        expiresAt: base.expiresAt,
+        scope: base.scope,
+        ...(path !== undefined ? { derivationPath: path } : {}),
+      }),
+    );
+  const parentSignature = (path: string | undefined) => nacl.sign.detached(signedBytes(path), principal.secretKey);
+  /** The old gateway: the same bytes, except the path was dropped when falsy. */
+  const oldGatewayVerifies = (path: string | undefined) =>
+    nacl.sign.detached.verify(signedBytes(path ? path : undefined), parentSignature(path), principal.publicKey);
+  const newGateway = (path: string | undefined) => {
+    const bundleHash = `sha256:${"cd".repeat(32)}`;
+    return verifyDeviceSignedEvidence({
+      signature: {
+        signer: `0x${toHex(session.publicKey).slice(0, 40)}`,
+        algorithm: "ed25519",
+        value: toHex(nacl.sign.detached(signingPreimage(bundleHash), session.secretKey)),
+      } as StoredSignature,
+      bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` },
+      sessionKeyAuthorization: {
+        ...base,
+        publicKey: toHex(session.publicKey),
+        parentSignature: toHex(parentSignature(path)),
+        ...(path !== undefined ? { derivationPath: path } : {}),
+      } as SessionKeyAuthorization,
+      contractId: "job-path",
+    });
+  };
+
+  it("absent: accepted before and after", async () => {
+    expect(oldGatewayVerifies(undefined)).toBe(true);
+    expect(await newGateway(undefined)).toMatchObject({ ok: true });
+  });
+
+  it("non-empty: accepted before and after", async () => {
+    expect(oldGatewayVerifies("m/44'/0'/0'")).toBe(true);
+    expect(await newGateway("m/44'/0'/0'")).toMatchObject({ ok: true });
+  });
+
+  it("empty: rejected before (bytes differed) and refused now before any signature check", async () => {
+    expect(oldGatewayVerifies("")).toBe(false);
+    expect(await newGateway("")).toEqual({ ok: false, reason: "session_key_malformed" });
   });
 });

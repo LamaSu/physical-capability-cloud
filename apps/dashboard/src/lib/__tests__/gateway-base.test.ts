@@ -15,8 +15,8 @@ import {
   resolveGatewayOrigin,
   resolveGatewayTarget,
 } from "../gateway-base.js";
-import { authorizedFetch } from "../authorized-fetch.js";
-import { adoptApiKey, readApiKeyForAuthorizedFetch, useAuthStore } from "../../stores/auth-store.js";
+import { authorizedFetch, hasStoredApiKey, installGatewayKeyGuard } from "../authorized-fetch.js";
+import { adoptApiKey, useAuthStore } from "../../stores/auth-store.js";
 
 const PAGE = window.location.origin;
 const KEY = "pcc_test_0123456789abcdef0123456789abcdef";
@@ -178,10 +178,10 @@ describe("the key is held outside the store (astra round 2, weakest link)", () =
     expect(state.isAuthenticated).toBe(true);
     expect("apiKey" in state).toBe(false);
     expect(JSON.stringify(Object.values(state).filter((v) => typeof v !== "function"))).not.toContain(KEY);
-    expect(readApiKeyForAuthorizedFetch()).toBe(KEY);
+    expect(hasStoredApiKey()).toBe(true);
     adoptApiKey(null);
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
-    expect(readApiKeyForAuthorizedFetch()).toBeNull();
+    expect(hasStoredApiKey()).toBe(false);
   });
 });
 
@@ -250,7 +250,7 @@ describe("installKeyEgressGuard: defence in depth for requests to other origins"
 
   beforeEach(() => {
     underlying = stubFetch();
-    uninstall = installKeyEgressGuard(readApiKeyForAuthorizedFetch);
+    uninstall = installGatewayKeyGuard();
   });
 
   afterEach(() => uninstall());

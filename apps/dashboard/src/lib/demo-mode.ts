@@ -17,11 +17,10 @@
  * isDemoMode(). The no-production-mock test (src/__tests__) enforces that.
  */
 
-const SESSION_KEY = "pcc-demo-mode";
-
 function readSession(): boolean {
   try {
-    return window.sessionStorage.getItem(SESSION_KEY) === "1";
+    // One literal slot name: the key-boundary lint (no-direct-auth-headers) allows no other.
+    return window.sessionStorage.getItem("pcc-demo-mode") === "1";
   } catch {
     return false;
   }
@@ -29,8 +28,8 @@ function readSession(): boolean {
 
 function writeSession(on: boolean): void {
   try {
-    if (on) window.sessionStorage.setItem(SESSION_KEY, "1");
-    else window.sessionStorage.removeItem(SESSION_KEY);
+    if (on) window.sessionStorage.setItem("pcc-demo-mode", "1");
+    else window.sessionStorage.removeItem("pcc-demo-mode");
   } catch {
     // Storage unavailable: demo mode then lasts only while ?demo=1 is in the URL.
   }

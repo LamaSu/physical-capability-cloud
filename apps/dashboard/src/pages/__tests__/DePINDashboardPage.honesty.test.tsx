@@ -103,7 +103,7 @@ async function renderPage(): Promise<string> {
 }
 
 // Values the old page rendered as live, as they appear on screen.
-const SAMPLE_VALUES = /12450\.00|24780\.50|84\.25|cnft_cert00\d|kernel-sovereign-001|Epoch #4[23]|520\.12|5VERy/;
+const SAMPLE_VALUES = /12,?450\.00|24,?780\.50|84\.25|cnft_cert00\d|kernel-sovereign-001|Epoch #4[23]|520\.12|5VERy/;
 
 // The gateway's own literal records (routes/rewards.ts), as a fabricated route would answer.
 const GATEWAY_LITERALS: Routes = {
@@ -152,7 +152,7 @@ describe("outside demo mode", () => {
     const stub = stubFetch(GATEWAY_LITERALS);
     const t = await renderPage();
     expect(t).toContain("DePIN economics isn't connected to live data yet");
-    expect(t).not.toMatch(/50000\.00|85000\.00|cnft_biolab|epoch_completed_001|10000\.00/);
+    expect(t).not.toMatch(/50,?000\.00|85,?000\.00|cnft_biolab|epoch_completed_001|10,?000\.00/);
     expect(t).not.toMatch(SAMPLE_VALUES);
     expect(stub).not.toHaveBeenCalled();
   });
@@ -180,7 +180,7 @@ describe("in demo mode", () => {
     const t = await renderPage();
     expect(container.querySelector('[data-live-state="demo"]')).not.toBeNull();
     expect(t).toContain("DePIN Economics: sample values, not live PCC state.");
-    expect(t).toContain("12450.00");
+    expect(t).toMatch(/12,?450\.00/);
     expect(t).toContain("cnft_cert001");
     expect(t).toContain("Epoch #42");
     expect(t).toContain("claim_c002");
