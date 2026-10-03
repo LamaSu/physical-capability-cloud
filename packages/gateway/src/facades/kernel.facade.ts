@@ -28,6 +28,7 @@ import {
 } from "./populators/kernel.populator.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -138,7 +139,11 @@ export function resolveKernelTtlHours(): number {
     parsed > KERNEL_TTL_UPPER_BOUND_HOURS
   ) {
     console.warn(
-      `[kernel-ttl] KERNEL_TTL_HOURS="${raw}" out of band [${KERNEL_TTL_LOWER_BOUND_HOURS},${KERNEL_TTL_UPPER_BOUND_HOURS}]; using ${KERNEL_TTL_DEFAULT_HOURS}`,
+      lit("[kernel-ttl] KERNEL_TTL_HOURS out of band; using default"),
+      declare.id(raw),
+      declare.metric(KERNEL_TTL_LOWER_BOUND_HOURS),
+      declare.metric(KERNEL_TTL_UPPER_BOUND_HOURS),
+      declare.metric(KERNEL_TTL_DEFAULT_HOURS),
     );
     return KERNEL_TTL_DEFAULT_HOURS;
   }
