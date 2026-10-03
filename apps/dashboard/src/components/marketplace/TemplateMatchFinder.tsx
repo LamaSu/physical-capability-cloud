@@ -35,15 +35,62 @@ interface TemplateMatch {
   reason: string;
 }
 
+/**
+ * A directory entry needs real display fields, not just the right types —
+ * an empty display_name/description would otherwise pass straight through
+ * the `?? fallback` below (nullish coalescing doesn't catch ""). An entry
+ * failing this is dropped from the map by the same per-entry `.filter`
+ * readDirectory already used for wrong-shaped rows, so its slug reads as
+ * absent, hitting the existing "details missing" path (slug name, no class,
+ * "Template details couldn't be loaded from the gateway.") that an unlisted
+ * slug already gets — rather than failing the whole directory read over one
+ * bad row among what may be many good ones.
+ */
 function isTemplateEntry(v: unknown): v is TemplateEntry {
   const t = v as Partial<TemplateEntry> | null;
   return (
     !!t &&
     typeof t.slug === "string" &&
+    t.slug.length > 0 &&
     typeof t.display_name === "string" &&
+    t.display_name.length > 0 &&
     typeof t.description === "string" &&
+    t.description.length > 0 &&
     (t.capability_class === "physical" || t.capability_class === "digital")
   );
+}
+
+/** A match row is usable only with a real slug, a real reason, and a score that's actually a [0,1] fraction. */
+function isMatchScore(v: unknown): v is MatchScore {
+  const m = v as Partial<MatchScore> | null;
+  return (
+    !!m &&
+    typeof m.slug === "string" &&
+    m.slug.length > 0 &&
+    typeof m.reason === "string" &&
+    m.reason.length > 0 &&
+    typeof m.score === "number" &&
+    Number.isFinite(m.score) &&
+    m.score >= 0 &&
+    m.score <= 1
+  );
+}
+
+/**
+ * All-or-nothing: the match route returns one ranked batch, so one malformed
+ * row (an out-of-range score, an empty reason) means the whole batch can't be
+ * trusted. Filtering just that row out — the old behavior — would render the
+ * remaining rows as a complete, confidently-ranked answer when it isn't one,
+ * or render the empty-array "No matches" state when every row was bad, which
+ * claims a real zero-result search rather than a failed read.
+ */
+function parseMatchScores(matches: unknown[]): MatchScore[] | null {
+  const result: MatchScore[] = [];
+  for (const m of matches) {
+    if (!isMatchScore(m)) return null;
+    result.push(m);
+  }
+  return result;
 }
 
 /** The template directory by slug, or null when it can't be read. */
@@ -96,16 +143,18 @@ export function TemplateMatchFinder() {
         setError("Unexpected response from /api/capabilities/templates/match");
         return;
       }
-      const scores = data.matches.filter(
-        (m): m is MatchScore => !!m && typeof (m as MatchScore).slug === "string" && typeof (m as MatchScore).score === "number",
-      );
+      const scores = parseMatchScores(data.matches);
+      if (!scores) {
+        setError("Unexpected response from /api/capabilities/templates/match");
+        return;
+      }
       setMatches(
         scores.map((m) => {
           const entry = directory?.get(m.slug);
           return {
             slug: m.slug,
             score: m.score,
-            reason: typeof m.reason === "string" ? m.reason : "",
+            reason: m.reason,
             display_name: entry?.display_name ?? null,
             description: entry?.description ?? null,
             capability_class: entry?.capability_class ?? null,
