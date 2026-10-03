@@ -17,9 +17,11 @@ import {
   dashboardManifestToIr, validateIr, WITHHELD_PROSE, isMoneyClaim, LIST_ROW_CAP,
   EFFECT_REVIEWED_READS, bindPolicyRouteSources, reviewedRouteSource,
   RECORD_STATUS_NOTE, isMoneyState, recordValueText,
+  WITHHELD_FIELD, RECORD_CLAIM_NOTE, boundValueText, isProseClaim, statesAmount, mentionsWithheld,
 } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
-import { bindListRows, bindScalar, bindSchemaCard } from "./dashboard-ir-renderer.js";
+import { bindListRows, bindScalar, bindSchemaCard, renderIrDoc } from "./dashboard-ir-renderer.js";
+import { buildMcpAppIrDashboardHtml } from "./mcp-app-view.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 
 const KIT = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"), "utf8");
@@ -34,6 +36,11 @@ function proseOf(n: IrNode | undefined, out: string[] = []): string[] {
   return out;
 }
 const ok = (m: unknown) => { const r = dashboardManifestToIr(m as never); if (!r.ok) throw new Error(r.reason); return r.doc; };
+/** PCC's structural withheld notices at or under `n` (astra r2 F4: a node, not a prose string). */
+function withheldOf(n: IrNode | undefined): number {
+  if (!n) return 0;
+  return (n.props?.withheld === true ? 1 : 0) + (n.children ?? []).reduce((a, c) => a + withheldOf(c), 0);
+}
 
 describe("#344 money: manifest prose cannot present money", () => {
   it("amounts and payment/verification claims are withheld in every prose slot", () => {
@@ -51,10 +58,9 @@ describe("#344 money: manifest prose cannot present money", () => {
       ] }],
     });
     const prose = [...proseOf(doc.title), ...proseOf(doc.root)];
-    const withheld = prose.filter((t) => t === WITHHELD_PROSE).length;
-    expect(withheld).toBe(9);
-    expect(prose).toContain("Pick a kernel near you");
-    for (const t of prose) expect(t === WITHHELD_PROSE || !isMoneyClaim(t), t).toBe(true);
+    expect(withheldOf(doc.title) + withheldOf(doc.root)).toBe(9); // PCC's notice nodes carry no agent words
+    expect(prose).toEqual(["Pick a kernel near you"]);
+    for (const t of prose) expect(isMoneyClaim(t), t).toBe(false);
     expect(validateIr(doc)).toEqual({ ok: true });
   });
 
@@ -174,10 +180,13 @@ describe("#344 /mcp/apps: every bindable route carries an effect review", () => 
     expect(reviewed).toEqual(bindPolicyRouteSources());
   });
 
-  it("each review names its handler and its effect", () => {
+  it("each review names its handler and its effect, operational effects included (astra r2 F3)", () => {
     for (const r of EFFECT_REVIEWED_READS) {
       expect(r.handler.length, r.route).toBeGreaterThan(10);
-      expect(r.effect, r.route).toMatch(/^read only/);
+      expect(r.effect, r.route).toMatch(/^no business-state write; /);
+      // a facade read is not effect-free: it emits telemetry; a capability read may add a funnel audit row
+      if (r.handler.includes("Facade")) expect(r.effect, r.route).toContain("telemetry event");
+      if (r.route.startsWith("/api/capabilities")) expect(r.effect, r.route).toContain("PCC_FUNNEL_ENABLED=true");
     }
   });
 });
@@ -206,7 +215,7 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
     expect(bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "status" } } as unknown as IrNode, { status: "released" }))
       .toBe("released" + RECORD_STATUS_NOTE);
     expect(bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "progress" } } as unknown as IrNode, { progress: "paid" }))
-      .toBe("paid"); // progress is not a status field
+      .toBe(WITHHELD_FIELD); // progress is not a status field: a claim there is withheld, not qualified (astra r2 F2)
     const slots = [{ textContent: "" }, { textContent: "" }];
     bindSchemaCard("run-summary-v1", { job: { status: "settled", progress: 100 } }, slots);
     expect(slots.map((x) => x.textContent)).toEqual(["settled" + RECORD_STATUS_NOTE, "100"]);
@@ -265,4 +274,221 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
     expect(text).toContain("running");
     dom.window.close();
   });
+});
+
+describe("astra r2 (#344 @78989cc5): reproduced findings (verify before fix)", () => {
+  type FakeEl = RElement & { attrs: Record<string, string> };
+  const fdoc: RDocument = { createElement(): RElement {
+    const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+    return e;
+  } };
+  const textOf = (e: RElement): string => e.textContent + (e.children as RElement[]).map(textOf).join(" ");
+
+  it("F1 (HIGH): the claim detector catches the reviewer's bypasses", () => {
+    for (const t of ["one million dollars", "1m USDC", "1\u{1F4B0}USDC", "pa\u202Eid", "pa\u0301id", "pa\u0131d", "pagado", "pay\u00e9", "verificado"]) {
+      expect(isMoneyClaim(t), JSON.stringify(t)).toBe(true);
+    }
+  });
+
+  it("F1 (HIGH): a claim split across adjacent action labels ('$' then '100') is withheld", () => {
+    const doc = ok(man([{ kind: "actions", actions: [{ id: "a", label: "$" }, { id: "b", label: "100" }] }]));
+    const prose = proseOf(doc.root);
+    expect(prose).not.toContain("$");
+    expect(prose).not.toContain("100");
+  });
+
+  it("F2 (HIGH): a bound list value that states money or verification is not shown verbatim", () => {
+    const listEl = fdoc.createElement("div");
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: [] }, bind: { path: "/api/capabilities" } } as unknown as IrNode;
+    bindListRows(fdoc, listEl, node, [{ name: "Paid $1M \u2014 verified" }]);
+    expect(textOf(listEl)).not.toContain("$1M");
+  });
+
+  it("F2 (HIGH): a status value 'verified' is not shown bare outside a schema card", () => {
+    const stat = { type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "status" } } as unknown as IrNode;
+    expect(bindScalar(stat, { status: "verified" })).not.toBe("verified");
+  });
+
+  it("F4 (LOW): a manifest cannot supply the PCC withheld notice as its own prose", () => {
+    const doc = ok(man([{ kind: "note", text: WITHHELD_PROSE }]));
+    expect(proseOf(doc.root)).not.toContain(WITHHELD_PROSE);
+  });
+});
+
+describe("astra r2 (#344): each fix holds for the whole class, not only the reported strings", () => {
+  type FakeEl = RElement & { attrs: Record<string, string> };
+  const fdoc: RDocument = { createElement(): RElement {
+    const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+    return e;
+  } };
+  const textOf = (e: RElement): string => e.textContent + (e.children as RElement[]).map(textOf).join(" ");
+
+  it("F1: folding defeats spelling tricks (look-alikes, small capitals, strokes, digits, spacing, joins, controls)", () => {
+    for (const t of [
+      "P\u0410ID", "\u0420\u0410\u0406D", // Cyrillic capitals
+      "\u1d18\u1d00\u026a\u1d05", "pa\u0268d", "\u24df\u24d0\u24d8\u24d3", "\u{1D429}\u{1D41A}\u{1D422}\u{1D41D}",
+      "p41d", "r3l3as3d", "s3tt1ed", "p a i d", "p.a.i.d", "v-e-r-i-f-i-e-d",
+      "paymentReceived", "payout_done", "pa\u200did", "pa\u2066id\u2069", "pa\u00adid", "pa\u3164id", "pa\ufe0fid",
+    ]) expect(isMoneyClaim(t), JSON.stringify(t)).toBe(true);
+  });
+
+  it("F1: amounts in words, magnitudes, symbols after the number, emoji and other currencies", () => {
+    for (const t of ["five dollars", "a million bucks", "million-dollar deal", "twenty euros", "2.5k USDC", "3bn\u20ac", "100\u20b9",
+      "\u00a5 3000", "USDC:100", "1mUSDC", "10 (USDC)", "\u{1F4B5}100", "100\u{1F4B8}", "\uff04\uff15"]) {
+      expect(isMoneyClaim(t), JSON.stringify(t)).toBe(true);
+      expect(statesAmount(t), JSON.stringify(t)).toBe(true);
+    }
+  });
+
+  it("F1: payment and verification words in other languages and scripts, in any case", () => {
+    for (const t of ["reembolsado", "rembours\u00e9", "\u00fcberwiesen", "best\u00e4tigt", "pagato", "betaald", "zap\u0142acono", "\u00f6dendi", "dibayar",
+      "\u043e\u043f\u043b\u0430\u0447\u0435\u043d\u043e", "\u041e\u041f\u041b\u0410\u0427\u0415\u041d\u041e", "\u5df2\u4ed8\u6b3e", "\u652f\u6255\u6e08\u307f",
+      "\uacb0\uc81c \uc644\ub8cc", "\u0645\u062f\u0641\u0648\u0639"]) {
+      expect(isMoneyClaim(t), JSON.stringify(t)).toBe(true);
+    }
+  });
+
+  it("F1: ordinary dashboard prose is still shown", () => {
+    for (const t of ["Pick a kernel near you", "Robot arm in Berlin", "Status of recent jobs", "Kernels by region", "Payload up to 5 kg",
+      "Top 3 kernels", "Uptime 99.9%", "Created 2026-09-24T10:00:00Z", "v1.2.3", "Choose a capability", "Approve", "Deny",
+      "Submit a job", "S\u00e3o Paulo", "Load balancer health", "Open settings", "Money facts appear only in PCC cards."]) {
+      expect(isProseClaim(t), t).toBe(false);
+    }
+  });
+
+  it("F1: a claim split across prose is withheld: adjacent labels, notes, single letters, and across sections", () => {
+    const labels = ok(man([{ kind: "actions", actions: [{ id: "a", label: "1" }, { id: "b", label: "USDC" }] }, { kind: "note", text: "Pick a kernel" }]));
+    expect(proseOf(labels.root)).toEqual([]); // the section's agent prose is withheld as a whole
+    expect(withheldOf(labels.root)).toBe(4); // heading, two labels, note
+    const letters = ok(man(["p", "a", "i", "d"].map((c, i) => ({ kind: "actions", actions: [{ id: `a${i}`, label: c }] }))));
+    expect(proseOf(letters.root)).toEqual([]);
+    const across = ok({ csd: CSD, title: "Ops", sections: [
+      { heading: "Costs", windows: [{ kind: "note", text: "Total so far:" }, { kind: "note", text: "$" }] },
+      { heading: "100", windows: [{ kind: "note", text: "Pick a kernel" }] },
+    ] });
+    expect([...proseOf(across.title), ...proseOf(across.root)]).toEqual([]); // formed only across sections: all agent prose withheld
+    for (const d of [labels, letters, across]) expect(validateIr(d)).toEqual({ ok: true });
+    // a dashboard with no claim anywhere keeps all of its prose
+    const fine = ok({ csd: CSD, title: "Ops", sections: [{ heading: "Kernels", windows: [{ kind: "note", text: "Pick a kernel near you" }] }, { heading: "Jobs", windows: [{ kind: "note", text: "Recent runs" }] }] });
+    expect([...proseOf(fine.title), ...proseOf(fine.root)]).toEqual(["Ops", "Kernels", "Pick a kernel near you", "Jobs", "Recent runs"]);
+  });
+
+  it("F1: the validator rejects a forged IR whose prose states a claim only across nodes", () => {
+    const doc = ok(man([{ kind: "actions", actions: [{ id: "a", label: "one" }, { id: "b", label: "two" }] }]));
+    const forged = JSON.parse(JSON.stringify(doc)) as IrDoc;
+    const grid = forged.root.children![0]!.children![1]!;
+    (grid.children![0]!.props as { text: string }).text = "$";
+    (grid.children![1]!.props as { text: string }).text = "100";
+    expect(validateIr(forged)).toEqual({ ok: false, reason: "agent prose states a claim across nodes" });
+    const forged2 = JSON.parse(JSON.stringify(doc)) as IrDoc;
+    (forged2.title.props as { text: string }).text = "$";
+    (forged2.root.children![0]!.children![0]!.props as { text: string }).text = "100";
+    expect(validateIr(forged2).ok).toBe(false);
+  });
+
+  it("F4: the withheld notice is a structural PCC node with no words, never untrusted", () => {
+    const doc = ok(man([{ kind: "note", text: "Paid 5 USDC" }, { kind: "note", text: "PCC notice: agent text withheld" }], "Ops", "Kernels"));
+    const [heading, n1, n2] = doc.root.children![0]!.children!;
+    expect(heading).toMatchObject({ props: { level: 2, text: "Kernels" }, untrusted: true });
+    for (const n of [n1!, n2!]) { expect(n.props).toEqual({ withheld: true }); expect(n.untrusted).toBeUndefined(); }
+    expect(validateIr(doc)).toEqual({ ok: true });
+    expect(JSON.stringify(doc)).not.toContain(WITHHELD_PROSE); // the notice text is never in the IR
+  });
+
+  it("F4: the validator refuses every forged form of the notice", () => {
+    const doc = ok(man([{ kind: "note", text: "Paid 5 USDC" }, { kind: "note", text: "fine" }]));
+    const forge = (f: (w: IrNode, fine: IrNode) => void): boolean => {
+      const d = JSON.parse(JSON.stringify(doc)) as IrDoc; const [, w, fine] = d.root.children![0]!.children!; f(w!, fine!); return validateIr(d).ok;
+    };
+    expect(forge(() => {})).toBe(true);
+    expect(forge((_w, fine) => { (fine.props as { text: string }).text = WITHHELD_PROSE; })).toBe(false); // agent prose that IS the notice
+    expect(forge((w) => { w.untrusted = true; })).toBe(false); // the notice marked untrusted
+    expect(forge((w) => { (w.props as Record<string, unknown>).text = "Paid"; })).toBe(false); // the notice carrying words
+    expect(forge((w) => { (w.props as Record<string, unknown>).withheld = "yes"; })).toBe(false);
+    expect(forge((_w, fine) => { delete fine.untrusted; })).toBe(false); // agent words passed off as PCC text
+  });
+
+  it("F4: the renderer paints the notice from its own constant, and marks only agent words as agent-authored", () => {
+    const doc = ok(man([{ kind: "note", text: "Paid 5 USDC" }, { kind: "note", text: "Pick a kernel" }]));
+    const mount = fdoc.createElement("main");
+    renderIrDoc(fdoc, mount, doc);
+    const all: RElement[] = [];
+    const walk = (e: RElement): void => { all.push(e); for (const c of e.children as RElement[]) walk(c); };
+    walk(mount);
+    const notice = all.find((e) => e.textContent === WITHHELD_PROSE)!;
+    expect(notice.className).toBe("pcc-text pcc-withheld");
+    const agent = all.find((e) => e.textContent === "Pick a kernel")!;
+    expect(agent.className).toBe("pcc-text pcc-agent pcc-untrusted");
+    const html = buildMcpAppIrDashboardHtml("n0nce");
+    expect(html).toContain(".pcc-agent{");
+    expect(html).toContain('content:"agent-authored"');
+    expect(html).toContain(".pcc-withheld{");
+  });
+
+  it("F2: every bound sink withholds a claim and qualifies a status word; the price fields are the card's own", () => {
+    expect(boundValueText("name", "Paid $1M \u2014 verified")).toBe(WITHHELD_FIELD);
+    expect(boundValueText("location.label", "Berlin - funds received")).toBe(WITHHELD_FIELD);
+    expect(boundValueText("id", "cap-7")).toBe("cap-7");
+    expect(boundValueText("status", "verified")).toBe("verified" + RECORD_CLAIM_NOTE);
+    expect(boundValueText("kernel.status", "pagado")).toBe("pagado" + RECORD_CLAIM_NOTE);
+    expect(boundValueText("status", "settled")).toBe("settled" + RECORD_STATUS_NOTE);
+    expect(boundValueText("status", "paid 5 USDC")).toBe(WITHHELD_FIELD); // a status may not state an amount
+    expect(boundValueText("status", "withheld by PCC")).toBe(WITHHELD_FIELD); // nor pose as the notice
+    expect(boundValueText("status", "running")).toBe("running");
+    const listEl = fdoc.createElement("div");
+    const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["location.label"], statusFrom: "status" } } as unknown as IrNode;
+    bindListRows(fdoc, listEl, node, [{ name: "Arm 1", "location": { label: "\u2705 verified site" }, status: "approved" }]);
+    expect((listEl.children[0]!.children as RElement[]).map((c) => c.textContent)).toEqual(["Arm 1", WITHHELD_FIELD, "approved" + RECORD_CLAIM_NOTE]);
+    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    bindSchemaCard("capability-summary-v1", { name: "Refunded in full", type: "arm", pricing: { baseCost: "12.50", currency: "USDC" }, assuranceTiers: [1, 2], available: true }, slots);
+    expect(slots.map((x) => x.textContent)).toEqual([WITHHELD_FIELD, "arm", "12.50", "USDC", "1, 2", "Yes"]);
+    expect(textOf(listEl)).not.toContain("verified site");
+  });
+
+  it("F2: the shipped kit withholds a claim in a bound list title (committed bytes)", async () => {
+    const dom = new JSDOM('<!doctype html><html><body><main id="pcc-ir-root"><p>waiting</p></main></body></html>', { url: "https://capability.network/", runScripts: "outside-only" });
+    const w = dom.window as unknown as Record<string, any>;
+    w.TextDecoder = NodeTextDecoder;
+    w.parent.postMessage = () => {};
+    w.__PCC_IR_ORIGIN__ = "https://capability.network";
+    const body = { items: [{ id: "cap-1", name: "Paid $1M \u2014 verified", type: "arm" }, { id: "cap-2", name: "Gripper", type: "arm" }] };
+    w.fetch = () => {
+      const bytes = new NodeTextEncoder().encode(JSON.stringify(body));
+      let sent = false;
+      return Promise.resolve({
+        status: 200, redirected: false,
+        headers: { get: (h: string) => (h.toLowerCase() === "content-type" ? "application/json" : null) },
+        body: { getReader: () => ({ read: async () => (sent ? { done: true } : ((sent = true), { done: false, value: bytes })), cancel: async () => {} }), cancel: async () => {} },
+      });
+    };
+    w.eval(KIT);
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", id: 1, result: { protocolVersion: "2026-01-26" } } }));
+    const m = man([{ kind: "list", binding: { path: "/api/capabilities" }, item: { title: "name", meta: ["type"] } }], "Capabilities", "All");
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: w.JSON.parse(JSON.stringify(m)) } } } }));
+    for (let i = 0; i < 60; i++) await new Promise((r) => setTimeout(r, 0));
+    const text = w.document.getElementById("pcc-ir-root").textContent as string;
+    expect(text).toContain("Gripper");
+    expect(text).toContain(WITHHELD_FIELD);
+    expect(text).not.toContain("$1M");
+    dom.window.close();
+  });
+});
+
+describe("astra r2 (#344): the checks stay linear at the manifest's size limits", () => {
+  // 24 sections x 32 notes x 2000 characters: the largest prose a manifest can carry. Every check,
+  // per node and across the joined dashboard, must stay linear-time: an unbounded repeat over the
+  // joined text never finishes, and the reviewed head's per-note regex already took seconds here.
+  const big = (text: (i: number) => string) => ({ csd: CSD, title: "Ops", sections: Array.from({ length: 24 }, () => ({ heading: "Sec", windows: Array.from({ length: 32 }, (_, i) => ({ kind: "note", text: text(i) })) })) });
+  for (const [label, text] of [
+    ["a run of digits", () => "1".repeat(2000)],
+    ["spaces after a digit", () => "1" + " ".repeat(1999)],
+    ["a number word then hyphens", () => "one" + "-".repeat(1997)],
+    ["digits split by currency symbols across notes", (i: number) => (i % 2 ? "1".repeat(2000) : "$")],
+  ] as Array<[string, (i: number) => string]>) {
+    it(`${label}: adapted and validated within the test timeout`, () => {
+      const r = dashboardManifestToIr(big(text) as never);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(validateIr(r.doc)).toEqual({ ok: true });
+    });
+  }
 });
