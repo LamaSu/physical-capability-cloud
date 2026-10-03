@@ -112,6 +112,8 @@ class FailingLoadAdapter implements MachineAdapter {
     return 0;
   }
   onEvidence(_cb: Parameters<MachineAdapter["onEvidence"]>[0]): void {}
+  // It emits nothing, so nothing is ever outstanding (the runner refuses an adapter without it).
+  async quiesceEvidence(): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -134,6 +136,8 @@ class OfflineAdapter implements MachineAdapter {
     return 0;
   }
   onEvidence(_cb: Parameters<MachineAdapter["onEvidence"]>[0]): void {}
+  // It emits nothing, so nothing is ever outstanding (the runner refuses an adapter without it).
+  async quiesceEvidence(): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
