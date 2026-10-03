@@ -1,24 +1,375 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import { randomUUID } from "node:crypto";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { MachineRegistration } from "@pcc/spec";
+import { sql, type RegistrationRow } from "@pcc/store";
 import { UnifiedKeychain } from "@pcc/agent-runtime";
-import { auditService } from "../services/audit-service.js";
+import { auditService, type AuditEntry } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { Sentry } from "../sentry.js";
-import { getRepos } from "../db.js";
+import { getRepos, getStore } from "../db.js";
+import {
+  PHOTO_MEDIA_TYPES,
+  PROOF_RATE_WINDOW_MS,
+  PROOF_RECORD_PREFIX,
+  PROOFS_PER_REGISTRATION_PER_WINDOW,
+  PROVE_BODY_LIMIT_BYTES,
+  buildEvidenceRecord,
+  checkEventTimestamps,
+  eventsDigest,
+  evidenceRecordDigest,
+  fabricatedEventIndices,
+  getEvidencePhotoStore,
+  inspectPhoto,
+  isPlainObject,
+  isReservedDescription,
+  summarizeEvidence,
+  validateEvidenceShape,
+  type EvidenceRejection,
+  type InspectedPhoto,
+  type StagedPhoto,
+} from "./onboard-evidence.js";
 import {
   analyzeOnboardingText,
   coalesceAnalysisText,
   coalesceSourceDocumentId,
 } from "./onboard-analysis.js";
+import { bindRegistrationOwner } from "./onboard-owner.js";
+import { adminOrCaller, mayAccess, requireAdminSecret } from "../auth/admin-secret-gate.js";
 // Wave 4.1 — TENANT_ENFORCE feature flag. Default OFF; when on, the listing
 // route filters registrations by req.tenantId (from T1.9 tenantContext
 // middleware). The /register handler always backfills tenant_id at insert
 // time so once the flag flips, scoped listing yields correct rows without a
 // data backfill.
 import { tenantOpts } from "../config/tenant-enforce.js";
+import { sameIdentity } from "../auth/identity-normalize.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
+
+// Onboarding review authority. /approve, /activate and /reject decide which
+// operators are live on the network, so they require the shared admin secret:
+// an X-Admin-Key header matching PCC_ADMIN_KEY, the same credential that gates
+// admin actions in routes/kernel-marketplace.ts. A caller's operatorId is not
+// enough, because /api/auth/provision issues keys for any email or wallet
+// without proving ownership, so an identity allowlist could be claimed by
+// anyone who knows an admin's address. They use the shared requireAdminSecret
+// (auth/admin-secret-gate.ts), so an unset PCC_ADMIN_KEY fails closed (503) in
+// EVERY environment, development and test included (astra pack 89b: the old
+// local check stayed open there and handed full registrations to any caller).
+
+/**
+ * Audit identity for an admin-key action: the constant "admin-key", plus how
+ * the route was authorized (adminAuth: always "admin-key"; there is no open
+ * mode since astra pack 89b). Nothing derived from the
+ * provided key is recorded (WP-B round 5, L3): any deterministic function of
+ * the key alone, even 32 bits of its sha256, lets anyone who can read audit
+ * rows test guesses of a weak PCC_ADMIN_KEY offline.
+ */
+function adminAuditIdentity(): { actor: "admin-key"; adminAuth: "admin-key" } {
+  // Only reachable after requireAdminSecret succeeded: there is no open mode (astra pack 89b).
+  return { actor: "admin-key", adminAuth: "admin-key" };
+}
+
+/** The authenticated caller set by the auth middleware, for audit attribution only. */
+function requestCaller(req: FastifyRequest): string | null {
+  return authenticatedActor(req, ["operatorId", "userId"]);
+}
+
+// ── Ownership (steward rule 7: fail closed) ─────────────────────────────
+// An owner check needs both an authenticated actor and a registration owner.
+// A missing actor is 401 before any lookup; a missing owner (or the zero
+// address /register writes when no operator is given) matches nobody.
+
+const ZERO_ADDRESS_RE = /^0x0{40}$/i;
+
+/**
+ * The authenticated actor, taking the first non-null field in `fields` (the
+ * same precedence as the original `a ?? b ?? ...` chains). An empty or
+ * non-string value is not an actor.
+ */
+function authenticatedActor(req: FastifyRequest, fields: readonly string[]): string | null {
+  const r = req as unknown as Record<string, unknown>;
+  for (const field of fields) {
+    const v = r[field];
+    if (v === undefined || v === null) continue;
+    return typeof v === "string" && v.length > 0 ? v : null;
+  }
+  return null;
+}
+
+/** The registration's owner identity, or null when it has none that can be matched. */
+function registrationOwner(reg: unknown): string | null {
+  const r = reg as {
+    operator?: { walletAddress?: unknown; email?: unknown } | null;
+    walletAddress?: unknown;
+    email?: unknown;
+    operatorId?: unknown;
+  };
+  const v = r.operator?.walletAddress ?? r.operator?.email ?? r.walletAddress ?? r.email ?? r.operatorId;
+  if (typeof v !== "string" || v.length === 0 || ZERO_ADDRESS_RE.test(v)) return null;
+  return v;
+}
+
+function sendEvidenceRejection(reply: FastifyReply, r: EvidenceRejection) {
+  return reply.status(r.status).send({ error: r.error, message: r.message, ...(r.details ? { details: r.details } : {}) });
+}
+
+// ── Review transitions ──────────────────────────────────────────────────
+// Allowed from-states per transition, as in #337 (reject: narrowed, see
+// below). A handler validates the status it observed against its set, then
+// applies the transition as a compare-and-swap pinned to exactly that status,
+// inside one immediate transaction together with its audit record. So the
+// audit's from -> to is exact, a transition that lost a race gets 409 instead
+// of overwriting the winner, and a failed audit write rolls the transition
+// back (auditService writes synchronously on the same SQLite connection).
+const PROVE_FROM: readonly string[] = ["submitted", "reviewing"];
+const APPROVE_FROM: readonly string[] = ["submitted", "reviewing"];
+const ACTIVATE_FROM: readonly string[] = ["approved"];
+// #337 allowed reject from every status except "rejected". "deleted" (and any
+// unknown status) is left out: rejecting a soft-deleted registration would
+// overwrite its GDPR deletion record and move it out of "deleted".
+const REJECT_FROM: readonly string[] = ["draft", "submitted", "reviewing", "approved", "active", "suspended"];
+const REJECT_REASON_MAX_CHARS = 2000;
+// The owner may edit the description only before evidence is submitted; after
+// that the column holds the server-written review record.
+const DESCRIPTION_EDITABLE_STATUSES: readonly string[] = ["draft", "submitted"];
+
+class AuditWriteError extends Error {
+  constructor(readonly original: unknown) {
+    super("audit write failed");
+  }
+}
+
+class BeforeCommitError extends Error {
+  constructor(readonly original: unknown) {
+    super("pre-commit step failed");
+  }
+}
+
+type Repos = ReturnType<typeof getRepos>;
+
+// ── The evidence a transition is bound to ───────────────────────────────
+// The description column is operator-writable before review (/register,
+// PATCH, the wizard), so a digest parsed out of it could be forged. The
+// evidence of record is the latest operator.proof_submitted audit row for
+// the registration instead: only /prove writes that event, and only for
+// evidence that passed every screen. commitTransition reads it inside the
+// transition's transaction, so no proof can land between the read and the
+// write.
+
+const PROOF_SUBMITTED_EVENT = "operator.proof_submitted";
+const EVIDENCE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+interface LatestProof {
+  /** evidenceDigest of the latest proof_submitted row; null when there is none. */
+  evidenceDigest: string | null;
+  /** audit_log id of that row; null when there is none. */
+  auditId: number | null;
+}
+
+function latestProof(repos: Repos, registrationId: string): LatestProof {
+  const [row] = repos.auditLog.query({
+    eventType: PROOF_SUBMITTED_EVENT,
+    resourceType: "registration",
+    resourceId: registrationId,
+    limit: 1,
+  });
+  if (!row) return { evidenceDigest: null, auditId: null };
+  const digest = isPlainObject(row.metadata) ? row.metadata.evidenceDigest : undefined;
+  return { evidenceDigest: typeof digest === "string" && EVIDENCE_DIGEST_RE.test(digest) ? digest : null, auditId: row.id };
+}
+
+/**
+ * The proof cap (M4): how many proofs this registration had accepted in the
+ * last PROOF_RATE_WINDOW_MS, counted from the audit log, and when the oldest
+ * of them leaves the window.
+ */
+function recentProofs(repos: Repos, registrationId: string, nowMs: number): { count: number; retryAfterSeconds: number } {
+  const rows = repos.auditLog.query({
+    eventType: PROOF_SUBMITTED_EVENT,
+    resourceType: "registration",
+    resourceId: registrationId,
+    since: new Date(nowMs - PROOF_RATE_WINDOW_MS).toISOString(),
+    limit: PROOFS_PER_REGISTRATION_PER_WINDOW,
+  });
+  const oldest = rows[rows.length - 1]; // newest first
+  const leavesWindowAt = oldest ? Date.parse(oldest.timestamp) + PROOF_RATE_WINDOW_MS : nowMs;
+  return { count: rows.length, retryAfterSeconds: Math.max(1, Math.ceil((leavesWindowAt - nowMs) / 1000)) };
+}
+
+/**
+ * True when a committed record refers to the retained evidence photo `cid`:
+ * a proof the audit log recorded for it, or a row of the storage index (an
+ * /api/storage upload of the same bytes; a soft-deleted row counts too,
+ * because uploading again revives it). The audit log is the evidence of
+ * record, so the registration's description, which an operator can write
+ * before review, does not count.
+ */
+function photoCidIsReferenced(cid: string): boolean {
+  const db = getStore().db;
+  const proofs = db.all(
+    sql`SELECT 1 AS hit FROM audit_log WHERE event_type = ${PROOF_SUBMITTED_EVENT} AND instr(metadata, ${cid}) > 0 LIMIT 1`,
+  );
+  if (proofs.length > 0) return true;
+  return db.all(sql`SELECT 1 AS hit FROM storage_blobs WHERE cid = ${cid} LIMIT 1`).length > 0;
+}
+
+/** What a transition's guard and audit record see, all read in its transaction. */
+interface TransitionContext {
+  /** The registration as the transaction read it (status === expectedFrom). */
+  pre: RegistrationRow;
+  /** The latest screened proof for it. */
+  proof: LatestProof;
+}
+
+type TransitionFailure =
+  | { ok: false; kind: "conflict"; currentStatus: string | null }
+  | { ok: false; kind: "evidence_changed"; currentEvidenceDigest: string | null }
+  | { ok: false; kind: "too_many_proofs"; retryAfterSeconds: number }
+  | { ok: false; kind: "audit_failed" | "store_failed" | "db_error"; error: unknown };
+type TransitionOutcome = { ok: true; row: RegistrationRow; pre: RegistrationRow; proof: LatestProof } | TransitionFailure;
+
+/**
+ * Apply one status transition atomically with its audit record.
+ * `expectedFrom` is the status the handler observed (and already checked
+ * against its allowed set); the CAS matches only that status. `guard` runs in
+ * the same transaction, after the status check and before the CAS; a failure
+ * it returns aborts the transition with nothing written. `beforeCommit` runs
+ * last, after the audit record; if it throws, the transition and its audit
+ * record roll back ("store_failed").
+ */
+function commitTransition(args: {
+  id: string;
+  expectedFrom: string;
+  to: string;
+  extra?: { approvedAt?: string; description?: string };
+  guard?: (ctx: TransitionContext) => TransitionFailure | null;
+  audit: (ctx: TransitionContext & { post: RegistrationRow }) => AuditEntry;
+  beforeCommit?: () => void;
+}): TransitionOutcome {
+  try {
+    return getStore().db.transaction(
+      (): TransitionOutcome => {
+        const repos = getRepos();
+        const pre = repos.registrations.findById(args.id);
+        if (!pre) return { ok: false, kind: "conflict", currentStatus: null };
+        if (pre.status !== args.expectedFrom) return { ok: false, kind: "conflict", currentStatus: pre.status };
+        const ctx: TransitionContext = { pre, proof: latestProof(repos, pre.id) };
+        const refused = args.guard?.(ctx) ?? null;
+        if (refused) return refused;
+        // The CAS itself, kept even though the immediate transaction already
+        // excludes every other writer.
+        const post = repos.registrations.transitionStatus(args.id, [args.expectedFrom], args.to, args.extra);
+        if (!post) return { ok: false, kind: "conflict", currentStatus: pre.status };
+        try {
+          auditService.logStrict(args.audit({ ...ctx, post }));
+        } catch (err) {
+          throw new AuditWriteError(err); // rolls the CAS back
+        }
+        if (args.beforeCommit) {
+          try {
+            args.beforeCommit();
+          } catch (err) {
+            throw new BeforeCommitError(err); // rolls the CAS and the audit record back
+          }
+        }
+        return { ok: true, row: post, pre, proof: ctx.proof };
+      },
+      { behavior: "immediate" },
+    );
+  } catch (err) {
+    if (err instanceof AuditWriteError) return { ok: false, kind: "audit_failed", error: err.original };
+    if (err instanceof BeforeCommitError) return { ok: false, kind: "store_failed", error: err.original };
+    return { ok: false, kind: "db_error", error: err };
+  }
+}
+
+/** registrationId, from -> to and the timestamp, as every transition records them. */
+function transitionAuditFields(ctx: TransitionContext & { post: RegistrationRow }, at: string): Record<string, unknown> {
+  return { registrationId: ctx.pre.id, from: ctx.pre.status, to: ctx.post.status, at };
+}
+
+/**
+ * The evidence an admin transition acted on: the latest screened proof, from
+ * the audit log (never from the description). With no proof on record the
+ * digest is null and evidenceVerified is false.
+ */
+function reviewedEvidenceFields(proof: LatestProof): Record<string, unknown> {
+  return { evidenceDigest: proof.evidenceDigest, evidenceVerified: proof.evidenceDigest !== null, proofAuditId: proof.auditId };
+}
+
+/** What an admin sends as expectedEvidenceDigest for a registration with no proof on record. */
+const NO_EVIDENCE = "none";
+
+/**
+ * True when `expected` (from the admin) names the latest screened proof:
+ * its digest, or NO_EVIDENCE when no proof was ever recorded. A proof row
+ * without a well-formed digest matches nothing, so it cannot be approved.
+ */
+function reviewedEvidenceMatches(proof: LatestProof, expected: string): boolean {
+  if (proof.auditId === null) return expected === NO_EVIDENCE;
+  return proof.evidenceDigest !== null && expected === proof.evidenceDigest;
+}
+
+/** Which transition failed, for messages: `verb` ("approve") and `noun` ("approval"). */
+interface TransitionLabel {
+  verb: string;
+  noun: string;
+}
+const APPROVE_LABEL: TransitionLabel = { verb: "approve", noun: "approval" };
+const REJECT_LABEL: TransitionLabel = { verb: "reject", noun: "rejection" };
+const ACTIVATE_LABEL: TransitionLabel = { verb: "activate", noun: "activation" };
+const PROVE_LABEL: TransitionLabel = { verb: "submit evidence for", noun: "evidence submission" };
+
+function sendTransitionFailure(req: FastifyRequest, reply: FastifyReply, failure: TransitionFailure, label: TransitionLabel) {
+  if (failure.kind === "conflict") {
+    return reply.status(409).send({
+      error: "invalid_transition",
+      message: `Cannot ${label.verb} this registration from its current status (${failure.currentStatus ?? "missing"}).`,
+      currentStatus: failure.currentStatus,
+    });
+  }
+  if (failure.kind === "evidence_changed") {
+    return reply.status(409).send({
+      error: "evidence_changed",
+      message:
+        `The evidence on record is not the evidence you reviewed, so nothing was changed. ` +
+        `Review the current evidence, then ${label.verb} with its evidenceDigest.`,
+      currentEvidenceDigest: failure.currentEvidenceDigest,
+    });
+  }
+  if (failure.kind === "too_many_proofs") {
+    return sendTooManyProofs(reply, failure.retryAfterSeconds);
+  }
+  req.log.error({ err: failure.error }, `[onboard] ${label.noun} rolled back (${failure.kind})`);
+  Sentry.captureException(failure.error, { extra: { transition: label.noun, failure: failure.kind, url: req.url } });
+  if (failure.kind === "audit_failed") {
+    return reply.status(500).send({
+      error: "audit_write_failed",
+      message: `The ${label.noun} was rolled back because its audit record could not be written.`,
+    });
+  }
+  if (failure.kind === "store_failed") {
+    return reply.status(503).send({
+      error: "evidence_store_unavailable",
+      message: "The evidence photo could not be stored; nothing was recorded. Try again later.",
+    });
+  }
+  return reply.status(500).send({ error: "transition_failed", message: `The ${label.noun} could not be applied.` });
+}
+
+function sendTooManyProofs(reply: FastifyReply, retryAfterSeconds: number) {
+  return reply
+    .status(429)
+    .header("retry-after", String(retryAfterSeconds))
+    .send({
+      error: "too_many_proofs",
+      message:
+        `A registration accepts at most ${PROOFS_PER_REGISTRATION_PER_WINDOW} evidence submissions per hour. ` +
+        `Try again in ${retryAfterSeconds} s.`,
+      retryAfterSeconds,
+    });
+}
 
 export async function onboardRoutes(app: FastifyInstance) {
   // Analyze an operator/machine description and return an input-derived
@@ -59,10 +410,28 @@ export async function onboardRoutes(app: FastifyInstance) {
   });
 
   // Submit machine registration
-  app.post("/api/onboard/register", async (req) => {
-    const body = req.body as Partial<MachineRegistration>;
+  app.post("/api/onboard/register", async (req, reply) => {
+    const body = (req.body ?? {}) as Partial<MachineRegistration>;
+    // A registration's description is operator text until evidence is
+    // submitted; the "PROOF SUBMITTED:" record format is reserved for the
+    // server, so a forged record can never reach an admin reviewing "submitted".
+    if (isReservedDescription(body.description)) {
+      return reply.status(400).send({
+        error: "reserved_description",
+        message: "Descriptions starting with \"PROOF SUBMITTED:\" or \"PROVED:\" are reserved for server-written review records.",
+      });
+    }
+    // M3: the owner is the authenticated caller, never an identity named in
+    // the body (see routes/onboard-owner.ts).
+    const actor = requestCaller(req);
+    const owner = bindRegistrationOwner(actor, (body as { operator?: unknown }).operator);
+    if (!owner.ok) {
+      return reply.status(owner.status).send({ error: owner.error, message: owner.message, ...(owner.field ? { field: owner.field } : {}) });
+    }
     const registration: MachineRegistration = {
-      id: `reg-${Date.now()}`,
+      // L4: random, as the wizard's ids are. A millisecond timestamp let two
+      // registrations collide, and the second caller got the first one's id.
+      id: `reg-${randomUUID()}`,
       name: body.name ?? "Unknown",
       category: body.category ?? "custom",
       manufacturer: body.manufacturer ?? "",
@@ -82,12 +451,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         vibrationIsolation: false,
       },
       pricing: body.pricing ?? { baseCost: "0", minimum: "0", currency: "USDC" },
-      operator: body.operator ?? {
-        walletAddress: "0x0000000000000000000000000000000000000000",
-        displayName: "Unknown",
-        certifications: [],
-        trainingAcknowledgments: {},
-      },
+      operator: owner.operator as unknown as MachineRegistration["operator"],
       // T2.3 — persist compliance regulations the operator claims to meet
       complianceRegulations: Array.isArray(body.complianceRegulations)
         ? body.complianceRegulations.filter((s) => typeof s === "string" && s.length > 0)
@@ -103,7 +467,7 @@ export async function onboardRoutes(app: FastifyInstance) {
       // means "public-discovery" — these rows surface to anonymous callers
       // even after TENANT_ENFORCE flips on.
       const tenantIdAtWrite = (req as any).tenantId ?? null;
-      repos.registrations.insert({
+      const inserted = repos.registrations.insert({
         id: registration.id,
         name: registration.name,
         category: registration.category,
@@ -122,12 +486,21 @@ export async function onboardRoutes(app: FastifyInstance) {
         createdAt: registration.createdAt,
         submittedAt: registration.submittedAt,
       });
-    } catch (e) { console.warn("[onboard] DB insert failed, continuing:", (e as Error).message); }
+      if (!inserted) throw new Error("the insert returned no row");
+    } catch (e) {
+      // L4: never answer 200 for a registration that was not saved.
+      req.log.error({ err: e }, "[onboard] registration insert failed");
+      Sentry.captureException(e, { extra: { action: "onboard.register" } });
+      return reply.status(500).send({
+        error: "registration_persist_failed",
+        message: "The registration could not be saved; nothing was registered. Try again.",
+      });
+    }
     pipelineTelemetry.emit(registration.id, "operator_register", "completed", { metadata: { name: registration.name, category: registration.category } });
     trackServerEvent("operator_registered", { name: registration.name, category: registration.category });
     auditService.log({
       eventType: "operator.registered",
-      actor: (req as any).operatorId ?? (req as any).apiKeyId ?? registration.operator?.walletAddress,
+      actor: actor ?? (req as any).apiKeyId ?? undefined,
       resourceType: "registration",
       resourceId: registration.id,
       action: "create",
@@ -160,60 +533,128 @@ export async function onboardRoutes(app: FastifyInstance) {
     } catch { return { registrations: [] }; }
   });
 
-  // Get registration detail
-  app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req) => {
+  // Get registration detail (N62). The FULL record (the operator block with the
+  // owner's identity and contact, the serial number, space and power requirements,
+  // and pricing) is its owner's (registrationOwner: the authenticated caller bound at
+  // write, M3), or the admin secret's (adminOrCaller: a wrong secret is refused,
+  // never downgraded). Anyone else, like an unknown id, gets 404. The list above is
+  // the sanitised public view. This route used to return every record to any key.
+  app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req, reply) => {
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
+    let reg: ReturnType<ReturnType<typeof getRepos>["registrations"]["findById"]>;
     try {
-      const repos = getRepos();
-      const reg = repos.registrations.findById(req.params.id);
-      if (!reg) return { error: "not_found" };
-      return { registration: reg };
-    } catch { return { error: "not_found" }; }
+      reg = getRepos().registrations.findById(req.params.id);
+    } catch {
+      reg = undefined;
+    }
+    if (!reg || !mayAccess(who, registrationOwner(reg))) {
+      return reply.status(404).send({ error: "not_found" });
+    }
+    return { registration: reg };
   });
 
-  // ── Approve a registration ──
+  // ── Approve a registration (admin key required) ──
+  // The approval is bound to the evidence the admin reviewed (M2): the body
+  // must carry expectedEvidenceDigest, the evidenceDigest of the review record
+  // the admin looked at, or "none" for a registration with no submitted
+  // evidence. It is compared with the latest screened proof inside the
+  // transition's transaction, so an owner who re-proves between the admin's
+  // read and this call gets 409 evidence_changed and nothing is approved.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/approve", async (req, reply) => {
-    const repos = getRepos();
-    const reg = repos.registrations.findById(req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
-    if (reg.status !== "submitted" && reg.status !== "reviewing") {
-      return reply.status(400).send({ error: "invalid_status", message: `Cannot approve registration in "${reg.status}" status` });
+    // Checked before the lookup so a non-admin learns nothing about which ids exist.
+    // The shared admin secret, with NO environment bypass (astra pack 89b): 401 blank,
+    // 403 wrong, 503 unconfigured, in every NODE_ENV. Checked before the lookup.
+    if (!requireAdminSecret(req, reply)) return reply;
+    const expectedEvidenceDigest = isPlainObject(req.body) ? req.body.expectedEvidenceDigest : undefined;
+    if (typeof expectedEvidenceDigest !== "string") {
+      return reply.status(400).send({
+        error: "expected_evidence_digest_required",
+        message:
+          `Send expectedEvidenceDigest: the evidenceDigest of the review record you approved, ` +
+          `or "${NO_EVIDENCE}" for a registration with no submitted evidence.`,
+      });
     }
-    repos.registrations.updateStatus(req.params.id, "approved", { approvedAt: new Date().toISOString() });
-    auditService.log({
-      eventType: "operator.approved",
-      actor: (req as any).operatorId ?? (req as any).apiKeyId,
-      resourceType: "registration",
-      resourceId: reg.id,
-      action: "approve",
-      metadata: { name: reg.name },
-      ip: req.ip,
-      userAgent: req.headers["user-agent"],
+    const reg = getRepos().registrations.findById(req.params.id);
+    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (!APPROVE_FROM.includes(reg.status)) {
+      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, APPROVE_LABEL);
+    }
+    const at = new Date().toISOString();
+    const admin = adminAuditIdentity();
+    const outcome = commitTransition({
+      id: reg.id,
+      expectedFrom: reg.status,
+      to: "approved",
+      extra: { approvedAt: at },
+      guard: ({ proof }) =>
+        reviewedEvidenceMatches(proof, expectedEvidenceDigest)
+          ? null
+          : { ok: false, kind: "evidence_changed", currentEvidenceDigest: proof.evidenceDigest },
+      audit: (ctx) => ({
+        eventType: "operator.approved",
+        actor: admin.actor,
+        resourceType: "registration",
+        resourceId: ctx.pre.id,
+        action: "approve",
+        metadata: {
+          ...transitionAuditFields(ctx, at),
+          ...reviewedEvidenceFields(ctx.proof),
+          expectedEvidenceDigest,
+          name: ctx.pre.name,
+          adminAuth: admin.adminAuth,
+          caller: requestCaller(req),
+        },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      }),
     });
-    return { registration: reg, approved: true };
+    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, APPROVE_LABEL);
+    return { registration: outcome.row, approved: true };
   });
 
-  // ── Reject a registration ──
+  // ── Reject a registration (admin key required) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/reject", async (req, reply) => {
-    const repos = getRepos();
-    const reg = repos.registrations.findById(req.params.id);
+    // The shared admin secret, with NO environment bypass (astra pack 89b): 401 blank,
+    // 403 wrong, 503 unconfigured, in every NODE_ENV. Checked before the lookup.
+    if (!requireAdminSecret(req, reply)) return reply;
+    const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
-    if (reg.status === "rejected") {
-      return reply.status(400).send({ error: "already_rejected" });
+    if (!REJECT_FROM.includes(reg.status)) {
+      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, REJECT_LABEL);
     }
-    const body = req.body as { reason?: string } | undefined;
-    const reason = body?.reason ?? "No reason provided";
-    repos.registrations.updateStatus(req.params.id, "rejected", { description: `REJECTED: ${reason}` });
-    auditService.log({
-      eventType: "operator.rejected",
-      actor: (req as any).operatorId ?? (req as any).apiKeyId,
-      resourceType: "registration",
-      resourceId: reg.id,
-      action: "reject",
-      metadata: { name: reg.name, reason: body?.reason },
-      ip: req.ip,
-      userAgent: req.headers["user-agent"],
+    const rawReason = (req.body as { reason?: unknown } | undefined)?.reason;
+    if (rawReason !== undefined && rawReason !== null && (typeof rawReason !== "string" || rawReason.length > REJECT_REASON_MAX_CHARS)) {
+      return reply.status(400).send({ error: "invalid_reason", message: `reason must be a string of at most ${REJECT_REASON_MAX_CHARS} characters.` });
+    }
+    const reason = typeof rawReason === "string" && rawReason.length > 0 ? rawReason : "No reason provided";
+    const at = new Date().toISOString();
+    const admin = adminAuditIdentity();
+    const outcome = commitTransition({
+      id: reg.id,
+      expectedFrom: reg.status,
+      to: "rejected",
+      extra: { description: `REJECTED: ${reason}` },
+      audit: (ctx) => ({
+        eventType: "operator.rejected",
+        actor: admin.actor,
+        resourceType: "registration",
+        resourceId: ctx.pre.id,
+        action: "reject",
+        metadata: {
+          ...transitionAuditFields(ctx, at),
+          ...reviewedEvidenceFields(ctx.proof),
+          name: ctx.pre.name,
+          reason,
+          adminAuth: admin.adminAuth,
+          caller: requestCaller(req),
+        },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      }),
     });
-    return { registration: reg, rejected: true };
+    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, REJECT_LABEL);
+    return { registration: outcome.row, rejected: true };
   });
 
   // ── T2.2 — Edit registration (PATCH, owner-only) ──
@@ -229,21 +670,17 @@ export async function onboardRoutes(app: FastifyInstance) {
       status?: string; // explicitly rejected
     };
   }>("/api/onboard/registrations/:id", async (req, reply) => {
+    // Caller must own the registration, and the check fails closed (rule 7):
+    // no authenticated actor is 401 before any lookup; no owner matches nobody.
+    const callerId = authenticatedActor(req, ["operatorId", "userId", "apiKeyId", "walletAddress"]);
+    if (!callerId) {
+      return reply.status(401).send({ error: "authentication_required", message: "Editing a registration requires an authenticated operator." });
+    }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
-
-    // Caller must own the registration. Mirror the /prove ownership check.
-    const callerId = (req as any).operatorId
-      ?? (req as any).userId
-      ?? (req as any).apiKeyId
-      ?? (req as any).walletAddress;
-    const regOperator = (reg as any).operator?.walletAddress
-      ?? (reg as any).operator?.email
-      ?? (reg as any).walletAddress
-      ?? (reg as any).email
-      ?? (reg as any).operatorId;
-    if (callerId && regOperator && callerId !== regOperator) {
+    const owner = registrationOwner(reg);
+    if (!owner || !sameIdentity(owner, callerId)) {
       return reply.status(403).send({ error: "forbidden", message: "You can only edit your own registration" });
     }
     if (reg.status === "deleted") {
@@ -256,6 +693,24 @@ export async function onboardRoutes(app: FastifyInstance) {
         error: "status_immutable",
         message: "Status changes go through /approve, /reject, /activate — not PATCH.",
       });
+    }
+    if (body.description !== undefined) {
+      // Once evidence is submitted, the description column holds the
+      // server-written review record (or an admin's rejection). The owner may
+      // not rewrite what is under or after review, nor forge such a record.
+      if (!DESCRIPTION_EDITABLE_STATUSES.includes(reg.status)) {
+        return reply.status(409).send({
+          error: "evidence_locked",
+          message: `The description holds the review record once evidence is submitted; it can't be edited in "${reg.status}" status.`,
+          currentStatus: reg.status,
+        });
+      }
+      if (isReservedDescription(body.description)) {
+        return reply.status(400).send({
+          error: "reserved_description",
+          message: "Descriptions starting with \"PROOF SUBMITTED:\" or \"PROVED:\" are reserved for server-written review records.",
+        });
+      }
     }
 
     const patch: any = {};
@@ -275,7 +730,7 @@ export async function onboardRoutes(app: FastifyInstance) {
 
     auditService.log({
       eventType: "operator.edited",
-      actor: callerId ?? "anonymous",
+      actor: callerId,
       resourceType: "registration",
       resourceId: reg.id,
       action: "update",
@@ -288,20 +743,16 @@ export async function onboardRoutes(app: FastifyInstance) {
 
   // ── T2.2 — Delete (soft) registration (owner-only, GDPR-required) ──
   app.delete<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req, reply) => {
+    // Owner-only, failing closed (rule 7), as for PATCH.
+    const callerId = authenticatedActor(req, ["operatorId", "userId", "apiKeyId", "walletAddress"]);
+    if (!callerId) {
+      return reply.status(401).send({ error: "authentication_required", message: "Deleting a registration requires an authenticated operator." });
+    }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
-
-    const callerId = (req as any).operatorId
-      ?? (req as any).userId
-      ?? (req as any).apiKeyId
-      ?? (req as any).walletAddress;
-    const regOperator = (reg as any).operator?.walletAddress
-      ?? (reg as any).operator?.email
-      ?? (reg as any).walletAddress
-      ?? (reg as any).email
-      ?? (reg as any).operatorId;
-    if (callerId && regOperator && callerId !== regOperator) {
+    const owner = registrationOwner(reg);
+    if (!owner || !sameIdentity(owner, callerId)) {
       return reply.status(403).send({ error: "forbidden", message: "You can only delete your own registration" });
     }
     if (reg.status === "deleted") {
@@ -310,12 +761,12 @@ export async function onboardRoutes(app: FastifyInstance) {
 
     const deletedAt = new Date().toISOString();
     repos.registrations.updateStatus(req.params.id, "deleted", {
-      description: `DELETED at ${deletedAt} by ${callerId ?? "anonymous"} — original: ${reg.description ?? "(no description)"}`,
+      description: `DELETED at ${deletedAt} by ${callerId} — original: ${reg.description ?? "(no description)"}`,
     });
 
     auditService.log({
       eventType: "operator.deleted",
-      actor: callerId ?? "anonymous",
+      actor: callerId,
       resourceType: "registration",
       resourceId: reg.id,
       action: "delete",
@@ -326,231 +777,357 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: { ...reg, status: "deleted" }, deletedAt, soft: true };
   });
 
-  // ── Activate an approved registration ──
+  // ── Activate an approved registration (admin key required) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/activate", async (req, reply) => {
-    const repos = getRepos();
-    const reg = repos.registrations.findById(req.params.id);
+    // The shared admin secret, with NO environment bypass (astra pack 89b): 401 blank,
+    // 403 wrong, 503 unconfigured, in every NODE_ENV. Checked before the lookup.
+    if (!requireAdminSecret(req, reply)) return reply;
+    const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
-    if (reg.status !== "approved") {
-      return reply.status(400).send({ error: "invalid_status", message: `Must be approved before activating (current: "${reg.status}")` });
+    if (!ACTIVATE_FROM.includes(reg.status)) {
+      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, ACTIVATE_LABEL);
     }
-    repos.registrations.updateStatus(req.params.id, "active");
-    return { registration: { ...reg, status: "active" }, activated: true };
+    const at = new Date().toISOString();
+    const admin = adminAuditIdentity();
+    const outcome = commitTransition({
+      id: reg.id,
+      expectedFrom: reg.status,
+      to: "active",
+      audit: (ctx) => ({
+        eventType: "operator.activated",
+        actor: admin.actor,
+        resourceType: "registration",
+        resourceId: ctx.pre.id,
+        action: "activate",
+        metadata: {
+          ...transitionAuditFields(ctx, at),
+          ...reviewedEvidenceFields(ctx.proof),
+          name: ctx.pre.name,
+          adminAuth: admin.adminAuth,
+          caller: requestCaller(req),
+        },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      }),
+    });
+    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, ACTIVATE_LABEL);
+    return { registration: outcome.row, activated: true };
   });
 
-  // ── Prove capability and auto-approve ──
+  // ── Submit proof-of-capability evidence for review ──
   // Operator submits evidence of a test job (photo, sensor data, device health).
-  // If evidence meets minimum requirements, registration is auto-approved + activated.
-  // Fast-track: no manual review needed if the machine can prove it works.
-  app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/prove", async (req, reply) => {
-    return Sentry.startSpan(
-      { name: "onboard.prove", op: "onboard", attributes: { "registration.id": req.params.id } },
-      async () => {
-        const repos = getRepos();
-        const reg = repos.registrations.findById(req.params.id);
-        if (!reg) return reply.status(404).send({ error: "not_found" });
-
-        // Verify the caller owns this registration (prevents self-approval by other operators)
-        const callerId = (req as any).operatorId ?? (req as any).userId;
-        const regOperator = (reg as any).operator?.walletAddress
-          ?? (reg as any).operator?.email
-          ?? (reg as any).walletAddress
-          ?? (reg as any).email
-          ?? (reg as any).operatorId;
-        if (callerId && regOperator && callerId !== regOperator) {
-          return reply.status(403).send({ error: "forbidden", message: "You can only prove your own registration" });
-        }
-
-        if (reg.status === "active") {
-          return reply.status(400).send({ error: "already_active", message: "Registration is already active" });
-        }
-        if (reg.status === "rejected") {
-          return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
-        }
-
-        const body = req.body as {
-          evidence?: {
-            /** SHA-256 bundle hash of the evidence */
-            bundleHash?: string;
-            /** Evidence events from the test job */
-            events?: Array<{
-              type: string;
-              timestamp: string;
-              payload: Record<string, unknown>;
-            }>;
-            /** Base64-encoded photo of test output (e.g. printed page, machined part) */
-            photoBase64?: string;
-            /** Device health snapshot */
-            deviceHealth?: {
-              status: string;
-              firmware?: string;
-              model?: string;
-              uptime?: number;
-              [key: string]: unknown;
-            };
-            /** IPFS CID if evidence was already uploaded */
-            ipfsCid?: string;
-          };
-        } | undefined;
-
-        const evidence = body?.evidence;
-        if (!evidence) {
-          return reply.status(400).send({
-            error: "evidence_required",
-            message: "Submit evidence to prove your device works. Include at least one of: bundleHash + events, photoBase64, or deviceHealth.",
-            example: {
-              evidence: {
-                bundleHash: "sha256:abc123...",
-                events: [
-                  { type: "execution_completed", timestamp: new Date().toISOString(), payload: { jobType: "test", pagesCount: 1 } },
-                  { type: "camera_snapshot", timestamp: new Date().toISOString(), payload: { description: "Photo of printed test page" } },
-                ],
-                deviceHealth: { status: "idle", model: "HP OfficeJet Pro 9010", firmware: "2409A" },
-              },
-            },
+  // The evidence is recorded and the registration moves to "reviewing". It is
+  // never approved or activated here, at any tier: every field in the body is
+  // self-asserted (nothing binds it to the device or to a server-issued
+  // challenge), so it cannot establish that the machine is real. An onboarding
+  // admin approves and activates through /approve and /activate.
+  //
+  // Order: authenticated actor (401) -> owner (403) -> status -> proof cap
+  // (429) -> bounded shape checks, no decode (400/413/422) -> fabrication
+  // screen (422, audited, status unchanged) -> timestamps -> bounded photo
+  // decode + header checks (422) -> stage the photo privately -> one immediate
+  // transaction: status + cap re-check, CAS to "reviewing", audit record, then
+  // the photo placed under its CID. Only `evidence` is read from the body; a
+  // `status` field anywhere is ignored.
+  app.post<{ Params: { id: string } }>(
+    "/api/onboard/registrations/:id/prove",
+    {
+      bodyLimit: PROVE_BODY_LIMIT_BYTES,
+      // The server's global handler reports an oversized body as a 400 about
+      // Content-Length. Give /prove a distinct 413 and hand every other error
+      // to the parent handler unchanged.
+      errorHandler: (error, _req, reply) => {
+        if ((error as { code?: string }).code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+          return reply.status(413).send({
+            error: "body_too_large",
+            message: `A /prove request body may be at most ${PROVE_BODY_LIMIT_BYTES} bytes.`,
           });
         }
-
-        // ── Validate bundleHash format ────────────────────────────────────
-        if (evidence.bundleHash !== undefined) {
-          if (!evidence.bundleHash.startsWith("sha256:") || evidence.bundleHash.length < 40) {
-            return reply.status(400).send({
-              error: "invalid_bundle_hash",
-              message: "bundleHash must start with 'sha256:' and be at least 40 characters (e.g. sha256:abc123...).",
+        throw error;
+      },
+    },
+    async (req, reply) => {
+      return Sentry.startSpan(
+        { name: "onboard.prove", op: "onboard", attributes: { "registration.id": req.params.id } },
+        async () => {
+          // Steward rule 7: no authenticated actor -> 401, before any lookup.
+          const actor = authenticatedActor(req, ["operatorId", "userId"]);
+          if (!actor) {
+            return reply.status(401).send({
+              error: "authentication_required",
+              message: "Submitting evidence requires an authenticated operator (API key or wallet session).",
             });
           }
-        }
 
-        // ── Validate event timestamps ─────────────────────────────────────
-        if (evidence.events && evidence.events.length > 0) {
-          const now = Date.now();
-          const oneHourMs = 60 * 60 * 1000;
-          for (const ev of evidence.events) {
-            const ts = Date.parse(ev.timestamp);
-            if (isNaN(ts)) {
-              return reply.status(400).send({
-                error: "invalid_event_timestamp",
-                message: `Event of type "${ev.type}" has an invalid ISO timestamp: "${ev.timestamp}"`,
+          const repos = getRepos();
+          const reg = repos.registrations.findById(req.params.id);
+          if (!reg) return reply.status(404).send({ error: "not_found" });
+
+          // Only the registration's owner may submit its evidence. No owner (or
+          // the zero-address placeholder) matches nobody.
+          const owner = registrationOwner(reg);
+          if (!owner || !sameIdentity(owner, actor)) {
+            return reply.status(403).send({
+              error: "forbidden",
+              message: owner
+                ? "You can only prove your own registration"
+                : "This registration has no owner identity, so no operator can submit evidence for it",
+            });
+          }
+
+          if (reg.status === "active") {
+            return reply.status(400).send({ error: "already_active", message: "Registration is already active" });
+          }
+          if (reg.status === "rejected") {
+            return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
+          }
+          if (reg.status === "deleted") {
+            return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
+          }
+          // Evidence is fixed once an admin approves, so what was reviewed is what stays on record.
+          if (reg.status === "approved") {
+            return reply.status(400).send({ error: "already_approved", message: "Registration is already approved; its evidence can't be changed after approval" });
+          }
+          if (!PROVE_FROM.includes(reg.status)) {
+            return reply.status(400).send({ error: "invalid_status", message: `Cannot submit evidence for a registration in "${reg.status}" status` });
+          }
+
+          // M4 — the proof cap, before anything is read, decoded or stored.
+          // The transition checks it again inside its transaction, exactly.
+          const cap = recentProofs(repos, reg.id, Date.now());
+          if (cap.count >= PROOFS_PER_REGISTRATION_PER_WINDOW) return sendTooManyProofs(reply, cap.retryAfterSeconds);
+
+          const body = req.body;
+          const rawEvidence = isPlainObject(body) ? body.evidence : undefined;
+          if (rawEvidence === undefined || rawEvidence === null) {
+            return reply.status(400).send({
+              error: "evidence_required",
+              message: "Submit evidence to prove your device works. Include at least one of: bundleHash + events, photoBase64, or deviceHealth.",
+              example: {
+                evidence: {
+                  bundleHash: "sha256:abc123...",
+                  events: [
+                    { type: "execution_completed", timestamp: new Date().toISOString(), payload: { jobType: "test", pagesCount: 1 } },
+                    { type: "camera_snapshot", timestamp: new Date().toISOString(), payload: { description: "Photo of printed test page" } },
+                  ],
+                  deviceHealth: { status: "idle", model: "HP OfficeJet Pro 9010", firmware: "2409A" },
+                },
+              },
+            });
+          }
+
+          // B2 — bounded shape checks. Nothing is decoded yet.
+          const shape = validateEvidenceShape(rawEvidence);
+          if (!shape.ok) return sendEvidenceRejection(reply, shape.rejection);
+          const evidence = shape.value;
+
+          // B1 — the canonical fabrication screen. A rejection rule only: the
+          // registration is left exactly as it was and nothing is stored, but
+          // the attempt is audited.
+          const fabricated = fabricatedEventIndices(evidence.events);
+          if (fabricated.length > 0) {
+            try {
+              auditService.logStrict({
+                eventType: "operator.proof_rejected",
+                actor,
+                resourceType: "registration",
+                resourceId: reg.id,
+                action: "prove_rejected",
+                metadata: {
+                  registrationId: reg.id,
+                  reason: "fabricated_evidence",
+                  fabricatedEventIndices: fabricated,
+                  eventCount: evidence.events.length,
+                  eventsSha256: eventsDigest(evidence.events),
+                  statusUnchanged: reg.status,
+                  at: new Date().toISOString(),
+                },
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+              });
+            } catch (err) {
+              // The rejection stands either way; surface the lost audit record.
+              req.log.error({ err }, "[onboard] audit write for a rejected (fabricated) proof failed");
+              Sentry.captureException(err, { extra: { action: "prove_rejected", registrationId: reg.id } });
+            }
+            return reply.status(422).send({
+              error: "fabricated_evidence",
+              message: "Evidence events marked as simulated or mock (source.simulated or payload.mock) cannot be submitted as proof of a real device.",
+              fabricatedEvents: fabricated,
+              currentStatus: reg.status,
+            });
+          }
+
+          const timestampRejection = checkEventTimestamps(evidence.events, Date.now());
+          if (timestampRejection) return sendEvidenceRejection(reply, timestampRejection);
+
+          // Bounded decode (<= 5 MiB, checked above) + magic bytes + header dimensions.
+          let photo: InspectedPhoto | undefined;
+          if (evidence.photo) {
+            const inspected = inspectPhoto(evidence.photo);
+            if (!inspected.ok) return sendEvidenceRejection(reply, inspected.rejection);
+            photo = inspected.value;
+          }
+
+          const summary = summarizeEvidence(evidence, photo);
+          if (summary.proofs.length === 0) {
+            return reply.status(422).send({
+              error: "insufficient_evidence",
+              message: "Evidence did not meet minimum requirements for review.",
+              warnings: summary.warnings,
+              hint: "Provide a bundleHash with completion events, a photo of test output, or a device health snapshot with model and status.",
+            });
+          }
+
+          // M4 — stage the decoded photo privately. It is placed under its CID
+          // inside the transition's transaction (beforeCommit below), so the
+          // record never references a photo that was not stored, and a
+          // transition that fails leaves no new blob in the shared store. The
+          // one failure after the placement is the database COMMIT itself;
+          // the finally block below then takes out the blob this request
+          // created (astra pack 88, Q3), if nothing refers to it.
+          let staged: StagedPhoto | null = null;
+          if (photo) {
+            try {
+              staged = await getEvidencePhotoStore().stage(photo.bytes, PHOTO_MEDIA_TYPES[photo.format]);
+            } catch (err) {
+              req.log.error({ err }, "[onboard] evidence photo staging failed");
+              return reply.status(503).send({
+                error: "evidence_store_unavailable",
+                message: "The evidence photo could not be stored; nothing was recorded. Try again later.",
               });
             }
-            if (ts > now + 5000) {
-              return reply.status(400).send({
-                error: "future_event_timestamp",
-                message: `Event of type "${ev.type}" has a timestamp in the future: "${ev.timestamp}"`,
-              });
+          }
+          const stagedPhoto = staged;
+          const photoCid = stagedPhoto?.cid ?? null;
+          let committed = false;
+
+          // Reference-aware removal of a photo that this request placed and
+          // that no committed proof refers to (see StagedPhoto). The check and
+          // the removal share one immediate transaction, so no other writer
+          // of this database (another gateway process included) can commit a
+          // reference between them: one that committed before is seen, and
+          // one that commits after finds the file gone and places its own
+          // copy. Whatever goes wrong, the blob stays: a leaked blob is
+          // harmless, a proof that points at a missing blob is not.
+          const removeIfUnreferenced = (cid: string, remove: () => void): void => {
+            try {
+              getStore().db.transaction(
+                () => {
+                  if (photoCidIsReferenced(cid)) return;
+                  remove();
+                  req.log.warn({ cid, registrationId: reg.id }, "[onboard] removed the evidence photo of a proof that did not commit");
+                },
+                { behavior: "immediate" },
+              );
+            } catch (err) {
+              req.log.error({ err, cid, registrationId: reg.id }, "[onboard] could not remove the evidence photo of a proof that did not commit (unreferenced blob left in place)");
+              Sentry.captureException(err, { extra: { action: "reclaim_evidence_photo", cid, registrationId: reg.id } });
             }
-            if (now - ts > oneHourMs) {
-              return reply.status(400).send({
-                error: "stale_event_timestamp",
-                message: `Event of type "${ev.type}" is older than 1 hour: "${ev.timestamp}". Submit fresh evidence.`,
-              });
-            }
+          };
+
+          try {
+            // B4 — the canonical evidence record, kept in the description column.
+            const submittedAt = new Date().toISOString();
+            const record = buildEvidenceRecord({
+              registrationId: reg.id,
+              submitterOperatorId: actor,
+              submittedAt,
+              evidence,
+              photo,
+              photoCid,
+              evidenceTierClaim: summary.evidenceTierClaim,
+            });
+            const evidenceDigest = evidenceRecordDigest(record);
+            const description = PROOF_RECORD_PREFIX + JSON.stringify({
+              submittedAt,
+              autoApproved: false,
+              proofs: summary.proofs,
+              evidenceBundleHash: record.bundleHash,
+              evidenceIpfsCid: record.ipfsCid,
+              evidenceTierClaim: summary.evidenceTierClaim,
+              evidenceDigest,
+              evidence: record,
+            });
+
+            // B3 — CAS to "reviewing" from exactly the status checked above, with
+            // the audit record in the same transaction. Nothing here approves,
+            // activates, or sets approvedAt.
+            const outcome = commitTransition({
+              id: reg.id,
+              expectedFrom: reg.status,
+              to: "reviewing",
+              extra: { description },
+              // M4 — the cap again, exact: no other proof can commit inside this transaction.
+              guard: () => {
+                const recent = recentProofs(getRepos(), reg.id, Date.now());
+                return recent.count >= PROOFS_PER_REGISTRATION_PER_WINDOW
+                  ? { ok: false, kind: "too_many_proofs", retryAfterSeconds: recent.retryAfterSeconds }
+                  : null;
+              },
+              // M4 — place the staged photo last: if it cannot be placed, the
+              // transition and its audit record roll back.
+              beforeCommit: stagedPhoto
+                ? () => {
+                    stagedPhoto.commit();
+                  }
+                : undefined,
+              audit: (ctx) => ({
+                eventType: PROOF_SUBMITTED_EVENT,
+                actor,
+                resourceType: "registration",
+                resourceId: ctx.pre.id,
+                action: "prove",
+                metadata: {
+                  ...transitionAuditFields(ctx, submittedAt),
+                  evidenceDigest,
+                  // The proof this one replaces, from the audit log (M1).
+                  previousEvidenceDigest: ctx.proof.evidenceDigest,
+                  previousProofAuditId: ctx.proof.auditId,
+                  evidenceTierClaim: summary.evidenceTierClaim,
+                  proofCount: summary.proofs.length,
+                  proofs: summary.proofs,
+                  autoApproved: false,
+                  evidence: record,
+                },
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+              }),
+            });
+            if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, PROVE_LABEL);
+            committed = true;
+
+            pipelineTelemetry.emit(reg.id, "operator_verify", "started", {
+              metadata: { proofCount: summary.proofs.length, autoApproved: false, pendingReview: true, evidenceTierClaim: summary.evidenceTierClaim },
+            });
+            trackServerEvent("operator_proved", { proofCount: summary.proofs.length, evidenceTierClaim: summary.evidenceTierClaim, pendingReview: true });
+            return {
+              registration: outcome.row,
+              autoApproved: false,
+              activated: false,
+              pendingReview: true,
+              proofs: summary.proofs,
+              // A claim about which self-asserted evidence was submitted. It grants
+              // no assurance tier; the served tier comes from the kernel ceiling.
+              evidenceTierClaim: summary.evidenceTierClaim,
+              evidenceDigest,
+              evidence: record,
+              warning: summary.tierWarning,
+              warnings: summary.warnings.length > 0 ? summary.warnings : undefined,
+              message: "Evidence recorded. The registration is pending review; an onboarding admin approves and activates it.",
+            };
+          } finally {
+            // The staging file is private and uniquely named, so dropping it is
+            // always safe: after a placement it is already gone, and on any
+            // failure (or an unexpected throw) nothing is left behind. A blob
+            // this request placed in a transition that did not commit is
+            // removed here if nothing refers to it (see StagedPhoto).
+            stagedPhoto?.discard({ committed, removeIfUnreferenced });
           }
-        }
-
-        // Validate evidence — need at least one substantial proof
-        const proofs: string[] = [];
-        const warnings: string[] = [];
-
-        // 1. Evidence bundle with events
-        if (evidence.bundleHash && evidence.events && evidence.events.length > 0) {
-          const hasCompletion = evidence.events.some((e) =>
-            ["execution_completed", "camera_snapshot", "power_profile_summary"].includes(e.type),
-          );
-          if (hasCompletion) {
-            proofs.push(`evidence_bundle: ${evidence.events.length} events, hash=${evidence.bundleHash.slice(0, 20)}...`);
-          } else {
-            warnings.push("Evidence events present but no completion/snapshot event found");
-          }
-        }
-
-        // 2. Photo of test output
-        if (evidence.photoBase64) {
-          const sizeBytes = Math.ceil((evidence.photoBase64.length * 3) / 4);
-          if (sizeBytes > 1024) {
-            proofs.push(`photo: ${(sizeBytes / 1024).toFixed(0)}KB image`);
-          } else {
-            warnings.push("Photo too small to be meaningful (< 1KB)");
-          }
-        }
-
-        // 3. Device health check
-        if (evidence.deviceHealth) {
-          if (evidence.deviceHealth.status && evidence.deviceHealth.model) {
-            proofs.push(`device_health: ${evidence.deviceHealth.model} status=${evidence.deviceHealth.status}`);
-          } else {
-            warnings.push("Device health missing status or model");
-          }
-        }
-
-        // 4. IPFS CID (evidence already uploaded to decentralized storage)
-        if (evidence.ipfsCid) {
-          proofs.push(`ipfs: ${evidence.ipfsCid}`);
-        }
-
-        if (proofs.length === 0) {
-          return reply.status(422).send({
-            error: "insufficient_evidence",
-            message: "Evidence did not meet minimum requirements for auto-approval.",
-            warnings,
-            hint: "Provide a bundleHash with completion events, a photo of test output, or a device health snapshot with model and status.",
-          });
-        }
-
-        // ── Determine assurance tier ────────────────────────────────────────
-        const hasEvents = evidence.events && evidence.events.length > 0;
-        const hasCompletion = hasEvents && evidence.events!.some((e) =>
-          ["execution_completed", "camera_snapshot", "power_profile_summary"].includes(e.type),
-        );
-        const hasPhoto = !!(evidence.photoBase64 && Math.ceil((evidence.photoBase64.length * 3) / 4) > 1024);
-        const hasDeviceHealth = !!(evidence.deviceHealth?.status && evidence.deviceHealth?.model);
-        const hasBundleHash = !!(evidence.bundleHash);
-
-        let assuranceTier: 0 | 1 | 2;
-        let tierWarning: string | undefined;
-
-        if (hasPhoto && hasDeviceHealth && hasEvents) {
-          // Tier 2: photo + device health + events
-          assuranceTier = 2;
-        } else if (hasBundleHash && hasEvents && hasCompletion) {
-          // Tier 1: bundle hash + events with completion event
-          assuranceTier = 1;
-        } else {
-          // Tier 0: self-attested only (deviceHealth only, no events or photo)
-          assuranceTier = 0;
-          tierWarning = "Self-attested only — no independent verification";
-        }
-
-        // Evidence passes — auto-approve and activate (PERSISTENT — survives deploys)
-        const now = new Date().toISOString();
-        const proveMetadata = JSON.stringify({ provedAt: now, autoApproved: true, proofs, evidenceBundleHash: evidence.bundleHash ?? null, evidenceIpfsCid: evidence.ipfsCid ?? null, assuranceTier });
-        repos.registrations.updateStatus(req.params.id, "active", { approvedAt: now, description: `PROVED: ${proveMetadata}` });
-
-        pipelineTelemetry.emit(reg.id, "operator_verify", "completed", { metadata: { proofCount: proofs.length, autoApproved: true, assuranceTier } });
-        trackServerEvent("operator_proved", { proofCount: proofs.length, assuranceTier });
-        auditService.log({
-          eventType: "operator.proved",
-          actor: (req as any).operatorId ?? (req as any).apiKeyId ?? reg.operator?.walletAddress,
-          resourceType: "registration",
-          resourceId: reg.id,
-          action: "prove",
-          metadata: { proofCount: proofs.length, assuranceTier, autoApproved: true, proofs },
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
-        });
-        return {
-          registration: { ...reg, status: "active", approvedAt: now },
-          autoApproved: true,
-          activated: true,
-          proofs,
-          assuranceTier,
-          warning: tierWarning,
-          warnings: warnings.length > 0 ? warnings : undefined,
-          message: "Evidence accepted — registration auto-approved and activated. Your device is now live on the network.",
-        };
-      },
-    );
-  });
+        },
+      );
+    },
+  );
 
   // ═══════════════════════════════════════════════════════════════
   // Agent Onboarding — one invite code provisions everything

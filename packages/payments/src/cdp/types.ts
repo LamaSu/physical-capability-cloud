@@ -13,7 +13,11 @@
 export type CdpNetwork = "base-sepolia" | "base";
 
 export interface CdpConfig {
-  /** CDP_API_KEY_ID (key id). When absent, the client runs in mock mode. */
+  /**
+   * CDP_API_KEY_ID (key id). Real mode needs ALL THREE of apiKeyId, apiKeySecret and
+   * walletSecret; with any missing, the client runs in mock mode and says so in every
+   * result (WP-A round 5, sol #2963).
+   */
   apiKeyId?: string;
   /** CDP_API_KEY_SECRET (the Ed25519 secret shown once at key creation). */
   apiKeySecret?: string;
@@ -23,7 +27,10 @@ export interface CdpConfig {
   network?: CdpNetwork;
   /** Coinbase Onramp App ID (CDP_ONRAMP_APP_ID) for building the hosted onramp URL. */
   onrampAppId?: string;
-  /** Force mock regardless of keys. Default: !apiKeyId. */
+  /**
+   * `true` forces mock mode. `false` can NOT force real mode: real mode always needs the
+   * full credential tuple (cdpCredentialsComplete), whatever this says (round 8, FC-6).
+   */
   mock?: boolean;
 }
 
@@ -33,6 +40,8 @@ export interface CdpWallet {
   /** Smart account (ERC-4337) — gasless USDC on Base via the CDP paymaster. */
   smartAccount: boolean;
   createdAt: string;
+  /** Present and true ONLY for a simulated wallet that no key controls (WP-A round 5). */
+  mock?: true;
 }
 
 export interface OnrampSession {
@@ -44,6 +53,8 @@ export interface OnrampSession {
   network: CdpNetwork;
   status: "created" | "pending" | "completed" | "failed";
   createdAt: string;
+  /** Present and true ONLY for a simulated session: its URL is not a real checkout. */
+  mock?: true;
 }
 
 export interface SpendPermission {
@@ -62,4 +73,6 @@ export interface SpendPermission {
   start: string;
   expiresAt: string;
   revoked: boolean;
+  /** Present and true ONLY for a simulated permission that exists on no chain. */
+  mock?: true;
 }

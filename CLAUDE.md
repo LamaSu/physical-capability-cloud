@@ -140,7 +140,7 @@ Response (201):
   "api_key": "pcc_live_abc123...",
   "key_id": "key-uuid",
   "operator_id": "operator@example.com",
-  "scopes": ["*"],
+  "scopes": ["operator"],
   "rate_limit": 100,
   "expires_at": null,
   "warning": "Save this API key now — it will not be shown again.",
@@ -151,10 +151,32 @@ Response (201):
 }
 ```
 
-You can also provision with a wallet address instead of email:
-```json
-{"walletAddress": "0x1234...abcd", "name": "My Workshop"}
+You can also provision with a wallet address instead of email — this now requires proving you
+control that wallet via SIWE (EIP-4361) first (retire-the-wildcard #1099: an unproven
+`walletAddress` string is no longer trusted):
+
+```bash
+# 1. Get a nonce
+curl https://capability.network/api/auth/nonce
+# {"nonce": "..."}
+
+# 2. Build and sign the EIP-4361 message with your wallet (see auth/siwe-auth.ts for the
+#    exact format), then verify it — capture the returned `token`
+curl -X POST https://capability.network/api/auth/verify \
+  -H "Content-Type: application/json" \
+  -d '{"message": "<the SIWE message you signed>", "signature": "0x..."}'
+# {"token": "...", "address": "0x1234...abcd", "expiresAt": "..."}
+
+# 3. Provision using the verified session
+curl -X POST https://capability.network/api/auth/provision \
+  -H "Authorization: Bearer <token from step 2>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Workshop"}'
 ```
+
+`walletAddress` in the body is optional once you have a verified session (it's derived from the
+session), but if you do pass it, it must match the session's address or the request is rejected
+with `401 wallet_not_verified`.
 
 **Alternative**: If you have an invite code, use `POST /api/onboard/redeem` with `{inviteCode, email, password}` to get a key plus wallet, identity, and LLM proxy access in one call.
 
@@ -206,7 +228,7 @@ All endpoints are under `https://capability.network`. All require `Authorization
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/auth/provision` | Create API key (PUBLIC). Body: `{email?, walletAddress?, name?, capability?}`. Returns `api_key`. |
+| POST | `/api/auth/provision` | Create API key (PUBLIC). Body: `{email?, walletAddress?, name?, capability?}`. `walletAddress` requires a verified SIWE session (`Authorization: Bearer <session-token>` from `/api/auth/verify`) matching that address — see Section 2 Step 1. Returns `api_key` scoped `["operator"]` (never `["*"]`). |
 | GET | `/api/auth/validate` | Validate current API key. Returns `{valid, operatorId}`. |
 | GET | `/api/auth/keys` | List your active API keys with usage stats. |
 | DELETE | `/api/auth/keys/:keyId` | Revoke an API key permanently. |
@@ -331,10 +353,10 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | POST | `/api/onboard/register` | Submit machine registration. Body: `MachineRegistration`. |
 | GET | `/api/onboard/registrations` | List all registrations. |
 | GET | `/api/onboard/registrations/:id` | Get registration detail. |
-| POST | `/api/onboard/registrations/:id/approve` | Approve a registration (admin). |
-| POST | `/api/onboard/registrations/:id/reject` | Reject a registration. Body: `{reason?}`. |
-| POST | `/api/onboard/registrations/:id/activate` | Activate an approved registration. |
-| POST | `/api/onboard/registrations/:id/prove` | Submit evidence for auto-approval (fast-track). See Section 4.4. |
+| POST | `/api/onboard/registrations/:id/approve` | Approve a registration (admin key required). |
+| POST | `/api/onboard/registrations/:id/reject` | Reject a registration (admin key required). Body: `{reason?}`. |
+| POST | `/api/onboard/registrations/:id/activate` | Activate an approved registration (admin key required). |
+| POST | `/api/onboard/registrations/:id/prove` | Submit evidence for admin review. See Section 4.5. |
 | POST | `/api/onboard/redeem` | One-click agent onboarding with invite code. Body: `{inviteCode, email, password}`. |
 | GET | `/api/onboard/check/:code` | Validate invite code before redeeming. |
 | GET | `/api/onboard/status` | Check what the agent has provisioned (requires Bearer token from redeem). |
@@ -519,9 +541,9 @@ This submits a test job and polls for up to 10 seconds. Returns:
 }
 ```
 
-### 4.5 Prove and activate (fast-track)
+### 4.5 Submit proof for review
 
-If you registered via `/api/onboard/register`, you can skip manual approval by proving your device works:
+If you registered via `/api/onboard/register`, submit evidence that your device works so an onboarding admin can review it:
 
 ```bash
 curl -X POST https://capability.network/api/onboard/registrations/$REG_ID/prove \
@@ -545,7 +567,7 @@ Evidence determines assurance tier:
 - **Tier 1**: Bundle hash + events with completion event.
 - **Tier 2**: Photo + device health + events (full proof).
 
-On success, the registration is auto-approved and activated immediately. No manual review.
+The evidence is recorded and the registration moves to `reviewing`. It is not approved or activated automatically at any tier: an admin approves and activates it by calling `/approve` and `/activate` with an `X-Admin-Key` header that matches the gateway's `PCC_ADMIN_KEY`.
 
 ### 4.6 Check setup status
 

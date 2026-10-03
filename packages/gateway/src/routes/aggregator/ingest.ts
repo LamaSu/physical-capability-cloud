@@ -18,18 +18,7 @@ import {
 } from "@pcc/aggregator";
 import type { ToolSourceType } from "@pcc/spec";
 import { getAggregatorRegistry } from "./index.js";
-
-function isAggregatorAdmin(operatorId: string | undefined | null): boolean {
-  if (!operatorId) return false;
-  const raw = process.env.PCC_AGGREGATOR_ADMINS ?? "";
-  const set = new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean),
-  );
-  return set.has(operatorId.toLowerCase());
-}
+import { requireAdminSecret } from "../../auth/admin-secret-gate.js";
 
 function requireAggregatorAdmin(
   req: FastifyRequest,
@@ -42,14 +31,9 @@ function requireAggregatorAdmin(
     void reply.status(401).send({ error: "authentication_required" });
     return null;
   }
-  if (!isAggregatorAdmin(callerId)) {
-    void reply.status(403).send({
-      error: "forbidden",
-      message:
-        "Aggregator ingest endpoints require operator on PCC_AGGREGATOR_ADMINS allowlist.",
-    });
-    return null;
-  }
+  // WP-A round 5 (coord-watch #2883): the admin SECRET grants this, not an
+  // asserted operatorId on PCC_AGGREGATOR_ADMINS (the allowlist only reserves those names now).
+  if (!requireAdminSecret(req, reply)) return null;
   return callerId;
 }
 

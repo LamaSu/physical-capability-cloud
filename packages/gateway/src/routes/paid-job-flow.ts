@@ -64,6 +64,7 @@ import {
   type SettlementEvidenceSlot,
 } from "../services/device-evidence-settlement.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
+import { adminOrCaller, mayAccess } from "../auth/admin-secret-gate.js";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -701,6 +702,30 @@ export async function createJobFromSession(
 // Routes
 // ---------------------------------------------------------------------------
 
+/**
+ * N46 authority (operator item 57): completing a job, or resuming its
+ * settlement, releases escrow. Only the job's operator (the owner of the job's
+ * kernel) or the admin may do either. A job on an unowned kernel (no owner, or
+ * the zero-address placeholder) is the admin's alone. Sends the refusal (401
+ * with no identity, 403 not_job_operator) and returns false.
+ */
+function mayReleaseJob(
+  req: Parameters<typeof adminOrCaller>[0],
+  reply: Parameters<typeof adminOrCaller>[1],
+  job: { kernelId?: string | null },
+): boolean {
+  const who = adminOrCaller(req, reply);
+  if (!who) return false;
+  const owner = job.kernelId ? getRepos().kernels.findById(job.kernelId)?.operatorAddress : undefined;
+  const ownedBy = owner && owner !== "0x0000000000000000000000000000000000000000" ? owner : null;
+  if (mayAccess(who, ownedBy)) return true;
+  void reply.status(403).send({
+    error: "not_job_operator",
+    message: "Only the job's operator (the owner of its kernel) or the admin may complete it or resume its settlement.",
+  });
+  return false;
+}
+
 export async function paidJobFlowRoutes(app: FastifyInstance) {
   const settlementFacade = getSettlementFacade();
   // ═════════════════════════════════════════════════════════════════════
@@ -914,6 +939,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       if (!job) {
         return reply.status(404).send({ error: "Job not found" });
       }
+      // N46 authority: before the completion claim, so a refusal changes nothing.
+      if (!mayReleaseJob(req, reply, job)) return reply;
 
       // Atomic completion claim (P1). better-sqlite3 is synchronous, so this
       // UPDATE ... WHERE ... RETURNING runs to completion without yielding the
@@ -1548,6 +1575,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       if (!job) {
         return reply.status(404).send({ error: "Job not found" });
       }
+      // N46 authority: before the reclaim, so a refusal changes nothing.
+      if (!mayReleaseJob(req, reply, job)) return reply;
 
       // Single-winner reclaim: flip ONLY an 'evidence_submitted' job into
       // 'completing'. Excludes settled/completed/failed/cancelled/completing, so a

@@ -14,6 +14,7 @@ import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { isAgentBridgeReady, getConversations, getRecentMessages } from "../agent-bridge.js";
 import { litEncryptionService } from "../services.js";
 import { auditService } from "../services/audit-service.js";
+import { requireAdminSecret } from "../auth/admin-secret-gate.js";
 
 export async function statusRoutes(app: FastifyInstance) {
   const kernelFacade = getKernelFacade();
@@ -65,7 +66,12 @@ export async function statusRoutes(app: FastifyInstance) {
   // GET /api/telemetry/system — raw DB state dump, no fake numbers, no summaries
   // ---------------------------------------------------------------------------
 
-  app.get("/api/telemetry/system", async () => {
+  app.get("/api/telemetry/system", async (req, reply) => {
+    // N62 (astra pack 89, CRITICAL): this is a raw cross-owner DB dump — every
+    // registration (serials, operator blocks), evidence, the audit log and env.
+    // It is the admin's alone; a non-admin key (authenticated ≠ authorized) and
+    // an unauthenticated caller are refused before anything is read.
+    if (!requireAdminSecret(req, reply)) return reply;
     const startedAt = process.hrtime.bigint();
 
     let kernels: unknown[] = [];

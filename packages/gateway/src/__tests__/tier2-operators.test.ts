@@ -45,6 +45,12 @@ async function buildApp(opts: { withAuth?: boolean } = {}): Promise<FastifyInsta
   const app = Fastify({ logger: false });
   if (opts.withAuth) {
     await app.register(apiGate);
+  } else {
+    // Stand-in for the gateway auth middleware: x-test-operator sets req.operatorId.
+    app.addHook("onRequest", async (req) => {
+      const operatorId = req.headers["x-test-operator"];
+      if (typeof operatorId === "string") (req as any).operatorId = operatorId;
+    });
   }
   await app.register(onboardRoutes);
   await app.register(operatorsPublicRoutes);
@@ -65,6 +71,8 @@ async function registerMachine(app: FastifyInstance, opts: RegisterOpts = {}): P
   const res = await app.inject({
     method: "POST",
     url: "/api/onboard/register",
+    // The owner is the authenticated caller (M3): register as the operator wallet, when there is one.
+    headers: opts.operatorWallet ? { "x-test-operator": opts.operatorWallet } : {},
     payload: {
       name: opts.name ?? "Test Printer",
       category: opts.category ?? "fdm",

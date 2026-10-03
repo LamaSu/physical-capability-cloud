@@ -16,6 +16,7 @@ import { createStore } from "@pcc/store";
 import { csdRoutes, resetCsdRegistry } from "../routes/csd.js";
 import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
 import { initStore, closeStore } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
 
 // ── CsdRegistry helper tests ────────────────────────────────────────────────
 
@@ -343,11 +344,17 @@ describe("A2A pcc-suggest-templates skill", () => {
 
 describe("pcc-author-integration auto-records CSD adoption", () => {
   let app: FastifyInstance;
+  // WP-C R6: the skill registers a kernel owned by the AUTHENTICATED caller,
+  // and the CSD adopter is that caller. The calls carry this key even with
+  // PCC_A2A_AUTH_DISABLED. (Old: sent anonymously; the adopter was the body's
+  // operatorAddress "0xtest-adopter", now the key's operatorId.)
+  let adopterKey: string;
 
   beforeAll(async () => {
     process.env.PCC_DB_PATH = ":memory:";
     process.env.PCC_A2A_AUTH_DISABLED = "true";
     initStore({ seed: true });
+    adopterKey = provisionApiKey({ operatorId: "0xtest-adopter", scopes: ["operator"] }).rawKey;
     app = Fastify({ logger: false });
     await app.register(a2aTasksRoutes);
     await app.ready();
@@ -384,7 +391,7 @@ describe("pcc-author-integration auto-records CSD adoption", () => {
           },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${adopterKey}` },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().result.state).toBe("COMPLETED");
@@ -429,7 +436,7 @@ describe("pcc-author-integration auto-records CSD adoption", () => {
           },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${adopterKey}` },
     });
     expect(res.statusCode).toBe(200);
     // No CSD got bumped — all usage counts remain 0

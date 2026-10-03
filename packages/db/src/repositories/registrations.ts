@@ -1,4 +1,4 @@
-import { eq, and, isNull, type SQL } from "drizzle-orm";
+import { eq, and, inArray, isNull, type SQL } from "drizzle-orm";
 import { machineRegistrations } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type {
@@ -78,6 +78,31 @@ export class RegistrationRepository implements IRegistrationRepository {
     if (extra?.approvedAt) data.approvedAt = extra.approvedAt;
     if (extra?.description) data.description = extra.description;
     return this.db.update(machineRegistrations).set(data).where(eq(machineRegistrations.id, id)).returning().get();
+  }
+
+  /**
+   * Compare-and-swap transition: the status precondition is part of the
+   * UPDATE's WHERE clause, so a concurrent transition that commits first makes
+   * this one match zero rows (null) instead of silently overwriting it.
+   */
+  transitionStatus(
+    id: string,
+    fromStatuses: readonly string[],
+    toStatus: string,
+    extra?: { approvedAt?: string; description?: string },
+  ): RegistrationRow | null {
+    // Fail closed: an empty from-set allows no transition.
+    if (fromStatuses.length === 0) return null;
+    const data: Partial<typeof machineRegistrations.$inferInsert> = { status: toStatus };
+    if (extra?.approvedAt !== undefined) data.approvedAt = extra.approvedAt;
+    if (extra?.description !== undefined) data.description = extra.description;
+    const row = this.db
+      .update(machineRegistrations)
+      .set(data)
+      .where(and(eq(machineRegistrations.id, id), inArray(machineRegistrations.status, [...fromStatuses])))
+      .returning()
+      .get();
+    return row ?? null;
   }
 
   /**

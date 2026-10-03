@@ -37,6 +37,15 @@ export interface DHTNodeOpts {
   queryTimeoutMs?: number;
   /** Announcement TTL prune interval in ms */
   pruneIntervalMs?: number;
+  /**
+   * Whether this node stores, forwards and returns records that arrive FROM PEERS
+   * (default true). A peer's announcement carries no verified signature and no owner
+   * check. A node whose registry must hold only authenticated records sets this
+   * false: the gateway, whose REST announce is owner-checked. It then drops inbound
+   * announcements, ignores peers' query results and answers queries from its own
+   * registry. It still answers peers' queries and syncs its own records to them.
+   */
+  trustPeerRecords?: boolean;
 }
 
 export class DHTNode {
@@ -47,6 +56,7 @@ export class DHTNode {
   private port: number;
   private defaultTTL: number;
   private queryTimeoutMs: number;
+  private trustPeerRecords: boolean;
   private pendingQueries = new Map<
     string,
     { resolve: (results: CapabilityAnnouncement[]) => void; results: CapabilityAnnouncement[]; timer: ReturnType<typeof setTimeout> }
@@ -61,6 +71,7 @@ export class DHTNode {
     this.port = opts.port ?? 0;
     this.defaultTTL = opts.defaultTTL ?? 3;
     this.queryTimeoutMs = opts.queryTimeoutMs ?? 3000;
+    this.trustPeerRecords = opts.trustPeerRecords ?? true;
     this.registry = new AnnouncementRegistry({
       pruneIntervalMs: opts.pruneIntervalMs,
     });
@@ -123,8 +134,8 @@ export class DHTNode {
     // Local results
     const localResults = this.registry.query(filter);
 
-    // If we have no peers, just return local
-    if (this.transport.peerCount === 0) {
+    // With no peers, or when peers' records are not trusted, answer from local only
+    if (this.transport.peerCount === 0 || !this.trustPeerRecords) {
       const ranked = rankResults(localResults, filter);
       dhtTelemetry.queryCompleted(ranked.length, Date.now() - queryStartMs);
       return ranked;
@@ -226,12 +237,17 @@ export class DHTNode {
   private handleMessage(peerId: string, msg: DHTMessage): void {
     switch (msg.type) {
       case "announce":
+        if (!this.trustPeerRecords) {
+          dhtTelemetry.gossipDropped(`peer:${peerId}`, "peer_records_untrusted");
+          break;
+        }
         this.handleAnnounce(peerId, msg);
         break;
       case "query":
         this.handleQuery(peerId, msg);
         break;
       case "query_result":
+        if (!this.trustPeerRecords) break; // a peer's answer is no more trusted than its announcement
         this.handleQueryResult(msg);
         break;
       case "ping":

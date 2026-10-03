@@ -149,6 +149,19 @@ describe("AuditLogRepository", () => {
       expect(rows.length).toBe(2);
       expect(rows.every((r) => r.eventType === "job.submitted" && r.actor === "alice")).toBe(true);
     });
+
+    it("filters by resourceId, newest first, combined with the other filters", () => {
+      const at = new Date().toISOString();
+      repo.insert({ timestamp: at, eventType: "operator.proof_submitted", resourceType: "registration", resourceId: "reg-a", action: "prove", metadata: { n: 1 } });
+      repo.insert({ timestamp: at, eventType: "operator.proof_submitted", resourceType: "registration", resourceId: "reg-b", action: "prove", metadata: { n: 2 } });
+      repo.insert({ timestamp: at, eventType: "operator.approved", resourceType: "registration", resourceId: "reg-a", action: "approve", metadata: { n: 3 } });
+      repo.insert({ timestamp: at, eventType: "operator.proof_submitted", resourceType: "registration", resourceId: "reg-a", action: "prove", metadata: { n: 4 } });
+
+      const rows = repo.query({ eventType: "operator.proof_submitted", resourceType: "registration", resourceId: "reg-a" });
+      expect(rows.map((r) => r.metadata)).toEqual([{ n: 4 }, { n: 1 }]);
+      expect(repo.query({ resourceId: "reg-a", limit: 1 })[0]!.metadata).toEqual({ n: 4 });
+      expect(repo.query({ resourceId: "reg-missing" })).toEqual([]);
+    });
   });
 
   // ── metadata JSON storage / retrieval ─────────────────────────────────────

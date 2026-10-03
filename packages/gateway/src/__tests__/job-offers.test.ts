@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { jobOffersRoutes } from "../routes/job-offers.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import {
   initJobOffersStore,
   _resetJobOffersStoreForTests,
@@ -49,6 +50,18 @@ const stubVerify: VerifyFn = async (url) => {
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  await app.register(jobOffersRoutes);
+  await app.ready();
+  return app;
+}
+
+/** The app with the caller's identity attached from x-test-operator, standing in for apiGate. */
+async function buildAppWithIdentity(): Promise<FastifyInstance> {
+  const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (req) => {
+    const who = req.headers["x-test-operator"];
+    if (typeof who === "string") (req as unknown as { operatorId: string }).operatorId = who;
+  });
   await app.register(jobOffersRoutes);
   await app.ready();
   return app;
@@ -630,33 +643,63 @@ describe("POST /api/job-offers/:id/claim", () => {
 // ── POST /api/job-offers/:id/events — generic event vocabulary ─────────────
 
 describe("POST /api/job-offers/:id/events", () => {
-  it("event=in_progress → status=in_progress; event=delivered → status=delivered", async () => {
-    const app = await buildApp();
+  it("the claimant's operator: event=in_progress → status=in_progress; event=delivered → status=delivered", async () => {
+    // Delivery is the claimant's (job-offer-events-owner.test.ts): the operator of the
+    // kernel that claimed the offer. It used to be anyone, named in the body.
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: false });
+    const DRIVER = "driver-operator@x.test";
+    getRepos().kernels.insert({
+      id: "kernel-driver-1",
+      name: "driver kernel",
+      operatorAddress: DRIVER,
+      location: { lat: 0, lng: 0 },
+      physicalAddress: "1 Test St",
+      maxAssuranceTier: 2,
+      publicKey: "pk",
+      reputation: 0,
+      totalJobsCompleted: 0,
+      status: "online",
+      registeredAt: new Date().toISOString(),
+      lastHeartbeat: new Date().toISOString(),
+      version: "1.0.0",
+    } as never);
+    const app = await buildAppWithIdentity();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-ev") });
+      await app.inject({ method: "POST", url: "/api/job-offers", headers: { "x-test-operator": "poster@x.test" }, payload: courierOffer("c-ev") });
+      const claim = await app.inject({
+        method: "POST", url: "/api/job-offers/c-ev/claim",
+        headers: { "x-test-operator": DRIVER },
+        payload: { kernelId: "kernel-driver-1" },
+      });
+      expect(claim.statusCode, claim.body).toBeLessThan(300);
       const r1 = await app.inject({
         method: "POST", url: "/api/job-offers/c-ev/events",
-        payload: { event: "in_progress", by: "kernel-driver-1" },
+        headers: { "x-test-operator": DRIVER },
+        payload: { event: "in_progress" },
       });
       expect(r1.statusCode).toBe(200);
       expect(r1.json().status).toBe("in_progress");
       const r2 = await app.inject({
         method: "POST", url: "/api/job-offers/c-ev/events",
-        payload: { event: "delivered", by: "kernel-driver-1" },
+        headers: { "x-test-operator": DRIVER },
+        payload: { event: "delivered" },
       });
       expect(r2.statusCode).toBe(200);
       expect(r2.json().status).toBe("delivered");
     } finally {
       await app.close();
+      closeStore();
     }
   });
 
-  it("free-form event 'progress_update' (no status change) is accepted with payload", async () => {
-    const app = await buildApp();
+  it("free-form event 'progress_update' (no status change) is accepted from the poster, with payload", async () => {
+    const app = await buildAppWithIdentity();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: opentronsOffer("ot-ev") });
+      await app.inject({ method: "POST", url: "/api/job-offers", headers: { "x-test-operator": "poster@x.test" }, payload: opentronsOffer("ot-ev") });
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/ot-ev/events",
+        headers: { "x-test-operator": "poster@x.test" },
         payload: {
           event: "progress_update",
           payload: { step: 3, totalSteps: 12, instrument: "OT-2" },

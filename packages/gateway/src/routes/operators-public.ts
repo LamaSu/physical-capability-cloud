@@ -20,6 +20,7 @@ import type { RegistrationRow } from "@pcc/store";
 // When ON: buyer-alpha's request scopes to alpha-tenant rows + null-tenant
 // (public discovery). See packages/gateway/src/config/tenant-enforce.ts.
 import { tenantOpts } from "../config/tenant-enforce.js";
+import { PROOF_RECORD_PREFIX } from "./onboard-evidence.js";
 
 // ── Public sanitisation ─────────────────────────────────────────────────
 //
@@ -35,7 +36,14 @@ function toPublicOperator(r: RegistrationRow) {
     category: r.category,
     manufacturer: r.manufacturer,
     model: r.model,
-    description: r.description ?? null,
+    // N62 (astra pack 89, CRITICAL): /prove overloads `description` with the full
+    // private evidence record (PROOF_RECORD_PREFIX + JSON: submitter identity,
+    // device health/model). Never surface that in public discovery; a genuine
+    // operator description (not a proof record) still shows.
+    description:
+      typeof r.description === "string" && r.description.startsWith(PROOF_RECORD_PREFIX)
+        ? null
+        : r.description ?? null,
     photos: Array.isArray(r.photos) ? r.photos : [],
     capabilities: Array.isArray(r.capabilities)
       ? r.capabilities.map((c: any) => ({

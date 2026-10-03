@@ -14,7 +14,7 @@ import { lobRoutes } from "../routes/lob.js";
 import { _resetLobLetterStoreForTests } from "../services/lob-letter-store.js";
 import { _setLobClientForTests } from "../services/lob-client.js";
 
-const LOB_ENV = ["LOB_API_KEY", "LOB_WEBHOOK_SECRET"] as const;
+const LOB_ENV = ["LOB_API_KEY", "LOB_WEBHOOK_SECRET", "PCC_ADMIN_KEY"] as const;
 
 let savedNodeEnv: string | undefined;
 const savedLobEnv: Record<string, string | undefined> = {};
@@ -55,6 +55,9 @@ async function buildApp(nodeEnv: string | undefined): Promise<FastifyInstance> {
 }
 
 const OWNER = { "x-test-operator": "0xlobgateowner" };
+// Production healthz details need the admin secret (WP-A round 5, #2883).
+const LOB_ADMIN_SECRET = "lob-healthz-test-admin-secret";
+const ADMIN = { ...OWNER, "x-admin-key": LOB_ADMIN_SECRET };
 
 const validBody = {
   jobId: "job-any",
@@ -124,7 +127,8 @@ describe("lob config gate — production, nothing configured", () => {
     }
   });
 
-  it("REDACTS healthz for anonymous production callers; authed callers get the posture", async () => {
+  it("REDACTS healthz for anonymous production callers and ordinary keys; the admin secret gets the posture", async () => {
+    process.env.PCC_ADMIN_KEY = LOB_ADMIN_SECRET;
     const app = await buildApp("production");
     try {
       const anon = await app.inject({ method: "GET", url: "/api/lob/healthz" });
@@ -134,7 +138,11 @@ describe("lob config gate — production, nothing configured", () => {
       expect(anon.json()).not.toHaveProperty("missingConfig");
       expect(anon.json()).not.toHaveProperty("letters");
 
-      const authed = await app.inject({ method: "GET", url: "/api/lob/healthz", headers: OWNER });
+      const plainKey = await app.inject({ method: "GET", url: "/api/lob/healthz", headers: OWNER });
+      expect(plainKey.json().redacted).toBe(true);
+      expect(plainKey.json()).not.toHaveProperty("letters");
+
+      const authed = await app.inject({ method: "GET", url: "/api/lob/healthz", headers: ADMIN });
       expect(authed.json().ok).toBe(false);
       expect(authed.json().configured).toBe(false);
       expect(authed.json().missingConfig.join(" ")).toContain("LOB_API_KEY");
@@ -174,9 +182,10 @@ describe("lob config gate — documented key prefixes are POLICY (sandbox-as-rea
   it("a live_ key + secret satisfies the credential requirements, readiness is PER REQUEST — and the DURABLE STORE remains required", async () => {
     process.env.LOB_API_KEY = "live_abc123";
     process.env.LOB_WEBHOOK_SECRET = "whsec_x";
+    process.env.PCC_ADMIN_KEY = LOB_ADMIN_SECRET;
     const app = await buildApp("production");
     try {
-      const before = await app.inject({ method: "GET", url: "/api/lob/healthz", headers: OWNER });
+      const before = await app.inject({ method: "GET", url: "/api/lob/healthz", headers: ADMIN });
       // Credentials satisfied — the ONLY remaining requirement is the durable letter
       // store (sol lob review R2/R3): with a memory-only store, production Lob stays
       // 503 BY CONSTRUCTION until a durable implementation lands. A capability that
@@ -187,7 +196,7 @@ describe("lob config gate — documented key prefixes are POLICY (sandbox-as-rea
       expect(before.json().missingConfig[0]).toContain("durable letter store");
       // The key disappears mid-process: the very next request must see it (no snapshot).
       delete process.env.LOB_API_KEY;
-      const after = await app.inject({ method: "GET", url: "/api/lob/healthz", headers: OWNER });
+      const after = await app.inject({ method: "GET", url: "/api/lob/healthz", headers: ADMIN });
       expect(after.json().missingConfig.join(" ")).toContain("LOB_API_KEY");
       expect(after.json().missingConfig).toHaveLength(2);
     } finally {
