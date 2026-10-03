@@ -241,8 +241,13 @@ export async function courierJobsRoutes(app: FastifyInstance, opts: CourierJobsR
           claimedBy: result.claimedBy,
         });
       }
+      if (result.reason === "recently_released") {
+        return reply.code(409).send({ error: "recently_released", retryAfterMs: result.retryAfterMs });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "claim_refused" });
     }
-    return { ok: true, job: (result as { ok: true; job: unknown }).job };
+    return { ok: true, job: result.job };
   });
 
   // ── POST /api/courier-jobs/:id/events ───────────────────────────────────
@@ -290,7 +295,12 @@ export async function courierJobsRoutes(app: FastifyInstance, opts: CourierJobsR
       b.proof ?? null,
       b.note ?? null,
     );
-    if (!result.ok) return reply.code(404).send({ error: "not_found" });
+    if (!result.ok) {
+      if (result.reason === "invalid_transition") {
+        return reply.code(409).send({ error: "invalid_transition", event: b.event, currentStatus: result.currentStatus });
+      }
+      return reply.code(404).send({ error: "not_found" });
+    }
     return { ok: true, status: result.status, event: result.event };
   });
 
@@ -340,8 +350,14 @@ export async function courierJobsRoutes(app: FastifyInstance, opts: CourierJobsR
           message: "You can only cancel jobs you posted",
         });
       }
+      // DELETE is a 'cancelled' event: refused the same way, from the same statuses.
+      if (result.reason === "invalid_transition") {
+        return reply.code(409).send({ error: "invalid_transition", event: "cancelled", currentStatus: result.currentStatus });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "cancel_refused" });
     }
-    return { ok: true, status: (result as { ok: true; status: string }).status };
+    return { ok: true, status: result.status };
   });
 
   // ── POST /api/courier-jobs/:id/heartbeat ────────────────────────────────

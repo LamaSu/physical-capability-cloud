@@ -660,6 +660,7 @@ describe("POST /api/job-offers/:id/events", () => {
     const app = await buildApp();
     try {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-ev") });
+      // N81: progress needs a claim first (an unclaimed offer is refused, 409).
       await app.inject({
         method: "POST", url: "/api/job-offers/c-ev/claim",
         headers: as("driver7@kits.test"), payload: { kernelId: "kernel-driver-7" },
@@ -868,6 +869,12 @@ describe("claimant binding: claims and progress events belong to authenticated p
     const app = await buildApp();
     try {
       await postAndClaim(app, "cb-n81-judge");
+      // N81: a delivery is judged only once the claimant has delivered it.
+      const delivered = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-judge/events",
+        headers: as("driver7@kits.test"), payload: { event: "delivered" },
+      });
+      expect(delivered.statusCode).toBe(200);
       for (const event of ["confirmed", "disputed"]) {
         const byClaimant = await app.inject({
           method: "POST", url: "/api/job-offers/cb-n81-judge/events",

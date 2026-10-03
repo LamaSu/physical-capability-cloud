@@ -315,8 +315,13 @@ export async function jobOffersRoutes(app: FastifyInstance, opts: JobOffersRoute
           claimedBy: result.claimedBy,
         });
       }
+      if (result.reason === "recently_released") {
+        return reply.code(409).send({ error: "recently_released", retryAfterMs: result.retryAfterMs });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "claim_refused" });
     }
-    return { ok: true, offer: (result as { ok: true; offer: unknown }).offer };
+    return { ok: true, offer: result.offer };
   });
 
   // ── POST /api/job-offers/:id/events ────────────────────────────────────
@@ -372,7 +377,12 @@ export async function jobOffersRoutes(app: FastifyInstance, opts: JobOffersRoute
       b.payload ?? null,
       b.note ?? null,
     );
-    if (!result.ok) return reply.code(404).send({ error: "not_found" });
+    if (!result.ok) {
+      if (result.reason === "invalid_transition" || result.reason === "review_window_closed") {
+        return reply.code(409).send({ error: result.reason, event: eventKind, currentStatus: result.currentStatus });
+      }
+      return reply.code(404).send({ error: "not_found" });
+    }
     return { ok: true, status: result.status, event: result.event };
   });
 
@@ -431,8 +441,14 @@ export async function jobOffersRoutes(app: FastifyInstance, opts: JobOffersRoute
           message: "You can only cancel offers you posted",
         });
       }
+      // DELETE is a 'cancelled' event: refused the same way, from the same statuses.
+      if (result.reason === "invalid_transition") {
+        return reply.code(409).send({ error: "invalid_transition", event: "cancelled", currentStatus: result.currentStatus });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "cancel_refused" });
     }
-    return { ok: true, status: (result as { ok: true; status: string }).status };
+    return { ok: true, status: result.status };
   });
 
   // ── POST /api/job-offers/:id/heartbeat ─────────────────────────────────
