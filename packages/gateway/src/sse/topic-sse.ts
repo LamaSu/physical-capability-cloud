@@ -9,6 +9,8 @@ import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-
 import { resolveSSEAuth } from "./sse-auth.js";
 import { asSent, gateJobRead, gateKernelRead, refuseJobRead, streamEventFilterOf, type KernelReadGate } from "../readmodels/job-read-gate.js";
 import { getStore } from "../db.js";
+import { jobPartScopeOf } from "../readmodels/job-read-gate.js";
+import { batchEventVisible, batchViewFor } from "../readmodels/batch-read.js";
 import { schema, eq } from "@pcc/store";
 import { batchTracker } from "../services.js";
 
@@ -131,7 +133,7 @@ export async function topicSSE(app: FastifyInstance) {
     id: string,
     kernelIdOf: () => string | null | undefined,
     topic: StreamTopic,
-    opts: { kernelRow?: boolean } = {},
+    opts: { kernelRow?: boolean; batchId?: string } = {},
   ) => {
     const auth = await resolveSSEAuth(req);
     if (!auth.authenticated) {
@@ -150,9 +152,26 @@ export async function topicSSE(app: FastifyInstance) {
       trackSSEClose(req.ip);
       return refuseJobRead(reply, events);
     }
+    // A batch's own events (sample events name only their slot) follow the batch view, decided at
+    // each event from the batch as it is then (review r4 of #403, CRITICAL), replayed ones included.
+    let keep = events.keep;
+    if (opts.batchId !== undefined) {
+      const parts = jobPartScopeOf(req);
+      if (!parts.ok) {
+        trackSSEClose(req.ip);
+        return refuseJobRead(reply, parts);
+      }
+      const batchId = opts.batchId;
+      keep = (event) => {
+        if (!events.keep(event)) return false;
+        if (parts.all) return true;
+        const view = batchViewFor(batchTracker.getBatch(batchId), parts);
+        return view !== undefined && batchEventVisible(event, view, parts);
+      };
+    }
     const lastEventId = req.headers["last-event-id"] as string | undefined;
     const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [topic], lastEventId, origin, events.keep);
+    setupSSE(req, reply, [topic], lastEventId, origin, keep);
     await new Promise(() => {});
   };
 
@@ -171,6 +190,6 @@ export async function topicSSE(app: FastifyInstance) {
 
   app.get("/sse/stream/batch/:batchId", async (req, reply) => {
     const { batchId } = req.params as { batchId: string };
-    return kernelStream(req, reply, "batch", batchId, () => batchTracker.getBatch(batchId)?.kernelId, { type: "batch", id: batchId });
+    return kernelStream(req, reply, "batch", batchId, () => batchTracker.getBatch(batchId)?.kernelId, { type: "batch", id: batchId }, { batchId });
   });
 }

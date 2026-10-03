@@ -165,7 +165,9 @@ export async function telemetryRoutes(app: FastifyInstance) {
     return {
       entries,
       total: entries.length,
-      sources: logger.getSources(),
+      // Only the sources of the lines this caller receives (review r4 of #403, MEDIUM): the full
+      // list would name the sources of lines it may not read.
+      sources: [...new Set(entries.map((entry) => (entry as { source?: unknown }).source).filter((s): s is string => typeof s === "string"))].sort(),
     };
   });
 

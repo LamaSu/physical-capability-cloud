@@ -105,11 +105,11 @@ export function gateJobRead(req: FastifyRequest, jobId: string): JobReadGate {
  */
 export function gateJobRecordRead(
   req: FastifyRequest,
-  recordOf: () => { jobId?: unknown; kernelId?: unknown } | null | undefined,
+  recordOf: () => { jobId?: unknown; kernelId?: unknown; tenantId?: unknown } | null | undefined,
 ): JobReadGate {
   const pre = precheckJobRead(jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }));
   if (!pre.proceed) return { ok: false, kind: pre.reason };
-  let record: { jobId?: unknown; kernelId?: unknown } | null | undefined;
+  let record: { jobId?: unknown; kernelId?: unknown; tenantId?: unknown } | null | undefined;
   let reader: JobReader | null = null;
   try {
     const store = getStore();
@@ -121,6 +121,13 @@ export function gateJobRecordRead(
   }
   const jobId = typeof record?.jobId === "string" && record.jobId !== "" ? record.jobId : undefined;
   if (!jobId) return { ok: false, kind: "not_found" };
+  // Under TENANT_ENFORCE a record that carries its own tenant is refused on it before any job row is
+  // read (review r4 of #403, MEDIUM): a tenant-scoped admin's refusal then makes the same reads
+  // whether the record exists or not. The job row's tenant is still checked after (gateJobRead).
+  const tenant = tenantOpts(req as any);
+  if (tenant && record && Object.prototype.hasOwnProperty.call(record, "tenantId") && (record.tenantId ?? null) !== tenant.tenantId) {
+    return { ok: false, kind: "not_found" };
+  }
   if (reader) {
     const kernelId = typeof record?.kernelId === "string" ? record.kernelId : "";
     if (!decideJobRead({ id: jobId, kernelId }, reader).allow) return { ok: false, kind: "not_found" };
