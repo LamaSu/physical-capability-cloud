@@ -183,7 +183,7 @@ function matchRoute(
  * Extract scopes from the API key record.
  * Falls back to ["*"] for backwards compatibility when scopes are not set.
  */
-function getCallerScopes(req: FastifyRequest): string[] {
+export function getCallerScopes(req: FastifyRequest): string[] {
   if (!req.apiKeyId) return [];
 
   try {

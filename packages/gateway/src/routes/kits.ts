@@ -4,8 +4,12 @@
  *
  *   GET  /api/kits                      list published kits (filters: csdUrl, deviceFamily, interface, q; limit, offset)
  *   GET  /api/kits/:digest              one verified kit: its manifest and publication time
- *   POST /api/kits                      publish a complete kit (authenticated; the principal is recorded, never shown)
- *   POST /api/kits/:digest/fork         publish a kit whose parentKitDigest is :digest
+ *   POST /api/kits                      publish a complete kit (an API key with a publishing scope; the principal is recorded, never shown)
+ *   POST /api/kits/:digest/fork         publish a kit whose parentKitDigest is :digest (same rule)
+ *
+ * The publishing role is checked HERE, not left to the scope-checker's
+ * defaults (astra k1-511): an API key holding template_author, operator, admin
+ * or *. A SIWE session carries no scopes and is refused.
  *
  * There is no update or delete: a published version never changes, and an edit
  * is a new manifest. Deprecation needs publisher ownership under WP-A's identity
@@ -14,7 +18,11 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { getCallerScopes } from "../middleware/scope-checker.js";
 import { getKitRegistry, KitIntegrityError, KitRegistryError, type KitRegistry } from "../services/kit-registry.js";
+
+/** The API-key scopes that may publish or fork a kit (as for template authoring). */
+export const KIT_PUBLISH_SCOPES: readonly string[] = ["*", "template_author", "operator", "admin"];
 
 const ListQuerySchema = z
   .object({
@@ -34,6 +42,28 @@ function principalOf(req: FastifyRequest): string | null {
   return typeof id === "string" && id.trim() !== "" ? id : null;
 }
 
+/**
+ * Whether this caller may publish: an API key holding one of KIT_PUBLISH_SCOPES,
+ * decided HERE (astra k1-511). The scope-checker's defaults cannot be relied on:
+ * a governance table with any rows replaces them (HIGH 1), and the checker
+ * skips callers without an API key (HIGH 2). A SIWE session carries no scopes,
+ * so it cannot show a publishing role and is refused until sessions have one.
+ */
+function publishRefusal(
+  req: FastifyRequest,
+  callerScopes: (req: FastifyRequest) => string[],
+): { status: number; error: string; message: string } | null {
+  const r = req as unknown as { apiKeyId?: unknown };
+  if (typeof r.apiKeyId !== "string" || r.apiKeyId === "") {
+    return { status: 403, error: "kit_publish_requires_api_key", message: "publishing a kit needs an API key with a publishing scope; a wallet session has none" };
+  }
+  const scopes = callerScopes(req);
+  if (!KIT_PUBLISH_SCOPES.some((s) => scopes.includes(s))) {
+    return { status: 403, error: "insufficient_scope", message: `publishing a kit needs one of: ${KIT_PUBLISH_SCOPES.join(", ")}` };
+  }
+  return null;
+}
+
 function sendError(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof KitRegistryError) {
     return reply.status(err.status).send({ error: err.code, message: err.message, ...err.details });
@@ -45,8 +75,13 @@ function sendError(reply: FastifyReply, err: unknown): FastifyReply {
   throw err;
 }
 
-export async function kitRoutes(app: FastifyInstance, opts: { registry?: KitRegistry } = {}): Promise<void> {
+export async function kitRoutes(
+  app: FastifyInstance,
+  opts: { registry?: KitRegistry; callerScopes?: (req: FastifyRequest) => string[] } = {},
+): Promise<void> {
   const registry = (): KitRegistry => opts.registry ?? getKitRegistry();
+  // The API key's scopes; injectable so route tests need no database.
+  const callerScopes = opts.callerScopes ?? getCallerScopes;
 
   app.get("/api/kits", async (req, reply) => {
     const parsed = ListQuerySchema.safeParse(req.query ?? {});
@@ -73,6 +108,8 @@ export async function kitRoutes(app: FastifyInstance, opts: { registry?: KitRegi
   app.post("/api/kits", async (req, reply) => {
     const principal = principalOf(req);
     if (!principal) return reply.status(401).send({ error: "missing_identity", message: "publishing a kit needs an authenticated principal" });
+    const refusal = publishRefusal(req, callerScopes);
+    if (refusal) return reply.status(refusal.status).send({ error: refusal.error, message: refusal.message });
     try {
       const result = await registry().publish(req.body, principal);
       return reply.status(result.created ? 201 : 200).send(result);
@@ -84,6 +121,8 @@ export async function kitRoutes(app: FastifyInstance, opts: { registry?: KitRegi
   app.post<{ Params: { digest: string } }>("/api/kits/:digest/fork", async (req, reply) => {
     const principal = principalOf(req);
     if (!principal) return reply.status(401).send({ error: "missing_identity", message: "forking a kit needs an authenticated principal" });
+    const refusal = publishRefusal(req, callerScopes);
+    if (refusal) return reply.status(refusal.status).send({ error: refusal.error, message: refusal.message });
     try {
       const result = await registry().publish(req.body, principal, { forkOf: req.params.digest });
       return reply.status(result.created ? 201 : 200).send(result);

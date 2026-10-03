@@ -145,15 +145,18 @@ async function writeRawPublication(
  * route runs (the compliance-routes.test.ts `buildAuthedApp` pattern).
  * Omitting it simulates an unauthenticated caller (no principal at all).
  */
-async function buildApp(registry: KitRegistry, operatorId?: string): Promise<FastifyInstance> {
+async function buildApp(registry: KitRegistry, operatorId?: string, scopes: string[] = ["template_author"]): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   if (operatorId !== undefined) {
     app.decorateRequest("operatorId", null);
+    app.decorateRequest("apiKeyId", null);
+    // An authenticated API-key caller, as api-gate records one (k1-511: publishing needs an API key with a publishing scope).
     app.addHook("onRequest", async (req) => {
       (req as unknown as { operatorId: string }).operatorId = operatorId;
+      (req as unknown as { apiKeyId: string }).apiKeyId = `key-${operatorId}`;
     });
   }
-  await app.register(kitRoutes, { registry });
+  await app.register(kitRoutes, { registry, callerScopes: () => scopes });
   return app;
 }
 
@@ -943,5 +946,97 @@ describe("audit", () => {
     expect(res.json().created).toBe(false);
     expect(audit).not.toHaveBeenCalled();
     await app.close();
+  });
+});
+
+// ── astra k1-511: durable reads, no symlinks, a hard-link probe, an exact cross-process quota ──
+
+describe("astra k1-511: the files are the only truth", () => {
+  it("MEDIUM: list() stops advertising a kit whose files stop verifying (no stale cache)", async () => {
+    const { registry, rootDir } = await mkRegistry();
+    const a = await registry.publish(kit({ version: "8.0.0" }), "alice@kits.test");
+    const b = await registry.publish(kit({ version: "8.0.1" }), "alice@kits.test");
+    expect((await registry.list()).total).toBe(2);
+    await fs.rm(manifestFilePath(rootDir, a.kitDigest));
+    await fs.writeFile(publicationFilePath(rootDir, b.kitDigest), "{}");
+    const after = await registry.list();
+    expect(after.total).toBe(0);
+    expect([...registry.skipped].sort()).toEqual([a.kitDigest, b.kitDigest].sort());
+  });
+
+  it("MEDIUM: a kit another registry published on the same root is listed at once", async () => {
+    const rootDir = await mkTempRoot();
+    const a = new KitRegistry({ rootDir, durable: () => true, audit: () => undefined });
+    const b = new KitRegistry({ rootDir, durable: () => true, audit: () => undefined });
+    expect((await a.list()).total).toBe(0);
+    const { kitDigest } = await b.publish(kit({ version: "8.1.0" }), "bob@kits.test");
+    expect((await a.list()).kits.map((k) => k.kitDigest)).toEqual([kitDigest]);
+    // ...and A treats it as existing: re-publishing it there is created:false, publisher unchanged.
+    expect((await a.publish(kit({ version: "8.1.0" }), "alice@kits.test")).created).toBe(false);
+    expect(await a.publisherOf(kitDigest)).toBe("bob@kits.test");
+  });
+
+  it("MEDIUM: a symlinked publication record is refused, never followed (get throws, list skips)", async () => {
+    const { registry, rootDir } = await mkRegistry();
+    const { kitDigest } = await registry.publish(kit({ version: "8.2.0" }), "alice@kits.test");
+    const outside = path.join(await mkTempRoot(), "planted.json");
+    await fs.copyFile(publicationFilePath(rootDir, kitDigest), outside);
+    await fs.rm(publicationFilePath(rootDir, kitDigest));
+    await fs.symlink(outside, publicationFilePath(rootDir, kitDigest));
+    await expect(registry.get(kitDigest)).rejects.toBeInstanceOf(KitIntegrityError);
+    expect((await registry.list()).total).toBe(0);
+    expect(registry.skipped).toContain(kitDigest);
+  });
+
+  it("MEDIUM: a symlinked shard directory is refused for reads and writes (root confinement)", async () => {
+    const { registry, rootDir } = await mkRegistry();
+    const m = kit({ version: "8.3.0" });
+    const digest = await computeKitDigest(m);
+    const shard = digest.slice(7, 9);
+    const elsewhere = await mkTempRoot();
+    await fs.mkdir(path.join(rootDir, "manifests"), { recursive: true });
+    await fs.symlink(elsewhere, path.join(rootDir, "manifests", shard));
+    await expect(registry.publish(m, "alice@kits.test")).rejects.toBeInstanceOf(KitIntegrityError);
+    expect(await fs.readdir(elsewhere)).toEqual([]);
+  });
+
+  it("the configured root itself may be a symlink (a volume mount): it is resolved once", async () => {
+    const real = await mkTempRoot();
+    const link = path.join(await mkTempRoot(), "mount");
+    await fs.symlink(real, link);
+    const registry = new KitRegistry({ rootDir: link, durable: () => true, audit: () => undefined });
+    const { kitDigest } = await registry.publish(kit({ version: "8.4.0" }), "alice@kits.test");
+    expect((await registry.get(kitDigest))?.kitDigest).toBe(kitDigest);
+  });
+
+  it("MEDIUM: on a volume without hard links, publish is refused (503) before anything is written", async () => {
+    const { registry, rootDir } = await mkRegistry();
+    const spy = vi.spyOn(fs, "link").mockRejectedValue(Object.assign(new Error("no hard links"), { code: "EOPNOTSUPP" }));
+    try {
+      await expect(registry.publish(kit({ version: "8.5.0" }), "alice@kits.test")).rejects.toMatchObject({ code: "registry_unsupported_fs", status: 503 });
+      expect(await fs.readdir(rootDir)).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("MEDIUM: the quota is exact across processes: two registries on one root, limit 1, one publisher", async () => {
+    const rootDir = await mkTempRoot();
+    const a = new KitRegistry({ rootDir, durable: () => true, audit: () => undefined, dailyLimit: 1 });
+    const b = new KitRegistry({ rootDir, durable: () => true, audit: () => undefined, dailyLimit: 1 });
+    const results = await Promise.allSettled([a.publish(kit({ version: "8.6.0" }), "alice@kits.test"), b.publish(kit({ version: "8.6.1" }), "alice@kits.test")]);
+    const created = results.filter((r) => r.status === "fulfilled" && r.value.created);
+    const refused = results.filter((r) => r.status === "rejected" && (r.reason as KitRegistryError).code === "publish_quota");
+    expect(created).toHaveLength(1);
+    expect(refused).toHaveLength(1);
+  });
+
+  it("a malformed quota claim counts as recent: the quota fails closed", async () => {
+    const { registry, rootDir } = await mkRegistry({ dailyLimit: 1 });
+    await registry.publish(kit({ version: "8.7.0" }), "alice@kits.test");
+    const owner = createHash("sha256").update("alice@kits.test", "utf8").digest("hex");
+    await fs.rm(path.join(rootDir, "quota", owner, "0.json"));
+    await fs.writeFile(path.join(rootDir, "quota", owner, "0.json"), "not json");
+    await expect(registry.publish(kit({ version: "8.7.1" }), "alice@kits.test")).rejects.toMatchObject({ code: "publish_quota" });
   });
 });

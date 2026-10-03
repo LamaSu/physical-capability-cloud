@@ -8,32 +8,42 @@
  * never part of the hashed bytes.
  *
  * Authority lives in write-once files on the durable volume, never in a mutable
- * table:
- *   - `<root>/manifests/`: the manifest bytes, through FsRegistrySnapshotStore
- *     (write-once, collision-verified; concurrent writers of one digest carry
- *     identical bytes).
- *   - `<root>/publications/`: one publication record per digest, written with
- *     an EXCLUSIVE create (link from a temp file), so the first publisher of a
- *     digest wins even under concurrent publishes, and a record is never
- *     overwritten. FsRegistrySnapshotStore's check-then-rename is safe only for
- *     identical bytes; two first publishers write different records.
+ * table or an in-memory cache. Every file is created EXCLUSIVELY (written to a
+ * unique temp file, then hard-linked to its final name; EEXIST means another
+ * writer got there first) and is never overwritten:
+ *   - `<root>/manifests/<shard>/<hex>.json`: the manifest bytes. A second
+ *     writer of the same digest must carry identical bytes.
+ *   - `<root>/publications/<shard>/<hex>.json`: one publication record per
+ *     digest, so the first publisher of a digest wins, across processes too.
+ *   - `<root>/quota/<sha256(publisher)>/<n>.json`: the publisher's n-th claim.
+ *     Claim n needs claim n - dailyLimit to be at least 24 hours old, so the
+ *     rolling quota is exact across processes without a lock (astra k1-511).
+ * Before its first write, a registry probes that the volume supports hard
+ * links, and refuses to publish (503) if it does not, so a failed link never
+ * leaves an orphan manifest (astra k1-511).
+ *
  * The kit index is deliberately NOT a capability_template_store row: on master
  * any key can rewrite any template row through the generic template routes
  * (kits D5), and a kit row there would also surface in their list, fork and
  * rate routes.
  *
- * Integrity: every `get` re-reads the stored bytes and requires that they hash
- * to their digest, that they are exactly the canonical form of a valid
- * manifest, and that a well-formed publication record names the same digest.
- * Anything else throws KitIntegrityError: the registry never serves unverified
- * bytes. The in-memory index is a cache rebuilt from the files at first use;
- * an entry that fails verification is skipped (and counted), never listed.
+ * Integrity: every read (get, list, the existence check and the quota count)
+ * reads the files afresh; nothing is cached, so another process's publish is
+ * seen and a file that stops verifying stops being listed (astra k1-511). A
+ * read requires that the bytes hash to their digest, that they are exactly the
+ * canonical form of a valid manifest, and that a well-formed publication record
+ * names the same digest; anything else is a KitIntegrityError, and a listing
+ * skips it. Files are opened with O_NOFOLLOW and every registry directory is
+ * checked with lstat, so a symlink planted under the root is refused, never
+ * followed (astra k1-511). The configured root itself may be a symlink (a
+ * volume mount): it is resolved once.
  *
  * Privacy: the publisher (an email or a wallet) stays in the server-side
- * record. Nothing this module returns to a route carries it.
+ * record; no kit route returns it. The audit log records it as `actor` for
+ * authorized audit queries.
  */
 
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -45,7 +55,7 @@ import {
   type CapabilityKitManifestV1,
 } from "@pcc/spec";
 import { auditService, type AuditEntry } from "./audit-service.js";
-import { FsRegistrySnapshotStore, isValidRegistryDigest, type IRegistrySnapshotStore } from "./registry-snapshot-store.js";
+import { isValidRegistryDigest } from "./registry-snapshot-store.js";
 
 /** Largest canonical manifest the registry stores. */
 export const MAX_KIT_MANIFEST_BYTES = 256 * 1024;
@@ -180,27 +190,38 @@ interface IndexEntry {
   manifest: CapabilityKitManifestV1;
 }
 
+const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
+const CLAIM_NAME = /^(0|[1-9][0-9]{0,15})\.json$/;
+const ClaimSchema = z
+  .object({ claimedAt: z.string().refine((s) => !Number.isNaN(Date.parse(s))), kitDigest: z.string().refine(isValidRegistryDigest) })
+  .strict();
+
+function errnoOf(err: unknown): string | undefined {
+  return (err as NodeJS.ErrnoException | undefined)?.code;
+}
+
 export class KitRegistry {
-  private readonly manifests: IRegistrySnapshotStore;
-  private readonly publicationsDir: string;
+  private readonly rootDir: string;
   private readonly now: () => Date;
   private readonly dailyLimit: number;
   private readonly audit: (entry: AuditEntry) => void;
   private readonly durable: () => boolean;
-  private readonly index = new Map<string, IndexEntry>();
-  private loading: Promise<void> | null = null;
+  private realRoot: Promise<string> | null = null;
+  private linksChecked = false;
   private queue: Promise<unknown> = Promise.resolve();
-  /** Digests skipped at load because they failed verification. */
-  readonly skipped: string[] = [];
+  private lastSkipped: string[] = [];
 
   constructor(options: KitRegistryOptions = {}) {
-    const root = options.rootDir ?? resolveKitRegistryRoot();
-    this.manifests = new FsRegistrySnapshotStore(path.join(root, "manifests"));
-    this.publicationsDir = path.join(root, "publications");
+    this.rootDir = options.rootDir ?? resolveKitRegistryRoot();
     this.now = options.now ?? (() => new Date());
     this.dailyLimit = options.dailyLimit ?? configuredDailyLimit();
     this.audit = options.audit ?? ((entry) => auditService.log(entry));
     this.durable = options.durable ?? isDurableKitRoot;
+  }
+
+  /** Digests the latest listing skipped because they failed verification. */
+  get skipped(): readonly string[] {
+    return this.lastSkipped;
   }
 
   // ── Reads ──────────────────────────────────────────────────────────
@@ -214,11 +235,11 @@ export class KitRegistry {
     return entry ? { kitDigest, manifest: entry.manifest, publishedAt: entry.record.publishedAt } : null;
   }
 
-  /** Published kits matching every given filter, newest first (then by digest). */
+  /** Published kits matching every given filter, newest first (then by digest), read from the files now. */
   async list(filter: KitListFilter = {}): Promise<{ kits: KitSummary[]; total: number }> {
-    await this.ensureLoaded();
+    const entries = await this.scan();
     const q = filter.q?.toLowerCase();
-    const matching = [...this.index.entries()]
+    const matching = [...entries.entries()]
       .filter(([, { manifest: m }]) => {
         if (filter.csdUrl !== undefined && !m.capabilities.some((c) => c.csdUrl === filter.csdUrl)) return false;
         if (filter.deviceFamily !== undefined && !(m.compatibility?.deviceFamilies ?? []).includes(filter.deviceFamily)) return false;
@@ -247,11 +268,12 @@ export class KitRegistry {
    * Publish a complete kit for `publisher` (the authenticated principal). With
    * `forkOf`, the manifest's parentKitDigest must equal it and that kit must
    * exist. Re-publishing an existing digest is not an error: it returns the
-   * existing publication (created: false) and never re-stamps it.
+   * existing publication (created: false), never re-stamps it, and costs no
+   * quota.
    */
   publish(input: unknown, publisher: string, options: { forkOf?: string } = {}): Promise<PublishResult> {
     const run = this.queue.then(() => this.publishNow(input, publisher, options));
-    // Serialize publishes in this process (quota and index stay exact); a failed one doesn't block the next.
+    // Serialize this process's publishes; a failed one doesn't block the next.
     this.queue = run.catch(() => undefined);
     return run;
   }
@@ -296,28 +318,20 @@ export class KitRegistry {
       throw new KitRegistryError("unknown_parent", 422, "parentKitDigest names no published kit");
     }
 
-    await this.ensureLoaded();
-    const existing = this.index.get(kitDigest);
+    // Read from the files, not a cache: another process may have published it.
+    const existing = await this.readVerified(kitDigest);
     if (existing) return { kitDigest, created: false, publishedAt: existing.record.publishedAt };
 
+    await this.ensureLinksSupported();
     const now = this.now();
-    const since = now.getTime() - DAY_MS;
-    let recent = 0;
-    for (const { record } of this.index.values()) {
-      if (record.publisher === publisher && Date.parse(record.publishedAt) > since) recent++;
-    }
-    if (recent >= this.dailyLimit) {
-      throw new KitRegistryError("publish_quota", 429, `at most ${this.dailyLimit} new kits per publisher per 24 hours`);
-    }
-
-    await this.manifests.put(kitDigest, bytes);
+    await this.claimQuota(publisher, kitDigest, now);
+    await this.writeManifestOnce(kitDigest, bytes);
     const { record, created } = await this.writePublicationOnce({
       schema: PUBLICATION_SCHEMA,
       kitDigest,
       publisher,
       publishedAt: now.toISOString(),
     });
-    this.index.set(kitDigest, { record, manifest });
     if (created) {
       this.audit({
         eventType: options.forkOf !== undefined ? "kit.forked" : "kit.published",
@@ -331,44 +345,161 @@ export class KitRegistry {
     return { kitDigest, created, publishedAt: record.publishedAt };
   }
 
-  // ── Storage ────────────────────────────────────────────────────────
+  // ── Storage: exclusive creates, no symlinks ───────────────────────
 
-  private publicationPath(kitDigest: string): string {
-    const hex = kitDigest.slice("sha256:".length);
-    return path.join(this.publicationsDir, hex.slice(0, 2), `${hex}.json`);
+  /** The configured root, created if absent and resolved once (the root itself may be a mount symlink). */
+  private root(): Promise<string> {
+    if (!this.realRoot) {
+      this.realRoot = (async () => {
+        await fs.mkdir(this.rootDir, { recursive: true });
+        return fs.realpath(this.rootDir);
+      })();
+    }
+    return this.realRoot;
   }
 
-  /** Exclusive create: the first record for a digest wins; a later one never overwrites it. */
-  private async writePublicationOnce(record: KitPublicationRecord): Promise<{ record: KitPublicationRecord; created: boolean }> {
-    const file = this.publicationPath(record.kitDigest);
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    const tmp = `${file}.tmp-${randomUUID()}`;
-    await fs.writeFile(tmp, canonicalize(record), { flag: "wx" });
-    let created = true;
+  /** `<root>/<area>/<shard>`; every component below the root must be a real directory, never a symlink. */
+  private async dirFor(area: string, shard: string, create: boolean): Promise<string | null> {
+    const root = await this.root();
+    let dir = root;
+    for (const part of [area, shard]) {
+      dir = path.join(dir, part);
+      if (create) await fs.mkdir(dir, { recursive: true }).catch((err) => (errnoOf(err) === "EEXIST" ? undefined : Promise.reject(err)));
+      let st;
+      try {
+        st = await fs.lstat(dir);
+      } catch (err) {
+        if (errnoOf(err) === "ENOENT" && !create) return null;
+        throw err;
+      }
+      if (st.isSymbolicLink() || !st.isDirectory()) throw new KitIntegrityError(`(${area}/${shard})`, "a registry directory is a symlink or not a directory");
+    }
+    return dir;
+  }
+
+  /** A file's bytes, opened without following a symlink; null when absent. */
+  private async readNoFollow(dir: string, name: string, kitDigest: string): Promise<Uint8Array | null> {
+    let handle;
     try {
-      await fs.link(tmp, file);
+      handle = await fs.open(path.join(dir, name), fsConstants.O_RDONLY | O_NOFOLLOW);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      created = false;
+      const code = errnoOf(err);
+      if (code === "ENOENT") return null;
+      if (code === "ELOOP" || code === "EMLINK") throw new KitIntegrityError(kitDigest, "a registry file is a symlink");
+      throw err;
+    }
+    try {
+      if (!(await handle.stat()).isFile()) throw new KitIntegrityError(kitDigest, "a registry file is not a regular file");
+      return new Uint8Array(await handle.readFile());
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** Create `<dir>/<name>` exclusively with `bytes`; false when it already exists. Never overwrites. */
+  private async createOnce(dir: string, name: string, bytes: Uint8Array | string): Promise<boolean> {
+    const tmp = path.join(dir, `.${name}.tmp-${randomUUID()}`);
+    await fs.writeFile(tmp, bytes, { flag: "wx" });
+    try {
+      await fs.link(tmp, path.join(dir, name));
+      return true;
+    } catch (err) {
+      if (errnoOf(err) === "EEXIST") return false;
+      throw err;
     } finally {
       await fs.unlink(tmp).catch(() => undefined);
     }
+  }
+
+  /** Probe once that the volume supports hard links, before anything is written; 503 if it does not. */
+  private async ensureLinksSupported(): Promise<void> {
+    if (this.linksChecked) return;
+    const root = await this.root();
+    const probe = path.join(root, `.link-probe-${randomUUID()}`);
+    try {
+      await fs.writeFile(probe, "", { flag: "wx" });
+      await fs.link(probe, `${probe}.link`);
+    } catch (err) {
+      throw new KitRegistryError("registry_unsupported_fs", 503, `the registry's volume cannot create hard links (${errnoOf(err) ?? "error"}), so it cannot publish write-once`);
+    } finally {
+      await fs.unlink(probe).catch(() => undefined);
+      await fs.unlink(`${probe}.link`).catch(() => undefined);
+    }
+    this.linksChecked = true;
+  }
+
+  private static nameOf(kitDigest: string): { shard: string; name: string } {
+    const hex = kitDigest.slice("sha256:".length);
+    return { shard: hex.slice(0, 2), name: `${hex}.json` };
+  }
+
+  /** Store the manifest bytes once; an existing file for the digest must hold exactly these bytes. */
+  private async writeManifestOnce(kitDigest: string, bytes: Uint8Array): Promise<void> {
+    const { shard, name } = KitRegistry.nameOf(kitDigest);
+    const dir = (await this.dirFor("manifests", shard, true))!;
+    if (await this.createOnce(dir, name, bytes)) return;
+    const stored = await this.readNoFollow(dir, name, kitDigest);
+    if (!stored || stored.length !== bytes.length || stored.some((b, i) => b !== bytes[i])) {
+      throw new KitIntegrityError(kitDigest, "different bytes are already stored under this digest");
+    }
+  }
+
+  /** The first record for a digest wins; a later one never overwrites it. */
+  private async writePublicationOnce(record: KitPublicationRecord): Promise<{ record: KitPublicationRecord; created: boolean }> {
+    const { shard, name } = KitRegistry.nameOf(record.kitDigest);
+    const dir = (await this.dirFor("publications", shard, true))!;
+    const created = await this.createOnce(dir, name, canonicalize(record));
     const winner = await this.readPublication(record.kitDigest);
     if (!winner) throw new KitIntegrityError(record.kitDigest, "the publication record vanished after it was written");
     return { record: winner, created };
   }
 
-  /** The publication record, or null when absent. Throws KitIntegrityError on a malformed record. */
-  private async readPublication(kitDigest: string): Promise<KitPublicationRecord | null> {
-    let text: string;
-    try {
-      text = strictUtf8.decode(await fs.readFile(this.publicationPath(kitDigest)));
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw new KitIntegrityError(kitDigest, "the publication record is unreadable");
+  /**
+   * Claim the publisher's next quota slot, exactly across processes: claim n
+   * (an exclusive create) needs claim n - dailyLimit to be at least 24 hours
+   * old. A claim is spent even if the publish then fails (conservative).
+   */
+  private async claimQuota(publisher: string, kitDigest: string, now: Date): Promise<void> {
+    const owner = createHash("sha256").update(publisher, "utf8").digest("hex");
+    const root = await this.root();
+    const quotaDir = path.join(root, "quota");
+    await fs.mkdir(quotaDir, { recursive: true });
+    const dir = (await this.dirFor("quota", owner, true))!;
+    const refused = () => new KitRegistryError("publish_quota", 429, `at most ${this.dailyLimit} new kits per publisher per 24 hours`);
+    for (let attempt = 0; attempt < 16; attempt++) {
+      let next = 0;
+      for (const entry of await fs.readdir(dir)) {
+        const m = CLAIM_NAME.exec(entry);
+        if (m) next = Math.max(next, Number(m[1]) + 1);
+      }
+      const back = next - this.dailyLimit;
+      if (back >= 0) {
+        const old = await this.readNoFollow(dir, `${back}.json`, kitDigest);
+        let claimedAt = Number.POSITIVE_INFINITY;
+        try {
+          if (old) claimedAt = Date.parse(ClaimSchema.parse(JSON.parse(strictUtf8.decode(old))).claimedAt);
+        } catch {
+          // a malformed claim counts as recent: fail closed
+        }
+        if (!(claimedAt <= now.getTime() - DAY_MS)) throw refused();
+      }
+      if (await this.createOnce(dir, `${next}.json`, canonicalize({ claimedAt: now.toISOString(), kitDigest }))) return;
+      // Another process took claim `next`; look again.
     }
+    throw new KitRegistryError("publish_busy", 503, "too many concurrent publishes for this publisher; retry");
+  }
+
+  /** The publication record, or null when absent. Throws KitIntegrityError on a malformed record or a symlink. */
+  private async readPublication(kitDigest: string): Promise<KitPublicationRecord | null> {
+    const { shard, name } = KitRegistry.nameOf(kitDigest);
+    const dir = await this.dirFor("publications", shard, false);
+    if (!dir) return null;
+    const raw = await this.readNoFollow(dir, name, kitDigest);
+    if (!raw) return null;
+    let text: string;
     let parsed: z.infer<typeof PublicationRecordSchema>;
     try {
+      text = strictUtf8.decode(raw);
       parsed = PublicationRecordSchema.parse(JSON.parse(text));
     } catch {
       throw new KitIntegrityError(kitDigest, "the publication record is malformed");
@@ -383,7 +514,9 @@ export class KitRegistry {
   private async readVerified(kitDigest: string): Promise<IndexEntry | null> {
     const record = await this.readPublication(kitDigest);
     if (!record) return null;
-    const bytes = await this.manifests.get(kitDigest);
+    const { shard, name } = KitRegistry.nameOf(kitDigest);
+    const dir = await this.dirFor("manifests", shard, false);
+    const bytes = dir ? await this.readNoFollow(dir, name, kitDigest) : null;
     if (!bytes) throw new KitIntegrityError(kitDigest, "the manifest bytes are missing");
     if (sha256Digest(bytes) !== kitDigest) throw new KitIntegrityError(kitDigest, "the manifest bytes do not hash to their digest");
     let manifest: CapabilityKitManifestV1;
@@ -399,34 +532,46 @@ export class KitRegistry {
     return { record, manifest };
   }
 
-  private ensureLoaded(): Promise<void> {
-    if (!this.loading) this.loading = this.loadIndex();
-    return this.loading;
-  }
-
-  /** Rebuild the index from the publication records; an entry that fails verification is skipped. */
-  private async loadIndex(): Promise<void> {
+  /** Every published kit that verifies, read from the files now; failures are skipped and remembered. */
+  private async scan(): Promise<Map<string, IndexEntry>> {
+    const entries = new Map<string, IndexEntry>();
+    const skipped: string[] = [];
+    const root = await this.root();
+    const area = path.join(root, "publications");
     let shards: string[];
     try {
-      shards = await fs.readdir(this.publicationsDir);
+      shards = await fs.readdir(area);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      if (errnoOf(err) === "ENOENT") {
+        this.lastSkipped = skipped;
+        return entries;
+      }
       throw err;
     }
     for (const shard of shards.sort()) {
       if (!/^[0-9a-f]{2}$/.test(shard)) continue;
-      for (const name of (await fs.readdir(path.join(this.publicationsDir, shard))).sort()) {
+      let names: string[];
+      try {
+        const dir = await this.dirFor("publications", shard, false);
+        names = dir ? (await fs.readdir(dir)).sort() : [];
+      } catch {
+        skipped.push(`(publications/${shard})`);
+        continue;
+      }
+      for (const name of names) {
         const match = /^([0-9a-f]{64})\.json$/.exec(name);
         if (!match || !match[1]!.startsWith(shard)) continue;
         const kitDigest = `sha256:${match[1]}`;
         try {
           const entry = await this.readVerified(kitDigest);
-          if (entry) this.index.set(kitDigest, entry);
+          if (entry) entries.set(kitDigest, entry);
         } catch {
-          this.skipped.push(kitDigest);
+          skipped.push(kitDigest);
         }
       }
     }
+    this.lastSkipped = skipped;
+    return entries;
   }
 }
 
