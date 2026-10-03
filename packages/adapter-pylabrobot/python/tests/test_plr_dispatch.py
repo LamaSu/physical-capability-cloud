@@ -339,7 +339,9 @@ async def test_concurrent_runs_on_one_device_are_serialized_not_interleaved(fake
     assert result_a["result"]["opCount"] == 4
     assert _calls(s) == ["setup", "pick_up_tips", "aspirate", "dispense", "return_tips"]
 
-    # the lease is released: B can run now
+    # the lease is released, and the adapter closes A's window (#526: a device holds one
+    # window at a time): B can run now
+    await call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-x"}, "22")
     resp_b2 = await call_run(s, out, {
         "deviceId": "lh1", "jobId": "job-b", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
     }, "21")
@@ -690,6 +692,67 @@ def test_a_lock_file_that_is_not_a_regular_file_is_refused_without_hanging(tmp_p
     with pytest.raises(backend_loader.DeviceBusy, match="cannot lock"):
         backend_loader.EndpointLock.acquire(key)
     assert not (tmp_path / "target").exists()
+
+
+# ── R39 r7 (astra r6): the lock object and the identity can't be substituted ──
+
+async def test_r7_no_job_can_replace_a_running_jobs_window(fake_plr):
+    # astra r6 HIGH (merge seam): open A's window, block A inside its run, open B's window,
+    # release A: A's operations must stay bound to A.
+    import asyncio
+
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
+    task = asyncio.create_task(_run(s, out, TRANSFER))  # job-x
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-b"}, "122")
+    window = s.evidence.get_window("lh1")
+    release.set()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert window is not None and window.job_id == "job-x", window
+
+
+# ── #526 (sensors) on R39's harness ─────────────────────────────────────────
+# #526's test_server.py versions slowed the stub with a __delay_ms op, which R39 refuses (astra r1
+# on #378). The same assertions, with the run held inside pick_up_tips instead.
+
+async def test_526_a_second_run_while_one_is_in_flight_on_the_device_is_refused(fake_plr):
+    import asyncio
+
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
+    task_a = asyncio.create_task(_run(s, out, TRANSFER))  # job-x
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    second = await asyncio.wait_for(call(s, out, "backend.run", {
+        "deviceId": "lh1", "jobId": "job-x", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
+    }, "130"), timeout=2.0)
+    assert second["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], second
+    release.set()
+    result_a = await asyncio.wait_for(task_a, timeout=2.0)
+    assert result_a["result"]["ok"] is True and result_a["result"]["opCount"] == 4
+
+
+async def test_526_a_running_jobs_window_is_neither_closed_nor_replaced_until_its_run_ends(fake_plr):
+    import asyncio
+
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
+    task_a = asyncio.create_task(_run(s, out, TRANSFER))  # job-x
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    close_a = await call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-x"}, "131")
+    open_b = await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-b"}, "132")
+    assert close_a["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], close_a
+    assert open_b["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], open_b
+    release.set()
+    await asyncio.wait_for(task_a, timeout=2.0)
+    await asyncio_sleep_for_notifications()
+    labelled = {m["params"].get("jobId") for m in out.messages() if m.get("method") == "evidence"}
+    assert labelled == {"job-x"}, labelled
+    after = await call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-x"}, "133")
+    assert after["result"]["jobId"] == "job-x" and after["result"]["opCount"] == 4, after
 
 
 # The identity check itself (the real _robot_serial, over HTTP on 127.0.0.1).

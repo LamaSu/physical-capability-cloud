@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from .backend_loader import DeviceBusy, is_stub_machine, reassert_tracking
 from .dispatcher import RPC_ERROR_CODES, RpcException
+from .evidence import RecordingWindowBusy
 
 if TYPE_CHECKING:
     from .backend_loader import BackendLoader
@@ -43,6 +44,8 @@ class Commands:
         # Windows this process closed, by (deviceId, jobId): the drain's watermark and the op
         # count, so a retried evidence.stopRecording answers as the first did. The last 64.
         self._closed: "OrderedDict[tuple[str, str], tuple[int, int]]" = OrderedDict()
+        # Devices with a backend.run in flight: one run per device (astra pack 473).
+        self._running: set[str] = set()
 
     def register_all(self, dispatcher: Any) -> None:
         dispatcher.register("backend.init", self.backend_init)
@@ -142,7 +145,19 @@ class Commands:
                 f"deviceId {device_id} is busy running job {handle.busy_job_id}",
                 {"deviceId": device_id, "jobId": job_id, "busyJobId": handle.busy_job_id},
             )
+        marked = False
         try:
+            # One run per device (#526, astra pack 473): the mark evidence.stopRecording reads,
+            # so a running device keeps its window. Under R39's lease above it is always free;
+            # checked anyway, and cleared below only if this run set it.
+            if device_id in self._running:
+                raise RpcException(
+                    RPC_ERROR_CODES["DEVICE_BUSY"],
+                    f"device {device_id} is already running a protocol, so job {job_id} does not run",
+                    {"jobId": job_id},
+                )
+            self._running.add(device_id)
+            marked = True
             if not handle.setup_done:
                 raise RpcException(
                     RPC_ERROR_CODES["NON_RETRYABLE"],
@@ -224,9 +239,11 @@ class Commands:
                 "durationMs": duration_ms,
                 "summary": summary,
             }
-            # Recording window is closed explicitly by the TS adapter via
-            # evidence.stopRecording — leave it open here.
         finally:
+            # The run is over: the device takes another. Its recording window is closed
+            # explicitly by the TS adapter via evidence.stopRecording, so it stays open here.
+            if marked:
+                self._running.discard(device_id)
             handle.release()
 
     async def backend_status(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -295,7 +312,14 @@ class Commands:
     async def evidence_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
-        window = self.evidence.start_recording(device_id, job_id)
+        try:
+            window = self.evidence.start_recording(device_id, job_id)
+        except RecordingWindowBusy as busy:
+            raise RpcException(
+                RPC_ERROR_CODES["DEVICE_BUSY"],
+                f"device {device_id} is recording job {busy.job_id}, so job {job_id} cannot open a window",
+                {"jobId": busy.job_id, "generation": self.evidence.generation},
+            ) from busy
         return {
             "ok": True,
             "jobId": window.job_id,
@@ -306,6 +330,16 @@ class Commands:
     async def evidence_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
+        # A device whose run is in flight keeps its window (astra pack 204). A client-side run
+        # timeout does not stop the run here: closing the window would attest a job whose run
+        # can still emit, and let another job's window open under it. Refused until the run
+        # ends; the adapter holds the device and retries this barrier until it answers.
+        if device_id in self._running:
+            raise RpcException(
+                RPC_ERROR_CODES["DEVICE_BUSY"],
+                f"device {device_id} is still running, so job {job_id}'s window stays open until its run ends",
+                {"jobId": job_id, "generation": self.evidence.generation},
+            )
         window = self.evidence.stop_recording(device_id, job_id)
         key = (device_id, job_id)
         if window is not None:
