@@ -293,3 +293,39 @@ describe("19f CRITICAL X2: a tab can't clear the teardown another tab hasn't fin
     expect(gateway.siweCookie).toBe(false);
   }, 30_000);
 });
+
+describe("19f, the parts of the protocol", () => {
+  it("signing out moves the account generation too: the change is pending until a teardown confirms it", async () => {
+    vi.resetModules();
+    const { useAuthStore } = await import("../stores/auth-store.js");
+    const { walletSessionEnding } = await import("../lib/account-generation.js");
+    expect(walletSessionEnding()).toBe(false);
+    useAuthStore.getState().logout();
+    expect(walletSessionEnding(), "signed out, not yet confirmed").toBe(true);
+  });
+
+  it("a teardown records only the generation it read before its logout; a change during it stays pending", async () => {
+    vi.resetModules();
+    const generation = await import("../lib/account-generation.js");
+    const { endWalletSession } = await import("../lib/wallet-session.js");
+    generation.beginAccountChange();
+    gateway.logoutsToAnswer = 0;
+    const ending = endWalletSession();
+    await settle(3);
+    expect(gateway.logoutWaiting, "the teardown's logout is on the wire").toHaveLength(1);
+    generation.beginAccountChange(); // another tab changes the account meanwhile
+    releaseLogouts();
+    expect(await ending).toBe(true);
+    expect(generation.walletSessionEnding(), "the later change is still pending").toBe(true);
+  });
+
+  it("without Web Locks a wallet sign-in refuses to send its verification", async () => {
+    vi.resetModules();
+    const { beginSignIn, verifySignIn } = await import("../lib/wallet-session.js");
+    Object.defineProperty(navigator, "locks", { value: undefined, configurable: true });
+    const signIn = beginSignIn();
+    await expect(verifySignIn("{}", signIn)).rejects.toThrow(/Web Locks/);
+    expect(gateway.verifies).toBe(0);
+    signIn.finish();
+  });
+});
