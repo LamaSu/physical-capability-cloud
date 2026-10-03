@@ -65,7 +65,7 @@ const EMPTY: Routes = {
   "/api/kernels": { status: 200, body: { kernels: [] } },
   "/api/escrow": { status: 200, body: { escrows: [] } },
   "/api/capabilities/templates": { status: 200, body: { templates: [] } },
-  "/api/capabilities": { status: 200, body: { items: [], total: 0, offset: 0, limit: 500 } },
+  "/api/capabilities": { status: 200, body: { items: [], total: 0, offset: 0, limit: 500, hasMore: false } },
 };
 
 // ── render harness ───────────────────────────────────────────────────────────
@@ -492,7 +492,7 @@ describe("C. Discover says when site names are missing", () => {
       ...EMPTY,
       "/api/capabilities": {
         status: 200,
-        body: { items: [{ id: "c1", name: "Cap One", type: "hplc", kernelId: "k1" }], total: 1, offset: 0, limit: 200 },
+        body: { items: [{ id: "c1", name: "Cap One", type: "hplc", kernelId: "k1" }], total: 1, offset: 0, limit: 200, hasMore: false },
       },
       "/api/kernels": { status: 503, body: { error: "unavailable" } },
     });
@@ -584,7 +584,7 @@ describe("F. the leaderboard reads every page of /api/capabilities", () => {
         const offset = Number(params.get("offset") ?? "0");
         const servedLimit = Math.min(requestedLimit, 200); // the gateway never serves more than 200 rows
         calls.push(`offset=${offset}&limit=${requestedLimit}`);
-        body = { items: allCaps.slice(offset, offset + servedLimit), total, offset, limit: servedLimit };
+        body = { items: allCaps.slice(offset, offset + servedLimit), total, offset, limit: servedLimit, hasMore: offset + servedLimit < total };
       } else if (path === "/api/health") {
         body = { status: "ok" };
       } else if (path === "/api/kernels") {
@@ -1078,10 +1078,10 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
       // Without the total check this would read 250 rows, find no more, and rank them as "the first 250 of 251".
       stubCapabilityPages((offset) =>
         offset === 0
-          ? { items: caps(0, 200), total: 250, offset, limit: 200 }
+          ? { items: caps(0, 200), total: 250, offset, limit: 200, hasMore: true }
           : offset === 200
-            ? { items: caps(200, 50), total: 251, offset, limit: 200 }
-            : { items: [], total: 251, offset, limit: 200 },
+            ? { items: caps(200, 50), total: 251, offset, limit: 200, hasMore: false }
+            : { items: [], total: 251, offset, limit: 200, hasMore: false },
       );
       const t = await renderPage(<KernelLeaderboardPage />);
       expect(t).toContain("Couldn't load the leaderboard");
@@ -1089,7 +1089,7 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
     });
 
     it("a page that answers for another offset fails the read", async () => {
-      stubCapabilityPages((offset) => ({ items: offset === 0 ? caps(0, 200) : caps(200, 50), total: 250, offset: 0, limit: 200 }));
+      stubCapabilityPages((offset) => ({ items: offset === 0 ? caps(0, 200) : caps(200, 50), total: 250, offset: 0, limit: 200, hasMore: true }));
       const t = await renderPage(<KernelLeaderboardPage />);
       expect(t).toContain("Couldn't load the leaderboard");
     });
@@ -1101,7 +1101,7 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
     });
 
     it("more rows than the total fails the read", async () => {
-      stubCapabilityPages(() => ({ items: caps(0, 2), total: 1, offset: 0, limit: 200 }));
+      stubCapabilityPages(() => ({ items: caps(0, 2), total: 1, offset: 0, limit: 200, hasMore: false }));
       const t = await renderPage(<KernelLeaderboardPage />);
       expect(t).toContain("Couldn't load the leaderboard");
     });
@@ -1114,10 +1114,44 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
     });
 
     it("Discover counts a capped read as a lower bound and says only part was read", async () => {
-      stubCapabilityPages((offset) => ({ items: offset === 0 ? caps(0, 1) : [], total: 3, offset, limit: 200 }));
+      stubCapabilityPages((offset) => ({ items: offset === 0 ? caps(0, 1) : [], total: 3, offset, limit: 200, hasMore: false }));
       const t = await renderPage(<DiscoverPage />);
       expect(t).toContain("Showing the first 1 of the 3 capabilities");
       expect(t).toContain("1+ capability found");
+    });
+
+    it("a read that changed between pages is never presented as complete (astra 18c MEDIUM)", async () => {
+      // Page 1 (offset 0) reads the list before it mutates: c0..c199 of 250.
+      // The list then mutates — c0 removed, c250 appended, total unchanged —
+      // and every request after the first serves the post-mutation list. So
+      // page 2 (offset 200) answers with c201..c250, and a re-read of page 1
+      // would answer with c1..c200, not c0..c199 again.
+      let calls = 0;
+      const postMutation = (offset: number) => {
+        const n = Math.min(200, 250 - offset);
+        return Array.from({ length: n }, (_, i) => ({ id: `c${offset + i + 1}`, kernelId: "k1", type: "hplc", queueDepth: 0 }));
+      };
+      stubCapabilityPages((offset) => {
+        calls++;
+        if (calls === 1) return { items: caps(0, 200), total: 250, offset, limit: 200, hasMore: true };
+        return { items: postMutation(offset), total: 250, offset, limit: 200, hasMore: offset + 200 < 250 };
+      });
+      const t = await renderPage(<KernelLeaderboardPage />);
+      // Before the fix: page 1 (c0..c199) plus page 2 (c201..c250) add up to
+      // 250 unique ids, so the existing checks certified the read complete
+      // despite c200 being missing and the list having moved mid-read.
+      expect(t).toContain("Couldn't load the leaderboard");
+      expect(t).not.toContain("Ranked over the first");
+    });
+
+    it("a page missing offset or limit is unavailable, not silently trusted (astra 18c MEDIUM)", async () => {
+      for (const partial of [{ limit: 200 }, { offset: 0 }]) {
+        act(() => root.unmount());
+        root = createRoot(container);
+        stubCapabilityPages(() => ({ items: caps(0, 1), total: 1, ...partial }));
+        const t = await renderPage(<KernelLeaderboardPage />);
+        expect(t, JSON.stringify(partial)).toContain("Couldn't load the leaderboard");
+      }
     });
   });
 
