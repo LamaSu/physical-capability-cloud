@@ -21,6 +21,9 @@ import type { CameraAdapter, MachineAdapter, SensorAdapter } from "../adapters/t
 import { PhotoCaptureService } from "../photo-capture-service.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
+// Added with the round-2 fixes.
+import { existsSync, readFileSync } from "node:fs";
+import { dshowAlternativeNames, linuxV4l2Identity, nodeLinuxFsOps, type LinuxFsOps } from "../adapters/pull-camera-adapter.js";
 
 vi.mock("@sentry/node", () => ({
   startSpan: vi.fn().mockImplementation((_opts: unknown, fn: () => unknown) => fn()),
@@ -444,5 +447,386 @@ describe("Fix A end to end: a JobRunner with a PullCameraAdapter (fake grabber) 
       expect(e.payload.captureClass).toBe("CC0");
       expect(kernelPullCaptureIssue(e, JOB)).toBeNull();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix C: the identity is bound to the device node that is opened.
+// ---------------------------------------------------------------------------
+
+/** glibc makedev(): the dev_t of a character device with this major and minor. */
+function makedev(major: number, minor: number): bigint {
+  const M = BigInt(major);
+  const m = BigInt(minor);
+  return ((M & 0xfffn) << 8n) | ((M & 0xfffff000n) << 32n) | (m & 0xffn) | ((m & 0xffffff00n) << 12n);
+}
+
+/** A LinuxFsOps that serves one node and its sysfs files, recording every call. `null` makes a read fail. */
+function fakeLinuxFs(
+  opts: { charDevice?: boolean; symlink?: boolean; rdev?: unknown; lstatFails?: boolean; dev?: string | null; serial?: string | null } = {},
+): LinuxFsOps & { calls: string[] } {
+  const calls: string[] = [];
+  const fail = (path: string) => Object.assign(new Error(`EACCES: ${path}`), { code: "EACCES" });
+  return {
+    calls,
+    async lstat(path) {
+      calls.push(`lstat ${path}`);
+      if (opts.lstatFails) throw fail(path);
+      return {
+        isCharacterDevice: () => opts.charDevice ?? true,
+        isSymbolicLink: () => opts.symlink ?? false,
+        rdev: (opts.rdev === undefined ? makedev(81, 0) : opts.rdev) as bigint,
+      };
+    },
+    async readFile(path) {
+      calls.push(`read ${path}`);
+      const content = path.endsWith("/dev")
+        ? opts.dev === undefined ? "81:0\n" : opts.dev
+        : path.endsWith("/device/../serial")
+          ? opts.serial === undefined ? "SER-LINUX-1\n" : opts.serial
+          : null;
+      if (content === null) throw fail(path);
+      return content;
+    },
+  };
+}
+
+const SYS0 = "/sys/class/video4linux/video0";
+
+describe("Fix C, Linux: linuxV4l2Identity binds the serial to the node that is opened", () => {
+  it("a character device whose rdev matches sysfs returns the serial, read for that node", async () => {
+    const fs = fakeLinuxFs();
+    expect(await linuxV4l2Identity("/dev/video0", fs)).toBe("SER-LINUX-1");
+    expect(fs.calls).toEqual(["lstat /dev/video0", `read ${SYS0}/dev`, `read ${SYS0}/device/../serial`]);
+  });
+
+  it("N comes from the path, and a minor above 255 decodes", async () => {
+    const fs = fakeLinuxFs({ rdev: makedev(81, 300), dev: "81:300\n" });
+    expect(await linuxV4l2Identity("/dev/video300", fs)).toBe("SER-LINUX-1");
+    expect(fs.calls).toEqual([
+      "lstat /dev/video300",
+      "read /sys/class/video4linux/video300/dev",
+      "read /sys/class/video4linux/video300/device/../serial",
+    ]);
+  });
+
+  it("a symlink is refused (even one that claims to be a character device), and sysfs is never read", async () => {
+    const fs = fakeLinuxFs({ symlink: true, charDevice: true });
+    expect(await linuxV4l2Identity("/dev/video0", fs)).toBeNull();
+    expect(fs.calls).toEqual(["lstat /dev/video0"]);
+  });
+
+  it("a node that is not a character device is refused", async () => {
+    const fs = fakeLinuxFs({ charDevice: false });
+    expect(await linuxV4l2Identity("/dev/video0", fs)).toBeNull();
+    expect(fs.calls).toEqual(["lstat /dev/video0"]);
+  });
+
+  it.each([
+    ["the minor", makedev(81, 1)],
+    ["the major", makedev(82, 0)],
+    ["the high minor bits", makedev(81, 256)],
+  ])("an rdev that differs from sysfs in %s is refused, and the serial is never read", async (_part, rdev) => {
+    const fs = fakeLinuxFs({ rdev });
+    expect(await linuxV4l2Identity("/dev/video0", fs)).toBeNull();
+    expect(fs.calls).toEqual(["lstat /dev/video0", `read ${SYS0}/dev`]);
+  });
+
+  it("an rdev that is not a bigint (lstat without { bigint: true }) is refused", async () => {
+    expect(await linuxV4l2Identity("/dev/video0", fakeLinuxFs({ rdev: 0x5100 }))).toBeNull();
+  });
+
+  it.each([
+    ["the node cannot be lstat'ed", { lstatFails: true }],
+    ["sysfs dev is unreadable", { dev: null }],
+    ["the serial is unreadable", { serial: null }],
+    ["the serial is blank", { serial: "  \n" }],
+    ["sysfs dev is malformed (81-0)", { dev: "81-0\n" }],
+    ["sysfs dev is malformed (81:0:1)", { dev: "81:0:1\n" }],
+    ["sysfs dev is empty", { dev: "" }],
+  ] as const)("null when %s", async (_why, opts) => {
+    expect(await linuxV4l2Identity("/dev/video0", fakeLinuxFs(opts))).toBeNull();
+  });
+
+  const NON_CANONICAL = [
+    "/dev/video0/../video1",
+    "/dev/videoX",
+    "video0",
+    "/tmp/video0",
+    "/dev/video01",
+    "/dev/video10000",
+    "/dev/video0\n",
+    "/dev/video",
+    "/dev//video0",
+    "/dev/video-1",
+    " /dev/video0",
+  ];
+
+  it.each(NON_CANONICAL)("a non-canonical path %j gives null without touching the filesystem", async (path) => {
+    const fs = fakeLinuxFs();
+    expect(await linuxV4l2Identity(path, fs)).toBeNull();
+    expect(fs.calls).toEqual([]);
+  });
+
+  it.each(NON_CANONICAL)("a non-canonical path %j is refused at construction, naming /dev/videoN", (path) => {
+    expect(() => new PullCameraAdapter("cam-c", KERNEL_ID, { platform: "linux-v4l2", device: path, identity: "SER-1" }, new PhotoCaptureService())).toThrow(
+      /is not a canonical \/dev\/videoN node/,
+    );
+  });
+
+  it.each(["/dev/video0", "/dev/video9", "/dev/video10", "/dev/video9999"])("a canonical %s is accepted at construction", (path) => {
+    expect(() => new PullCameraAdapter("cam-c", KERNEL_ID, { platform: "linux-v4l2", device: path, identity: "SER-1" }, new PhotoCaptureService())).not.toThrow();
+  });
+
+  it("the configuration is copied and frozen at construction: a later change cannot reach the grab", async () => {
+    const configured: CameraDeviceSpec = { platform: "linux-v4l2", device: "/dev/video0", identity: "SER-1" };
+    const grabbed: string[] = [];
+    const g: FrameGrabber = {
+      identity: async () => "SER-1",
+      grab: async (d) => {
+        grabbed.push(d.device);
+        return jpeg();
+      },
+    };
+    const cam = new PullCameraAdapter("cam-c", KERNEL_ID, configured, new PhotoCaptureService(), g, { timeoutMs: 1_000, now: () => NOW_MS });
+    configured.device = "/tmp/video0";
+    await cam.captureSnapshot({ jobId: JOB });
+    expect(grabbed).toEqual(["/dev/video0"]);
+  });
+});
+
+describe("Fix C, Linux: nodeLinuxFsOps uses lstat with bigint fields (the real filesystem)", () => {
+  it("lstat describes a symlink itself, never its target", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lose1-lstat-"));
+    try {
+      const link = join(dir, "video0");
+      symlinkSync("/dev/null", link);
+      const stats = await nodeLinuxFsOps.lstat(link);
+      expect(stats.isSymbolicLink()).toBe(true);
+      expect(stats.isCharacterDevice()).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lstat of /dev/null is a character device with a bigint rdev of 1:3", async () => {
+    const stats = await nodeLinuxFsOps.lstat("/dev/null");
+    expect(stats.isCharacterDevice()).toBe(true);
+    expect(typeof stats.rdev).toBe("bigint");
+    expect(stats.rdev).toBe(makedev(1, 3));
+  });
+
+  it("readFile reads text, and the ops object is frozen", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lose1-read-"));
+    try {
+      writeFileSync(join(dir, "serial"), "SER-REAL\n");
+      expect(await nodeLinuxFsOps.readFile(join(dir, "serial"))).toBe("SER-REAL\n");
+      expect(Object.isFrozen(nodeLinuxFsOps)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix C, Windows: an exact alternative name, from a fake ffmpeg on PATH.
+// ---------------------------------------------------------------------------
+
+const ALT_A = String.raw`@device_pnp_\\?\usb#vid_046d&pid_0825&mi_00#6&2b8a0e0&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global`;
+const ALT_B = String.raw`@device_pnp_\\?\usb#vid_046d&pid_0825&mi_00#7&11aa22b&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global`;
+const ALT_MIC = String.raw`@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{0A1B}`;
+
+/** Two cameras with the SAME friendly name, told apart only by their alternative names. */
+const TWO_C270 = [
+  `[dshow @ 0000020b] "Logitech Webcam C270" (video)`,
+  `[dshow @ 0000020b]   Alternative name "${ALT_A}"`,
+  `[dshow @ 0000020b] "Logitech Webcam C270" (video)`,
+  `[dshow @ 0000020b]   Alternative name "${ALT_B}"`,
+  `[dshow @ 0000020b] "Microphone (Realtek Audio)" (audio)`,
+  `[dshow @ 0000020b]   Alternative name "${ALT_MIC}"`,
+  `dummy: Immediate exit requested`,
+].join("\n");
+
+interface FakeFfmpegMode {
+  stdout?: string;
+  stderr?: string;
+  exit?: number;
+}
+
+/** Runs `fn` with a fake ffmpeg first on PATH. It answers -list_devices with `list`, anything else with `grab`, and logs its argv. */
+async function withFakeFfmpeg<T>(modes: { list?: FakeFfmpegMode; grab?: FakeFfmpegMode }, fn: (argv: () => string[][]) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "lose1-ffmpeg-"));
+  const config = join(dir, "modes.json");
+  const log = join(dir, "argv.jsonl");
+  writeFileSync(config, JSON.stringify(modes));
+  writeFileSync(
+    join(dir, "ffmpeg"),
+    [
+      "#!/usr/bin/env python3",
+      "import json, sys",
+      `modes = json.load(open(${JSON.stringify(config)}))`,
+      `open(${JSON.stringify(log)}, "a").write(json.dumps(sys.argv[1:]) + "\\n")`,
+      `mode = modes.get("list" if "-list_devices" in sys.argv else "grab", {})`,
+      `sys.stdout.write(mode.get("stdout", ""))`,
+      `sys.stderr.write(mode.get("stderr", ""))`,
+      `sys.exit(mode.get("exit", 0))`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(dir, "ffmpeg"), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${dir}:${path}`;
+  try {
+    return await fn(() => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as string[]) : []));
+  } finally {
+    process.env.PATH = path;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const dshow = (device: string): CameraDeviceSpec => ({ platform: "windows-dshow", device, identity: device });
+
+describe("Fix C, Windows: the identity is the exact dshow alternative name", () => {
+  it("two devices with the same friendly name are told apart, and an absent one is null", async () => {
+    await withFakeFfmpeg({ list: { stderr: TWO_C270, exit: 1 } }, async () => {
+      expect(await ffmpegFrameGrabber.identity(dshow(ALT_A))).toBe(ALT_A);
+      expect(await ffmpegFrameGrabber.identity(dshow(ALT_B))).toBe(ALT_B);
+      expect(await ffmpegFrameGrabber.identity(dshow(ALT_A.replace("#6&", "#9&")))).toBeNull();
+    });
+  });
+
+  it("a prefix-only match gives null, either way round", async () => {
+    const listedPrefix = TWO_C270.replace(ALT_A, ALT_A.slice(0, 40));
+    await withFakeFfmpeg({ list: { stderr: listedPrefix, exit: 1 } }, async () => {
+      // A listed name that is only a prefix of the configured one.
+      expect(await ffmpegFrameGrabber.identity(dshow(ALT_A))).toBeNull();
+    });
+    await withFakeFfmpeg({ list: { stderr: TWO_C270, exit: 1 } }, async () => {
+      // A configured name that is only a prefix of a listed one.
+      expect(await ffmpegFrameGrabber.identity(dshow(ALT_A.slice(0, 40)))).toBeNull();
+    });
+  });
+
+  it("a FRIENDLY name equal to the configured alternative name is not an alternative name", async () => {
+    const spoof = [`[dshow @ 01] "${ALT_A}" (video)`, `[dshow @ 01]   Alternative name "@device_pnp_other"`].join("\n");
+    await withFakeFfmpeg({ list: { stderr: spoof, exit: 1 } }, async () => {
+      expect(await ffmpegFrameGrabber.identity(dshow(ALT_A))).toBeNull();
+    });
+  });
+
+  it("the list is read from stderr with CRLF line ends, and from stderr on a zero exit too", async () => {
+    await withFakeFfmpeg({ list: { stderr: TWO_C270.replace(/\n/g, "\r\n"), exit: 1 } }, async () => {
+      expect(await ffmpegFrameGrabber.identity(dshow(ALT_B))).toBe(ALT_B);
+    });
+    await withFakeFfmpeg({ list: { stderr: TWO_C270, exit: 0 } }, async () => {
+      expect(await ffmpegFrameGrabber.identity(dshow(ALT_A))).toBe(ALT_A);
+    });
+  });
+
+  it("a failing ffmpeg with no list gives null", async () => {
+    await withFakeFfmpeg({ list: { stderr: "", exit: 1 } }, async () => {
+      expect(await ffmpegFrameGrabber.identity(dshow(ALT_A))).toBeNull();
+    });
+  });
+
+  it("dshowAlternativeNames parses only Alternative name lines", () => {
+    expect(dshowAlternativeNames(TWO_C270)).toEqual([
+      ALT_A,
+      ALT_B,
+      ALT_MIC,
+    ]);
+  });
+
+  it("the grab opens video=<alternative name>, exactly", async () => {
+    await withFakeFfmpeg({ grab: { stdout: "FRAME", exit: 0 } }, async (argv) => {
+      const frame = await ffmpegFrameGrabber.grab(dshow(ALT_B), 5_000);
+      expect(new TextDecoder().decode(frame)).toBe("FRAME");
+      const args = argv()[0]!;
+      expect(args.slice(args.indexOf("-f"), args.indexOf("-f") + 4)).toEqual(["-f", "dshow", "-i", `video=${ALT_B}`]);
+    });
+  });
+
+  it("run() keeps ffmpeg's stdout and stderr on the error when it fails", async () => {
+    await withFakeFfmpeg({ grab: { stdout: "partial", stderr: "boom: device busy", exit: 3 } }, async () => {
+      const err = (await ffmpegFrameGrabber.grab(dshow(ALT_A), 5_000).catch((e: unknown) => e)) as { stdout?: Buffer; stderr?: Buffer; code?: number };
+      expect(err).toBeInstanceOf(Error);
+      expect(err.code).toBe(3);
+      expect(String(err.stdout)).toBe("partial");
+      expect(String(err.stderr)).toBe("boom: device busy");
+    });
+  });
+
+  it("a friendly-name configuration is refused at construction", () => {
+    expect(
+      () => new PullCameraAdapter("cam-w", KERNEL_ID, dshow("Logitech Webcam C270"), new PhotoCaptureService()),
+    ).toThrow(/not a dshow alternative name .*a friendly name is neither unique nor a hardware identity/);
+  });
+
+  it("an identity that is not the device is refused at construction", () => {
+    expect(
+      () => new PullCameraAdapter("cam-w", KERNEL_ID, { platform: "windows-dshow", device: ALT_A, identity: "SER-1" }, new PhotoCaptureService()),
+    ).toThrow(/capture\.identity must equal capture\.device/);
+  });
+
+  it("an alternative name with identity === device is accepted at construction", () => {
+    expect(() => new PullCameraAdapter("cam-w", KERNEL_ID, dshow(ALT_A), new PhotoCaptureService())).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix C: the identity is checked before AND after the grab.
+// ---------------------------------------------------------------------------
+
+/** A grabber whose identity answers come from `answers` in order, logging every call. */
+function sequencedGrabber(answers: Array<string | null>): FrameGrabber & { log: string[] } {
+  const log: string[] = [];
+  return {
+    log,
+    async identity() {
+      log.push("identity");
+      return answers.length > 0 ? answers.shift()! : null;
+    },
+    async grab() {
+      log.push("grab");
+      return jpeg();
+    },
+  };
+}
+
+function pullCamera(g: FrameGrabber): { cam: PullCameraAdapter; seen: EmittedEvent[] } {
+  const cam = new PullCameraAdapter("cam-r", KERNEL_ID, { platform: "linux-v4l2", device: "/dev/video0", identity: "SER-1" }, new PhotoCaptureService(), g, {
+    timeoutMs: 1_000,
+    now: () => NOW_MS,
+  });
+  const seen: EmittedEvent[] = [];
+  cam.onEvidence((e) => seen.push(e));
+  return { cam, seen };
+}
+
+describe("Fix C: the identity is re-checked after the grab", () => {
+  it("a capture checks identity, grabs, then checks identity again", async () => {
+    const g = sequencedGrabber(["SER-1", "SER-1"]);
+    const { cam, seen } = pullCamera(g);
+    await cam.captureSnapshot({ jobId: JOB });
+    expect(g.log).toEqual(["identity", "grab", "identity"]);
+    expect(seen).toHaveLength(1);
+  });
+
+  it.each([
+    ["another device", "SER-2"],
+    ["no readable identity", null],
+  ])("an identity that changes to %s between the two checks: a throw, and no event", async (_what, after) => {
+    const g = sequencedGrabber(["SER-1", after]);
+    const { cam, seen } = pullCamera(g);
+    await expect(cam.captureSnapshot({ jobId: JOB })).rejects.toThrow(/after the grab, not the configured "SER-1"/);
+    expect(g.log).toEqual(["identity", "grab", "identity"]);
+    expect(seen).toEqual([]);
+  });
+
+  it("runInspection re-checks too: a changed identity throws and emits nothing", async () => {
+    const g = sequencedGrabber(["SER-1", "SER-2"]);
+    const { cam, seen } = pullCamera(g);
+    await expect(cam.runInspection(undefined, { jobId: JOB })).rejects.toThrow(/after the grab/);
+    expect(seen).toEqual([]);
   });
 });

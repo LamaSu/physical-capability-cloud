@@ -19,8 +19,21 @@
  *     With no storage service they are not: the storageRef stays
  *     `photo:<hash>` and `frameStored` is false. The "photo" factory builds
  *     PhotoCaptureService without storage today;
- *   - `device {path, identity}`: checked against the configuration at every
- *     capture (the Linux sysfs serial, or the Windows dshow device name);
+ *   - `device {path, identity}`: the identity is checked against the
+ *     configuration before AND after every grab, and it is bound to the node
+ *     that is opened (astra pack 155 HIGH 3):
+ *       - Linux: `device` must be a canonical `/dev/videoN`. linuxV4l2Identity
+ *         lstat()s it: it must be a character device, not a symlink, and its
+ *         rdev must equal the MAJOR:MINOR that sysfs reports for videoN. Only
+ *         then is the serial read: sysfs videoN/device/../serial.
+ *       - Windows: `device` must be a dshow ALTERNATIVE NAME (`@device_...`,
+ *         the device instance path, unique per device), and `identity` must
+ *         equal it. A friendly name is neither unique nor a hardware identity.
+ *         The grab opens `video=<alternative name>`. The identity check passes
+ *         only if ffmpeg's device list names that alternative name EXACTLY.
+ *     Residual: the check runs in user space, before and after the grab.
+ *     That narrows a device swap to the grab itself; a swap during the grab
+ *     is beyond any user-space check;
  *   - `declaredChallengeId`, `declaredChallengeAnchor`: the job's
  *     WorkflowChallenge id and anchor block hash, when one is supplied, scoped
  *     to this job and still fresh; otherwise both null. They are UNVERIFIED
@@ -39,8 +52,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
+import { lstat, readFile } from "node:fs/promises";
 
 import type { EvidenceEvent, EvidenceSource, WorkflowChallenge } from "@pcc/spec";
 
@@ -50,10 +62,83 @@ import type { CameraAdapter, CaptureContext } from "./types.js";
 /** Where the frames come from. Every field is required configuration; none is defaulted. */
 export interface CameraDeviceSpec {
   platform: "linux-v4l2" | "windows-dshow";
-  /** `/dev/videoN` on Linux; the dshow device name on Windows. */
+  /** A canonical `/dev/videoN` on Linux; the dshow ALTERNATIVE NAME (`@device_...`) on Windows. */
   device: string;
-  /** The expected identity: the USB serial (Linux sysfs), or the dshow device name (Windows). */
+  /** The expected identity: the USB serial (Linux sysfs), or the alternative name itself (Windows). */
   identity: string;
+}
+
+/** The only Linux device a capture may name: a canonical /dev/videoN node, N from 0 to 9999, no leading zero. */
+const LINUX_VIDEO_NODE = /^\/dev\/video(0|[1-9][0-9]{0,3})$/;
+
+/** A dshow alternative name (the device instance path) starts with this; a friendly name does not. */
+const DSHOW_ALTERNATIVE_NAME_PREFIX = "@device_";
+
+/** One line of ffmpeg's dshow device list that carries an alternative name. */
+const DSHOW_ALTERNATIVE_NAME_LINE = /Alternative name "(.*)"\s*$/;
+
+/** The filesystem reads linuxV4l2Identity needs. Injectable, so tests need neither a device node nor root. */
+export interface LinuxFsOps {
+  /** lstat with bigint fields: it describes a symlink itself, never its target. */
+  lstat(path: string): Promise<{ isCharacterDevice(): boolean; isSymbolicLink(): boolean; rdev: bigint }>;
+  readFile(path: string): Promise<string>;
+}
+
+export const nodeLinuxFsOps: LinuxFsOps = Object.freeze({
+  lstat: (path: string) => lstat(path, { bigint: true }),
+  readFile: (path: string) => readFile(path, "utf8"),
+});
+
+/**
+ * The USB serial of the V4L2 device at `devicePath`, bound to the node that
+ * ffmpeg opens; null when any link of that binding fails:
+ *   1. `devicePath` is a canonical /dev/videoN, and N comes from it;
+ *   2. lstat (with bigint fields): it is a character device, not a symlink;
+ *   3. its rdev, decoded with glibc's major()/minor(), equals the
+ *      "MAJOR:MINOR" that sysfs reports in /sys/class/video4linux/videoN/dev;
+ *   4. the serial is /sys/class/video4linux/videoN/device/../serial, trimmed,
+ *      non-blank.
+ * Any read error gives null.
+ */
+export async function linuxV4l2Identity(devicePath: string, fs: LinuxFsOps = nodeLinuxFsOps): Promise<string | null> {
+  const node = LINUX_VIDEO_NODE.exec(devicePath);
+  if (node === null) return null;
+  const sysfs = `/sys/class/video4linux/video${node[1]}`;
+  try {
+    const stats = await fs.lstat(devicePath);
+    if (stats.isSymbolicLink() || !stats.isCharacterDevice()) return null;
+    const rdev = stats.rdev;
+    if (typeof rdev !== "bigint") return null;
+    const pair = /^([0-9]+):([0-9]+)$/.exec((await fs.readFile(`${sysfs}/dev`)).trim());
+    if (pair === null) return null;
+    const major = ((rdev >> 8n) & 0xfffn) | ((rdev >> 32n) & ~0xfffn);
+    const minor = (rdev & 0xffn) | ((rdev >> 12n) & ~0xffn);
+    if (major !== BigInt(pair[1]!) || minor !== BigInt(pair[2]!)) return null;
+    const serial = (await fs.readFile(`${sysfs}/device/../serial`)).trim();
+    return serial.length > 0 ? serial : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The alternative names in ffmpeg's dshow device list (built by split/map/filter, never by [[Set]]). */
+export function dshowAlternativeNames(listing: string): string[] {
+  return listing
+    .split(/\r?\n/)
+    .map((line) => DSHOW_ALTERNATIVE_NAME_LINE.exec(line)?.[1])
+    .filter((name): name is string => typeof name === "string");
+}
+
+/** `device` when ffmpeg's dshow device list names exactly that alternative name; otherwise null. */
+async function dshowIdentity(device: CameraDeviceSpec): Promise<string | null> {
+  let listing: string;
+  try {
+    listing = String((await run("ffmpeg", ["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"], 15_000)).stderr);
+  } catch (err) {
+    // ffmpeg exits non-zero after listing; run() keeps its stderr on the error.
+    listing = String((err as { stderr?: unknown } | null)?.stderr ?? "");
+  }
+  return dshowAlternativeNames(listing).some((name) => name === device.device) ? device.device : null;
 }
 
 /** Acquires exactly one frame from the device. Injectable so tests never touch hardware. */
@@ -68,7 +153,8 @@ const MAX_FRAME_BYTES = 20 * 1024 * 1024;
 function run(file: string, args: string[], timeoutMs: number): Promise<{ stdout: Buffer; stderr: Buffer }> {
   return new Promise((resolve, reject) => {
     execFile(file, args, { encoding: "buffer", timeout: timeoutMs, maxBuffer: MAX_FRAME_BYTES }, (err, stdout, stderr) => {
-      if (err) reject(err);
+      // Keep ffmpeg's output on failure: execFile's callback error carries neither stream.
+      if (err) reject(Object.assign(err, { stdout, stderr }));
       else resolve({ stdout, stderr });
     });
   });
@@ -86,24 +172,8 @@ export const ffmpegFrameGrabber: FrameGrabber = {
     return new Uint8Array(stdout);
   },
   async identity(device) {
-    if (device.platform === "linux-v4l2") {
-      // /dev/videoN -> the USB device's serial, two levels up from the video4linux node.
-      try {
-        const serial = await readFile(`/sys/class/video4linux/${basename(device.device)}/device/../serial`, "utf8");
-        return serial.trim() || null;
-      } catch {
-        return null;
-      }
-    }
-    // Windows: the device is identified by its dshow name, which must be among the devices ffmpeg lists.
-    try {
-      await run("ffmpeg", ["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"], 15_000);
-    } catch (err) {
-      // ffmpeg exits non-zero after listing; the list is on stderr.
-      const stderr = String((err as { stderr?: Buffer }).stderr ?? "");
-      return stderr.includes(`"${device.device}"`) ? device.device : null;
-    }
-    return null;
+    // Linux: the serial of the very node that is opened. Windows: the alternative name, matched exactly.
+    return device.platform === "linux-v4l2" ? linuxV4l2Identity(device.device) : dshowIdentity(device);
   },
 };
 
@@ -139,22 +209,47 @@ function declaredChallenge(
 export class PullCameraAdapter implements CameraAdapter {
   readonly id: string;
   readonly source: EvidenceSource;
+  /** A frozen copy of the configuration, each field read once: what is validated is what every check and grab uses. */
+  private readonly device: CameraDeviceSpec;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
 
   constructor(
     id: string,
     kernelId: string,
-    private readonly device: CameraDeviceSpec,
+    configured: CameraDeviceSpec,
     private readonly photoCaptureService: PhotoCaptureService,
     private readonly grabber: FrameGrabber = ffmpegFrameGrabber,
     private readonly options: { timeoutMs: number; now: () => number } = { timeoutMs: 10_000, now: () => Date.now() },
   ) {
+    const device = Object.freeze({
+      platform: configured?.platform,
+      device: configured?.device,
+      identity: configured?.identity,
+    }) as CameraDeviceSpec;
     for (const key of ["platform", "device", "identity"] as const) {
-      if (!nonEmpty(device?.[key])) throw new Error(`[PullCameraAdapter] capture.${key} is required configuration`);
+      if (!nonEmpty(device[key])) throw new Error(`[PullCameraAdapter] capture.${key} is required configuration`);
     }
     if (device.platform !== "linux-v4l2" && device.platform !== "windows-dshow") {
       throw new Error(`[PullCameraAdapter] capture.platform ${JSON.stringify(device.platform)} is not linux-v4l2 or windows-dshow`);
     }
+    if (device.platform === "linux-v4l2" && !LINUX_VIDEO_NODE.test(device.device)) {
+      throw new Error(
+        `[PullCameraAdapter] capture.device ${JSON.stringify(device.device)} is not a canonical /dev/videoN node (N from 0 to 9999, no leading zero): the identity is read for the node that is opened, so no other path, symlink or relative name is accepted`,
+      );
+    }
+    if (device.platform === "windows-dshow") {
+      if (!device.device.startsWith(DSHOW_ALTERNATIVE_NAME_PREFIX)) {
+        throw new Error(
+          `[PullCameraAdapter] capture.device ${JSON.stringify(device.device)} is not a dshow alternative name (${DSHOW_ALTERNATIVE_NAME_PREFIX}...): a friendly name is neither unique nor a hardware identity. Configure the device instance path that 'ffmpeg -list_devices true -f dshow -i dummy' prints as its Alternative name`,
+        );
+      }
+      if (device.identity !== device.device) {
+        throw new Error(
+          "[PullCameraAdapter] on windows-dshow, capture.identity must equal capture.device: the alternative name is the device's identity, and a friendly name is neither unique nor a hardware identity",
+        );
+      }
+    }
+    this.device = device;
     this.id = id;
     this.source = { deviceId: id, deviceType: "camera", kernelId, firmwareVersion: "PullCameraAdapter-1.0.0" };
   }
@@ -222,10 +317,18 @@ export class PullCameraAdapter implements CameraAdapter {
       );
     }
     const bytes = await this.grabber.grab(this.device, this.options.timeoutMs);
+    const nowMs = this.options.now();
     if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
       throw new Error(`[PullCameraAdapter] device ${JSON.stringify(this.device.device)} returned no frame`);
     }
-    const nowMs = this.options.now();
+    // Re-check after the grab: a device swapped since the first check is refused. This narrows a
+    // swap to the grab itself, which no user-space check can see.
+    const identityAfter = await this.grabber.identity(this.device);
+    if (identityAfter !== this.device.identity) {
+      throw new Error(
+        `[PullCameraAdapter] device ${JSON.stringify(this.device.device)} presents identity ${JSON.stringify(identityAfter)} after the grab, not the configured ${JSON.stringify(this.device.identity)}: the device may have changed during the capture`,
+      );
+    }
     const acquiredAt = new Date(nowMs).toISOString();
     const result = await this.photoCaptureService.capture(bytes, { deviceId: this.id });
     const declared = declaredChallenge(challenge, jobId, nowMs);
