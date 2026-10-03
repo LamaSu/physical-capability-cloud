@@ -416,6 +416,9 @@ describe("PlanPresentation live terms: the acceptance-time terms shown beside a 
       const sealed = sealedOf(bad);
       expect(shape(sealed)).toEqual(["B", "sealed", null, 2]);
       for (const n of sealed.nodes) expect(n.live, `node ${n.nodeId} shows no live terms beside a sealed agreement deal`).toBeUndefined();
+      // A current verdict has no reason: none may be attached, not even an undefined one (the gateway build
+      // refused that branch until the current case was handled on its own).
+      for (const n of sealed.nodes) expect(Object.hasOwn(n, "reason"), `node ${n.nodeId} carries no reason key`).toBe(false);
       expect(sealed.nodes.find((n) => n.nodeId === "print")!.money?.gross.baseUnits).toBe("7000000");
     });
 

@@ -700,8 +700,9 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
           // A sealed deal shows only terms it commits. An agreement-backed deal does not commit the operator's
           // quote (royalties go on top, and the plan keeps only the gross), so the live view, quote included,
           // is not shown beside one: nothing can check it against the deal (astra, #434 confirmation).
-          if (v.status === "current" && !(sealed && plan?.agreementHash != null)) out.live = v.live;
-          else if (v.status === "stale") {
+          if (v.status === "current") {
+            if (!(sealed && plan?.agreementHash != null)) out.live = v.live;
+          } else if (v.status === "stale") {
             out.live = v.live;
             out.diffs = v.diffs;
           } else out.reason = v.reason;
