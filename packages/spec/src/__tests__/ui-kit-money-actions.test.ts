@@ -1652,6 +1652,19 @@ describe("astra r3 (#342 @48c156e5): reproduced findings (verify before fix)", (
     expect(keys[0]).not.toBe(keys[1]);
   });
 
+  it("F1: a manifest idempotencyKey never splits an intent: two non-money POSTs differing only in it are ONE request", async () => {
+    let n = 0;
+    const calls = installFetch((c) => (c.method === "POST" ? { status: n++ === 0 ? 500 : 200 } : { status: 200 }));
+    const fb = (k: string) => ({ id: "fb" + k, label: "Note " + k, kind: "post", path: "/api/feedback", body: { note: "n", idempotencyKey: k } });
+    boot(man([{ kind: "actions", actions: [fb("A"), fb("B")] }]));
+    btn("Note A").click(); await flush(); // 500: unresolved, its key is kept
+    btn("Note B").click(); await flush(); // the SAME request (the manifest key is kit-owned): it retries with that key
+    const sent = posts(calls, "/api/feedback");
+    expect(sent.length).toBe(2);
+    expect(sent[1]!.headers["Idempotency-Key"]).toBe(sent[0]!.headers["Idempotency-Key"]);
+    for (const c of sent) expect(c.body!["idempotencyKey"]).toBe(c.headers["Idempotency-Key"]); // the wire carries the kit's key, never "A"/"B"
+  });
+
   it("F1/F2: a different request to a money endpoint whose earlier request is unresolved is refused, never sent under its key", async () => {
     let n = 0;
     const calls = installFetch((c) => (c.method === "POST" ? { status: n++ === 0 ? 500 : 200 } : { status: 200 }));
