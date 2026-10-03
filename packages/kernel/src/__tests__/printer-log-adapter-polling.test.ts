@@ -7,10 +7,20 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EvidenceEvent } from "@pcc/spec";
+import type { EvidenceBundle, EvidenceEvent, SHA256 } from "@pcc/spec";
 
 import { PrinterLogAdapter } from "../adapters/printer-log-adapter.js";
+import type { MachineAdapter } from "../adapters/types.js";
+import { EvidenceEmitter } from "../evidence-emitter.js";
+import { JobRunner } from "../job-runner.js";
 import type { LogCaptureService } from "../log-capture-service.js";
+
+// JobRunner's spans, as in its own tests: plain functions, so vi.restoreAllMocks() cannot strip them.
+vi.mock("@sentry/node", () => ({
+  startSpan: (_opts: unknown, fn: () => unknown) => fn(),
+  addBreadcrumb: () => {},
+  captureException: () => {},
+}));
 
 type Emitted = Omit<EvidenceEvent, "id" | "hash">;
 
@@ -639,5 +649,88 @@ describe("PrinterLogAdapter lifecycle (astra pack 196)", () => {
     expect.soft(calls, "log polls").toBe(0);
     expect.soft(heard, "events").toEqual([]);
     expect.soft(vi.getTimerCount(), "timers").toBe(0);
+  });
+});
+
+describe("PrinterLogAdapter under JobRunner (astra pack 196): its start at step 2, its stop at step 6, and the stop its failure path retries", () => {
+  it("each run's calls meet the lifecycle: a summary per recorded run, a failed stop retried before the run returns, and a failed start's stop refused", async () => {
+    vi.useRealTimers(); // real hashing (crypto.subtle) and a real run, as in job-runner-evidence-settled.test.ts
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // Each job's log, one answer per poll: its first poll, then its stop's final poll (and a retry's).
+    const script: Record<string, Array<string | Error | null>> = {
+      "job-1": ["job-1 line 1", "job-1 line 2"],
+      "job-2": ["job-2 line 1", new Error("final poll failed once"), "job-2 line 2"],
+      "job-3": [new Error("log source unreachable")],
+      "job-4": ["job-4 line 1", null],
+    };
+    const logProvider = async (jobId: string): Promise<string | null> => {
+      const next = script[jobId]?.shift() ?? null;
+      if (next instanceof Error) throw next;
+      return next;
+    };
+    const log = new PrinterLogAdapter("log-jobrunner", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider });
+    const seen: unknown[][] = [];
+    log.onEvidence((e) => seen.push([e.type, e.payload.jobId, e.payload.rawContent ?? e.payload.chainLength]));
+    const machine = {
+      id: "machine-jobrunner",
+      type: "fdm",
+      source: { deviceId: "machine-jobrunner", deviceType: "controller", kernelId: KERNEL_ID },
+      getStatus: async () => "idle",
+      getProgress: async () => 100,
+      execute: async () => ({ success: true, message: "ok" }),
+      onEvidence: () => {},
+      quiesceEvidence: async () => {}, // it emits nothing
+      dispose: async () => {},
+    } as unknown as MachineAdapter;
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const bundles: EvidenceBundle[] = [];
+    emitter.onBundle((bundle) => bundles.push(bundle));
+    const run = (jobId: string, n: number) =>
+      new JobRunner(machine, [log], null, emitter).run({ jobId, stepId: "step-1", gcodeHash: `sha256:${n.toString(16).padStart(64, "0")}` as SHA256, assuranceTier: 1 });
+
+    const r1 = await run("job-1", 1);
+    const r2 = await run("job-2", 2); // step 6's stop fails; the failure path retries it
+    const seenWhenRun2Returned = seen.length;
+    const r3 = await run("job-3", 3); // step 2's start fails; the failure path's stop is refused
+    const r4 = await run("job-4", 4);
+
+    expect.soft([r1.success, r4.success], "the recorded runs").toEqual([true, true]);
+    expect.soft([r2.success, r2.error], "the run whose stop failed").toEqual([false, "final poll failed once"]);
+    expect.soft([r3.success, r3.error], "the run whose start failed").toEqual([false, "log source unreachable"]);
+    expect.soft(seen, "what the adapter emitted, in order").toEqual([
+      ["log_hash_chain_entry", "job-1", "job-1 line 1"],
+      ["log_hash_chain_entry", "job-1", "job-1 line 2"],
+      ["printer_job_verified", "job-1", 2],
+      ["log_hash_chain_entry", "job-2", "job-2 line 1"],
+      ["log_hash_chain_entry", "job-2", "job-2 line 2"], // the retried stop's final poll
+      ["printer_job_verified", "job-2", 2],
+      ["log_hash_chain_entry", "job-4", "job-4 line 1"],
+      ["printer_job_verified", "job-4", 1],
+    ]);
+    expect.soft(seenWhenRun2Returned, "events emitted by the time run 2 returned: its retry's summary included").toBe(6);
+    expect
+      .soft(
+        errors.mock.calls.filter((call) => String(call[0]).includes("stopping sensor log-jobrunner after a failed run")).map((call) => String(call[1])),
+        "the failure path's stops that failed",
+      )
+      .toEqual([expect.stringMatching(/log-jobrunner: no recording to stop/)]);
+    expect
+      .soft(
+        bundles.map((bundle) => bundle.events.map((e) => [e.type, e.payload.jobId])),
+        "each recorded run's bundle",
+      )
+      .toEqual([
+        [
+          ["log_hash_chain_entry", "job-1"],
+          ["log_hash_chain_entry", "job-1"],
+          ["printer_job_verified", "job-1"],
+        ],
+        [
+          ["log_hash_chain_entry", "job-4"],
+          ["printer_job_verified", "job-4"],
+        ],
+      ]);
   });
 });
