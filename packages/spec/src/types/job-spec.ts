@@ -12,7 +12,8 @@
  *     params, programOverride: programOverride?.programHash ?? null,
  *     constraints, buyer, seller,
  *     parentJobId ?? null,
- *     cofundedBy: sortedByKey("buyer", cofundedBy ?? []),
+ *     cofundedBy: cofundedBy sorted by buyer, then by canonical_json(entry),
+ *                 both in UTF-16 code-unit order (null when absent),
  *     resolverId,
  *   }))
  *
@@ -23,6 +24,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalize } from "../util/canonical.js";
+import { compareCodeUnits } from "../util/code-unit-order.js";
 import { VerificationProgramSchema } from "./verification-program.js";
 
 const HEX_HASH = /^0x[a-f0-9]{64}$/i;
@@ -130,8 +132,12 @@ export function computeJobSpecHash(
     | Omit<JobSpec, "jobSpecHash" | "buyerSignature" | "sellerSignature">
     | JobSpec,
 ): `0x${string}` {
+  // Code units, never locale collation. Buyers may repeat, so ties fall back
+  // to the entry's canonical JSON: the order is total over the hashed content.
   const sortedCofunded = job.cofundedBy
-    ? [...job.cofundedBy].sort((a, b) => a.buyer.localeCompare(b.buyer))
+    ? [...job.cofundedBy].sort(
+        (a, b) => compareCodeUnits(a.buyer, b.buyer) || compareCodeUnits(canonicalize(a), canonicalize(b)),
+      )
     : null;
   const payload = {
     version: job.version,

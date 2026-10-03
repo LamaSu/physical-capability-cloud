@@ -13,6 +13,7 @@ import asyncio
 import logging
 import math
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
@@ -39,6 +40,9 @@ class Commands:
     ) -> None:
         self.loader = loader
         self.evidence = evidence
+        # Windows this process closed, by (deviceId, jobId): the drain's watermark and the op
+        # count, so a retried evidence.stopRecording answers as the first did. The last 64.
+        self._closed: "OrderedDict[tuple[str, str], tuple[int, int]]" = OrderedDict()
 
     def register_all(self, dispatcher: Any) -> None:
         dispatcher.register("backend.init", self.backend_init)
@@ -115,6 +119,7 @@ class Commands:
             "deviceId": device_id,
             "plrBackend": plr_backend,
             "deckSnapshot": deck_snapshot,
+            "generation": self.evidence.generation,
             "metadata": dict(handle.metadata),
         }
 
@@ -130,7 +135,7 @@ class Commands:
 
         # R39 CRIT2: one per-device execution lease, taken BEFORE anything else
         # -- a second run on the same device fails fast with DEVICE_BUSY and
-        # touches nothing: no recording start, no backend call. It doesn't queue.
+        # touches nothing: no backend call. It doesn't queue.
         if not handle.try_acquire(job_id):
             raise RpcException(
                 RPC_ERROR_CODES["DEVICE_BUSY"],
@@ -144,16 +149,16 @@ class Commands:
                     f"deviceId {device_id} has not finished setup; call backend.init first",
                     {"deviceId": device_id, "jobId": job_id},
                 )
-            # This run's evidence is open until its final seal_and_drain (R39 r5).
-            self.evidence.unseal(device_id)
+            # A run records only into its own job's window, which the adapter opened (and saw
+            # attested) first. No window, or another job's, is refused: nothing runs unrecorded,
+            # and no op is attributed to another job (astra pack 194; there is no auto-open).
             window = self.evidence.get_window(device_id)
             if window is None or window.job_id != job_id:
-                # Auto-start this job's window if the TS adapter didn't pre-arm it.
-                # R39 r4: a window left for ANOTHER job is replaced, never reused,
-                # so this run's evidence is never labelled with another job id.
-                if window is not None:
-                    log.warning("replacing job %s's recording window on %s for job %s", window.job_id, device_id, job_id)
-                self.evidence.start_recording(device_id, job_id)
+                raise RpcException(
+                    RPC_ERROR_CODES["NO_RECORDING_WINDOW"],
+                    f"no recording window for job {job_id} on device {device_id}",
+                    {"generation": self.evidence.generation},
+                )
 
             started_at = time.monotonic()
             if not is_stub_machine(handle.machine):
@@ -171,10 +176,8 @@ class Commands:
                 op_count = await self._run_plr_ops(
                     handle, device_id, job_id, protocol_source, protocol_inline,
                 )
-                # R39 HIGH5: completion never outruns the evidence it claims --
-                # await every atomic-op write before reporting success. A write
-                # failure here means this run does not report clean success.
-                await self._drain_evidence(device_id, job_id)
+                # The job's evidence is complete once evidence.stopRecording answers:
+                # that close is the barrier (#502's model).
                 return {
                     "ok": True,
                     "jobId": job_id,
@@ -213,8 +216,6 @@ class Commands:
                     ) from e
 
             duration_ms = int((time.monotonic() - started_at) * 1000)
-            # R39 HIGH5: same rule on the stub path -- drain before success.
-            await self._drain_evidence(device_id, job_id)
             return {
                 "ok": True,
                 "jobId": job_id,
@@ -227,19 +228,6 @@ class Commands:
             # evidence.stopRecording — leave it open here.
         finally:
             handle.release()
-
-    async def _drain_evidence(self, device_id: str, job_id: str) -> None:
-        """R39 HIGH5: await every atomic-op evidence write scheduled for this
-        run before `backend.run` returns. If a write failed, surface it as an
-        error rather than letting the caller report clean success."""
-        try:
-            await self.evidence.seal_and_drain(device_id)
-        except Exception as e:  # noqa: BLE001 — any drain failure voids success
-            raise RpcException(
-                RPC_ERROR_CODES["INTERNAL_ERROR"],
-                f"evidence write failed: {e}",
-                {"jobId": job_id, "deviceId": device_id, "plrException": type(e).__name__},
-            ) from e
 
     async def backend_status(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
@@ -307,44 +295,42 @@ class Commands:
     async def evidence_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
-        # R39 CRIT2: a recording window is bound to the run holding the device's
-        # lease. A different job may not open (or silently replace) a window
-        # while that lease is held.
-        if self.loader.has(device_id):
-            handle = self.loader.get(device_id)
-            # R39 r5: the running job owns its window. While a run holds the
-            # lease, no request may open, replace or close the window, not
-            # even one naming the running job.
-            if handle.busy or handle.setting_up:
-                raise RpcException(
-                    RPC_ERROR_CODES["DEVICE_BUSY"],
-                    f"deviceId {device_id} is busy running job {handle.busy_job_id}",
-                    {"deviceId": device_id, "jobId": job_id, "busyJobId": handle.busy_job_id},
-                )
         window = self.evidence.start_recording(device_id, job_id)
-        return {"ok": True, "jobId": window.job_id, "startedAt": window.started_at.isoformat()}
+        return {
+            "ok": True,
+            "jobId": window.job_id,
+            "startedAt": window.started_at.isoformat(),
+            "generation": self.evidence.generation,
+        }
 
     async def evidence_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         device_id = _require_str(params, "deviceId")
         job_id = _require_str(params, "jobId")
-        # R39 CRIT2 (review): the window belongs to the run holding the device's
-        # lease; a different job may not close it either.
-        if self.loader.has(device_id):
-            handle = self.loader.get(device_id)
-            # R39 r5: the running job owns its window. While a run holds the
-            # lease, no request may open, replace or close the window, not
-            # even one naming the running job.
-            if handle.busy or handle.setting_up:
-                raise RpcException(
-                    RPC_ERROR_CODES["DEVICE_BUSY"],
-                    f"deviceId {device_id} is busy running job {handle.busy_job_id}",
-                    {"deviceId": device_id, "jobId": job_id, "busyJobId": handle.busy_job_id},
-                )
         window = self.evidence.stop_recording(device_id, job_id)
+        key = (device_id, job_id)
+        if window is not None:
+            self._closed[key] = (self.evidence.watermark(), window.op_count)
+            while len(self._closed) > 64:
+                self._closed.popitem(last=False)
+        elif key not in self._closed:
+            # No window of this job was ever open in this process: nothing to attest. A
+            # restarted sidecar says so, with its own generation (astra pack 194).
+            raise RpcException(
+                RPC_ERROR_CODES["NO_RECORDING_WINDOW"],
+                f"no recording window for job {job_id} on device {device_id} in this sidecar",
+                {"generation": self.evidence.generation},
+            )
+        mark, op_count = self._closed[key]
+        # A barrier: every notification scheduled before the window closed is written
+        # before this answer, so once the TS adapter has it, it has all of the job's
+        # evidence (astra pack 186). A retried close of the same window answers the same
+        # way, once that drain is done. Notifications scheduled later are not waited for.
+        await self.evidence.drain_through(mark)
         return {
             "ok": True,
             "jobId": job_id,
-            "opCount": window.op_count if window else 0,
+            "opCount": op_count,
+            "generation": self.evidence.generation,
         }
 
     async def evidence_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:

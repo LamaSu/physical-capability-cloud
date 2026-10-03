@@ -102,43 +102,6 @@ async def test_plr_log_record_becomes_evidence_notification(captured):
 
 
 @pytest.mark.asyncio
-async def test_drain_awaits_all_pending_notifications_for_a_device(captured):
-    # R39 HIGH5: emit_atomic_op is fire-and-forget (threadsafe scheduling for
-    # logging.Handler.emit's sake); drain is the explicit rendezvous backend.run
-    # uses before it reports success.
-    writer, sent = captured
-    loop = asyncio.get_running_loop()
-    handler = EvidenceHandler(writer=writer, loop=loop)
-    handler.start_recording("dev-1", "job-1")
-    handler.emit_atomic_op("dev-1", "aspirate", {})
-    handler.emit_atomic_op("dev-1", "dispense", {})
-    await handler.drain("dev-1")
-    assert len(sent) == 2  # both writes completed -- no sleep needed to prove it
-
-
-@pytest.mark.asyncio
-async def test_drain_surfaces_a_write_failure_instead_of_swallowing_it():
-    async def failing_writer(method, params):
-        raise RuntimeError("stdout pipe broken")
-
-    loop = asyncio.get_running_loop()
-    handler = EvidenceHandler(writer=failing_writer, loop=loop)
-    handler.start_recording("dev-1", "job-1")
-    handler.emit_atomic_op("dev-1", "aspirate", {})
-    with pytest.raises(RuntimeError, match="stdout pipe broken"):
-        await handler.drain("dev-1")
-
-
-@pytest.mark.asyncio
-async def test_drain_is_a_noop_with_nothing_pending(captured):
-    writer, sent = captured
-    loop = asyncio.get_running_loop()
-    handler = EvidenceHandler(writer=writer, loop=loop)
-    await handler.drain("dev-1")  # must not hang or raise
-    assert sent == []
-
-
-@pytest.mark.asyncio
 async def test_emit_event_outside_window_emits_with_null_job_id(captured):
     writer, sent = captured
     loop = asyncio.get_running_loop()
@@ -151,63 +114,57 @@ async def test_emit_event_outside_window_emits_with_null_job_id(captured):
     assert params["type"] == "camera_snapshot"
 
 
-@pytest.mark.asyncio
-async def test_drain_surfaces_a_write_that_failed_before_drain_was_called():
-    # R39 r3 review: a write that fails BEFORE backend.run reaches drain() (the run awaited its
-    # ops in between) must still void the run's success, not vanish with its finished task.
-    async def failing_writer(method, params):
-        raise RuntimeError("stdout pipe broken")
-
-    loop = asyncio.get_running_loop()
-    handler = EvidenceHandler(writer=failing_writer, loop=loop)
-    handler.start_recording("dev-1", "job-1")
-    handler.emit_atomic_op("dev-1", "aspirate", {})
-    for _ in range(5):
-        await asyncio.sleep(0)  # the write runs and fails before anyone drains
-    with pytest.raises(RuntimeError, match="stdout pipe broken"):
-        await handler.drain("dev-1")
-    await handler.drain("dev-1")  # reported once, then consumed
+# ── the evidence.stopRecording barrier (astra pack 186) ─────────────────────
+# Plain tests (asyncio.run), so they run without pytest-asyncio.
 
 
-@pytest.mark.asyncio
-async def test_drain_waits_for_a_write_queued_from_another_thread():
-    # R39 r4 (HIGH5): a write a worker thread queued with call_soon_threadsafe is drained too,
-    # even though its task does not exist yet when drain() starts.
-    import threading
+def test_a_notification_for_a_window_closed_before_it_was_scheduled_is_dropped():
+    """A logging thread can read a window just before evidence.stopRecording closes it. Its
+    notification would then be written after the barrier, so it is dropped. The private
+    scheduler is called directly to make that interleaving deterministic."""
 
-    written = []
+    async def scenario() -> list[str]:
+        sent: list[str] = []
 
-    async def writer(method, params):
-        written.append(params)
+        async def writer(method: str, params: dict) -> None:
+            sent.append(params["type"])
 
-    loop = asyncio.get_running_loop()
-    handler = EvidenceHandler(writer=writer, loop=loop)
-    handler.start_recording("dev-1", "job-1")
-    worker = threading.Thread(target=lambda: handler.emit_event("dev-1", "log_line", {"line": "x"}))
-    worker.start()
-    worker.join()  # the event loop is blocked here: the queued callback has not run
-    await handler.drain("dev-1")
-    assert len(written) == 1, written
+        handler = EvidenceHandler(writer=writer, loop=asyncio.get_running_loop())
+        window = handler.start_recording("dev-1", "job-1")
+        handler.emit_atomic_op("dev-1", "aspirate", {})
+        handler.stop_recording("dev-1", "job-1")
+        handler._schedule_notify("evidence", {"type": "late"}, window)
+        await handler.drain_through(handler.watermark())
+        await asyncio.sleep(0.01)
+        return sent
+
+    assert asyncio.run(scenario()) == ["aspirate"]
 
 
-@pytest.mark.asyncio
-async def test_no_write_from_another_thread_is_left_pending_after_the_final_drain():
-    # R39 r5 (HIGH5): once backend.run's final drain has returned, a write a worker thread queues
-    # for that run must not be left pending (or fail) after the run reported success.
-    import threading
+def test_drain_through_waits_for_notifications_up_to_the_watermark_only():
+    """The barrier waits for what was scheduled before it, not for what a busy logger
+    schedules afterwards."""
 
-    async def failing_writer(method, params):
-        raise RuntimeError("stdout pipe broken")
+    async def scenario() -> tuple[list[str], list[str]]:
+        release_b = asyncio.Event()
+        sent: list[str] = []
 
-    loop = asyncio.get_running_loop()
-    handler = EvidenceHandler(writer=failing_writer, loop=loop)
-    handler.start_recording("dev-1", "job-1")
-    finish = getattr(handler, "seal_and_drain", None) or handler.drain
-    await finish("dev-1")  # the run's final drain: nothing pending, it returns
-    worker = threading.Thread(target=lambda: handler.emit_event("dev-1", "log_line", {"line": "late"}))
-    worker.start()
-    worker.join()
-    for _ in range(5):
-        await asyncio.sleep(0)
-    pending = [t for t in handler._pending.get("dev-1", []) if not t.cancelled()]
-    assert pending == [], "a write was accepted for the run after its final drain"
+        async def writer(method: str, params: dict) -> None:
+            if params["type"] == "B":
+                await release_b.wait()
+            sent.append(params["type"])
+
+        handler = EvidenceHandler(writer=writer, loop=asyncio.get_running_loop())
+        handler.start_recording("dev-1", "job-1")
+        handler.emit_atomic_op("dev-1", "A", {})
+        mark = handler.watermark()
+        handler.emit_atomic_op("dev-1", "B", {})
+        await asyncio.wait_for(handler.drain_through(mark), timeout=1)
+        by_drain = list(sent)
+        release_b.set()
+        await asyncio.wait_for(handler.drain_through(handler.watermark()), timeout=1)
+        return by_drain, sent
+
+    by_drain, sent = asyncio.run(scenario())
+    assert by_drain == ["A"]
+    assert sent == ["A", "B"]

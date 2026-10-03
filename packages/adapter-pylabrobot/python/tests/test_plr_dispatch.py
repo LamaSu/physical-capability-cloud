@@ -90,6 +90,14 @@ async def call(server: Server, out: Out, method: str, params: dict, msg_id: str 
     return next(m for m in out.messages() if m.get("id") == msg_id)
 
 
+async def call_run(server: Server, out: Out, params: dict, msg_id: str = "1") -> dict:
+    """backend.run as the TS adapter sends it: the job's recording window first. A run
+    records only into its own job's window, opened beforehand (#502's evidence model)."""
+    await call(server, out, "evidence.startRecording",
+               {"deviceId": params["deviceId"], "jobId": params["jobId"]}, msg_id + "w")
+    return await call(server, out, "backend.run", params, msg_id)
+
+
 async def init(server: Server, out: Out, **config) -> dict:
     return await call(server, out, "backend.init", {"deviceId": "lh1", "plrBackend": "chatterbox", "backendConfig": config})
 
@@ -168,7 +176,7 @@ async def test_run_drives_the_populated_deck_and_evidence_follows_the_machine(fa
     s, out = _server()
     await init(s, out, deckLayout=DECK)
     await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-1"}, "2")
-    resp = await call(s, out, "backend.run", {
+    resp = await call_run(s, out, {
         "deviceId": "lh1", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": TRANSFER,
     }, "3")
     assert resp["result"]["ok"] is True
@@ -196,7 +204,7 @@ async def asyncio_sleep_for_notifications() -> None:
 
 
 async def _run(s: Server, out: Out, ops: list, source: str = "inline-ops") -> dict:
-    return await call(s, out, "backend.run", {
+    return await call_run(s, out, {
         "deviceId": "lh1", "jobId": "job-x", "protocolSource": source, "protocolInline": ops,
     }, "9")
 
@@ -321,7 +329,7 @@ async def test_concurrent_runs_on_one_device_are_serialized_not_interleaved(fake
 
     # a different device is not blocked
     await call(s, out, "backend.init", {"deviceId": "lh2", "plrBackend": "chatterbox", "backendConfig": {"deckLayout": DECK}}, "30")
-    other = await asyncio.wait_for(call(s, out, "backend.run", {
+    other = await asyncio.wait_for(call_run(s, out, {
         "deviceId": "lh2", "jobId": "job-other", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
     }, "31"), timeout=2.0)
     assert other["result"]["ok"] is True
@@ -332,55 +340,10 @@ async def test_concurrent_runs_on_one_device_are_serialized_not_interleaved(fake
     assert _calls(s) == ["setup", "pick_up_tips", "aspirate", "dispense", "return_tips"]
 
     # the lease is released: B can run now
-    resp_b2 = await call(s, out, "backend.run", {
+    resp_b2 = await call_run(s, out, {
         "deviceId": "lh1", "jobId": "job-b", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
     }, "21")
     assert resp_b2["result"]["opCount"] == 1, resp_b2
-
-
-async def test_evidence_start_recording_refuses_a_different_job_while_the_device_is_busy(fake_plr):
-    import asyncio
-
-    s, out = _server()
-    await init(s, out, deckLayout=DECK)
-    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
-    task_a = asyncio.create_task(_run(s, out, TRANSFER))  # _run always uses jobId "job-x"
-    await entered.wait()
-
-    resp = await asyncio.wait_for(
-        call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-b"}, "40"), timeout=2.0,
-    )
-    assert resp["error"]["code"] == RPC_ERROR_CODES["DEVICE_BUSY"], resp
-
-    # R39 r5: not even the lease holder's own job ("job-x", see _run) may re-arm
-    # the window mid-run; the run owns it until it ends.
-    own = await asyncio.wait_for(
-        call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-x"}, "41"), timeout=2.0,
-    )
-    assert own.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], own
-
-    release.set()
-    await asyncio.wait_for(task_a, timeout=2.0)
-
-
-async def test_evidence_stop_recording_refuses_a_different_job_while_the_device_is_busy(fake_plr):
-    # R39 r3 review (CRIT2): the window is bound to the lease holder; another job may not close it.
-    import asyncio
-
-    s, out = _server()
-    await init(s, out, deckLayout=DECK)
-    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
-    task_a = asyncio.create_task(_run(s, out, TRANSFER))  # jobId "job-x"
-    await entered.wait()
-
-    resp = await asyncio.wait_for(
-        call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-b"}, "42"), timeout=2.0,
-    )
-    assert resp.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], resp
-    assert s.evidence.is_recording("lh1"), "job-x's window was closed by job-b"
-
-    release.set()
-    await asyncio.wait_for(task_a, timeout=2.0)
 
 
 async def test_shutdown_waits_for_the_lease_holder_and_no_second_handle_loads_meanwhile(fake_plr):
@@ -507,30 +470,6 @@ async def test_two_sidecars_cannot_drive_one_ot2_until_the_first_lets_go(fake_pl
     await call(s1, out1, "backend.shutdown", {"deviceId": "ot"}, "84")
     c = await call(s2, out2, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": cfg}, "85")
     assert "error" not in c, c
-
-
-async def test_a_run_never_records_its_evidence_under_another_jobs_window(fake_plr):
-    # R39 r4 (CRIT2 evidence): a window pre-armed for job A is not reused by job B's run.
-    s, out = _server()
-    await init(s, out, deckLayout=DECK)
-    await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-a"}, "90")
-    out.lines.clear()
-    await s.handle_line(json.dumps({"jsonrpc": "2.0", "id": "91", "method": "backend.run", "params": {
-        "deviceId": "lh1", "jobId": "job-x", "protocolSource": "inline-ops", "protocolInline": TRANSFER}}))
-    await asyncio_sleep_for_notifications()
-    notes = [m for m in out.messages() if "id" not in m]
-    labelled = {m["params"].get("jobId") for m in notes if isinstance(m.get("params"), dict)}
-    assert notes and labelled == {"job-x"}, labelled
-
-
-async def test_stop_recording_never_closes_another_jobs_window(fake_plr):
-    # R39 r4 (CRIT2 evidence): stopRecording closes only its own job's window.
-    s, out = _server()
-    await init(s, out, deckLayout=DECK)
-    await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-a"}, "92")
-    await call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-b"}, "93")
-    window = s.evidence.get_window("lh1")
-    assert window is not None and window.job_id == "job-a", window
 
 
 @pytest.mark.parametrize("first,second", [
@@ -852,25 +791,6 @@ def test_the_identity_check_gives_up_on_a_robot_that_never_answers(monkeypatch):
         silent.close()
 
 
-async def test_no_job_can_close_or_restart_the_window_while_a_run_holds_the_lease(fake_plr):
-    # R39 r5 (CRIT2 evidence): not even the lease holder's own job id; the run owns its window.
-    import asyncio
-
-    s, out = _server()
-    await init(s, out, deckLayout=DECK)
-    entered, release = _block_pick_up_tips_on(s.loader.get("lh1").machine)
-    task = asyncio.create_task(_run(s, out, TRANSFER))  # jobId "job-x"
-    await entered.wait()
-    stop = await asyncio.wait_for(call(s, out, "evidence.stopRecording", {"deviceId": "lh1", "jobId": "job-x"}, "94"), timeout=2.0)
-    assert stop.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], stop
-    restart = await asyncio.wait_for(call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-x"}, "95"), timeout=2.0)
-    assert restart.get("error", {}).get("code") == RPC_ERROR_CODES["DEVICE_BUSY"], restart
-    window = s.evidence.get_window("lh1")
-    assert window is not None and window.job_id == "job-x"
-    release.set()
-    await asyncio.wait_for(task, timeout=2.0)
-
-
 async def test_tips_can_be_dropped_into_a_named_spot(fake_plr):
     s, out = _server()
     await init(s, out, deckLayout=DECK)
@@ -878,70 +798,6 @@ async def test_tips_can_be_dropped_into_a_named_spot(fake_plr):
     assert resp["result"]["opCount"] == 2
     lh = s.loader.get("lh1").machine
     assert lh.calls[-1] == ("drop_tips", ["A2"], [0])
-
-
-# ── R39 HIGH5: completion never outruns the evidence it claims ─────────────
-
-async def test_every_atomic_op_notification_precedes_the_runs_response(fake_plr):
-    import asyncio
-
-    s, out = _server()
-    # EvidenceHandler captures a bound reference to Server.write_notification
-    # at construction time (see Server.__init__), so patching s.write_notification
-    # itself would be a no-op for evidence writes -- patch the handler's own
-    # writer, which is what emit_atomic_op's scheduled tasks actually call.
-    original_writer = s.evidence._writer
-
-    async def tracked_writer(method, params):
-        if method == "evidence" and params.get("type") in ("pickUpTips", "aspirate", "dispense", "dropTips"):
-            # Force a genuine scheduling checkpoint on every atomic-op write --
-            # proves backend.run truly awaits it, not just that the fire-and-
-            # forget task object happens to exist.
-            await asyncio.sleep(0)
-        await original_writer(method, params)
-
-    s.evidence._writer = tracked_writer
-
-    await init(s, out, deckLayout=DECK)
-    await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-1"}, "2")
-    resp = await call(s, out, "backend.run", {
-        "deviceId": "lh1", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": TRANSFER,
-    }, "3")
-    assert resp["result"]["ok"] is True, resp
-
-    # No asyncio.sleep() needed here: if backend.run didn't drain the writes,
-    # this would be flaky/wrong by construction, not just slow.
-    messages = out.messages()
-    response_index = next(i for i, m in enumerate(messages) if m.get("id") == "3")
-    op_names = ("pickUpTips", "aspirate", "dispense", "dropTips")
-    before = [
-        m["params"]["type"] for m in messages[:response_index]
-        if m.get("method") == "evidence" and m["params"]["type"] in op_names
-    ]
-    after = [
-        m for m in messages[response_index + 1:]
-        if m.get("method") == "evidence" and m["params"]["type"] in op_names
-    ]
-    assert before == list(op_names), messages
-    assert after == []
-
-
-async def test_backend_run_does_not_report_success_if_an_evidence_write_fails(fake_plr):
-    s, out = _server()
-    await init(s, out, deckLayout=DECK)
-
-    async def failing_writer(method, params):
-        if method == "evidence":
-            raise RuntimeError("stdout pipe broken")
-
-    s.evidence._writer = failing_writer
-    resp = await _run(s, out, TRANSFER)
-    assert "error" in resp, resp
-    assert resp["error"]["code"] == RPC_ERROR_CODES["INTERNAL_ERROR"], resp
-    # The physical ops already ran -- draining surfaces the write failure, it
-    # doesn't (and can't) undo actuation that already happened.
-    lh = s.loader.get("lh1").machine
-    assert [c[0] for c in lh.calls] == ["setup", "pick_up_tips", "aspirate", "dispense", "return_tips"]
 
 
 # ── astra r1 on #378: no op is skipped, and every op is checked before any runs ─
@@ -1028,7 +884,7 @@ async def test_every_result_and_event_says_how_the_ops_were_executed(fake_plr):
     init_resp = await init(s, out, deckLayout=DECK)
     assert init_resp["result"]["metadata"]["executionMode"] == "simulated"
     await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-1"}, "2")
-    resp = await call(s, out, "backend.run", {
+    resp = await call_run(s, out, {
         "deviceId": "lh1", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": TRANSFER,
     }, "3")
     assert resp["result"]["executionMode"] == "simulated"
@@ -1042,7 +898,7 @@ async def test_every_result_and_event_says_how_the_ops_were_executed(fake_plr):
     await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
         "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}})
     await call(s, out, "evidence.startRecording", {"deviceId": "ot", "jobId": "j"}, "3b")
-    run = await call(s, out, "backend.run", {
+    run = await call_run(s, out, {
         "deviceId": "ot", "jobId": "j", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]]}, "4")
     # never "hardware": no hardware-identity provenance check exists yet (D1 #19).
     assert run["result"]["executionMode"] == "unverified"
@@ -1053,7 +909,7 @@ async def test_every_result_and_event_says_how_the_ops_were_executed(fake_plr):
 
     s, out = _server()
     await call(s, out, "backend.init", {"deviceId": "st", "plrBackend": "stub", "backendConfig": {}})
-    stub = await call(s, out, "backend.run", {
+    stub = await call_run(s, out, {
         "deviceId": "st", "jobId": "j", "protocolSource": "inline-ops", "protocolInline": TRANSFER}, "5")
     assert stub["result"]["executionMode"] == "stub"
 
@@ -1073,7 +929,7 @@ async def _stub_server():
 )
 async def test_malformed_or_unknown_stub_ops_fail_loud_with_zero_ops_run(fake_plr, bad_inline):
     s, out = await _stub_server()
-    resp = await call(s, out, "backend.run", {
+    resp = await call_run(s, out, {
         "deviceId": "st", "jobId": "j", "protocolSource": "inline-ops", "protocolInline": bad_inline,
     }, "6")
     assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
@@ -1083,7 +939,7 @@ async def test_malformed_or_unknown_stub_ops_fail_loud_with_zero_ops_run(fake_pl
 
 async def test_a_valid_stub_protocol_still_runs_as_before(fake_plr):
     s, out = await _stub_server()
-    resp = await call(s, out, "backend.run", {
+    resp = await call_run(s, out, {
         "deviceId": "st", "jobId": "j", "protocolSource": "inline-ops",
         "protocolInline": [{"op": "pickUpTips", "channel": 0}, {"op": "aspirate", "well": "A1", "volume_uL": 100}],
     }, "6")
@@ -1418,7 +1274,7 @@ async def test_loading_a_simulator_cannot_weaken_tracking_while_hardware_is_load
     assert not s.loader.has("lh1")  # the simulator never finished loading either
     assert TRACKING == {"tips": True, "volume": True}  # the switches stayed ON
 
-    run = await call(s, out, "backend.run", {
+    run = await call_run(s, out, {
         "deviceId": "ot", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
     }, "9")
     assert run["result"]["ok"] is True, run  # the ot2 run still sees tracking ON
@@ -1436,7 +1292,7 @@ async def test_an_ot2_run_reasserts_tracking_even_if_something_flipped_it(fake_p
     set_volume_tracking(False)
     assert TRACKING["volume"] is False
 
-    run = await call(s, out, "backend.run", {
+    run = await call_run(s, out, {
         "deviceId": "ot", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
     }, "9")
     assert run["result"]["ok"] is True, run
@@ -1450,7 +1306,7 @@ async def test_an_ot2_run_refuses_if_tracking_cannot_be_verified(fake_plr, monke
     await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
         "ot2Url": "10.0.0.5", "robotSerial": ROBOT, "deckLayout": dict(DECK, type="OTDeck")}})
     monkeypatch.setattr(plr_resources, "does_volume_tracking", lambda: False)
-    run = await call(s, out, "backend.run", {
+    run = await call_run(s, out, {
         "deviceId": "ot", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]],
     }, "9")
     assert run["error"]["code"] == RPC_ERROR_CODES["NON_RETRYABLE"], run

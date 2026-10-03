@@ -16,6 +16,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { CameraAdapter } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 import type { PhotoCaptureService } from "../photo-capture-service.js";
 import type { GeminiComparisonService } from "../gemini-comparison-service.js";
 
@@ -30,6 +31,9 @@ export class PhotoCameraAdapter implements CameraAdapter {
 
   /** Last captured bytes — used as "captured image" in runInspection(). */
   private lastCapturedBytes: Uint8Array | null = null;
+
+  /** Captures and inspections in flight: the only things that emit. */
+  private readonly work = new OutstandingWork();
 
   constructor(
     id: string,
@@ -59,7 +63,11 @@ export class PhotoCameraAdapter implements CameraAdapter {
   // CameraAdapter implementation
   // ---------------------------------------------------------------------------
 
-  async captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+  captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+    return this.work.track(this.capture());
+  }
+
+  private async capture(): Promise<{ imageHash: string; storageRef: string }> {
     const bytes = this.pendingBytes;
     if (!bytes || bytes.length === 0) {
       throw new Error(
@@ -98,7 +106,16 @@ export class PhotoCameraAdapter implements CameraAdapter {
     return { imageHash, storageRef };
   }
 
-  async runInspection(referenceHash?: string): Promise<{
+  runInspection(referenceHash?: string): Promise<{
+    passed: boolean;
+    confidence: number;
+    findings: string[];
+    imageHash: string;
+  }> {
+    return this.work.track(this.inspect(referenceHash));
+  }
+
+  private async inspect(referenceHash?: string): Promise<{
     passed: boolean;
     confidence: number;
     findings: string[];
@@ -210,6 +227,14 @@ export class PhotoCameraAdapter implements CameraAdapter {
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
     this.listeners.push(callback);
+  }
+
+  /**
+   * Resolves once no capture or inspection is in flight; at once when none is. Each awaits
+   * the capture service (and Gemini), then emits, before it returns.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
   }
 
   async dispose(): Promise<void> {

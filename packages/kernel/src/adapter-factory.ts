@@ -580,6 +580,12 @@ function createSiLASensorAdapter(
       sila.onEvidence(callback);
     },
 
+    // The shim itself emits nothing (stopRecording returns its summary); what reaches
+    // onEvidence comes from the SiLAAdapter, whose hook covers its calls in flight.
+    quiesceEvidence(): Promise<void> {
+      return sila.quiesceEvidence();
+    },
+
     async dispose(): Promise<void> {
       await sila.dispose();
     },
