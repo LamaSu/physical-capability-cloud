@@ -52,7 +52,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { geohashEncode, LOCATION_CELL_PRECISION } from "../facades/populators/public-location.js";
+import { geohashCenter, geohashEncode, LOCATION_CELL_PRECISION } from "../facades/populators/public-location.js";
 
 const ROUTES = vi.hoisted(() => [] as Array<{ method: string | string[]; url: string; websocket?: boolean; schema?: unknown }>);
 vi.mock("fastify", async (orig) => {
@@ -107,6 +107,16 @@ for (const v of [
 ] as const) {
   delete process.env[v];
 }
+// The list above names the integrations this sweep was read against; this clear also covers any
+// it does not name, now that fixture bodies drive routes to their success branch (orchestrator
+// review of 44b0dcbc: /api/feedback posts to DISCORD_WEBHOOK_URL, /api/telemetry/emit to PostHog,
+// a 5xx goes to SENTRY_DSN, evidence storage to STORACHA_*). Every credential-, webhook- or
+// endpoint-shaped variable is removed; nothing this harness needs has such a name.
+const EXTERNAL_ENV_RE = /(KEY|SECRET|TOKEN|PRIVATE|PASSWORD|PROOF|DSN|WEBHOOK|_DID$|_RPC$|_URL$)/i;
+for (const v of Object.keys(process.env)) {
+  if (EXTERNAL_ENV_RE.test(v)) delete process.env[v];
+}
+delete process.env.EVIDENCE_STORAGE; // the local default: no remote storage
 process.env.NODE_ENV = process.env.NODE_ENV === "production" ? process.env.NODE_ENV : "test";
 process.env.STORY_MOCK = process.env.STORY_MOCK ?? "true";
 
@@ -392,7 +402,9 @@ const NUMBER_IN_STRING_RE = /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 const DMS_SYMBOL_RE =
-  /(\d{1,3})\s*°\s*(\d{1,2}(?:\.\d+)?)\s*['′]\s*(?:(\d{1,2}(?:\.\d+)?)\s*["″]\s*)?([NSEWnsew])\b/g;
+  /(\d{1,3})\s*°\s*(\d{1,2}(?:\.\d+)?)\s*['′]\s*(?:(\d{1,2}(?:\.\d+)?)\s*["″]\s*)?([NSEWnsew](?![A-Za-z]))?/g;
+/** 47:37:13.8 (N) — colon-separated; the hemisphere is optional, as in the symbol form. */
+const DMS_COLON_RE = /(\d{1,3}):(\d{1,2}(?:\.\d+)?)(?::(\d{1,2}(?:\.\d+)?))?\s*([NSEWnsew](?![A-Za-z]))?/g;
 const DMS_SPACED_RE =
   /\b(\d{1,3})\s+(\d{1,2}(?:\.\d+)?)(?:\s+(\d{1,2}(?:\.\d+)?))?\s+([NSEWnsew])\b/g;
 
@@ -406,17 +418,18 @@ function dmsToDecimal(deg: number, min: number, sec: number, hemi: string): numb
  *  lower-precision spaced form's 1-decimal seconds — still ~45x tighter than the ~0.045°
  *  coarse cell the production fix allows, so nowhere near a false accept. */
 function dmsLeak(text: string): string | null {
-  for (const re of [DMS_SYMBOL_RE, DMS_SPACED_RE]) {
+  for (const re of [DMS_SYMBOL_RE, DMS_SPACED_RE, DMS_COLON_RE]) {
     for (const m of text.matchAll(re)) {
       const deg = Number(m[1]);
       const min = Number(m[2]);
       const sec = m[3] !== undefined ? Number(m[3]) : 0;
       const hemi = m[4];
       if (deg > 180 || min >= 60 || sec >= 60) continue; // not a plausible coordinate triple
-      const dec = dmsToDecimal(deg, min, sec, hemi);
-      if (Math.abs(dec - CANARY.lat) < 1e-3 || Math.abs(dec - CANARY.lng) < 1e-3) {
-        return `dms-overprecise:${m[0]}`;
-      }
+      // With no hemisphere letter (a signed or hemisphere-first form), compare the magnitude.
+      const close = hemi
+        ? (dec: number) => Math.abs(dec - CANARY.lat) < 1e-3 || Math.abs(dec - CANARY.lng) < 1e-3
+        : (dec: number) => Math.abs(dec - Math.abs(CANARY.lat)) < 1e-3 || Math.abs(dec - Math.abs(CANARY.lng)) < 1e-3;
+      if (close(dmsToDecimal(deg, min, sec, hemi ?? "N"))) return `dms-overprecise:${m[0]}`;
     }
   }
   return null;
@@ -466,7 +479,12 @@ const CANARY_PLUS_CODE = olcEncodePairs(CANARY.lat, CANARY.lng, 10);
 const CANARY_PLUS8 = CANARY_PLUS_CODE.replace("+", "").toUpperCase().slice(0, 8);
 const PLUS_CODE_RUN_RE = /[23456789CFGHJMPQRVWXcfghjmpqrvwx+]{4,}/g;
 
+/** The canary's short code (digits 5-10 around the "+", e.g. JMC2+58): about 14 m once a
+ *  locality is named beside it, which is how maps render it. */
+const CANARY_SHORT_CODE = CANARY_PLUS_CODE.slice(4, 11).toUpperCase();
+
 function plusCodeLeak(text: string): string | null {
+  if (text.toUpperCase().includes(CANARY_SHORT_CODE)) return `plus-code-short:${CANARY_SHORT_CODE}`;
   for (const run of text.match(PLUS_CODE_RUN_RE) ?? []) {
     const digits = run.replace(/\+/g, "").toUpperCase();
     if (digits.length < 8) continue; // ≤6-digit (~5.5km) coarse form is the allowed precision
@@ -1107,6 +1125,30 @@ describe("N68: no read of the real gateway shows an operator's exact location or
     const k = (res.json().kernels as Array<Record<string, unknown>>).find((x) => x.id === NOLOC)!;
     console.log("ZERO", res.statusCode, "location", JSON.stringify(k.location), "precision", JSON.stringify(k.locationPrecision));
     expect(k.location ?? null).toBeNull();
+  });
+
+  it("DETECTOR: flags DMS, plus codes and non-JSON bodies; allows the coarse cell and its centre", () => {
+    const flagged = [
+      "47°37′13.77516″N 122°20′57.28092″W", // the review's own reproduction
+      JSON.stringify({ note: `site at 47°37'13.8"N` }), // ASCII symbols inside a JSON string
+      "-122°20′57.28″", // signed, no hemisphere letter
+      "N47°37′13.8″", // hemisphere first
+      "47°37.2296′N", // degrees and decimal minutes
+      "47 37 13.8 N", // spaced
+      "47:37:13.8", // colon-separated
+      CANARY_PLUS_CODE, // full code, 10 digits
+      `${CANARY_PLUS_CODE.slice(0, 8)}+`, // full code, 8 digits (about 275 m)
+      `${CANARY_PLUS_CODE.slice(4, 11)} Testville`, // short code with a locality
+      "<html><body>47.6204931, -122.3492447</body></html>", // a non-JSON body
+    ];
+    for (const body of flagged) expect(leakHits(body), body).not.toEqual([]);
+    const centre = geohashCenter(CANARY_CELL);
+    const allowed = [
+      JSON.stringify({ location: centre, locationCell: CANARY_CELL, locationPrecision: "approximate" }),
+      `${CANARY_PLUS_CODE.slice(0, 6)}00+`, // a 6-digit (about 5.5 km) code
+      "12:30:00 order 4762 at 122 Main St",
+    ];
+    for (const body of allowed) expect(leakHits(body), body).toEqual([]);
   });
 
   it("STRUCTURAL: every registered POST route is swept or explicitly excluded with a reason", () => {
