@@ -6,7 +6,7 @@ initSentry();
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 initPostHog();
 import { closeConsole, gatewayLoggerOptions, issueRequestId } from "./observability/closed-sinks.js";
-import { declare, declaredRoute, lit, METHODS, openRequestScope, telemetryKeyWarning, trackRouteTemplates } from "./observability/closed-schema.js";
+import { closedError, declare, declaredRoute, lit, METHODS, openRequestScope, telemetryKeyWarning, trackRouteTemplates } from "./observability/closed-schema.js";
 // Request-path console output leaves under the closed observability schema (N107b).
 closeConsole();
 import { randomBytes } from "node:crypto";
@@ -1127,11 +1127,16 @@ if (isMain) {
 
 // Catch unhandled rejections and uncaught exceptions so the process
 // never exits silently. Railway needs log output to diagnose failures.
-process.on("unhandledRejection", (reason) => {
-  console.error("[gateway] Unhandled rejection:", reason);
-});
-process.on("uncaughtException", (err) => {
-  console.error("[gateway] Uncaught exception:", err);
+// Each prints the error closed (N107b): its class, code and code frames, its message as a keyed
+// hash. A rejection from work a request started can echo that request, and these handlers run
+// outside any request scope. Exported for the test.
+export function onUnhandledRejection(reason: unknown): void {
+  console.error("[gateway] Unhandled rejection:", closedError(reason));
+}
+export function onUncaughtException(err: unknown): void {
+  console.error("[gateway] Uncaught exception:", closedError(err));
   process.exit(1);
-});
+}
+process.on("unhandledRejection", onUnhandledRejection);
+process.on("uncaughtException", onUncaughtException);
 
