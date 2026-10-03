@@ -155,8 +155,10 @@ function moduleEntries(modules) {
     if (PNPM_METADATA.has(child.name)) continue; // only pnpm's own metadata, not any dot-name
     const dir = join(modules, child.name);
     if (child.name.startsWith("@") && isDirectory(dir)) {
+      // Inside a scope every entry is a package candidate: .bin/.pnpm/.modules.yaml are pnpm
+      // metadata only at the node_modules root, so nothing is skipped here, and a package cannot
+      // hide at @scope/.pnpm (verdict 101e).
       for (const scoped of readdirSync(dir, { withFileTypes: true })) {
-        if (PNPM_METADATA.has(scoped.name)) continue;
         out.push([`${child.name}/${scoped.name}`, join(dir, scoped.name)]);
       }
     } else {

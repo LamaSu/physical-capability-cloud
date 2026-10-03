@@ -158,6 +158,17 @@ describe("verdict 101c: the installed-graph walk fails closed, not open", () => 
     });
     expect(problems.some((p) => p.includes("viem") && p.includes("bundled inside wrapper"))).toBe(true);
   });
+
+  it("reports a package concealed under a dot-name inside a scope", () => {
+    // At ea73e2df the scope loop also skipped .bin/.pnpm/.modules.yaml, so @scope/.pnpm hid a package (101e).
+    const { problems } = scan((root) => {
+      const nm = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules");
+      writePkg(join(nm, "wrapper"), "wrapper");
+      mkdirSync(join(nm, "wrapper/node_modules/@scope"), { recursive: true });
+      writePkg(join(nm, "wrapper/node_modules/@scope/.pnpm"), "viem");
+    });
+    expect(problems.some((p) => p.includes("viem") && p.includes("bundled inside wrapper"))).toBe(true);
+  });
 });
 
 describe("verdict 101 F6: the payload is an allowlist of fresh build output", () => {
