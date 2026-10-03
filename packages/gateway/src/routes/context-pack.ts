@@ -150,6 +150,8 @@ All endpoints are relative to the base URL above. Most return JSON.
 |--------|------|-------------|
 | POST | /api/discover/generate-csd | Generate a CSD from a discovered device |
 
+\`POST /api/discover/scan\` and \`POST /api/discover/onboard\` are live only when this gateway can reach its own local network -- see "Conditionally Available Routes" below.
+
 ### CSD (Capability StructureDefinitions)
 | Method | Path | Description |
 |--------|------|-------------|
@@ -348,6 +350,12 @@ AssuranceTier -- evidence depth + liability
   3: Cryptographic proof (ZK proofs + on-chain anchoring)
 \`\`\`
 
+## Conditionally Available Routes
+${CONDITIONALLY_LIVE_NOTE}
+| Method | Path | Description |
+|--------|------|-------------|
+${CONDITIONALLY_LIVE_ENDPOINTS.map((e) => `| ${e.method} | ${e.path} | ${e.description} |`).join("\n")}
+
 ## Workflow Templates
 
 ### For Users: "I want something manufactured"
@@ -439,8 +447,6 @@ const DEMO_ONLY_ENDPOINTS: EndpointDef[] = [
   { method: "GET", path: "/api/marketplace/orders", description: "List marketplace supply orders" },
   { method: "GET", path: "/api/marketplace/orders/:id", description: "Get marketplace order details" },
   { method: "POST", path: "/api/marketplace/orders", description: "Place a marketplace order" },
-  { method: "POST", path: "/api/discover/scan", description: "Scan local network for devices (mDNS/IPP)" },
-  { method: "POST", path: "/api/discover/onboard", description: "Full pipeline: discover, generate CSD, register device, register CSD" },
   { method: "GET", path: "/api/protocols", description: "List/search protocol templates" },
   { method: "GET", path: "/api/protocols/:id", description: "Get protocol template" },
   { method: "POST", path: "/api/protocols", description: "Create a new protocol template" },
@@ -535,6 +541,23 @@ const DEMO_ONLY_NOTE =
   "These routes answer 501 not_available unless the gateway runs with PCC_DEMO_ROUTES=true, which production never does. " +
   "In demo mode their answers are examples marked mock: true, demo: true. Follow each refusal's see pointers instead.";
 
+// Routes that are live or refused depending on THIS GATEWAY's own network reach, not on demo
+// mode (board N34 follow-up, reviewer round 2 MEDIUM B): discover.ts returns real discovered
+// devices when mDNS works here, and falls back to the demo-only behavior (501, or a marked
+// example in demo mode) only when it cannot -- see routes/discover.ts:268-283 and :305-318.
+// Blanket-listing them under DEMO_ONLY_ENDPOINTS, as this file once did, told an agent they
+// always refuse outside demo mode; false on any gateway where local discovery actually works.
+const CONDITIONALLY_LIVE_ENDPOINTS: EndpointDef[] = [
+  { method: "POST", path: "/api/discover/scan", description: "Scan local network for devices (mDNS/IPP)" },
+  { method: "POST", path: "/api/discover/onboard", description: "Full pipeline: discover, generate CSD, register device, register CSD" },
+];
+
+const CONDITIONALLY_LIVE_NOTE =
+  "These two routes depend on whether THIS GATEWAY can run local network discovery (mDNS), not on demo mode: when discovery " +
+  "works they return real discovered devices regardless of PCC_DEMO_ROUTES. When discovery is unavailable (true of most " +
+  "hosted gateways) they fall back the same way the demo-only routes above do: 501 not_available with PCC_DEMO_ROUTES unset, " +
+  "or example printers marked mock: true, demo: true with it set. Never present an example as a real discovered device.";
+
 interface EndpointGroup {
   name: string;
   endpoints: EndpointDef[];
@@ -548,6 +571,7 @@ function buildStructuredPack(baseUrl: string): {
   roles: string[];
   endpointGroups: EndpointGroup[];
   demoOnlyEndpoints: { note: string; endpoints: EndpointDef[] };
+  conditionallyLiveEndpoints: { note: string; endpoints: EndpointDef[] };
   dataTypes: Record<string, Record<string, string>>;
   sseStreams: EndpointDef[];
   contracts: Record<string, string>;
@@ -643,6 +667,7 @@ function buildStructuredPack(baseUrl: string): {
       },
     ],
     demoOnlyEndpoints: { note: DEMO_ONLY_NOTE, endpoints: DEMO_ONLY_ENDPOINTS },
+    conditionallyLiveEndpoints: { note: CONDITIONALLY_LIVE_NOTE, endpoints: CONDITIONALLY_LIVE_ENDPOINTS },
     dataTypes: {
       Capability: { id: "cap_...", type: "string", kernelId: "string", status: "available|busy|offline" },
       Kernel: { id: "kernel_...", name: "string", status: "online|offline|maintenance", capabilities: "string[]" },

@@ -15,9 +15,16 @@
  * Shrink-only: a count above its allowance fails (new fabrication), and so does an allowance
  * above the count (lower it, to lock in the gain) or an entry for a file with none.
  *
- * It cannot see a literal written inline in a handler, or an imported mock service (the SWF's
- * was one). The families' demo-off refusal tests and the context pack's refused-is-documented
- * check cover those.
+ * It cannot see a literal written inline in a handler, an imported mock service (the SWF's was
+ * one), or a NEW route that serves such a literal with a 200 (reviewer round 2, MEDIUM A —
+ * reproduced via `app.get("/api/marketplace/new", async () => [{ id: "fixture" }])`, which
+ * this ratchet does not catch). A new route that instead REFUSES (501) without being
+ * documented is caught by the context pack's refused-is-documented check; a new LIVE GET
+ * route in one of the ten N34 route families context-pack-availability.test.ts probes is
+ * caught by its route-inventory check. Neither covers a new POST/PUT/PATCH/DELETE route, a
+ * live GET added outside those ten families, or an existing route's handler rewritten in
+ * place (same path, a real read swapped for a literal) — all still invisible to every check
+ * in this file.
  */
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
