@@ -493,21 +493,134 @@ class TestExecutionLeaseGuard:
             ("POST", "/api/relay/k1/tool-result", {"callId": "c-pause-move", "error": "not_executed:lease_expired"}),
         ]
 
-    def test_a_deadline_that_passes_between_two_device_requests_stops_the_second(self):
-        """The first request leaves before the deadline, the second would leave after it: the
-        second is never sent, and the report is a device outcome (it may have moved)."""
+    # ── r11: the deadline holds at the socket write (a real server on 127.0.0.1) ──
+
+    @staticmethod
+    def _device_server():
+        """A device on 127.0.0.1 that records every request it receives. Returns (url, received, stop)."""
+        import http.server
+        import threading
+
+        received = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                received.append((self.path, self.rfile.read(length)))
+                payload = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def stop():
+            server.shutdown()
+            server.server_close()
+
+        return "http://127.0.0.1:%d" % server.server_address[1], received, stop
+
+    def test_a_slow_connection_setup_that_crosses_the_deadline_writes_nothing(self):
+        """r10 F3, astra's regression: http() starts at t=1000 (deadline 1005), but establishing the
+        connection takes until t=1006. The check before the first byte refuses: the device receives
+        nothing. This distinguishes urlopen() entry from the underlying write."""
+        import http.client
+        import pcc_node.http_util as hu
+
+        url, received, stop = self._device_server()
+        clock = [1000.0]
+        real_connect = http.client.HTTPConnection.connect
+
+        def slow_connect(conn):
+            real_connect(conn)
+            clock[0] += 6.0  # the connection took until after the deadline
+
+        try:
+            with mock.patch("pcc_node.http_util.time.monotonic", side_effect=lambda: clock[0]), \
+                    mock.patch.object(http.client.HTTPConnection, "connect", slow_connect):
+                with hu.actuation_deadline(1005.0) as guard:
+                    status, body = hu.http("POST", url + "/move", {})
+        finally:
+            stop()
+        assert received == []
+        assert (status, body) == (0, {"error": "not_executed:lease_expired"})
+        assert guard["written"] == 0 and guard["refused"] == "not_executed:lease_expired"
+
+    def test_a_request_checked_before_its_deadline_is_written_and_counted(self):
+        import pcc_node.http_util as hu
+
+        url, received, stop = self._device_server()
+        try:
+            with mock.patch("pcc_node.http_util.time.monotonic", return_value=1000.0):
+                with hu.actuation_deadline(1005.0) as guard:
+                    status, body = hu.http("POST", url + "/move", {"x": 1})
+        finally:
+            stop()
+        assert status == 200 and body == {"ok": True}
+        assert [path for path, _ in received] == ["/move"]
+        assert guard["written"] == 1 and guard["refused"] is None
+
+    def test_the_last_check_is_immediately_before_the_write_and_a_later_pause_is_the_residual(self):
+        """The stated residual (operator item 127): the connection's check comes right before the
+        socket write. A pause after it passes delays the write past the deadline, and the write
+        still happens. Documented, not prevented."""
+        import http.client
+        import pcc_node.http_util as hu
+
+        url, received, stop = self._device_server()
+        clock = [1000.0]
+        steps = []
+        real_holds = hu._deadline_holds
+        real_send = http.client.HTTPConnection.send
+
+        def holds_then_maybe_pause(guard):
+            result = real_holds(guard)
+            steps.append(("check", clock[0], result))
+            if len([s for s in steps if s[0] == "check"]) == 2:  # the connection's own check
+                clock[0] += 6.0
+            return result
+
+        def recording_send(conn, data):
+            steps.append(("write", clock[0], None))
+            return real_send(conn, data)
+
+        try:
+            with mock.patch("pcc_node.http_util.time.monotonic", side_effect=lambda: clock[0]), \
+                    mock.patch("pcc_node.http_util._deadline_holds", side_effect=holds_then_maybe_pause), \
+                    mock.patch.object(http.client.HTTPConnection, "send", recording_send):
+                with hu.actuation_deadline(1005.0):
+                    hu.http("POST", url + "/move", {})
+        finally:
+            stop()
+        kinds = [step[0] for step in steps]
+        assert kinds[:3] == ["check", "check", "write"]  # start check, connection check, then the write
+        assert steps[1][1] < 1005.0 and steps[1][2] is True  # the last check passed before the deadline
+        assert steps[2][1] > 1005.0  # the residual: the pause made the write late
+        assert [path for path, _ in received] == ["/move"]
+
+    def test_a_deadline_that_passes_between_two_device_requests_writes_only_the_first(self):
+        """The first request is written before the deadline. The second would start after it, so
+        it is never written. The report is a device outcome: the first may have moved the device."""
         import pcc_node.executor as ex
         from pcc_node.http_util import http
 
+        url, received, stop = self._device_server()
         clock = [1000.0]
 
         class TwoStep(object):
             device_type = "two-step"
 
             def execute(self, tool_name, tool_args):
-                first = http("POST", "http://device.invalid/a", {})
+                first = http("POST", url + "/a", {})
                 clock[0] += 6.0  # the first move took long
-                second = http("POST", "http://device.invalid/b", {})
+                second = http("POST", url + "/b", {})
                 return json.dumps({"first": first[0], "second": second[0]})
 
         call = {"id": "c-two-step", "kernelId": "k1", "toolName": "t", "args": {},
@@ -520,79 +633,43 @@ class TestExecutionLeaseGuard:
             posts.append((method, path, body))
             return 200, {}
 
-        with mock.patch("pcc_node.executor.time.monotonic", side_effect=lambda: clock[0]), \
-                mock.patch("pcc_node.executor.pcc_request", side_effect=fake_pcc), \
-                mock.patch("pcc_node.http_util.urlopen") as sent:
-            sent.return_value.__enter__.return_value.read.return_value = b'{"ok": true}'
-            sent.return_value.__enter__.return_value.status = 200
-            result = ex.execute_and_report(call, [TwoStep()], "http://pcc", "key", "k1")
-        assert sent.call_count == 1
+        try:
+            with mock.patch("pcc_node.executor.time.monotonic", side_effect=lambda: clock[0]), \
+                    mock.patch("pcc_node.executor.pcc_request", side_effect=fake_pcc):
+                result = ex.execute_and_report(call, [TwoStep()], "http://pcc", "key", "k1")
+        finally:
+            stop()
+        assert [path for path, _ in received] == ["/a"]
         assert result is False
         assert posts == [
             ("POST", "/api/relay/k1/tool-result", {"callId": "c-two-step", "error": "lease_lapsed_mid_command"}),
         ]
 
-    def test_a_pause_after_the_final_check_runs_no_shell_command(self):
+    def test_under_a_lease_the_shell_path_is_refused_outright(self):
+        """A started shell process can act at any later time, so no deadline bounds it: under a lease
+        it never runs, whatever the clock says."""
+        import pcc_node.http_util as hu
+        from pcc_node.executor import OpentronAdapter
+
+        with mock.patch("pcc_node.executor.subprocess.run") as ran:
+            with hu.actuation_deadline(10 ** 9) as guard:
+                shell = OpentronAdapter(base_url="http://ot2.invalid")._shell({"command": "true"})
+            outside = OpentronAdapter(base_url="http://ot2.invalid")._shell({"command": "true"})
+        assert json.loads(shell) == {"error": "not_executed:shell_not_lease_bound"}
+        assert guard["refused"] == "not_executed:shell_not_lease_bound" and guard["written"] == 0
+        assert ran.call_count == 1  # only the call outside any lease ran
+        assert "error" not in json.loads(outside) or "not_executed" not in json.loads(outside)["error"]
+
+    def test_a_relayed_shell_call_is_reported_not_executed(self):
         from pcc_node.executor import OpentronAdapter
 
         with mock.patch("pcc_node.executor.subprocess.run") as run:
             result, posts, sent = self._paused_after_final_check(
-                OpentronAdapter(base_url="http://ot2.invalid"), "ot2_shell", {"command": "true"},
+                OpentronAdapter(base_url="http://ot2.invalid"), "ot2_shell", {"command": "true"}, advance_s=0.0,
             )
         run.assert_not_called()
-        sent.assert_not_called()
         assert result is False
-        assert posts[-1][2] == {"callId": "c-pause-ot2_shell", "error": "not_executed:lease_expired"}
-
-    def test_the_deadline_check_is_the_last_step_before_each_send_and_a_later_pause_is_the_residual(self):
-        """r9 F3, astra's regression: the suspension comes AFTER may_emit_device_command() says
-        yes. This documents the stated residual (operator item 127). The check is the last step
-        before the send, nothing runs between them, the decision was taken before the deadline,
-        and a pause after it delays the send. It does not prevent the send."""
-        import pcc_node.http_util as hu
-
-        clock = [1000.0]
-        steps = []
-        real_guard = hu.may_emit_device_command
-
-        def guard_then_pause():
-            allowed = real_guard()
-            steps.append(("check", clock[0], allowed))
-            clock[0] += 6.0  # suspended after the check said yes
-            return allowed
-
-        def send(*_args, **_kwargs):
-            steps.append(("send", clock[0], None))
-            response = mock.MagicMock()
-            response.__enter__.return_value.read.return_value = b"{}"
-            response.__enter__.return_value.status = 200
-            return response
-
-        with mock.patch("pcc_node.http_util.time.monotonic", side_effect=lambda: clock[0]), \
-                mock.patch("pcc_node.http_util.may_emit_device_command", side_effect=guard_then_pause), \
-                mock.patch("pcc_node.http_util.urlopen", side_effect=send):
-            with hu.actuation_deadline(1005.0):
-                hu.http("POST", "http://device.invalid/move", {})
-        assert [step[0] for step in steps] == ["check", "send"]  # the check is the last step
-        assert steps[0][1] < 1005.0 and steps[0][2] is True  # decided before the deadline
-        assert steps[1][1] > 1005.0  # the residual: the pause made the send late
-
-    def test_a_check_after_the_deadline_never_sends_on_either_path(self):
-        import pcc_node.http_util as hu
-        from pcc_node.executor import OpentronAdapter
-
-        clock = [1006.0]
-        with mock.patch("pcc_node.http_util.time.monotonic", side_effect=lambda: clock[0]), \
-                mock.patch("pcc_node.http_util.urlopen") as sent, \
-                mock.patch("pcc_node.executor.subprocess.run") as ran:
-            with hu.actuation_deadline(1005.0) as guard:
-                status, body = hu.http("POST", "http://device.invalid/move", {})
-                shell = OpentronAdapter(base_url="http://ot2.invalid")._shell({"command": "true"})
-        sent.assert_not_called()
-        ran.assert_not_called()
-        assert (status, body) == (0, {"error": "not_executed:lease_expired"})
-        assert json.loads(shell) == {"error": "not_executed:lease_expired"}
-        assert guard["refused"] is True and guard["sent"] == 0
+        assert posts[-1][2] == {"callId": "c-pause-ot2_shell", "error": "not_executed:shell_not_lease_bound"}
 
     def test_200_started_true_runs_adapter_once_and_reports_result(self):
         adapter = mock.Mock()

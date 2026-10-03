@@ -325,38 +325,43 @@ and fails closed at every step:
    reported. A fence that can't be created reports `not_executed:fence_unavailable`.
 4. **The lease**, as above, with a 10 s timeout. The call runs only on 200 with
    `"started": true` exactly.
-5. **At adapter entry, and at the device boundary** (r8, r9). The grant is an
-   expiring authority. The node may send a device command for the call only
+5. **At adapter entry, and at the socket write** (r8-r11). The grant is an
+   expiring authority. The node may write a device command for the call only
    within the lease window, counted from just before it sent the start request,
    so a slow answer can only shorten it. The window is the gateway's `leaseMs`,
    capped at the node's own 5 s.
    - Right before each adapter is entered, the node re-checks the window and the
      poll's freshness.
-   - The window is also checked where each command leaves the node. Inside the
-     call's `actuation_deadline` block, `http_util.http()` and the shell path call
-     `may_emit_device_command()` immediately before they send. A command whose
-     deadline has passed never leaves.
-   - If no device command left, the node reports `not_executed:lease_expired`
-     (or `not_executed:stale`), and nothing ran.
-   - If one did, and a later one was held back, the device may have moved. The
-     node reports `lease_lapsed_mid_command`, a device outcome.
+   - Inside the call's `actuation_deadline` block, `http()` checks before any
+     connection is made. The guarded connection checks again after it is
+     established (TLS included) and immediately before the request's first byte
+     is written to the socket. A request that fails either check is never written.
+   - Under a lease, the shell path (`ot2_shell`) is refused outright
+     (`not_executed:shell_not_lease_bound`). A started process could act at any
+     later time, so no deadline can bound it.
+   - If no request of the call was written, the node reports
+     `not_executed:lease_expired` (or `not_executed:stale`, or
+     `not_executed:shell_not_lease_bound`), and nothing ran.
+   - If one was written and a later one was held back, the device may have moved.
+     The node reports `lease_lapsed_mid_command`, a device outcome.
 
 **What the lease guarantees, and its one residual.** The node checks the call's
-lease deadline immediately before each device command is sent. Inside the
-call's `actuation_deadline` block, `may_emit_device_command()` is the last step
-before `urlopen()` or `subprocess.run()`, with no other work between them. A
-command checked before its deadline is sent; one checked after it never is.
+lease deadline at the last point it controls before a command is transmitted:
+inside the connection, immediately before the request's first byte is written
+to the socket. A request checked after its deadline is never written.
 
-The residual: if the node process is suspended between that check and the send
-syscall (a scheduler pause, SIGSTOP, a VM freeze), the command leaves late, by
-the length of the suspension. No check in user space can be made atomic with a
-send to a device that doesn't enforce deadlines itself, and an HTTP robot
-doesn't. This residual is the operator's decision (item 127).
+The residual: if the node process is suspended between that check and the
+socket write, the write is late by the length of the suspension. After the
+write, the network and the device's own processing add delays that no check on
+the node can bound. That is the property put to the operator (item 127). A
+device that enforces deadlines itself, such as a facade on the same host
+comparing CLOCK_MONOTONIC, can close it, and that is the follow-up.
 
 The gateway's last check of the stop, the scope, the budget and the breaker is
 at the grant, so a stop that lands after a call's grant can't reach that call.
-Apart from the residual, no relayed device command is sent more than 5 s after
-its start request. Stopping a command already sent is the operator node's job.
+Apart from the residual, no relayed device request is written more than 5 s
+after its start request. Stopping a command already written is the operator
+node's job.
 
 **`RELAY_LEASE_ENFORCE=off` must never be used on an armed (physically
 actuating) deployment:** it serves executors that take no lease at all.
