@@ -340,6 +340,8 @@ describe("verdict 102f: the pack's claims hold, and its schema enforces contract
       const text = raw.replace(/\\\n\s*/g, " "); // join shell line continuations
       const lines = [...text.matchAll(/pip3?\b[^\n`]*?\binstall\b[^\n`]*pcc-node[^\n`]*/gi)].map((m) => m[0]);
       for (const line of lines) {
+        // Every install names >=0.1.1 or the pinned commit (102h): an unversioned install is refused.
+        expect(line, `${file}: ${line}`).toMatch(/pcc-node(?:\[[^\]]*\])?>=0\.1\.1|pcc-node\[crypto\] @ git\+https:\/\/github\.com\/LamaSu\/physical-capability-cloud@[0-9a-f]{40}#subdirectory=packages\/pcc-node/);
         // A version spec on pcc-node is exactly >=0.1.1, or the pinned commit.
         for (const spec of line.matchAll(/pcc-node(?:\[[^\]]*\])?\s*([<>=!~][^\s"'`;&|\\]*)/g)) {
           expect(spec[1], `${file}: ${line}`).toBe(">=0.1.1");
@@ -485,6 +487,39 @@ describe("verdict 102g: offers are claims, the report schema is contract v1, and
     }
   });
 
+  it("F1 (102h): no copy treats an offer's verified flag as outcome proof", () => {
+    for (const [file, text] of COPIES) {
+      expect(text, file).not.toMatch(/trust the gateway's `verified` flag|verified flag, not your own optimism|sourceVerifyUrl passed\)/);
+      for (const m of text.matchAll(/`?(?:offer\.)?verified(?:: true)?`?[^\n]{0,40}(?:means|proves|boolean)/g)) {
+        const around = text.slice(m.index!, m.index! + 400);
+        expect(around, `${file}: ${m[0]}`).toMatch(/not proof of fulfillment/);
+      }
+    }
+  });
+
+  it("F1 (102h binding): an offer is verified while still open, with no work and no evidence", async () => {
+    const { createServer } = await import("node:http");
+    const upstream = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    try {
+      const port = (upstream.address() as { port: number }).port;
+      const created = await app.inject({
+        method: "POST", url: "/api/job-offers", headers: { authorization: `Bearer ${posterKey}` },
+        payload: { capabilityType: "pizza.order", requirements: { shopId: "shop-2", externalRef: "order-9" },
+          pricing: { amount: 18.5, currency: "USD", model: "fixed" }, sourceVerifyUrl: `http://127.0.0.1:${port}/orders/9` },
+      });
+      expect(created.statusCode, created.body).toBeLessThan(300);
+      const body = created.json() as { id?: string; offer?: { id: string } };
+      const got = await app.inject({ method: "GET", url: `/api/job-offers/${body.offer?.id ?? body.id}` });
+      const offer = (got.json() as { offer: { verified: boolean; status: string } }).offer;
+      // If verified ever comes to mean fulfillment, the pack's verified text must change.
+      expect(offer.verified).toBe(true);
+      expect(offer.status).toBe("open");
+    } finally {
+      upstream.close();
+    }
+  });
+
   it("F1 (binding): on this gateway any key can mark an offer delivered, with no evidence", async () => {
     const created = await app.inject({
       method: "POST", url: "/api/job-offers", headers: { authorization: `Bearer ${posterKey}` },
@@ -531,6 +566,7 @@ describe("verdict 102g: offers are claims, the report schema is contract v1, and
         ...base, durationMs: null, summary: null, detail: null, traceId: null,
         device: { make: null, model: null, class: null }, env: { os: null, python: null, pccNode: null },
         pack: { version: null, digest: null }, ids: { kernelId: null, capabilityId: null, kitId: null, jobId: null },
+        consent: null,
       }],
     ])("accepts %s, as contract v1 does", async (_label, body) => {
       expect(await status(body)).toBe(200);
@@ -560,19 +596,32 @@ describe("verdict 102g: offers are claims, the report schema is contract v1, and
     // The oracle tools say the gateway answers 404: it does, for each of their endpoints.
     const oracle = tools.filter((t) => t.endpoint.path.startsWith("/api/oracle/"));
     expect(oracle.length).toBeGreaterThan(0);
+    const routeTable = app.printRoutes({ commonPrefix: false });
+    expect(routeTable).toContain("/api/onboard/start"); // the table lists full paths, so the next check is not vacuous
+    expect(routeTable).not.toContain("/api/oracle");
     for (const t of oracle) {
+      // A body with every required field, so a handler that served valid requests could not hide behind a 400.
+      const props = (t.input_schema.properties ?? {}) as Record<string, { type?: string }>;
+      const body = Object.fromEntries(((t.input_schema.required ?? []) as string[]).map((f) =>
+        [f, props[f]?.type === "object" ? {} : props[f]?.type === "number" || props[f]?.type === "integer" ? 1 : "x"]));
       const res = await app.inject({ method: t.endpoint.method as "GET" | "POST", url: t.endpoint.path, headers: auth,
-        ...(t.endpoint.method === "GET" ? {} : { payload: {} }) });
+        ...(t.endpoint.method === "GET" ? {} : { payload: body }) });
       expect(res.statusCode, t.name).toBe(404);
+      expect(res.json().message, t.name).toBe(`Route ${t.endpoint.method}:${t.endpoint.path} not found`);
     }
-    // N75: announcing capabilities stores none.
-    const { getRepos } = await import("../db.js");
+    // N75: announcing capabilities stores none: no row in the table, even after async work had time to run.
+    const { getRepos, getStore } = await import("../db.js");
+    const { schema } = await import("@pcc/store");
+    const rows = () => (getStore().db as any).select().from(schema.capabilities).all().length as number;
     const kernelId = "kernel_announce_probe";
-    const before = getRepos().capabilities.findByKernel(kernelId).length;
+    const before = rows();
     const announced = await app.inject({ method: "POST", url: `/api/kernels/${kernelId}/capabilities`, headers: auth,
       payload: { capabilities: [{ type: "lab.absorbance", name: "probe" }] } });
     expect(announced.statusCode, announced.body).toBeLessThan(500);
-    expect(getRepos().capabilities.findByKernel(kernelId).length).toBe(before);
+    await new Promise((r) => setTimeout(r, 250));
+    expect(rows()).toBe(before);
+    const listed = await app.inject({ method: "GET", url: `/api/capabilities/by-kernel/${kernelId}`, headers: auth });
+    expect(JSON.stringify(listed.json())).not.toContain("lab.absorbance");
     // create_capability's route stores a capability that can be read back.
     const created = await app.inject({ method: "POST", url: tool("create_capability").endpoint.path, headers: auth,
       payload: { kernelId: "kernel_create_probe", type: "lab.absorbance", name: "probe capability" } });

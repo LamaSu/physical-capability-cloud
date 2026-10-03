@@ -69,7 +69,7 @@ For any binary artifact (STL files, photo evidence, reference images), upload th
 
 1. Poll `GET /api/job-offers/:id`. It answers `{offer, events}`: read `offer.status` and the `events` timeline. `offer.status` is a claim, not proof: `delivered` means someone posted a `delivered` event (`POST /api/job-offers/:id/events`), and on the current gateway any authenticated caller can post one, with no evidence. Nothing sets `settled` today.
 2. Report an outcome only from evidence the gateway actually serves. An offer has no evidence field, so evidence comes as storage CIDs the operator shares (`GET /api/storage/:cid`), or, for work run as a job, from `GET /api/jobs/:jobId/evidence`. Say what it shows, and that PCC has not verified it.
-3. If the request involved an external system (Domino's, Uber, etc.) and there's an `externalRef` in the offer's requirements, the gateway will have a `sourceVerifyUrl` checking it — trust the gateway's `verified` flag, not your own optimism.
+3. If the offer names an external reference (an `externalRef` the poster's `sourceVerifyUrl` checks), `offer.verified: true` means only that the URL answered 2xx and did not say `placed: false` or `valid: false` when the offer was posted or last re-checked. It is not proof of fulfillment or delivery: it can be true while the offer is still `open`. Report an outcome only from evidence.
 4. If the user asked for something time-bound ("food before 7pm"), check that the timestamp is satisfied before reporting "ordered". A status of `open` past the deadline = nobody claimed it.
 
 Never report "ordered", "delivered", "complete" or "done" from a status alone: only from evidence you have read.
