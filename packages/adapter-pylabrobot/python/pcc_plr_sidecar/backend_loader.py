@@ -46,6 +46,15 @@ lock for that serial and the robot at the configured address must report that
 very serial, so no two devices or sidecars on a host can drive one robot,
 whatever address spelling, alias or interface each uses (R39 r6).
 
+The boundary (R39 r7, DECISIONS 10:24): this guarantees exclusivity among
+HONEST sidecars on one host, against accidental double control
+(misconfiguration, aliases, restarts). Hostile local users and network
+attackers are kept out by deployment (queue item 124). The install provides
+the robot-lock directory (``/var/lib/pcc-plr/robot-locks``: the sidecars'
+dedicated service user, mode 0700, bind-mounted into every sidecar container);
+the OT-2 sits on an isolated segment at a static address with no proxy or DNS
+name in between; and there is one PCC host per OT-2.
+
 A small ``stub`` backend exists for tests. It is used only when ``plrBackend``
 is ``"stub"``, never as a fallback, and every result it gives says
 ``executionMode: "stub"``.
@@ -309,13 +318,14 @@ async def _confirm_robot(identity: RobotIdentity) -> str:
     return reported
 
 
-# R39 r6: ONE lock namespace per host. No environment variable or temp-dir
-# setting can move it, so two sidecars on a host can never hold two locks on
-# one robot. Linux uses its lock directory, /run/lock (the FHS /var/lock): one
-# tmpfs shared by every process on the host, outside systemd's PrivateTmp, and
-# sticky world-writable (1777) on Debian and Ubuntu. Other POSIX systems use
-# /tmp. A host where it can't be used refuses to drive hardware.
-_LOCK_NAMESPACE = "/run/lock/pcc-plr-robots" if sys.platform.startswith("linux") else "/tmp/pcc-plr-robots"
+# R39 r6/r7: ONE robot-lock directory per host, provided by the INSTALL (operator
+# rule, queue item 124; DECISIONS 10:24). The installer creates it, owned by the
+# sidecars' dedicated service user with mode 0700 (never 1777), and bind-mounts
+# it into every sidecar container. No sidecar creates, moves or loosens it, and
+# no environment variable or temp-dir setting changes where it is. A sidecar
+# that finds it missing, not a directory, a symlink, owned by another user, or
+# writable by group or others refuses to drive hardware.
+_LOCK_NAMESPACE = "/var/lib/pcc-plr/robot-locks"
 
 
 def _lock_file_name(key: str) -> str:
@@ -323,31 +333,24 @@ def _lock_file_name(key: str) -> str:
 
 
 def _open_lock_namespace(path: str) -> int:
-    """Open (creating if needed) the host's lock directory, returning its fd.
-
-    It is shared by every sidecar user on the host (1777: sticky, so no one can
-    remove or replace another's lock file). A symlink in its place, or a
-    directory others may write to without the sticky bit, is refused.
-    """
+    """Open the install-provided robot-lock directory, returning its fd. Raises
+    OSError when it is missing or isn't exactly what the install promises: a
+    real directory (not a symlink), owned by this service user, and writable by
+    no one else."""
     parent, leaf = os.path.split(path)
     parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        try:
-            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
-        except FileExistsError:
-            pass
         dir_fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     finally:
         os.close(parent_fd)
     try:
         info = os.fstat(dir_fd)
-        if info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) != 0o1777:
-            os.fchmod(dir_fd, 0o1777)
-            info = os.fstat(dir_fd)
         if not stat.S_ISDIR(info.st_mode):
             raise OSError(f"{path} is not a directory")
-        if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
-            raise OSError(f"{path} is writable by others but not sticky")
+        if info.st_uid != os.geteuid():
+            raise OSError(f"{path} is not owned by this sidecar's service user")
+        if info.st_mode & 0o022:
+            raise OSError(f"{path} is writable by group or others")
     except BaseException:
         os.close(dir_fd)
         raise
@@ -359,10 +362,16 @@ class EndpointLock:
     (R39 r4; keyed by the robot's serial since r6). ``flock`` locks belong to an
     open file description, so a second device id in this sidecar, or any other
     sidecar on this host, cannot take it while it is held, and a crashed
-    process releases it with its fds. Lock files live in the host's one lock
-    namespace (``_LOCK_NAMESPACE``) and are never deleted, so a lock is always
-    one inode. Two hosts driving one robot are outside it: the robot-server's
-    own single current run is the guard there."""
+    process releases it with its fds. Lock files live in the install-provided
+    robot-lock directory (``_LOCK_NAMESPACE``). A sidecar creates one on first
+    use (0600, its own) and never deletes it, so a lock is always one inode.
+
+    The boundary (R39 r7, DECISIONS 10:24): this guarantees exclusivity among
+    HONEST sidecars on one host, against accidental double control
+    (misconfiguration, aliases, restarts). Hostile local users and network
+    attackers are kept out by deployment (queue item 124): the service user's
+    0700 lock directory, the OT-2 on an isolated segment at a static address
+    with no proxy or DNS name in between, and one PCC host per OT-2."""
 
     def __init__(self, fd: int, key: str) -> None:
         self._fd: Optional[int] = fd
@@ -378,14 +387,14 @@ class EndpointLock:
             dir_fd = _open_lock_namespace(_LOCK_NAMESPACE)
         except (OSError, NotImplementedError) as e:
             raise DeviceBusy(
-                f"the host lock directory {_LOCK_NAMESPACE} is unusable ({e}); refusing to drive hardware",
+                f"the robot-lock directory {_LOCK_NAMESPACE} is unusable ({e}); it comes from the "
+                "install (service user, mode 0700): refusing to drive hardware",
             ) from e
         try:
-            # O_RDONLY is enough for flock, and lets every sidecar user open a
-            # lock file another user created; O_NONBLOCK so a FIFO planted in its
-            # place can't hang the open.
+            # O_RDONLY is enough for flock; O_NONBLOCK so a FIFO in its place
+            # can't hang the open; created 0600, the service user's alone.
             fd = os.open(
-                _lock_file_name(key), os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644,
+                _lock_file_name(key), os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
                 dir_fd=dir_fd,
             )
         except OSError as e:
@@ -396,8 +405,8 @@ class EndpointLock:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise DeviceBusy(f"the lock file for {key} is not a regular file; refusing to drive it")
-            if info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) != 0o644:
-                os.fchmod(fd, 0o644)  # readable by every sidecar user, whatever the umask
+            if info.st_uid != os.geteuid():
+                raise DeviceBusy(f"the lock file for {key} is not this service user's; refusing to drive it")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except DeviceBusy:
             os.close(fd)

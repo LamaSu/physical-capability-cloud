@@ -21,9 +21,15 @@ def _private_robot_locks_and_one_test_robot(tmp_path, monkeypatch):
     and refuse the next test's init of the same robot. And no test reaches the
     network: every OT-2 address answers as one test robot unless the test
     installs its own robots."""
+    import os
+
     from pcc_plr_sidecar import backend_loader
 
-    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(tmp_path / "robot-locks"))
+    # The install provides the robot-lock directory (R39 r7): the service user's, mode 0700.
+    locks = tmp_path / "robot-locks"
+    locks.mkdir()
+    os.chmod(locks, 0o700)
+    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(locks))
     monkeypatch.setattr(backend_loader, "_robot_serial", lambda host, port: TEST_ROBOT_SERIAL)
 
 

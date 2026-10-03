@@ -629,26 +629,54 @@ def test_the_lock_namespace_refuses_a_symlink_in_its_place(tmp_path, monkeypatch
     assert list(elsewhere.iterdir()) == []
 
 
-def test_a_lock_namespace_others_can_write_must_be_sticky(tmp_path, monkeypatch):
+def _install_lock_dir(path, mode=0o700):
+    path.mkdir()
+    os.chmod(path, mode)
+    return path
+
+
+def test_a_missing_robot_lock_directory_refuses_hardware_and_is_never_created(tmp_path, monkeypatch):
+    # R39 r7 (DECISIONS 10:24): the directory comes from the install, never from the first sidecar.
     from pcc_plr_sidecar import backend_loader
 
-    ns = tmp_path / "ns"
-    ns.mkdir()
-    os.chmod(ns, 0o777)
+    missing = tmp_path / "not-installed"
+    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(missing))
+    with pytest.raises(backend_loader.DeviceBusy, match="comes from the install"):
+        backend_loader.EndpointLock.acquire("ot2-serial:x")
+    assert not missing.exists()
+
+
+@pytest.mark.parametrize("mode", [0o777, 0o1777, 0o770, 0o720])
+def test_a_robot_lock_directory_others_can_write_is_refused(tmp_path, monkeypatch, mode):
+    from pcc_plr_sidecar import backend_loader
+
+    ns = _install_lock_dir(tmp_path / "ns", mode)
     monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(ns))
-    real_euid = os.geteuid()
-    monkeypatch.setattr(os, "geteuid", lambda: real_euid + 1)  # as if another user created it
-    with pytest.raises(backend_loader.DeviceBusy, match="not sticky"):
+    with pytest.raises(backend_loader.DeviceBusy, match="writable by group or others"):
         backend_loader.EndpointLock.acquire("ot2-serial:x")
     assert list(ns.iterdir()) == []
+    import stat as st
+
+    assert st.S_IMODE(ns.stat().st_mode) == mode  # never loosened or tightened by a sidecar
 
 
-def test_our_lock_namespace_and_lock_files_are_shared_by_every_sidecar_user(tmp_path, monkeypatch):
+def test_a_robot_lock_directory_of_another_user_is_refused(tmp_path, monkeypatch):
     from pcc_plr_sidecar import backend_loader
 
-    ns = tmp_path / "ns"
+    ns = _install_lock_dir(tmp_path / "ns")
     monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(ns))
-    old_umask = os.umask(0o077)
+    real_euid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_euid + 1)  # as if another service user ran it
+    with pytest.raises(backend_loader.DeviceBusy, match="not owned by this sidecar's service user"):
+        backend_loader.EndpointLock.acquire("ot2-serial:x")
+
+
+def test_lock_files_are_the_service_users_alone(tmp_path, monkeypatch):
+    from pcc_plr_sidecar import backend_loader
+
+    ns = _install_lock_dir(tmp_path / "ns")
+    monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(ns))
+    old_umask = os.umask(0)
     try:
         lock = backend_loader.EndpointLock.acquire("ot2-serial:x")
     finally:
@@ -656,10 +684,33 @@ def test_our_lock_namespace_and_lock_files_are_shared_by_every_sidecar_user(tmp_
     try:
         import stat as st
 
-        assert st.S_IMODE(ns.stat().st_mode) == 0o1777
-        assert st.S_IMODE((ns / backend_loader._lock_file_name("ot2-serial:x")).stat().st_mode) == 0o644
+        info = (ns / backend_loader._lock_file_name("ot2-serial:x")).stat()
+        assert st.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.geteuid()
+        assert st.S_IMODE(ns.stat().st_mode) == 0o700
     finally:
         lock.release()
+
+
+def test_an_honest_sidecar_never_unlinks_or_recreates_its_lock_file(tmp_path, monkeypatch):
+    # astra r6's unlink/recreate case, kept as an honest-sidecar regression (DECISIONS 10:24): no
+    # sidecar removes a lock file, so a released lock and the next holder share one inode, and a
+    # second holder can't exist while the first holds it.
+    from pcc_plr_sidecar import backend_loader
+
+    key = "ot2-serial:" + ROBOT.casefold()
+    path = os.path.join(backend_loader._LOCK_NAMESPACE, backend_loader._lock_file_name(key))
+    first = backend_loader.EndpointLock.acquire(key)
+    inode = os.stat(path).st_ino
+    with pytest.raises(backend_loader.DeviceBusy, match="already driven"):
+        backend_loader.EndpointLock.acquire(key)
+    first.release()
+    assert os.stat(path).st_ino == inode  # still there, the same file
+    again = backend_loader.EndpointLock.acquire(key)
+    try:
+        assert os.stat(path).st_ino == inode
+    finally:
+        again.release()
+    assert os.stat(path).st_ino == inode
 
 
 def test_a_lock_file_that_is_not_a_regular_file_is_refused_without_hanging(tmp_path, monkeypatch):
@@ -667,8 +718,7 @@ def test_a_lock_file_that_is_not_a_regular_file_is_refused_without_hanging(tmp_p
 
     from pcc_plr_sidecar import backend_loader
 
-    ns = tmp_path / "ns"
-    ns.mkdir()
+    ns = _install_lock_dir(tmp_path / "ns")
     monkeypatch.setattr(backend_loader, "_LOCK_NAMESPACE", str(ns))
     key = "ot2-serial:x"
     lock_path = ns / backend_loader._lock_file_name(key)

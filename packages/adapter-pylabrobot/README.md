@@ -98,10 +98,28 @@ Per-device overrides via `config.pythonPath`, `config.rpcTimeoutMs`,
 | Backend       | Config keys                          | Notes |
 |---------------|--------------------------------------|-------|
 | `chatterbox`  | `deckLayout` or `deckLayoutPath` (required), `numChannels?` (1–96), `maxVolumeUL?`, `initialLiquids?`, `tracking?` | PLR's `LiquidHandlerChatterboxBackend`: an in-memory digital twin of the declared deck. Dry-run only: `executionMode: "simulated"`, and its evidence is marked `mock: true`. |
-| `ot2`         | `ot2Url`, `robotSerial`, `deckLayout` or `deckLayoutPath` (an `OTDeck`, required), `maxVolumeUL?`, `initialLiquids?` | Opentrons OT-2 via PLR's `OpentronsOT2Backend(host, port)`. `robotSerial` is the robot's serial number, as its robot-server reports it (`GET http://<robot>:31950/health`, `robot_serial`). Before anything is built, the sidecar takes this host's lock for that serial (in `/run/lock/pcc-plr-robots` on Linux, `/tmp/pcc-plr-robots` elsewhere; no setting moves it), and the robot at `ot2Url` must report that very serial. So no two devices or sidecars on a host drive one robot, whatever address, alias or interface each uses (R39 r6). A host where that directory can't be used refuses to drive hardware. `executionMode: "unverified"` — the backend name alone never proves physical execution (R39 CRIT1); no hardware-identity provenance check exists yet (D1, queue item 19), so `ot2` evidence stays marked `mock: true` too, same as a simulator. Requires the `[ot2]` extra (PLR's own `opentrons` extra). Tip and volume tracking are always on. |
+| `ot2`         | `ot2Url`, `robotSerial`, `deckLayout` or `deckLayoutPath` (an `OTDeck`, required), `maxVolumeUL?`, `initialLiquids?` | Opentrons OT-2 via PLR's `OpentronsOT2Backend(host, port)`. `robotSerial` is the robot's serial number, as its robot-server reports it (`GET http://<robot>:31950/health`, `robot_serial`). Before anything is built, the sidecar takes this host's lock for that serial and the robot at `ot2Url` must report that very serial. So no two honest devices or sidecars on a host drive one robot, whatever address, alias or interface each uses (R39 r6, r7; see *Deploying an OT-2* below). `executionMode: "unverified"` — the backend name alone never proves physical execution (R39 CRIT1); no hardware-identity provenance check exists yet (D1, queue item 19), so `ot2` evidence stays marked `mock: true` too, same as a simulator. Requires the `[ot2]` extra (PLR's own `opentrons` extra). Tip and volume tracking are always on. |
 | `stub`        | (none)                               | Pure-stdlib test backend, used only when `plrBackend` is `"stub"`; nothing falls back to it. `executionMode: "stub"`, evidence marked `mock: true`. |
 
 Phase 2 extends with `flex`, `star`, `vantage`, `evo`, `hamilton-hhs`, `inheco-thermoshake`. Phase 3 adds `clariostar`, `cytation5`, `inheco-odtc`, `vspin`. Phase 4 adds `cytomat-2`, `cytomat-6`, `liconic-stx`.
+
+## Deploying an OT-2 (operator rules, queue item 124)
+
+**The boundary (R39 r7, DECISIONS 10:24).** The sidecar guarantees exclusivity among
+HONEST sidecars on one host, against accidental double control: misconfiguration,
+address aliases and restarts. Hostile local users and network attackers are kept
+out by deployment, not by the sidecar:
+
+- **The robot-lock directory comes from the install.** Create
+  `/var/lib/pcc-plr/robot-locks` owned by the sidecars' dedicated service user,
+  mode `0700` (never `1777`), and bind-mount it into every sidecar container.
+  Run every sidecar as that user. A sidecar never creates or changes the
+  directory. It refuses to drive hardware if the directory is missing, is a
+  symlink, is owned by another user, or is writable by group or others. Lock
+  files inside it are created on first use (`0600`) and never deleted.
+- **The OT-2 sits on an isolated network segment at a static address**, with no
+  proxy or DNS name between the sidecar and the robot.
+- **One PCC host per OT-2.**
 
 ## Usage
 
