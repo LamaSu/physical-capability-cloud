@@ -25,6 +25,9 @@ export * from "./is-fabricated.js";
 // signingPreimage / sessionKeyDelegationPreimage — the ONE LO-EV-1 signing byte
 // contract every Ed25519 producer and consumer of evidence builds its message from.
 export * from "./signing-preimage.js";
+// verifyEvidenceSubjectBinding — LO-EV-9: a signed bundle digest must open to
+// events that commit the job, the accepting kernel and (when known) the output.
+export * from "./subject-binding.js";
 // evidenceLevelOfBundles / evidenceLevelsOfEvents / deriveContradictions /
 // inspectionVerdict — submitted / device_reported / inspected_output, the one
 // classification of how strongly evidence shows the work was done (must-close 5).
