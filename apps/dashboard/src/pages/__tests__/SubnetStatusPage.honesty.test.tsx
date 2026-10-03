@@ -164,6 +164,23 @@ const CASCADE_EMPTY: Reply = {
   },
 };
 
+// What the gateway's bridge would report if its own invariants ever broke:
+// a score outside the verification-confidence scale, and an activeOracles
+// count that doesn't match any oracle actually marked available.
+const CASCADE_OFF_SCHEMA: Reply = {
+  status: 200,
+  body: {
+    available: true,
+    metrics: {
+      totalVerifications: 5,
+      averageScore: 4,
+      activeOracles: 5,
+      recentResults: [{ oracle: "uma", passed: true, score: -2, timestamp: "2026-09-24T11:59:00Z" }],
+    },
+    oracles: [{ name: "uma", available: true, totalVerifications: 5, averageScore: 4, isPrimary: true }],
+  },
+};
+
 // ── outage ───────────────────────────────────────────────────────────────────
 
 describe("gateway unreachable", () => {
@@ -267,6 +284,31 @@ describe("gateway running the oracle cascade live", () => {
     const t = container.textContent ?? "";
     expect(t).toContain("Couldn't refresh oracle status");
     expect(t).toContain("0.712");
+  });
+});
+
+// ── off-schema metrics (astra 408c F2) ────────────────────────────────────────
+
+/**
+ * astra 408c, finding F2 (MEDIUM): the oracle parser checked counts but only
+ * required scores to be finite numbers, and never reconciled `activeOracles`
+ * against the oracle list it returned alongside it. Reproduction below is
+ * astra's cheapest repro, run against the reviewed code: a response can
+ * report an average score of 4, 5 active oracles against a 1-entry oracle
+ * list, and a recent result scored -2, and the page renders all three as if
+ * they were genuine oracle state.
+ */
+describe("gateway running the oracle cascade live, with off-schema metrics (astra 408c F2)", () => {
+  it("fails the read instead of rendering an out-of-range average, active-oracle count, or result score", async () => {
+    stubFetch({
+      "/api/status/live": statusLive("real"),
+      "/api/verification/subnet-status": CASCADE_OFF_SCHEMA,
+    });
+    const t = await renderPage();
+    expect(t).not.toContain("4.000");
+    expect(t).not.toContain("-2.000");
+    expect(t).not.toContain("5 / 1");
+    expect(t).toContain("Couldn't load oracle status");
   });
 });
 

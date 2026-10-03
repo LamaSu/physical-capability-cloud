@@ -108,3 +108,58 @@ describe("TemplateMatchFinder", () => {
     expect(cards()).toHaveLength(0);
   });
 });
+
+/**
+ * astra 408c, finding F1 (MEDIUM): malformed match responses became
+ * valid-looking partial or empty results instead of a failed read. Before the
+ * fix, the component filtered invalid rows out of `matches` one at a time
+ * (so a batch with one bad row still rendered the good ones, or rendered the
+ * "No matches" empty state when all rows were bad) and accepted any numeric
+ * score without range-checking it. Reproductions below are astra's cheapest
+ * repros, run against the reviewed code.
+ */
+describe("TemplateMatchFinder — malformed match response (astra 408c F1)", () => {
+  it("rejects the whole response when a score is out of [0,1], instead of rendering it as a percentage over 100", async () => {
+    matchReply = {
+      status: 200,
+      body: { matches: [{ slug: "physical-operator", score: 2, reason: "mentions a 3D printer" }] },
+    };
+    await match("I run a 3D printing shop");
+    expect(container.textContent).not.toContain("200%");
+    expect(cards()).toHaveLength(0);
+  });
+
+  it("rejects the whole response when every row is invalid, instead of claiming the search legitimately found no matches", async () => {
+    matchReply = {
+      status: 200,
+      // A string score is the alternate cheapest repro astra gave: the old
+      // code's filter drops it (not a `typeof === "number"`), leaving an
+      // empty `matches` array that renders the same "No matches" copy a
+      // real, successful, zero-result search would.
+      body: { matches: [{ slug: "physical-operator", score: "high", reason: "mentions a 3D printer" }] },
+    };
+    await match("I run a 3D printing shop");
+    expect(container.textContent).not.toContain("No matches");
+    expect(cards()).toHaveLength(0);
+  });
+
+  it("a directory entry with an empty display name and description is treated as absent, not rendered blank", async () => {
+    directoryReply = {
+      status: 200,
+      body: {
+        templates: [{ slug: "physical-operator", display_name: "", description: "", capability_class: "physical" }],
+      },
+    };
+    matchReply = {
+      status: 200,
+      body: { matches: [{ slug: "physical-operator", score: 0.8, reason: "mentions a 3D printer" }] },
+    };
+    await match("I run a 3D printing shop");
+    const [first] = cards();
+    // `display_name ?? m.slug` and `description ?? "...couldn't be loaded..."`
+    // only fall back on null/undefined — an empty string passes straight
+    // through today, rendering a blank name and a blank description instead
+    // of the existing "details missing" copy an absent/unlisted slug gets.
+    expect(first!.textContent).toContain("Template details couldn't be loaded from the gateway.");
+  });
+});
