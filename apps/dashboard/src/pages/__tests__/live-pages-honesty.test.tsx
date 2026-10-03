@@ -623,7 +623,10 @@ describe("F. the leaderboard reads every page of /api/capabilities", () => {
 
     const t = await renderPage(<KernelLeaderboardPage />);
 
-    expect(calls).toEqual(["offset=0&limit=200", "offset=200&limit=200"]);
+    // A two-page read that looks complete re-reads page 1 once to check it
+    // against a snapshot/revision- or cursor-free gateway (astra 18c MEDIUM);
+    // this list is unchanging, so the re-read matches and adds no notice.
+    expect(calls).toEqual(["offset=0&limit=200", "offset=200&limit=200", "offset=0&limit=200"]);
     expect(t).not.toContain("Ranked over the first");
     expect(t).toMatch(/Kernels\s*5/);
     expect(t).not.toMatch(/Kernels\s*5\+/);
@@ -1121,25 +1124,29 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
     });
 
     it("a read that changed between pages is never presented as complete (astra 18c MEDIUM)", async () => {
-      // Page 1 (offset 0) reads the list before it mutates: c0..c199 of 250.
-      // The list then mutates — c0 removed, c250 appended, total unchanged —
-      // and every request after the first serves the post-mutation list. So
-      // page 2 (offset 200) answers with c201..c250, and a re-read of page 1
-      // would answer with c1..c200, not c0..c199 again.
+      // astra's example: page 1 (offset 0) reads c0..c199 of 250, then the
+      // list mutates — c0 removed, c250 appended, total unchanged — and page
+      // 2 (offset 200) answers with c201..c250. Total stays 250 and no id
+      // repeats, so the pre-fix checks certified the combined read complete
+      // despite c200 being missing.
+      //
+      // Modelled here as the list shifting by one more element on every
+      // single request (never settling), rather than mutating exactly once:
+      // a one-time mutation is what astra described, but it also makes the
+      // query's own retry (configured on this hook) re-read a since-settled
+      // list and succeed — correctly, since nothing is inconsistent once the
+      // list has stopped moving. An indefinitely moving list keeps every
+      // attempt, including the retry, inconsistent, so the fix's protection
+      // is what's under test here rather than the hook's retry behavior.
       let calls = 0;
-      const postMutation = (offset: number) => {
-        const n = Math.min(200, 250 - offset);
-        return Array.from({ length: n }, (_, i) => ({ id: `c${offset + i + 1}`, kernelId: "k1", type: "hplc", queueDepth: 0 }));
-      };
       stubCapabilityPages((offset) => {
+        const shift = calls;
         calls++;
-        if (calls === 1) return { items: caps(0, 200), total: 250, offset, limit: 200, hasMore: true };
-        return { items: postMutation(offset), total: 250, offset, limit: 200, hasMore: offset + 200 < 250 };
+        const n = Math.min(200, 250 - offset);
+        const items = Array.from({ length: n }, (_, i) => ({ id: `c${offset + i + shift}`, kernelId: "k1", type: "hplc", queueDepth: 0 }));
+        return { items, total: 250, offset, limit: 200, hasMore: offset + 200 < 250 };
       });
       const t = await renderPage(<KernelLeaderboardPage />);
-      // Before the fix: page 1 (c0..c199) plus page 2 (c201..c250) add up to
-      // 250 unique ids, so the existing checks certified the read complete
-      // despite c200 being missing and the list having moved mid-read.
       expect(t).toContain("Couldn't load the leaderboard");
       expect(t).not.toContain("Ranked over the first");
     });

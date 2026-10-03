@@ -169,6 +169,8 @@ export interface AllCapabilities {
   total: number;
   /** True when every listed capability was read; a ranking over fewer is only partial. */
   complete: boolean;
+  /** How many GET /api/capabilities requests were combined to build this list (not counting the astra-18c re-read below). */
+  pages: number;
 }
 
 /**
@@ -183,44 +185,93 @@ export interface AllCapabilities {
  * - a page answers for an offset other than the one asked;
  * - its hasMore disagrees with its own offset, limit and total;
  * - an id repeats;
- * - more rows arrive than the total.
+ * - more rows arrive than the total;
+ * - any page omits offset, limit or hasMore. The real gateway always sends
+ *   all three (packages/gateway/src/facades/capability.facade.ts), so a page
+ *   without them would otherwise silently skip the two checks above that
+ *   read them (astra 18c MEDIUM).
  * A page that comes back empty before the total is reached ends the read,
  * which is then marked incomplete, as is one that stops at
  * CAPABILITIES_MAX_PAGES.
+ *
+ * None of the above proves the pages came from one unchanging list: offset
+ * pagination has no snapshot, revision or cursor, so the backing list can
+ * mutate between two requests and still pass every check above — a row
+ * removed from an earlier page and a row appended past the last one keeps
+ * the total unchanged and every id unique (astra 18c MEDIUM). So when a read
+ * spans more than one page and would otherwise be reported complete, page 1
+ * is re-read and compared to what the first read of it returned; a total or
+ * an id-sequence mismatch is treated the same as a changed total. A
+ * single-page read skips this: one request is already one snapshot, and
+ * there is nothing to compare it against. The real fix is a gateway
+ * snapshot/revision token or a cursor, so that a re-read of page 1 is always
+ * the same page 1; that is routed as a follow-up, not attempted here.
  */
 export function useAllCapabilities() {
   return useQuery<AllCapabilities>({
     queryKey: ["capabilities", "all"],
     queryFn: async () => {
       const route = "/api/capabilities";
+
+      /** One page, with the metadata every check below needs already validated present. */
+      const readPage = async (offset: number) => {
+        const res = await api.getCapabilities({ offset, limit: CAPABILITIES_PAGE_LIMIT });
+        if (!isRecord(res) || !isCount(res.total)) throw new Error(`unexpected response shape from ${route}`);
+        if (typeof res.offset !== "number" || typeof res.limit !== "number" || typeof res.hasMore !== "boolean") {
+          throw new Error(`unexpected response shape from ${route}`);
+        }
+        return res as { items: unknown; total: number; offset: number; limit: number; hasMore: boolean };
+      };
+
       const items: CapabilityDTO[] = [];
       const seen = new Set<string>();
       let total: number | null = null;
+      let pages = 0;
+      let firstPageIds: string[] = [];
       for (let page = 0; page < CAPABILITIES_MAX_PAGES; page++) {
         const offset = items.length;
-        const res = await api.getCapabilities({ offset, limit: CAPABILITIES_PAGE_LIMIT });
-        if (!isRecord(res) || !isCount(res.total)) throw new Error(`unexpected response shape from ${route}`);
+        const res = await readPage(offset);
         const rows = rowsOrThrow<CapabilityDTO>(res.items, route, capabilityRowOk);
         if (total !== null && res.total !== total) {
           throw new Error(`the capability list changed while it was read (${route} total ${total}, then ${res.total})`);
         }
         total = res.total;
-        if (typeof res.offset === "number" && res.offset !== offset) {
+        if (res.offset !== offset) {
           throw new Error(`${route} answered for offset ${res.offset} when offset ${offset} was asked`);
         }
-        if (typeof res.hasMore === "boolean" && typeof res.limit === "number" && res.hasMore !== offset + res.limit < total) {
+        if (res.hasMore !== offset + res.limit < total) {
           throw new Error(`${route} hasMore disagrees with its offset, limit and total`);
         }
         for (const row of rows) {
           if (seen.has(row.id)) throw new Error(`${route} listed capability ${row.id} twice`);
           seen.add(row.id);
         }
+        if (page === 0) firstPageIds = rows.map((row) => row.id);
         items.push(...rows);
+        pages++;
         if (items.length > total) throw new Error(`${route} returned more rows than its total of ${total}`);
         if (items.length === total || rows.length === 0) break;
       }
+
       const read = total ?? 0;
-      return { items, total: read, complete: items.length === read };
+      const complete = items.length === read;
+
+      // astra 18c MEDIUM: a read that took more than one page and looks
+      // complete is exactly the case with no snapshot proof. Re-read page 1
+      // and compare; a read that was already incomplete needs no extra
+      // proof, and a single page was never at risk of this.
+      if (complete && pages > 1) {
+        const reread = await readPage(0);
+        const rows = rowsOrThrow<CapabilityDTO>(reread.items, route, capabilityRowOk);
+        const ids = rows.map((row) => row.id);
+        const unchanged =
+          reread.total === total && ids.length === firstPageIds.length && ids.every((id, i) => id === firstPageIds[i]);
+        if (!unchanged) {
+          throw new Error(`the capability list changed while it was read (a re-read of ${route}'s first page no longer matches)`);
+        }
+      }
+
+      return { items, total: read, complete, pages };
     },
     retry: 1,
     staleTime: 30_000,

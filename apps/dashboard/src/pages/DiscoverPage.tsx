@@ -56,7 +56,7 @@ export function DiscoverPage() {
   // The capabilities operators list (GET /api/capabilities, every page), not
   // the template catalog: a template describes a kind of work, not anyone
   // offering it (astra 18b F2). useAllCapabilities validates every row.
-  const { items: capabilities, total, complete } = capabilitiesQ.data;
+  const { items: capabilities, total, complete, pages } = capabilitiesQ.data;
   const kernels = kernelsQ.isSuccess ? kernelsQ.data : undefined;
 
   const filtered = capabilities.filter((cap) => {
@@ -199,6 +199,11 @@ export function DiscoverPage() {
             <p role="status" className="text-xs text-amber-200/70">
               Showing the first {capabilities.length} of the {total} capabilities the gateway lists; search and filters cover
               only these.
+            </p>
+          )}
+          {pages > 1 && (
+            <p className="text-xs text-white/30">
+              Read in {pages} pages; the gateway gives no snapshot across pages.
             </p>
           )}
           <div className="text-xs text-white/30">
