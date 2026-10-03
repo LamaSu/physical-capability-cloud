@@ -872,7 +872,9 @@ describe("astra r5 (#344 @c3e04dd9): findings 1-5 reproduced (verify before fix)
   });
 
   it("F3 (MEDIUM): listRowsOf never accepts a bare array — only the route's own rows key", () => {
-    expect(listRowsOf("/api/jobs", [{ id: "j1" }])).toEqual([]);
+    // null = no collection, distinct from a real empty one (astra 28e H1): a bare array is not
+    // the route's own envelope key, so this is now a rejected (unavailable) shape, not [].
+    expect(listRowsOf("/api/jobs", [{ id: "j1" }])).toBeNull();
   });
 
   it("F4 (MEDIUM): an impossible calendar timestamp fails the whole jobs row closed", () => {

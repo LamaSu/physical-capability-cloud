@@ -19,7 +19,7 @@
  * projection still preserves `format`; it should be updated to drop it. Until then
  * a metric window carrying `format` is rejected — the correct strict signal.
  */
-import type { DashboardManifest } from "@pcc/spec";
+import type { BoundSourceClass, DashboardManifest, RenderSourceClass } from "@pcc/spec";
 
 // Frozen catalog = the EXACT set of node types the adapter emits (nothing more).
 export const IR_NODE_TYPES = [
@@ -339,15 +339,21 @@ export const LIST_PROFILES: Readonly<Record<string, { rows: string; title: reado
   "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"] },
 };
 /** The rows of a list response, read ONLY by the route's PCC-owned rows key (an own property;
- * never a manifest selector, never a bare top-level array — astra r5 F3). A bare array, or any
- * other shape, gives no rows: rows come from the route's own envelope key or not at all. */
-export function listRowsOf(path: string, data: unknown): unknown[] {
+ * never a manifest selector, never a bare top-level array — astra r5 F3). Returns **null** when
+ * there is no collection at all: the path has no LIST_PROFILES entry; `data` is not a non-null,
+ * non-array object; the route's own rows key is not an OWN property of `data`; or its value is
+ * not an array. Returns `[]` ONLY when the route's own rows key holds an empty array — the
+ * source explicitly returned an empty collection. A caller must never treat null as []: an
+ * off-contract envelope is unavailable, never a fresh "none" (astra 28e H1: absence is not
+ * evidence). */
+export function listRowsOf(path: string, data: unknown): unknown[] | null {
   const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path]!.rows : undefined;
-  if (key && data !== null && typeof data === "object" && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, key)) {
-    const v = (data as Record<string, unknown>)[key];
-    if (Array.isArray(v)) return v;
-  }
-  return [];
+  if (!key) return null; // no LIST_PROFILES entry for this path
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null; // not a non-null, non-array object
+  if (!Object.prototype.hasOwnProperty.call(data, key)) return null; // the route's own rows key is not an own property
+  const v = (data as Record<string, unknown>)[key];
+  if (!Array.isArray(v)) return null; // present but not an array
+  return v; // [] here means the source explicitly returned an empty collection
 }
 
 // ── A closed TYPE for every list field (the structural boundary; astra r4 on #344) ───────
@@ -421,6 +427,12 @@ const RESERVED_EXACT: ReadonlySet<string> = new Set([
 ]);
 export type BindSchema = "capability-summary-v1" | "run-summary-v1";
 interface BindPolicy {
+  // Provenance (PX-4): the class, schema and freshness budget of the data this route serves.
+  // Server-owned, like the routes themselves; a manifest can never choose any of these.
+  // Bound data is only ever A (authoritative) or B (accepted), never C/D/E.
+  sourceClass: BoundSourceClass;
+  schemaId: string;
+  maxAgeMs: number; // older than this at render time => visibly stale
   routes: RegExp[];
   // Query parameters a manifest may pass, per exact route path. Anything else (including any
   // credential-like name) is refused: a binding URL never carries a token (review #2504).
@@ -442,12 +454,13 @@ const BIND_POLICY: Record<string, BindPolicy> = {
   // gate is the METRIC_SELECT_LABEL allowlist (PCC-owned label per allowlisted selector) — a
   // manifest can neither select a money/timestamp scalar NOR supply a payment/settlement label.
   metric: {
+    sourceClass: "authoritative", schemaId: "metric-scalar-v1", maxAgeMs: 120_000,
     routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
     needsSelect: true,
   },
   // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
   // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
-  capability: { routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" }, // ID_SEG excludes types/templates/search/graph-*
+  capability: { sourceClass: "authoritative", schemaId: "capability-summary-v1", maxAgeMs: 3_600_000, routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" }, // ID_SEG excludes types/templates/search/graph-*
   // NOTE: `receipt` has NO bind policy — the settlement record is a STATIC POINTER (no
   // fetch). A public read GET cannot reach settlement (auth-gated) and, worse, the
   // endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL
@@ -457,6 +470,7 @@ const BIND_POLICY: Record<string, BindPolicy> = {
   // list: collection reads whose rows are listable ONLY through a PCC-owned field profile
   // (LIST_PROFILES). Escrow is NOT listable: money state appears only in schema cards.
   list: {
+    sourceClass: "authoritative", schemaId: "collection-v1", maxAgeMs: 300_000,
     routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities")],
     queryByRoute: {
       "/api/jobs": ["kernelId", "status", "offset", "limit"],
@@ -468,6 +482,7 @@ const BIND_POLICY: Record<string, BindPolicy> = {
   // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
   // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
   run: {
+    sourceClass: "authoritative", schemaId: "run-summary-v1", maxAgeMs: 60_000,
     routes: [route("/api/jobs/:"), route("/api/jobs/:/status")],
     sse: [route("/sse/stream/job/:")],
     correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") },
@@ -959,6 +974,41 @@ const NODE_SCHEMA: Record<IrNodeType, NodeSpec> = {
   "form-summary": { noBind: true, parentOf: ["field-label"], maxChildren: LIM.fields },
   "field-label": { props: { label: "s400" }, required: ["label"], noBind: true, prose: true, childless: true },
 };
+/** The BIND_POLICY key a node binds under. A card resolves by its kind (run vs capability).
+ *  The SINGLE resolution used by both validateIr and the provenance derivation, so they
+ *  cannot drift. Null for a node type that never binds. */
+export function policyKeyOf(node: IrNode): string | null {
+  const spec = NODE_SCHEMA[node.type as IrNodeType];
+  if (!spec || !spec.bindKey) return null;
+  if (node.type === "card") return node.props && node.props.kind === "run" ? "run" : "capability";
+  return spec.bindKey;
+}
+
+/** Authority class of an IR node (PX-4), DERIVED from its structure and the server-owned
+ *  bind registry, never read from the node or the manifest. Prose (manifest-authored
+ *  words) is always `proposed`; a bindable node takes the class its route is registered
+ *  with; PCC constants (the fixed approval sentence, the static receipt pointer, the
+ *  withheld notice that replaces prose) and containers are not data and return null. A
+ *  forged IR cannot carry a class of its own: validateIr rejects any node key outside the
+ *  closed set, and a withheld slot carries no words. */
+export function sourceClassOf(node: IrNode): RenderSourceClass | null {
+  const spec = NODE_SCHEMA[node.type as IrNodeType];
+  if (!spec) return null;
+  if (spec.prose) return isWithheldProse(node) ? null : "proposed";
+  const key = policyKeyOf(node);
+  const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : undefined;
+  return policy ? policy.sourceClass : null;
+}
+
+export interface BoundProvenance { sourceClass: BoundSourceClass; schemaId: string; maxAgeMs: number }
+/** Provenance of a BOUND node's data (class, schema, freshness budget); null if unbound. */
+export function provenanceOf(node: IrNode): BoundProvenance | null {
+  if (!node.bind) return null;
+  const key = policyKeyOf(node);
+  const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : undefined;
+  return policy ? { sourceClass: policy.sourceClass, schemaId: policy.schemaId, maxAgeMs: policy.maxAgeMs } : null;
+}
+
 function propType(v: unknown, t: PropT): boolean {
   switch (t) {
     case "s400": return typeof v === "string" && v.length > 0 && v.length <= LIM.title;
@@ -1015,7 +1065,7 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
     if (n.bind !== undefined) {
       if (spec.noBind || !spec.bindKey) return `${n.type} must not bind`;
       if (!isPlain(n.bind) || !onlyKeys(n.bind, ["path", "select", "query", "pollMs", "sse", "schema"])) return "bind shape";
-      const bk = n.type === "card" ? ((n.props as any).kind === "run" ? "run" : "capability") : spec.bindKey;
+      const bk = policyKeyOf(n as unknown as IrNode) as string; // ONE resolution, shared with provenanceOf
       const reason = bindMatchesPolicy(n.bind as unknown as IrBind, bk); if (reason) return `bind: ${reason}`;
       if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget"; // poll-amplification cap (mirrors adapter)
     } else if (spec.needsBind) return `${n.type} requires a bind`;

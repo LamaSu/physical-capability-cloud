@@ -53,12 +53,13 @@ describe("#344 r5 typed list fields accept the REAL producers' rows (seeded stor
       const data = res.json() as unknown;
       // The browser binder's own row extraction (dashboard-ir-browser-entry.ts uses listRowsOf).
       const rows = listRowsOf(path, data);
-      expect(rows.length, `${path} returned no rows the binder can read`).toBeGreaterThan(0);
+      expect(rows, `${path}: listRowsOf must find this route's own collection`).not.toBeNull(); // null = no collection, distinct from a real empty one (astra 28e H1)
+      expect(rows!.length, `${path} returned no rows the binder can read`).toBeGreaterThan(0);
       for (const title of prof.title) {
         const listEl = fdoc.createElement("div");
         const props: Record<string, unknown> = { rowTitle: title, rowMeta: [...prof.meta] };
         if (prof.status.length) props.statusFrom = prof.status[0];
-        bindListRows(fdoc, listEl, { type: "list", id: "n1", props, bind: { path } } as unknown as IrNode, rows);
+        bindListRows(fdoc, listEl, { type: "list", id: "n1", props, bind: { path } } as unknown as IrNode, rows!);
         expect((listEl.children as RElement[]).length, `${path} title=${title}: no rows rendered`).toBeGreaterThan(0);
         expect(leaves(listEl), `${path} title=${title}: a real row failed closed`).not.toContain(UNAVAILABLE);
       }
@@ -75,11 +76,12 @@ describe("#344 r5 typed list fields accept the REAL producers' rows (seeded stor
       const res = await app.inject({ method: "GET", url: path });
       expect(res.statusCode).toBe(200);
       const rows = listRowsOf(path, res.json() as unknown);
-      expect(rows.length, `${path} returned no rows`).toBeGreaterThan(0);
+      expect(rows, `${path}: listRowsOf must find this route's own collection`).not.toBeNull(); // null = no collection, distinct from a real empty one (astra 28e H1)
+      expect(rows!.length, `${path} returned no rows`).toBeGreaterThan(0);
       const fields = new Set<string>([...prof.title, ...prof.meta, ...prof.status]);
       for (const field of fields) {
-        const presentCount = rows.filter((row) => isPresent(row, field)).length;
-        expect(presentCount, `${path} field "${field}" is present in 0/${rows.length} real rows (dead profile surface)`).toBeGreaterThan(0);
+        const presentCount = rows!.filter((row) => isPresent(row, field)).length;
+        expect(presentCount, `${path} field "${field}" is present in 0/${rows!.length} real rows (dead profile surface)`).toBeGreaterThan(0);
       }
     });
   }
@@ -88,12 +90,13 @@ describe("#344 r5 typed list fields accept the REAL producers' rows (seeded stor
 describe("listRowsOf reads only the route's own rows key", () => {
   it("own key only, never a prototype key; a bare array (or any other shape) gives no rows", () => {
     expect(listRowsOf("/api/jobs", { jobs: [1, 2] })).toEqual([1, 2]);
-    expect(listRowsOf("/api/jobs", { items: [1] })).toEqual([]); // another route's key
-    expect(listRowsOf("/api/kernels", Object.create({ kernels: [1] }))).toEqual([]); // inherited
+    expect(listRowsOf("/api/jobs", { items: [1] })).toBeNull(); // another route's key — null = no collection, distinct from a real empty one (astra 28e H1)
+    expect(listRowsOf("/api/kernels", Object.create({ kernels: [1] }))).toBeNull(); // inherited — null = no collection, distinct from a real empty one (astra 28e H1)
     // astra r5 F3: a bare array is no longer accepted as-is — only the route's own envelope key
     // is read; rows from anywhere else (including a top-level array) give no rows.
-    expect(listRowsOf("/api/capabilities", [3])).toEqual([]);
-    expect(listRowsOf("/api/unknown", { items: [1] })).toEqual([]);
-    expect(listRowsOf("/api/jobs", { jobs: "x" })).toEqual([]);
+    expect(listRowsOf("/api/capabilities", [3])).toBeNull(); // bare array — null = no collection, distinct from a real empty one (astra 28e H1)
+    expect(listRowsOf("/api/unknown", { items: [1] })).toBeNull(); // unknown path — null = no collection, distinct from a real empty one (astra 28e H1)
+    expect(listRowsOf("/api/jobs", { jobs: "x" })).toBeNull(); // mistyped {jobs:"x"} — null = no collection, distinct from a real empty one (astra 28e H1)
+    expect(listRowsOf("/api/jobs", { jobs: [] })).toEqual([]); // a real empty collection is still [] — the source explicitly returned it
   });
 });

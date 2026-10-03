@@ -23,7 +23,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind, MetricFieldKind } from "./dashboard-ir.js";
-import { LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource } from "./dashboard-ir.js";
+import { sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -33,11 +33,13 @@ export interface RElement {
   className: string;
   readonly children: RElement[];
   setAttr(name: string, value: string): void;
+  /** Optional: hosts that can remove an attribute (the browser does; test fakes may not). */
+  removeAttr?(name: string): void;
   appendChild(child: RElement): RElement;
 }
 export interface RDocument { createElement(tag: string): RElement; }
 
-const CLS: Record<IrNodeType | "untrusted" | "agent" | "withheld" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fieldname", string> = {
+const CLS: Record<IrNodeType | "untrusted" | "agent" | "withheld" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fieldname" | "fresh" | "stale" | "unavail" | "empty" | "timeUnknown" | "absent", string> = {
   root: "pcc-ir", section: "pcc-section", heading: "pcc-heading", text: "pcc-text",
   stat: "pcc-stat", card: "pcc-card", receipt: "pcc-receipt", list: "pcc-list",
   badge: "pcc-badge", grid: "pcc-grid", "approval-notice": "pcc-approval",
@@ -46,7 +48,19 @@ const CLS: Record<IrNodeType | "untrusted" | "agent" | "withheld" | "invalid" | 
   untrusted: "pcc-untrusted", agent: "pcc-agent", withheld: "pcc-withheld",
   invalid: "pcc-invalid", value: "pcc-value", row: "pcc-row", meta: "pcc-meta",
   note: "pcc-note", schemaCard: "pcc-schema-card", field: "pcc-fieldlabel",
+  fresh: "pcc-fresh", stale: "pcc-stale", unavail: "pcc-unavail", empty: "pcc-empty",
+  timeUnknown: "pcc-time-unknown", absent: "pcc-absent",
 };
+const STATE_CLASSES: readonly string[] = ["pcc-stale", "pcc-unavail", "pcc-time-unknown"];
+function withState(host: RElement, cls: string | null): void {
+  const base = host.className.split(" ").filter((c) => c !== "" && !STATE_CLASSES.includes(c)).join(" ");
+  host.className = cls ? base + " " + cls : base;
+}
+/** "2026-09-24 10:12:33Z" from a normalized ISO string (date included: a time alone is ambiguous). */
+function stamp(iso: string): string {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(iso);
+  return m ? m[1] + " " + m[2] + "Z" : "unknown time";
+}
 
 /** own-property read via a dotted selector (NO prototype traversal, NO traversal THROUGH
  * an array). Returns the raw final value, or undefined for a proto segment / missing key
@@ -82,9 +96,11 @@ export const UNAVAILABLE = "—"; // em dash — honest "not available", never a
 // as documentation that a price field shows money as the card's own — it is no longer consulted to
 // skip validation: the "amount"/"currency" kinds admit no prose at all, so the withheld notice can
 // never be painted there, and a hostile shape (an object, a sentence, "verified" as a currency) is
-// rejected like any other mistyped field, never silently displayed.
+// rejected like any other mistyped field, never silently displayed. `required` (#348) is kept
+// BESIDE `kind`: a required field that is simply ABSENT fails the whole card closed (bindSchemaCard
+// below), the same way a present-but-mistyped field does.
 type FieldKind = "text" | "capType" | "amount" | "currency" | "tiers" | "bool" | "status" | "percent";
-interface SchemaField { label: string; key: string | readonly string[]; kind: FieldKind; money?: boolean }
+interface SchemaField { label: string; key: string | readonly string[]; kind: FieldKind; required?: boolean; money?: boolean }
 interface SchemaSpec { heading: string; note?: string; fields: readonly SchemaField[] }
 // Only the DATA-BEARING cards have a schema (a public/known-shape GET). The settlement
 // record is NOT here — it is a static pointer (see SETTLEMENT_NOTICE + the receipt painter).
@@ -92,8 +108,8 @@ export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.fr
   "capability-summary-v1": Object.freeze({
     heading: "Capability",
     fields: Object.freeze([
-      { label: "Name", key: "name", kind: "text" },
-      { label: "Type", key: "type", kind: "capType" },
+      { label: "Name", key: "name", kind: "text", required: true },
+      { label: "Type", key: "type", kind: "capType", required: true },
       { label: "Base cost", key: "pricing.baseCost", kind: "amount", money: true },
       { label: "Currency", key: "pricing.currency", kind: "currency", money: true },
       { label: "Assurance tiers", key: "assuranceTiers", kind: "tiers" },
@@ -106,7 +122,7 @@ export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.fr
     // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
     // keys (NOT a manifest selector); first present wins.
     fields: Object.freeze([
-      { label: "Status", key: ["status", "job.status"], kind: "status" },
+      { label: "Status", key: ["status", "job.status"], kind: "status", required: true },
       { label: "Progress", key: ["progress", "job.progress"], kind: "percent" },
     ]),
   }),
@@ -186,22 +202,51 @@ function readField(data: unknown, f: SchemaField): FieldRead {
   }
 }
 
+/** Read + type-validate every fixed-schema field of `schema` from fetched data (no DOM writes).
+ *  null for an unknown schema. Otherwise the per-field reads (in field order) plus whether a
+ *  REQUIRED field was simply absent (readField reports an absent field as `{ok:true,
+ *  text:UNAVAILABLE}`, which is not itself "mistyped" — missingRequired is how the caller tells
+ *  the two apart). Shared by bindSchemaCard (paints) and schemaCardFailure (reports why, astra
+ *  28e L2), so the two can never disagree about what counts as a passing card. */
+function readSchemaCard(schema: BindSchema, data: unknown): { reads: FieldRead[]; missingRequired: boolean } | null {
+  const spec = SCHEMA_FIELDS[schema];
+  if (!spec) return null;
+  const reads = spec.fields.map((f) => readField(data, f));
+  const missingRequired = spec.fields.some((f, i) => f.required && reads[i]!.ok && (reads[i] as { ok: true; text: string }).text === UNAVAILABLE);
+  return { reads, missingRequired };
+}
+
 /** Fill a fixed-schema card's value slots from fetched data (text-only). PCC owns the field set +
  * order; slot[i] <- the i-th field's fixed key. If ANY present field is mistyped for its `kind`,
  * EVERY slot is set to UNAVAILABLE and this returns false — never a partial card built from one
- * off-type field (astra r3 M3 / #348 r2b F1). Otherwise every slot is filled and this returns
- * true. The caller (dashboard-ir-browser-entry.ts) may ignore the boolean. */
+ * off-type field (astra r3 M3 / #348 r2b F1). A payload missing a REQUIRED field (#348) is not
+ * this card's data EITHER, even though a missing field alone is not "mistyped" (readField reports
+ * it `{ok:true, text:UNAVAILABLE}`): the whole card fails closed the same way, never a partial
+ * card with "Name: —". Otherwise every slot is filled and this returns true. The caller
+ * (dashboard-ir-browser-entry.ts) may ignore the boolean. */
 export function bindSchemaCard(schema: BindSchema, data: unknown, slots: Array<{ textContent: string }>): boolean {
-  const spec = SCHEMA_FIELDS[schema];
-  if (!spec) return false;
-  const reads = spec.fields.map((f) => readField(data, f));
-  const allOk = reads.every((r) => r.ok);
-  reads.forEach((r, i) => {
+  const r = readSchemaCard(schema, data);
+  if (!r) return false;
+  const { reads, missingRequired } = r;
+  const allOk = !missingRequired && reads.every((x) => x.ok);
+  reads.forEach((x, i) => {
     const slot = slots[i];
     if (!slot) return;
-    slot.textContent = allOk && r.ok ? r.text : UNAVAILABLE;
+    slot.textContent = allOk && x.ok ? x.text : UNAVAILABLE;
   });
   return allOk;
+}
+
+/** Why a fixed-schema card is unavailable — an honest browser-side reason (astra 28e L2),
+ *  rather than always reporting "missing required fields" even when every required field is
+ *  present and only an OPTIONAL field is mistyped. null means the card is fine (bindSchemaCard
+ *  would return true for the same (schema, data)). */
+export function schemaCardFailure(schema: BindSchema, data: unknown): "missing required fields" | "mistyped field" | "unknown schema" | null {
+  const r = readSchemaCard(schema, data);
+  if (!r) return "unknown schema";
+  if (r.missingRequired) return "missing required fields";
+  if (r.reads.some((x) => !x.ok)) return "mistyped field";
+  return null;
 }
 
 // ── Frozen painter dispatch — exactly the 14 catalog types, immutable ─────────────
@@ -270,7 +315,45 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
 function paintNode(doc: RDocument, node: IrNode): RElement {
   const p = PAINTERS[node.type];
   if (!p) { return el(doc, CLS.invalid, ""); } // frozen dispatch; unknown type → inert
-  return p(doc, node);
+  const e = p(doc, node);
+  // PX-4 provenance: stamp the DERIVED authority class (never read from the node or the
+  // manifest). Prose → "proposed"; bound data → its registered class; constants → none.
+  const src = sourceClassOf(node);
+  if (src !== null) { e.setAttr("data-source", src); e.className = e.className + " pcc-src-" + src; }
+  return e;
+}
+
+/** PX-4 freshness marker for a BOUND node whose SOURCE stated when it read the state: sets
+ *  `data-as-of` and the stale class on the host, and writes the line into `meta` (TEXT ONLY,
+ *  readable with no stylesheet): "source read 2026-09-24 10:12:33Z" or "... · stale". `asOf`
+ *  is the source's own read time (sourceAsOf), never the receipt time. */
+export function applyFreshness(host: RElement, meta: RElement, asOf: string, stale: boolean): void {
+  host.setAttr("data-as-of", asOf);
+  withState(host, stale ? CLS.stale : null);
+  meta.className = CLS.fresh;
+  meta.textContent = "source read " + stamp(asOf) + (stale ? " · stale" : "");
+}
+
+/** The source served data but did NOT say when it read it. Receipt time is not a substitute,
+ *  so the datum is never presented as fresh: the line says so and gives the receipt time
+ *  separately. No `data-as-of` (no source time exists). */
+export function applyUnknownTime(host: RElement, meta: RElement, receivedIso: string): void {
+  if (host.removeAttr) host.removeAttr("data-as-of");
+  withState(host, CLS.timeUnknown);
+  meta.className = CLS.fresh;
+  meta.textContent = "source time not reported · received " + stamp(receivedIso);
+}
+
+/** PX-4 failure marker for a bound node that has shown NO datum yet: the read failed, or
+ *  the payload does not fit the route's schema. The view says so (TEXT ONLY: "unavailable ·
+ *  HTTP 401") instead of showing an empty authoritative view, which would read as "none":
+ *  absence is not evidence. No `data-as-of`, because nothing was observed. `why` is a fixed
+ *  reason from the binder or the painter, never response text. */
+export function applyUnavailable(host: RElement, meta: RElement, why: string): void {
+  if (host.removeAttr) host.removeAttr("data-as-of");
+  withState(host, CLS.unavail);
+  meta.className = CLS.fresh;
+  meta.textContent = "unavailable · " + why;
 }
 
 /** Paint a validated IrDoc into `mount`. Clears mount, appends title then root. */
@@ -380,8 +463,11 @@ function readListField(row: unknown, field: string): ListFieldRead {
  * row-wide `alreadyWithheld` escape: excluding an already-withheld FRAGMENT from the join is enough
  * on its own, so one individually-withheld value never disables the check for the rest of the row.
  * This is the structural boundary; the lexical claim/pair detectors it calls (isMoneyClaim,
- * boundStatusText's SAFE_STATUS_WORDS) remain defense in depth, not the only gate. */
-export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[]): void {
+ * boundStatusText's SAFE_STATUS_WORDS) remain defense in depth, not the only gate. (#348:
+ * returns the count of rows actually painted, and appends a `CLS.empty` "none" node when the
+ * route's collection is genuinely empty — the browser entry's provenance gate relies on this to
+ * tell a real empty collection from a withheld/unavailable one.) */
+export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[]): number {
   const rowTitle = String(node.props?.rowTitle ?? "");
   const rowMeta = Array.isArray(node.props?.rowMeta) ? (node.props!.rowMeta as string[]) : [];
   const statusFrom = typeof node.props?.statusFrom === "string" ? node.props!.statusFrom : "";
@@ -397,11 +483,13 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
     const titleRead = readListField(row, rowTitle);
     if (titleRead.ok && titleRead.text === "") continue; // drop row: title ABSENT (never a mistyped one)
 
-    const metaCells: Cell[] = rowMeta
-      .map((field) => ({ field, read: readListField(row, field) }))
-      .filter((c) => !(c.read.ok && c.read.text === "")); // an absent meta field is simply not shown
+    // A selected field the row lacks is shown as explicitly ABSENT ("not reported"), never silently
+    // omitted (#348 PX-4 review #2524: absence is not evidence). The marker is PCC's own text, so an
+    // absent cell never joins the backstop below.
+    const isAbsent = (c: Cell): boolean => c.read.ok && c.read.text === "";
+    const metaCells: Cell[] = rowMeta.map((field) => ({ field, read: readListField(row, field) }));
     const statusReadRaw = statusFrom ? readListField(row, statusFrom) : null;
-    const statusCell: Cell | null = statusReadRaw && !(statusReadRaw.ok && statusReadRaw.text === "") ? { field: statusFrom, read: statusReadRaw } : null;
+    const statusCell: Cell | null = statusReadRaw ? { field: statusFrom, read: statusReadRaw } : null;
 
     const titleCell: Cell = { field: rowTitle, read: titleRead };
     const allCells = statusCell ? [titleCell, ...metaCells, statusCell] : [titleCell, ...metaCells];
@@ -426,8 +514,9 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
         const r = c.read.ok ? (c.read as { ok: true; raw: unknown }).raw : undefined;
         return typeof r === "string" ? r : null;
       };
-      const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
-      const statusRaw = allCells.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r): r is string => r !== null);
+      const present = allCells.filter((c) => !isAbsent(c));
+      const nonStatusCells = present.filter((c) => !isStatusKind(c.field));
+      const statusRaw = present.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r): r is string => r !== null);
       const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
       // Every ATTRIBUTED kind (text, id, capType) joins by its RAW value, never the "reported: " display,
       // so the inserted word cannot widen the pair window and hide a claim split across fields.
@@ -444,15 +533,31 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
     line.appendChild(el(doc, CLS.heading, texts.get(titleCell)!, true));
     for (const c of metaCells) {
       line.appendChild(el(doc, CLS.fieldname, listFieldLabel(c.field) + ":"));
-      line.appendChild(el(doc, CLS.meta, texts.get(c)!, true));
+      line.appendChild(rowOk && isAbsent(c) ? el(doc, CLS.meta + " " + CLS.absent, "not reported") : el(doc, CLS.meta, texts.get(c)!, true));
     }
     if (statusCell) {
       line.appendChild(el(doc, CLS.fieldname, listFieldLabel(statusFrom) + ":"));
-      line.appendChild(el(doc, CLS.badge, texts.get(statusCell)!, true));
+      line.appendChild(rowOk && isAbsent(statusCell) ? el(doc, CLS.badge + " " + CLS.absent, "not reported") : el(doc, CLS.badge, texts.get(statusCell)!, true));
     }
     listEl.appendChild(line);
     shown++;
   }
+  if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, "none")); // a real empty collection says so
+  return shown;
+}
+
+/** True only if EVERY row (up to the cap) is an object carrying its title field: a partial
+ *  collection is not data (PX-4 review #2524: partial reads render unavailable). */
+export function listRowsReadable(node: IrNode, rows: unknown[]): boolean {
+  const rowTitle = String(node.props?.rowTitle ?? "");
+  for (const row of rows.slice(0, LIST_ROW_CAP)) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) return false;
+    // By the title field's CLOSED KIND (readListField), not a bare scalar coercion: a present
+    // but MISTYPED title is just as "not readable" as an absent one (#344's typed row reader).
+    const read = readListField(row, rowTitle);
+    if (!read.ok || read.text === "") return false;
+  }
+  return true;
 }
 
 /** Fill a STAT value slot from a fetched object via the node's `select` — own-property,

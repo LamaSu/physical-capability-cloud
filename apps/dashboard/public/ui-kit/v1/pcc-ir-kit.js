@@ -382,11 +382,12 @@
   };
   function listRowsOf(path, data) {
     const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path].rows : void 0;
-    if (key && data !== null && typeof data === "object" && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, key)) {
-      const v = data[key];
-      if (Array.isArray(v)) return v;
-    }
-    return [];
+    if (!key) return null;
+    if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+    if (!Object.prototype.hasOwnProperty.call(data, key)) return null;
+    const v = data[key];
+    if (!Array.isArray(v)) return null;
+    return v;
   }
   var LIST_FIELD_KINDS = {
     id: "id",
@@ -455,12 +456,15 @@
     // gate is the METRIC_SELECT_LABEL allowlist (PCC-owned label per allowlisted selector) — a
     // manifest can neither select a money/timestamp scalar NOR supply a payment/settlement label.
     metric: {
+      sourceClass: "authoritative",
+      schemaId: "metric-scalar-v1",
+      maxAgeMs: 12e4,
       routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
       needsSelect: true
     },
     // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
     // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
-    capability: { routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" },
+    capability: { sourceClass: "authoritative", schemaId: "capability-summary-v1", maxAgeMs: 36e5, routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" },
     // ID_SEG excludes types/templates/search/graph-*
     // NOTE: `receipt` has NO bind policy — the settlement record is a STATIC POINTER (no
     // fetch). A public read GET cannot reach settlement (auth-gated) and, worse, the
@@ -471,6 +475,9 @@
     // list: collection reads whose rows are listable ONLY through a PCC-owned field profile
     // (LIST_PROFILES). Escrow is NOT listable: money state appears only in schema cards.
     list: {
+      sourceClass: "authoritative",
+      schemaId: "collection-v1",
+      maxAgeMs: 3e5,
       routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities")],
       queryByRoute: {
         "/api/jobs": ["kernelId", "status", "offset", "limit"],
@@ -482,6 +489,9 @@
     // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
     // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
     run: {
+      sourceClass: "authoritative",
+      schemaId: "run-summary-v1",
+      maxAgeMs: 6e4,
       routes: [route("/api/jobs/:"), route("/api/jobs/:/status")],
       sse: [route("/sse/stream/job/:")],
       correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") },
@@ -669,6 +679,9 @@
   function withhold(node) {
     node.props = node.type === "heading" ? { level: node.props?.level, withheld: true } : { withheld: true };
     delete node.untrusted;
+  }
+  function isWithheldProse(node) {
+    return node.props?.withheld === true;
   }
   function agentWords(node) {
     if (node.untrusted !== true || !node.props) return null;
@@ -919,6 +932,26 @@
     "form-summary": { noBind: true, parentOf: ["field-label"], maxChildren: LIM.fields },
     "field-label": { props: { label: "s400" }, required: ["label"], noBind: true, prose: true, childless: true }
   };
+  function policyKeyOf(node) {
+    const spec = NODE_SCHEMA[node.type];
+    if (!spec || !spec.bindKey) return null;
+    if (node.type === "card") return node.props && node.props.kind === "run" ? "run" : "capability";
+    return spec.bindKey;
+  }
+  function sourceClassOf(node) {
+    const spec = NODE_SCHEMA[node.type];
+    if (!spec) return null;
+    if (spec.prose) return isWithheldProse(node) ? null : "proposed";
+    const key = policyKeyOf(node);
+    const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : void 0;
+    return policy ? policy.sourceClass : null;
+  }
+  function provenanceOf(node) {
+    if (!node.bind) return null;
+    const key = policyKeyOf(node);
+    const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : void 0;
+    return policy ? { sourceClass: policy.sourceClass, schemaId: policy.schemaId, maxAgeMs: policy.maxAgeMs } : null;
+  }
   function propType(v, t) {
     switch (t) {
       case "s400":
@@ -984,7 +1017,7 @@
       if (n.bind !== void 0) {
         if (spec.noBind || !spec.bindKey) return `${n.type} must not bind`;
         if (!isPlain(n.bind) || !onlyKeys(n.bind, ["path", "select", "query", "pollMs", "sse", "schema"])) return "bind shape";
-        const bk = n.type === "card" ? n.props.kind === "run" ? "run" : "capability" : spec.bindKey;
+        const bk = policyKeyOf(n);
         const reason = bindMatchesPolicy(n.bind, bk);
         if (reason) return `bind: ${reason}`;
         if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget";
@@ -1070,8 +1103,23 @@
     meta: "pcc-meta",
     note: "pcc-note",
     schemaCard: "pcc-schema-card",
-    field: "pcc-fieldlabel"
+    field: "pcc-fieldlabel",
+    fresh: "pcc-fresh",
+    stale: "pcc-stale",
+    unavail: "pcc-unavail",
+    empty: "pcc-empty",
+    timeUnknown: "pcc-time-unknown",
+    absent: "pcc-absent"
   };
+  var STATE_CLASSES = ["pcc-stale", "pcc-unavail", "pcc-time-unknown"];
+  function withState(host, cls) {
+    const base = host.className.split(" ").filter((c) => c !== "" && !STATE_CLASSES.includes(c)).join(" ");
+    host.className = cls ? base + " " + cls : base;
+  }
+  function stamp(iso) {
+    const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(iso);
+    return m ? m[1] + " " + m[2] + "Z" : "unknown time";
+  }
   function readOwnPath(obj, sel) {
     let cur = obj;
     for (const seg of sel.split(".")) {
@@ -1093,8 +1141,8 @@
     "capability-summary-v1": Object.freeze({
       heading: "Capability",
       fields: Object.freeze([
-        { label: "Name", key: "name", kind: "text" },
-        { label: "Type", key: "type", kind: "capType" },
+        { label: "Name", key: "name", kind: "text", required: true },
+        { label: "Type", key: "type", kind: "capType", required: true },
         { label: "Base cost", key: "pricing.baseCost", kind: "amount", money: true },
         { label: "Currency", key: "pricing.currency", kind: "currency", money: true },
         { label: "Assurance tiers", key: "assuranceTiers", kind: "tiers" },
@@ -1107,7 +1155,7 @@
       // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
       // keys (NOT a manifest selector); first present wins.
       fields: Object.freeze([
-        { label: "Status", key: ["status", "job.status"], kind: "status" },
+        { label: "Status", key: ["status", "job.status"], kind: "status", required: true },
         { label: "Progress", key: ["progress", "job.progress"], kind: "percent" }
       ])
     })
@@ -1155,17 +1203,31 @@
         return { ok: false };
     }
   }
-  function bindSchemaCard(schema, data, slots) {
+  function readSchemaCard(schema, data) {
     const spec = SCHEMA_FIELDS[schema];
-    if (!spec) return false;
+    if (!spec) return null;
     const reads = spec.fields.map((f) => readField(data, f));
-    const allOk = reads.every((r) => r.ok);
-    reads.forEach((r, i) => {
+    const missingRequired = spec.fields.some((f, i) => f.required && reads[i].ok && reads[i].text === UNAVAILABLE);
+    return { reads, missingRequired };
+  }
+  function bindSchemaCard(schema, data, slots) {
+    const r = readSchemaCard(schema, data);
+    if (!r) return false;
+    const { reads, missingRequired } = r;
+    const allOk = !missingRequired && reads.every((x) => x.ok);
+    reads.forEach((x, i) => {
       const slot = slots[i];
       if (!slot) return;
-      slot.textContent = allOk && r.ok ? r.text : UNAVAILABLE;
+      slot.textContent = allOk && x.ok ? x.text : UNAVAILABLE;
     });
     return allOk;
+  }
+  function schemaCardFailure(schema, data) {
+    const r = readSchemaCard(schema, data);
+    if (!r) return "unknown schema";
+    if (r.missingRequired) return "missing required fields";
+    if (r.reads.some((x) => !x.ok)) return "mistyped field";
+    return null;
   }
   function paintChildren(doc, node, into) {
     if (node.children) for (const c of node.children) into.appendChild(paintNode(doc, c));
@@ -1247,7 +1309,31 @@
     if (!p) {
       return el(doc, CLS.invalid, "");
     }
-    return p(doc, node);
+    const e = p(doc, node);
+    const src = sourceClassOf(node);
+    if (src !== null) {
+      e.setAttr("data-source", src);
+      e.className = e.className + " pcc-src-" + src;
+    }
+    return e;
+  }
+  function applyFreshness(host, meta, asOf, stale) {
+    host.setAttr("data-as-of", asOf);
+    withState(host, stale ? CLS.stale : null);
+    meta.className = CLS.fresh;
+    meta.textContent = "source read " + stamp(asOf) + (stale ? " \xB7 stale" : "");
+  }
+  function applyUnknownTime(host, meta, receivedIso) {
+    if (host.removeAttr) host.removeAttr("data-as-of");
+    withState(host, CLS.timeUnknown);
+    meta.className = CLS.fresh;
+    meta.textContent = "source time not reported \xB7 received " + stamp(receivedIso);
+  }
+  function applyUnavailable(host, meta, why) {
+    if (host.removeAttr) host.removeAttr("data-as-of");
+    withState(host, CLS.unavail);
+    meta.className = CLS.fresh;
+    meta.textContent = "unavailable \xB7 " + why;
   }
   function renderIrDoc(doc, mount, ir) {
     while (mount.children.length) mount.children.pop();
@@ -1320,9 +1406,10 @@
       if (row === null || typeof row !== "object") continue;
       const titleRead = readListField(row, rowTitle);
       if (titleRead.ok && titleRead.text === "") continue;
-      const metaCells = rowMeta.map((field) => ({ field, read: readListField(row, field) })).filter((c) => !(c.read.ok && c.read.text === ""));
+      const isAbsent = (c) => c.read.ok && c.read.text === "";
+      const metaCells = rowMeta.map((field) => ({ field, read: readListField(row, field) }));
       const statusReadRaw = statusFrom ? readListField(row, statusFrom) : null;
-      const statusCell = statusReadRaw && !(statusReadRaw.ok && statusReadRaw.text === "") ? { field: statusFrom, read: statusReadRaw } : null;
+      const statusCell = statusReadRaw ? { field: statusFrom, read: statusReadRaw } : null;
       const titleCell = { field: rowTitle, read: titleRead };
       const allCells = statusCell ? [titleCell, ...metaCells, statusCell] : [titleCell, ...metaCells];
       const rowOk = allCells.every((c) => c.read.ok);
@@ -1332,8 +1419,9 @@
           const r = c.read.ok ? c.read.raw : void 0;
           return typeof r === "string" ? r : null;
         };
-        const nonStatusCells = allCells.filter((c) => !isStatusKind(c.field));
-        const statusRaw = allCells.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r) => r !== null);
+        const present = allCells.filter((c) => !isAbsent(c));
+        const nonStatusCells = present.filter((c) => !isStatusKind(c.field));
+        const statusRaw = present.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r) => r !== null);
         const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
         const isAttributedKind = (field) => {
           const k = LIST_FIELD_KINDS[field];
@@ -1350,15 +1438,26 @@
       line.appendChild(el(doc, CLS.heading, texts.get(titleCell), true));
       for (const c of metaCells) {
         line.appendChild(el(doc, CLS.fieldname, listFieldLabel(c.field) + ":"));
-        line.appendChild(el(doc, CLS.meta, texts.get(c), true));
+        line.appendChild(rowOk && isAbsent(c) ? el(doc, CLS.meta + " " + CLS.absent, "not reported") : el(doc, CLS.meta, texts.get(c), true));
       }
       if (statusCell) {
         line.appendChild(el(doc, CLS.fieldname, listFieldLabel(statusFrom) + ":"));
-        line.appendChild(el(doc, CLS.badge, texts.get(statusCell), true));
+        line.appendChild(rowOk && isAbsent(statusCell) ? el(doc, CLS.badge + " " + CLS.absent, "not reported") : el(doc, CLS.badge, texts.get(statusCell), true));
       }
       listEl.appendChild(line);
       shown++;
     }
+    if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, "none"));
+    return shown;
+  }
+  function listRowsReadable(node, rows) {
+    const rowTitle = String(node.props?.rowTitle ?? "");
+    for (const row of rows.slice(0, LIST_ROW_CAP)) {
+      if (row === null || typeof row !== "object" || Array.isArray(row)) return false;
+      const read = readListField(row, rowTitle);
+      if (!read.ok || read.text === "") return false;
+    }
+    return true;
   }
   function bindScalar(node, data) {
     const sel = node.bind?.select;
@@ -1425,7 +1524,40 @@
     const ms = typeof bind.pollMs === "number" && Number.isFinite(bind.pollMs) ? bind.pollMs : BINDER_LIM.defaultPollMs;
     return Math.max(BINDER_LIM.minPollMs, Math.min(ms, BINDER_LIM.maxPollMs));
   }
-  function startBind(node, deps, onData) {
+  var ASOF_MAX_SKEW_MS = 12e4;
+  var ASOF_MIN_YEAR = 2020;
+  var ASOF_MAX_YEAR = 2100;
+  var ASOF_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,3})?Z$/;
+  function sourceAsOf(json, nowMs) {
+    if (json === null || typeof json !== "object" || Array.isArray(json)) return null;
+    if (!Object.prototype.hasOwnProperty.call(json, "asOf")) return null;
+    const raw = json.asOf;
+    if (typeof raw !== "string") return null;
+    const m = ASOF_RE.exec(raw);
+    if (!m) return null;
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]), hh = Number(m[4]), mi = Number(m[5]), ss = Number(m[6]);
+    if (y < ASOF_MIN_YEAR || y > ASOF_MAX_YEAR) return null;
+    const calendarMs = Date.UTC(y, mo - 1, d, hh, mi, ss);
+    const check = new Date(calendarMs);
+    if (check.getUTCFullYear() !== y || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d || check.getUTCHours() !== hh || check.getUTCMinutes() !== mi || check.getUTCSeconds() !== ss) return null;
+    const ms = m[7] ? Number((m[7].slice(1) + "000").slice(0, 3)) : 0;
+    const t = calendarMs + ms;
+    if (!Number.isFinite(t) || t > nowMs + ASOF_MAX_SKEW_MS) return null;
+    return new Date(t).toISOString();
+  }
+  function isStale(asOfIso, maxAgeMs, nowMs) {
+    const t = Date.parse(asOfIso);
+    return !Number.isFinite(t) || nowMs - t > maxAgeMs;
+  }
+  function acceptsNewer(currentAsOf, incomingAsOf, currentFingerprint, incomingFingerprint) {
+    if (currentAsOf === null) return true;
+    const cur = Date.parse(currentAsOf), inc = Date.parse(incomingAsOf);
+    if (inc > cur) return true;
+    if (inc < cur) return false;
+    if (incomingFingerprint === null) return true;
+    return incomingFingerprint === currentFingerprint;
+  }
+  function startBind(node, deps, onData, onStale, onEnded) {
     const bind = node.bind;
     let stopped = false;
     let pollTimer = null;
@@ -1453,12 +1585,19 @@
       stop();
       return { stop };
     }
-    sessionTimer = deps.setTimer(stop, BINDER_LIM.sessionMs);
+    sessionTimer = deps.setTimer(() => {
+      if (stopped) return;
+      stop();
+      if (onEnded) onEnded("updates stopped");
+    }, BINDER_LIM.sessionMs);
     if (channelFor(bind) === "sse" && deps.openSse && bind.sse) {
       const sseUrl = deps.origin + bind.sse;
       sse = deps.openSse(sseUrl, (d) => {
         if (!stopped) onData(d);
-      }, () => stop());
+      }, () => {
+        if (!stopped && onStale) onStale("stream error");
+        stop();
+      });
     } else {
       let fails = 0;
       const nextDelay = () => Math.min(clampPoll(bind) * Math.pow(2, fails < 6 ? fails : 6), BINDER_LIM.maxPollMs);
@@ -1466,16 +1605,19 @@
         if (stopped) return;
         deps.getJson(url, deps.makeSignal()).then((r) => {
           if (stopped) return;
-          if (r.status === 200 && !r.redirected && !r.bytesOver) {
+          const clean = r.ok !== false && r.status === 200 && !r.redirected && !r.bytesOver && r.json !== null && typeof r.json === "object";
+          if (clean) {
             fails = 0;
             onData(r.json);
           } else {
             fails++;
+            if (onStale) onStale(r.reason ?? (r.redirected ? "redirected" : r.bytesOver ? "response too large" : r.status !== 200 ? "HTTP " + r.status : "empty response"));
           }
           pollTimer = deps.setTimer(tick, nextDelay());
         }).catch(() => {
           if (stopped) return;
           fails++;
+          if (onStale) onStale("network error");
           pollTimer = deps.setTimer(tick, nextDelay());
         });
       };
@@ -1526,6 +1668,9 @@
       },
       setAttr(n, v) {
         real.setAttribute(n, v);
+      },
+      removeAttr(n) {
+        real.removeAttribute(n);
       },
       appendChild(c) {
         real.appendChild(c._el);
@@ -1626,7 +1771,8 @@
         await resp.body?.cancel();
       } catch {
       }
-      return { status: resp.status, redirected, bytesOver: false, json: null };
+      const reason = resp.status !== 200 ? "HTTP " + resp.status : redirected ? "redirected" : "unexpected content type";
+      return { status: resp.status, redirected, bytesOver: false, json: null, ok: false, reason };
     }
     const reader = resp.body ? resp.body.getReader() : null;
     const chunks = [];
@@ -1642,7 +1788,7 @@
               await reader.cancel();
             } catch {
             }
-            return { status: 200, redirected: false, bytesOver: true, json: null };
+            return { status: 200, redirected: false, bytesOver: true, json: null, ok: false, reason: "response too large" };
           }
           chunks.push(value);
         }
@@ -1652,9 +1798,10 @@
     try {
       json = JSON.parse(new TextDecoder().decode(concat(chunks, received)));
     } catch {
-      json = null;
+      return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "unreadable response" };
     }
-    return { status: 200, redirected: false, bytesOver: false, json };
+    if (json === null || typeof json !== "object") return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "empty response" };
+    return { status: 200, redirected: false, bytesOver: false, json, ok: true };
   }
   var rendered = false;
   var disposed = false;
@@ -1675,9 +1822,107 @@
     walk(doc.root);
     return { stats, lists, schemaCards };
   }
+  var MISSING = /* @__PURE__ */ Symbol("missing-field");
+  function selectPath(data, select) {
+    let cur = data;
+    for (const seg of select.split(".")) {
+      if (cur === null || typeof cur !== "object" || Array.isArray(cur) || !Object.prototype.hasOwnProperty.call(cur, seg)) return MISSING;
+      cur = cur[seg];
+    }
+    return cur;
+  }
+  function shapeOf(n) {
+    if (n.nodeType === 3) return n.textContent;
+    if (n.nodeType === 1) {
+      const e = n;
+      const attrs = Array.from(e.attributes).map((a) => [a.name, a.value]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+      return [e.tagName, attrs, ...Array.from(e.childNodes).map(shapeOf)];
+    }
+    return null;
+  }
+  var provStates = /* @__PURE__ */ new Map();
+  function provenanced(node, el2, prepare, clear, fingerprint) {
+    const prov = provenanceOf(node);
+    const host = wrapEl(el2);
+    let st = provStates.get(node.id);
+    if (!st) {
+      const metaReal = document.createElement("div");
+      if (el2.parentNode) el2.parentNode.insertBefore(metaReal, el2.nextSibling);
+      st = { meta: metaReal, watermark: null, fingerprint: null, shown: false, timeKnown: false, expiry: null };
+      provStates.set(node.id, st);
+    }
+    const state = st;
+    const meta = wrapEl(state.meta);
+    const disarm = () => {
+      if (state.expiry !== null) {
+        clearTimeout(state.expiry);
+        state.expiry = null;
+      }
+    };
+    const markFresh = () => {
+      disarm();
+      if (!state.shown || !state.timeKnown || state.watermark === null || !prov) return;
+      const now = Date.now();
+      const stale = isStale(state.watermark, prov.maxAgeMs, now);
+      applyFreshness(host, meta, state.watermark, stale);
+      if (!stale) {
+        const left = Date.parse(state.watermark) + prov.maxAgeMs - now;
+        state.expiry = setTimeout(() => {
+          state.expiry = null;
+          if (state.shown && state.watermark) applyFreshness(host, meta, state.watermark, true);
+        }, Math.max(0, left) + 1);
+      }
+    };
+    const failed = (why) => {
+      disarm();
+      clear();
+      state.shown = false;
+      applyUnavailable(host, meta, why);
+    };
+    markFresh();
+    return {
+      onData: (data) => {
+        const now = Date.now();
+        const src = sourceAsOf(data, now);
+        const prepared = prepare(data, src);
+        if (typeof prepared === "string") {
+          failed(prepared);
+          return;
+        }
+        const incomingFingerprint = fingerprint(data);
+        if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src, state.fingerprint, incomingFingerprint))) return;
+        prepared();
+        state.shown = true;
+        state.fingerprint = incomingFingerprint;
+        if (src !== null) {
+          state.watermark = src;
+          state.timeKnown = true;
+          markFresh();
+        } else {
+          disarm();
+          state.timeKnown = false;
+          applyUnknownTime(host, meta, new Date(now).toISOString());
+        }
+      },
+      onStale: failed,
+      onEnded: failed
+    };
+  }
   function startBinds(doc, root) {
     const origin = pccApiOrigin();
-    if (!origin) return;
+    if (!origin) {
+      const { stats: stats2, lists: lists2, schemaCards: schemaCards2 } = collectBound(doc);
+      const els = (cls) => Array.from(root.querySelectorAll("." + cls));
+      const mark = (nodes, cls) => nodes.forEach((node, i) => {
+        const el2 = els(cls)[i];
+        if (el2) provenanced(node, el2, () => "no live data source", () => {
+        }, () => null).onStale("no live data source");
+      });
+      mark(stats2, "pcc-stat");
+      mark(lists2, "pcc-list");
+      mark(schemaCards2, "pcc-schema-card");
+      return;
+    }
     const gen = new AbortController();
     genController = gen;
     const deps = {
@@ -1713,10 +1958,24 @@
     stats.forEach((node, i) => {
       const el2 = statEls[i];
       const slot = el2?.querySelector(".pcc-value");
-      if (slot) push(startBind(node, deps, (data) => {
-        const v = bindScalar(node, data);
-        slot.textContent = v !== "" ? v : "\u2014";
-      }));
+      if (!el2 || !slot) return;
+      const select = String(node.bind?.select ?? "");
+      const pv = provenanced(node, el2, (data) => {
+        const cur = selectPath(data, select);
+        if (cur === MISSING) return "missing field";
+        const text = bindScalar(node, data);
+        if (text === UNAVAILABLE) return "mistyped field";
+        return () => {
+          slot.textContent = text;
+        };
+      }, () => {
+        slot.textContent = "";
+      }, (data) => {
+        const cur = selectPath(data, select);
+        if (cur === MISSING) return null;
+        return bindScalar(node, data) === UNAVAILABLE ? null : JSON.stringify(cur);
+      });
+      push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
     schemaCards.forEach((node, i) => {
       const el2 = schemaEls[i];
@@ -1724,16 +1983,45 @@
       const schema = node.bind?.schema;
       if (!schema) return;
       const slots = Array.from(el2.querySelectorAll(".pcc-value"));
-      push(startBind(node, deps, (data) => bindSchemaCard(schema, data, slots)));
+      const pv = provenanced(node, el2, (data) => {
+        const staging = slots.map(() => ({ textContent: "" }));
+        if (!bindSchemaCard(schema, data, staging)) return schemaCardFailure(schema, data) ?? "payload does not match schema";
+        return () => {
+          staging.forEach((s, j) => {
+            const sl = slots[j];
+            if (sl) sl.textContent = s.textContent;
+          });
+        };
+      }, () => {
+        for (const sl of slots) sl.textContent = "";
+      }, (data) => {
+        const staging = slots.map(() => ({ textContent: "" }));
+        return bindSchemaCard(schema, data, staging) ? JSON.stringify(staging.map((s) => s.textContent)) : null;
+      });
+      push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
     lists.forEach((node, i) => {
       const el2 = listEls[i];
       if (!el2) return;
-      push(startBind(node, deps, (data) => {
+      const pv = provenanced(node, el2, (data, src) => {
         const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+        if (rows === null) return "unexpected response shape";
+        if (!listRowsReadable(node, rows)) return "partial collection";
+        if (rows.length === 0 && src === null) return "empty result without a source time";
+        const staging = document.createElement("div");
+        bindListRows(rdoc, wrapEl(staging), node, rows);
+        return () => el2.replaceChildren(...Array.from(staging.childNodes));
+      }, () => {
         el2.replaceChildren();
-        bindListRows(rdoc, wrapEl(el2), node, rows);
-      }));
+      }, (data) => {
+        const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+        if (rows === null) return null;
+        if (!listRowsReadable(node, rows)) return null;
+        const staging = document.createElement("div");
+        bindListRows(rdoc, wrapEl(staging), node, rows);
+        return JSON.stringify(shapeOf(staging));
+      });
+      push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
   }
   function stopBinds() {
@@ -1821,6 +2109,13 @@
       }
     });
     window.addEventListener("pagehide", stopBinds);
+    window.addEventListener("pageshow", () => {
+      if (disposed) return;
+      if (!document.hidden && liveDoc && liveRoot) {
+        stopBinds();
+        startBinds(liveDoc, liveRoot);
+      }
+    });
     parent.postMessage({ jsonrpc: "2.0", id: CAP.initId, method: "ui/initialize", params: { protocolVersion: CAP.protocol, appInfo: { name: "pcc-dashboard-ir", version: "1" }, appCapabilities: {} } }, "*");
   }
   if (typeof window !== "undefined" && typeof document !== "undefined") boot();
