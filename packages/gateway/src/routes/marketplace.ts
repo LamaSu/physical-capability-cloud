@@ -355,12 +355,12 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       currency: declare.id(listing.currency),
     }, (req as any).operatorId);
     auditService.log({
-      eventType: "marketplace.listing_created",
+      eventType: lit("marketplace.listing_created"),
       actor: (req as any).operatorId ?? (req as any).apiKeyId ?? listing.sellerId,
-      resourceType: "listing",
-      resourceId: listing.id,
-      action: "create",
-      metadata: { name: listing.name, category: listing.category, pricePerUnit: listing.pricePerUnit },
+      resourceType: lit("listing"),
+      resourceId: declare.id(listing.id),
+      action: lit("create"),
+      metadata: { name: declare.id(listing.name), category: declare.id(listing.category), pricePerUnit: declare.id(listing.pricePerUnit) },
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
@@ -427,12 +427,12 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       totalPrice: declare.id(order.totalPrice),
     }, (req as any).operatorId);
     auditService.log({
-      eventType: "marketplace.order_placed",
+      eventType: lit("marketplace.order_placed"),
       actor: (req as any).operatorId ?? (req as any).apiKeyId ?? order.buyerId,
-      resourceType: "order",
-      resourceId: order.id,
-      action: "create",
-      metadata: { listingId: order.listingId, quantity: order.quantity, totalPrice: order.totalPrice },
+      resourceType: lit("order"),
+      resourceId: declare.id(order.id),
+      action: lit("create"),
+      metadata: { listingId: declare.id(order.listingId), quantity: declare.id(order.quantity), totalPrice: declare.id(order.totalPrice) },
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
