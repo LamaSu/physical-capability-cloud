@@ -68,6 +68,10 @@ const ATTACKER_ADDRESS = "attacker-b@n84.test";
 const WEBHOOK_URL = "https://hooks.n84.test/owner-a/orders";
 const VAULT_REF = "N84_OWNER_A_VAULT_REF";
 const PROBE_LABEL = "N84-probe-attach";
+// master's N84 (#483): a credentialRef is usable only when the gateway operator lists the (slug, ref) pair in
+// PCC_CHANNEL_CREDENTIALS. These tests are about WHO may see and change a channel, so the disabled webhook's
+// ref is listed for every slug they attach it under, as an operator would configure it.
+process.env.PCC_CHANNEL_CREDENTIALS = [SLUG, SLUG_B, SLUG_C].map((s) => `${s}:${VAULT_REF}`).join(", ");
 
 let app: FastifyInstance;
 let keyA = "";

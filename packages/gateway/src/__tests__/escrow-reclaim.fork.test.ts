@@ -17,7 +17,8 @@
  * Requires `anvil` (ANVIL_BIN or PATH) and the fixture artifact built WITHOUT dynamic test linking
  * (`forge build --no-dynamic-test-linking` in packages/contracts). forge 1.8 links test-directory contracts through
  * cheatcodes by default, and such bytecode only deploys inside forge's own EVM. When anvil or a deployable artifact
- * is missing, the suite skips with the reason (CI's node job has no Foundry).
+ * is missing, every test is reported SKIPPED with the reason (CI's node job has no Foundry). A job that must run them
+ * sets PCC_REQUIRE_FORK_TESTS=1, and then a missing prerequisite FAILS instead (astra, #472 F2).
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -187,24 +188,28 @@ afterAll(() => {
   if (anvil && !anvil.killed) anvil.kill("SIGKILL");
 });
 
+/** Skip this test for real when the chain is unavailable (or fail, where the fork tests are required). */
+function needsChain(ctx: { skip: () => void }): void {
+  if (available) return;
+  if (process.env.PCC_REQUIRE_FORK_TESTS === "1") throw new Error(`fork tests are required but unavailable: ${skipReason}`);
+  console.warn(`[escrow-reclaim.fork] SKIPPED: ${skipReason}`);
+  ctx.skip();
+}
+
 describe("V3 deadline reclaim: live anvil fork", () => {
-  it("boots anvil and deploys real escrows, or skips with a clear reason", () => {
-    if (!available) {
-      console.warn(`[escrow-reclaim.fork] SKIPPED: ${skipReason}`);
-      expect(skipReason.length).toBeGreaterThan(0);
-      return;
-    }
+  it("boots anvil and deploys real escrows", (ctx) => {
+    needsChain(ctx);
     expect(GATEWAY.address).toBe(E.A.payer);
   });
 
-  it("reads the window in force: the 30-day default, or the payer's own", async () => {
-    if (!available) return;
+  it("reads the window in force: the 30-day default, or the payer's own", async (ctx) => {
+    needsChain(ctx);
     expect((await getReclaimStateV3(E.A.escrow)).windowSeconds).toBe(BigInt(30 * DAY));
     expect((await getReclaimStateV3(E.B.escrow)).windowSeconds).toBe(3600n);
   });
 
-  it("before the deadline it refuses not_due and sends nothing", async () => {
-    if (!available) return;
+  it("before the deadline it refuses not_due and sends nothing", async (ctx) => {
+    needsChain(ctx);
     const before = await balanceOf(E.A.usdc, E.A.payer);
     const out = await reclaimEscrowV3(E.A.escrow);
     const state = await getReclaimStateV3(E.A.escrow);
@@ -213,8 +218,8 @@ describe("V3 deadline reclaim: live anvil fork", () => {
     expect(await balanceOf(E.A.usdc, E.A.payer)).toBe(before);
   });
 
-  it("a payer-set one-hour window is honoured: B reclaims after an hour while A is still early", async () => {
-    if (!available) return;
+  it("a payer-set one-hour window is honoured: B reclaims after an hour while A is still early", async (ctx) => {
+    needsChain(ctx);
     await advance(3601);
     const out = await reclaimEscrowV3(E.B.escrow);
     expect(out).toEqual(expect.objectContaining({ outcome: "reclaimed", reclaimed: [expect.objectContaining({ index: 0 })] }));
@@ -223,8 +228,8 @@ describe("V3 deadline reclaim: live anvil fork", () => {
     expect(await reclaimEscrowV3(E.A.escrow)).toEqual(expect.objectContaining({ outcome: "refused", reason: "not_due" }));
   });
 
-  it("past fundedAt + 30 days it reclaims every milestone, and the payer is repaid in full", async () => {
-    if (!available) return;
+  it("past fundedAt + 30 days it reclaims every milestone, and the payer is repaid in full", async (ctx) => {
+    needsChain(ctx);
     await advance(30 * DAY);
     const out = await reclaimEscrowV3(E.A.escrow);
     expect(out).toEqual(expect.objectContaining({ outcome: "reclaimed", alreadyRefunded: [] }));
@@ -235,15 +240,15 @@ describe("V3 deadline reclaim: live anvil fork", () => {
     expect(await balanceOf(E.A.usdc, OPERATOR)).toBe(0n);
   });
 
-  it("a repeat sends nothing: already_refunded", async () => {
-    if (!available) return;
+  it("a repeat sends nothing: already_refunded", async (ctx) => {
+    needsChain(ctx);
     const nonce = await publicClient.getTransactionCount({ address: GATEWAY.address });
     expect(await reclaimEscrowV3(E.A.escrow)).toEqual({ outcome: "already_refunded", escrow: E.A.escrow, alreadyRefunded: [0, 1] });
     expect(await publicClient.getTransactionCount({ address: GATEWAY.address })).toBe(nonce);
   });
 
-  it("an escrow the gateway signer does not pay for is refused not_payer, and nothing is sent", async () => {
-    if (!available) return;
+  it("an escrow the gateway signer does not pay for is refused not_payer, and nothing is sent", async (ctx) => {
+    needsChain(ctx);
     const nonce = await publicClient.getTransactionCount({ address: GATEWAY.address });
     expect(await reclaimEscrowV3(E.C.escrow)).toEqual(
       expect.objectContaining({ outcome: "refused", reason: "not_payer", payer: STRANGER.address }),
