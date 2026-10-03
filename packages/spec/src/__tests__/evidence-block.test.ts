@@ -13,12 +13,14 @@ import {
   computeEvidenceBlockHash,
   computeKernelSignedEventsRoot,
   computeSessionKeyAuthDigest,
+  computeSessionKeyGrantHash,
   computeSettlementUnitId,
   computeUnitContextDigest,
   sessionKeyAuthSnapshot,
   taggedDigestToBytes32,
   type AttestationQuorumRole,
   type Bytes32Hex,
+  type SessionKeyAuthDigestContext,
 } from "../evidence/evidence-block.js";
 import { canonicalize, hashBundle, hashEvent, verifyEventHash } from "../util/canonical.js";
 import { computeVerificationProgramHash, type VerificationProgram } from "../types/verification-program.js";
@@ -53,6 +55,17 @@ const sessionKeyAuth = {
   scope: { allowedActions: ["sign-evidence"], contractIds: ["unit-golden"], maxSignatures: 8 },
   parentSignature: "bb".repeat(64),
 } as SessionKeyAuthorization;
+
+// D3 (RATIFIED, oracle #1030): computeSessionKeyAuthDigest needs the parent's raw32 public key, the
+// scheme and the key version, none of which live on `sessionKeyAuth` itself (see the module's
+// `SessionKeyAuthDigestContext`). This fixed, arbitrary context is paired with the `sessionKeyAuth`
+// sample everywhere below that sample is reused (it is not the evidence lane's D3 golden sample,
+// which has its own session key and its own context; see "E7 D3" for that one).
+const sessionAuthContext: SessionKeyAuthDigestContext = {
+  parentPublicKey: K("golden-parent-pubkey"),
+  keyVersion: 1,
+  scheme: "ed25519",
+};
 
 // D4 (RATIFIED, oracle #1030/#1289): computeAttestationRoleDigest/computeAttestationSetRoot are
 // keccak/abi and bound to the funded program, not a job. This fixture IS the evidence lane's pinned
@@ -110,6 +123,15 @@ const program = {
 // byte-exact against the ratified D4 goldens in "E7 D4" below, not against this sample.
 const PRE_D4_SAMPLE_ATTESTATION_SET_ROOT = "0x606f17fcfd5dabd1746cd8ec406636b3d1bae2e80f310bd6dee221a756c024b2";
 
+// The EvidenceBlockV2 sample's sessionKeyAuthDigest, computed with the pre-D3 mirror formula (0x +
+// sha256(canonicalize(SessionKeyAuthorization))), kept as an opaque 32-byte input so the shared
+// block golden below (0x4605a6e9… / 0x854079f7…) does not move. computeSessionKeyAuthDigest itself
+// is D3 now (the two-value keccak/abi formula, bound to a parent public key/scheme/keyVersion
+// context): it is tested byte-exact against the ratified D3 goldens in "E7 D3" below, not against
+// this sample. (Recorded from the pre-change code via a scratch vitest file, run once, then
+// deleted; not committed — same method as PRE_D4_SAMPLE_ATTESTATION_SET_ROOT above.)
+const PRE_D3_SAMPLE_SESSION_KEY_AUTH_DIGEST = "0x73b60d4d141e850b65714161967709a37e792caa138ed315016fc3c7d0d0ffaf";
+
 async function goldenRoots() {
   const settlementUnitId = computeSettlementUnitId(unit);
   const events = await Promise.all(rawEvents.map(async (e) => ({ ...e, id: e.type, hash: await hashEvent(e) })));
@@ -118,7 +140,7 @@ async function goldenRoots() {
     events,
     unitContextDigest: computeUnitContextDigest({ ...unit, settlementUnitId, challengeNonce }),
     kernelSignedEventsRoot: taggedDigestToBytes32(await hashBundle(events)),
-    sessionKeyAuthDigest: computeSessionKeyAuthDigest(sessionKeyAuth),
+    sessionKeyAuthDigest: PRE_D3_SAMPLE_SESSION_KEY_AUTH_DIGEST,
     attestationSetRoot: PRE_D4_SAMPLE_ATTESTATION_SET_ROOT,
     workProductRoot: computeWorkProductHash(workProduct),
     programHash: computeVerificationProgramHash(program),
@@ -359,6 +381,150 @@ describe("E7 D4 — computeAttestationRoleDigest and computeAttestationSetRoot m
     expect(() => computeAttestationRoleDigest(attFundedProgramHash, { ...roles[0]!, total: 2 ** 32 })).toThrow(
       EvidenceBlockInputError,
     );
+  });
+});
+
+// D3 (RATIFIED, oracle #1030): the evidence lane's own golden sample (sessionkey-grant-golden-vector.cjs
+// on #270 @ 973fdeb8), copied verbatim from its printed output, not derived here. Distinct from the
+// top-level `sessionKeyAuth` fixture (different issuedAt/expiresAt/parentSignature): this is the one
+// sample the oracle's production aggregate actually binds (see the acceptance test below).
+describe("E7 D3 — computeSessionKeyGrantHash and computeSessionKeyAuthDigest match the ratified two-value keccak/abi formula", () => {
+  const d3Auth: SessionKeyAuthorization = {
+    sessionId: "sess-golden",
+    parentAgentId: "kernel-golden-01",
+    publicKey: "aa".repeat(32),
+    issuedAt: 1755648000,
+    expiresAt: 1755734400,
+    scope: { allowedActions: ["sign-evidence"], contractIds: ["unit-golden"], maxSignatures: 8 },
+    parentSignature:
+      "92d91e4a7e4ab5838b9ea04f035c057ef7fe24149ca60e6f42d7371229f2e4c30b646d220a4906a3da85857ab964950460eb66d7ff638b4c87e09fc9803c4905",
+  };
+  const d3Context: SessionKeyAuthDigestContext = {
+    parentPublicKey: "0xd759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+    keyVersion: 1,
+    scheme: "ed25519",
+  };
+
+  it("the grant hash and the auth digest match the spec's pinned goldens", () => {
+    expect(computeSessionKeyGrantHash(d3Auth)).toBe("0x9b0a9a62a6d89e55194a6d6af16aec5889b30a846585ca459653cc5d5021ba14");
+    expect(computeSessionKeyAuthDigest(d3Auth, d3Context)).toBe(
+      "0xaccbbe5a396764ac3eff908cca1c03d9d57e617407e0d8f3cb9bf9f9904a8323",
+    );
+  });
+
+  it("negatives (D3): a mutated parentSignature, a different keyVersion or a mutated session body each give a different digest", () => {
+    const base = computeSessionKeyAuthDigest(d3Auth, d3Context);
+    // parentSignature mutated: EXCLUDED from the grant (the grant hash is unchanged) but BOUND in
+    // the auth (the auth digest moves): proof substitution is refused, not merely unsigned.
+    const otherSignature = `ff${d3Auth.parentSignature.slice(2)}`;
+    expect(computeSessionKeyGrantHash({ ...d3Auth, parentSignature: otherSignature })).toBe(
+      computeSessionKeyGrantHash(d3Auth),
+    );
+    expect(computeSessionKeyAuthDigest({ ...d3Auth, parentSignature: otherSignature }, d3Context)).not.toBe(base);
+    // keyVersion 2: a different digest (rotation is unambiguous).
+    expect(computeSessionKeyAuthDigest(d3Auth, { ...d3Context, keyVersion: 2 })).not.toBe(base);
+    // the session body mutated: a different grant, and so a different auth digest.
+    expect(computeSessionKeyGrantHash({ ...d3Auth, sessionId: "sess-EVIL" })).not.toBe(computeSessionKeyGrantHash(d3Auth));
+    expect(computeSessionKeyAuthDigest({ ...d3Auth, sessionId: "sess-EVIL" }, d3Context)).not.toBe(base);
+  });
+
+  it("refuses malformed context: a non-raw32 parentPublicKey, a keyVersion outside uint32, or an unknown scheme", () => {
+    for (const bad of ["0xabcd", `0x${"ab".repeat(31)}`, `0X${"ab".repeat(32)}`, "ab".repeat(32), 7, null]) {
+      const err = refusalOf(() => computeSessionKeyAuthDigest(d3Auth, { ...d3Context, parentPublicKey: bad as never }));
+      expect(err.field, String(bad)).toBe("context.parentPublicKey");
+    }
+    for (const bad of [-1, 1.5, NaN, Infinity, -0, 2 ** 32, "1"]) {
+      const err = refusalOf(() => computeSessionKeyAuthDigest(d3Auth, { ...d3Context, keyVersion: bad as never }));
+      expect(err.field, String(bad)).toBe("context.keyVersion");
+    }
+    for (const bad of ["ED25519", "secp256k1", "", 1, null, undefined]) {
+      const err = refusalOf(() => computeSessionKeyAuthDigest(d3Auth, { ...d3Context, scheme: bad as never }));
+      expect(err.field, String(bad)).toBe("context.scheme");
+    }
+  });
+
+  it("refuses a non-object context, and a Proxy or an accessor inside it, without running a trap", () => {
+    for (const bad of [null, undefined, 7, "ctx"]) {
+      expect(refusalOf(() => computeSessionKeyAuthDigest(d3Auth, bad as never)).field, String(bad)).toBe("context");
+    }
+    const traps: string[] = [];
+    expect(
+      refusalOf(() => computeSessionKeyAuthDigest(d3Auth, new Proxy(d3Context, recordingHandler(traps)))).field,
+    ).toBe("context");
+    expect(traps, "no trap may run").toEqual([]);
+    let reads = 0;
+    const withGetter = Object.defineProperty({ ...d3Context }, "keyVersion", {
+      enumerable: true,
+      get() {
+        reads++;
+        return 1;
+      },
+    });
+    const err = refusalOf(() => computeSessionKeyAuthDigest(d3Auth, withGetter as never));
+    expect(err.field).toBe("context.keyVersion");
+    expect(reads).toBe(0);
+  });
+});
+
+describe("EvidenceBlockV1 v2 — reproduces the oracle's production EvidenceBlockV2 aggregate (D3 + D4 + the production events root)", () => {
+  // The production events root (kernel-signed-events-root-golden-vector.cjs on #270): ported
+  // verbatim (same two schema-valid, ISO-8601 events already pinned in the "kernelSignedEventsRoot
+  // — the production-form golden" describe block above), through #361's own
+  // computeKernelSignedEventsRoot, not pinned as a constant.
+  const isoEvents: Array<Omit<EvidenceEvent, "id" | "hash">> = [
+    { type: "execution_completed", timestamp: "2026-08-20T00:00:00Z", source, payload: { ok: true } },
+    { type: "cv_inspection_result", timestamp: "2026-08-20T00:00:05Z", source, payload: { pass: 1, defects: 0 } },
+  ];
+  // The D3 golden sample (same as "E7 D3" above): the oracle's production sessionKeyAuthDigest
+  // binds this exact session key and context, not the top-level `sessionKeyAuth` fixture.
+  const d3Auth: SessionKeyAuthorization = {
+    sessionId: "sess-golden",
+    parentAgentId: "kernel-golden-01",
+    publicKey: "aa".repeat(32),
+    issuedAt: 1755648000,
+    expiresAt: 1755734400,
+    scope: { allowedActions: ["sign-evidence"], contractIds: ["unit-golden"], maxSignatures: 8 },
+    parentSignature:
+      "92d91e4a7e4ab5838b9ea04f035c057ef7fe24149ca60e6f42d7371229f2e4c30b646d220a4906a3da85857ab964950460eb66d7ff638b4c87e09fc9803c4905",
+  };
+  const d3Context: SessionKeyAuthDigestContext = {
+    parentPublicKey: "0xd759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+    keyVersion: 1,
+    scheme: "ed25519",
+  };
+
+  it("the six production roots give the oracle's pinned aggregate 0xcb30733c… (bus #1069, #5772)", async () => {
+    const settlementUnitId = computeSettlementUnitId(unit);
+    const unitContextDigest = computeUnitContextDigest({ ...unit, settlementUnitId, challengeNonce });
+    expect(unitContextDigest).toBe("0x4de8723033b81fe8465870c2105d5a13ca37337bea5881eafdf72666591fb519");
+
+    const events = await Promise.all(isoEvents.map(async (e) => ({ ...e, id: e.type, hash: await hashEvent(e) })));
+    const bundleHash = await hashBundle(events);
+    const { root: kernelSignedEventsRoot } = await computeKernelSignedEventsRoot({ events, bundleHash });
+    expect(kernelSignedEventsRoot).toBe("0x4e0af964e4e066717998ed7a49bf7c874023bd402b825da22b4dabd70fb6f9fe");
+
+    const sessionKeyAuthDigest = computeSessionKeyAuthDigest(d3Auth, d3Context);
+    expect(sessionKeyAuthDigest).toBe("0xaccbbe5a396764ac3eff908cca1c03d9d57e617407e0d8f3cb9bf9f9904a8323");
+
+    const attestationSetRoot = computeAttestationSetRoot(attFundedProgramHash, roles);
+    expect(attestationSetRoot).toBe("0xcb38575b678a08c0915704d648c851ee7b26f6737c2ddb097c7ff531a16ad0e9");
+
+    const workProductRoot = computeWorkProductHash(workProduct);
+    expect(workProductRoot).toBe("0xa7f8570e430e1dee4deed6c2d118ed7cbc9b9d60d81d6dbd6cb980a3ef4bb1a7");
+
+    const programHash = computeVerificationProgramHash(program);
+    expect(programHash).toBe("0x95e8193a8602b26f5930d45d810404ea6cf0a91c13849f918af40f406be565bc");
+
+    expect(
+      computeEvidenceBlockHash({
+        unitContextDigest,
+        kernelSignedEventsRoot,
+        sessionKeyAuthDigest,
+        attestationSetRoot,
+        workProductRoot,
+        programHash,
+      }),
+    ).toBe("0xcb30733c2904e714a4ef89a387b75bdcfa07aff5a4ea7482b55404a1e24e396c");
   });
 });
 
@@ -1665,7 +1831,7 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       name: "computeSessionKeyAuthDigest",
       root: S,
       make: authOf,
-      call: (input) => computeSessionKeyAuthDigest(input),
+      call: (input) => computeSessionKeyAuthDigest(input, sessionAuthContext),
       members: sessionMembers,
       missing: { path: `${S}.sessionId`, holder: (i) => i, key: "sessionId" },
       extras: false,
@@ -1899,7 +2065,7 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       role: computeAttestationRoleDigest(attFundedProgramHash, roleInput),
       set: computeAttestationSetRoot(attFundedProgramHash, rolesInput),
       block: computeEvidenceBlockHash(rootsInput),
-      sessionDigest: computeSessionKeyAuthDigest(authA as never),
+      sessionDigest: computeSessionKeyAuthDigest(authA as never, sessionAuthContext),
       sessionSnapshot: sessionKeyAuthSnapshot(authB as never).digest,
       tagged: taggedDigestToBytes32(taggedInput),
     });
@@ -2018,7 +2184,7 @@ describe("E7c round 2 — every public entry point refuses code-running input an
       { name: "token", valid: "role-1", regex: originals.token, check: (t) => accepts(() => computeAttestationRoleDigest(attFundedProgramHash, roleOf({ roleId: t })), "role.roleId") },
       { name: "registry id token", valid: "registry-1", regex: originals.token, check: (t) => accepts(() => computeAttestationRoleDigest(attFundedProgramHash, roleOf({ signers: { ...roleOf().signers, registryId: t } })), "role.signers.registryId") },
       { name: "funded program hash", valid: `0x${"11".repeat(32)}`, regex: originals.bytes32, check: (t) => accepts(() => computeAttestationRoleDigest(t as Bytes32Hex, roleOf()), "fundedProgramHash") },
-      { name: "session public key", valid: "ab".repeat(32), regex: originals.sessionKey, check: (t) => accepts(() => computeSessionKeyAuthDigest({ ...authOf(), publicKey: t } as never), `${S}.publicKey`) },
+      { name: "session public key", valid: "ab".repeat(32), regex: originals.sessionKey, check: (t) => accepts(() => computeSessionKeyAuthDigest({ ...authOf(), publicKey: t } as never, sessionAuthContext), `${S}.publicKey`) },
       { name: "tagged digest", valid: `sha256:${"ef".repeat(32)}`, regex: originals.tagged, check: (t) => accepts(() => taggedDigestToBytes32(t), "kernelSignedEventsRoot") },
     ];
     for (const { name, valid, regex, check } of cases) {
@@ -2316,12 +2482,18 @@ describe("E7 F3 — roles are admitted and read from their own descriptors, and 
   describe("session authorization", () => {
     const freshAuth = (): SessionKeyAuthorization => structuredClone(sessionKeyAuth);
     const refuseAuth = (auth: unknown) =>
-      refusalOf(() => computeSessionKeyAuthDigest(auth as SessionKeyAuthorization));
+      refusalOf(() => computeSessionKeyAuthDigest(auth as SessionKeyAuthorization, sessionAuthContext));
     const P = "sessionKeyAuthorization";
 
-    it("the digest is sha256 of the canonical authorization, as the mirror defines it", () => {
-      expect(computeSessionKeyAuthDigest(sessionKeyAuth)).toBe(sha(canonicalize(sessionKeyAuth)));
-      expect(sessionKeyAuthSnapshot(sessionKeyAuth).digest).toBe(computeSessionKeyAuthDigest(sessionKeyAuth));
+    it("the digest is now the D3 two-value keccak/abi formula, not sessionKeyAuthSnapshot's own (superseded) mirror digest", () => {
+      // sessionKeyAuthSnapshot itself is unchanged (E7 F3/F4 below still exercise it directly): its
+      // own `.digest` stays the pre-D3 mirror form, 0x + sha256(canonicalize(value)).
+      expect(sessionKeyAuthSnapshot(sessionKeyAuth).digest).toBe(sha(canonicalize(sessionKeyAuth)));
+      // computeSessionKeyAuthDigest no longer reads that field: it binds context and the D3 grant
+      // hash instead, so the two digests diverge for the same authorization.
+      expect(computeSessionKeyAuthDigest(sessionKeyAuth, sessionAuthContext)).not.toBe(
+        sessionKeyAuthSnapshot(sessionKeyAuth).digest,
+      );
     });
 
     it("returns a deep-frozen plain copy that is not the object passed in", () => {
@@ -2347,12 +2519,15 @@ describe("E7 F3 — roles are admitted and read from their own descriptors, and 
       const auth = freshAuth();
       const snap = sessionKeyAuthSnapshot(auth);
       expect(sha(canonicalize(snap.value))).toBe(snap.digest);
+      const originalAuthDigest = computeSessionKeyAuthDigest(auth, sessionAuthContext);
       auth.sessionId = "changed-after-hashing";
       auth.scope.contractIds.push("zz-added-after-hashing"); // sorts after "unit-golden": still canonical order
       expect(snap.value.sessionId).toBe("sess-golden");
       expect(snap.value.scope.contractIds).toEqual(["unit-golden"]);
       expect(sha(canonicalize(snap.value))).toBe(snap.digest);
-      expect(computeSessionKeyAuthDigest(auth)).not.toBe(snap.digest);
+      // computeSessionKeyAuthDigest re-admits and re-snapshots `auth` itself (it does not reuse
+      // `snap`), so the MUTATED auth now gives a different D3 digest than it did before the mutation.
+      expect(computeSessionKeyAuthDigest(auth, sessionAuthContext)).not.toBe(originalAuthDigest);
     });
 
     it("snapshotting a snapshot is idempotent", () => {
@@ -2495,14 +2670,18 @@ describe("E7 F3 — roles are admitted and read from their own descriptors, and 
         expect(refuseAuth(bad).field, String(bad)).toBe(P);
       }
       const bare = Object.assign(Object.create(null), freshAuth());
-      expect(computeSessionKeyAuthDigest(bare)).toBe(computeSessionKeyAuthDigest(sessionKeyAuth));
+      expect(computeSessionKeyAuthDigest(bare, sessionAuthContext)).toBe(
+        computeSessionKeyAuthDigest(sessionKeyAuth, sessionAuthContext),
+      );
       const foreign = runInNewContext(`({
         sessionId: "sess-golden", parentAgentId: "kernel-golden-01", publicKey: "${"aa".repeat(32)}",
         issuedAt: 1699999000, expiresAt: 1700003600,
         scope: { allowedActions: ["sign-evidence"], contractIds: ["unit-golden"], maxSignatures: 8 },
         parentSignature: "${"bb".repeat(64)}"
       })`);
-      expect(computeSessionKeyAuthDigest(foreign)).toBe(computeSessionKeyAuthDigest(sessionKeyAuth));
+      expect(computeSessionKeyAuthDigest(foreign, sessionAuthContext)).toBe(
+        computeSessionKeyAuthDigest(sessionKeyAuth, sessionAuthContext),
+      );
     });
 
     it("refuses a missing required field and names it", () => {
@@ -2561,12 +2740,22 @@ describe("E7 F3 — roles are admitted and read from their own descriptors, and 
     });
 
     it("an undefined derivationPath is the same authorization as an absent one; a present one is committed", () => {
-      const absent = computeSessionKeyAuthDigest(freshAuth());
-      expect(computeSessionKeyAuthDigest({ ...freshAuth(), derivationPath: undefined })).toBe(absent);
+      // sessionKeyAuthSnapshot's own (superseded) mirror digest: unchanged behavior.
+      const absentSnapshotDigest = sessionKeyAuthSnapshot(freshAuth()).digest;
+      expect(sessionKeyAuthSnapshot({ ...freshAuth(), derivationPath: undefined }).digest).toBe(absentSnapshotDigest);
       const withPath = sessionKeyAuthSnapshot({ ...freshAuth(), derivationPath: "m/8004'/84532'/1'/0'" });
       expect(withPath.value.derivationPath).toBe("m/8004'/84532'/1'/0'");
-      expect(withPath.digest).not.toBe(absent);
+      expect(withPath.digest).not.toBe(absentSnapshotDigest);
       expect(withPath.digest).toBe(sha(canonicalize({ ...sessionKeyAuth, derivationPath: "m/8004'/84532'/1'/0'" })));
+
+      // computeSessionKeyAuthDigest (D3): the same absent/undefined/present relationship holds,
+      // over the grant hash (derivationPath lives in the grant body, see sessionKeyGrantBody).
+      const absent = computeSessionKeyAuthDigest(freshAuth(), sessionAuthContext);
+      expect(computeSessionKeyAuthDigest({ ...freshAuth(), derivationPath: undefined }, sessionAuthContext)).toBe(absent);
+      expect(
+        computeSessionKeyAuthDigest({ ...freshAuth(), derivationPath: "m/8004'/84532'/1'/0'" }, sessionAuthContext),
+      ).not.toBe(absent);
+
       for (const bad of [5, "", null]) {
         expect(refuseAuth({ ...freshAuth(), derivationPath: bad }).field, String(bad)).toBe(`${P}.derivationPath`);
       }
@@ -2581,10 +2770,11 @@ describe("E7 F4 — one session authorization has exactly one accepted spelling 
   const SIG = "bb".repeat(64);
   const freshAuth = (): SessionKeyAuthorization => structuredClone(sessionKeyAuth);
   const refuseAuth = (auth: unknown) =>
-    refusalOf(() => computeSessionKeyAuthDigest(auth as SessionKeyAuthorization));
+    refusalOf(() => computeSessionKeyAuthDigest(auth as SessionKeyAuthorization, sessionAuthContext));
 
-  it("the golden spelling (bare lowercase hex) is accepted and keeps the mirror's digest", () => {
-    expect(computeSessionKeyAuthDigest(freshAuth())).toBe(sha(canonicalize(sessionKeyAuth)));
+  it("the golden spelling (bare lowercase hex) is accepted and gives the same D3 digest every time", () => {
+    const golden = computeSessionKeyAuthDigest(sessionKeyAuth, sessionAuthContext);
+    expect(computeSessionKeyAuthDigest(freshAuth(), sessionAuthContext)).toBe(golden);
   });
 
   it("refuses the same Ed25519 key with a 0x prefix, in uppercase or in mixed case, so it cannot get a second digest", () => {
@@ -2625,7 +2815,10 @@ describe("E7 F4 — one session authorization has exactly one accepted spelling 
     const auth = { ...freshAuth(), publicKey: toHex(key), parentSignature: toHex(sig) };
     expect(auth.publicKey).toMatch(/^00/);
     expect(sessionKeyAuthSnapshot(auth).value.publicKey).toBe(auth.publicKey);
-    expect(computeSessionKeyAuthDigest(auth)).toBe(sha(canonicalize(auth)));
+    // Accepted (does not throw) and deterministic over two separate objects with the same content.
+    expect(computeSessionKeyAuthDigest(auth, sessionAuthContext)).toBe(
+      computeSessionKeyAuthDigest(structuredClone(auth), sessionAuthContext),
+    );
   });
 
   // E7 F4 scope arrays, unblocked by gateway #4670: SessionKeyService.issueSessionKey now builds
@@ -2641,7 +2834,7 @@ describe("E7 F4 — one session authorization has exactly one accepted spelling 
     };
     const accepts = (key: (typeof KEYS)[number], value: string[]) => {
       try {
-        computeSessionKeyAuthDigest(withScope(key, value));
+        computeSessionKeyAuthDigest(withScope(key, value), sessionAuthContext);
         return true;
       } catch (e) {
         expect(e).toBeInstanceOf(EvidenceBlockInputError);
@@ -2675,19 +2868,25 @@ describe("E7 F4 — one session authorization has exactly one accepted spelling 
       for (const key of KEYS) {
         const sorted = ["alpha", "beta", "gamma-3"];
         const auth = withScope(key, sorted);
-        expect(computeSessionKeyAuthDigest(auth), key).toBe(sha(canonicalize(auth)));
+        expect(computeSessionKeyAuthDigest(auth, sessionAuthContext), key).toBe(
+          computeSessionKeyAuthDigest(structuredClone(auth), sessionAuthContext),
+        );
         expect(sessionKeyAuthSnapshot(auth).value.scope[key], key).toEqual(sorted);
       }
       const both = freshAuth();
       both.scope.allowedActions = ["a", "b"];
       both.scope.contractIds = ["x", "y", "z"];
-      expect(computeSessionKeyAuthDigest(both)).toBe(sha(canonicalize(both)));
+      expect(computeSessionKeyAuthDigest(both, sessionAuthContext)).toBe(
+        computeSessionKeyAuthDigest(structuredClone(both), sessionAuthContext),
+      );
     });
 
     it("accepts an empty array, for contractIds and for allowedActions", () => {
       for (const key of KEYS) {
         const auth = withScope(key, []);
-        expect(computeSessionKeyAuthDigest(auth), key).toBe(sha(canonicalize(auth)));
+        expect(computeSessionKeyAuthDigest(auth, sessionAuthContext), key).toBe(
+          computeSessionKeyAuthDigest(structuredClone(auth), sessionAuthContext),
+        );
         expect(sessionKeyAuthSnapshot(auth).value.scope[key], key).toEqual([]);
       }
     });
@@ -2917,7 +3116,11 @@ describe("the Proxy test is taken from the host: a runtime without it still load
     { name: "computeAttestationSetRoot", call: (m, wrap) => m.computeAttestationSetRoot(attFundedProgramHash, wrap(structuredClone(roles))) },
     { name: "computeEvidenceBlockHash", call: (m, wrap) => m.computeEvidenceBlockHash(wrap(rootsOf())) },
     { name: "sessionKeyAuthSnapshot", call: (m, wrap) => m.sessionKeyAuthSnapshot(wrap(structuredClone(sessionKeyAuth))) },
-    { name: "computeSessionKeyAuthDigest", call: (m, wrap) => m.computeSessionKeyAuthDigest(wrap(structuredClone(sessionKeyAuth))) },
+    { name: "computeSessionKeyGrantHash", call: (m, wrap) => m.computeSessionKeyGrantHash(wrap(structuredClone(sessionKeyAuth))) },
+    {
+      name: "computeSessionKeyAuthDigest",
+      call: (m, wrap) => m.computeSessionKeyAuthDigest(wrap(structuredClone(sessionKeyAuth)), sessionAuthContext),
+    },
     { name: "computeKernelSignedEventsRoot", call: async (m, wrap) => m.computeKernelSignedEventsRoot(wrap(await bundleOf())) },
   ];
   /** What a call did, without an `expect` in the way: the value it returned (a promise is awaited) or what it threw. */
