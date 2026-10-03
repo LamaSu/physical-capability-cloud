@@ -34,6 +34,22 @@ vi.mock("../sentry.js", () => ({
   },
 }));
 
+/** While set, the next endTrace() throws once (N115). */
+const tracing = vi.hoisted(() => ({ failEnd: false }));
+vi.mock("../tracing.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../tracing.js")>();
+  return {
+    ...real,
+    endTrace: (...args: Parameters<typeof real.endTrace>) => {
+      if (tracing.failEnd) {
+        tracing.failEnd = false;
+        throw new Error("trace end failed");
+      }
+      return real.endTrace(...args);
+    },
+  };
+});
+
 vi.mock("../sse/stream-hub.js", () => ({
   streamHub: { publish: vi.fn(), subscribe: vi.fn(), unsubscribe: vi.fn() },
 }));
@@ -78,7 +94,7 @@ vi.mock("../contracts/batch-settlement.js", () => ({
 }));
 
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { Sentry } from "../sentry.js";
 import { KernelService } from "../services/kernel-service.js";
 import {
@@ -531,5 +547,64 @@ describe("KernelService charges a failed run to the device its JobResult names (
     await waitDone(svc, "ks-origin-camera");
     expect.soft(gw.getStatus().circuits.get("dev-origin-cm")?.failures ?? 0, "failures charged to the machine").toBe(0);
     expect.soft(gw.getStatus().circuits.get("dev-origin-camera")?.failures ?? 0, "failures charged to the camera").toBe(1);
+  });
+});
+
+describe("telemetry never changes a job's breaker charge or its status (N115)", () => {
+  const LC_TYPE = "test-working-ks-n115";
+  beforeAll(() => {
+    try { unregisterMachineAdapter(LC_TYPE); } catch { /* not registered */ }
+    registerMachineAdapter(LC_TYPE, (device, _cfg, kernelId) => new WorkingAdapter(device.id, kernelId));
+  });
+  afterAll(() => {
+    try { unregisterMachineAdapter(LC_TYPE); } catch { /* already gone */ }
+  });
+
+  /** Runs one successful tier-0 job on its own machine; returns the machine's circuit, the 'failed' marks and unhandled rejections. */
+  async function successfulJob(kernelId: string, deviceId: string) {
+    initSafetyGateway({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
+    const gw = getSafetyGateway();
+    const markedFailed = vi.spyOn(getRepos().jobs, "updateStatus");
+    let unhandled = 0;
+    const on = () => void (unhandled += 1);
+    process.on("unhandledRejection", on);
+    try {
+      const svc = new KernelService({ kernelId, mockMode: false, devices: [{ id: deviceId, type: "machine", adapterType: LC_TYPE, config: {} }] });
+      await svc.submitJob({ jobId: `${kernelId}-job`, stepId: "s", assuranceTier: 0, deviceId });
+      const start = Date.now();
+      while ((await svc.getJobStatus(`${kernelId}-job`)).status === "executing" && Date.now() - start < 2_000) await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 30));
+    } finally {
+      process.off("unhandledRejection", on);
+    }
+    const failedMarks = markedFailed.mock.calls.filter(([, status]) => status === "failed").length;
+    return { circuit: gw.getStatus().circuits.get(deviceId), failedMarks, unhandled };
+  }
+
+  it.each([
+    ["its lifecycle span's end() throws", { end: () => { throw new Error("span end failed"); }, setStatus: () => {} }],
+    ["its lifecycle span's setStatus() throws", { end: () => {}, setStatus: () => { throw new Error("span status failed"); } }],
+  ])("a successful job whose %s: no failure is charged, it is not marked failed, nothing is unhandled", async (_what, span) => {
+    vi.mocked(Sentry.startSpanManual).mockImplementationOnce((_o: unknown, cb: (s: object) => void) => {
+      cb(span);
+    });
+    const out = await successfulJob(`kernel-ks-n115-${_what.length}`, `dev-n115-${_what.length}`);
+    expect.soft(out.circuit?.failures ?? 0, "failures charged to the machine").toBe(0);
+    expect.soft(out.circuit?.state ?? "closed", "the machine's breaker").toBe("closed");
+    expect.soft(out.failedMarks, "the job marked failed").toBe(0);
+    expect.soft(out.unhandled, "unhandled rejections").toBe(0);
+  });
+
+  it("on the fallback path, a successful job whose trace's end throws: no failure is charged, it is not marked failed, nothing is unhandled", async () => {
+    vi.mocked(Sentry.startSpanManual).mockImplementationOnce(() => {
+      throw new Error("Sentry not initialised");
+    });
+    tracing.failEnd = true;
+    const out = await successfulJob("kernel-ks-n115-fallback", "dev-n115-fallback");
+    expect.soft(tracing.failEnd, "the trace's end threw").toBe(false);
+    expect.soft(out.circuit?.failures ?? 0, "failures charged to the machine").toBe(0);
+    expect.soft(out.circuit?.state ?? "closed", "the machine's breaker").toBe("closed");
+    expect.soft(out.failedMarks, "the job marked failed").toBe(0);
+    expect.soft(out.unhandled, "unhandled rejections").toBe(0);
   });
 });
