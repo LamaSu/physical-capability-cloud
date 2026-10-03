@@ -118,8 +118,9 @@ Status transitions: `pickup` → `in_transit`; `delivered` → `delivered`;
 - `PATCH /api/courier-jobs/:id` — update `pickupReadyAt`, `feeUSD`,
   `description`, or `validUntil`. Ownership check: caller's API-key
   `operatorId` must match the original `postedBy`. Otherwise 403.
-- `DELETE /api/courier-jobs/:id` — set status to `cancelled`. Same
-  ownership check.
+- `DELETE /api/courier-jobs/:id` — cancel an open, claimed or in-progress job.
+  Same ownership check. Any other status answers 409 `invalid_transition`
+  with `currentStatus` (in the courier vocabulary), and nothing changes.
 - `POST /api/courier-jobs/:id/heartbeat` — refresh `lastHeartbeatAt`.
   Required if `requireHeartbeat: true` was set on create (5min grace).
 
