@@ -2,15 +2,16 @@
 // Do not edit. Regenerate with: pnpm --filter @pcc/adk generate
 
 import type { AgentToolEndpoint } from "../agent-package-types.js";
+import { deepFreeze } from "../deep-freeze.js";
 
-export const AGENT_PACKAGE_PIN = {
+export const AGENT_PACKAGE_PIN = deepFreeze({
   schema: "pcc-agent-package/2.0",
   version: "2.19.1",
   toolCount: 253,
   sha256: "sha256:7e941fc11ebdc2c675242c4e61bf44bea04a61e58dd3569cdfb012bc655d2f77",
-} as const;
+} as const);
 
-export const AGENT_TOOLS = {
+export const AGENT_TOOLS = deepFreeze({
   "activate_registration": { method: "POST", path: "/api/onboard/registrations/{registrationId}/activate", required: ["registrationId"] },
   "advance_automation": { method: "POST", path: "/api/automation-status/{fromNodeId}/{toNodeId}/advance", required: ["fromNodeId","toNodeId"] },
   "analyze_machine_docs": { method: "POST", path: "/api/onboard/analyze", required: [] },
@@ -264,6 +265,6 @@ export const AGENT_TOOLS = {
   "validate_protocol": { method: "POST", path: "/api/protocols/{id}/validate", required: ["id"] },
   "verify_bounty": { method: "POST", path: "/api/bounty/verify", required: ["bountyId","jobId","score"] },
   "verify_evidence_zk": { method: "POST", path: "/api/zk/verify", required: ["proofId"] },
-} as const satisfies Record<string, AgentToolEndpoint>;
+} as const satisfies Record<string, AgentToolEndpoint>);
 
 export type AgentToolName = keyof typeof AGENT_TOOLS;
