@@ -22,7 +22,7 @@ import {
   type Bytes32Hex,
   type SessionKeyAuthDigestContext,
 } from "../evidence/evidence-block.js";
-import { canonicalize, hashBundle, hashEvent, verifyEventHash } from "../util/canonical.js";
+import { NonCanonicalValueError, canonicalize, hashBundle, hashEvent, verifyEventHash } from "../util/canonical.js";
 import { computeVerificationProgramHash, type VerificationProgram } from "../types/verification-program.js";
 import { computeWorkProductHash, type WorkProduct } from "../types/work-product.js";
 import type { EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
@@ -2145,6 +2145,103 @@ describe("E7c round 2 — every public entry point refuses code-running input an
     const events = withForbidden(forEvents, false, () => computeKernelSignedEventsRoot(bundle as never));
     expect(events.failure, "the events call looked something up at call time").toBeUndefined();
     expect((await events.value!).root).toBe(honestRoot);
+  });
+
+  it("runs no inherited toJSON, and no digest changes, when a prototype gains one after load (E7f MEDIUM)", () => {
+    // JSON.stringify looks `toJSON` up on every object and array it serializes, through the prototype
+    // chain: capturing JSON.stringify at load does not stop that lookup. Three ways to install one after load:
+    // (a) an own toJSON on Object.prototype or Array.prototype: canonicalize's polluted-prototype guard
+    //     (util/canonical.ts) refuses the session snapshot, so every session-key entry point refuses before
+    //     JSON.stringify runs, and the other digests are unchanged;
+    // (b) a toJSON on an object inserted between Array.prototype and Object.prototype: that guard reads only
+    //     the two prototypes' own properties, so this one reaches JSON.stringify unless the grant body has no
+    //     prototype chain to walk (the E7f reproduction). Object.prototype's own prototype cannot be set;
+    // (c) an own toJSON on String.prototype or Number.prototype: JSON.stringify never looks one up for a primitive.
+    // In every case the hook is neither looked up nor run: a method (the reviewer's reproduction, returning
+    // "changed") and a getter that counts every lookup.
+    const derivationPath = "m/8004'/84532'/1'/0'";
+    const inputs = () => ({
+      unit: { ...unit },
+      ctx: ctxOf(),
+      role: roleOf(),
+      roles: [roleOf(), roleOf({ roleId: "buyer" })],
+      roots: rootsOf(),
+      grant: authOf(),
+      auth: authOf(),
+      grantWithPath: { ...authOf(), derivationPath },
+      authWithPath: { ...authOf(), derivationPath },
+      snapshot: authOf(),
+    });
+    const sessionKeys = ["grant", "auth", "grantWithPath", "authWithPath", "snapshot"];
+    const runAll = (i: ReturnType<typeof inputs>): Record<string, { error?: unknown; value?: unknown }> => ({
+      unitId: settle(() => computeSettlementUnitId(i.unit)),
+      context: settle(() => computeUnitContextDigest(i.ctx)),
+      role: settle(() => computeAttestationRoleDigest(attFundedProgramHash, i.role)),
+      set: settle(() => computeAttestationSetRoot(attFundedProgramHash, i.roles)),
+      block: settle(() => computeEvidenceBlockHash(i.roots)),
+      grant: settle(() => computeSessionKeyGrantHash(i.grant as never)),
+      auth: settle(() => computeSessionKeyAuthDigest(i.auth as never, sessionAuthContext)),
+      grantWithPath: settle(() => computeSessionKeyGrantHash(i.grantWithPath as never)),
+      authWithPath: settle(() => computeSessionKeyAuthDigest(i.authWithPath as never, sessionAuthContext)),
+      snapshot: settle(() => sessionKeyAuthSnapshot(i.snapshot as never).digest),
+    });
+    const honest = runAll(inputs());
+    for (const [key, outcome] of Object.entries(honest)) expect(outcome.error, `honest ${key}`).toBeUndefined();
+    type Install = { name: string; sessionRefused: boolean; install: (descriptor: PropertyDescriptor) => () => void };
+    const ownOn = (label: string, target: object, sessionRefused: boolean): Install => ({
+      name: `an own ${label}.toJSON`,
+      sessionRefused,
+      install: (descriptor) => {
+        Object.defineProperty(target, "toJSON", descriptor);
+        return () => void delete (target as Record<string, unknown>).toJSON;
+      },
+    });
+    const insertedUnder = (label: string, target: object): Install => ({
+      name: `a toJSON on an object inserted under ${label}`,
+      sessionRefused: false,
+      install: (descriptor) => {
+        const original = Object.getPrototypeOf(target) as object | null;
+        Object.setPrototypeOf(target, Object.create(original, { toJSON: descriptor }));
+        return () => void Object.setPrototypeOf(target, original);
+      },
+    });
+    const installs: Install[] = [
+      ownOn("Object.prototype", Object.prototype, true),
+      ownOn("Array.prototype", Array.prototype, true),
+      insertedUnder("Array.prototype", Array.prototype),
+      ownOn("String.prototype", String.prototype, false),
+      ownOn("Number.prototype", Number.prototype, false),
+    ];
+    for (const { name, sessionRefused, install } of installs) {
+      for (const kind of ["method", "getter"] as const) {
+        const label = `${name} (${kind})`;
+        let runs = 0;
+        const descriptor: PropertyDescriptor =
+          kind === "method"
+            ? { configurable: true, enumerable: false, writable: true, value: () => (runs++, "changed") }
+            : { configurable: true, enumerable: false, get: () => void runs++ };
+        const fresh = inputs();
+        let hooked: ReturnType<typeof runAll> | undefined;
+        // Held only through this synchronous window: held across an await, it would reach vitest's own JSON.
+        const uninstall = install(descriptor);
+        try {
+          hooked = runAll(fresh);
+        } finally {
+          uninstall();
+        }
+        expect(runs, `${label}: looked up or run`).toBe(0);
+        for (const [key, outcome] of Object.entries(honest)) {
+          const got = hooked[key]!;
+          if (sessionRefused && sessionKeys.includes(key)) {
+            expect(got.error, `${label}: ${key}`).toBeInstanceOf(NonCanonicalValueError);
+            expect((got.error as Error).message, `${label}: ${key}`).toMatch(/prototype that defines toJSON/);
+          } else {
+            expect(got.error, `${label}: ${key}`).toBeUndefined();
+            expect(got.value, `${label}: ${key}`).toBe(outcome.value);
+          }
+        }
+      }
+    }
   });
 
   it("judges every spelling exactly as the regular expressions it replaced did", () => {

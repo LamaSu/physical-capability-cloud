@@ -219,6 +219,7 @@ const ownKeys = Reflect.ownKeys;
 const getOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
 const getPrototypeOf = Reflect.getPrototypeOf;
 const defineProperty = Reflect.defineProperty;
+const setPrototypeOf = Reflect.setPrototypeOf;
 const isSafeInteger = Number.isSafeInteger;
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const hostIsProxy = takeHostIsProxy();
@@ -249,6 +250,10 @@ const textEncoderEncode = call.bind(TextEncoder.prototype.encode) as unknown as 
 // already-validated primitives (never the caller's own object), so the call itself runs no code of
 // the caller — but capturing the reference, instead of an ambient `JSON.stringify` lookup at call
 // time, keeps it immune to a global JSON replaced after load, like every other reference above.
+// Capturing the function does NOT stop the lookup it makes per value: it asks every object and array
+// it serializes for `toJSON`, through the prototype chain. So every object and array it is handed has
+// no prototype (`sessionKeyGrantBody`, `prototypeFreeArray`), and a `toJSON` placed on any prototype
+// after load is never consulted (E7f).
 const jsonStringify = JSON.stringify;
 /** The largest value a Solidity `uint32` holds: 2**32 - 1. Declared here (not only where the D4
  * attestation fields first use it) so the D3 session-auth-digest context can reference it too. */
@@ -1196,24 +1201,43 @@ export interface SessionKeyAuthDigestContext {
  * EXCLUDED: it is the signature OVER this body, bound separately into the auth digest
  * (`computeSessionKeyAuthDigest`), never into the grant it signs. `value` is
  * `sessionKeyAuthSnapshot`'s own frozen copy — already validated and read from its own data
- * descriptors — so building this plain object literal from it and handing the literal to the
- * captured `jsonStringify` runs no code of the caller: every leaf here is a string, a validated
- * safe integer, or a nested object/array of those, never the caller's own value.
+ * descriptors — so building this object from it and handing it to the captured `jsonStringify` runs
+ * no code of the caller: every leaf here is a string, a validated safe integer, or a nested
+ * object/array of those, never the caller's own value. The body, its `scope` and both scope arrays
+ * have NO prototype (E7f): `JSON.stringify` asks each object and array it serializes for `toJSON`,
+ * and with no prototype chain that lookup ends at the value itself, so a `toJSON` placed after load
+ * on Object.prototype, Array.prototype or an object inserted between them is never consulted. The
+ * bytes are unchanged: a null prototype changes neither the own keys, their insertion order, nor
+ * how an array (still an Array exotic object, with its own `length`) is written.
  */
 function sessionKeyGrantBody(value: FrozenSessionKeyAuthorization): Record<string, unknown> {
   return {
+    __proto__: null,
     sessionId: value.sessionId,
     parentAgentId: value.parentAgentId,
     publicKey: value.publicKey,
     issuedAt: value.issuedAt,
     expiresAt: value.expiresAt,
     scope: {
-      allowedActions: value.scope.allowedActions,
-      contractIds: value.scope.contractIds,
+      __proto__: null,
+      allowedActions: prototypeFreeArray(value.scope.allowedActions),
+      contractIds: prototypeFreeArray(value.scope.contractIds),
       maxSignatures: value.scope.maxSignatures,
     },
     ...(value.derivationPath === undefined ? {} : { derivationPath: value.derivationPath }),
   };
+}
+
+/**
+ * A copy of `list` with NO prototype, for `jsonStringify` (see `sessionKeyGrantBody`, E7f). The
+ * prototype is removed before any element exists, and each element is DEFINED (`appendTo`), never
+ * assigned: no setter or `toJSON` on any prototype is consulted, now or when it is serialized.
+ */
+function prototypeFreeArray(list: readonly string[]): string[] {
+  const copy: string[] = [];
+  setPrototypeOf(copy, null);
+  for (let i = 0; i < list.length; i++) appendTo(copy, list[i]!);
+  return copy;
 }
 
 /**
@@ -1237,7 +1261,8 @@ function keccakDomainPrefixedBytes(domainWord: Uint8Array, data: Uint8Array): By
  * on #270): `canonicalSessionKeyBytes` is `utf8(JSON.stringify(sessionKeyGrantBody(value)))`, the
  * exact bytes the production parent signs. `jsonStringify` and `textEncoderEncode` are captures
  * taken at module load (the latter is the same capture D4 added for `keccakUtf8`), so no global
- * replaced after load changes this preimage.
+ * replaced after load changes this preimage, and the body `jsonStringify` serializes has no
+ * prototype anywhere, so no `toJSON` placed on a prototype after load changes it either (E7f).
  */
 function sessionKeyGrantHashOf(value: FrozenSessionKeyAuthorization): Bytes32Hex {
   const json = jsonStringify(sessionKeyGrantBody(value));
