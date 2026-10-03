@@ -387,12 +387,15 @@
     RELEASE_ALLOCATED: 'allocated', REFUND_ALLOCATED: 'allocated',
     SETTLED_RELEASED: 'settled', SETTLED_REFUNDED: 'settled'
   });
-  // Generic (non-money) run/action states. NEVER consulted for money data (see dataStatusClass).
+  // Generic (non-money) run/action states. NEVER consulted for money data (see dataStatusClass). Green
+  // means money finally reached the payee and nothing else is ever green, so a generic success word is a
+  // NEUTRAL acknowledgement (st-ack): whatever the routing heuristic decides, it cannot paint money green
+  // (astra r2 on #313, F2).
   var GENERIC_STATES = Object.freeze({
     RUNNING: 'st-running', IN_PROGRESS: 'st-running', PROGRESS: 'st-running', STREAMING: 'st-running', BUILDING: 'st-running', CONNECTING: 'st-running',
     PENDING: 'st-waiting', QUEUED: 'st-waiting', WAITING: 'st-waiting', PAUSED: 'st-waiting', REVIEW: 'st-waiting', CONFIRM: 'st-waiting', NEEDS_INPUT: 'st-waiting', NEEDS_YOU: 'st-waiting',
     ERROR: 'st-failed', FAILED: 'st-failed', DENIED: 'st-failed', CANCELLED: 'st-failed', CANCELED: 'st-failed', REJECTED: 'st-failed',
-    DONE: 'st-settled', COMPLETE: 'st-settled', COMPLETED: 'st-settled', OK: 'st-settled', SUCCESS: 'st-settled', SUCCEEDED: 'st-settled', RESOLVED: 'st-settled', READY: 'st-settled'
+    DONE: 'st-ack', COMPLETE: 'st-ack', COMPLETED: 'st-ack', OK: 'st-ack', SUCCESS: 'st-ack', SUCCEEDED: 'st-ack', RESOLVED: 'st-ack', READY: 'st-ack'
   });
   // NON-money data only (a job, a kernel): generic run/action states first, then the flat money
   // table (which has no green). Callers route money data away from here (dataStatusClass).
@@ -490,10 +493,75 @@
     }
     return false;
   }
-  function dataStatusClass(bindingPath, row, s) {
+  // The only routes whose LIVE reads may present a FINAL settlement state (mirrors the spec's
+  // SETTLEMENT_READ_ROUTE; the unit id is the route's own UNIT_ID_RE).
+  var SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
+  // DISPLAY class of a settlement record given where it came from -> [pillClass, label, text]. Mirrors
+  // classifySettlementRead: a FINAL V-next state (settled 8, refunded 9) needs a LIVE read of an exact
+  // per-unit settlement route. Field shape is not provenance (astra r2 on #313, F1): a baked snapshot,
+  // a fallback, a stream event or a settled-shaped body from any other route is unknown.
+  function settlementReadClass(o, bindingPath, live) {
+    var rc = settlementRecordClass(o);
+    if (!isVNextRecord(o) || (rc[0] !== 'st-settled' && rc[0] !== 'st-refunded')) return rc;
+    var p = typeof bindingPath === 'string' ? bindingPath.split('?')[0] : '';
+    if (live === true && SETTLEMENT_READ_ROUTE.test(p)) return rc;
+    return ['st-unknown', 'final state not shown - not a live read of a settlement route', rc[2]];
+  }
+  function dataStatusClass(bindingPath, row, s, live) {
     if (!isMoneyData(bindingPath, row)) return statusClass(s);
-    if (isVNextRecord(row)) return settlementRecordClass(row)[0]; // a read model: by its schema
+    if (isVNextRecord(row)) return settlementReadClass(row, bindingPath, live)[0]; // a read model: schema AND source
     return moneyStatusClass(s); // a bare money word: never green
+  }
+  // Pill TEXT (astra r4 on #313, F6; astra r5 on #313, F7-F9). The class decides the colour, and the text
+  // may not claim more. Fails CLOSED over a CLOSED safe vocabulary (no blacklist to miss a spelling, and
+  // no blacklist to over-qualify a non-money surface, astra r5 F7/F9): unverified text is shown as-is
+  // only when it normalizes to a word on the surface's OWN safe list; anything else is qualified, with a
+  // suffix that matches the surface (money: "settlement unconfirmed"; non-money: "status unverified").
+  // Mirrors the spec's statusPillText (the conformance test compares them).
+  var SAFE_STATUS_WORDS = Object.freeze({
+    RUNNING: true, IN_PROGRESS: true, PROGRESS: true, STREAMING: true, BUILDING: true, CONNECTING: true,
+    PENDING: true, QUEUED: true, WAITING: true, PAUSED: true, REVIEW: true, CONFIRM: true, NEEDS_INPUT: true, NEEDS_YOU: true,
+    ERROR: true, FAILED: true, DENIED: true, CANCELLED: true, CANCELED: true, REJECTED: true,
+    DONE: true, COMPLETE: true, COMPLETED: true, OK: true, SUCCESS: true, SUCCEEDED: true, RESOLVED: true, READY: true,
+    DISPATCHED: true, ACCEPTED: true, PREPARING: true, EXECUTING: true, COLLECTING_EVIDENCE: true, AWAITING_PICKUP: true, TIMED_OUT: true,
+    ONLINE: true, OFFLINE: true, MAINTENANCE: true, SUSPENDED: true, HEALTHY: true, DEGRADED: true, UNKNOWN: true,
+    BIDDING: true, ASSIGNED: true, PROPOSED: true, OVER_BUDGET: true, NO_PATH_FOUND: true, APPROVED: true, EXPIRED: true,
+    ACTIVE: true, INACTIVE: true, REVOKED: true, IDLE: true, BUSY: true, DRAFT: true, DEPRECATED: true, RESERVED: true, LIVE: true, STUB: true, PLANNED: true
+  });
+  var SAFE_MONEY_STATUS_WORDS = Object.freeze({
+    RUNNING: true, IN_PROGRESS: true, PROGRESS: true, PENDING: true, QUEUED: true, WAITING: true, PAUSED: true, REVIEW: true,
+    ERROR: true, FAILED: true, DENIED: true, CANCELLED: true, CANCELED: true, REJECTED: true, EXPIRED: true, UNKNOWN: true
+  });
+  var UNCONFIRMED_SUFFIX = ' - settlement unconfirmed';
+  var UNVERIFIED_SUFFIX = ' - status unverified';
+  function statusPillText(raw, verified, money) {
+    var t = raw == null ? '' : String(raw);
+    if (verified || t === '') return t;
+    var k = normStatus(t);
+    var safe = money ? SAFE_MONEY_STATUS_WORDS : SAFE_STATUS_WORDS;
+    if (k !== '' && ownKey(safe, k)) return t;
+    return 'reported status: ' + t + (money ? UNCONFIRMED_SUFFIX : UNVERIFIED_SUFFIX);
+  }
+  // A free-text server MESSAGE outside a pill (astra r6 F12): never PCC's own claim, so it is attributed
+  // to its source, and on money data it says the settlement is unconfirmed. Callers pass `verified` only
+  // for a VERIFIED PAYEE PAYMENT, never a verified refund (astra r6 F10). Mirrors the spec's reportedText.
+  function reportedText(raw, verified, money) {
+    var t = raw == null ? '' : String(raw);
+    if (verified || t === '') return t;
+    return 'reported: ' + t + (money ? UNCONFIRMED_SUFFIX : '');
+  }
+  // The TEXT of a data status pill (list rows, run windows), paired with dataStatusClass. Money data shows
+  // the classifier's honest label, and a VERIFIED final (a live read of an exact settlement route) keeps
+  // its plain name. Anything else is the value itself, qualified when it claims money moved.
+  function dataStatusText(bindingPath, row, s, live) {
+    if (isMoneyData(bindingPath, row)) {
+      var vnext = isVNextRecord(row);
+      var rc = vnext ? settlementReadClass(row, bindingPath, live) : [moneyStatusClass(s), settlementLabel(s), s];
+      if (vnext && (rc[0] === 'st-settled' || rc[0] === 'st-refunded')) return String(rc[2]);
+      if (rc[1]) return rc[1];
+      return statusPillText(s, false, true);
+    }
+    return statusPillText(s, false, false);
   }
   // </status-map v2>
 
@@ -762,6 +830,19 @@
   // Window renderers — one per manifest window kind (schema-closed set)
   // ═══════════════════════════════════════════════════════════════════════
 
+  // A binding path whose last segment names a status field (status, state, phase): its value is a status
+  // LABEL, so it takes the closed-vocabulary text rule wherever it is shown (astra r6).
+  function isStatusPath(p) {
+    return typeof p === 'string' && /status|state|phase/i.test(p.split('.').pop() || '');
+  }
+  // A bound value shown as plain text (a list title or meta field, a metric): a status field takes the
+  // closed-vocabulary rule (astra r6, the F8/F11 class); anything else (a name, an id, an amount) is shown
+  // as sent. Never verified: these windows read collections, snapshots or single values, not a live
+  // settlement read model.
+  function boundText(path, v, money) {
+    return isStatusPath(path) ? statusPillText(v, false, money) : String(v);
+  }
+
   // note — prose; split on double newline into <p>, textContent only.
   function renderNote(ctx, w) {
     var wrap = el('article', 'pcc-win pcc-win-note');
@@ -783,7 +864,8 @@
     resolveBinding(ctx, w.binding).then(function (r) {
       var raw = sel != null ? dot(r.data, sel) : r.data;
       if (r.error) { clear(wrap._body); wrap._body.appendChild(errorLine(r.error)); }
-      else val.textContent = fmtVal(raw, w.format);
+      else val.textContent = isStatusPath(sel) && raw != null && typeof raw !== 'object'
+        ? boundText(sel, raw, isMoneyData(w.binding && w.binding.path, r.data)) : fmtVal(raw, w.format);
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
     return wrap;
@@ -835,18 +917,22 @@
         var row = rows[i];
         var li = el('li', 'pcc-list-row');
         var main = el('div', 'pcc-list-main');
-        main.appendChild(el('span', 'pcc-list-title', String(dot(row, w.item.title) != null ? dot(row, w.item.title) : (w.item.title || ''))));
+        var rowMoney = isMoneyData(w.binding && w.binding.path, row);
+        var tv = dot(row, w.item.title);
+        main.appendChild(el('span', 'pcc-list-title', tv != null ? boundText(w.item.title, tv, rowMoney) : String(w.item.title || '')));
         var metaVals = [];
         var metaKeys = (w.item.meta || []);
         for (var j = 0; j < metaKeys.length; j++) {
           var mv = dot(row, metaKeys[j]);
-          if (mv != null && mv !== '') metaVals.push(String(mv));
+          if (mv != null && mv !== '') metaVals.push(boundText(metaKeys[j], mv, rowMoney));
         }
         if (metaVals.length) main.appendChild(el('span', 'pcc-list-meta', metaVals.join(' · ')));
         li.appendChild(main);
         if (w.item.statusFrom) {
           var st = dot(row, w.item.statusFrom);
-          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st), String(st)));
+          // A row is an element of a collection, never the top-level record a settlement route returns, so
+          // it is never a verified read, however live the fetch (astra r7 F13).
+          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st, false), dataStatusText(w.binding && w.binding.path, row, st, false)));
         }
         listNode.appendChild(li);
       }
@@ -977,18 +1063,48 @@
       elapsed.textContent = Math.floor((Date.now() - started) / 1000) + 's elapsed';
     }, 1000);
 
-    function apply(statusVal, latestVal, data, full) {
+    // Secondary text is HELD raw and repainted under each read's verification (astra r7 F10): a later
+    // read that is not a verified payee payment, or a failed read, requalifies what an earlier verified
+    // read left plain. held.latest = { raw, isStatus, money }; held.feed = { lines: [{ ts, label }], money }.
+    var held = { latest: null, feed: null };
+    function paintLatest(verified) {
+      var h = held.latest;
+      if (h) latest.textContent = h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, verified, h.money);
+    }
+    function paintFeed(verified) {
+      var f = held.feed;
+      if (!f) return;
+      clear(feed);
+      for (var i = 0; i < f.lines.length; i++) feedLine(f.lines[i].ts + statusPillText(f.lines[i].label, verified, f.money));
+    }
+
+    // `live` is true only for a successful poll of the binding (never a snapshot or a stream event).
+    function apply(statusVal, latestVal, data, full, live) {
       var bpath = w.binding && w.binding.path;
+      var cls = null; // this read's pill class, when it sets one
       if (full && isVNextRecord(data) && isMoneyData(bpath, data)) {
-        var rc = settlementRecordClass(data); // a settlement read model: by its schema
-        pill.textContent = rc[2]; pill.className = 'pcc-pill ' + rc[0];
+        cls = settlementReadClass(data, bpath, live)[0]; // a settlement read model: by its schema AND source
+        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + cls;
       } else if (statusVal != null) {
-        pill.textContent = String(statusVal); pill.className = 'pcc-pill ' + dataStatusClass(bpath, data, statusVal);
+        cls = dataStatusClass(bpath, data, statusVal, live);
+        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + cls;
       } else if (full) {
         // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
         pill.textContent = 'unknown'; pill.className = 'pcc-pill st-unknown';
       }
-      if (latestVal != null && latestVal !== '') latest.textContent = String(latestVal);
+      // Secondary text (the latest line, timeline and feed lines) is plain only on a VERIFIED PAYEE
+      // PAYMENT: a V-next record whose live exact read is st-settled. A verified refund proves the payees
+      // were NOT paid, so it vouches for no other claim (astra r6 F10).
+      var payeeVerified = isVNextRecord(data) && cls === 'st-settled';
+      if (latestVal != null && latestVal !== '') {
+        // The latest line, on every surface (astra r5 F8, r6 F12). Status-sourced text (the status path
+        // itself, or a status/state/phase field) is a label, so it takes the closed vocabulary; anything
+        // else is a free-text message, attributed to its source.
+        var latestIsStatus = typeof w.latestFrom === 'string' && (w.latestFrom === w.statusFrom || isStatusPath(w.latestFrom));
+        held.latest = { raw: latestVal, isStatus: latestIsStatus, money: isMoneyData(bpath, data) };
+      }
+      paintLatest(payeeVerified); // this read decides, even when it carries no new latest value
+      return payeeVerified;
     }
     function feedLine(txt) {
       var line = el('div', 'pcc-mono pcc-feed-line', txt);
@@ -998,13 +1114,18 @@
 
     if (ctx.mode === 'snapshot') {
       var snap = ctx.snapshot[w.binding.path];
-      apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom), snap, true);
+      apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom), snap, true, false);
       var stat = dot(snap, w.statusFrom);
-      pill.textContent = String(stat != null ? stat : 'snapshot');
+      // apply() has set the honest text (F6: never the raw word); only a status-less, non-read-model
+      // snapshot keeps the plain 'snapshot' marker.
+      if (stat == null && !isVNextRecord(snap)) pill.textContent = 'snapshot';
       var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
       if (Array.isArray(tl) && tl.length) {
-        for (var ti = 0; ti < tl.length; ti++) feedLine((tl[ti].timestamp ? fmtTs(tl[ti].timestamp) + ' · ' : '') + (tl[ti].type || ''));
-        latest.textContent = String(tl[tl.length - 1].type || latest.textContent); // last event = latest truth
+        // Timeline entries are labels (astra r6 F11): the closed vocabulary, never verified in a snapshot.
+        var snapMoney = isMoneyData(w.binding.path, snap);
+        for (var ti = 0; ti < tl.length; ti++) feedLine((tl[ti].timestamp ? fmtTs(tl[ti].timestamp) + ' \u00b7 ' : '') + statusPillText(tl[ti].type || '', false, snapMoney));
+        var lastType = tl[tl.length - 1].type; // last event = latest truth
+        if (lastType != null && lastType !== '') latest.textContent = statusPillText(lastType, false, snapMoney);
       }
       wrap._setFoot(null, true);
       clearInterval(tick); elapsed.textContent = '';
@@ -1016,14 +1137,24 @@
     function poll(delay) {
       if (stopped) return;
       ctx.tx.getJSON(w.binding.path, w.binding.query).then(function (d) {
-        apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true);
-        // timeline feed if the response carries one
+        var payeeVerified = apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, true);
+        // Timeline feed, if the response carries one. Each entry (its type, or the raw entry) is a label:
+        // the closed vocabulary, plain only on a verified payee payment (astra r6 F10, F11). It is held,
+        // so a later unverified read requalifies it (astra r7 F10).
         var tl = dot(d, 'timeline') || dot(d, 'job.timeline');
-        if (Array.isArray(tl)) { clear(feed); for (var i = 0; i < tl.length; i++) feedLine((tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' · ' : '') + (tl[i].type || JSON.stringify(tl[i]))); }
+        if (Array.isArray(tl)) {
+          var lines = [];
+          for (var i = 0; i < tl.length; i++) lines.push({ ts: tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' \u00b7 ' : '', label: tl[i].type || JSON.stringify(tl[i]) });
+          held.feed = { lines: lines, money: isMoneyData(w.binding.path, d) };
+        }
+        paintFeed(payeeVerified);
         wrap._setFoot(ctx.tx.lastTrace, false);
         setTimeout(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }, w.binding.pollMs || POLL_DEFAULT_MS);
       }, function () {
         var next = Math.min((delay || POLL_DEFAULT_MS) * 2, 120000); // backoff
+        // A failed read never keeps an earlier state, least of all a final one (astra r2 on #313, F3).
+        pill.textContent = 'unknown · read failed'; pill.className = 'pcc-pill st-unknown';
+        paintLatest(false); paintFeed(false); // nothing earlier stays vouched for (astra r7 F10)
         wrap._setFoot(ctx.tx.lastTrace, true);
         setTimeout(function () { poll(next); }, next);
       });
@@ -1032,8 +1163,12 @@
     if (w.binding.sse) {
       ctx.tx.streamSSE(w.binding.sse, function (ev) {
         apply(dot(ev, w.statusFrom) != null ? dot(ev, w.statusFrom) : ev.status,
-              dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev, false);
-        feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' · ' : '') + (ev.type || ev.status || JSON.stringify(ev)));
+              dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev, false, false);
+        // The feed line (astra r5 F8, r6 F12). Every label (the event's type, its status or the raw
+        // event) takes the closed vocabulary on every surface. A stream event is never a verified read.
+        var feedMoney = isMoneyData(w.binding && w.binding.path, ev);
+        var label = ev.type || ev.status || JSON.stringify(ev);
+        feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' \u00b7 ' : '') + statusPillText(label, false, feedMoney));
         wrap._setFoot(ctx.tx.lastTrace, false);
       }).catch(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }); // stream dropped → poll
     } else {
@@ -1084,7 +1219,8 @@
   }
   function rebindApproval(ctx, w, wrap) {
     var pill = wrap.querySelector('.pcc-pill');
-    if (pill) { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-settled'; }
+    // A successful approval POST resolves the REQUEST, not the money: neutral, never green (astra r3 F5).
+    if (pill) { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-ack'; }
   }
   function approvalDetails(info) {
     var box = el('div', 'pcc-approval');
@@ -1151,9 +1287,16 @@
       // Settlement state by SOURCE SCHEMA (V-next /lifecycle or /receipt, a legacy escrow record,
       // or "not a settlement record"), never by a bare status word. Never inferred from a count or
       // from the receipt's existence (contract rule 12).
-      var rec = settlementRecordClass(e);
+      // Authority needs the UNPROJECTED top-level response of the exact route: a binding.select projection
+      // (or any nested object) never inherits the route's provenance (astra r7 F13).
+      var recTopLevel = r.raw !== undefined && e === r.raw;
+      var rec = settlementReadClass(e, w.binding && w.binding.path, !r.stale && ctx.mode !== 'snapshot' && recTopLevel);
       var railRow = el('div', 'pcc-receipt-rail');
-      railRow.appendChild(el('span', 'pcc-pill ' + rec[0], rec[2]));
+      // The pill text may not claim more than the class (F6): only a verified final keeps its plain name;
+      // "no settlement state" is PCC's own text.
+      var recVerified = isVNextRecord(e) && (rec[0] === 'st-settled' || rec[0] === 'st-refunded');
+      var payeePaid = isVNextRecord(e) && rec[0] === 'st-settled'; // secondary text: payee payment only
+      railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], recVerified || (!isVNextRecord(e) && e.status == null), true)));
       if (rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', ' ' + rec[1]));
       if (e.rail) railRow.appendChild(el('span', 'pcc-muted', ' · ' + String(e.rail)));
       wrap._body.appendChild(railRow);
@@ -1164,7 +1307,12 @@
         for (var i = 0; i < events.length; i++) {
           var ev = events[i];
           var li = el('li', 'pcc-timeline-row');
-          li.appendChild(el('span', 'pcc-timeline-type', String(ev.type || ev.name || ev.status || 'event')));
+          // Each entry is a server claim about this money record (astra r5 F8). Its label (type, name or
+          // status) takes the closed vocabulary, plain only on a VERIFIED PAYEE PAYMENT: a verified refund
+          // keeps its own pill text but vouches for no entry (astra r6 F10). 'event' is PCC's own placeholder.
+          var evRaw = ev.type || ev.name || ev.status;
+          var evTxt = evRaw != null && evRaw !== '' ? statusPillText(evRaw, payeePaid, true) : 'event';
+          li.appendChild(el('span', 'pcc-timeline-type', evTxt));
           if (ev.timestamp) li.appendChild(el('span', 'pcc-mono pcc-timeline-ts', fmtTs(ev.timestamp)));
           tl.appendChild(li);
         }
@@ -1295,7 +1443,8 @@
         status.className = 'pcc-action-status st-failed';
         status.textContent = hostOpErrorText(result) || 'Operation failed';
       } else {
-        status.className = 'pcc-action-status st-settled';
+        // The operation ran; that is not a settlement read, so it is acknowledged, never green (astra r3 F5).
+        status.className = 'pcc-action-status st-ack';
         status.textContent = 'Done' + (ctx && ctx.tx && ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
       }
     }, function (err) {
@@ -1348,7 +1497,8 @@
     var idemHeader = body.idempotencyKey;
     ctx.tx.send(method, action.path, body, idemHeader).then(function (res) {
       if (res.ok) {
-        status.className = 'pcc-action-status st-settled';
+        // An HTTP 2xx means the request was accepted, not that money moved: neutral (astra r3 F5).
+        status.className = 'pcc-action-status st-ack';
         status.textContent = 'Done' + (ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
         if (typeof opts.rebind === 'function') opts.rebind();
       } else {
@@ -1656,6 +1806,8 @@
       '.pcc-pill.st-running{background:var(--info-dim);color:var(--info);}',
       '.pcc-pill.st-refunded{background:var(--wait-dim);color:var(--wait);}',
       '.pcc-pill.st-unknown{background:var(--surface-3);color:var(--ink-3);}',
+      /* neutral acknowledgement: an HTTP 2xx is never settlement (ruling 2) -- no hue */
+      '.pcc-pill.st-ack{background:var(--surface-3);color:var(--ink-2);}',
       /* type helpers */
       '.pcc-muted{color:var(--ink-3);font:400 13px/18px var(--font);}',
       '.pcc-mono{font-family:var(--mono);font-size:12px;color:var(--ink-3);}',
@@ -1708,6 +1860,7 @@
       '.pcc-actionbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}',
       '.pcc-action-status{font:400 13px/18px var(--font);color:var(--ink-2);display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;}',
       '.pcc-action-status.st-settled{color:var(--signal);}',
+      '.pcc-action-status.st-ack{color:var(--ink-2);}',
       '.pcc-action-status.st-failed{color:var(--deny);}',
       '.pcc-confirm-q{color:var(--ink-2);}',
       /* run */

@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import vm from "node:vm";
-import { classifySettlementRecord } from "@pcc/spec";
+import { classifySettlementRecord, classifySettlementRead } from "@pcc/spec";
 import { settlementReadRoutes, setSettlementUnitReader, type SettlementUnitReader } from "../routes/settlement-read.js";
 import { UnitState } from "../settlement/unit-state-mapper.js";
 
@@ -106,6 +106,22 @@ describe("#313 classifies the settlement routes' REAL bodies (spec and shipped k
     const withState = { ...eight.receipt, unitState: 8 };
     for (const bad of [{ ...withState, unitState: 6 }, { ...withState, isAllocated: true }, { ...withState, phase: "allocated" }, { ...withState, isTerminal: false }]) {
       expect(both(bad).tone, JSON.stringify(bad)).toBe("unknown");
+    }
+  });
+
+  it("DISPLAY gate (astra r2 on #313): the real bodies show a final state only as a LIVE read of their own route", async () => {
+    for (const s of [UnitState.SETTLED_RELEASED, UnitState.SETTLED_REFUNDED, UnitState.RELEASE_ALLOCATED]) {
+      const b = await bodies(s);
+      for (const [leaf, body] of [["lifecycle", b.lifecycle], ["receipt", b.receipt]] as const) {
+        const path = `/api/settlement/units/${UNIT}/${leaf}`;
+        const live = classifySettlementRead(body, { path, live: true });
+        expect(live.tone, `${leaf} ${s} live`).toBe(classifySettlementRecord(body).tone);
+        const offline = classifySettlementRead(body, { path, live: false });
+        const elsewhere = classifySettlementRead(body, { path: "/api/jobs/j1", live: true });
+        const final = s === UnitState.SETTLED_RELEASED || s === UnitState.SETTLED_REFUNDED;
+        expect(offline.tone, `${leaf} ${s} snapshot`).toBe(final ? "unknown" : live.tone);
+        expect(elsewhere.tone, `${leaf} ${s} other route`).toBe(final ? "unknown" : live.tone);
+      }
     }
   });
 
