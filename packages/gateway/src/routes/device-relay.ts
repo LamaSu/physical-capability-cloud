@@ -72,6 +72,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getStore, getRepos } from "../db.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
@@ -103,6 +104,46 @@ function generateId(prefix: string): string {
  */
 const CLAIM_TIMEOUT_MS = 120_000;
 const CLAIM_TIMEOUT_ERROR = "claim_timeout";
+
+// ── The execution lease (N4b-gw r7, F3) ─────────────────────────────────────
+// A claimed call is not yet a command the device may run. The executor must
+// first take the call's lease, POST /tool-call/:callId/start with the claim
+// token the poll gave it. That re-checks, in one synchronous step at the moment
+// of actuation, everything that moves between the claim and the run (the
+// emergency stop, the scope's status/expiry/budget, the breaker, the claim's
+// age) and moves the row claimed -> executing exactly once. pcc-node runs a
+// call only on that 200 (packages/pcc-node/pcc_node/executor.py). This is the
+// same wire shape as #471's job claim: claim, then start with the token, the
+// token opaque to the node.
+//
+// An executor that does not send `X-PCC-Lease: 1` predates the lease. While
+// RELAY_LEASE_ENFORCE is on (the default; anything but "off"), it is handed no
+// calls: `{calls: [], count: 0, leaseRequired: true}` makes it idle, not unsafe.
+// "off" is a transition window for installed nodes, an operator decision: such a
+// poller is served as before, without a lease.
+
+/** A claim older than this cannot be started: the executor sat on it too long. */
+const LEASE_MAX_AGE_MS = 60_000;
+const CLAIM_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+function leaseEnforced(): boolean {
+  return (process.env.RELAY_LEASE_ENFORCE ?? "").trim().toLowerCase() !== "off";
+}
+
+/** An executor's report that it did NOT run the call (a lease refusal on the node). */
+function isNotExecuted(error: unknown): boolean {
+  return typeof error === "string" && error.startsWith("not_executed:");
+}
+
+function claimTokenHash(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+/** Constant-time comparison of two SHA-256 hex digests. */
+function sameHash(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+}
 
 /** Resolve the device type for a kernel. Falls back to "generic". */
 function resolveDeviceType(kernelId: string): string {
@@ -174,6 +215,7 @@ export const RELAY_ROUTE_ACCESS: Readonly<Record<string, RelayAccess>> = {
   "GET /api/relay/:kernelId/manifest": "operator_or_grant",
   "POST /api/relay/:kernelId/tool-call": "operator_or_grant",
   "GET /api/relay/:kernelId/tool-call/pending": "kernel_operator",
+  "POST /api/relay/:kernelId/tool-call/:callId/start": "kernel_operator",
   "POST /api/relay/:kernelId/tool-result": "kernel_operator",
   "GET /api/relay/:kernelId/tool-result/:id": "object_owner",
   "POST /api/relay/:kernelId/scope": "kernel_operator",
@@ -407,7 +449,7 @@ function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: st
     .filter(
       (c) =>
         c.id !== call.id &&
-        (c.status === "claimed" || c.status === "completed" || c.status === "failed") &&
+        (c.status === "claimed" || c.status === "executing" || c.status === "completed" || c.status === "failed") &&
         !isToolSafe(deviceType, c.toolName),
     );
   if (dispatchedNonSafe.length >= scope.maxCommands) return "max_commands_reached";
@@ -797,6 +839,13 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       return { calls: [], count: 0, emergencyStop: true };
     }
 
+    // The execution lease (F3): a poller that cannot take one gets no calls
+    // while it is enforced, and nothing is claimed for it.
+    const leaseCapable = req.headers["x-pcc-lease"] === "1";
+    if (!leaseCapable && leaseEnforced()) {
+      return { calls: [], count: 0, leaseRequired: true };
+    }
+
     // At-most-once delivery (N4b-gw r6, F2). A claim the executor has not
     // reported within CLAIM_TIMEOUT_MS is CLOSED as failed, never put back in
     // the queue: the executor may still be running the command, and handing a
@@ -844,7 +893,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // so no later poll can claim it and it does not hold back the calls behind
     // it. A call whose escrow lookup fails stays queued for the next poll.
     const deviceType = resolveDeviceType(kernelId);
-    const pending: Array<typeof toolCallRelay.$inferSelect> = [];
+    const pending: Array<{ call: typeof toolCallRelay.$inferSelect; claimToken: string | null }> = [];
     for (const call of queued) {
       if (pending.length === 5) break;
       let refusal: string | null;
@@ -944,26 +993,104 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       // e-stop that rejected the row while our async safety check awaited leaves
       // it non-`pending`, so this claim changes 0 rows and we do NOT return it.
       // The row is returned to the executor only if THIS poll won the claim.
+      // A lease-capable executor gets a fresh claim token with the call; only
+      // its hash is stored, so the row alone can't start the call (F3).
+      const claimToken = leaseCapable ? randomBytes(32).toString("hex") : null;
       const claimed = db
         .update(toolCallRelay)
-        .set({ status: "claimed", claimedAt: now })
+        .set({ status: "claimed", claimedAt: now, claimTokenHash: claimToken ? claimTokenHash(claimToken) : null })
         .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
         .run();
       if ((claimed as { changes?: number }).changes !== 1) continue;
-      pending.push(call);
+      pending.push({ call, claimToken });
     }
 
     return {
-      calls: pending.map((c) => ({
+      calls: pending.map(({ call: c, claimToken }) => ({
         id: c.id,
         scopeId: c.scopeId,
         kernelId: c.kernelId,
         toolName: c.toolName,
         args: c.toolArgs,
         createdAt: c.createdAt,
+        ...(claimToken ? { claimToken } : {}),
       })),
       count: pending.length,
     };
+  });
+
+  // POST /api/relay/:kernelId/tool-call/:callId/start
+  // The execution lease (F3; see LEASE_MAX_AGE_MS). 200 {started: true} once,
+  // and the executor may run the call. 409 {error: "lease_refused", reason}: do
+  // not run it; a refusal for a reason that closes the call (the emergency stop,
+  // the scope, the budget, the breaker, a stale claim) has already closed it as
+  // rejected. 503 policy_unavailable: do not run it; it stays claimed, and the
+  // claim timeout closes it unless the executor reports first.
+  app.post<{
+    Params: { kernelId: string; callId: string };
+    Body: { claimToken?: unknown };
+  }>("/api/relay/:kernelId/tool-call/:callId/start", async (req, reply) => {
+    const { kernelId, callId } = req.params;
+    const token = (req.body ?? {}).claimToken;
+    if (typeof token !== "string" || !CLAIM_TOKEN_RE.test(token)) {
+      return reply.status(400).send({ error: "claim_token_required" });
+    }
+    const { db } = getStore();
+    const call = db.select().from(toolCallRelay).where(eq(toolCallRelay.id, callId)).get();
+    if (!call || call.kernelId !== kernelId) {
+      return reply.status(404).send({ error: "not_found" });
+    }
+    const presented = claimTokenHash(token);
+    if (!call.claimTokenHash || !sameHash(presented, call.claimTokenHash)) {
+      return reply.status(409).send({ error: "lease_refused", reason: "token_mismatch" });
+    }
+    if (call.status !== "claimed") {
+      return reply.status(409).send({ error: "lease_refused", reason: "not_claimed" });
+    }
+
+    // ── One synchronous section: re-check everything that moves, then start.
+    // No await from here to the compare-and-set, so nothing can change between
+    // the reads and the start (better-sqlite3 is synchronous).
+    const stop = emergencyStopState(kernelId);
+    if (stop === "unavailable") return reply.status(503).send({ error: "policy_unavailable" });
+    let refusal: string | null;
+    try {
+      const claimedMs = call.claimedAt ? Date.parse(call.claimedAt) : NaN;
+      refusal =
+        stop === "stopped"
+          ? "emergency_stopped"
+          : !Number.isFinite(claimedMs) || Date.now() - claimedMs > LEASE_MAX_AGE_MS
+            ? "stale_claim"
+            : (dispatchRefusal(call, resolveDeviceType(kernelId)) ??
+              (getSafetyGateway().isCircuitOpen(kernelId) ? "circuit_open" : null));
+    } catch {
+      // An escrow lookup or the safety gateway failed: we can't clear it, so it
+      // does not start. It stays claimed for the claim timeout.
+      return reply.status(503).send({ error: "policy_unavailable" });
+    }
+    const now = new Date().toISOString();
+    if (refusal) {
+      db.update(toolCallRelay)
+        .set({ status: "rejected", error: refusal, completedAt: now })
+        .where(and(eq(toolCallRelay.id, callId), eq(toolCallRelay.status, "claimed")))
+        .run();
+      return reply.status(409).send({ error: "lease_refused", reason: refusal });
+    }
+    const started = db
+      .update(toolCallRelay)
+      .set({ status: "executing", startedAt: now })
+      .where(
+        and(
+          eq(toolCallRelay.id, callId),
+          eq(toolCallRelay.status, "claimed"),
+          eq(toolCallRelay.claimTokenHash, presented),
+        ),
+      )
+      .run();
+    if ((started as { changes?: number }).changes !== 1) {
+      return reply.status(409).send({ error: "lease_refused", reason: "not_claimed" });
+    }
+    return { started: true, callId, startedAt: now };
   });
 
   // POST /api/relay/:kernelId/tool-result
@@ -1036,6 +1163,14 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       });
     }
 
+    // The lease (F3): a call claimed with a token runs only after /start moved it
+    // to executing. A success reported for one that was never started is not a
+    // device outcome the gateway authorized, so it is refused and the row stays
+    // claimed (an error still closes it, below).
+    if (call.status === "claimed" && call.claimTokenHash && !error) {
+      return reply.status(409).send({ error: "not_started", callId });
+    }
+
     const now = new Date().toISOString();
     const newStatus = error ? "failed" : "completed";
 
@@ -1051,7 +1186,17 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // claim the poll timed out (it was picked up too). The terminal-state guard
     // above already excluded replays, so this is the single first-transition
     // record.
-    if (call.status === "claimed" || lateReport) {
+    //
+    // A report is a device outcome only if the device may have run the call:
+    // it was started under the lease (executing), or it was claimed without a
+    // token (a lease-less executor, RELAY_LEASE_ENFORCE=off) and so may have run
+    // straight from the claim. A not_executed:* report, or any report on a
+    // token-claimed call that never started, ran nothing: it closes the call,
+    // but the breaker never counts it as a device failure (F3).
+    const mayHaveRun =
+      !isNotExecuted(error) &&
+      (call.status === "executing" || ((call.status === "claimed" || lateReport) && !call.claimTokenHash));
+    if (mayHaveRun) {
       try {
         const gateway = getSafetyGateway();
         if (error) {

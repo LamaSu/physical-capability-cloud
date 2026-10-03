@@ -258,6 +258,74 @@ While a kernel is under an emergency stop, or its stop policy cannot be read,
 the poll does not run this timeout step: the first poll after the resume does,
 and the timed-out claim is closed then, not delivered.
 
+## The execution lease: claim, then start
+
+A claimed call is not yet a command the device may run. The executor first takes
+the call's **lease**, at the moment it would actuate, and runs the call only if
+the gateway grants it. This is the same wire shape as the job claim of #471:
+claim, then start with the token, and the token is opaque to the node.
+
+1. **Poll with `X-PCC-Lease: 1`.** Each call the poll claims for such an
+   executor carries a fresh `claimToken` (32 random bytes, hex). The row stores
+   only the token's SHA-256, so the database alone can't start a call.
+2. **`POST /api/relay/:kernelId/tool-call/:callId/start`**, body
+   `{"claimToken": "<token>"}`, operator only. In ONE synchronous step with no
+   `await` before the compare-and-set, it re-checks everything that can move
+   between the claim and the run:
+   - the emergency stop (`unavailable` answers 503 `policy_unavailable` and the
+     call stays claimed, for the claim timeout);
+   - the claim's age: a claim older than 60 s is `stale_claim`;
+   - the dispatch checks: the scope's status and expiry, its tools, its budget
+     (an `executing` call counts against `maxCommands`), and escrow funding;
+   - the circuit breaker (`circuit_open`).
+   It then moves the row `claimed` → `executing` exactly once.
+   | Answer | Meaning for the executor |
+   |--------|--------------------------|
+   | 200 `{"started": true, "callId", "startedAt"}` | Run it. Nothing else may run. |
+   | 409 `{"error": "lease_refused", "reason"}` | Don't run it, and don't report it. A stop, scope, budget, breaker or stale-claim refusal has already closed the call as `rejected` with that reason. `token_mismatch` and `not_claimed` leave the row as it is: the call isn't this executor's to start. |
+   | 404 | Don't run it, and don't report it (no such call on this kernel). |
+   | 400 `claim_token_required`, 503, any other answer, a transport error or a timeout | Don't run it. Report it as `not_executed:lease_unavailable`, so the gateway closes it. |
+3. **Report** with `POST /tool-result`:
+   - A call claimed with a token can report a success only after it started.
+     A success for one that never started is refused with 409
+     `{"error": "not_started"}`, and the row stays claimed.
+   - An error closes the call as `failed`, started or not.
+   - Only a report on a call that may have run is a device outcome, so only such
+     a report feeds the circuit breaker: a call that started (`executing`), or a
+     call claimed without a token (a lease-less executor, below) that may have
+     run straight from the claim. A `not_executed:<reason>` report, or any report
+     on a token-claimed call that never started, ran nothing: it is never counted
+     as a device failure.
+
+**`RELAY_LEASE_ENFORCE`** (gateway environment). On by default: any value but
+exactly `off`. While it is on, a poller that doesn't send `X-PCC-Lease: 1` is
+handed no calls and nothing is claimed for it: 200
+`{"calls": [], "count": 0, "leaseRequired": true}`. That leaves an executor
+which predates the lease idle, not unsafe. `off` is a transition window for
+installed nodes, and turning it on is the operator's decision. With it off, such
+a poller is served as before, with no token, and its reports count as device
+outcomes.
+
+**pcc-node's guard** (`packages/pcc-node/pcc_node/executor.py`,
+`acquire_execution_lease`) runs before any adapter is touched, in this order,
+and fails closed at every step:
+
+1. The call must carry a non-empty `claimToken`. Without one (a gateway without
+   leases) it reports `not_executed:no_lease`.
+2. **Freshness.** The poll stamps each call with the local monotonic time its
+   answer arrived. That stamp never leaves the node, and the poll overwrites any
+   value the gateway sent. A call older than 30 s, or with no stamp, reports
+   `not_executed:stale`. The bound is set with `PCC_NODE_LEASE_FRESHNESS_S`; a
+   value that isn't a positive, finite number refuses every call.
+3. **Fence.** A marker named by the SHA-256 of the call id is created with
+   `O_CREAT|O_EXCL` (0600) in `PCC_NODE_FENCE_DIR` (default
+   `~/.pcc-node/relay-fence`, 0700) BEFORE the lease is requested. A crash after a
+   granted lease therefore never re-runs the call on this node. A marker that
+   already exists means this node has attempted the call: it is refused and not
+   reported. A fence that can't be created reports `not_executed:fence_unavailable`.
+4. **The lease**, as above, with a 10 s timeout. The call runs only on 200 with
+   `"started": true` exactly.
+
 ## Validation Flow
 
 ```
@@ -313,12 +381,20 @@ Executor polls GET /api/relay/:kernelId/tool-call/pending (operator only)
     ├── circuit breaker open now (a read that moves nothing)? → REJECTED
     │
     ▼
-CLAIMED → handed to the executor, once
+CLAIMED → handed to the executor, once (with a claim token if it takes leases)
     │
-    ├── the executor reports → COMPLETED, or FAILED with its error
-    ├── no report within 120 s → the next poll closes it FAILED (claim_timeout);
-    │      it is never handed out again, and the caller resubmits
-    │      (a late report is still recorded, once)
+    ├── POST /tool-call/:callId/start with the token, in one synchronous step:
+    │      emergency stop, claim older than 60 s, scope/tool/budget/escrow,
+    │      breaker? → REJECTED (409 lease_refused; the executor runs nothing)
+    │      stop policy unreadable or a check unavailable → 503; stays CLAIMED
+    │      otherwise → EXECUTING (200 started: true), once
+    │
+    ├── EXECUTING: the executor reports → COMPLETED, or FAILED with its error
+    ├── a token-claimed call that never started: an error (such as
+    │      not_executed:<reason>) → FAILED; a success → 409 not_started
+    ├── a claim unreported (and unstarted) for 120 s → the next poll closes it
+    │      FAILED (claim_timeout); it is never handed out again, and the caller
+    │      resubmits (a late report is still recorded, once)
 ```
 
 ## Protocol Hash Enforcement (planned — not yet enforced)
@@ -362,11 +438,12 @@ This prevents the brain from uploading a different protocol than what was approv
 Every tool call under a scope is recorded in `tool_call_relay` with:
 - Scope ID
 - Tool name and args, stored and returned as submitted (they are not hashed)
-- Status and reason: `pending`, `claimed`, `completed`, `failed`, or `rejected`
-  with the reason (`scope_expired`, `emergency_stopped`, `circuit_open`, ...),
-  and `failed` with `claim_timeout` for a claim that was never reported
-- The executor's result or error
-- When it was created, claimed and completed
+- Status and reason: `pending`, `claimed`, `executing`, `completed`, `failed`, or
+  `rejected` with the reason (`scope_expired`, `emergency_stopped`,
+  `circuit_open`, `stale_claim`, ...), and `failed` with `claim_timeout` for a
+  claim that was never reported
+- The executor's result or error (`not_executed:<reason>` when it refused to run)
+- When it was created, claimed, started and completed
 
 The requesting principal is not recorded per call; the scope's `createdBy` is
 the holder it was minted for.
@@ -420,29 +497,44 @@ kernel's stop as one of three states, and fails closed:
   tool results (the device reports what an in-flight call did), the camera and
   chat.
 
+- **Start (`POST /tool-call/:callId/start`).** `stopped` refuses the lease (409
+  `lease_refused`, `emergency_stopped`) and closes the call as `rejected`;
+  `unavailable` answers 503 and starts nothing. So a call that was claimed but
+  not yet started never runs while the stop is engaged, and never after it
+  either.
+
 Not done by the stop (planned; do not rely on it): it does not revoke active
 execution scopes, does not send a "stop" to an in-flight run, and does not
 change the kernel's status. Resume is by clearing the flag
 (`POST /api/operator/emergency-resume`); a scope that was active stays active
 and works again once the stop clears, until it expires or is revoked. A call the
-node had already claimed is not recalled by the stop: stopping it is the
-operator node's job (below). It is not redelivered after a resume either: a
-claim the node never reports is closed as `failed` (`claim_timeout`) by the
-first poll after the resume, never handed out again (see "Delivery is
+node has already STARTED (`executing`) is not recalled by the stop: stopping it
+is the operator node's job (below). A claimed call is not redelivered after a
+resume either: one the node never started is refused at its start and closed,
+and a claim the node never reports is closed as `failed` (`claim_timeout`) by
+the first poll after the resume, never handed out again (see "Delivery is
 at-most-once"). Stopping an in-flight run and revoking scopes on e-stop is
 tracked follow-up.
 
 ### The authoritative physical-safety boundary is the operator node
 
-The gateway relay is a best-effort **admission** gate: it re-checks the safety
-governor, the circuit breaker and the emergency stop at dispatch, and claims a
-row atomically so a revoked/expired/duplicate call is not handed out. But the
-breaker and governor state are **per gateway instance and in-memory**
-(`packages/kernel/src/safety/gateway.ts`): a horizontally-scaled second instance
-has independent safety truth, and a deploy resets it. And once a call is handed
-to the executor, the gateway cannot recall it. Therefore the authoritative,
-single-instance, per-device safety boundary is the **operator node**: the OT-2
-start guard (N4a) and pcc-node's per-command checks (N4b-robot), which sit in
-front of the actual actuator. Shared cross-instance safety state (a common
-breaker/e-stop store) is a separate gateway-scaling concern, tracked apart from
-this relay.
+The gateway relay is an **admission** gate: it re-checks the safety governor,
+the circuit breaker and the emergency stop at dispatch, and claims a row
+atomically so a revoked/expired/duplicate call is not handed out. The execution
+lease moves the last of those checks to the moment of actuation: pcc-node runs a
+relayed call only after the gateway grants its start, and the start re-checks
+the stop, the scope, the budget, the breaker and the claim's age in one
+synchronous step. Until the gateway says `started`, nothing runs; on any doubt
+(no token, a stale poll, a fence it can't write, no clear answer) the node
+refuses. The node also fences locally, so it never runs one call twice.
+
+What the lease does not change: the breaker and governor state are **per
+gateway instance and in-memory** (`packages/kernel/src/safety/gateway.ts`). A
+horizontally scaled second instance would have independent safety truth, and a
+deploy resets it. The deployment is single-replica (one gateway process on one
+SQLite store), so the start's re-check is the one gateway's truth. A call the
+node has already started can't be recalled by the gateway. Stopping a run in
+progress is the operator node's job: the OT-2 start guard (N4a) and pcc-node's
+per-command checks (N4b-robot) sit in front of the actuator. Shared
+cross-instance safety state (a common breaker and e-stop store) is a separate
+gateway-scaling concern, tracked apart from this relay.

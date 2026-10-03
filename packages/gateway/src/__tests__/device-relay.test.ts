@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import Fastify from "fastify";
+import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { deviceRelayRoutes, RELAY_ROUTE_ACCESS } from "../routes/device-relay.js";
@@ -20,7 +21,9 @@ const OPERATOR_2 = "operator-2"; // operator of kernel-test-2
 const SIWE_OPERATOR = "0xabc0000000000000000000000000000000000001"; // operator of kernel-siwe
 const asKey = (id: string) => ({ "x-test-key": id });
 const asSiwe = (address: string) => ({ "x-test-siwe": address });
-const op = asKey(OPERATOR);
+// The operator's executor, as current pcc-node runs it: it takes the execution
+// lease (N4b-gw r7 F3), so it sends X-PCC-Lease: 1 on the pending poll.
+const op = { ...asKey(OPERATOR), "x-pcc-lease": "1" };
 
 function seedKernel(id: string, operatorAddress: string) {
   getStore().db.insert(shopKernels).values({
@@ -126,6 +129,32 @@ async function createAndClaim(toolName = "health"): Promise<string> {
     url: "/api/relay/kernel-test-1/tool-call/pending",
     headers: op,
   });
+  return callId;
+}
+
+/** Claim a call and take its execution lease, as a lease-capable executor does
+ * before it runs anything (F3): only a started call's report is a device outcome. */
+async function createClaimAndStart(toolName = "health"): Promise<string> {
+  const createRes = await app.inject({
+    method: "POST",
+    url: "/api/relay/kernel-test-1/tool-call",
+    headers: op,
+    payload: { toolName },
+  });
+  const callId = createRes.json().id as string;
+  const pending = await app.inject({
+    method: "GET",
+    url: "/api/relay/kernel-test-1/tool-call/pending",
+    headers: op,
+  });
+  const claimToken = (pending.json().calls as Array<{ id: string; claimToken: string }>).find((c) => c.id === callId)!.claimToken;
+  const started = await app.inject({
+    method: "POST",
+    url: `/api/relay/kernel-test-1/tool-call/${callId}/start`,
+    headers: op,
+    payload: { claimToken },
+  });
+  expect(started.json()).toMatchObject({ started: true });
   return callId;
 }
 
@@ -346,13 +375,13 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
 describe("POST /api/relay/:kernelId/tool-result — breaker idempotency (F2)", () => {
   it("records a re-POSTed (dropped-200 retry) result only once to the breaker", async () => {
     getSafetyGateway().resetCircuit("kernel-test-1");
-    const callId = await createAndClaim();
+    const callId = await createClaimAndStart();
 
     const failSpy = vi
       .spyOn(getSafetyGateway(), "recordDeviceFailure")
       .mockImplementation(() => {});
 
-    // First terminal transition (claimed -> failed): records once.
+    // First terminal transition (executing -> failed): records once.
     const res1 = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
@@ -382,7 +411,7 @@ describe("POST /api/relay/:kernelId/tool-result — breaker idempotency (F2)", (
 
   it("does not re-record (nor spuriously reset) a completed call on replay", async () => {
     getSafetyGateway().resetCircuit("kernel-test-1");
-    const callId = await createAndClaim();
+    const callId = await createClaimAndStart();
 
     const okSpy = vi
       .spyOn(getSafetyGateway(), "recordDeviceSuccess")
@@ -458,7 +487,7 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
 
   it("still records the first result from the kernel operator (legit path works)", async () => {
     getSafetyGateway().resetCircuit("kernel-test-1");
-    const callId = await createAndClaim();
+    const callId = await createClaimAndStart();
 
     const okSpy = vi
       .spyOn(getSafetyGateway(), "recordDeviceSuccess")
@@ -1039,6 +1068,7 @@ describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout (at-most-
 function urlFor(pattern: string, ids: { callId?: string; scopeId?: string } = {}) {
   return pattern
     .replace(":kernelId", "kernel-test-1")
+    .replace(":callId", ids.callId ?? "tc_none")
     .replace(":id", ids.callId ?? "tc_none")
     .replace(":scopeId", ids.scopeId ?? "scope_none");
 }
@@ -1048,6 +1078,7 @@ function bodyFor(method: string, pattern: string, ids: { callId?: string } = {})
   if (method !== "POST") return undefined;
   if (pattern.endsWith("/tool-call")) return { toolName: "health" };
   if (pattern.endsWith("/tool-result")) return { callId: ids.callId ?? "tc_none", result: { ok: true } };
+  if (pattern.endsWith("/start")) return { claimToken: "a".repeat(64) };
   if (pattern.endsWith("/scope")) return { createdBy: "mallory", allowedTools: ["shell"] };
   if (pattern.endsWith("/camera/frame")) return { frame: Buffer.from("x").toString("base64") };
   if (pattern.endsWith("/chat")) return { message: "hi" };
@@ -1073,7 +1104,7 @@ describe("N4b-gw: the access table covers the plugin exactly", () => {
     await probe.close();
 
     expect(registered.sort()).toEqual(Object.keys(RELAY_ROUTE_ACCESS).sort());
-    expect(registered).toHaveLength(17);
+    expect(registered).toHaveLength(18);
   });
 
   it("refuses a registered route that has no table entry (default-deny), even for the operator", async () => {
@@ -2422,5 +2453,262 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       expect((await mint()).statusCode).toBe(201);
       expect(idsOf(await poll())).toEqual([scoped.json().id]);
     });
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// N4b-gw round 7, F3: the execution lease. A claimed call is not yet a command
+// the device may run: the executor starts it with the claim token the poll gave
+// it, and the start re-checks, at the moment of actuation, everything that moves
+// between claim and run. pcc-node runs a call only on that 200.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("N4b-gw r7 F3: the execution lease", () => {
+  const KERNEL = "kernel-test-1";
+  const legacy = asKey(OPERATOR); // an executor that predates the lease: no X-PCC-Lease
+  const rowOf = (id: string) =>
+    getStore().db.select().from(toolCallRelay).where(eq(toolCallRelay.id, id)).get()!;
+  const start = (callId: string, claimToken: unknown, headers: Record<string, string> = op, kernel = KERNEL) =>
+    app.inject({ method: "POST", url: `/api/relay/${kernel}/tool-call/${callId}/start`, headers, payload: { claimToken } });
+  const sha256 = (t: string) => createHash("sha256").update(t, "utf8").digest("hex");
+
+  async function submit(toolName = "health"): Promise<string> {
+    const res = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: op, payload: { toolName } });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
+  }
+  async function submitAndClaim(toolName = "health"): Promise<{ id: string; token: string }> {
+    const id = await submit(toolName);
+    const res = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: op });
+    const call = (res.json().calls as Array<{ id: string; claimToken?: string }>).find((c) => c.id === id)!;
+    return { id, token: call.claimToken! };
+  }
+  function setPolicyText(text: string) {
+    getStore().db.run(sql`INSERT OR REPLACE INTO operator_policies (kernel_id, policy, updated_at, updated_by)
+      VALUES (${KERNEL}, ${text}, ${new Date().toISOString()}, ${"test"})`);
+  }
+
+  afterEach(() => {
+    delete process.env.RELAY_LEASE_ENFORCE;
+    getSafetyGateway().resetCircuit(KERNEL);
+    getStore().db.run(sql`DELETE FROM operator_policies`);
+  });
+
+  it("an executor that can't take a lease gets no calls, and nothing is claimed for it (enforced by default)", async () => {
+    const id = await submit();
+    const res = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: legacy });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ calls: [], count: 0, leaseRequired: true });
+    expect(rowOf(id).status).toBe("pending");
+  });
+
+  it("RELAY_LEASE_ENFORCE=off serves such an executor as before, with no token (the operator's transition window)", async () => {
+    process.env.RELAY_LEASE_ENFORCE = "off";
+    const id = await submit();
+    const res = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: legacy });
+    const calls = res.json().calls as Array<{ id: string; claimToken?: string }>;
+    expect(calls.map((c) => c.id)).toEqual([id]);
+    expect(calls[0]!.claimToken).toBeUndefined();
+    expect(rowOf(id)).toMatchObject({ status: "claimed", claimTokenHash: null });
+  });
+
+  it("any value but exactly off keeps it enforced", async () => {
+    process.env.RELAY_LEASE_ENFORCE = "of";
+    await submit();
+    const res = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: legacy });
+    expect(res.json().leaseRequired).toBe(true);
+  });
+
+  it("a lease-capable poll hands each call a fresh claim token; the row keeps only its hash", async () => {
+    const { id, token } = await submitAndClaim();
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(rowOf(id)).toMatchObject({ status: "claimed", claimTokenHash: sha256(token) });
+  });
+
+  it("start with the token moves claimed -> executing exactly once", async () => {
+    const { id, token } = await submitAndClaim();
+    const first = await start(id, token);
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ started: true, callId: id });
+    expect(rowOf(id).status).toBe("executing");
+    expect(rowOf(id).startedAt).toBeTruthy();
+    const second = await start(id, token);
+    expect(second.statusCode).toBe(409);
+    expect(second.json()).toEqual({ error: "lease_refused", reason: "not_claimed" });
+  });
+
+  it("a wrong token, or none, starts nothing and leaves the call claimed", async () => {
+    const { id } = await submitAndClaim();
+    const wrong = await start(id, "f".repeat(64));
+    expect(wrong.statusCode).toBe(409);
+    expect(wrong.json()).toEqual({ error: "lease_refused", reason: "token_mismatch" });
+    expect((await start(id, undefined)).statusCode).toBe(400);
+    expect((await start(id, "not-hex")).statusCode).toBe(400);
+    expect(rowOf(id).status).toBe("claimed");
+  });
+
+  it("a call claimed without a lease (the transition window) can never be started", async () => {
+    process.env.RELAY_LEASE_ENFORCE = "off";
+    const id = await submit();
+    await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: legacy });
+    const res = await start(id, "a".repeat(64));
+    expect(res.json()).toEqual({ error: "lease_refused", reason: "token_mismatch" });
+  });
+
+  it("an emergency stop engaged after the claim refuses the start and closes the call", async () => {
+    const { id, token } = await submitAndClaim();
+    setPolicyText(JSON.stringify({ version: 1, emergencyStop: true }));
+    const res = await start(id, token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: "lease_refused", reason: "emergency_stopped" });
+    expect(rowOf(id)).toMatchObject({ status: "rejected", error: "emergency_stopped" });
+  });
+
+  it("a scope that expired after the claim refuses the start", async () => {
+    const scope = await mintScope("agent-f3", ["run_create"]);
+    const res0 = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: asKey("agent-f3"), payload: { toolName: "home", scopeId: scope } });
+    expect(res0.statusCode).toBe(201);
+    const id = res0.json().id as string;
+    const poll = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: op });
+    const token = (poll.json().calls as Array<{ id: string; claimToken: string }>).find((c) => c.id === id)!.claimToken;
+    getStore().db.update(executionScopes).set({ expiresAt: new Date(Date.now() - 1000).toISOString() }).where(eq(executionScopes.id, scope)).run();
+    const res = await start(id, token);
+    expect(res.json()).toEqual({ error: "lease_refused", reason: "scope_expired" });
+    expect(rowOf(id)).toMatchObject({ status: "rejected", error: "scope_expired" });
+  });
+
+  it("a breaker that opened after the claim refuses the start", async () => {
+    const { id, token } = await submitAndClaim();
+    const gw = getSafetyGateway();
+    gw.resetCircuit(KERNEL);
+    gw.recordDeviceFailure(KERNEL);
+    gw.recordDeviceFailure(KERNEL);
+    gw.recordDeviceFailure(KERNEL); // threshold 3 -> OPEN
+    const res = await start(id, token);
+    expect(res.json()).toEqual({ error: "lease_refused", reason: "circuit_open" });
+    expect(rowOf(id)).toMatchObject({ status: "rejected", error: "circuit_open" });
+  });
+
+  it("a claim held longer than the lease age can't be started", async () => {
+    const { id, token } = await submitAndClaim();
+    getStore().db.update(toolCallRelay).set({ claimedAt: new Date(Date.now() - 90_000).toISOString() }).where(eq(toolCallRelay.id, id)).run();
+    const res = await start(id, token);
+    expect(res.json()).toEqual({ error: "lease_refused", reason: "stale_claim" });
+    expect(rowOf(id)).toMatchObject({ status: "rejected", error: "stale_claim" });
+  });
+
+  it("an unreadable policy answers 503, starts nothing and leaves the call claimed", async () => {
+    const { id, token } = await submitAndClaim();
+    setPolicyText("{not json");
+    const res = await start(id, token);
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ error: "policy_unavailable" });
+    expect(rowOf(id).status).toBe("claimed");
+  });
+
+  it("another kernel's call is not found, even with its token", async () => {
+    const { id, token } = await submitAndClaim();
+    const res = await start(id, token, { ...asKey(OPERATOR_2), "x-pcc-lease": "1" }, "kernel-test-2");
+    expect(res.statusCode).toBe(404);
+    expect(rowOf(id).status).toBe("claimed");
+  });
+
+  it("an executing call counts against its scope's command budget", async () => {
+    const res = await app.inject({
+      method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: op,
+      payload: { createdBy: "agent-budget", allowedTools: ["run_create"], maxCommands: 1 },
+    });
+    const scope = res.json().id as string;
+    const insert = (id: string, status: string) =>
+      getStore().db.insert(toolCallRelay).values({
+        id, scopeId: scope, kernelId: KERNEL, toolName: "run_create", toolArgs: {}, status,
+        createdAt: new Date().toISOString(),
+      }).run();
+    insert("tc-running", "executing");
+    insert("tc-next", "pending");
+    await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: op });
+    expect(rowOf("tc-next")).toMatchObject({ status: "rejected", error: "max_commands_reached" });
+  });
+
+  it("a node's not_executed report closes a claimed call but is never a device failure", async () => {
+    const { id } = await submitAndClaim();
+    const fail = vi.spyOn(getSafetyGateway(), "recordDeviceFailure");
+    try {
+      const res = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: op, payload: { callId: id, error: "not_executed:lease_unavailable" } });
+      expect(res.statusCode).toBe(200);
+      expect(rowOf(id)).toMatchObject({ status: "failed", error: "not_executed:lease_unavailable" });
+      expect(fail).not.toHaveBeenCalled();
+    } finally {
+      fail.mockRestore();
+    }
+  });
+
+  it("any error on a token-claimed call that never started closes it, but is not a device failure", async () => {
+    const { id } = await submitAndClaim();
+    const fail = vi.spyOn(getSafetyGateway(), "recordDeviceFailure");
+    try {
+      await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: op, payload: { callId: id, error: "device_unreachable" } });
+      expect(rowOf(id)).toMatchObject({ status: "failed", error: "device_unreachable" });
+      expect(fail).not.toHaveBeenCalled();
+    } finally {
+      fail.mockRestore();
+    }
+  });
+
+  it("a not_executed report is never a device failure, even on a started call", async () => {
+    const { id, token } = await submitAndClaim();
+    expect((await start(id, token)).statusCode).toBe(200);
+    const fail = vi.spyOn(getSafetyGateway(), "recordDeviceFailure");
+    try {
+      await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: op, payload: { callId: id, error: "not_executed:stale" } });
+      expect(rowOf(id).status).toBe("failed");
+      expect(fail).not.toHaveBeenCalled();
+    } finally {
+      fail.mockRestore();
+    }
+  });
+
+  it("a success for a token-claimed call that never started is refused, and the call stays claimed", async () => {
+    const { id } = await submitAndClaim();
+    const ok = vi.spyOn(getSafetyGateway(), "recordDeviceSuccess");
+    try {
+      const res = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: op, payload: { callId: id, result: "{}" } });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({ error: "not_started", callId: id });
+      expect(rowOf(id).status).toBe("claimed");
+      expect(ok).not.toHaveBeenCalled();
+    } finally {
+      ok.mockRestore();
+    }
+  });
+
+  it("a lease-less claim (RELAY_LEASE_ENFORCE=off) still feeds the breaker: that executor may have run it", async () => {
+    process.env.RELAY_LEASE_ENFORCE = "off";
+    const id = await submit();
+    await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: legacy });
+    expect(rowOf(id)).toMatchObject({ status: "claimed", claimTokenHash: null });
+    const fail = vi.spyOn(getSafetyGateway(), "recordDeviceFailure");
+    try {
+      await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: legacy, payload: { callId: id, error: "device_unreachable" } });
+      expect(rowOf(id).status).toBe("failed");
+      expect(fail).toHaveBeenCalledTimes(1);
+    } finally {
+      fail.mockRestore();
+    }
+  });
+
+  it("the result of an executing call is recorded once and feeds the breaker", async () => {
+    const { id, token } = await submitAndClaim();
+    expect((await start(id, token)).statusCode).toBe(200);
+    const spy = vi.spyOn(getSafetyGateway(), "recordDeviceSuccess");
+    try {
+      const res = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: op, payload: { callId: id, result: "{}" } });
+      expect(res.statusCode).toBe(200);
+      expect(rowOf(id).status).toBe("completed");
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
