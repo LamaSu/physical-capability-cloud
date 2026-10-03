@@ -563,7 +563,8 @@ describe("astra r3 (#313 @9250c578): F5, generic request success is never green 
     (0, eval)(kitSrc);
   }
   const click = (label: string) => {
-    const b = Array.from(document.querySelectorAll("button")).find((x) => (x.textContent || "").trim() === label) as HTMLButtonElement | undefined;
+    // startsWith: a kit may append its own tag after the manifest label (#342, ruling 4).
+    const b = Array.from(document.querySelectorAll("button")).find((x) => (x.textContent || "").trim().startsWith(label)) as HTMLButtonElement | undefined;
     if (!b) throw new Error("no button " + label);
     b.click();
   };
