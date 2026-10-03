@@ -771,6 +771,41 @@ describe("PrinterLogAdapter: a stop asked from inside a timer poll (astra pack 1
     expect.soft(t.asked.hook?.resolved, "quiesceEvidence(), once the stop failed").toBe(true);
     expect.soft(vi.getTimerCount(), "timers left").toBe(0);
   });
+
+  it("a dispose from inside the timer's poll: quiesceEvidence() still waits for that poll, which then emits nothing", async () => {
+    const held = deferredLine();
+    let log!: PrinterLogAdapter;
+    let hook: { resolved: boolean; seen?: number } | undefined;
+    let calls = 0;
+    const logProvider = (): Promise<string | null> => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve("first");
+      if (calls === 2) {
+        void log.dispose();
+        hook = ask(log, events);
+        return held.promise;
+      }
+      return Promise.resolve(null);
+    };
+    // The capture sees every line the adapter takes, even once dispose has cleared its listeners.
+    const captured: string[] = [];
+    const capture = memoryLogCapture();
+    const counting = { ...capture, captureEntry: (line: string, source: string) => (captured.push(line), capture.captureEntry(line, source)) } as LogCaptureService;
+    log = new PrinterLogAdapter("log-reenter-timer-dispose", KERNEL_ID, counting, { pollIntervalMs: 1_000, logProvider });
+    const events = record(log);
+
+    await log.startRecording("job-d");
+    await vi.advanceTimersByTimeAsync(1_000); // the timer's poll disposes the adapter; its line is held
+
+    expect.soft(hook?.resolved, "quiesceEvidence() while the timer's poll is in flight").toBe(false);
+    held.resolve("late");
+    await vi.advanceTimersByTimeAsync(0);
+    expect.soft(hook?.resolved, "quiesceEvidence(), once that poll settled").toBe(true);
+    expect.soft(captured, "lines captured: the first poll's, none after dispose").toEqual(["first"]);
+    expect.soft(entries(events), "entries").toEqual(["first"]);
+    expect.soft(calls, "log polls").toBe(2);
+    expect.soft(vi.getTimerCount(), "timers left").toBe(0);
+  });
 });
 
 describe("PrinterLogAdapter under JobRunner (astra pack 196): its start at step 2, its stop at step 6, and the stop its failure path retries", () => {
