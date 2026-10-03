@@ -25,7 +25,7 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { ids, canonicalize, sha256 } from "@pcc/spec";
+import { ids, canonicalize, sha256, signingPreimage } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -362,8 +362,7 @@ export class ProcurementRFQKernel {
     const bundleHash = await sha256(canonicalize(sortedHashes));
 
     // Sign the bundle with the session key
-    const bundleHashBytes = new TextEncoder().encode(bundleHash);
-    const sig = nacl.sign.detached(bundleHashBytes, params.sessionPrivateKey);
+    const sig = nacl.sign.detached(signingPreimage(bundleHash), params.sessionPrivateKey);
 
     const evidenceBundle: EvidenceBundle = {
       id: ids.bundle(),

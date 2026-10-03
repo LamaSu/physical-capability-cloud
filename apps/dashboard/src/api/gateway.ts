@@ -1,4 +1,5 @@
 import { getAuthHeaders } from "../stores/auth-store.js";
+import type { JobExecutionDTO } from "@pcc/spec";
 import type {
   CapabilityDTO,
   JobDTO,
@@ -17,6 +18,20 @@ const BASE_URL = "/api";
 
 let sessionId: string | undefined;
 
+/**
+ * A non-2xx gateway response. Keeps the HTTP status so a page can tell "this does not
+ * exist" (404) from "this could not be read right now" (401, 5xx, network): the two must
+ * never render the same way.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(status: number, statusText: string) {
+    super(`API error: ${status} ${statusText}`);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -30,7 +45,7 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   });
 
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`);
+    throw new ApiError(res.status, res.statusText);
   }
 
   // Capture session ID from response if returned
@@ -38,6 +53,20 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   if (newSession) sessionId = newSession;
 
   return res.json();
+}
+
+/**
+ * GET /api/jobs. `jobs` is the original envelope; newer gateways also send collection-v1
+ * `items`, the paging fields (`total` counts ALL matching jobs) and `asOf` (read time).
+ */
+export interface JobListResponse {
+  jobs: JobDTO[];
+  items?: JobDTO[];
+  total?: number;
+  offset?: number;
+  limit?: number;
+  hasMore?: boolean;
+  asOf?: string;
 }
 
 export const api = {
@@ -111,7 +140,7 @@ export const api = {
     if (params?.offset != null) qs.set("offset", String(params.offset));
     if (params?.limit != null) qs.set("limit", String(params.limit));
     const query = qs.toString() ? `?${qs.toString()}` : "";
-    return fetchAPI<{ jobs: JobDTO[] }>(`/jobs${query}`);
+    return fetchAPI<JobListResponse>(`/jobs${query}`);
   },
 
   /**
@@ -120,6 +149,13 @@ export const api = {
    */
   getJob: (jobId: string) =>
     fetchAPI<{ job: JobDetailDTO; evidence: EvidenceSummaryDTO[] }>(`/jobs/${jobId}`),
+
+  /**
+   * Product read model for one job (PX-6): execution / evidence / verification /
+   * settlement axes, each with its source. Route: GET /api/jobs/:jobId/execution.
+   */
+  getJobExecution: (jobId: string) =>
+    fetchAPI<JobExecutionDTO>(`/jobs/${encodeURIComponent(jobId)}/execution`),
 
   /**
    * Get drift alerts for a job.

@@ -927,7 +927,7 @@ function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: 
               }}
             >
               AI agents discover, bid, and hire real equipment. Operators earn directly. No brokers.
-              Cryptographic proof on every job.
+              Public beta: payments settle on a test network.
             </p>
           </div>
 
@@ -967,6 +967,9 @@ function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: 
           }}
         >
           <CapabilityGrid mousePos={mousePos} />
+          <p style={{ fontFamily: mono, fontSize: "0.65rem", color: TEXT_MUTED, marginTop: "0.5rem", textAlign: "center" }}>
+            Illustrative, not live listings
+          </p>
         </div>
       </div>
 
@@ -1217,7 +1220,7 @@ function ProblemSection() {
                     marginBottom: "1rem",
                   }}
                 >
-                  BEFORE
+                  BEFORE (ILLUSTRATIVE)
                 </p>
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                   {[
@@ -1274,7 +1277,7 @@ function ProblemSection() {
                     marginBottom: "1rem",
                   }}
                 >
-                  WITH PCC
+                  WITH PCC (ILLUSTRATIVE)
                 </p>
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                   {[
@@ -1361,7 +1364,7 @@ const PHASES = [
   {
     number: "05",
     phase: "VERIFY",
-    title: "Cryptographic proof. On every job.",
+    title: "Proof set by the contract's tier.",
     description:
       "Evidence bundles are encrypted via Lit Protocol, stored permanently on IPFS via Storacha, Merkle-committed, and the proof hash anchored on Starknet. You can verify every claim.",
     tech: "Lit Protocol threshold encryption. Storacha w3up → IPFS CIDv1. Starknet felt252 anchoring. Photo verification: pHash + SSIM.",
@@ -1909,6 +1912,9 @@ function ForOperatorsSection() {
         {/* Right — terminal */}
         <div ref={ref} className="pcc-sticky-side" style={{ position: "sticky", top: "6rem" }}>
           <TerminalBlock active={inView} />
+          <p style={{ fontFamily: mono, fontSize: "0.65rem", color: TEXT_MUTED, marginTop: "0.5rem", textAlign: "center" }}>
+            Illustrative output
+          </p>
         </div>
       </div>
     </section>

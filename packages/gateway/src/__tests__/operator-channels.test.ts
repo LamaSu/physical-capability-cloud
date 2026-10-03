@@ -54,7 +54,9 @@ describe("attachChannel + getChannelsByOperator", () => {
       label: "Counter printer",
       transport: "webhook",
       describe: "POST JSON with order_id, items, total_usd to the local printer",
-      endpoint: { url: "http://10.0.0.5:9100/print" },
+      // N84: webhook targets must be public https URLs; private, loopback and
+      // link-local addresses are refused at attach time (see n84-channel-ssrf.test.ts).
+      endpoint: { url: "https://printer.example.com:9100/print" },
     });
     expect(ch.id).toMatch(/^ch_/);
     expect(ch.operatorSlug).toBe("pizza-shop-alpha");
@@ -197,7 +199,7 @@ describe("operator-channels HTTP routes", () => {
         label: "Counter printer",
         transport: "webhook",
         describe: "POST JSON to the receipt printer; staff watches the dashboard too",
-        endpoint: { url: "http://10.0.0.5/print" },
+        endpoint: { url: "https://printer.example.com/print" },
       },
     });
     expect(res.statusCode).toBe(201);
@@ -327,7 +329,7 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
             label: "Counter receipt printer",
             transport: "webhook",
             describe: "POST to the printer's HTTP endpoint, plain text body",
-            endpoint: { url: "http://10.0.0.42:9100" },
+            endpoint: { url: "https://printer.example.com:9100" },
           },
         },
       }),
@@ -428,7 +430,7 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
                 label: "Receipt printer",
                 transport: "webhook",
                 describe: "POST plain text ticket to the local printer URL",
-                endpoint: { url: "http://10.0.0.5/print" },
+                endpoint: { url: "https://printer.example.com/print" },
               },
               {
                 label: "Owner phone",
