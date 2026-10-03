@@ -15,18 +15,25 @@
  *   4. command-malformed: the command is not plain data exactly {name, params}.
  *   5. unknown-command: the command is not in `envelope.commands`.
  *   6. The stop (`eStop.stopCommand` of an adapter stop), sent through THIS
- *      ordinary dispatch check, skips 7 and 8 (the deadline and the rate). It is
- *      still held to 1 to 5 and 9 to 12, so a stop to an unverified adapter, or
- *      under unreadable time, is refused here. A genuine EMERGENCY stop never
- *      comes through this check: see `emergencyStopOf` (astra pack 174).
+ *      ordinary dispatch check, skips 7, 8 and 9 (the deadline, the rate and
+ *      the telemetry readings). It is still held to 1 to 5 and 10 to 13, so a
+ *      stop to an unverified adapter, or under unreadable time, is refused
+ *      here. A genuine EMERGENCY stop never comes through this check: see
+ *      `emergencyStopOf` (astra pack 174).
  *   7. past-deadline: the job has run longer than the deadline limit's max.
  *   8. rate-limited: `maxCommandsPerMinute` were already sent in (now - 60 s, now].
- *   9. undeclared-param, 10. missing-param: the params are exactly the declared ones.
- *  11. not-a-number, out-of-range, value-not-allowed: a parameter that sets a
+ *   9. telemetry-missing, telemetry-stale, telemetry-out-of-limit: every channel
+ *      in `telemetryChannels`, in envelope order, has a latest reading in the
+ *      state, taken at most its `maxAgeMs` before `nowMs`, and that reading is
+ *      a finite number inside its quantity's limit's [min, max] (#508 round 3,
+ *      astra pack 176: a device-controlled limit is enforced through its
+ *      channel, and so is every other committed channel).
+ *  10. undeclared-param, 11. missing-param: the params are exactly the declared ones.
+ *  12. not-a-number, out-of-range, value-not-allowed: a parameter that sets a
  *      quantity carries a finite number inside its limit's [min, max], 0 a real
  *      bound, no unit conversion; an enumerated physical parameter (`allowed`)
  *      carries one of its listed values.
- *  12. value-not-allowed: an unbounded parameter carries one of `allowed`, or a
+ *  13. value-not-allowed: an unbounded parameter carries one of `allowed`, or a
  *      non-empty list of distinct items from `allowedItems`.
  *
  * Authority (astra packs 164 and 167). The decision depends only on this
@@ -56,9 +63,9 @@
  * beyond any in-process check.
  *
  * Time (astra pack 174). Every time in the state is an epoch millisecond: a
- * safe integer, so no subtraction overflows. A send time after `nowMs` is
- * refused as state-invalid, never ignored: a clock that stepped back must not
- * open the rate window.
+ * safe integer, so no subtraction overflows. A send time or a reading time
+ * after `nowMs` is refused as state-invalid, never ignored: a clock that
+ * stepped back must not open the rate window or make a stale reading current.
  *
  * The emergency stop is not this check. A genuine emergency stop must never be
  * refused because the clock is wrong, the rate is spent, or ordinary
@@ -81,9 +88,11 @@ import {
   HAZARDS,
   isAdapterManifestDigest,
   isSafetyEnvelopeDigest,
+  isTelemetryChannelId,
   isTimeUnit,
   supervisionPolicy,
   SUPERVISION_MODES,
+  telemetryChannelsIssue,
   type DeviceClassTemplate,
   type EStopDeclaration,
 } from "./safety-envelope.js";
@@ -128,6 +137,22 @@ export interface RuntimeState {
   nowMs: number;
   /** When each command already sent to this device was sent (epoch ms), any order, any length. */
   recentCommandsAtMs: readonly number[];
+  /**
+   * The latest reading of each telemetry channel the runtime reads, one per
+   * channel, any order; an empty list when it reads none. A reading of a
+   * channel the envelope does not commit decides nothing.
+   */
+  telemetry: readonly TelemetryReading[];
+}
+
+/** The latest reading of one telemetry channel, as the runtime took it. */
+export interface TelemetryReading {
+  /** The channel's id, as the envelope's `telemetryChannels` names it. */
+  channel: string;
+  /** What the channel reported, in its unit. Rule 9 passes only a finite number inside the limit. */
+  value: unknown;
+  /** When it was taken: an epoch millisecond on the runtime's clock, never after `nowMs`. */
+  atMs: number;
 }
 
 export type RuntimeRefusalCode =
@@ -142,7 +167,10 @@ export type RuntimeRefusalCode =
   | "out-of-range"
   | "value-not-allowed"
   | "past-deadline"
-  | "rate-limited";
+  | "rate-limited"
+  | "telemetry-missing"
+  | "telemetry-stale"
+  | "telemetry-out-of-limit";
 
 export type RuntimeDecision = { allowed: true } | { allowed: false; code: RuntimeRefusalCode; reason: string };
 
@@ -316,6 +344,7 @@ const ENVELOPE_KEYS: readonly string[] = deepFreeze([
   "adapterVersion",
   "strict",
   "limits",
+  "telemetryChannels",
   "deviceControlled",
   "commands",
   "deadlineQuantity",
@@ -409,7 +438,9 @@ function envelopeProblem(e: unknown): string | null {
   if (template === undefined) return `unknown deviceClass ${quoted(e.deviceClass)}`;
   const limits = limitsProblem(e.limits, template);
   if (limits !== null) return limits;
-  const controlledIssue = deviceControlledIssue(e.deviceControlled, template.id);
+  const channels = telemetryChannelsIssue(e.telemetryChannels, template.id);
+  if (channels !== null) return `telemetryChannels: ${channels}`;
+  const controlledIssue = deviceControlledIssue(e.deviceControlled, template.id, e.telemetryChannels as readonly unknown[]);
   if (controlledIssue !== null) return controlledIssue;
   const controlled = mapList(e.deviceControlled as readonly { quantity: string }[], (d) => d.quantity);
   const map = ObjectCreate(null) as { commands: unknown };
@@ -440,6 +471,8 @@ function epochMs(v: unknown): v is number {
   return typeof v === "number" && NumberIsInteger(v) && v <= MAX_SAFE_MS && v >= -MAX_SAFE_MS;
 }
 
+const READING_KEYS: readonly string[] = deepFreeze(["channel", "value", "atMs"]);
+
 function stateProblem(s: unknown): string | null {
   if (!isRecord(s)) return "the state must be an object";
   if (!isAdapterManifestDigest(s.adapterManifestDigest)) {
@@ -455,7 +488,29 @@ function stateProblem(s: unknown): string | null {
     // Refused, never ignored: a clock that stepped back would otherwise open the rate window (astra pack 174).
     if (at > s.nowMs) return `recentCommandsAtMs[${i}] is after nowMs: a send time in the future means the clock stepped back`;
   }
+  const readings = s.telemetry;
+  if (!ArrayIsArray(readings)) return "telemetry must be a list of the latest readings, each {channel, value, atMs} (empty when the runtime reads none)";
+  const seen = newList<string>(0);
+  for (let i = 0; i < readings.length; i++) {
+    const reading: unknown = readings[i];
+    if (!isRecord(reading)) return `telemetry[${i}] must be an object {channel, value, atMs}`;
+    const shape = shapeProblem(reading, READING_KEYS, `telemetry[${i}]`);
+    if (shape !== null) return shape;
+    if (!isTelemetryChannelId(reading.channel)) return `telemetry[${i}].channel must be a telemetry channel id`;
+    // One latest reading per channel: two would leave which one counts to the order of a list.
+    if (includesValue(seen, reading.channel)) return `telemetry holds two readings of ${reading.channel}; it holds the latest one`;
+    append(seen, reading.channel);
+    if (!epochMs(reading.atMs)) return `telemetry[${i}].atMs must be an epoch millisecond: a safe integer`;
+    // Refused, never ignored: a clock that stepped back would otherwise make an old reading look current.
+    if (reading.atMs > s.nowMs) return `telemetry[${i}] was taken after nowMs: a reading from the future means the clock stepped back`;
+  }
   return null;
+}
+
+/** The reading of `channel` in `readings`, by index (channels are unique in a valid state). */
+function readingOf(readings: readonly TelemetryReading[], channel: string): TelemetryReading | undefined {
+  for (let i = 0; i < readings.length; i++) if (readings[i]!.channel === channel) return readings[i];
+  return undefined;
 }
 
 // ── Rule 4: the command's shape ─────────────────────────────────────
@@ -542,8 +597,8 @@ export function checkRuntimeCommand(envelope: unknown, command: unknown, state: 
   const spec = commandOf(env.commands, cmd.name);
   if (spec === undefined) return refuse("unknown-command", `${quoted(cmd.name)} is not one of the envelope's commands`);
 
-  // 6. The stop, through this ordinary dispatch, skips the deadline and the rate (7 and 8). It has
-  //    already passed 1 to 5, and 9 to 12 still apply. The EMERGENCY stop is a separate path (emergencyStopOf).
+  // 6. The stop, through this ordinary dispatch, skips the deadline, the rate and the readings (7, 8 and 9).
+  //    It has already passed 1 to 5, and 10 to 13 still apply. The EMERGENCY stop is a separate path (emergencyStopOf).
   const eStop = env.eStop;
   const isStop = eStop.mechanism === "adapter-stop" && cmd.name === eStop.stopCommand;
   if (!isStop) {
@@ -565,12 +620,36 @@ export function checkRuntimeCommand(envelope: unknown, command: unknown, state: 
     if (!(sent < env.maxCommandsPerMinute)) {
       return refuse("rate-limited", `${sent} commands were sent in the last 60 s; the envelope allows ${env.maxCommandsPerMinute} per minute`);
     }
+    // 9. The readings: every committed channel, in envelope order, has a reading no older than its maxAgeMs
+    //    (inclusive; the state already refused one from the future), and it is a finite number inside the limit.
+    const channels = env.telemetryChannels;
+    for (let i = 0; i < channels.length; i++) {
+      const channel = channels[i]!;
+      const reading = readingOf(st.telemetry, channel.id);
+      if (reading === undefined) {
+        return refuse("telemetry-missing", `there is no reading of ${channel.id}, which reports ${channel.quantity}; every committed channel is read before a command is sent`);
+      }
+      const ageMs = st.nowMs - reading.atMs;
+      if (!(ageMs <= channel.maxAgeMs)) {
+        return refuse("telemetry-stale", `the latest reading of ${channel.id} is ${ageMs} ms old; it counts for ${channel.maxAgeMs} ms`);
+      }
+      const limit = limitOf(env.limits, channel.quantity);
+      const value: unknown = reading.value;
+      if (limit === undefined || !finite(value) || !(value >= limit.min && value <= limit.max)) {
+        return refuse(
+          "telemetry-out-of-limit",
+          limit === undefined
+            ? `${channel.quantity} has no confirmed limit`
+            : `${channel.id} reads ${describe(value)}, not a finite number inside the confirmed ${channel.quantity} [${limit.min}, ${limit.max}] ${limit.unit}`,
+        );
+      }
+    }
   }
 
   const declared = spec.params;
   const params = cmd.params;
 
-  // 9. No parameter the command does not declare.
+  // 10. No parameter the command does not declare.
   const given = ObjectKeys(params);
   for (let i = 0; i < given.length; i++) {
     if (paramOf(declared, given[i]!) === undefined) {
@@ -578,14 +657,14 @@ export function checkRuntimeCommand(envelope: unknown, command: unknown, state: 
     }
   }
 
-  // 10. Every declared parameter, present: a device default would be unbounded.
+  // 11. Every declared parameter, present: a device default would be unbounded.
   for (let i = 0; i < declared.length; i++) {
     if (!hasOwn(params, declared[i]!.name)) {
       return refuse("missing-param", `${quoted(spec.name)} needs ${quoted(declared[i]!.name)}; every declared parameter is required`);
     }
   }
 
-  // 11. Bounded parameters, in declaration order: a finite JSON number in the declared unit (no conversion),
+  // 12. Bounded parameters, in declaration order: a finite JSON number in the declared unit (no conversion),
   //     inside the limit's [min, max], 0 a bound like any other.
   for (let i = 0; i < declared.length; i++) {
     const p = declared[i]!;
@@ -605,7 +684,7 @@ export function checkRuntimeCommand(envelope: unknown, command: unknown, state: 
     }
   }
 
-  // 12. Unbounded parameters: only an allowed value, or a list of allowed items.
+  // 13. Unbounded parameters: only an allowed value, or a list of allowed items.
   for (let i = 0; i < declared.length; i++) {
     const p = declared[i]!;
     if (p.unbounded === undefined) continue;
@@ -614,7 +693,7 @@ export function checkRuntimeCommand(envelope: unknown, command: unknown, state: 
     }
   }
 
-  // 13.
+  // 14.
   return ALLOWED;
 }
 
