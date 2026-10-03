@@ -1273,6 +1273,16 @@ describe("Q3 MEDIUM (#455 r2): the 1 h re-claim guard is rebuilt from the persis
     expect((await claimAs(id, "k-2", OTHER_CLAIMANT)).statusCode).toBe(200);
   });
 
+  it("kits (astra 142): a release ends the released operator's claimant authority, in memory and after a restart", async () => {
+    await restart();
+    const id = await offerIn("claimed"); // claimed by k-1 (CLAIMANT)
+    expect(store().claimantOf(id)).not.toBeNull();
+    expect((await event_(id, "release")).statusCode).toBe(200);
+    expect(store().claimantOf(id)).toBeNull();
+    await restart(); // a NEW store over the SAME database must not bring the claimant back
+    expect(store().claimantOf(id)).toBeNull();
+  });
+
   it("after the hour, a restart does not resurrect an expired guard: the releasing kernel may claim again", async () => {
     await restart();
     const id = await offerIn("claimed");

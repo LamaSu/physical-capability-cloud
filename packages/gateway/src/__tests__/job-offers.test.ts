@@ -916,6 +916,74 @@ describe("claimant binding: claims and progress events belong to authenticated p
     }
   });
 
+  // astra 142, required closure 2: the role checks sit on N81's lifecycle, so a cancel ends the
+  // claimant's authority and a release really returns the offer.
+  it("astra 142: after the poster cancels, the claimant cannot deliver; the offer stays cancelled", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-142-cancel");
+      const cancel = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-cancel/events",
+        headers: as("poster@kits.test"), payload: { event: "cancelled" },
+      });
+      expect(cancel.statusCode).toBe(200);
+      for (const event of ["delivered", "in_progress", "pickup"]) {
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-142-cancel/events",
+          headers: as("driver7@kits.test"), payload: { event },
+        });
+        expect(res.statusCode, event).toBe(409);
+        expect(res.json(), event).toMatchObject({ error: "invalid_transition", event, currentStatus: "cancelled" });
+      }
+      expect(getJobOffersStore().get("cb-142-cancel")!.status).toBe("cancelled");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("astra 142: a release returns the offer to open; the released claimant can no longer advance it, and another kernel claims it at once", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-142-release");
+      const release = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "release" },
+      });
+      expect(release.statusCode).toBe(200);
+      expect(release.json().status).toBe("open");
+      expect(getJobOffersStore().get("cb-142-release")!.claimedByKernelId).toBeNull();
+      const late = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "delivered" },
+      });
+      expect(late.statusCode).toBe(403);
+      expect(late.json().reason).toBe("not_claimed");
+      // Nor may it post the events a claimant or the poster may (note, progress_update, ...).
+      const progress = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "progress_update", note: "still on it" },
+      });
+      expect(progress.statusCode).toBe(403);
+      expect(progress.json().reason).toBe("not_participant");
+      expect(getJobOffersStore().get("cb-142-release")!.status).toBe("open");
+      kernelOwners.set("kernel-other-8", "other8@kits.test");
+      const reclaim = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/claim",
+        headers: as("other8@kits.test"), payload: { kernelId: "kernel-other-8" },
+      });
+      expect(reclaim.statusCode).toBe(200);
+      expect(reclaim.json().offer.claimedByKernelId).toBe("kernel-other-8");
+      const formerClaimant = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "in_progress" },
+      });
+      expect(formerClaimant.statusCode).toBe(403);
+      expect(getJobOffersStore().get("cb-142-release")!.status).toBe("claimed");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("records the actor's role as 'by', never the body label or the identity", async () => {
     const app = await buildApp();
     try {

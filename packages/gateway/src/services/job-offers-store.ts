@@ -833,6 +833,9 @@ export class JobOffersStore {
     }
     if (event === "release") {
       const kernelId = releasedKernelId;
+      // The released operator stops being the claimant (astra 142): otherwise it could still post
+      // claimant-or-poster events on the open offer, and the persisted row would bring it back.
+      this.claimants.delete(o.id);
       o.status = "open";
       o.claimedByKernelId = null;
       o.claimedAt = null;
