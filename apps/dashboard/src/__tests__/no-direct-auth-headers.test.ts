@@ -552,6 +552,8 @@ describe("the rules catch each known way around them (self-test)", () => {
       "$.extend(Request.prototype, { clone: observe });",
       "merge(Headers.prototype, overrides);",
       "patch(Headers.prototype, observe);",
+      "_.assign(navigator, { sendBeacon: observe });",
+      'const O = Object;\nO.defineProperty(navigator, "sendBeacon", { value: observe });',
     ]) {
       expect(caught(code), code).toContain("global-write");
     }
