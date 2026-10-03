@@ -395,6 +395,25 @@ async function buildCases(): Promise<void> {
   const captureHash = "sha256:" + "d".repeat(64);
   const committedCapture = await toBundle([...PRINTED, { ...PILOT[2]!, payload: { passed: true, captureHash }, observation: { sampleId: captureHash } }], p);
   add("admit: a leg that checks the capture, which matches", await input(p, [committedCapture], { verifyPrimitiveInstance: capturesMatch }));
+  // The window opens at the EARLIEST start event and closes at the LATEST end event: an observation between two
+  // starts, or between two ends, is inside it.
+  const fromStart = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started" }));
+  add(
+    "admit: an inspection between two starts (the window opens at the earliest)",
+    await input(fromStart, [
+      await toBundle(
+        [PILOT[0]!, { type: "execution_started", t: 15, device: PRINTER }, { type: "execution_completed", t: 16, device: PRINTER }, { ...PILOT[2]!, t: 10 }],
+        fromStart,
+      ),
+    ]),
+  );
+  const startToEnd = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started", endCondition: "execution_completed" }));
+  add(
+    "admit: an inspection between two ends (the window closes at the latest)",
+    await input(startToEnd, [
+      await toBundle([PILOT[0]!, PILOT[1]!, { type: "execution_completed", t: 30, device: PRINTER }, PILOT[2]!], startToEnd),
+    ]),
+  );
 
   // reject: the set, the signature, binding
   const pin2 = await computeBundleSetDigest(SUBJECT, [pilot.bundleHash, failure.bundleHash]);
