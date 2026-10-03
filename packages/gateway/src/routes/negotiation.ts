@@ -675,8 +675,10 @@ export async function negotiationRoutes(app: FastifyInstance) {
             paidJobResult = await createJobFromSession(committedRow);
           }
         } catch (err) {
+          // settlementError (the extracted message) still feeds the HTTP response and DB
+          // transition below, unchanged — only the console line is closed, on the raw err.
           settlementError = err instanceof Error ? err.message : String(err);
-          console.warn("[negotiation] Paid job flow wiring failed:", settlementError);
+          console.warn(lit("[negotiation] Paid job flow wiring failed:"), err);
         }
 
         // ── Money-path guard: never return a false 200 in REAL settlement ──
@@ -839,8 +841,10 @@ export async function negotiationRoutes(app: FastifyInstance) {
             .get();
           if (committedRow) paidJobResult = await createJobFromSession(committedRow);
         } catch (err) {
+          // settlementError (the extracted message) still feeds the HTTP response and DB
+          // transition below, unchanged — only the console line is closed, on the raw err.
           settlementError = err instanceof Error ? err.message : String(err);
-          console.warn("[negotiation] retry-settlement wiring failed:", settlementError);
+          console.warn(lit("[negotiation] retry-settlement wiring failed:"), err);
         }
 
         // Same money-path guard as /commit: no false success in REAL mode.
