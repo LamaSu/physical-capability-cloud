@@ -362,6 +362,55 @@ describe("operator.ts: read-modify-write routes never write a default over an un
   });
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// astra pack 150 HIGH: a bare JSON array in the policy column is a different
+// kind of "unreadable" — it PARSES fine (unlike UNREADABLE above, which throws),
+// it just isn't a usable policy object. `typeof [] === "object"`, so the old
+// per-route `row?.policy ?? DEFAULT_OPERATOR_POLICY` checks (and the shared
+// helper's own `typeof policy !== "object"` guard) let it through as truthy,
+// non-default "policy" whose `.emergencyStop` reads as undefined (not stopped).
+// Worse: POST /api/operator/emergency-stop could set `.emergencyStop = true` on
+// the array object in memory and still answer 200 {stopped:true} — but arrays
+// serialize to JSON without their named properties, so the write that reached
+// the DB was functionally still `[]`. Nothing was ever actually stopped.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("POST /api/operator/emergency-stop: a bare-array policy row must not produce a false stopped:true", () => {
+  /** The policy column holds a parseable-but-wrong-shaped value: a plain array. */
+  function makeArrayPolicy(kernelId: string): void {
+    getStore().db.run(
+      sql`INSERT OR REPLACE INTO operator_policies (kernel_id, policy, updated_at, updated_by)
+          VALUES (${kernelId}, ${"[]"}, ${new Date().toISOString()}, ${"test"})`,
+    );
+  }
+
+  it("[repro] refuses (never 200 stopped:true) and never (re)persists the array unmodified", async () => {
+    const kernelId = await ownedKernel("estop-array");
+    makeArrayPolicy(kernelId);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/operator/emergency-stop",
+      headers: asOwner(),
+      payload: { kernelId, reason: "array-policy repro" },
+    });
+
+    // The bug: this used to be 200 {stopped:true, ...} while `rawPolicy` stayed
+    // "[]" — a claimed stop that persisted nothing. Same refusal shape as the
+    // UNREADABLE case above: 500, no write.
+    expect(res.statusCode, res.body).toBe(500);
+    expect(res.body).not.toContain("\"stopped\":true");
+    expect(rawPolicy(kernelId)).toBe("[]");
+  });
+
+  it("[repro] a job-creating path never reads the array-stored kernel as accepting jobs", async () => {
+    const kernelId = await ownedKernel("estop-array-jobs");
+    makeArrayPolicy(kernelId);
+    const { checkKernelAcceptsJobs } = await import("../services/kernel-emergency-stop.js");
+    expect(checkKernelAcceptsJobs(kernelId).ok).toBe(false);
+  });
+});
+
 describe("operator.ts: POST /api/operator/approvals does not decide on a default when the policy cannot be read", () => {
   it("refuses (not 2xx) and stores no approval, for the owner and for anyone else", async () => {
     const kernelId = await ownedKernel("approvals");

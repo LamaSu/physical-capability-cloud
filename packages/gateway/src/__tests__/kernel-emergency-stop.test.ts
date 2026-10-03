@@ -83,6 +83,12 @@ describe("checkKernelAcceptsJobs", () => {
     ["a JSON null", "null"],
     ["a JSON number", "5"],
     ["a JSON string", '"stopped"'],
+    // astra pack 150 HIGH: typeof [] === "object", so a bare array slipped past
+    // the old `typeof policy !== "object"` guard and was read as "not stopped"
+    // (worse: routes/operator.ts's emergency-stop route could set `.emergencyStop`
+    // on the array and have it silently vanish on JSON serialization — see
+    // operator-policy-failclosed.test.ts for that half of the repro).
+    ["a JSON array", "[]"],
   ])("a stored policy that is not a readable object is 503 policy_unavailable, never 'not stopped': %s", (_label, text) => {
     const id = uid("unreadable");
     storePolicyText(id, text);
