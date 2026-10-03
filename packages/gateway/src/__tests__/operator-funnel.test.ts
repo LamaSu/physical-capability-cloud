@@ -844,3 +844,189 @@ describe("#469 round-1 fix F4: durable recording", () => {
   });
 });
 
+// ── #469 round-2 follow-ups (cross-family review of a9dbf245) ────────────
+//
+// R1: test_job_passed must credit the kernel the device belonged to when the
+// job actually ran (resolved from a PRE-SUBMIT snapshot), not whatever
+// kernel/adapter/config the device carries by the time the completion poll
+// finishes. R3: adapter_ready must bind the COMPLETE device revision
+// (kernelId + adapterType + adapterConfig + lastUpdated), not just the first
+// two fields.
+
+describe("#469 round-2 follow-ups", () => {
+  let app: FastifyInstance;
+  beforeEach(async () => { app = await buildFullApp(); });
+  afterEach(async () => { await app.close(); closeStore(); resetKernelService(); });
+
+  const reg = (kernelId: string, deviceId: string, adapterConfig: Record<string, string>) =>
+    app.inject({
+      method: "POST",
+      url: "/api/setup/register-device",
+      payload: { kernelId, deviceId, type: "machine", model: "Real Printer", adapterType: "octoprint", adapterConfig },
+    });
+
+  // ── R1 ────────────────────────────────────────────────────────────────
+
+  it("R1a: a device re-parented onto the caller-claimed kernel WHILE the test job polls is credited to NEITHER kernel", async () => {
+    await reg("kernel-nyc", "dev-r1a", { url: "http://10.0.0.5:5000" });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let submitted = false;
+    _mockService.submitJob.mockImplementationOnce(async () => {
+      submitted = true;
+      return { jobId: "j-r1a", deviceId: "dev-r1a", status: "accepted" };
+    });
+    _mockService.getJobStatus.mockImplementationOnce(async () => {
+      await gate;
+      return { status: "completed", progress: 100 };
+    });
+    const pending = app.inject({
+      method: "POST",
+      url: "/api/setup/test-job",
+      payload: { kernelId: "kernel-la", deviceId: "dev-r1a" },
+    });
+    while (!submitted) await new Promise((r) => setTimeout(r, 5));
+    // Mid-poll: re-parent the device onto the very kernelId the caller claimed.
+    // The device belonged to kernel-nyc, not kernel-la, when the job ran.
+    const moved = await reg("kernel-la", "dev-r1a", { url: "http://10.0.0.5:5000" });
+    expect(moved.statusCode).toBe(200);
+    release();
+    expect((await pending).statusCode).toBe(200);
+    expect(opFunnelRows().filter((r) => r.action === "test_job_passed")).toHaveLength(0);
+  });
+
+  it("R1b: submitJob reporting a different deviceId than the one requested is not credited", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/setup/register-device",
+      payload: { kernelId: "kernel-nyc", deviceId: "dev-r1b-req", ...OCTO_DEVICE },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/setup/register-device",
+      payload: { kernelId: "kernel-nyc", deviceId: "dev-r1b-other", ...OCTO_DEVICE },
+    });
+    // The service reports it ran the job on a DIFFERENT (also real, also
+    // kernel-nyc) device than the one the caller named in the request.
+    _mockService.submitJob.mockResolvedValueOnce({ jobId: "j-r1b", deviceId: "dev-r1b-other", status: "accepted" });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/setup/test-job",
+      payload: { kernelId: "kernel-nyc", deviceId: "dev-r1b-req" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(opFunnelRows().filter((r) => r.action === "test_job_passed")).toHaveLength(0);
+  });
+
+  it("R1c: re-registering the SAME device with a different adapterConfig mid-poll is not credited", async () => {
+    await reg("kernel-nyc", "dev-r1c", { url: "http://10.0.0.5:5000" });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let submitted = false;
+    _mockService.submitJob.mockImplementationOnce(async () => {
+      submitted = true;
+      return { jobId: "j-r1c", deviceId: "dev-r1c", status: "accepted" };
+    });
+    _mockService.getJobStatus.mockImplementationOnce(async () => {
+      await gate;
+      return { status: "completed", progress: 100 };
+    });
+    const pending = app.inject({
+      method: "POST",
+      url: "/api/setup/test-job",
+      payload: { kernelId: "kernel-nyc", deviceId: "dev-r1c" },
+    });
+    while (!submitted) await new Promise((r) => setTimeout(r, 5));
+    // Mid-poll: same kernel, same device id, but the adapterConfig (and thus
+    // lastUpdated) changes underneath the in-flight job.
+    const swapped = await reg("kernel-nyc", "dev-r1c", { url: "http://203.0.113.9:5000" });
+    expect(swapped.statusCode).toBe(200);
+    release();
+    expect((await pending).statusCode).toBe(200);
+    expect(opFunnelRows().filter((r) => r.action === "test_job_passed")).toHaveLength(0);
+  });
+
+  // ── R3 ────────────────────────────────────────────────────────────────
+
+  it("R3a: an adapterConfig swap (same kernel, same adapter type) mid-check is not credited", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/setup/register-device",
+      payload: { kernelId: "kernel-nyc", deviceId: "dev-r3a", type: "machine", model: "Real Printer", adapterType: "octoprint", adapterConfig: { url: "http://10.0.0.6:5000" } },
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let checking = false;
+    _mockService.checkDeviceHealth.mockImplementationOnce(async () => {
+      checking = true;
+      await gate;
+      return { healthy: true, details: "idle" };
+    });
+    const pending = app.inject({ method: "POST", url: "/api/devices/dev-r3a/health" });
+    while (!checking) await new Promise((r) => setTimeout(r, 5));
+    const swapped = await app.inject({
+      method: "POST",
+      url: "/api/setup/register-device",
+      payload: { kernelId: "kernel-nyc", deviceId: "dev-r3a", type: "machine", model: "Real Printer", adapterType: "octoprint", adapterConfig: { url: "http://203.0.113.9:5000" } },
+    });
+    expect(swapped.statusCode).toBe(200);
+    release();
+    expect((await pending).statusCode).toBe(200);
+    expect(opFunnelRows().filter((r) => r.action === "adapter_ready")).toHaveLength(0);
+  });
+
+  it("R3b: a re-registration with byte-identical fields mid-check (only lastUpdated changes) is not credited", async () => {
+    const payload = { kernelId: "kernel-nyc", deviceId: "dev-r3b", type: "machine", model: "Real Printer", adapterType: "octoprint", adapterConfig: { url: "http://10.0.0.7:5000" } };
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let checking = false;
+    _mockService.checkDeviceHealth.mockImplementationOnce(async () => {
+      checking = true;
+      await gate;
+      return { healthy: true, details: "idle" };
+    });
+    const pending = app.inject({ method: "POST", url: "/api/devices/dev-r3b/health" });
+    while (!checking) await new Promise((r) => setTimeout(r, 5));
+    // Re-register with the exact same fields — only lastUpdated bumps.
+    const reregistered = await app.inject({ method: "POST", url: "/api/setup/register-device", payload });
+    expect(reregistered.statusCode).toBe(200);
+    release();
+    expect((await pending).statusCode).toBe(200);
+    expect(opFunnelRows().filter((r) => r.action === "adapter_ready")).toHaveLength(0);
+  });
+
+  // ── Positive controls: the round-1 fixes (F1, F2) must still hold ──────
+
+  it("positive control: F1's 'a real device of the named kernel still counts' still passes with the R1 fix", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/setup/register-device",
+      payload: { kernelId: "kernel-nyc", deviceId: "dev-r2-f1", ...OCTO_DEVICE },
+    });
+    _mockService.submitJob.mockResolvedValueOnce({ jobId: "j-r2-f1", deviceId: "dev-r2-f1", status: "accepted" });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/setup/test-job",
+      payload: { kernelId: "kernel-nyc", deviceId: "dev-r2-f1" },
+    });
+    expect(res.statusCode).toBe(200);
+    const rows = opFunnelRows().filter((r) => r.action === "test_job_passed");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ resourceId: "kernel-nyc" });
+  });
+
+  it("positive control: F2's authenticated health check still credits adapter_ready with the R3 fix", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/setup/register-device",
+      payload: { kernelId: "kernel-nyc", deviceId: "dev-r2-f2", ...OCTO_DEVICE },
+    });
+    const res = await app.inject({ method: "POST", url: "/api/devices/dev-r2-f2/health" });
+    expect(res.statusCode).toBe(200);
+    const rows = opFunnelRows().filter((r) => r.action === "adapter_ready");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ resourceId: "kernel-nyc", actor: "op-test" });
+  });
+});
+
