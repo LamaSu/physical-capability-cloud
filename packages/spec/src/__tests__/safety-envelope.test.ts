@@ -933,9 +933,12 @@ describe("review additions: compile carries the confirmed values exactly", () =>
       enforcedBy: l.quantity === "run_duration" ? [{ kind: "dispatch" }, { kind: "deadline" }] : [{ kind: "dispatch" }],
     }));
     expect(compiled.evidence["envelope-conformance"]?.primitives?.[0]?.params).toEqual({ envelope: want });
+    expect(compiled.evidence["envelope-conformance"]?.description).toBe(
+      `Checks against the operator-confirmed safety envelope ${confirmed.envelopeDigest}: each limit lists the mechanisms that checked it. A dispatch check covers each value when it was sent. Once the confirmed maximum of run_duration has elapsed, the runtime sends the stop; when the device then halts is not observed here.`,
+    );
     expect(compiled.evidence["envelope-conformance"]?.required).toEqual([
       "every parameter that sets a quantity was inside its confirmed limit when it was sent",
-      "the job ended by the confirmed maximum of run_duration",
+      "every command but the stop was sent within the confirmed maximum of run_duration from the job's start, and the stop was sent then if the job had not ended",
     ]);
     expect(compiled.composition.parameters.map((d) => [d.name, d.minimum, d.maximum])).toEqual(
       confirmed.envelope.limits.map((l) => [l.param, { value: l.min, unit: l.unit }, { value: l.max, unit: l.unit }]),

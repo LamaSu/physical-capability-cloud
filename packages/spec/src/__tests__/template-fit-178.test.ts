@@ -107,11 +107,23 @@ describe("astra 178 HIGH: a channel reports a state, so a duration keeps its rea
     });
   });
 
-  it("the evidence claims sampled checks, never conformance for the whole job", () => {
+  it("the evidence claims sampled checks, never conformance for the whole job (and, astra pack 180, nowhere else either)", () => {
     const c = confirmSafetyEnvelope(simPr1(), DECISION);
     const tier = compileSafetyEnvelope(c, register(c), verifyRegistry).evidence["envelope-conformance"]!;
-    expect(tier.required).toContain("at each enforcement check, every telemetry channel had a reading no older than its maxAgeMs, inside its quantity's limit");
-    expect(tier.required.join(" ")).not.toMatch(/whole job/);
+    // Every claim, exactly. SIM-PR1 has no settable quantity, so there is no dispatch clause.
+    expect(tier.required).toEqual([
+      "at each enforcement check, every telemetry channel had a reading no older than its maxAgeMs, inside its quantity's limit",
+      "every command but the stop was sent within the confirmed maximum of job_duration from the job's start, and the stop was sent then if the job had not ended",
+    ]);
+    expect(tier.description).toBe(
+      `Checks against the operator-confirmed safety envelope ${c.envelopeDigest}: each limit lists the mechanisms that checked it. ` +
+        "A state reading shows what the device reported at an enforcement check, never what happened between checks; for a duration it is the duration the device was configured to run for, so a run's actual elapsed time is bounded only by the deadline stop. " +
+        "Once the confirmed maximum of job_duration has elapsed, the runtime sends the stop; when the device then halts is not observed here.",
+    );
+    // astra pack 180: no clause, and not the description, claims conformance between checks or a halt nobody observed.
+    for (const text of [tier.description, ...tier.required]) {
+      expect(text).not.toMatch(/whole job|stayed inside|ended by|throughout|continuous/);
+    }
   });
 
   it("a hand-built body and the runtime schema refuse a channel that is not a state", () => {

@@ -49,8 +49,10 @@
  *   - a device that moves or heats cannot run unattended;
  *   - remote supervision needs a stop the supervisor can trigger remotely, an
  *     adapter stop;
- *   - every template names a deadline quantity (a whole job's duration); the
- *     runtime stops a job that runs past its confirmed maximum.
+ *   - every template names a deadline quantity (a whole job's duration). Once
+ *     a job's elapsed time passes its confirmed maximum, the runtime sends no
+ *     command but the stop, and it sends the stop. When the device then halts
+ *     is the stop path's latency: it is not observed here (astra pack 180).
  *
  * The command surface. The adapter declares every command it can send and,
  * for each parameter, either the template quantity it sets (checked against
@@ -346,7 +348,8 @@ export interface TelemetryChannelSpec {
 
 /**
  * The kinds of reading a channel may report. "state" is the quantity's current
- * value, a continuous invariant, checked against both bounds at every check.
+ * value, checked against both bounds at every enforcement check. A check is a
+ * sample: nothing between two checks is claimed (astra pack 180).
  * A counter (an elapsed time) or a terminal quantity is not a state and is not
  * accepted in v1 (astra pack 178).
  */
@@ -2082,7 +2085,7 @@ export function checkCommittedEnvelope(
 export interface CompiledSafetyEnvelope {
   /** Typed job inputs, each bounded by its confirmed range (CSD `parameters`). */
   parameters: CsdParameter[];
-  /** The #53 evidence tier: the job's signals stayed inside the confirmed limits. */
+  /** The #53 evidence tier: the checks the runtime made against the confirmed limits, each by its mechanism. */
   evidence: Record<string, CsdEvidenceTier>;
   /** Composable typed I/O (CSD `composition`): bounded parameters and the device's output ports. */
   composition: { parameters: ParameterDefinition[]; outputPorts: Record<string, PortType> };
@@ -2164,13 +2167,29 @@ export function compileSafetyEnvelope(
   if (channels.length > 0) {
     append(required, "at each enforcement check, every telemetry channel had a reading no older than its maxAgeMs, inside its quantity's limit");
   }
-  append(required, `the job ended by the confirmed maximum of ${template.deadline}`);
+  // The deadline guarantee is a stop the runtime sends, not a device that has halted (astra pack 180).
+  append(
+    required,
+    `every command but the stop was sent within the confirmed maximum of ${template.deadline} from the job's start, and the stop was sent then if the job had not ended`,
+  );
+  // The description claims only what the mechanisms check, never conformance between checks or a halt
+  // nobody observed (astra pack 180).
+  const described = newList<string>(0);
+  append(described, `Checks against the operator-confirmed safety envelope ${committedDigest}: each limit lists the mechanisms that checked it.`);
+  if (settable.length > 0) append(described, "A dispatch check covers each value when it was sent.");
+  if (channels.length > 0) {
+    append(
+      described,
+      "A state reading shows what the device reported at an enforcement check, never what happened between checks; for a duration it is the duration the device was configured to run for, so a run's actual elapsed time is bounded only by the deadline stop.",
+    );
+  }
+  append(described, `Once the confirmed maximum of ${template.deadline} has elapsed, the runtime sends the stop; when the device then halts is not observed here.`);
 
   return deepFreeze({
     parameters,
     evidence: {
       "envelope-conformance": {
-        description: `The job stayed inside the operator-confirmed safety envelope ${committedDigest}, each limit by the mechanisms it lists.`,
+        description: joinStrings(described, " "),
         required,
         primitives: [
           {
