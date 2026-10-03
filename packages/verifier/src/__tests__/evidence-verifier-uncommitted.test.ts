@@ -201,11 +201,16 @@ describe("N118 — the verifier reads nothing unsigned (the property, not a rout
 
   it("a bundle that claims a tier other than the accepted one is rejected; the matching claim is valid", async () => {
     const valid = await tier1Bundle(true);
-    expect((await verifier.verify(valid, ACCEPTED)).result).toBe("valid");
+    const honest = verdictOf(await verifier.verify(valid, ACCEPTED));
+    expect(honest.result).toBe("valid");
+    const acceptedRequirements = honest.findings.filter((f) => f.startsWith("tier_requirement_"));
+    expect(acceptedRequirements).toContain("tier_requirement_power_profile_summary:true:-");
     for (const tier of [0, 2, 3]) {
       const v = verdictOf(await verifier.verify({ ...valid, assuranceTier: tier } as EvidenceBundle, ACCEPTED));
       expect(v.result, `claims ${tier}`).toBe("invalid");
       expect(v.findings, `claims ${tier}`).toContain("assurance_tier_accepted:false:critical");
+      // The evidence required is still the ACCEPTED tier's, whatever tier the bundle claims.
+      expect(v.findings.filter((f) => f.startsWith("tier_requirement_")), `claims ${tier}`).toEqual(acceptedRequirements);
     }
     // An accepted tier that is not a tier is no accepted tier at all.
     for (const bad of ["1", 4, -1, 1.5, null]) {
