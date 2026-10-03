@@ -24,11 +24,26 @@
  *   - no code supplied with the data runs: a proxy, an accessor (a getter or
  *     setter), an array with a nonstandard prototype, and an array index that
  *     is not the array's own data (a hole, or one served by a prototype) are
- *     refused through property descriptors, never by reading them.
+ *     refused through property descriptors, never by reading them;
+ *   - building the copy runs no inherited setter either: array elements are
+ *     installed with `Object.defineProperty`, and objects have no prototype.
  */
 
-import { types } from "node:util";
-
+/**
+ * A proxy check that runs no trap: Node's `util.types.isProxy`, loaded at
+ * module load without a static `node:util` import, so browser bundles of
+ * @pcc/spec still build (the dashboard bundles this module and never calls
+ * it; vite has no `node:util`). Where no such check exists (a browser, or
+ * Node before 20.16), `isProxy` is null and plainDataCopy refuses every
+ * object: a proxy cannot be told apart from plain data there without running
+ * its traps.
+ */
+export const isProxy: ((value: object) => boolean) | null = (() => {
+  const runtime = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process;
+  const util = runtime?.getBuiltinModule?.("node:util") as { types?: { isProxy?: (value: unknown) => boolean } } | undefined;
+  const check = util?.types?.isProxy;
+  return typeof check === "function" ? (value: object) => check(value) : null;
+})();
 
 class NotPlainData extends Error {}
 
@@ -44,7 +59,8 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
       return Object.is(v, -0) ? 0 : v;
     }
     if (typeof v !== "object") throw new NotPlainData(`${at}: a ${typeof v} is not JSON data`);
-    if (types.isProxy(v)) throw new NotPlainData(`${at}: a proxy`);
+    if (isProxy === null) throw new NotPlainData(`${at}: this runtime has no trap-free proxy check, so no object is copied as plain data`);
+    if (isProxy(v)) throw new NotPlainData(`${at}: a proxy`);
     if (ancestors.has(v)) throw new NotPlainData(`${at}: a cycle`);
     ancestors.add(v);
     try {
@@ -58,7 +74,9 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
           if (!("value" in element)) throw new NotPlainData(`${at}[${i}]: an accessor (a getter or setter)`);
           const item: unknown = element.value;
           if (item === undefined) throw new NotPlainData(`${at}[${i}]: undefined in an array`);
-          out[i] = walk(item, `${path}[${i}]`);
+          // Installed as the copy's own data property. An assignment would run a
+          // setter that Array.prototype serves for this index (astra pack 158).
+          Object.defineProperty(out, i, { value: walk(item, `${path}[${i}]`), writable: true, enumerable: true, configurable: true });
         }
         return out;
       }
