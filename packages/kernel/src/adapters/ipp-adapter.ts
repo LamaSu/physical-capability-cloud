@@ -728,8 +728,9 @@ export class IppAdapter implements MachineAdapter {
           type: "execution_progress",
           timestamp: new Date().toISOString(),
           source: this.source,
+          // The printer's job number, as on every IPP event: payload.jobId is the PCC job's (LO-EV-9).
           payload: {
-            jobId,
+            ippJobId: jobId,
             completedSheets: attrs.completedSheets,
           },
         });
