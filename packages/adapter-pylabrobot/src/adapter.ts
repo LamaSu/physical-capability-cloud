@@ -115,6 +115,8 @@ interface HoldSpec {
   requireWindow: boolean;
 }
 
+const START_NEEDS_JOB_ID = "start needs the job's id (payload.jobId), so the run's evidence is bound to its job";
+
 /** Lifecycle events are the adapter's own; the sidecar cannot send them (astra pack 194). */
 const ADAPTER_LIFECYCLE: ReadonlySet<string> = new Set(["execution_started", "execution_completed", "execution_failed"]);
 
@@ -243,6 +245,11 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         message: `the evidence of job ${this.unproven.jobId} is not yet proven complete (its barrier has not answered), so no new run starts`,
       };
     }
+    // A start needs its job's id before anything reaches the sidecar: not even backend.init,
+    // which can run a backend's setup() on the device (astra pack 197).
+    if (command.type === "start" && this.startJobId(command.payload) === null) {
+      return { success: false, message: START_NEEDS_JOB_ID };
+    }
     try {
       await this.ensureInitialized();
       switch (command.type) {
@@ -346,15 +353,21 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
 
   private pendingProtocol: Record<string, unknown> = {};
 
+  /** The job's id a start would run under (its payload over load_gcode's), or null if it names none. */
+  private startJobId(payload: Record<string, unknown> | undefined): string | null {
+    const jobId = { ...this.pendingProtocol, ...(payload ?? {}) }.jobId;
+    return typeof jobId === "string" && jobId.length > 0 ? jobId : null;
+  }
+
   private async handleStart(
     payload: Record<string, unknown> | undefined,
   ): Promise<MachineCommandResult> {
     const merged = { ...this.pendingProtocol, ...(payload ?? {}) };
     // The run is the caller's job, and its id binds every event of it (astra pack 194): never
-    // invented here. A start without one is refused before anything reaches the sidecar.
-    const jobId = merged.jobId;
-    if (typeof jobId !== "string" || jobId.length === 0) {
-      return { success: false, message: "start needs the job's id (payload.jobId), so the run's evidence is bound to its job" };
+    // invented here. executeCommand has already refused a start without one.
+    const jobId = this.startJobId(payload);
+    if (jobId === null) {
+      return { success: false, message: START_NEEDS_JOB_ID };
     }
     const generation = this.generation;
     if (generation === null) {
