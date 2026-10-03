@@ -113,12 +113,12 @@ export async function litProvisionRoutes(app: FastifyInstance) {
       }
 
       auditService.log({
-        eventType: "lit.key_provisioned",
+        eventType: lit("lit.key_provisioned"),
         actor: body.operatorDid,
-        resourceType: "lit_usage_key",
-        resourceId: body.kernelId,
-        action: "create",
-        metadata: { kernelId: body.kernelId, operatorDid: body.operatorDid },
+        resourceType: lit("lit_usage_key"),
+        resourceId: declare.id(body.kernelId),
+        action: lit("create"),
+        metadata: { kernelId: declare.id(body.kernelId), operatorDid: declare.id(body.operatorDid) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
