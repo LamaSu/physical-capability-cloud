@@ -396,4 +396,48 @@ describe("accepted-policy: code-running input is refused before it is read (E7c-
     sparse[2] = GOLDEN_BINDINGS[1]!; // index 1 is a hole
     expect(() => computeBindingsRoot(sparse)).toThrow(AcceptedPolicyDigestInputError);
   });
+
+  // ── E12 HIGH (astra r1, 98501e35, SHIP-WITH-FIXES): an indexed getter on a bindings
+  // element runs code, and reading it twice can make one admitted array yield two
+  // different roots. Reviewer's reproduction, added verbatim first against 98501e35
+  // (see /mnt/sparkbulk/tmp/evidence-496-e12-repro-98501e35.txt for the pre-fix run);
+  // the fix made both calls throw instead, so the assertions below are the POST-FIX
+  // expected behavior, landed in the same commit as the fix. ───────────────────────────
+  it("E12: refuses an indexed getter standing in for a bindings array element; the getter never runs and the array never yields two roots", () => {
+    const bindings = [GOLDEN_BINDINGS[0]!];
+    let calls = 0;
+    Object.defineProperty(bindings, "0", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        calls++;
+        return { ...GOLDEN_BINDINGS[0]!, valueRef: K(calls % 2 ? "first" : "second") };
+      },
+    });
+    const first = computeBindingsRoot(bindings);
+    const second = computeBindingsRoot(bindings);
+    expect(calls).toBe(0);
+    expect(first).toBe(second);
+  });
+
+  it("E12: refuses a hole replaced by an unrelated extra key (own-key count matches, but canonical index 1 is missing)", () => {
+    const a: unknown[] = [GOLDEN_BINDINGS[0]!, GOLDEN_BINDINGS[1]!];
+    delete a[1];
+    (a as Record<string, unknown>).extra = GOLDEN_BINDINGS[1]!;
+    expect(Reflect.ownKeys(a).length).toBe(3); // "0", "extra", "length" — same count as a dense length-2 array
+    expect(() => computeBindingsRoot(a as unknown as SubjectBinding[])).toThrow(AcceptedPolicyDigestInputError);
+  });
+
+  it("E12: a hole backed by a polluted Array.prototype[1], combined with the extra-key count trick, is still refused (prototype values are never read)", () => {
+    const a: unknown[] = [GOLDEN_BINDINGS[0]!, GOLDEN_BINDINGS[1]!];
+    delete a[1];
+    (a as Record<string, unknown>).extra = GOLDEN_BINDINGS[1]!;
+    const pollutedProto = Array.prototype as unknown as Record<string, unknown>;
+    pollutedProto[1] = { ...GOLDEN_BINDINGS[1]!, valueRef: K("polluted-prototype-value") };
+    try {
+      expect(() => computeBindingsRoot(a as unknown as SubjectBinding[])).toThrow(AcceptedPolicyDigestInputError);
+    } finally {
+      delete pollutedProto[1];
+    }
+  });
 });
