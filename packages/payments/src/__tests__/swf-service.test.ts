@@ -798,7 +798,29 @@ describe("Summary and dashboard", () => {
     expect(summary.participantCount).toBe(0);
     expect(summary.activeProposals).toBe(0);
     expect(summary.currentEpochId).toBe("");
-    expect(summary.chainBalances).toHaveLength(1);
+    // Nothing is invented: no distribution time before a distribution, and no chain balance for a ledger
+    // that lives in memory (readmodels #3284: it used to report now, and a Base USDC balance).
+    expect(summary.lastDistributionAt).toBeNull();
+    expect(summary.chainBalances).toEqual([]);
+    // Zero here is the empty simulation ledger, not a measured fund (astra EC2 F3).
+    expect(summary.basis).toBe("simulation");
+    expect(summary.unavailable).toEqual(["totalBalance", "totalAccruedAllTime", "totalDistributedAllTime", "lastDistributionAt", "chainBalances"]);
+  });
+
+  it("a completed epoch is a simulation, not a distribution: no distribution time is reported (astra EC2 F2)", () => {
+    const p = reg(svc, "did:key:last1");
+    const epochId = svc.createEpoch().id;
+    svc.accrue({ sourceType: "protocol_fee", sourceId: "a1", grossAmount: 10000, epochId });
+    svc.calculateContributionScores(epochId, [
+      { participantId: p.id, jobCount: 10, reputation: 500, uptimeOrActivity: 80, tenureDays: 100, votedThisEpoch: false },
+    ]);
+    const done = svc.distributeEpoch(epochId);
+    expect(done.status).toBe("completed");
+    // The epoch's endTime is its SCHEDULED deadline, which may still be in the future; nothing was paid.
+    const summary = svc.getSummary();
+    expect(summary.lastDistributionAt).toBeNull();
+    expect(summary.unavailable).toContain("lastDistributionAt");
+    expect(summary.chainBalances).toEqual([]);
   });
 
   it("getSummary reflects active epoch id", () => {

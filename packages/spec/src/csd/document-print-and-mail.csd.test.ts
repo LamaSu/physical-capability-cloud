@@ -43,15 +43,29 @@ describe("pcc://capabilities/document-print-and-mail/v1 (composite CSD, kind=wor
     expect(t1).not.toContain("confirm.target_system");
   });
 
-  it("the print leg reuses the existing document-printing vocabulary (pair-to-pair per evidence §6: receipt → printer_job_verified, log → printer_log_captured)", () => {
+  it("the print leg follows evidence contract §9 (re-golden, #1705): receipt → execution_completed; log → printer_log_captured with printer_job_verified as tier≥1 SUPPORTING; absence is never a CSD binding", () => {
     const csd = CsdSchema.parse(printAndMailCsd);
+    for (const tier of ["tier1", "tier2", "tier3"] as const) {
+      const prims = csd.evidence?.[tier]?.primitives ?? [];
+      const receipt = prims.find((p) => p.id === "receipt.kernel_signed");
+      expect(receipt?.params?.capability).toBe("document-printing");
+      // The kernel-signed SUCCESS receipt is execution_completed (evidence.ts:31), not the log summary.
+      expect(receipt?.bind).toBe("execution_completed");
+      const logs = prims.filter((p) => p.id === "machine.execution_log");
+      expect(logs.map((p) => p.bind).sort()).toEqual(["printer_job_verified", "printer_log_captured"]);
+      expect(logs.find((p) => p.bind === "printer_job_verified")?.params?.role).toBe("supporting");
+      expect(csd.evidence?.[tier]?.required).toContain("execution_completed");
+      // execution_failed must be ABSENT — an oracle event-absent predicate over the kernel-signed set,
+      // not producible evidence, so it appears NOWHERE in the CSD (evidence #1705 part b, oracle #1689).
+      expect(prims.map((p) => p.bind)).not.toContain("execution_failed");
+      expect(csd.evidence?.[tier]?.required).not.toContain("execution_failed");
+    }
+    // tier 0 stays self-attested — no receipt primitive is required there.
+    expect(csd.evidence?.tier0?.primitives?.map((p) => p.id)).toEqual(["decl.self_attested"]);
     const receipt = csd.evidence?.tier1?.primitives?.find((p) => p.id === "receipt.kernel_signed");
-    expect(receipt?.params?.capability).toBe("document-printing");
     const log = csd.evidence?.tier1?.primitives?.find((p) => p.id === "machine.execution_log");
-    // Evidence §6 pair-to-pair map (coord #1476-S): the LOG primitive binds the log event, the
-    // RECEIPT primitive binds the verification event — one vocabulary across CSD/bundle/oracle.
     expect(log?.bind).toBe("printer_log_captured");
-    expect(receipt?.bind).toBe("printer_job_verified");
+    expect(receipt?.bind).toBe("execution_completed");
     const spoof = csd.evidence?.tier2?.primitives?.find((p) => p.id === "fresh.challenge_bound");
     expect(spoof?.bind).toBe("photo_anti_spoof_check");
     expect(csd.pricing.basePrice).toBe("6.50");

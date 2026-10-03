@@ -24,10 +24,25 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalize } from "../util/canonical.js";
+import { compareCodeUnits } from "../util/code-unit-order.js";
 
 const HEX_HASH = /^0x[a-f0-9]{64}$/i;
 const ETH_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
 const SIGNATURE = /^0x[a-fA-F0-9]+$/;
+/**
+ * Hash-bearing registry keys (set entries, map keys) are printable ASCII.
+ * `toLowerCase()` applies full, Unicode-version-dependent case mapping
+ * (U+0130 becomes two code units), which a Go, Solidity or older-Unicode
+ * mirror would not reproduce. On printable ASCII it maps A-Z only.
+ */
+const REGISTRY_KEY = /^[\x21-\x7e]+$/;
+
+function registryKey(what: string, key: unknown): string {
+  if (typeof key !== "string" || !REGISTRY_KEY.test(key)) {
+    throw new Error(`${what} must be printable ASCII (0x21-0x7e): ${JSON.stringify(key)}`);
+  }
+  return key;
+}
 
 // ---------------------------------------------------------------------------
 // Shape & descriptor
@@ -62,12 +77,12 @@ export type RegistryDescriptor = z.infer<typeof RegistryDescriptorSchema>;
 // Entry shapes
 // ---------------------------------------------------------------------------
 
-/** A `set` entry is an opaque string. Convention: lower-cased canonical form. */
-export const SetEntrySchema = z.string().min(1);
+/** A `set` entry is an opaque printable-ASCII string. Convention: lower-cased canonical form. */
+export const SetEntrySchema = z.string().min(1).regex(REGISTRY_KEY, "printable ASCII (0x21-0x7e)");
 
-/** A `map` entry is a (key, value) where value is JSON. */
+/** A `map` entry is a (key, value) where the key is printable ASCII and value is JSON. */
 export const MapEntrySchema = z.object({
-  key: z.string().min(1),
+  key: z.string().min(1).regex(REGISTRY_KEY, "printable ASCII (0x21-0x7e)"),
   value: z.unknown(),
 });
 export type MapEntry = z.infer<typeof MapEntrySchema>;
@@ -110,34 +125,36 @@ export type RegistrySnapshot = z.infer<typeof RegistrySnapshotSchema>;
 // ---------------------------------------------------------------------------
 
 /**
- * Compute the snapshotHash for a set-shaped registry. Entries are
- * lower-cased and lex-sorted before hashing so that the same set always
- * produces the same hash regardless of insertion order or case.
+ * Compute the snapshotHash for a set-shaped registry. Entries must be
+ * printable ASCII; they are lower-cased and lex-sorted before hashing so that
+ * the same set always produces the same hash regardless of insertion order
+ * or case.
  */
 export function computeSetSnapshotHash(entries: string[]): `0x${string}` {
-  const normalized = [...new Set(entries.map((e) => e.toLowerCase()))].sort();
+  const normalized = [...new Set(entries.map((e) => registryKey("Set registry entry", e).toLowerCase()))].sort();
   const canonical = canonicalize({ entries: normalized });
   const hex = createHash("sha256").update(canonical).digest("hex");
   return `0x${hex}` as `0x${string}`;
 }
 
 /**
- * Compute the snapshotHash for a map-shaped registry. Entries are sorted
- * by key (lower-cased) before hashing so the same key→value mapping always
- * produces the same hash regardless of insertion order. Duplicate keys
- * throw — the publisher must dedupe upstream.
+ * Compute the snapshotHash for a map-shaped registry. Keys must be printable
+ * ASCII. Entries are sorted by key (lower-cased) before hashing so the same
+ * key→value mapping always produces the same hash regardless of insertion
+ * order. Duplicate keys throw — the publisher must dedupe upstream.
  */
 export function computeMapSnapshotHash(entries: MapEntry[]): `0x${string}` {
   const seen = new Set<string>();
   const normalized = entries.map((e) => {
-    const key = e.key.toLowerCase();
+    const key = registryKey("Map registry key", e.key).toLowerCase();
     if (seen.has(key)) {
       throw new Error(`Map registry has duplicate key: ${e.key}`);
     }
     seen.add(key);
     return { key, value: e.value };
   });
-  normalized.sort((a, b) => a.key.localeCompare(b.key));
+  // Code-unit order, never locale collation (util/code-unit-order.ts).
+  normalized.sort((a, b) => compareCodeUnits(a.key, b.key));
   const canonical = canonicalize({ entries: normalized });
   const hex = createHash("sha256").update(canonical).digest("hex");
   return `0x${hex}` as `0x${string}`;
@@ -189,6 +206,9 @@ export function setContains(
   if (entries === null) {
     throw new Error(`Cannot query IPFS-backed registry without resolved entries`);
   }
+  // Members are printable ASCII, so any other candidate is not one. Checked before
+  // lowercasing: toLowerCase maps some non-ASCII letters (U+212A KELVIN SIGN) to ASCII.
+  if (typeof candidate !== "string" || !REGISTRY_KEY.test(candidate)) return false;
   const target = candidate.toLowerCase();
   return entries.some((e) => e.toLowerCase() === target);
 }
@@ -208,6 +228,8 @@ export function mapGet(
   if (entries === null) {
     throw new Error(`Cannot query IPFS-backed registry without resolved entries`);
   }
+  // Keys are printable ASCII, so any other key is absent (see setContains).
+  if (typeof key !== "string" || !REGISTRY_KEY.test(key)) return undefined;
   const target = key.toLowerCase();
   const hit = entries.find((e) => e.key.toLowerCase() === target);
   return hit?.value;

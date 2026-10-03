@@ -33,6 +33,60 @@ export type CapabilityNodeWithBinding = CapabilityNode & {
 };
 
 /**
+ * The SECOND matched convention in the codebase: request-decomposer's
+ * `decomposeDirectMatch` emits routed nodes carrying bare `capabilityId`/`kernelId`
+ * and NO `matchStatus` at all. Structural — the type lives gateway-side.
+ */
+type RoutedConventionFields = { capabilityId?: string; kernelId?: string };
+
+/**
+ * Reconcile BOTH matched conventions onto the agentic shape this adapter reads —
+ * the ONE normalization, shared by every caller that computes roots from a stored
+ * plan (the job-offer producer normalized privately first; #1827 Finding B is that
+ * GET /:id/commitment did NOT, so the endpoint refused to reproduce the very roots
+ * offers stamp for routed/direct-match requests).
+ *
+ * Rules (byte-equivalent to the producer's resolveMatch/normalizeForCommitment,
+ * sol-round-2-hardened there, pinned by tests here):
+ * - `matchStatus:"matched"` is authoritative but must be COMPLETE: without both
+ *   matchedCapabilityId and matchedKernelId it is forced to "none" — a corrupt
+ *   "matched" flag must read unmatched everywhere, not pass through unexamined.
+ * - `matchStatus:"none"` is authoritative: routed-looking fields on such a node are
+ *   never reinterpreted.
+ * - ABSENT matchStatus with both routed fields = the routed convention: normalized
+ *   to matched with those ids, and `matchedCapabilityDigest` CLEARED — a digest on
+ *   a routed node was never set alongside ITS ids, so keeping it would bind a real,
+ *   valid-looking digest to the wrong capability. Cleared, the node falls into the
+ *   honest digest-gap degrade path instead of committing a corrupted binding.
+ * - ABSENT matchStatus without routed fields = legacy row, unchanged (absent reads
+ *   as "none" downstream).
+ * - Agentic matched nodes pass through with IDENTICAL bytes — roots cannot drift
+ *   for the existing convention.
+ */
+export function normalizeCapabilityNodeConventions(
+  nodes: readonly CapabilityNode[],
+): CapabilityNode[] {
+  return nodes.map((node) => {
+    if (node.matchStatus === "matched") {
+      return node.matchedCapabilityId && node.matchedKernelId ? node : { ...node, matchStatus: "none" as const };
+    }
+    if (node.matchStatus === undefined) {
+      const routed = node as CapabilityNode & RoutedConventionFields;
+      if (routed.capabilityId && routed.kernelId) {
+        return {
+          ...node,
+          matchStatus: "matched" as const,
+          matchedCapabilityId: routed.capabilityId,
+          matchedKernelId: routed.kernelId,
+          matchedCapabilityDigest: undefined,
+        } as CapabilityNode;
+      }
+    }
+    return node;
+  });
+}
+
+/**
  * Canonical decimal string for a JS number: no sign, no leading zeros, no exponent, <= 18 fraction digits.
  * Returns undefined for anything that cannot be represented canonically (NaN, Infinity, negatives, exponents).
  */
