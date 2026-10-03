@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell, Sidebar, TopBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
-import { useAuthStore } from "./stores/auth-store.js";
+import { useAuthStore, onIdentityChange } from "./stores/auth-store.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -117,14 +117,9 @@ const queryClient = new QueryClient({
   },
 });
 
-// Cached reads belong to the API key that made them. Signing in or out empties
-// the cache, so the next person at this browser never sees the previous
-// account's jobs, kernels or escrows, not even for the moment before a
-// refetch. The key changes only through sign-in (LoginPage, shown only when
-// signed out) and sign-out, so these transitions cover every key change.
-useAuthStore.subscribe((state, prev) => {
-  if (state.isAuthenticated !== prev.isAuthenticated) queryClient.clear();
-});
+// A cached read belongs to the identity that made it: clear the cache whenever the signed-in
+// identity changes, so the next identity never sees the previous one's jobs or money.
+onIdentityChange(() => queryClient.clear());
 
 // ---------------------------------------------------------------------------
 // Agent workspace (/agent) — the live agent conversation, no sidebar

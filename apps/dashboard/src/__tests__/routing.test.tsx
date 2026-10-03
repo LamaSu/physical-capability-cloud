@@ -97,8 +97,8 @@ describe("signed-in deep links open their page, not the spatial canvas", () => {
   it("/jobs/:id renders that job's page inside the dashboard shell", async () => {
     const r = await renderAt("/jobs/job-123", { signedIn: true });
     expect(r.text()).toContain(DASHBOARD_NAV_MARK);
-    expect(await waitForText("Job progress, evidence, and escrow details")).toBe(true);
-    expect(r.text()).toContain("Back to jobs");
+    // JobDetailPage's own subtitle (master's #353 job-execution read model).
+    expect(await waitForText("What the executor reported, the evidence held, and what the settlement record says")).toBe(true);
     expect(r.spatial()).toBe(false);
   });
 
