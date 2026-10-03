@@ -130,9 +130,19 @@ for (const [label, body] of [
   ["a valid answer followed by malformed bytes", '{"result":{"verified":true}} trailing'],
   ["a string where the boolean belongs", '{"result":{"verified":"true"}}'],
   ["an array", '[{"result":{"verified":true}}]'],
+  // N44 (round 5, F3): a NUL anywhere in the body becomes SOH before bash ever
+  // sees it (nul_safe), and json_object_where refuses a body holding one
+  // outright, so all three shapes below must fail exactly like the others.
+  ["a valid object followed by a NUL byte", '{"result":{"verified":true}}' + "\0"],
+  ["a NUL byte inside a JSON string", '{"result":{"verified":true,"reason":"a' + "\0" + 'b"}}'],
+  ["a leading NUL byte", "\0" + '{"result":{"verified":true}}'],
 ]) {
   test(`a 200 verify answer with ${label} fails`, () => {
-    assert.equal(status(run(verifyAnswer(body)), "oracle-verify"), "FAIL");
+    const r = run(verifyAnswer(body));
+    assert.equal(status(r, "oracle-verify"), "FAIL");
+    // F3: bash's command substitution would otherwise silently drop the NUL
+    // and print this warning straight to stderr, bypassing say() entirely.
+    assert.ok(!r.stderr.includes("ignored null byte"), r.stderr);
   });
 }
 
@@ -191,4 +201,49 @@ test("control bytes in a response never reach the terminal", () => {
   assert.ok(!r.stdout.includes("\u001b]0;PWNED"), "an OSC sequence from the response");
   assert.ok(!r.stdout.includes("\u001b[2J"), "a CSI sequence from the response");
   assert.ok(!r.stdout.includes("\rcleared"), "a carriage return from the response");
+});
+
+// ── Sanitization order: redact runs again after the control-byte strip ─────
+// (F2, round 5). Stripping control bytes can JOIN a split "pcc_live_" prefix
+// to the hex that follows it ("pcc_" "live_" + CR + hex is no key until the
+// CR is gone); sanitize() must redact again after the strip, or the rejoined
+// key prints whole. Built at run time so this file holds no key literal.
+const HEX64 = "0123456789abcdef".repeat(4);
+const CONTIGUOUS_KEY = ["pcc", "live", HEX64].join("_");
+
+for (const [label, byte, stripped] of [
+  ["a carriage return", "\r", true],
+  ["an ESC byte", "\x1b", true],
+  ["a DEL byte", "\x7f", true],
+  ["a SOH byte", "\x01", true],
+  ["a backspace byte", "\x08", true],
+  ["a VT byte", "\x0b", true],
+  // tab and newline are never stripped, so the key can never rejoin; these
+  // two are a non-regression check that they are not treated specially.
+  ["a newline", "\n", false],
+  ["a tab", "\t", false],
+]) {
+  test(`a verify reason split by ${label} never reaches the output as a contiguous key`, () => {
+    const reason = ["pcc", "live", byte + HEX64].join("_");
+    const r = run(verifyAnswer(JSON.stringify({ result: { verified: true, reason } })));
+    assert.equal(status(r, "oracle-verify"), "PASS");
+    assert.ok(!r.stdout.includes(CONTIGUOUS_KEY), "stdout");
+    assert.ok(!r.stderr.includes(CONTIGUOUS_KEY), "stderr");
+    if (stripped) {
+      assert.ok(r.stdout.includes("pcc_live_<redacted>"), `expected a redacted marker in:\n${r.stdout}`);
+    }
+  });
+}
+
+// ── NUL bytes never reach bash's command substitution as a raw NUL ─────────
+// (F3, round 5). Every response body is piped through nul_safe (NUL -> SOH)
+// before bash's $(...) sees it, so bash can never silently drop one or print
+// its "ignored null byte" warning straight to stderr, bypassing say().
+
+test("the gateway health endpoint answering a body with an embedded NUL byte does not crash the script", () => {
+  const r = run({ [`GET ${GW}/api/health`]: { status: 200, body: '{"status":"ok","note":"a' + "\0" + 'b"}' } });
+  assert.ok(!r.stderr.includes("ignored null byte"), r.stderr);
+  // The script ran to completion (a later check recorded a status) rather
+  // than aborting under `set -euo pipefail`.
+  assert.notEqual(status(r, "new-code-deployed"), "MISSING");
 });

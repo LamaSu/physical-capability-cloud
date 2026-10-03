@@ -36,12 +36,27 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# N44: every line the script prints about a response goes through say(). The
-# message is redacted, then stripped of control characters (escape sequences,
-# carriage returns and every other byte below 0x20 except tab and newline, and
-# DEL), then printed with %s. Only the colour constants are interpreted.
+# N44: every line the script prints about a response goes through say(), which
+# prints sanitize()'s text with %s. Only the colour constants are interpreted.
 say() {
-  printf '  %b%s%b %s\n' "$1" "$2" "$NC" "$(redact "$3" | tr -d '\000-\010\013-\037\177')"
+  printf '  %b%s%b %s\n' "$1" "$2" "$NC" "$(sanitize "$3")"
+}
+
+# N44 (round 5): what say() prints. It strips control characters: escape
+# sequences, carriage returns, every other byte below 0x20 except tab and
+# newline, and DEL. Stripping can JOIN what was split ("pcc_" "live_" + CR +
+# hex is no key until the CR is gone), so the text is redacted AFTER the strip.
+# It is also redacted before it, so nothing key-shaped passes either step.
+sanitize() {
+  redact "$(redact "$1" | LC_ALL=C tr -d '\000-\010\013-\037\177')"
+}
+
+# N44 (round 5): every response body is read through this pipe. NUL bytes become
+# SOH (0x01) before bash sees them, so bash never drops one silently (or prints
+# its "ignored null byte" warning, which would bypass say()), and a body that
+# held one is not valid JSON, which json_object_where refuses outright.
+nul_safe() {
+  LC_ALL=C tr '\000' '\001'
 }
 
 pass() {
@@ -70,11 +85,13 @@ redact() {
 
 # N44: one HTTP request, judged by what came back. Sets HTTP_STATUS to the
 # status code, or to "transport-error" when curl failed at any point (even
-# after part of a body arrived), and HTTP_BODY to the body. curl's own
-# messages are discarded, never printed, and no temporary file is written.
+# after part of a body arrived), and HTTP_BODY to the body (a NUL byte in it
+# arrives as SOH, see nul_safe). curl's own messages are discarded, never
+# printed, and no temporary file is written. pipefail (set above) makes a curl
+# failure the pipeline's failure.
 http_request() {
   local out rc=0
-  out=$(curl -sS "$@" -w '\n%{http_code}' 2>/dev/null) || rc=$?
+  out=$(curl -sS "$@" -w '\n%{http_code}' 2>/dev/null | nul_safe) || rc=$?
   if [ "$rc" -ne 0 ]; then
     HTTP_STATUS="transport-error"
     HTTP_BODY=""
@@ -85,8 +102,11 @@ http_request() {
 }
 
 # N44: succeeds only when HTTP_BODY is exactly one JSON object (not empty, not
-# two documents, no trailing bytes) for which the jq condition $1 holds.
+# two documents, no trailing bytes, no NUL byte anywhere) for which the jq
+# condition $1 holds. A body that held a NUL holds SOH here (nul_safe), and no
+# valid JSON holds a raw SOH, so it is refused before jq sees it.
 json_object_where() {
+  case "$HTTP_BODY" in *$'\001'*) return 1 ;; esac
   printf '%s' "$HTTP_BODY" | jq -e -s "length == 1 and (.[0] | type) == \"object\" and (.[0] | $1)" >/dev/null 2>&1
 }
 
@@ -214,7 +234,7 @@ echo ""
 echo "-- Check 3: Gateway Health -------------------------------------------"
 T0=$(millis)
 
-HEALTH_RESP=$(curl -sS --max-time 15 "$GW/api/health" 2>/dev/null || echo "CURL_ERROR")
+HEALTH_RESP=$(curl -sS --max-time 15 "$GW/api/health" 2>/dev/null | nul_safe || echo "CURL_ERROR")
 T1=$(millis)
 DURATION=$((T1 - T0))
 
@@ -232,7 +252,7 @@ else
   fi
 
   # Also check setup status
-  SETUP_RESP=$(curl -sS --max-time 15 "$GW/api/setup/status" 2>/dev/null || echo "")
+  SETUP_RESP=$(curl -sS --max-time 15 "$GW/api/setup/status" 2>/dev/null | nul_safe || echo "")
   if [ -n "$SETUP_RESP" ]; then
     OVERALL=$(echo "$SETUP_RESP" | jq -r .overall 2>/dev/null || echo "unknown")
     info "Setup status: overall=$OVERALL"
@@ -287,12 +307,12 @@ T0=$(millis)
 ORACLE_HEALTH=""
 ORACLE_URL_USED=""
 
-ORACLE_HEALTH=$(curl -sS --max-time 10 "$ORACLE_TUNNEL/health" 2>/dev/null || echo "")
+ORACLE_HEALTH=$(curl -sS --max-time 10 "$ORACLE_TUNNEL/health" 2>/dev/null | nul_safe || echo "")
 if [ -n "$ORACLE_HEALTH" ]; then
   ORACLE_URL_USED="$ORACLE_TUNNEL"
 else
   info "Tunnel unreachable, trying direct Spark access..."
-  ORACLE_HEALTH=$(curl -sS --max-time 10 "$ORACLE_DIRECT/health" 2>/dev/null || echo "")
+  ORACLE_HEALTH=$(curl -sS --max-time 10 "$ORACLE_DIRECT/health" 2>/dev/null | nul_safe || echo "")
   if [ -n "$ORACLE_HEALTH" ]; then
     ORACLE_URL_USED="$ORACLE_DIRECT"
   fi
@@ -435,7 +455,7 @@ if $E2E_OK; then
 
   # Step 5: Check integrations (informational; not a pass condition)
   info "Step 5: Integration status..."
-  INT_RESP=$(curl -sS --max-time 10 "$GW/api/status/integrations" 2>/dev/null || echo "")
+  INT_RESP=$(curl -sS --max-time 10 "$GW/api/status/integrations" 2>/dev/null | nul_safe || echo "")
   if [ -n "$INT_RESP" ]; then
     LIT_LIVE=$(echo "$INT_RESP" | jq -r '.litProtocol.configured' 2>/dev/null || echo "false")
     STARKNET_LIVE=$(echo "$INT_RESP" | jq -r '.starknet.configured' 2>/dev/null || echo "false")
