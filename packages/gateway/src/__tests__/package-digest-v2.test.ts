@@ -547,9 +547,13 @@ describe("mintablePackageDigest — the only money-bound digest (F3)", () => {
       state: "issued" as const,
     }),
   };
+  // F1 (D1 half): this file only needs a positive control, so this verifier
+  // simply answers true — the D1 fail-closed rules themselves are pinned in
+  // final-milestone-package-v2.test.ts, not re-tested here.
+  const OPERATOR_VERIFIER = { verifyOperatorSignature: async () => true };
 
   it("hashes a real MintablePackage exactly as packageDigestV2Unchecked would over the same body/signatures", async () => {
-    const mintable = await assertMintablePackage(MINTABLE_BODY, [D1, D2], REGISTRY, CHALLENGES);
+    const mintable = await assertMintablePackage(MINTABLE_BODY, [D1, D2], REGISTRY, CHALLENGES, OPERATOR_VERIFIER);
     expect(mintable).toBeInstanceOf(MintablePackage);
     expect(mintablePackageDigest(mintable)).toBe(packageDigestV2Unchecked(mintable.body, mintable.signatures));
   });
