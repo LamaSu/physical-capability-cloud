@@ -129,7 +129,8 @@ export interface Eip712OperatorVerifierDeps {
  * operator address, or `null` if that is not known — in which case this verifier refuses.
  */
 export function createEip712OperatorVerifier(deps: Eip712OperatorVerifierDeps): OperatorSignatureVerifier {
-  const timeoutMs = deps.operatorLookupTimeoutMs ?? DEFAULT_OPERATOR_LOOKUP_TIMEOUT_MS;
+  // Only `undefined` selects the default: `null`, like any other non-number, is refused (E13b).
+  const timeoutMs = deps.operatorLookupTimeoutMs === undefined ? DEFAULT_OPERATOR_LOOKUP_TIMEOUT_MS : deps.operatorLookupTimeoutMs;
   if (typeof timeoutMs !== "number" || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new RangeError("operatorLookupTimeoutMs must be a positive safe integer of milliseconds");
   }
@@ -150,24 +151,33 @@ export function createEip712OperatorVerifier(deps: Eip712OperatorVerifierDeps): 
 
 type OperatorForUnit = Eip712OperatorVerifierDeps["operatorForUnit"];
 
-/** `operatorForUnit`'s answer, or TIMED_OUT once `timeoutMs` passes; its signal is aborted then (E13 F2). */
+/**
+ * `operatorForUnit`'s answer, or TIMED_OUT once `timeoutMs` passes; its signal is aborted then (E13 F2).
+ * The deadline is LATCHED before the abort (E13b): abort() runs its listeners synchronously, so a lookup
+ * that answers from one (a thenable can settle the race inside abort() itself) answered after the bound,
+ * and `expired` turns that answer into TIMED_OUT whichever promise the race saw first. A lookup that
+ * answers before the bound settles the race in microtasks, which all run before the timer can fire.
+ */
 async function lookupOperator(
   operatorForUnit: OperatorForUnit,
   unitBinding: UnitBinding,
   timeoutMs: number,
 ): Promise<unknown> {
   const controller = new AbortController();
+  let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = new Promise<typeof TIMED_OUT>((resolve) => {
     timer = setTimeout(() => {
-      controller.abort();
+      expired = true;
       resolve(TIMED_OUT);
+      controller.abort();
     }, timeoutMs);
   });
   try {
     // A synchronous throw becomes a rejection, which the outer try/catch turns into false.
     const lookup = Promise.resolve().then(() => operatorForUnit(unitBinding, { signal: controller.signal }));
-    return await Promise.race([lookup, timedOut]);
+    const answer = await Promise.race([lookup, timedOut]);
+    return expired ? TIMED_OUT : answer;
   } finally {
     clearTimeout(timer);
   }

@@ -523,8 +523,43 @@ describe("E13 F2 — a lookup that never settles is bounded: the verifier answer
     await expect(verifier.verifyOperatorSignature(positiveInput())).resolves.toBe(true);
   });
 
+  it("refuses a lookup that answers only from its abort handler, once the bound has passed (E13b F2)", async () => {
+    // abort() runs its listeners synchronously: a lookup that resolves inside one has settled AFTER the bound.
+    const fromAbortHandler = createEip712OperatorVerifier({
+      operatorForUnit: (_unitBinding: UnitBinding, options?: { signal: AbortSignal }) =>
+        new Promise<string>((resolve) => options!.signal.addEventListener("abort", () => resolve(OPERATOR_ADDRESS_LOWER))),
+      operatorLookupTimeoutMs: 20,
+    });
+    await expect(fromAbortHandler.verifyOperatorSignature(positiveInput())).resolves.toBe(false);
+    const asyncAfterAbort = createEip712OperatorVerifier({
+      operatorForUnit: async (_unitBinding: UnitBinding, options?: { signal: AbortSignal }) => {
+        await new Promise((resolve) => options!.signal.addEventListener("abort", resolve));
+        return OPERATOR_ADDRESS_LOWER;
+      },
+      operatorLookupTimeoutMs: 20,
+    });
+    await expect(asyncAfterAbort.verifyOperatorSignature(positiveInput())).resolves.toBe(false);
+    // A thenable whose `then` hands its resolver straight to the abort listener settles the lookup
+    // synchronously inside abort(), one microtask ahead of a native promise.
+    const thenableFromAbortHandler = createEip712OperatorVerifier({
+      operatorForUnit: (_unitBinding: UnitBinding, options?: { signal: AbortSignal }) =>
+        ({
+          then(resolve: (value: string) => void) {
+            options!.signal.addEventListener("abort", () => resolve(OPERATOR_ADDRESS_LOWER));
+          },
+        }) as unknown as Promise<string>,
+      operatorLookupTimeoutMs: 20,
+    });
+    await expect(thenableFromAbortHandler.verifyOperatorSignature(positiveInput())).resolves.toBe(false);
+  });
+
+  it("an undefined bound is the default; it is not an invalid one", async () => {
+    const verifier = createEip712OperatorVerifier({ operatorForUnit: operatorForUnitAlways(OPERATOR_ADDRESS_LOWER), operatorLookupTimeoutMs: undefined });
+    await expect(verifier.verifyOperatorSignature(positiveInput())).resolves.toBe(true);
+  });
+
   it("refuses to be built with a bound that is not a positive safe integer of milliseconds", () => {
-    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53, "100"]) {
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53, "100", null]) {
       expect(
         () => createEip712OperatorVerifier({ operatorForUnit: operatorForUnitAlways(OPERATOR_ADDRESS_LOWER), operatorLookupTimeoutMs: bad as never }),
         String(bad),
