@@ -152,7 +152,11 @@ describe("the patch harness: nothing changed after load changes a decision, a di
    * accessor deep in the bundles, so only the reason shows whether codeInData
    * itself read the descriptor's OWN value (astra pack 162).
    */
-  const IDENTICAL = new Set(["recipe: Object.prototype.value written; an accessor deep in the bundles (codeInData)"]);
+  const IDENTICAL = new Set([
+    "recipe: Object.prototype.value written; an accessor deep in the bundles (codeInData)",
+    // More terms would be a refusal; identical shows unverifiableProfileTerms read no inherited term at all.
+    "recipe: Object.prototype.tolerance and maxIntervalMs written; unverifiableProfileTerms on an ordinary profile",
+  ]);
 
   for (const id of SCENARIOS) {
     it(id, () => {
