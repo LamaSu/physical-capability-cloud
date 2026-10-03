@@ -112,7 +112,7 @@ PCC ships a library-only durable execution package at `packages/workflow/` — e
 
 ## 1. What Is PCC
 
-PCC is AWS for the physical world. It is a cloud control plane for physical manufacturing capabilities.
+PCC exists to turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network. It is a cloud control plane for physical capabilities, organised much like a cloud provider:
 
 - **Shop Kernels** = Availability Zones. Each kernel is a physical site (lab, workshop, factory) with equipment.
 - **Capabilities** = billable units. Not machines — what machines can DO (3D printing, CNC milling, HPLC analysis).
@@ -393,10 +393,10 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Gateway healthcheck (bare alias of `/api/health`; same JSON payload — not the SPA shell). |
+| GET | `/health` | Gateway healthcheck (bare alias of `/api/health`; same JSON payload — not the SPA shell). Also reports the served build: `commit` (the full git SHA a build argument named, recorded in the image at build time, or `null`), `commitSource` (`build_argument` or `unknown`), `buildArg`, `sourceDigest` (digest of the source the image was built from; CI checks it against the commit before pushing, and `scripts/verify-build-source.sh` checks any served gateway), `sourceDigestSpec`, and `deployMetadata.railwayGitCommitSha` (host metadata, never reported as `commit`); see `docs/DEPLOY.md`. |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
-| GET | `/agent-package.json` | 249-tool agent package for any LLM (PUBLIC). |
+| GET | `/agent-package.json` | The agent package (250+ tools) for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
 | GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
@@ -584,11 +584,12 @@ curl -X POST https://capability.network/api/wizard/sessions/$SESSION_ID/complete
 
 For operators who prefer CLI:
 ```bash
-pip install pcc-node
+pip install "pcc-node[crypto]>=0.1.1"
+# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
-This auto-detects hardware, generates Ed25519 keys, provisions an API key, registers the kernel, announces capabilities, and starts a daemon. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+This auto-detects hardware, generates Ed25519 keys, registers the kernel with the API key you give it (`PCC_API_KEY` or `--api-key`), and starts a daemon that keeps the kernel online. Without a key it stops: the gateway refuses to provision one without an email, so provision it first (`POST /api/auth/provision`). From 0.1.1 the daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
 
 ---
 
@@ -917,9 +918,9 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
 ---
 
-## 10. Agent Package (249 Tools)
+## 10. Agent Package (250+ Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 249 tools with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
+The agent package is a single JSON file any LLM can consume, containing 250+ tools (the exact count is its `toolCount`) with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
 
 > **Claude Max quickstart**: visit `https://capability.network/start` for the three-card landing (Code / Desktop / Web). Per-surface walkthroughs live in `docs/quickstart/`.
 
@@ -933,8 +934,8 @@ curl https://capability.network/agent-package.json
 | Field | Purpose |
 |-------|---------|
 | `title`, `description` | Human-friendly product framing |
-| `system_prompt` | ~9000 chars. Claude-as-user-agent framing: two-step model (identify → post job-offer), composition pattern (pizza + courier), auth flow, verification ("executor success ≠ outcome success"), DO/DON'T list, 15-category taxonomy. Drop this verbatim into a Claude conversation and it can operate. |
-| `tools` | 249 entries. Each has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`). |
+| `system_prompt` | ~22,000 chars. Claude-as-user-agent framing: two-step model (identify → post job-offer), composition pattern (pizza + courier), auth flow, verification ("executor success ≠ outcome success"), DO/DON'T list, 15-category taxonomy. Drop this verbatim into a Claude conversation and it can operate. |
+| `tools` | 250+ entries. Each has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`). |
 | `examples` | 3 worked examples — pizza, STL print, operator browse. Each lists user_request + step-by-step what_claude_does + tools_used. |
 | `auth` | `modes`, `provision_endpoint`, `public_endpoints_no_auth`, `bearer_header`, `trace_header`. |
 | `categories` | 15 PCC categories (C.1..C.15) with canonical `capabilityType` examples. |
@@ -944,7 +945,7 @@ curl https://capability.network/agent-package.json
 - **Claude Max (the easy path)**: paste the JSON URL into a conversation, or install the skill at `https://capability.network/skills/pcc.md`. The polished `system_prompt` plus the catalog + examples is enough context.
 - **Other LLMs**: load the JSON, present `tools[].description` to your model, when it picks a tool make the corresponding HTTP request to `https://capability.network` + `endpoint.path`, passing input as JSON body (POST/PUT/PATCH) or query params (GET).
 
-**Polish script**: `scripts/polish-agent-package-claude-max.mjs` rewrites the system_prompt + adds top-level fields. Idempotent. Re-run when the framing changes.
+**Polish script (retired 2026-09-29)**: `scripts/polish-agent-package-claude-max.mjs` refuses to run. Its templates are older than the live package, so a re-run would drop later edits and downgrade the version. Edit `apps/dashboard/public/agent-package.json` directly; `agent-pack-truth.test.ts` and `agent-package-auto-feedback.test.ts` in `packages/gateway` guard it.
 
 ---
 
@@ -998,16 +999,17 @@ curl -N -H "Authorization: Bearer $PCC_KEY" \
 ### Install and run
 
 ```bash
-pip install pcc-node
+pip install "pcc-node[crypto]>=0.1.1"
+# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
 This single command:
 1. Auto-detects connected hardware (printers, lab equipment, cameras)
 2. Generates Ed25519 signing keys
-3. Provisions an API key from the gateway
-4. Registers a kernel and announces capabilities
-5. Starts a daemon that processes jobs and emits evidence
+3. Uses the API key you give it (`PCC_API_KEY` or `--api-key`); without one it stops, because the gateway refuses to provision a key without an email
+4. Registers a kernel
+5. Starts a daemon that keeps the kernel online. From 0.1.1 it takes no jobs: they run through the operating agent's typed operations
 
 ### Commands
 
