@@ -25,6 +25,7 @@ import {
   SAFETY_ENVELOPE_DOMAIN,
   SAFETY_ENVELOPE_REGISTRATION_DOMAIN,
   type ConfirmedSafetyEnvelope,
+  type EnvelopeDecision,
   type RegistrationVerifier,
   type SafetyEnvelopeInput,
   type SafetyEnvelopeRegistration,
@@ -88,6 +89,49 @@ const PLATE_MAP = {
   ],
 };
 
+/**
+ * SIM-PR1 as refvertical's rehearsal simulator declares it: one run command with
+ * three finite-set parameters, and a stop. It has no incubator, so its class is
+ * the absorbance-only reader (Addendum 6: physical absence comes only from a
+ * reviewed template). Its firmware fixes each read's timing, so read_duration is
+ * device-controlled, enforced by that cutoff, and keeps its limit.
+ */
+const SIM_PR1_MAP = {
+  commands: [
+    {
+      name: "runPlate",
+      params: [
+        { name: "plateFormat", unbounded: { reason: "the plate format; this reader takes 96-well plates only", allowed: ["96-well"] } },
+        { name: "wavelengthNm", unbounded: { reason: "an optical setting, not a safety quantity", allowed: [405, 450, 600] } },
+        { name: "wells", unbounded: { reason: "which wells to read; a well name sets no physical quantity", allowed: ["all"], allowedItems: WELLS_96 } },
+      ],
+    },
+    { name: "stop", params: [] },
+  ],
+};
+
+/** A heated reader whose incubator the firmware runs: no command sets the temperature, but the device causes it. */
+const HEATED_RUN_ONLY_MAP = {
+  commands: [
+    { name: "run", params: [] },
+    { name: "stop", params: [] },
+  ],
+};
+
+/** What each fixture's operator decides beyond who and when. */
+const DECISIONS: Record<string, Partial<EnvelopeDecision>> = {
+  "plate-reader-sim-pr1-absorbance": {
+    deviceControlled: [{ quantity: "read_duration", enforcement: "cutoff", detail: "the reader's firmware fixes each read's timing (SIM-PR1 manual 5.1)" }],
+  },
+  // Given out of template order on purpose: the body commits template order.
+  "plate-reader-heated-device-controlled": {
+    deviceControlled: [
+      { quantity: "read_duration", enforcement: "cutoff", detail: "firmware read timing" },
+      { quantity: "incubation_temperature", enforcement: "telemetry", detail: "chamber thermistor, GET /status" },
+    ],
+  },
+};
+
 const INPUTS: Record<string, SafetyEnvelopeInput> = {
   "ot2-operator-answers": {
     deviceClass: "liquid-handler-ot2",
@@ -141,12 +185,49 @@ const INPUTS: Record<string, SafetyEnvelopeInput> = {
       },
     ],
   },
+  "plate-reader-sim-pr1-absorbance": {
+    deviceClass: "lab-plate-reader-absorbance",
+    device: { deviceId: "sim-pr1", adapterType: "generic-http", adapterVersion: `sha256:${"31".repeat(32)}` },
+    commandMap: SIM_PR1_MAP,
+    intake: {
+      limits: [
+        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 60 },
+        { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 30 },
+      ],
+      eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
+      supervision: "attended",
+      hazards: [],
+      maxCommandsPerMinute: 20,
+    },
+    references: [],
+  },
+  "plate-reader-heated-device-controlled": {
+    deviceClass: "lab-plate-reader",
+    device: { deviceId: "pr-heated", adapterType: "generic-http", adapterVersion: `sha256:${"41".repeat(32)}` },
+    commandMap: HEATED_RUN_ONLY_MAP,
+    intake: {
+      limits: [
+        { field: "safety.limits", quantity: "incubation_temperature", unit: "degC", min: 20, max: 40 },
+        { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 600 },
+        { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 120 },
+      ],
+      eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
+      supervision: "attended",
+      hazards: ["heat"],
+      maxCommandsPerMinute: 20,
+    },
+    references: [],
+  },
 };
 
 type Change = (e: Record<string, any>) => void;
 
-/** Each is refused by OperationalEnvelopeV1Schema; `paths` are the issue paths a validator should report. */
-const INVALID: Array<[string, Change]> = [
+/**
+ * Each is refused by OperationalEnvelopeV1Schema; `paths` are the issue paths a
+ * validator should report. The third entry, when given, names the valid envelope
+ * it changes (default: the OT-2's).
+ */
+const INVALID: Array<[string, Change] | [string, Change, string]> = [
   ["numeric-string-max", (e) => (e.limits[0].max = "300")],
   ["min-above-max", (e) => (e.limits[0].min = 500)],
   ["duplicate-quantity", (e) => e.limits.push({ ...e.limits[0], max: 10 })],
@@ -212,6 +293,22 @@ const INVALID: Array<[string, Change]> = [
       e.hazards = ["mechanical"];
     },
   ],
+  // Addendum 6: deviceControlled (astra pack 173).
+  ["device-controlled-missing", (e) => delete e.deviceControlled],
+  ["device-controlled-the-deadline", (e) => e.deviceControlled.push({ quantity: "run_duration", enforcement: "cutoff", detail: "x" })],
+  ["device-controlled-unknown-quantity", (e) => e.deviceControlled.push({ quantity: "spindle_speed", enforcement: "cutoff", detail: "x" })],
+  ["device-controlled-a-settable-quantity", (e) => e.deviceControlled.push({ quantity: "module_temperature", enforcement: "telemetry", detail: "x" })],
+  ["device-controlled-unknown-enforcement", (e) => (e.deviceControlled[0].enforcement = "trust"), "plate-reader-heated-device-controlled"],
+  ["device-controlled-blank-detail", (e) => (e.deviceControlled[0].detail = " "), "plate-reader-heated-device-controlled"],
+  ["device-controlled-extra-key", (e) => (e.deviceControlled[0].limit = "none"), "plate-reader-heated-device-controlled"],
+  ["device-controlled-out-of-order", (e) => e.deviceControlled.reverse(), "plate-reader-heated-device-controlled"],
+  ["device-controlled-twice", (e) => (e.deviceControlled[1] = e.deviceControlled[0]), "plate-reader-heated-device-controlled"],
+  ["device-controlled-omits-an-unset-quantity", (e) => e.deviceControlled.pop(), "plate-reader-heated-device-controlled"],
+  ["device-controlled-limit-removed", (e) => e.limits.shift(), "plate-reader-heated-device-controlled"],
+  // Enumerated physical parameters.
+  ["enumerated-value-outside-the-limit", (e) => (e.commands[2].params[0].allowed = [4, 120])],
+  ["enumerated-value-not-a-number", (e) => (e.commands[2].params[0].allowed = ["hot"])],
+  ["enumerated-empty", (e) => (e.commands[2].params[0].allowed = [])],
 ];
 
 function issuePaths(value: unknown): string[] {
@@ -221,10 +318,10 @@ function issuePaths(value: unknown): string[] {
 
 function buildFixtures() {
   const confirmed = Object.entries(INPUTS).map(([name, input]) => {
-    const c = confirmSafetyEnvelope(input, { confirmedBy: "operator:fixture", confirmedAt: AT });
+    const c = confirmSafetyEnvelope(input, { confirmedBy: "operator:fixture", confirmedAt: AT, ...DECISIONS[name] });
     return { name, confirmed: c, runtime: compileOperationalEnvelope(c, register(c), verifyRegistry) };
   });
-  const ot2 = confirmed[0]!.runtime;
+  const runtimeOf = (name: string) => confirmed.find((c) => c.name === name)!.runtime;
   return {
     _comment: [
       "GENERATED by packages/spec/src/__tests__/safety-envelope-fixtures.test.ts from the TS reference; do not edit by hand.",
@@ -234,6 +331,7 @@ function buildFixtures() {
       "114b: the schema now refuses an unknown deviceClass outright (see 'unknown-class-generic-rules-only', moved here from 'valid'), limits must be in the template's exact order and units, an adapter-stop's command must be one of the declared commands, and deadlineQuantity must be the template's own deadline.",
       "153 (round 3): adapterVersion is the adapter's release manifest digest (sha256: + 64 lowercase hex); an unbounded parameter is {reason, allowed}, and a runtime passes only a value in allowed (same type and value); a reference source carries the bound it cites (value) and its unit.",
       "round 4: the template's deadline (deadlineQuantity) needs no command parameter: the runtime enforces it as elapsed time, and a parameter that does set it is checked against the same limit. A list-valued parameter declares unbounded.allowedItems: a runtime passes a non-empty list of distinct items, each in allowedItems (compared by type and value); a single value must be in allowed.",
+      "Addendum 6 (dispositions, astra pack 173): every template quantity keeps a limit. A required quantity that no declared command parameter sets is device-controlled: the operator confirms how its limit is enforced, {quantity, enforcement: telemetry | cutoff, detail}, and its limit stays in the body, the runtime limits and the conformance evidence. A runtime that cannot enforce a device-controlled limit by its mechanism refuses the job. The confirmed body commits deviceControlled in template order only when non-empty, so every other envelope's digest is unchanged; the runtime envelope always carries it (possibly empty). Physical absence comes only from a template that does not list the quantity (lab-plate-reader-absorbance has no incubator). A parameter that sets a quantity may list its only values (allowed), each inside the limit.",
       "registration: the registry signs statementDigest = 'sha256:' + lowercase hex(sha256(UTF-8(canonicalize({domain, deviceId, envelopeDigest, registeredAt})))) with Ed25519; the signed message is the UTF-8 of statementDigest itself (LO-EV-1 signingPreimage, 71 bytes). Signatures are not in this file: verify with the registry's key.",
     ],
     digest: {
@@ -259,8 +357,8 @@ function buildFixtures() {
     },
     operationalEnvelopeV1: {
       valid: confirmed.map(({ name, runtime }) => ({ name, envelope: runtime })),
-      invalid: INVALID.map(([name, change]) => {
-        const envelope = structuredClone(ot2) as unknown as Record<string, any>;
+      invalid: INVALID.map(([name, change, base]) => {
+        const envelope = structuredClone(runtimeOf(base ?? "ot2-operator-answers")) as unknown as Record<string, any>;
         change(envelope);
         return { name, envelope, paths: issuePaths(envelope) };
       }),

@@ -86,13 +86,8 @@ function register(c: ConfirmedSafetyEnvelope): SafetyEnvelopeRegistration {
   return { ...statement, signature: Buffer.from(sign(null, registrationSigningPreimage(statement), REGISTRY.privateKey)).toString("hex") };
 }
 
-type Stage = "draft" | "confirmed" | "csd" | "runtime" | "refusals";
+type Stage = "draft" | "confirmed" | "csd" | "runtime" | "cannotSetConfirmed" | "cannotSetCsd" | "cannotSetRuntime" | "refusals";
 
-/**
- * Everything the module produces from one input, stage by stage; a stage that
- * throws records the error's name. Serialized only after every patch is
- * restored. The untouched run is the reference.
- */
 /**
  * Digests that are well formed except for their digits, and a draft input that
  * carries one, built before any patch is applied (and before CLEAN): the
@@ -105,6 +100,48 @@ const NOT_HEX_INPUT: SafetyEnvelopeInput = (() => {
   return { ...given, device: { ...given.device, adapterVersion: NOT_HEX_MANIFEST } };
 })();
 
+/**
+ * SIM-PR1 (Addendum 6): the absorbance-only class (no incubator), and a read
+ * duration its firmware fixes, so it is device-controlled and keeps its limit.
+ * Built before any patch is applied.
+ */
+const SIM_PR1_INPUT: SafetyEnvelopeInput = {
+  deviceClass: "lab-plate-reader-absorbance",
+  device: { deviceId: "sim-pr1", adapterType: "generic-http", adapterVersion: MANIFEST },
+  commandMap: {
+    commands: [
+      {
+        name: "runPlate",
+        params: [
+          { name: "plateFormat", unbounded: { reason: "the plate format", allowed: ["96-well"] } },
+          { name: "wavelengthNm", unbounded: { reason: "an optical setting", allowed: [405, 450, 600] } },
+        ],
+      },
+      { name: "stop", params: [] },
+    ],
+  },
+  intake: {
+    limits: [
+      { field: "safety.limits", quantity: "read_duration", unit: "s", min: 1, max: 60 },
+      { field: "safety.limits", quantity: "job_duration", unit: "min", min: 1, max: 30 },
+    ],
+    eStop: { mechanism: "adapter-stop", stopCommand: "stop" },
+    supervision: "attended",
+    hazards: [],
+    maxCommandsPerMinute: 20,
+  },
+  references: [],
+};
+const SIM_PR1_DECISION = {
+  ...DECISION,
+  deviceControlled: [{ quantity: "read_duration", enforcement: "cutoff" as const, detail: "firmware read timing" }],
+};
+
+/**
+ * Everything the module produces from one input, stage by stage; a stage that
+ * throws records the error's name. Serialized only after every patch is
+ * restored. The untouched run is the reference.
+ */
 function runStages(): Record<Stage, unknown> {
   const out = {} as Record<Stage, unknown>;
   const attempt = (stage: Stage, run: () => unknown) => {
@@ -120,6 +157,12 @@ function runStages(): Record<Stage, unknown> {
   const registration = confirmed ? register(confirmed) : undefined;
   attempt("csd", () => compileSafetyEnvelope(confirmed!, registration!, verifyRegistry));
   attempt("runtime", () => compileOperationalEnvelope(confirmed!, registration!, verifyRegistry));
+  // Addendum 6: the device-controlled path through confirm and both compilers.
+  let cannotSet: ConfirmedSafetyEnvelope | undefined;
+  attempt("cannotSetConfirmed", () => (cannotSet = confirmSafetyEnvelope(SIM_PR1_INPUT, SIM_PR1_DECISION)));
+  const cannotSetRegistration = cannotSet ? register(cannotSet) : undefined;
+  attempt("cannotSetCsd", () => compileSafetyEnvelope(cannotSet!, cannotSetRegistration!, verifyRegistry));
+  attempt("cannotSetRuntime", () => compileOperationalEnvelope(cannotSet!, cannotSetRegistration!, verifyRegistry));
   // Refusals too: a replacement that only shows on bad input (an always-true hasOwnProperty, a trim that
   // never blanks) must not turn a refusal into an acceptance or change its reason.
   const refusals: string[] = [];
@@ -156,6 +199,9 @@ const CLEAN = (() => {
     confirmed: JSON.stringify(stages.confirmed),
     csd: JSON.stringify(stages.csd),
     runtime: JSON.stringify(stages.runtime),
+    cannotSetConfirmed: JSON.stringify(stages.cannotSetConfirmed),
+    cannotSetCsd: JSON.stringify(stages.cannotSetCsd),
+    cannotSetRuntime: JSON.stringify(stages.cannotSetRuntime),
     refusals: JSON.stringify(stages.refusals),
   };
 })();
@@ -279,6 +325,10 @@ describe("astra 164 CRITICAL: an intrinsic replaced after load cannot change wha
       expect(JSON.stringify(produced.confirmed)).toBe(CLEAN.confirmed);
       expect(JSON.stringify(produced.csd)).toBe(CLEAN.csd);
       expect(JSON.stringify(produced.refusals)).toBe(CLEAN.refusals);
+      expect(JSON.stringify(produced.cannotSetConfirmed)).toBe(CLEAN.cannotSetConfirmed);
+      expect(JSON.stringify(produced.cannotSetCsd)).toBe(CLEAN.cannotSetCsd);
+      const cannotSetRuntime = JSON.stringify(produced.cannotSetRuntime);
+      if (cannotSetRuntime !== CLEAN.cannotSetRuntime) expect((produced.cannotSetRuntime as { threw?: string }).threw).toBe("EnvelopeRefused");
       // The runtime compile also asks zod (third-party code, which does call ambient methods) to validate the
       // frozen candidate. Zod may refuse under a replacement: that is fail closed. It can never change the value.
       const runtime = JSON.stringify(produced.runtime);
