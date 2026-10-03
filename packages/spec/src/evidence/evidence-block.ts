@@ -1209,8 +1209,14 @@ export interface SessionKeyAuthDigestContext {
  * on Object.prototype, Array.prototype or an object inserted between them is never consulted. The
  * bytes are unchanged: a null prototype changes neither the own keys, their insertion order, nor
  * how an array (still an Array exotic object, with its own `length`) is written.
+ *
+ * The optional `derivationPath` is read as the snapshot's OWN data property (E7g). The snapshot
+ * leaves an absent one out and has Object.prototype, so an ordinary `value.derivationPath` walked
+ * there, where a getter placed after load could supply a path that the grant then committed. Every
+ * other field read here is always present on the snapshot, so its ordinary read never leaves it.
  */
 function sessionKeyGrantBody(value: FrozenSessionKeyAuthorization): Record<string, unknown> {
+  const derivationPath = ownDataValue(value, "derivationPath");
   return {
     __proto__: null,
     sessionId: value.sessionId,
@@ -1224,7 +1230,8 @@ function sessionKeyGrantBody(value: FrozenSessionKeyAuthorization): Record<strin
       contractIds: prototypeFreeArray(value.scope.contractIds),
       maxSignatures: value.scope.maxSignatures,
     },
-    ...(value.derivationPath === undefined ? {} : { derivationPath: value.derivationPath }),
+    // Present only as the validated non-empty string; ABSENT (a symbol) leaves the key out.
+    ...(typeof derivationPath === "string" ? { derivationPath } : {}),
   };
 }
 

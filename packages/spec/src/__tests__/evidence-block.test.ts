@@ -2147,6 +2147,37 @@ describe("E7c round 2 — every public entry point refuses code-running input an
     expect((await events.value!).root).toBe(honestRoot);
   });
 
+  /** Fresh inputs for every synchronous entry point, the session authorization with and without its optional derivationPath. */
+  const everyDigestInputs = () => {
+    const derivationPath = "m/8004'/84532'/1'/0'";
+    return {
+      unit: { ...unit },
+      ctx: ctxOf(),
+      role: roleOf(),
+      roles: [roleOf(), roleOf({ roleId: "buyer" })],
+      roots: rootsOf(),
+      grant: authOf(),
+      auth: authOf(),
+      grantWithPath: { ...authOf(), derivationPath },
+      authWithPath: { ...authOf(), derivationPath },
+      snapshot: authOf(),
+      context: { ...sessionAuthContext },
+    };
+  };
+  /** Every synchronous entry point over `everyDigestInputs()`, each settled on its own. */
+  const runEveryDigest = (i: ReturnType<typeof everyDigestInputs>): Record<string, { error?: unknown; value?: unknown }> => ({
+    unitId: settle(() => computeSettlementUnitId(i.unit)),
+    context: settle(() => computeUnitContextDigest(i.ctx)),
+    role: settle(() => computeAttestationRoleDigest(attFundedProgramHash, i.role)),
+    set: settle(() => computeAttestationSetRoot(attFundedProgramHash, i.roles)),
+    block: settle(() => computeEvidenceBlockHash(i.roots)),
+    grant: settle(() => computeSessionKeyGrantHash(i.grant as never)),
+    auth: settle(() => computeSessionKeyAuthDigest(i.auth as never, i.context)),
+    grantWithPath: settle(() => computeSessionKeyGrantHash(i.grantWithPath as never)),
+    authWithPath: settle(() => computeSessionKeyAuthDigest(i.authWithPath as never, i.context)),
+    snapshot: settle(() => sessionKeyAuthSnapshot(i.snapshot as never).digest),
+  });
+
   it("runs no inherited toJSON, and no digest changes, when a prototype gains one after load (E7f MEDIUM)", () => {
     // JSON.stringify looks `toJSON` up on every object and array it serializes, through the prototype
     // chain: capturing JSON.stringify at load does not stop that lookup. Three ways to install one after load:
@@ -2159,32 +2190,9 @@ describe("E7c round 2 — every public entry point refuses code-running input an
     // (c) an own toJSON on String.prototype or Number.prototype: JSON.stringify never looks one up for a primitive.
     // In every case the hook is neither looked up nor run: a method (the reviewer's reproduction, returning
     // "changed") and a getter that counts every lookup.
-    const derivationPath = "m/8004'/84532'/1'/0'";
-    const inputs = () => ({
-      unit: { ...unit },
-      ctx: ctxOf(),
-      role: roleOf(),
-      roles: [roleOf(), roleOf({ roleId: "buyer" })],
-      roots: rootsOf(),
-      grant: authOf(),
-      auth: authOf(),
-      grantWithPath: { ...authOf(), derivationPath },
-      authWithPath: { ...authOf(), derivationPath },
-      snapshot: authOf(),
-    });
+    const inputs = everyDigestInputs;
     const sessionKeys = ["grant", "auth", "grantWithPath", "authWithPath", "snapshot"];
-    const runAll = (i: ReturnType<typeof inputs>): Record<string, { error?: unknown; value?: unknown }> => ({
-      unitId: settle(() => computeSettlementUnitId(i.unit)),
-      context: settle(() => computeUnitContextDigest(i.ctx)),
-      role: settle(() => computeAttestationRoleDigest(attFundedProgramHash, i.role)),
-      set: settle(() => computeAttestationSetRoot(attFundedProgramHash, i.roles)),
-      block: settle(() => computeEvidenceBlockHash(i.roots)),
-      grant: settle(() => computeSessionKeyGrantHash(i.grant as never)),
-      auth: settle(() => computeSessionKeyAuthDigest(i.auth as never, sessionAuthContext)),
-      grantWithPath: settle(() => computeSessionKeyGrantHash(i.grantWithPath as never)),
-      authWithPath: settle(() => computeSessionKeyAuthDigest(i.authWithPath as never, sessionAuthContext)),
-      snapshot: settle(() => sessionKeyAuthSnapshot(i.snapshot as never).digest),
-    });
+    const runAll = runEveryDigest;
     const honest = runAll(inputs());
     for (const [key, outcome] of Object.entries(honest)) expect(outcome.error, `honest ${key}`).toBeUndefined();
     type Install = { name: string; sessionRefused: boolean; install: (descriptor: PropertyDescriptor) => () => void };
@@ -2242,6 +2250,80 @@ describe("E7c round 2 — every public entry point refuses code-running input an
         }
       }
     }
+  });
+
+  it("runs no inherited getter for an absent optional field: both session-key hashes stay unchanged (E7g MEDIUM)", () => {
+    // `derivationPath` is optional, and the snapshot leaves an absent one out. Read with an ordinary [[Get]],
+    // the absent field walked to Object.prototype, where a getter placed after load supplied a path.
+    // The review's reproduction, one to one: the fixture has no own derivationPath.
+    const honestGrant = computeSessionKeyGrantHash(authOf() as never);
+    const honestAuth = computeSessionKeyAuthDigest(authOf() as never, sessionAuthContext);
+    const grantInput = authOf();
+    const authInput = authOf();
+    let runs = 0;
+    let grant: { error?: unknown; value?: unknown } | undefined;
+    let auth: { error?: unknown; value?: unknown } | undefined;
+    // Held only through this synchronous window.
+    Object.defineProperty(Object.prototype, "derivationPath", { configurable: true, enumerable: false, get: () => (runs++, "m/injected") });
+    try {
+      grant = settle(() => computeSessionKeyGrantHash(grantInput as never));
+      auth = settle(() => computeSessionKeyAuthDigest(authInput as never, sessionAuthContext));
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).derivationPath;
+    }
+    expect(runs, "the inherited derivationPath getter ran").toBe(0);
+    expect(grant).toEqual({ value: honestGrant });
+    expect(auth).toEqual({ value: honestAuth });
+  });
+
+  it("reads and writes no inherited property at all: an Object.prototype accessor for every key the module reads never runs (E7g, the general property)", () => {
+    // E7f and E7g each found one ordinary access that reached a prototype. The general property: every read
+    // of a caller's input or of a module-built object is of an OWN property, and every write defines one, so
+    // an accessor placed on Object.prototype after load, under ANY key the module uses, is never consulted.
+    // The keys: every own key of every input below (recursively), the optional derivationPath, the property
+    // descriptor keys, the module's own result keys, and "length". Each accessor logs a get or a set; a set
+    // still defines the property on its receiver, so ordinary assignment semantics are kept.
+    const keys = new Set<string>(["derivationPath", "value", "writable", "enumerable", "configurable", "get", "set", "length", "digest", "root", "events"]);
+    const collect = (node: unknown): void => {
+      if (node === null || typeof node !== "object") return;
+      for (const key of Object.keys(node)) {
+        if (!Array.isArray(node)) keys.add(key);
+        collect((node as Record<string, unknown>)[key]);
+      }
+    };
+    collect(everyDigestInputs());
+    const installable = [...keys].filter((key) => !Object.prototype.hasOwnProperty.call(Object.prototype, key));
+    expect(installable).toContain("derivationPath");
+    expect(installable).toContain("parentPublicKey");
+    const honest = runEveryDigest(everyDigestInputs());
+    for (const [key, outcome] of Object.entries(honest)) expect(outcome.error, `honest ${key}`).toBeUndefined();
+    const fresh = everyDigestInputs();
+    let log = "";
+    let hooked: ReturnType<typeof runEveryDigest> | undefined;
+    // Held only through this synchronous window. The descriptors have no prototype, so installing one
+    // accessor never reads another through Object.prototype.
+    for (const key of installable) {
+      Object.defineProperty(Object.prototype, key, {
+        __proto__: null,
+        configurable: true,
+        enumerable: false,
+        get() {
+          log += `get ${key};`;
+          return `injected-${key}`;
+        },
+        set(this: object, v: unknown) {
+          log += `set ${key};`;
+          Reflect.defineProperty(this, key, { __proto__: null, value: v, writable: true, enumerable: true, configurable: true } as PropertyDescriptor);
+        },
+      } as PropertyDescriptor);
+    }
+    try {
+      hooked = runEveryDigest(fresh);
+    } finally {
+      for (const key of installable) delete (Object.prototype as Record<string, unknown>)[key];
+    }
+    expect(log, "an inherited accessor ran").toBe("");
+    expect(hooked).toEqual(honest);
   });
 
   it("judges every spelling exactly as the regular expressions it replaced did", () => {
