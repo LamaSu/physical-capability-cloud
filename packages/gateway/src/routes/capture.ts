@@ -48,6 +48,7 @@ import type { CaptureNonceChallenge } from "@pcc/verifier";
 import { schema, eq, desc } from "@pcc/store";
 import { getStore } from "../db.js";
 import { requireAuth } from "../auth/require-auth.js";
+import { lit } from "../observability/closed-schema.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import {
   getCaptureVerifier,
@@ -506,7 +507,7 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
         };
         return response;
       } catch (err) {
-        req.log.error({ err }, "capture_challenge failed");
+        req.log.error({ err }, lit("capture_challenge failed"));
         return reply.status(500).send({
           error: "challenge_failed",
           message: (err as Error).message,
@@ -595,7 +596,7 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
           attestations: undefined,
         });
       } catch (err) {
-        req.log.error({ err }, "capture_upload verifier threw");
+        req.log.error({ err }, lit("capture_upload verifier threw"));
         return reply.status(500).send({
           error: "verifier_threw",
           message: (err as Error).message,
@@ -625,7 +626,7 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
       try {
         insertVerdict(row);
       } catch (err) {
-        req.log.error({ err }, "capture_upload DB insert failed");
+        req.log.error({ err }, lit("capture_upload DB insert failed"));
         return reply.status(500).send({
           error: "persist_failed",
           message: (err as Error).message,
@@ -811,7 +812,7 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
           anchoredAt,
         };
       } catch (err) {
-        req.log.error({ err }, "capture_anchor failed");
+        req.log.error({ err }, lit("capture_anchor failed"));
         pipelineTelemetry.emit(
           verdict.jobId ?? verdictId,
           "evidence_capture",
@@ -1053,7 +1054,7 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
           },
         };
       } catch (err) {
-        req.log.error({ err }, "capture_registry read failed");
+        req.log.error({ err }, lit("capture_registry read failed"));
         return reply.status(500).send({
           error: "registry_read_failed",
           message: (err as Error).message,
