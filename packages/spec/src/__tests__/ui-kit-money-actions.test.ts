@@ -1067,7 +1067,10 @@ describe("E: idempotency intents (kit-owned, per body fingerprint) and money one
     expect(k[3]).toBe(k[1]);
   });
 
-  it("A/B/A through the Approval gate (a money form) reuses A's key as well", async () => {
+  it("A/B/A through the Approval gate (a money form): B is refused while A's outcome is unknown; A's retry reuses A's key", async () => {
+    // astra r3 F1 on #342: a money intent is its endpoint. A DIFFERENT request to that endpoint while A's
+    // outcome is unknown is refused (under A's key the server would replay A; under a new key it might
+    // move money twice). Only the identical request retries, with A's key.
     const calls = installFetch(() => ({ status: 503 }));
     boot(noteForm("/api/escrow/chain/0xabc/fund"));
     for (const v of ["A", "B", "A"]) {
@@ -1075,12 +1078,13 @@ describe("E: idempotency intents (kit-owned, per body fingerprint) and money one
       btn("Send").click();
       gateApproveBtn()!.click();
       await flush();
+      if (v === "B") expect(document.body.textContent).toContain("an earlier request to this endpoint has an unknown outcome");
       gateBtn("Cancel")!.click();
     }
     const k = posts(calls).map((c) => c.headers["Idempotency-Key"]);
-    expect(k.length).toBe(3);
-    expect(k[1]).not.toBe(k[0]);
-    expect(k[2]).toBe(k[0]);
+    expect(k.length).toBe(2);
+    expect(posts(calls).map((c) => c.body!["note"])).toEqual(["A", "A"]);
+    expect(k[1]).toBe(k[0]);
   });
 
   it("a 2xx consumes only THAT fingerprint's key: B keeps its key; A re-sends under a NEW key (non-money)", async () => {
@@ -1566,14 +1570,96 @@ describe("astra r2 (#342 @60137b16): reproduced findings (verify before fix)", (
     expect(posts(calls, "/fund").length).toBe(1);
   });
 
-  it("F3 (MEDIUM): an idempotencyFrom key covers the query string (different targets, different keys)", async () => {
-    const calls = installFetch(() => ({ status: 200 }));
+  it("F3 (MEDIUM): an idempotencyFrom key covers the query string (different targets never share a key)", async () => {
+    // Across views (a reload) the derived keys differ by query. Within one view, a second money request to
+    // the same endpoint is refused after the first was accepted (astra r3 F1 on #342), so it never carries
+    // the first one's key either.
+    const keys: string[] = [];
     const form = (q: string) => ({ kind: "form", schema: { properties: { ref: { type: "string", default: "R1" } } },
       submit: { id: "s" + q, label: "Send " + q, kind: "post", path: "/api/example?mode=" + q, idempotencyFrom: "ref", body: { x: 1 } } });
-    boot(man([form("A"), form("B")]));
-    for (const q of ["A", "B"]) { btn("Send " + q).click(); lastApprove()!.click(); await flush(); }
-    const keys = posts(calls, "/api/example").map((c) => c.headers["Idempotency-Key"]);
-    expect(keys.length).toBe(2);
+    for (const q of ["A", "B"]) {
+      const calls = installFetch(() => ({ status: 200 }));
+      boot(man([form(q)]));
+      btn("Send " + q).click(); lastApprove()!.click(); await flush();
+      keys.push(posts(calls, "/api/example")[0]!.headers["Idempotency-Key"]!);
+    }
     expect(keys[0]).not.toBe(keys[1]);
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(man([form("A"), form("B")]));
+    btn("Send A").click(); lastApprove()!.click(); await flush();
+    btn("Send B").click();
+    expect(posts(calls, "/api/example").length).toBe(1);
+    expect(document.body.textContent).toContain("Already submitted");
+  });
+});
+
+describe("astra r3 (#342 @48c156e5): reproduced findings (verify before fix)", () => {
+  const FUND = "/api/escrow/chain/0xabc/fund";
+  const clone = { id: "fund", label: "Fund", kind: "post", path: FUND, body: { escrowId: "e1", amount: 5 } };
+  const fundBtns = () => buttons().filter((b) => (b.textContent || "").indexOf("Fund") === 0);
+  // open BOTH gates first, then approve every enabled gate
+  async function openBothApproveAll(a: unknown, b: unknown, calls: Call[]): Promise<number> {
+    boot(man([{ kind: "actions", actions: [a, b] }]));
+    const [b1, b2] = fundBtns();
+    b1!.click(); b2!.click();
+    for (const g of Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")).filter((x) => x.textContent === "Approve") as HTMLButtonElement[]) if (!g.disabled) g.click();
+    await flush();
+    // and once more, sequentially: a gate that was refused while the first was open may open now
+    b2!.click();
+    for (const g of Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")).filter((x) => x.textContent === "Approve") as HTMLButtonElement[]) if (!g.disabled) g.click();
+    await flush();
+    return posts(calls, "/fund").length;
+  }
+
+  it("F1 (HIGH): two money actions differing only in a manifest idempotencyKey send ONE request", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    const n = await openBothApproveAll({ ...clone, body: { ...clone.body, idempotencyKey: "A" } }, { ...clone, body: { ...clone.body, idempotencyKey: "B" } }, calls);
+    expect(n).toBe(1);
+  });
+
+  it("F1 (HIGH): a field the route ignores (an extra query parameter or body member) does not mint a second money request", async () => {
+    for (const v of [{ ...clone, path: FUND + "?x=1" }, { ...clone, body: { ...clone.body, note: "x" } }]) {
+      const calls = installFetch(() => ({ status: 200 }));
+      expect(await openBothApproveAll(clone, v, calls), JSON.stringify(v)).toBe(1);
+    }
+  });
+
+  it("F1: nor does the endpoint's spelling (hex case, a trailing slash, a doubled slash)", async () => {
+    for (const p of ["/api/escrow/chain/0xABC/fund", FUND + "/", "/api/escrow/chain//0xabc/fund"]) {
+      const calls = installFetch(() => ({ status: 200 }));
+      expect(await openBothApproveAll(clone, { ...clone, path: p }, calls), p).toBe(1);
+    }
+  });
+
+  const approveNewest = async (): Promise<boolean> => {
+    const g = (Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")) as HTMLButtonElement[]).filter((x) => x.textContent === "Approve" && !x.disabled).pop();
+    if (!g) return false;
+    g.click(); await flush(); return true;
+  };
+
+  it("F2 (MEDIUM): repeated query values in a different order are different requests: their derived keys differ", async () => {
+    // Before the fix canonicalTarget sorted equal names by VALUE, so ?r=A&r=B and ?r=B&r=A derived the
+    // SAME idempotencyFrom key across a reload, and the server would replay the first as the second.
+    const keys: string[] = [];
+    const form = (q: string) => ({ kind: "form", schema: { properties: { ref: { type: "string", default: "R1" } } },
+      submit: { id: "s", label: "Send", kind: "post", path: "/api/example?" + q, idempotencyFrom: "ref", body: { x: 1 } } });
+    for (const q of ["r=A&r=B", "r=B&r=A"]) {
+      const calls = installFetch(() => ({ status: 200 }));
+      boot(man([form(q)]));
+      btn("Send").click(); expect(await approveNewest()).toBe(true);
+      keys.push(posts(calls, "/api/example")[0]!.headers["Idempotency-Key"]!);
+    }
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("F1/F2: a different request to a money endpoint whose earlier request is unresolved is refused, never sent under its key", async () => {
+    let n = 0;
+    const calls = installFetch((c) => (c.method === "POST" ? { status: n++ === 0 ? 500 : 200 } : { status: 200 }));
+    const fb = (q: string, label: string) => ({ id: label, label, kind: "post", path: "/api/feedback?" + q, body: { note: "n" } });
+    boot(man([{ kind: "actions", actions: [fb("recipient=A&recipient=B", "Send AB"), fb("recipient=B&recipient=A", "Send BA")] }]));
+    btn("Send AB").click(); expect(await approveNewest()).toBe(true); // 500: outcome unknown, its key is kept
+    btn("Send BA").click(); await approveNewest();
+    expect(posts(calls, "/api/feedback").length).toBe(1); // BA never left, so it never carried AB's key
+    expect(document.body.textContent).toMatch(/already open|unknown outcome/);
   });
 });

@@ -91,10 +91,20 @@
   //   key     the Idempotency-Key while this intent's outcome is UNRESOLVED (A/B/A reuses A's key)
   //   posting / done / gate: as above, for the intent
   var INTENT_STATE = Object.create(null);
-  // The intent is CANONICAL -- the request's meaning, not its spelling -- so a manifest cannot mint a
-  // "new" intent for the same effect by reordering body keys, %-encoding a path character or
-  // reordering query parameters: object keys are sorted at every depth; the target is the decoded
-  // pathname the gateway routes (desc.canonical) plus the decoded query parameters, sorted.
+  // What the kit can and cannot know (astra r3 F1 on #342): a request's SPELLING does not identify its
+  // business effect. A route may ignore a query parameter or a body member, or read its target
+  // case-insensitively, so two differently spelled requests can move the same money. So a MONEY intent
+  // is the coarsest thing the kit can see: the method and the ENDPOINT (the decoded route, lowercased,
+  // without doubled or trailing slashes), never the query or the body. Every money request to one
+  // endpoint shares one gate, one unresolved key and one money one-shot per render. While one request's
+  // outcome is unknown, a DIFFERENT request to that endpoint is refused: under the earlier key the server
+  // would replay the earlier result, and under a new key it might move money twice. Only the identical
+  // request may retry. This fails closed: a second, genuinely different payment to one endpoint needs a
+  // reload. Effect-level identity is the SERVER's to enforce (an idempotent, operation-specific effect).
+  // A NON-money write (the allowlist) keeps the exact canonical request as its intent: object keys
+  // sorted at every depth; the decoded pathname the gateway routes (desc.canonical) plus the decoded
+  // query parameters, sorted by NAME only, so repeated values keep their order (?r=A&r=B is not
+  // ?r=B&r=A; astra r3 F2).
   function canonicalJson(v) {
     if (v === null || typeof v !== 'object') return JSON.stringify(v);
     var i, out = [];
@@ -109,14 +119,17 @@
   function canonicalTarget(desc) {
     var q = [];
     try { new URL(desc.url).searchParams.forEach(function (val, key) { q.push([key, val]); }); } catch (e) { q = []; }
-    q.sort(function (x, y) { return x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : (x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0); });
+    q.sort(function (x, y) { return x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0; }); // stable: equal names keep their order
     var qs = q.map(function (p) { return encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1]); }).join('&');
     return desc.canonical + (qs ? '?' + qs : '');
   }
+  function requestFingerprint(desc) { return desc.method + ' ' + canonicalTarget(desc) + '\n' + canonicalJson(desc.body); }
+  function moneyEndpoint(desc) { return String(desc.canonical).toLowerCase().replace(/\/{2,}/g, '/').replace(/\/+$/, ''); }
   function intentState(desc) {
-    var k = desc.method + ' ' + canonicalTarget(desc) + '\n' + canonicalJson(desc.body);
+    var k = desc.money ? 'money ' + desc.method + ' ' + moneyEndpoint(desc) : requestFingerprint(desc);
     var it = INTENT_STATE[k];
-    if (!it) { it = { key: null, posting: false, done: false, gate: null }; INTENT_STATE[k] = it; }
+    // request: the fingerprint of the request that holds the unresolved key (only it may retry with it)
+    if (!it) { it = { key: null, request: null, posting: false, done: false, gate: null }; INTENT_STATE[k] = it; }
     return it;
   }
 
@@ -389,6 +402,10 @@
   //      (the first of each; assetField names the body field the asset came from, if any) }
   function requestDescriptor(action, body, isHost, base, overrides) {
     var b = plainBody(body, overrides);
+    // A POST's idempotencyKey is kit-owned (the kit sets it on send): a manifest value never reaches the
+    // intent, the display or the wire (astra r3 F1 on #342). A PATCH body's idempotencyKey stays plain
+    // data, shown and sent as is (review charlie F4: the kit keys a PATCH by header only).
+    if (b && actionMethod(action) === 'POST') delete b.idempotencyKey;
     var own = b || {};
     var amounts = ownFields(own, ['amount', 'totalAmount', 'value', 'priceUSD', 'budgetUSD'], false);
     var refs = ownFields(own, ['jobId', 'escrowId', 'escrowAddress', 'offerId', 'compositionId', 'id'], true);
@@ -1704,13 +1721,19 @@
     // DERIVES the key from (method, canonical target with its query, reference, body): the same logical
     // intent dedupes even across a reload, and never shares a key with another target or body.
     var fp = canonicalJson(desc.body);
+    var request = requestFingerprint(desc);
+    if (it.key && it.request !== null && it.request !== request) {
+      // a DIFFERENT request to a money endpoint whose earlier request has an unknown outcome (see INTENT_STATE)
+      show('pcc-action-status st-failed', 'Refused: an earlier request to this endpoint has an unknown outcome. Reload to check it before sending a different one - nothing was sent.');
+      return null;
+    }
     var key = it.key;
     if (!key) {
       var ref = (action.idempotencyFrom && opts.formValues) ? opts.formValues[action.idempotencyFrom] : null;
       key = (ref != null && ref !== '')
         ? 'idem-' + hash53(desc.method + ' ' + canonicalTarget(desc) + '|' + String(ref) + '|' + fp)
         : 'idem-' + uuid();
-      it.key = key;
+      it.key = key; it.request = request;
     }
     var sendBody = Object.assign({}, desc.body);
     if (desc.method === 'POST') sendBody.idempotencyKey = key; // legacy body field (kind "post"), preserved
@@ -1732,7 +1755,7 @@
     return sending.then(function (res) {
       st.posting = false; it.posting = false;
       if (res.ok) {
-        it.key = null; // this intent is resolved
+        it.key = null; it.request = null; // this intent is resolved
         var trace = ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '';
         // An HTTP 2xx is an ACKNOWLEDGEMENT, never settlement (ruling 2; astra r3 F5 on #313). A money write reads
         // "submitted" (waiting) and is one-shot for this render; anything else a NEUTRAL "Done".
