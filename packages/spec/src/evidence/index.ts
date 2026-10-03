@@ -22,6 +22,9 @@ export * from "./primitives.js";
 // isFabricated / bundleHasFabricatedEvents — the ONE canonical fabricated-evidence
 // predicate, read by every detector site (ALCOA, settlement, tier gate, oracle).
 export * from "./is-fabricated.js";
+// kernelPullCaptureIssue / KERNEL_PULL_CAPTURE_TYPES — the closed LO-SE-1 contract a
+// camera event must meet to count toward an assurance tier (astra pack 155 HIGH 1).
+export * from "./kernel-pull-capture.js";
 // signingPreimage / sessionKeyDelegationPreimage — the ONE LO-EV-1 signing byte
 // contract every Ed25519 producer and consumer of evidence builds its message from.
 export * from "./signing-preimage.js";
