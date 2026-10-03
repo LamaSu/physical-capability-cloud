@@ -135,6 +135,9 @@ REFUSED_ANYWHERE = {"ProcessPoolExecutor", "CGIHTTPRequestHandler"}
 CLICK_REFUSED = {"edit", "launch"}
 FRAME_ATTRS = {"f_globals", "f_locals", "f_builtins", "f_back", "f_code", "tb_frame", "tb_next",
                "gi_frame", "gi_code", "cr_frame", "cr_code", "ag_frame", "ag_code"}
+# Deliberately over-broad (verdict 105g): every attribute of any object is checked against these
+# names, so an ordinary field such as job.operator or device.site is refused too. Rename the field
+# rather than shrink this set.
 REACH_NAMES = MODULE_NAMES - {"code"}
 
 
@@ -450,13 +453,18 @@ def chains_used(source):
     return used
 
 
+def _own(module):
+    """The package's own modules, imported absolutely (pcc_node.x), are not outside surface."""
+    return module == PACKAGE.name or module.startswith(PACKAGE.name + ".")
+
+
 def imported_modules(source):
-    """Every absolute module a source imports, by its full dotted name."""
+    """Every absolute module a source imports from outside the package, by its full dotted name."""
     found = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            found.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            found.update(alias.name for alias in node.names if not _own(alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module and not _own(node.module):
             found.add(node.module)
     return found
 
@@ -778,6 +786,12 @@ def test_the_guard_catches(label):
 @pytest.mark.parametrize("label", sorted(IMPORT_EVASIONS))
 def test_the_import_allowlist_catches(label):
     assert import_violations(IMPORT_EVASIONS[label]), label
+
+
+def test_the_packages_own_absolute_imports_are_allowed():
+    # pcc_node.x is the package itself, like a relative import; the operating runtime (#471) uses this form.
+    assert import_violations("from pcc_node.log_capture import canonicalize\nimport pcc_node.http_util\n") == []
+    assert import_violations("import pcc_nodes\n") != []  # only the package itself, not a lookalike
 
 
 def test_a_module_reexported_across_files_is_caught():
