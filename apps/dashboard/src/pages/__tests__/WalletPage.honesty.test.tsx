@@ -308,7 +308,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     const stub = stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
-        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, usableNow: true },
       },
       "/api/fiat-ramp/coinbase/onramp": { status: 200, body: onrampAnswer("0x2222222222222222222222222222222222222222", checkout) },
     });
@@ -328,7 +328,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     const stub = stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
-        body: { walletAddress: "0x3333333333333333333333333333333333333333", network: "base-sepolia", smartAccount: true, mock: false },
+        body: { walletAddress: "0x3333333333333333333333333333333333333333", network: "base-sepolia", smartAccount: true, mock: false, usableNow: true },
       },
     });
     await renderPage();
@@ -343,7 +343,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
-        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, usableNow: true },
       },
       "/api/fiat-ramp/coinbase/onramp": {
         status: 200,
@@ -368,7 +368,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     const routes: Record<string, { status: number; body: unknown }> = {
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
-        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, usableNow: true },
       },
       "/api/fiat-ramp/cdp/spend-permission": { status: 200, body: perm },
       "/api/fiat-ramp/cdp/spend-permission/0xperm": { status: 200, body: { ok: true } },
@@ -416,7 +416,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
-        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, ...change },
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, usableNow: true, ...change },
       },
     });
     await renderPage();
@@ -430,7 +430,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
-        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, usableNow: true },
       },
       "/api/fiat-ramp/coinbase/onramp": { status: 200, body: { onrampUrl: "https://example.test/pay" } },
     });
@@ -445,7 +445,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
-        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, usableNow: true },
       },
       "/api/fiat-ramp/cdp/spend-permission": { status: 200, body: { permissionId: "x" } },
     });
@@ -470,7 +470,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     ["is for another network", { network: "base-sepolia" }],
   ])("a checkout that %s is not offered (astra 408a HIGH)", async (_what, change) => {
     stubFetch({
-      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false } },
+      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false, usableNow: true } },
       "/api/fiat-ramp/coinbase/onramp": { status: 200, body: { ...onrampAnswer(WALLET_2, coinbaseCheckout(WALLET_2)), ...change } },
     });
     await renderPage();
@@ -493,7 +493,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     ["no id", { permissionId: "" }],
   ])("a permission with %s is not shown as issued (astra 408a HIGH)", async (_what, echo) => {
     stubFetch({
-      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false } },
+      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false, usableNow: true } },
       "/api/fiat-ramp/cdp/spend-permission": { status: 200, body: permissionAnswer(echo) },
     });
     await renderPage();
@@ -509,7 +509,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
-        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, usableNow: true },
       },
       "/api/fiat-ramp/cdp/spend-permission": {
         status: 200,
@@ -529,7 +529,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     const stub = stubFetch({
       "/api/fiat-ramp/cdp/wallet": {
         status: 200,
-        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false, usableNow: true },
       },
     });
     await renderPage();
@@ -546,7 +546,7 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     ["doesn't say whether it is usable", { usableNow: undefined }],
   ])("a wallet answer that %s is never called usable, and gets no card funding (astra 408d HIGH)", async (_what, change) => {
     stubFetch({
-      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false, usableNow: true, ...change } },
+      "/api/fiat-ramp/cdp/wallet": { status: 200, body: { walletAddress: WALLET_2, network: "base", smartAccount: true, mock: false, ...change } },
     });
     await renderPage();
     await click(button("Funded Key"));

@@ -42,12 +42,15 @@ interface Wallet {
   smartAccount: true;
   /** Explicit in every answer: true when no key controls the address. */
   mock: boolean;
+  /** Explicit in every answer: whether the gateway says the wallet can be used on PCC now (astra 408d). */
+  usableNow: boolean;
 }
 interface Permission {
   permissionId: string;
   spender: string;
   allowanceUSDC: number;
   periodSec: number;
+  start: string;
   expiresAt: string;
   revoked: boolean;
 }
@@ -67,11 +70,11 @@ const sameAddress = (a: unknown, b: string) => typeof a === "string" && a.toLowe
 /** POST /api/fiat-ramp/cdp/wallet's answer, or null when it isn't one in full. */
 function parseWallet(v: unknown): Wallet | null {
   if (!isRecord(v)) return null;
-  const { walletAddress, network, smartAccount, mock } = v;
+  const { walletAddress, network, smartAccount, mock, usableNow } = v;
   if (typeof walletAddress !== "string" || !ADDRESS.test(walletAddress)) return null;
   if (typeof network !== "string" || !NETWORKS.has(network)) return null;
-  if (smartAccount !== true || typeof mock !== "boolean") return null;
-  return { walletAddress, network, smartAccount, mock };
+  if (smartAccount !== true || typeof mock !== "boolean" || typeof usableNow !== "boolean") return null;
+  return { walletAddress, network, smartAccount, mock, usableNow };
 }
 
 /**
@@ -91,6 +94,16 @@ function parseCheckout(v: unknown, wallet: Wallet): { url: string } | { note: st
     return null;
   }
   if (url.origin !== CHECKOUT_ORIGIN || !url.pathname.startsWith("/buy")) return null;
+  // What the checkout sells, on which network: its own locks, which must agree with the answer (astra 408d).
+  const params = url.searchParams;
+  if (params.get("defaultAsset") !== "USDC" || params.get("defaultNetwork") !== "base") return null;
+  let assets: unknown;
+  try {
+    assets = JSON.parse(params.get("assets") ?? "");
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(assets) || assets.length !== 1 || assets[0] !== "USDC") return null;
   // Where the money goes: {"<address>": ["base"]}, this wallet and nothing else.
   let addresses: unknown;
   try {
@@ -120,12 +133,13 @@ function parsePermission(v: unknown, request: PermissionRequest): Permission | n
   const until = Date.parse(expiresAt);
   if (!Number.isFinite(from) || !Number.isFinite(until) || until <= from) return null;
   if (revoked !== false) return null;
-  return { permissionId, spender: spender as string, allowanceUSDC, periodSec, expiresAt, revoked };
+  return { permissionId, spender: spender as string, allowanceUSDC, periodSec, start, expiresAt, revoked };
 }
 
-/** What a permission is now: revoked only on the gateway's confirmation, expired past its expiry. */
-function permissionStatus(perm: Permission, now = Date.now()): "REVOKED" | "EXPIRED" | "ACTIVE" {
+/** What a permission is now: revoked only on the gateway's confirmation, pending before its start (astra 408d), expired past its expiry. */
+function permissionStatus(perm: Permission, now = Date.now()): "REVOKED" | "PENDING" | "EXPIRED" | "ACTIVE" {
   if (perm.revoked) return "REVOKED";
+  if (Date.parse(perm.start) > now) return "PENDING";
   return Date.parse(perm.expiresAt) <= now ? "EXPIRED" : "ACTIVE";
 }
 
@@ -174,7 +188,7 @@ export function CdpFundedKeyOnramp() {
   // Coinbase's card checkout pays out USDC on Base mainnet. Only a real wallet
   // on "base" can receive it. A base-sepolia (testnet) wallet would be paid
   // real money on a network PCC doesn't read for it.
-  const cardFundable = !!wallet && wallet.mock === false && wallet.network === "base";
+  const cardFundable = !!wallet && wallet.mock === false && wallet.usableNow === true && wallet.network === "base";
 
   async function createWallet() {
     setCreating(true);
@@ -182,7 +196,7 @@ export function CdpFundedKeyOnramp() {
     try {
       const w = parseWallet(await api("/api/fiat-ramp/cdp/wallet", "POST"));
       if (w) setWallet(w);
-      else setErr("The gateway's wallet answer was incomplete (it must give the address and network, and say whether the wallet is simulated), so no wallet is shown.");
+      else setErr("The gateway's wallet answer was incomplete (it must give the address and network, and say whether the wallet is simulated and usable), so no wallet is shown.");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -301,9 +315,13 @@ export function CdpFundedKeyOnramp() {
                   Simulated wallet: this gateway has no CDP credentials, so no key controls this
                   address. Don't send funds to it.
                 </div>
-              ) : (
+              ) : wallet.usableNow ? (
                 <div className="text-[11px] text-emerald-400/70">
                   ✓ Usable on PCC now · {wallet.network} · gasless
+                </div>
+              ) : (
+                <div className="text-[11px] text-amber-400/80">
+                  The gateway says this wallet isn't usable on PCC yet · {wallet.network}
                 </div>
               )}
             </div>
@@ -320,6 +338,10 @@ export function CdpFundedKeyOnramp() {
               <p className="text-[12px] text-white/40">
                 Card funding is off for a simulated wallet: money sent to its address could not be
                 recovered.
+              </p>
+            ) : !wallet.usableNow ? (
+              <p className="text-[12px] text-white/40">
+                Card funding is off until the gateway says this wallet is usable.
               </p>
             ) : !cardFundable ? (
               <p className="text-[12px] text-white/40">
