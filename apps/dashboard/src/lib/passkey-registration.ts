@@ -206,7 +206,7 @@ async function safeJson(res: Response): Promise<{ error?: string; message?: stri
  */
 export async function detectPasskeySupport(
   win: { PublicKeyCredential?: unknown } | undefined = typeof window !== "undefined"
-    ? (window as { PublicKeyCredential?: unknown })
+    ? { PublicKeyCredential: window.PublicKeyCredential }
     : undefined,
 ): Promise<{ available: boolean; platformAuthenticator: boolean }> {
   const PublicKeyCredential = win?.PublicKeyCredential as

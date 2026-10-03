@@ -106,7 +106,7 @@ export function usePasskey(options: UsePasskeyOptions = {}): UsePasskeyReturn {
           apiBase,
           operatorId,
           authorizedFetchFn: authorizedFetch,
-          fetchFn: window.fetch.bind(window),
+          fetchFn: (input, init) => window.fetch(input, init),
           startRegistration: startRegistrationAdapter,
         },
         // Random handle for the anonymous-user path. crypto.randomUUID is
