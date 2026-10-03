@@ -663,3 +663,189 @@ describe("rule 6, the stop: always sendable, past the deadline and at the rate l
     expect(codeOf(checkRuntimeCommand(OT2, { name: "Stop", params: {} }, late(OT2, 0)))).toBe("unknown-command");
   });
 });
+
+/** The adjacent doubles: the tightest possible epsilon on each side of a bound. */
+function nextUp(x: number): number {
+  if (x === 0) return Number.MIN_VALUE;
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  const bits = view.getBigUint64(0);
+  view.setBigUint64(0, x > 0 ? bits + 1n : bits - 1n);
+  return view.getFloat64(0);
+}
+function nextDown(x: number): number {
+  return -nextUp(-x);
+}
+
+describe("rules 9 and 10, undeclared-param and missing-param: the params are exactly the declared ones", () => {
+  const code = (env: OperationalEnvelopeV1, name: string, params: Record<string, unknown>) =>
+    codeOf(checkRuntimeCommand(env, { name, params }, stateFor(env)));
+
+  it("refuses a parameter the command does not declare, inherited names and another command's params included", () => {
+    expect(code(OT2, "aspirate", { volumeUl: 150, speed: 2 })).toBe("undeclared-param");
+    expect(code(OT2, "stop", { force: true })).toBe("undeclared-param");
+    for (const key of ["constructor", "toString", "hasOwnProperty", "valueOf", "0"]) {
+      expect(code(OT2, "aspirate", { volumeUl: 150, [key]: 1 }), key).toBe("undeclared-param");
+    }
+    expect(code(OT2, "setModuleTemp", { celsius: 37, volumeUl: 150 })).toBe("undeclared-param");
+  });
+
+  it("refuses a declared parameter that is absent: every one is required, and undefined is absent", () => {
+    expect(code(OT2, "aspirate", {})).toBe("missing-param");
+    expect(code(OT2, "aspirate", { volumeUl: undefined })).toBe("missing-param");
+    expect(code(OT2, "runProtocol", { minutes: 10 })).toBe("missing-param");
+    expect(code(PLATE, "read", { seconds: 30, wavelengthNm: 450 })).toBe("missing-param");
+  });
+
+  it("checks undeclared before missing, and missing before any value", () => {
+    expect(code(OT2, "aspirate", { celsius: 37 })).toBe("undeclared-param");
+    expect(code(OT2, "transfer", { aspirateUl: "x" })).toBe("missing-param");
+    expect(code(PLATE, "read", { seconds: 1e9, wells: ["Z9"] })).toBe("missing-param");
+  });
+});
+
+describe("rule 11, bounded params: a finite JSON number inside [min, max], 0 a real bound, no conversion", () => {
+  const value = (env: OperationalEnvelopeV1, name: string, key: string, v: unknown, rest: Record<string, unknown> = {}) =>
+    codeOf(checkRuntimeCommand(env, { name, params: { ...rest, [key]: v } }, stateFor(env)));
+  const aspirate = (v: unknown) => value(OT2, "aspirate", "volumeUl", v);
+
+  it("allows exactly min and exactly max, and refuses the adjacent doubles outside them", () => {
+    expect(aspirate(1)).toBe("allowed");
+    expect(aspirate(300)).toBe("allowed");
+    expect(aspirate(nextDown(1))).toBe("out-of-range");
+    expect(aspirate(nextUp(300))).toBe("out-of-range");
+    expect(nextDown(1)).toBe(0.9999999999999999);
+    expect(nextUp(300)).toBe(300.00000000000006);
+    expect(aspirate(nextUp(1))).toBe("allowed");
+    expect(aspirate(nextDown(300))).toBe("allowed");
+  });
+
+  it("takes 0 as a bound like any other, on either side", () => {
+    const minutes = (v: unknown) => value(OT2, "runProtocol", "minutes", v, { labwareSlot: 1 });
+    expect(minutes(0)).toBe("allowed");
+    expect(minutes(nextDown(0))).toBe("out-of-range");
+    expect(minutes(-1)).toBe("out-of-range");
+    const cold = (v: unknown) => value(OT2_COLD, "setModuleTemp", "celsius", v);
+    expect(cold(0)).toBe("allowed");
+    expect(cold(nextUp(0))).toBe("out-of-range");
+    expect(cold(-20)).toBe("allowed");
+    expect(cold(nextDown(-20))).toBe("out-of-range");
+  });
+
+  it("counts -0 as 0, in a value and in a bound", () => {
+    expect(value(OT2, "runProtocol", "minutes", -0, { labwareSlot: 1 })).toBe("allowed");
+    expect(value(OT2_COLD, "setModuleTemp", "celsius", -0)).toBe("allowed");
+    const negativeZeroMin = changed(OT2, (e) => (e.limits[3].min = -0));
+    expect(value(negativeZeroMin, "runProtocol", "minutes", 0, { labwareSlot: 1 })).toBe("allowed");
+    expect(value(negativeZeroMin, "runProtocol", "minutes", nextDown(0), { labwareSlot: 1 })).toBe("out-of-range");
+  });
+
+  it("refuses a numeric string and every other non-number as not-a-number (NaN and Infinity are not JSON: command-malformed)", () => {
+    for (const v of ["150", " 150", "1.5e2", "0x96", "", "NaN", "Infinity", null, true, false, [150], { value: 150, unit: "uL" }]) {
+      expect(aspirate(v), JSON.stringify(v)).toBe("not-a-number");
+    }
+    for (const v of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) expect(aspirate(v), String(v)).toBe("command-malformed");
+  });
+
+  it("refuses values far outside, and converts no unit: 0.3 is 0.3 uL, below the 1 uL min", () => {
+    for (const v of [1e308, -1e308, Number.MAX_VALUE, -Number.MAX_VALUE, -150]) expect(aspirate(v), String(v)).toBe("out-of-range");
+    expect(aspirate(0.3)).toBe("out-of-range");
+  });
+
+  it("checks each quantity against its own limit", () => {
+    const temp = (v: number) => value(OT2, "setModuleTemp", "celsius", v);
+    expect([temp(4), temp(95), temp(nextDown(4)), temp(nextUp(95))]).toEqual(["allowed", "allowed", "out-of-range", "out-of-range"]);
+    const dispense = (v: number) => value(OT2, "dispense", "volumeUl", v);
+    expect([dispense(1), dispense(300), dispense(nextUp(300))]).toEqual(["allowed", "allowed", "out-of-range"]);
+    const incubate = (v: number) => value(PLATE, "setIncubation", "celsius", v);
+    expect([incubate(20), incubate(45), incubate(19.99), incubate(45.01)]).toEqual(["allowed", "allowed", "out-of-range", "out-of-range"]);
+    const read = (v: number) => value(PLATE, "read", "seconds", v, { wavelengthNm: 405, wells: "all" });
+    expect([read(1), read(600), read(0), read(601)]).toEqual(["allowed", "allowed", "out-of-range", "out-of-range"]);
+    // run_duration is also a command parameter here: checked against the same limit as the deadline.
+    expect(value(OT2, "runProtocol", "minutes", 120, { labwareSlot: 1 })).toBe("allowed");
+    expect(value(OT2, "runProtocol", "minutes", nextUp(120), { labwareSlot: 1 })).toBe("out-of-range");
+  });
+
+  it("checks bounded params one by one in declaration order, type then range, and all of them before any unbounded param", () => {
+    const transfer = (params: Record<string, unknown>) => codeOf(checkRuntimeCommand(OT2, { name: "transfer", params }, stateFor(OT2)));
+    expect(transfer({ aspirateUl: "5", dispenseUl: 1e9, slot: 1 })).toBe("not-a-number");
+    expect(transfer({ aspirateUl: 1e9, dispenseUl: "5", slot: 1 })).toBe("out-of-range");
+    expect(transfer({ aspirateUl: 100, dispenseUl: "5", slot: 99 })).toBe("not-a-number");
+    expect(transfer({ aspirateUl: 100, dispenseUl: 1e9, slot: 99 })).toBe("out-of-range");
+    expect(transfer({ aspirateUl: 100, dispenseUl: 100, slot: 99 })).toBe("value-not-allowed");
+    expect(transfer({ aspirateUl: 100, dispenseUl: 100, slot: 11 })).toBe("allowed");
+  });
+});
+
+describe("rule 12, unbounded params: one allowed value, or a non-empty list of distinct allowed items", () => {
+  const slot = (v: unknown) => codeOf(checkRuntimeCommand(OT2, { name: "runProtocol", params: { minutes: 10, labwareSlot: v } }, stateFor(OT2)));
+  const read = (env: OperationalEnvelopeV1, params: Record<string, unknown>) =>
+    codeOf(checkRuntimeCommand(env, { name: "read", params: { seconds: 30, wavelengthNm: 450, wells: "all", ...params } }, stateFor(env)));
+
+  it("passes a value === one of allowed (same type and value) and refuses anything else", () => {
+    for (const v of SLOTS) expect(slot(v), String(v)).toBe("allowed");
+    expect(slot(1.0)).toBe("allowed");
+    for (const v of [0, 12, 1.5, "1", "one", true, null, [1], [1, 2], {}, { slot: 1 }]) expect(slot(v), JSON.stringify(v)).toBe("value-not-allowed");
+    expect(read(PLATE, { wavelengthNm: 405 })).toBe("allowed");
+    for (const v of ["405", 405.5, 404]) expect(read(PLATE, { wavelengthNm: v }), JSON.stringify(v)).toBe("value-not-allowed");
+  });
+
+  it("passes a non-empty list of distinct allowedItems, in any order", () => {
+    for (const wells of [["A1"], ["A1", "H12"], ["H12", "A1"], ["A1", "A2", "A3", "H12"]]) {
+      expect(read(PLATE, { wells }), JSON.stringify(wells)).toBe("allowed");
+    }
+  });
+
+  it("refuses an allowedItems list that is empty, duplicated, holds a non-member, an object or a list, and a single item or the single value as a list", () => {
+    const refused: unknown[] = [[], ["A1", "A1"], ["A1", "B7"], ["a1"], [{}], [{ A1: true }], [["A1"]], [null], [1], "A1", ["all"], ["A1", "A2", "A3", "H12", "A1"]];
+    for (const wells of refused) expect(read(PLATE, { wells }), JSON.stringify(wells)).toBe("value-not-allowed");
+  });
+
+  it("with allowedItems alone, a single value never passes; with allowed alone, a list never passes", () => {
+    const itemsOnly = changed(PLATE, (e) => delete e.commands[1].params[2].unbounded.allowed);
+    expect(read(itemsOnly, { wells: "all" })).toBe("value-not-allowed");
+    expect(read(itemsOnly, { wells: ["A1"] })).toBe("allowed");
+    expect(slot([1])).toBe("value-not-allowed");
+  });
+
+  it("compares list items by type and value, and distinctness by their JSON (so -0 and 0 are the same item)", () => {
+    const mixed = changed(PLATE, (e) => (e.commands[1].params[2].unbounded.allowedItems = [0, 1, "1"]));
+    expect(read(mixed, { wells: [1, "1"] })).toBe("allowed");
+    expect(read(mixed, { wells: [1, 1] })).toBe("value-not-allowed");
+    expect(read(mixed, { wells: ["1", "1"] })).toBe("value-not-allowed");
+    expect(read(mixed, { wells: [-0] })).toBe("allowed");
+    expect(read(mixed, { wells: [0, -0] })).toBe("value-not-allowed");
+    expect(read(mixed, { wells: [true] })).toBe("value-not-allowed");
+  });
+});
+
+describe("rule 13 and the decision itself", () => {
+  it("allows a command that passes every rule, as a frozen { allowed: true }", () => {
+    const d = checkRuntimeCommand(OT2, ASPIRATE, stateFor(OT2));
+    expect(d).toEqual({ allowed: true });
+    expect(Object.keys(d)).toEqual(["allowed"]);
+    expect(Object.isFrozen(d)).toBe(true);
+  });
+
+  it("refuses with a frozen { allowed: false, code, reason }, the reason a non-empty human message", () => {
+    const d = checkRuntimeCommand(OT2, { name: "aspirate", params: { volumeUl: 301 } }, stateFor(OT2));
+    expect(d.allowed).toBe(false);
+    expect(Object.keys(d)).toEqual(["allowed", "code", "reason"]);
+    expect(Object.isFrozen(d)).toBe(true);
+    if (!d.allowed) {
+      expect(d.code).toBe("out-of-range");
+      expect(d.reason).toMatch(/volumeUl.*301.*\[1, 300\] uL/);
+    }
+  });
+
+  it("is pure: it changes none of its inputs, and the same inputs give the same decision", () => {
+    const envelope = structuredClone(OT2);
+    const command = { name: "transfer", params: { aspirateUl: 100, dispenseUl: 100, slot: 2 } };
+    const state = stateFor(OT2, { recentCommandsAtMs: [NOW - 1, NOW - 2] });
+    const before = JSON.stringify([envelope, command, state]);
+    const first = checkRuntimeCommand(envelope, command, state);
+    expect(checkRuntimeCommand(envelope, command, state)).toEqual(first);
+    expect(JSON.stringify([envelope, command, state])).toBe(before);
+    expect(Object.isFrozen(envelope) || Object.isFrozen(command) || Object.isFrozen(state)).toBe(false);
+  });
+});
