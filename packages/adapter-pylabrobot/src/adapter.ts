@@ -525,13 +525,16 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       client.on("crash", () => {
         if (client !== this.sidecar) return;
         this.initialized = false;
+        // Evidence only when a job is recording, and bound to it: with none, the failure names
+        // no job, so it is not forwarded (steward #5413). The run in flight fails on its own.
+        if (this.currentJobId === null) return;
         this.forwardEvent({
           type: "execution_failed",
           timestamp: new Date().toISOString(),
           source: this.source,
           payload: {
             reason: "sidecar crash; pending RPC invalidated",
-            jobId: this.currentJobId ?? undefined,
+            jobId: this.currentJobId,
           },
         });
       });

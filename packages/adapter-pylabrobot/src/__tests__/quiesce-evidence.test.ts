@@ -217,11 +217,13 @@ describe("astra pack 186 HIGH: the sidecar's stopRecording answer is the barrier
     expect(events.map((e) => e.type)).toEqual(["device_birth", "execution_started", "instrument_result", "execution_failed"]);
   });
 
-  it("(sidecar) when the sidecar is recycled after a job, the old sidecar answers the barrier first", async () => {
+  it("(sidecar) when the sidecar is recycled after a job, the old sidecar answers the barrier first, and its stop is no evidence", async () => {
     const transport = new InMemoryTransport();
     const sidecar = new SidecarClient({ inMemoryTransport: transport });
     const adapter = new PyLabRobotAdapter({ deviceId: "dev-q-recycle", kernelId: "kernel-q", plrBackend: "chatterbox", backendConfig: {}, sidecar, restartAfterJobs: 1 });
     await sidecar.start();
+    const events: AdapterEvidenceEvent[] = [];
+    adapter.onEvidence((e) => events.push(e));
 
     const startP = adapter.execute({ type: "start", payload: { jobId: "j-r" } });
     const methods: string[] = [];
@@ -231,6 +233,8 @@ describe("astra pack 186 HIGH: the sidecar's stopRecording answer is the barrier
     }
     await startP;
     expect(methods).toEqual(["backend.init", "evidence.startRecording", "backend.run", "evidence.stopRecording", "backend.shutdown"]);
+    // Stopping the old sidecar emits its "crash": that is no evidence of the job that succeeded.
+    expect(events.map((e) => e.type), "the job's events").toEqual(["device_birth", "execution_started", "execution_completed"]);
   });
 });
 describe("astra pack 191 HIGH: a barrier that fails proves nothing, so the run fails and the adapter is held until it answers", () => {
