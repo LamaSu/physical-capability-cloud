@@ -808,7 +808,8 @@ describe("per-caller API responses are never stored (astra pack 146b)", () => {
   });
 
   it("[neg] the admin's channel list is private, no-store too", async () => {
-    const res = await call("GET", `/api/operators/${SLUG}/channels`, null, adminHeaders);
+    // An API key AND the admin secret, as production's outer gate requires (the admin secret alone is 401 there).
+    const res = await call("GET", `/api/operators/${SLUG}/channels`, keyB, adminHeaders);
     expect(res.statusCode).toBe(200);
     assertNeverStored(res, "channel list (admin)");
   });

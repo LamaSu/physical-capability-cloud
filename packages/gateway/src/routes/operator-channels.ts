@@ -562,7 +562,12 @@ export async function operatorChannelsRoutes(app: FastifyInstance): Promise<void
     async (req, reply) => {
       const who = adminOrCaller(req, reply);
       if (!who) return reply;
-      return reply.status(200).send({ channels: channelsVisibleTo(req.params.slug, who) });
+      // Per-caller body (own channels; the admin sees all): never stored, so a session switch in one
+      // browser, or an intermediary, cannot replay it to another identity (astra pack 146b).
+      return reply
+        .status(200)
+        .header("cache-control", "private, no-store")
+        .send({ channels: channelsVisibleTo(req.params.slug, who) });
     },
   );
 

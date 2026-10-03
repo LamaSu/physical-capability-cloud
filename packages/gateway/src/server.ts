@@ -254,6 +254,20 @@ export async function createGateway(port = 3200) {
   // making the package's "any 5xx carries report_hint" contract actually true. The
   // status gate is cheap (only 5xx pay the parse cost) and it skips /api/feedback
   // itself. See ai/research/agent-feedback-auto-design.md.
+  // Default cache policy for API responses (astra packs 146 and 146b). Most /api
+  // responses are computed for the CALLER (its own channels, jobs, keys; an admin
+  // view), and a browser or intermediary that stores one can replay it to another
+  // identity after a session switch. So every /api response that sets no
+  // Cache-Control of its own is "private, no-store". A route that is deliberately
+  // cacheable sets its own header, which this never overrides.
+  app.addHook("onSend", async (request, reply, payload) => {
+    const path = request.url;
+    if ((path === "/api" || path.startsWith("/api/") || path.startsWith("/api?")) && !reply.hasHeader("cache-control")) {
+      reply.header("cache-control", "private, no-store");
+    }
+    return payload;
+  });
+
   app.addHook("onSend", async (request, reply, payload) => {
     if (typeof payload !== "string" || reply.statusCode < 500 || reply.statusCode >= 600) return payload;
     return decorateWithReportHint(payload, {
