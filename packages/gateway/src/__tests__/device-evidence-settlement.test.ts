@@ -295,45 +295,32 @@ describe("verifyDeviceSignedEvidence — registered-signer → Ed25519 verify (r
     expect(result).toMatchObject({ ok: true });
   });
 
-  it("NEGATIVE (adk #4322, rule 5): a session bundle is checked against the job being SETTLED, not the job it was signed for", async () => {
-    // /complete builds the slot with contractId = the route's jobId (paid-job-flow.ts), so a
-    // bundle whose delegation names only job A cannot anchor job B.
+  it("NEGATIVE (adk #4322, rule 5): the session delegation is checked against the job being SETTLED", async () => {
+    // Under LO-EV-9 (#341) a bundle signed for job A and presented for job B already fails the subject
+    // binding (see "a real kernel-sdk bundle opens to its own events and anchors; for another job it does
+    // not" below). This test isolates rule 5 itself: the events ARE bound to job B, the job being settled,
+    // but the session key's delegation names only job A, so the scope check refuses it.
     const principal = nacl.sign.keyPair();
-    const handler = createKernelHandler({
-      manifest: {
-        manifestVersion: "1.0.0",
-        kernelId: "kernel-delegated-4322",
-        name: "Delegated Kernel",
-        description: "test",
-        builder: { agentId: "agent:test" },
-        capabilityType: "test.transform",
-        workflowSteps: [],
-        pricing: { currency: "USDC", baseUSD: 0 },
-        maxAssuranceTier: 0,
-        endpointURL: "https://example.test/run",
-        sessionKeyPolicy: { maxTTLSeconds: 300, allowedActions: ["evidence_submit"] },
-        status: "pending",
-      } as any,
-      principalKey: {
-        agentId: "eip155:1:0x0000000000000000000000000000000000000001",
-        walletAddress: "0x0000000000000000000000000000000000000001",
-        publicKey: principal.publicKey,
-      },
-      principalPrivateKey: principal.secretKey,
-      execute: async () => ({ ok: true }),
-    });
-    const { evidenceBundle } = await handler({ jobId: "job-A-4322", input: { value: 1 } });
-    const registeredSigner = { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` };
+    const session = nacl.sign.keyPair();
+    const now = Math.floor(Date.now() / 1000);
+    const body = {
+      sessionId: "session-4322-rule5",
+      parentAgentId: "eip155:1:0x0000000000000000000000000000000000000001",
+      publicKey: session.publicKey,
+      issuedAt: now,
+      expiresAt: now + 300,
+      scope: { allowedActions: ["evidence_submit"], contractIds: ["job-A-4322"], maxSignatures: 10 },
+    };
+    const auth: SessionKeyAuthorization = {
+      ...body,
+      publicKey: toHex(session.publicKey),
+      parentSignature: toHex(nacl.sign.detached(sessionKeyDelegationPreimage(body), principal.secretKey)),
+    };
+    const b = await boundDeviceEvidence({ jobId: "job-B-4322", kernelId: "kernel-delegated-4322", keyPair: session });
     const decision = await resolveSettlementEvidence({
-      deviceBundle: {
-        bundleHash: evidenceBundle.bundleHash,
-        kernelSignature: evidenceBundle.kernelSignature,
-        assuranceTier: 0,
-        sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization,
-        contractId: "job-B-4322",
-      },
-      registeredSigner,
-      fallback: { bundleHash: `sha256:${"aa".repeat(32)}`, kernelSignature: { signer: "gateway", algorithm: "sha256", value: "x" }, assuranceTier: 0 },
+      deviceBundle: { ...b.slot(), sessionKeyAuthorization: auth },
+      registeredSigner: ed25519Signer(principal.publicKey),
+      fallback: GATEWAY_FALLBACK,
       gateOpen: true,
     });
     expect(decision).toMatchObject({ source: "gateway-fallback", reason: "contract_not_allowed" });
