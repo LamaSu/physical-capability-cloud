@@ -112,6 +112,18 @@ interface Fixture {
 const fixture = (name: string, camera: EmittedEvent): Fixture => ({ name, events: stored([...TIER1, camera]) });
 
 /**
+ * A valid capture whose STORED event then gets `payload` as an accessor (stored() copies each event
+ * with a spread, which would read the getter and turn it into data).
+ */
+function accessorPayloadFixture(): Fixture {
+  const events = stored([...TIER1, lose1()]);
+  const camera = events[TIER1.length]! as unknown as Record<string, unknown>;
+  const payload = camera.payload;
+  accessor(camera, "payload", payload);
+  return { name: "an accessor event.payload", events };
+}
+
+/**
  * Valid camera events (a replacement that forces a refusal shows here) and invalid ones (one that
  * forces an acceptance, or another reason, shows here). Built once, before any replacement.
  */
@@ -159,14 +171,15 @@ const FIXTURES: readonly Fixture[] = [
   fixture("a device with a blank identity", edited((p) => (p.device = { path: "/dev/video0", identity: " " }))),
   fixture("a source that is not a camera", edited((_p, e) => (e.source = { ...e.source, deviceType: "controller" }))),
   fixture("a class-instance payload", edited((p, e) => (e.payload = new NotPlain(p) as unknown as Record<string, unknown>))),
+  accessorPayloadFixture(),
 ];
 
 type Answer = { met: boolean; missing: string[] } | { threw: unknown };
 
 /** The answers in a form that compares by value; called only after every replacement is restored. */
-function described(answers: readonly Answer[]): Array<{ fixture: string; answer: unknown }> {
+function described(fixtures: readonly Fixture[], answers: readonly Answer[]): Array<{ fixture: string; answer: unknown }> {
   return answers.map((answer, i) => ({
-    fixture: FIXTURES[i]!.name,
+    fixture: fixtures[i]!.name,
     answer: "threw" in answer ? `threw: ${String((answer.threw as Error)?.message)}` : answer,
   }));
 }
@@ -175,9 +188,9 @@ function described(answers: readonly Answer[]): Array<{ fixture: string; answer:
 const EMITTER = new EvidenceEmitter(KERNEL_ID);
 
 /** Every fixture's tier-2 answer, in an indexed loop that writes only to elements `out` already owns. */
-function answerAll(out: Answer[]): void {
-  for (let i = 0; i < FIXTURES.length; i++) {
-    const f = FIXTURES[i]!;
+function answerAll(fixtures: readonly Fixture[], out: Answer[]): void {
+  for (let i = 0; i < fixtures.length; i++) {
+    const f = fixtures[i]!;
     try {
       out[i] = EMITTER.checkTierRequirements(f.events, 2, undefined, OPTIONS);
     } catch (err) {
@@ -186,11 +199,14 @@ function answerAll(out: Answer[]): void {
   }
 }
 
-const CLEAN = (() => {
-  const out: Answer[] = FIXTURES.map(() => ({ threw: "not run" }));
-  answerAll(out);
-  return described(out);
-})();
+/** The untouched answers for `fixtures`, before any replacement. */
+function cleanAnswers(fixtures: readonly Fixture[]): Array<{ fixture: string; answer: unknown }> {
+  const out: Answer[] = fixtures.map(() => ({ threw: "not run" }));
+  answerAll(fixtures, out);
+  return described(fixtures, out);
+}
+
+const CLEAN = cleanAnswers(FIXTURES);
 
 /** Calls of whatever a row replaced; reset before each row. */
 let calls = 0;
@@ -281,9 +297,8 @@ const ROWS: Row[] = [
   replaced("Function.prototype.call", Function.prototype, "call", () => (calls++, undefined)),
   replaced("Object.create", Object, "create", () => (calls++, {})),
   replaced("Object.defineProperty", Object, "defineProperty", (o: unknown) => (calls++, o)),
-  // Data written on a prototype: no call to count; the answers must not move. (Not `simulated` or
-  // `mock` on Object.prototype: the emitter's own isFabricated call reads the caller's events, a
-  // separate path from kernelPullCaptureIssue, which spec's intrinsics test covers for both.)
+  // Data written on a prototype: no call to count; the answers must not move. (`simulated` and
+  // `mock` on Object.prototype have their own describe below.)
   written("Object.prototype.value", Object.prototype, "value", "CC0"),
   written("Array.prototype[0]", Array.prototype, 0, "forged"),
   {
@@ -303,18 +318,47 @@ const ROWS: Row[] = [
   },
 ];
 
-/** The answers with `row` applied, and the calls of what it replaced; restored before returning. */
-function hostileRun(row: Row): { answers: Array<{ fixture: string; answer: unknown }>; calls: number } {
-  const out: Answer[] = FIXTURES.map(() => ({ threw: "not run" }));
+/** The answers for `fixtures` with `row` applied, and the calls of what it replaced; restored before returning. */
+function hostileRun(row: Row, fixtures: readonly Fixture[] = FIXTURES): { answers: Array<{ fixture: string; answer: unknown }>; calls: number } {
+  const out: Answer[] = fixtures.map(() => ({ threw: "not run" }));
   calls = 0;
   const restore = row.apply();
   try {
-    answerAll(out);
+    answerAll(fixtures, out);
   } finally {
     restore();
   }
-  return { answers: described(out), calls };
+  return { answers: described(fixtures, out), calls };
 }
+
+/** A copy of `o` on a null prototype: a [[Get]] on it reads only its own properties. */
+function nullPrototype<T extends object>(o: T): T {
+  return Object.assign(Object.create(null) as T, o);
+}
+
+/**
+ * For Object.prototype.simulated and .mock written after load. The camera check hands isFabricated
+ * null-prototype copies of the capture's source and payload, so neither is read as the capture's
+ * own. The emitter's own isFabricated call, on each event it then counts, is a separate path that
+ * reads through prototypes, so the events it reads here (the Tier 1 events and the valid capture)
+ * carry null-prototype sources and payloads. The refused captures keep ordinary objects: had the
+ * check handed isFabricated the event itself, an inherited `true` would change their reason.
+ */
+const TIER1_NULL_PROTOTYPE: EmittedEvent[] = TIER1.map((e) => ({ ...e, source: nullPrototype(e.source), payload: nullPrototype(e.payload) }));
+const FABRICATION_FIXTURES: readonly Fixture[] = [
+  {
+    name: "a valid capture (null-prototype source and payload)",
+    events: stored([...TIER1_NULL_PROTOTYPE, (() => {
+      const e = lose1();
+      return { ...e, source: nullPrototype(e.source), payload: nullPrototype(e.payload) };
+    })()]),
+  },
+  { name: "an extra key", events: stored([...TIER1_NULL_PROTOTYPE, edited((p) => (p.extra = 1))]) },
+  { name: "a capture for another job", events: stored([...TIER1_NULL_PROTOTYPE, edited((p) => (p.jobId = "job-other"))]) },
+  { name: 'imageHash "invalid"', events: stored([...TIER1_NULL_PROTOTYPE, edited((p) => (p.imageHash = "invalid"))]) },
+  { name: "a missing key", events: stored([...TIER1_NULL_PROTOTYPE, edited((p) => delete p.antiSpoofScore)]) },
+];
+const FABRICATION_CLEAN = cleanAnswers(FABRICATION_FIXTURES);
 
 const GROUP_MISSING = "Missing one of: cv_inspection_result | camera_snapshot";
 
@@ -361,5 +405,23 @@ describe("astra pack 299 HIGH: nothing replaced after load changes the tier-2 an
     const hostile = hostileRun(row);
     expect(hostile.answers).toEqual(CLEAN);
     expect(hostile.calls, "calls of what was replaced").toBe(0);
+  });
+});
+
+describe("astra pack 299: a `simulated` or `mock` written on Object.prototype after load is not read as a capture's own", () => {
+  it("the fixtures: the valid capture meets tier 2, and each refused one names its own reason, not fabrication", () => {
+    expect(FABRICATION_CLEAN[0]!.answer).toEqual({ met: true, missing: [] });
+    for (const c of FABRICATION_CLEAN.slice(1)) {
+      const answer = c.answer as { met: boolean; missing: string[] };
+      expect(answer.met, c.fixture).toBe(false);
+      expect(answer.missing.some((m) => m.includes(": not an LO-SE-1 capture for this job (payload")), c.fixture).toBe(true);
+    }
+  });
+
+  it.each([
+    written("Object.prototype.simulated", Object.prototype, "simulated", true),
+    written("Object.prototype.mock", Object.prototype, "mock", true),
+  ])("$name: every tier-2 answer is the untouched one", (row) => {
+    expect(hostileRun(row, FABRICATION_FIXTURES).answers).toEqual(FABRICATION_CLEAN);
   });
 });
