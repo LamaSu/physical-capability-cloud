@@ -18,8 +18,8 @@ from datetime import datetime
 import click
 
 from . import __version__
-from .config import NodeConfig, generate_config, save_config, load_config
-from .crypto import load_or_create_keys
+from .config import ConfigFileError, NodeConfig, generate_config, save_config, load_config, load_config_data
+from .crypto import KeyFileError, load_or_create_keys
 from .daemon import run_daemon, is_running, read_state
 from .detect import detect_all
 from .discovery import (
@@ -32,7 +32,6 @@ from .register import (
     provision_api_key,
     register_kernel,
     register_devices,
-    announce_capabilities,
     register_signing_key,
 )
 from .log_capture import LogSigningRefused
@@ -150,27 +149,58 @@ def _format_device(dev):
 
 
 
+def _load_node_keys():
+    """The node's key pair, or a plain message and exit 1 if its key file is unusable."""
+    try:
+        return load_or_create_keys()
+    except KeyFileError as exc:
+        click.echo(f"Cannot use this node's key file: {exc}", err=True)
+        sys.exit(1)
+
+
 #: The public PCC gateway, the default target of `pcc-node start`.
 PUBLIC_GATEWAY = "https://capability.network"
 
 
-def _config_file_base(config_file):
-    """The gateway a config file names (written by `pcc-node setup` or a
-    previous start), or None."""
+def _existing_config_data(config_file):
+    """The existing config's checked JSON object, or None if there is none.
+
+    The config names the gateway that receives the operator's key, so it is
+    read once, through load_config_data's checks, before anything else. Only a
+    missing file means "create one": any other failure (a refusal, a symlink,
+    malformed JSON) stops the command before it registers or saves anything
+    (verdict 105c, finding 6).
+    """
+    path = os.path.abspath(config_file)
     try:
-        with open(os.path.abspath(config_file)) as f:
-            base = json.load(f).get("pcc_base")
-    except (OSError, ValueError, AttributeError):
+        return load_config_data(path)
+    except FileNotFoundError:
         return None
-    return base.rstrip("/") if isinstance(base, str) and base.strip() else None
+    except ConfigFileError as e:
+        click.echo(f"Cannot use the config file: {e}", err=True)
+    except Exception as e:
+        click.echo(f"Cannot read the config file {path} ({type(e).__name__}): fix it or move it aside.", err=True)
+    sys.exit(1)
 
 
-def _resolve_target(pcc_base, config_file):
+def _optional_config(config_file):
+    """The config, for a command that can run without one; a refusal is said, not hidden."""
+    try:
+        return load_config(os.path.abspath(config_file))
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        reason = e if isinstance(e, ConfigFileError) else type(e).__name__
+        click.echo(f"Not using the config file: {reason}", err=True)
+        return None
+
+
+def _resolve_target(pcc_base, config_file, config_data=None):
     """The gateway `start` will use, and where that choice came from.
 
-    --pcc-base, then PCC_BASE, then the config file's pcc_base, then the public
-    gateway. Returns (base, source); source is "flag", "env", "default", or
-    "config:<path>".
+    --pcc-base, then PCC_BASE, then the config file's pcc_base (from
+    *config_data*, the checked file), then the public gateway. Returns
+    (base, source); source is "flag", "env", "default", or "config:<path>".
     """
     source = None
     try:
@@ -181,15 +211,15 @@ def _resolve_target(pcc_base, config_file):
         return pcc_base.rstrip("/"), "flag"
     if source == click.core.ParameterSource.ENVIRONMENT:
         return pcc_base.rstrip("/"), "env"
-    from_file = _config_file_base(config_file)
-    if from_file:
-        return from_file, f"config:{os.path.abspath(config_file)}"
+    base = (config_data or {}).get("pcc_base")
+    if isinstance(base, str) and base.strip():
+        return base.rstrip("/"), f"config:{os.path.abspath(config_file)}"
     return PUBLIC_GATEWAY, "default"
 
 
 def _target_banner(base, source):
     """The first lines `pcc-node start` prints (N57): the gateway this node will
-    register with and take jobs from, and what starting creates there."""
+    register with (it takes no jobs), and what starting creates there."""
     if base == PUBLIC_GATEWAY:
         where = "public PCC network, test-net payments"
     elif source == "flag":
@@ -305,10 +335,12 @@ def main(ctx, verbose):
 )
 def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     """Detect hardware, register on PCC, and start the node daemon."""
-    log = logging.getLogger("pcc-node")
+    # The existing config, read once through the checked loader: it names the
+    # gateway, so an unusable one stops the node before anything else.
+    config_data = _existing_config_data(config_file)
 
     # N57: say which gateway this node will talk to before doing anything.
-    target, target_source = _resolve_target(pcc_base, config_file)
+    target, target_source = _resolve_target(pcc_base, config_file, config_data)
     for line in _target_banner(target, target_source):
         click.echo(line)
 
@@ -322,14 +354,11 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     if not _confirm_public_target(target, target_source, yes):
         sys.exit(1)
 
-    # Try loading existing config
+    # The existing config, if any (already checked above).
     config = None
-    if os.path.exists(os.path.abspath(config_file)):
-        try:
-            config = load_config(config_file)
-            click.echo(f"Loaded config from {os.path.abspath(config_file)}")
-        except Exception as e:
-            log.warning(f"Failed to load config: {e}")
+    if config_data is not None:
+        config = NodeConfig.from_dict(config_data)
+        click.echo(f"Loaded config from {os.path.abspath(config_file)}")
 
     # Network discovery (optional)
     network_devices = []
@@ -383,7 +412,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
 
     # Load or create node keys
     click.echo("Loading node keys...")
-    public_key, secret_key = load_or_create_keys()
+    public_key, secret_key = _load_node_keys()
     config.public_key = public_key
 
     click.echo(f"  Kernel ID: {config.kernel_id}")
@@ -427,15 +456,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     except LogSigningRefused as exc:
         click.echo(f"  Skipping signing-key registration (dev key): {exc}")
 
-    # Announce capabilities
-    if devices:
-        announce_capabilities(
-            config.pcc_base,
-            config.pcc_api_key,
-            config.kernel_id,
-            devices,
-            secret_key=secret_key,
-        )
+    # No capability announcement: this node takes no jobs (verdict 68d, finding 3).
 
     # First-run diagnostics banner (no-op if already acknowledged)
     _maybe_prompt_diagnostics(config)
@@ -446,7 +467,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
 
     # Start daemon
     click.echo("")
-    click.echo("Node running. Accepting jobs.")
+    click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
     click.echo(f"  Dashboard: {config.pcc_base}/operator")
     click.echo("  Press Ctrl+C to stop.")
     click.echo("")
@@ -506,12 +527,11 @@ def discover_cmd(subnet, register, pcc_base, api_key):
             )
             # Register as a single-device kernel
             from .config import generate_config, save_config
-            from .crypto import load_or_create_keys
             node_config = generate_config([cfg])
             node_config.pcc_base = pcc_base
             if api_key:
                 node_config.pcc_api_key = api_key
-            pub_key, _ = load_or_create_keys()
+            pub_key, _ = _load_node_keys()
             node_config.public_key = pub_key
             register_kernel(pcc_base, api_key, node_config)
             registered += 1
@@ -733,7 +753,7 @@ def ui_serve(port, ui_dir):
 @click.argument("template")
 @click.option("--port", default=3200, help="Server port (default: 3200)")
 def ui_open(template, port):
-    """Install and open a built-in template in the browser."""
+    """Install a built-in template and print the URL to open it at."""
     from .ui_gen import install_template, list_templates
 
     available = list_templates()
@@ -746,9 +766,7 @@ def ui_open(template, port):
         filename = install_template(template)
         url = f"http://localhost:{port}/{filename}"
         click.echo(f"Installed: {filename}")
-        click.echo(f"URL: {url}")
-        import webbrowser
-        webbrowser.open(url)
+        click.echo(f"Open it in your browser: {url}")
     except FileNotFoundError as e:
         click.echo(f"Error: {e}")
 
@@ -847,6 +865,9 @@ def feedback_cmd(config_file, mode, interval):
                 click.echo("  Trigger: after 5+ consecutive errors")
         except FileNotFoundError:
             click.echo("No config file found. Run 'pcc-node start' first.")
+        except ConfigFileError as e:
+            click.echo(f"Cannot use the config file: {e}", err=True)
+            sys.exit(1)
         return
 
     try:
@@ -855,6 +876,9 @@ def feedback_cmd(config_file, mode, interval):
         click.echo(f"Config not found: {config_path}")
         click.echo("Run 'pcc-node start' first to generate a config.")
         return
+    except ConfigFileError as e:
+        click.echo(f"Cannot use the config file: {e}", err=True)
+        sys.exit(1)
 
     if mode == "on":
         mode = "errors"
@@ -1016,12 +1040,8 @@ def logs_cmd(ctx, config_file, pcc_base, api_key, max_lines, no_device_health, l
 
     # Try to get kernel_id and api_key from config if not provided
     if not api_key:
-        try:
-            from .config import load_config as _lc
-            cfg = _lc(os.path.abspath(config_file))
-            api_key = cfg.pcc_api_key or ""
-        except Exception:
-            pass
+        cfg = _optional_config(config_file)
+        api_key = (cfg.pcc_api_key or "") if cfg is not None else ""
 
     kernel_id = bundle_data.get("config", {}).get("kernel_id", "")
 
@@ -1142,16 +1162,14 @@ def support_cmd(message, config_file, pcc_base, api_key, attach_logs, check):
     kernel_name = ""
 
     # Load config for kernel info and API key
-    try:
-        cfg = load_config(config_path)
+    cfg = _optional_config(config_path)
+    if cfg is not None:
         kernel_id = cfg.kernel_id
         kernel_name = cfg.kernel_name
         if not api_key:
             api_key = cfg.pcc_api_key or ""
         if not pcc_base or pcc_base == "https://capability.network":
             pcc_base = cfg.pcc_base or pcc_base
-    except Exception:
-        pass
 
     if check:
         if not kernel_id:
