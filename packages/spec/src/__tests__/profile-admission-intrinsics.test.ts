@@ -185,6 +185,18 @@ describe("the patch harness: nothing changed after load changes a decision, a di
     // identical shows the delegation preimage and the window use the ones captured at load (astra pack 281).
     "patch: JSON.stringify",
     "patch: Date.parse",
+    // A replaced typed-array length once made a keyless delegation preimage verify, an admit (astra pack 289).
+    "patch: %TypedArray%.prototype length, byteLength and byteOffset",
+    // Every other scenario added with the signature and registry rounds is identical-strict too (DECISIONS 01:30):
+    // admission uses none of these, so not even a refusal may change.
+    "patch: node:crypto verify answers true",
+    "patch: crypto.subtle.verify answers true",
+    "patch: crypto.subtle.importKey refuses",
+    "patch: parseInt",
+    "patch: Math.floor",
+    "patch: String.prototype.toLowerCase",
+    // A hole or an index past the end served by a prototype would change a key, a digest or a level (astra pack 291).
+    "patch: Array.prototype[0..63] and String.prototype[0..255] written",
   ]);
 
   for (const id of SCENARIOS) {

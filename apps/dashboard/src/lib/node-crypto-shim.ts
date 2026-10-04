@@ -152,5 +152,14 @@ export function createHash(algo: string): Hash {
   return new Hash(algo);
 }
 
+/**
+ * `verify`, which @pcc/spec's profile admission captures at load for Ed25519 signatures. A browser
+ * has no synchronous Ed25519 check, and the dashboard bundles admission but never admits a bundle.
+ * So this refuses if anything calls it: a signature is never taken as verified here.
+ */
+export function verify(): never {
+  throw new Error("node:crypto verify is not available in the browser: evidence admission runs server-side");
+}
+
 // Some Node tooling expects a default export with `createHash` on it.
-export default { createHash };
+export default { createHash, verify };
