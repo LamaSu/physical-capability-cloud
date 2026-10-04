@@ -62,6 +62,7 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { geohashCenter, geohashEncode, LOCATION_CELL_PRECISION } from "../facades/populators/public-location.js";
 import { signWithPrivateKeyHex } from "../auth/ed25519.js";
 import { setCaptureChainClientForTests, type CaptureChainClient } from "../routes/capture.js";
+import { _setSmokeTestFetch } from "../routes/kernel-marketplace.js";
 
 const ROUTES = vi.hoisted(() => [] as Array<{ method: string | string[]; url: string; websocket?: boolean; schema?: unknown }>);
 vi.mock("fastify", async (orig) => {
@@ -319,6 +320,14 @@ beforeAll(async () => {
     },
   };
   setCaptureChainClientForTests(fakeChainClient);
+  // round-3 re-triage: kernel-marketplace.ts's runSmokeTest() does a REAL fetch(manifest.
+  // endpointURL, ...) to verify a registered kernel (kernel-marketplace.ts:211-220) — the
+  // route ships its OWN test-only override for exactly this ("Dependency-injectable fetch so
+  // tests can mock the smoke-test network call without monkey-patching globalThis",
+  // kernel-marketplace.ts:33-39). Installed here, before the gateway import, so
+  // /api/kernels/:kernelId/verify never takes the real-fetch path regardless of which
+  // endpointURL a fixture supplies.
+  _setSmokeTestFetch((async () => ({ ok: true, status: 200 }) as Response) as typeof fetch);
   const { createGateway } = await import("../server.js");
   app = (await createGateway(0)).app as unknown as FastifyInstance;
   await app.ready();
@@ -345,6 +354,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app?.close();
   setCaptureChainClientForTests(null);
+  _setSmokeTestFetch(null);
   if (dataDir) rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -1544,6 +1554,165 @@ Object.assign(FIXTURE_POST_BODIES, {
     });
     return { status: r.status, body: r.body };
   }) as DynamicFixture,
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // round 3 (cross-family review of #533, the one OPEN MEDIUM): every entry below replaces a
+  // round-2 NOT_REACHED reason that deferred the actual re-check ("not chased", "not
+  // attempted", "not independently re-verified", ...) or — for /api/capture/challenge — stated
+  // a blocker that was already false (the fake chain client was installed, just not used by
+  // this route's own reason). Each was decided by reading the route AND its prerequisites,
+  // same standard as every other dynamic fixture in this file.
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+
+  // ── capture/challenge: getChainClient() (capture.ts:223-237) already returns the fake chain
+  // client installed in beforeAll (setCaptureChainClientForTests) — no real RPC call on this
+  // path at all. getChallengeService() (verifier-factory.ts:115-120) builds a REAL
+  // ChallengeService, but it's a pure in-memory nonce issuer; the only network-shaped call
+  // (chain.getLatestBlock()) is already satisfied by the fake. requireAuth passes with any
+  // key. capture.ts:437-450. ─────────────────────────────────────────────────────────────────
+  "/api/capture/challenge": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/capture/challenge", {
+      jobId: "n68-dynfix-capture-job", declaredClass: "CC0",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── compose/:id/execute: executeComposition()'s effective step runner (compose.ts:722-739)
+  // is binding.runStep (none passed by this route) → PCC_COMPOSE_EXECUTE_REAL==="true" (unset
+  // here) → the MODULE-LEVEL DEFAULT, which is NOOP_RUNNER (compose.ts:617,625: "the scaffold
+  // assumes every step succeeds" — a pure Promise.resolve(), no job submission, no money, no
+  // network) UNLESS a test or PCC_COMPOSE_EXECUTE_REAL explicitly rebinds it, which this sweep
+  // never does. /api/compose alone isn't enough to reach a "proposed" composition though — by
+  // default it draws candidates from an in-memory pool that starts EMPTY (production uses
+  // PCC_COMPOSE_USE_FACADE=true, unset here), so an outcomeType with no registered candidate
+  // returns status "no_path_found" (confirmed empirically) and :id/execute then 409s
+  // "not_executable". /api/compose/_dev/register-candidate (already fixture'd for its own url)
+  // seeds a matching candidate for a FRESH capabilityType first. ──────────────────────────────
+  "/api/compose/:id/execute": (async (ctx: FixtureCtx) => {
+    const capType = `n68-dynfix-compose-${ctx.ip()}`;
+    await fixtureCall(ctx, "POST", "/api/compose/_dev/register-candidate", {
+      capabilityId: `cap-n68-dynfix-compose-${ctx.ip()}`, kernelId: CANARY.kernelId,
+      operatorAddress: "0xn68dynfixcompose", capabilityType: capType,
+      estimatedPriceUSD: 10, estimatedDurationMs: 60000, assuranceTier: 0,
+    });
+    const created = await fixtureCall(ctx, "POST", "/api/compose", {
+      outcomeType: capType, budgetUSD: 100, minAssuranceTier: 0,
+    });
+    const compositionId = String(created.json.compositionId ?? "");
+    if (!compositionId) return { status: -3, body: "dynamic fixture setup failed: no compositionId" };
+    const r = await fixtureCall(ctx, "POST", `/api/compose/${encodeURIComponent(compositionId)}/execute`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── compositions/:compositionId/disputes: recordStepOutcome() (reputation.ts:593) does NOT
+  // validate that compositionId matches a real /api/compose row — it inserts a step-outcome
+  // keyed by WHATEVER compositionId string the caller supplies (reputation.ts:577-603). A
+  // self-chosen fresh id removes any dependency on the (separately fixture'd, fake-id) step-
+  // outcome entry above: create our OWN step-outcome, then dispute that exact step. ──────────
+  "/api/compositions/:compositionId/disputes": (async (ctx: FixtureCtx) => {
+    const compositionId = `n68-dynfix-comp-${ctx.ip()}`;
+    await fixtureCall(ctx, "POST", `/api/compositions/${encodeURIComponent(compositionId)}/step-outcome`, {
+      compositionId, stepIndex: 0, capabilityId: "cap-n68-dynfix", agentId: "n68-dynfix-agent",
+      status: "success", startedAt: new Date().toISOString(),
+    });
+    const r = await fixtureCall(ctx, "POST", `/api/compositions/${encodeURIComponent(compositionId)}/disputes`, {
+      disputerId: "n68-dynfix-disputer", stepIndex: 0, reason: "timeout",
+      description: "N68 dynamic fixture dispute",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── kernels/:kernelId/verify: isAdminAuthorized()'s dev-mode bypass (no PCC_ADMIN_KEY, NODE_
+  // ENV!==production, both true here) clears auth; runSmokeTest() (kernel-marketplace.ts:211-
+  // 220) now resolves through _setSmokeTestFetch's fake {ok:true} response installed in
+  // beforeAll — no real fetch to manifest.endpointURL on this path at all. ───────────────────
+  "/api/kernels/:kernelId/verify": (async (ctx: FixtureCtx) => {
+    const kernelId = `n68-dynfix-kernel-verify-${ctx.ip()}-${Date.now()}`;
+    await fixtureCall(ctx, "POST", "/api/kernels/register", {
+      manifestVersion: "1.0.0", kernelId, name: "N68 dynamic fixture kernel", description: "test",
+      builder: { agentId: "n68-dynfix-builder" }, capabilityType: "3d-printing",
+      workflowSteps: [{ step: "print" }], pricing: { currency: "USDC", baseUSD: 1 },
+      maxAssuranceTier: 1, endpointURL: "https://example.invalid/webhook",
+      sessionKeyPolicy: { maxTTLSeconds: 3600, allowedActions: ["evidence_submit"] },
+    });
+    const r = await fixtureCall(ctx, "POST", `/api/kernels/${encodeURIComponent(kernelId)}/verify`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── operators/:id/rate: repos.registrations.findById(operatorId) (operators-public.ts:171)
+  // needs a real onboard-registrations row — /api/onboard/register (onboard.ts:62-98) takes
+  // ANY body (every field optional, defaulted) and always 200s with a real `reg-<ts>` id. The
+  // buyer-identity check only requires SOME authenticated identity (any truthy operatorId/
+  // apiKeyId/userId/walletAddress); the TODO at operators-public.ts:196-200 confirms no real
+  // buyer-of-jobId check exists yet, so a self-chosen jobId is fine. ──────────────────────────
+  "/api/operators/:id/rate": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/onboard/register", {
+      name: "N68 Dynamic Fixture Machine", category: "custom",
+    });
+    const regId = String((created.json.registration as Record<string, unknown> | undefined)?.id ?? "");
+    if (!regId) return { status: -3, body: "dynamic fixture setup failed: no registration id" };
+    const r = await fixtureCall(ctx, "POST", `/api/operators/${encodeURIComponent(regId)}/rate`, {
+      rating: 5, jobId: "n68-dynfix-job", comment: "N68 dynamic fixture rating",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── print-and-mail/:jobId/handoff: print-and-mail.ts's own doc comment (print-and-mail.ts:
+  // 1-20) says this route "READS the claim state the courier-jobs store ALREADY holds" — the
+  // SAME getCourierJobsStore() the /api/courier-jobs/:id/claim dynamic fixture above already
+  // uses (round-2's reason calling this "a SEPARATE store" was simply wrong, not just
+  // deferred). getCarrierBridge() is unwired by default (print-and-mail.ts:172-188), so the
+  // commitment-match branch is skipped entirely — any commitmentHash/trackingCode is accepted
+  // as caller-attested. Chain: create the courier job, claim it as the SAME driverAgent, then
+  // hand off as that driver. ──────────────────────────────────────────────────────────────────
+  "/api/print-and-mail/:jobId/handoff": (async (ctx: FixtureCtx) => {
+    const driverAgent = "n68-dynfix-driver";
+    const created = await fixtureCall(ctx, "POST", "/api/courier-jobs", {
+      deliveryId: `n68-dynfix-del-handoff-${ctx.ip()}`, pickup: { address: "123 Test St" }, dropoff: { address: "456 Test Ave" },
+    });
+    const jobId = String(created.json.id ?? "");
+    if (!jobId) return { status: -3, body: "dynamic fixture setup failed: no courier job id" };
+    const claimed = await fixtureCall(ctx, "POST", `/api/courier-jobs/${encodeURIComponent(jobId)}/claim`, { driverAgent });
+    if (claimed.status < 200 || claimed.status >= 300) return { status: claimed.status, body: claimed.body };
+    const r = await fixtureCall(ctx, "POST", `/api/print-and-mail/${encodeURIComponent(jobId)}/handoff`, {
+      driverAgent, kernelId: CANARY.kernelId, commitmentHash: "sha256:n68dynfix", trackingCode: "N68DYNFIXTRACK",
+      printJobId: "n68-dynfix-printjob", photo: { imageHash: "sha256:n68dynfixphoto", capturedAt: new Date().toISOString() },
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── relay/:kernelId/tool-call + relay/:kernelId/tool-result: resolveDeviceType() (device-
+  // relay.ts:50-68) falls back to "generic" when a kernel has no registered devices —
+  // generic.tools.json's safeTools list (packages/spec/src/tool-manifests/generic.tools.json)
+  // includes "health", so isToolSafe("generic","health") is true and no execution scope is
+  // required at all (device-relay.ts:290-306) — CANARY.kernelId works fine for tool-call
+  // alone. tool-result is DIFFERENT: it 403s "tool_result_not_yours" for any caller who isn't
+  // the kernel's operatorAddress or the owning scope (device-relay.ts:536, confirmed
+  // empirically — CANARY.kernelId is owned by this file's OWNER identity, not the stranger
+  // pass) — so tool-result registers its OWN fresh kernel AS the current pass's identity
+  // first (POST /api/kernels sets operatorAddress from the authenticated caller), making the
+  // SAME caller naturally the operator for the tool-call + tool-result pair that follows. ────
+  "/api/relay/:kernelId/tool-call": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(CANARY.kernelId)}/tool-call`, {
+      toolName: "health",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/relay/:kernelId/tool-result": (async (ctx: FixtureCtx) => {
+    const kernelId = `n68-dynfix-relay-${ctx.ip()}`;
+    await fixtureCall(ctx, "POST", "/api/kernels", {
+      id: kernelId, name: "N68 dynamic fixture relay kernel", maxAssuranceTier: 1,
+    });
+    const created = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/tool-call`, {
+      toolName: "health",
+    });
+    const callId = String(created.json.id ?? "");
+    if (!callId) return { status: -3, body: "dynamic fixture setup failed: no relay tool-call id" };
+    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/tool-result`, {
+      callId, result: { ok: true },
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
 });
 
 /** A handful of FIXTURE_POST_BODIES routes also need a non-default header to reach 2xx — the
@@ -1582,6 +1751,18 @@ const POST_EXCLUSIONS: PostExclusion[] = [
   {
     test: (u) => u === "/api/settlement/submit" || u === "/api/settlement/release" || u === "/api/settlement/flush",
     reason: "mutates money — queues, releases, or flushes real settlement/milestone operations (settlement.ts)",
+  },
+  {
+    test: (u) => u === "/api/jobs/:jobId/resume-settlement",
+    reason:
+      "mutates money — round-3 re-check (the prior 404-only reason deferred this, round 2): " +
+      "with a real job in evidence_submitted status, this route re-drives the SAME on-chain " +
+      "settlement path as /api/settlement/* — driveSettlement() funds/submits-evidence/RELEASES " +
+      "a milestone and the subsequent EAS attestation mint (paid-job-flow.ts:1629-1676, gated by " +
+      "escrowWriteEnabled() but excluded on principle, same as the other settlement/escrow " +
+      "entries above). Chaining a job into evidence_submitted purely to reach this route would " +
+      "also require simulating most of the paid-job-flow lifecycle, for a route whose own doc " +
+      "comment (paid-job-flow.ts:1518-1537) describes it as a funds-recovery operation.",
   },
   {
     test: (u) => u === "/api/pgtr/relay",
@@ -1657,14 +1838,11 @@ const NOT_REACHED: Record<string, { reason: string }> = {
   "/api/automation-status/:fromNodeId/:toNodeId/episode": { reason: "404 not_found, same hardcoded-mock-id reason, per protocols.ts:663-669 (re-checked round 2, still holds)" },
   "/api/batches/:batchId/slots": { reason: "round 2 re-check: even the REAL batch id (not a kernelId/capId/operatorId guess) doesn't help — services.ts:130-156 seeds exactly ONE BatchTracker batch at module load, then immediately seals() + start()s it before this test ever runs; addSample() 400s \"Cannot add samples to batch in running state\" regardless of :batchId. No reachable route creates a SECOND, still-assembling batch (batches.ts has no POST that calls batchTracker.createBatch) — the sibling /api/batches/shared/:batchId/claim (a wholly separate in-memory Map) IS now reached via a dynamic fixture; this one remains structurally dead, batches.ts:50-63, kernel/batch-tracker.ts:24-39,65-70" },
   "/api/capture/anchor": { reason: "selectVerdict(verdictId) 404s for any crafted UUID; rows only exist after a successful /api/capture/upload (itself unreachable below) — a dead chain, not an id-guessing problem; re-checked round 2, still holds, capture.ts:682-688" },
-  "/api/capture/challenge": { reason: "Schema passes with jobId+declaredClass, but handler then makes a REAL chain RPC call (sepolia.base.org) with no test override in this sweep — now additionally blocked outright by this file's own no-network guard (round-2 fix 4) if ever reached; re-checked round 2, still holds, capture.ts:223-235,456-458" },
   "/api/capture/sim": { reason: "Requires spawning a real python3 pcc_genesis_runner.py subprocess; not reliably available in this harness regardless of body, capture-sim.ts:163-226 (re-checked round 2 — /api/capture/3d-stream below is the analogous case; same category, same conclusion)" },
   "/api/capture/upload": { reason: "Requires a correctly-hashed CaptureManifest passing CaptureVerifier G1..G6 (@pcc/verifier); too complex to confidently craft from validation alone, capture.ts:582-596 (re-checked round 2, still holds)" },
   "/api/capture/3d-stream": { reason: "astra round-2 finding 1(c): this url matched the old broad SKIP regex on the substring \"stream\" in its NAME — it is NOT an SSE/stream route at all (a single JSON request/response, capture-3d.ts), so it is swept normally now (not in POST_STREAM_ROUTES). requireAuth passes with any key, and a minimal valid videoBytesBase64 clears body validation, but the handler then calls runLingBotInference (capture-3d.ts:146-150), which — absent PCC_LINGBOT_STUB — spawns a real python3 LingBot-Map process; same category as /api/capture/sim (not reliably available in this harness) and not a kernel/capability location surface (point maps/poses from the CALLER's own uploaded video, never operator data)" },
   "/api/carrier/shipments": { reason: "getJobFacade().getById(jobId) 404s for any synthetic jobId; even a real job would 403 since canary kernel's operator is the OWNER not stranger — an ownership gate, not an id-guessing problem this sweep's ANONYMOUS/STRANGER model is meant to defeat; re-checked round 2, still holds, carrier.ts:625-649" },
   "/api/carrier/webhook/easypost": { reason: "503 — EASYPOST_WEBHOOK_SECRET unset in test env, checked before any signature/business logic, carrier.ts:846-851 (unconditional env gate; re-checked round 2, still holds)" },
-  "/api/compose/:id/execute": { reason: "getComposition(:id) 404s — composition ids are cmp_<randomUUID>, never equal kernelId/capId/operatorId, compose.ts:872-877. Re-checked round 2: /api/compose (already fixture'd) could mint a real composition id to chain in, but executeComposition()'s default step-runner behavior (compose.ts _setStepRunnerForTests/NOOP_RUNNER machinery) was not independently re-verified safe for an automated sweep to invoke blind — deliberately NOT chased this round out of caution, same standard POST_EXCLUSIONS applies to money-adjacent routes" },
-  "/api/compositions/:compositionId/disputes": { reason: "FileDisputeSchema-valid body clears the 400, but then 404 outcome_not_found — no step-outcome row exists for a synthetic compositionId/stepIndex pair. Re-checked round 2: the existing POST /api/compositions/:compositionId/step-outcome fixture itself targets a FAKE compositionId (\"test-comp-1\"), so chaining through it doesn't help without ALSO fixing that entry; not attempted this round, per reputation.ts:616-637" },
   "/api/demo/jobs/:jobId/accept": { reason: "404 not_found — in-memory `jobs` Map empty, per pizza-demo.ts:539-540" },
   "/api/demo/jobs/:jobId/complete": { reason: "404 not_found, same reason; even if reached, `order.deliveryLocation` in the response is the CALLER's own self-supplied address, not an operator/kernel secret, per pizza-demo.ts:605-606,619-621" },
   "/api/demo/jobs/:jobId/pickup": { reason: "404 not_found, same reason, per pizza-demo.ts:572-574" },
@@ -1679,8 +1857,6 @@ const NOT_REACHED: Record<string, { reason: string }> = {
   "/api/fiat-ramp/webhook/stripe": { reason: "410 Gone — same PCC_LEGACY_FIAT_WEBHOOKS gate, unconditional regardless of body, fiat-ramp.ts:706-708" },
   "/api/fiat-ramp/webhook/yellowcard": { reason: "410 Gone — same PCC_LEGACY_FIAT_WEBHOOKS gate, unconditional regardless of body, fiat-ramp.ts:731-733" },
   "/api/jobs/:jobId/attestations/aggregate": { reason: "repos.jobs.findById(:jobId) 404s — param never matches a real job; even if it did, stranger isn't submitter/kernel-operator (403) — an ownership gate, re-checked round 2, still holds, compliance.ts:119-133" },
-  "/api/jobs/:jobId/resume-settlement": { reason: "404 Job not found — :jobId never matches a real job-<uuid> (no job exists without first running submit-from-discovery/commit). Re-checked round 2: a chain through submit-from-discovery is plausible, but resume-settlement is itself a settlement-retry action in the same family POST_EXCLUSIONS treats as money-adjacent (see /api/settlement/* above) — not independently re-verified safe to chase this round, per paid-job-flow.ts:1537-1550" },
-  "/api/kernels/:kernelId/verify": { reason: "round 2 re-check: registering a fresh manifest + the dev-mode admin bypass (isAdminAuthorized — no PCC_ADMIN_KEY configured and NODE_ENV!==production, both true here) get PAST the 404/401 this reason used to cite. The remaining, confirmed-by-reading blocker is different: runSmokeTest() (kernel-marketplace.ts:211-220) does a REAL fetch(manifest.endpointURL, ...) — any non-loopback endpointURL is now blocked outright by this file's OWN no-network guard (round-2 fix 4), and no unauthenticated POST endpoint in this harness returns a bare 2xx for a loopback endpointURL to land on. 502 either way; not chased further this round" },
   "/api/lit/provision": { reason: "503 — LIT_API_KEY unset in test env (excluded cred), checked right after field validation and before any fetch, lit-provision.ts:26-40" },
   "/api/lob/letters": { reason: "plugin config-gate passes (NODE_ENV=test → computeMissingLobConfig()=[] per lob.ts:190-213), but handler then 404s on no job row for crafted jobId AND would 403 \"not_kernel_operator\" regardless since caller=stranger≠owner, lob.ts:353-357,375-377" },
   "/api/lob/webhook": { reason: "503 — LOB_WEBHOOK_SECRET unset (excluded LOB_* cred); plugin \"webhook\" gate passes through (not production) but handler's own hasWebhookSecret check 503s before any signature check, lob.ts:464-469" },
@@ -1695,11 +1871,9 @@ const NOT_REACHED: Record<string, { reason: string }> = {
   "/api/onboard/registrations/:id/approve": { reason: "404 not_found, same reason, per onboard.ts:176-177" },
   "/api/onboard/registrations/:id/prove": { reason: "404 not_found, same reason (checked before the ownership/evidence checks), per onboard.ts:350-351" },
   "/api/onboard/registrations/:id/reject": { reason: "404 not_found, same reason, per onboard.ts:198-199" },
-  "/api/operators/:id/rate": { reason: "404 operator_not_found fires BEFORE the buyerId/auth check — :id never matches an onboard `registrations` row (a different table from kernels); re-checked round 2 — same unreached-registrations-table family as /api/onboard/registrations/:id/* below, not independently re-verified this round, per operators-public.ts:171-173" },
   "/api/orchestrator/data-product/:id/build-agent": { reason: "Registered by template-session.ts, mounted at prefix \"/api/orchestrator/data-product\" (server.ts:809-813); 404 session_not_found, per template-session.ts:440-441" },
   "/api/orchestrator/data-product/:id/ingest-docs": { reason: "same relocation; 404 session_not_found, per template-session.ts:382-383" },
   "/api/orchestrator/data-product/:id/scrape": { reason: "same relocation; 404 session_not_found, per template-session.ts:318-319" },
-  "/api/print-and-mail/:jobId/handoff": { reason: "all 7 required fields can be supplied, but courier-job lookup still 404s (\"job_not_found\") — :jobId never matches a real courier-jobs-store entry (a SEPARATE store from the courier-jobs.ts shim this round's dynamic fixtures use — re-checked round 2, confirmed still a different system, never seeded), per print-and-mail.ts:76-96,138-155" },
   "/api/protocol-runs/:runId/cancel": { reason: "404 not_found — runId never matches mock \"prun_active_001\", per protocols.ts:630-632" },
   "/api/protocol-runs/:runId/pause": { reason: "404 not_found, same reason, per protocols.ts:612-614" },
   "/api/protocol-runs/:runId/resume": { reason: "404 not_found, same reason, per protocols.ts:621-623" },
@@ -1708,8 +1882,6 @@ const NOT_REACHED: Record<string, { reason: string }> = {
   "/api/protocols/:id/publish": { reason: "404 not_found, same reason, per protocols.ts:521-523" },
   "/api/protocols/:id/runs": { reason: "404 not_found (POST variant), same reason, per protocols.ts:587-589" },
   "/api/protocols/:id/validate": { reason: "404 not_found, same reason, per protocols.ts:720-722" },
-  "/api/relay/:kernelId/tool-call": { reason: "Non-safe toolName w/o a real scopeId → 403 scope_required. Re-checked round 2: creating a scope first (as the sibling /api/relay/:kernelId/scope/:scopeId/revoke dynamic fixture now does) only helps for a toolName isToolSafe() already allows without a scope, or one the created scope's allowedTools covers — isToolSafe()'s per-deviceType safe-tool table (device-relay.ts) was not independently re-verified for the canary kernel's (unregistered) device type this round; not chased, device-relay.ts:290-306" },
-  "/api/relay/:kernelId/tool-result": { reason: "no toolCallRelay row for any guessed callId; ids are tc_<random>, minted only by a prior /tool-call — DEAD-CHAIN pending that route above, which itself isn't chased this round, device-relay.ts:514-522" },
   "/api/verification/:requestId/dispute": { reason: "404 — verificationRequests Map has no entry for synthetic requestId (kernel/cap/operatorId); requests only exist via /submit's random hvreq_ ids, human-verification.ts:391-394" },
   "/api/verification/:requestId/respond": { reason: "404 — same verificationRequests Map miss for synthetic requestId, human-verification.ts:298-301" },
   "/api/wizard/sessions/:id/complete": { reason: "404 — sessions.get(:id) can't match; session ids are server-generated uuidv4(), per wizard.ts:313-317" },
@@ -2045,6 +2217,24 @@ describe("N68: no read of the real gateway shows an operator's exact location or
 
     expect(notReachedMissingEntry).toEqual([]);
     expect(staleNotReached).toEqual([]);
+
+    // ── cross-family review of #533 (round 3, the one OPEN MEDIUM): round 2 promised that
+    // "every remaining NOT_REACHED entry was re-checked against the same standard" — but
+    // several reasons just SAID that and deferred the actual work ("not chased", "not
+    // attempted", "not independently re-verified", "this round", ...), and one
+    // (/api/capture/challenge) stated a blocker (no test override) that was already false by
+    // the time it was written (the fake chain client is installed above, before the gateway
+    // import). A NOT_REACHED reason must be a STRUCTURAL fact proven by reading the code —
+    // not a promise to look later. Permanent guard: no reason may contain language that defers
+    // work to a future round. Re-triaged every flag from this exact assertion (round 3) into a
+    // dynamic fixture, a verified POST_EXCLUSIONS entry, or an accurate structural blocker —
+    // see the NOT_REACHED table itself for the resolution of each.
+    const DEFERRING_LANGUAGE_RE = /not chased|not attempted|not independently re-verified|deliberately not|this round|not verified/i;
+    const deferringNotReached = Object.entries(NOT_REACHED)
+      .filter(([, entry]) => DEFERRING_LANGUAGE_RE.test(entry.reason))
+      .map(([url]) => url);
+    console.log("NOT_REACHED entries with deferring language:", JSON.stringify(deferringNotReached));
+    expect(deferringNotReached).toEqual([]);
 
     // At least these three — the review's own named examples — must reach a genuine 2xx with
     // a meaningful body, not just a blank-body validation 400.
