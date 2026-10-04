@@ -288,9 +288,11 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
 
   const completion: PrintCompletion = {
     jobId,
+    // The printer's own job number: the IPP adapter reports it as ippJobId,
+    // since payload.jobId is reserved for the PCC job (LO-EV-9).
     printerJobId:
-      typeof cp.jobId === "string" || typeof cp.jobId === "number"
-        ? (cp.jobId as string | number)
+      typeof cp.ippJobId === "string" || typeof cp.ippJobId === "number"
+        ? (cp.ippJobId as string | number)
         : undefined,
     pageCount,
     printerId,
