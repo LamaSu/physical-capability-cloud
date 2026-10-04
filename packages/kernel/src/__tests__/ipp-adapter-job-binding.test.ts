@@ -121,4 +121,29 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
     expect(recorded.map((e) => e.type)).toEqual(["execution_started", "execution_progress", "execution_progress", "execution_completed"]);
     for (const event of recorded) expect(event.payload, event.type).toMatchObject({ jobId: "job-ipp-3", ippJobId: expect.any(Number) });
   });
+
+  it("(real mode) a slow digest of execution_started still leaves the print's events in the order the printer reported them (N123)", async () => {
+    // runPrintJob calls addEvent as each event arrives, without waiting for the one before to be
+    // stored. execution_started's digest is held 3 s of the fake clock, past the 2 s poll's
+    // progress event: the emitter still stores it first, in the signed bundle too.
+    const subtle = globalThis.crypto.subtle;
+    const real = subtle.digest.bind(subtle);
+    vi.spyOn(subtle, "digest").mockImplementation(((algorithm: Parameters<typeof real>[0], data: Parameters<typeof real>[1]) => {
+      const started = new TextDecoder().decode(data as Uint8Array).includes('"type":"execution_started"');
+      return started ? new Promise((resolve) => setTimeout(resolve, 3_000)).then(() => real(algorithm, data)) : real(algorithm, data);
+    }) as typeof subtle.digest);
+    const ipp = await realModePrinter("ipp-bind-slow-start");
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const outcome = runPrintJob({ adapter: ipp, emitter, jobId: "job-ipp-5", jobName: "doc", totalPages: 3, documentData: "%PDF-1.4" }).then(
+      (result) => ({ result, rejected: undefined }),
+      (err: unknown) => ({ result: undefined, rejected: String(err) }),
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    const { result, rejected } = await outcome;
+    expect(rejected, "runPrintJob rejected").toBeUndefined();
+    expect(result).toMatchObject({ success: true });
+    expect(result?.events.map((e) => e.type)).toEqual(PRINTED);
+    expect(result?.bundle?.events.map((e) => e.type)).toEqual(PRINTED);
+  });
 });
