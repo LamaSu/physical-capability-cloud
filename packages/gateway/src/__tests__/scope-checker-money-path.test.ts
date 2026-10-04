@@ -23,7 +23,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 
 // ── Mock the repo layer the middleware reads ──────────────────────
 let keyScopes: string;
@@ -36,7 +36,7 @@ vi.mock("../db.js", () => ({
   }),
 }));
 
-const { scopeChecker } = await import("../middleware/scope-checker.js");
+const { scopeChecker, hasAdminScope } = await import("../middleware/scope-checker.js");
 
 /** Build an app with the scope-checker mounted and a key pre-attached. */
 async function buildApp(): Promise<FastifyInstance> {
@@ -195,5 +195,30 @@ describe("scope-checker — money-path authorization", () => {
       expect(res.statusCode).toBe(200);
       await app.close();
     });
+  });
+});
+
+describe("hasAdminScope: the TMP task route's admin exception (#6182)", () => {
+  const keyCaller = { apiKeyId: "key-1" } as unknown as FastifyRequest;
+
+  it("is true only for a key listing the literal admin scope", () => {
+    keyScopes = JSON.stringify(["admin"]);
+    expect(hasAdminScope(keyCaller)).toBe(true);
+    keyScopes = "operator, admin";
+    expect(hasAdminScope(keyCaller)).toBe(true);
+  });
+
+  it("the wildcard is NOT admin: self-service sign-up mints every key with it", () => {
+    keyScopes = JSON.stringify(["*"]);
+    expect(hasAdminScope(keyCaller)).toBe(false);
+  });
+
+  it("is false for other scopes, a malformed scope set, and a caller without an API key", () => {
+    keyScopes = JSON.stringify(["operator", "verifier", "administrator"]);
+    expect(hasAdminScope(keyCaller)).toBe(false);
+    keyScopes = "{}";
+    expect(hasAdminScope(keyCaller)).toBe(false);
+    keyScopes = JSON.stringify(["admin"]);
+    expect(hasAdminScope({} as FastifyRequest)).toBe(false);
   });
 });

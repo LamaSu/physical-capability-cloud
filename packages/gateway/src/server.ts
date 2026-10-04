@@ -138,7 +138,7 @@ import { securityMonitorPlugin } from "./middleware/security-monitor.js";
 import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
 import { rateLimiter } from "./middleware/rate-limiter.js";
 import { dlpRedactor } from "./middleware/dlp-redactor.js";
-import { scopeChecker } from "./middleware/scope-checker.js";
+import { scopeChecker, hasAdminScope } from "./middleware/scope-checker.js";
 import { templateRoutes } from "./routes/templates.js";
 import { nlQueryRoutes } from "./routes/nl-query.js";
 import { complianceTemplateRoutes } from "./routes/compliance-templates.js";
@@ -723,7 +723,9 @@ export async function createGateway(port = 3200) {
   await app.register(traceRoutes);
   await app.register(jobSubmitRoutes);
   await app.register(pgtrRelayRoutes);
-  await app.register(tmpTaskRoutes);
+  // TMP tasks are owner-bound (E11e). This gateway cannot resolve a milestone's poster yet, so only an
+  // admin key creates them (#6182, the N55 precedent; the deploy consequence is operator item 134).
+  await app.register(tmpTaskRoutes, { isAdmin: hasAdminScope });
   await app.register(setupRoutes);
   await app.register(unbrowseRoutes);
   await app.register(csdRoutes);

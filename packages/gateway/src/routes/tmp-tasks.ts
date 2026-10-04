@@ -37,10 +37,18 @@ import type { BenchmarkProofEnvelope } from "@pcc/verifier";
 export interface TmpTaskRouteOptions {
   /**
    * The principal that owns a milestone (its poster), from authoritative state outside this route, or
-   * null when unknown. Without a resolver no TMP task can be created, so the routes fail closed: the
-   * gateway cannot yet resolve a milestone's poster here.
+   * null when unknown. With a resolver, only that owner creates the milestone's task. Wire it only with a
+   * PROVEN caller principal: today an API key's operatorId is whatever its self-service sign-up typed
+   * (routes/provision.ts), which proves nothing until WP-A proves an operator's wallet.
    */
   milestoneOwner?: (milestoneId: string) => Promise<string | null> | string | null;
+  /**
+   * The admin exception while no resolver is wired (the steward's ruling on #6182, the N55 precedent):
+   * only a caller this answers exactly `true` for creates a task, and everyone else is refused. In the
+   * gateway it is an API key holding the literal "admin" scope (hasAdminScope). Absent, throwing, or any
+   * other answer: no admin. With a resolver wired, the owner path alone applies.
+   */
+  isAdmin?: (req: FastifyRequest) => boolean | Promise<boolean>;
 }
 
 /** The caller's authenticated principal: the operator behind the API key, else the key, else the session user. */
@@ -132,16 +140,35 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
         assuranceTier?: unknown;
       };
 
-      // Owner-bound (E11e): only the milestone's poster creates its task, once.
+      // Owner-bound (E11e): only the milestone's poster creates its task, once. Until this gateway can
+      // resolve a milestone's poster, only an admin creates it, and everyone else is refused (#6182).
       const principal = callerPrincipal(req);
       if (principal === null) {
         return reply.code(401).send({ error: "unauthenticated", message: "creating a TMP task needs an authenticated caller" });
       }
-      if (!opts.milestoneOwner) {
-        return reply.code(503).send({
-          error: "owner_resolver_unavailable",
-          message: "TMP tasks are owner-bound, and this gateway cannot resolve a milestone's poster yet, so none can be created",
-        });
+      if (opts.milestoneOwner) {
+        let owner: string | null;
+        try {
+          owner = await opts.milestoneOwner(milestoneId);
+        } catch {
+          owner = null;
+        }
+        if (owner === null || owner !== principal) {
+          return reply.code(403).send({ error: "not_milestone_owner", message: "only the milestone's poster creates its TMP task" });
+        }
+      } else {
+        let admin = false;
+        try {
+          admin = opts.isAdmin !== undefined && (await opts.isAdmin(req)) === true;
+        } catch {
+          admin = false;
+        }
+        if (!admin) {
+          return reply.code(403).send({
+            error: "admin_only",
+            message: "TMP tasks are owner-bound, and this gateway cannot resolve a milestone's poster yet, so only an admin creates them",
+          });
+        }
       }
 
       if (!body.mode || !body.modeConfig) {
@@ -166,15 +193,6 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
         });
       }
 
-      let owner: string | null;
-      try {
-        owner = await opts.milestoneOwner(milestoneId);
-      } catch {
-        owner = null;
-      }
-      if (owner === null || owner !== principal) {
-        return reply.code(403).send({ error: "not_milestone_owner", message: "only the milestone's poster creates its TMP task" });
-      }
       if (tmpTasks.has(milestoneId)) {
         return reply.code(409).send({ error: "task_exists", message: "a milestone's TMP task is created once" });
       }
@@ -184,7 +202,7 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
         mode: body.mode,
         modeConfig: body.modeConfig,
         acceptedTier: body.assuranceTier as 0 | 1 | 2 | 3,
-        owner,
+        owner: principal,
         status: "pending",
         createdAt: new Date().toISOString(),
       };

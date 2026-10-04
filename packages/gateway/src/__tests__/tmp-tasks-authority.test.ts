@@ -1,14 +1,19 @@
 /**
  * E11e (cross-family review of #560): the TMP task state that decides a proof's verdict (its tier, its
  * pipeline) must be authoritative and owner-bound. Nothing may come from the worker's submission or from
- * another caller's task creation (N118, restated by the steward in bus #6161).
+ * another caller's task creation (N118, restated by the steward in bus #6161). Until the gateway can
+ * resolve a milestone's poster, only an admin creates a task (the steward's ruling on #6182).
  */
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import Fastify from "fastify";
+import Fastify, { type FastifyRequest } from "fastify";
 import { tmpTaskRoutes, type TmpTaskRouteOptions } from "../routes/tmp-tasks.js";
 
 const OWNER = "op-owner";
 const OTHER = "op-other";
+const ADMIN = "op-admin";
+/** The tests' stand-in for the gateway's hasAdminScope: a header the test sets. */
+const adminHeader = (req: FastifyRequest) => req.headers["x-test-admin"] === "yes";
 
 const benchmark = (assuranceTier: unknown, proofType = "sensor_evidence") => ({
   mode: "benchmark",
@@ -36,17 +41,68 @@ const create = (app: Awaited<ReturnType<typeof appWith>>, milestone: string, pri
   });
 
 describe("E11e HIGH 2: the accepted tier is owner-bound, authoritative task state", () => {
-  it("without an owner resolver no task can be created: the route fails closed", async () => {
-    const app = await appWith({});
-    const res = await create(app, "m-1", OWNER, benchmark(3));
-    expect(res.statusCode).toBe(503);
-    expect(res.json().error).toBe("owner_resolver_unavailable");
+  const asAdmin = (app: Awaited<ReturnType<typeof appWith>>, milestone: string, body: object) =>
+    app.inject({
+      method: "POST",
+      url: `/api/milestones/${milestone}/tmp-task`,
+      payload: body,
+      headers: { "x-test-principal": ADMIN, "x-test-admin": "yes" },
+    });
+
+  it("without an owner resolver only an admin creates a task, once; everyone else is refused (#6182)", async () => {
+    const app = await appWith({ isAdmin: adminHeader });
+    const refused = await create(app, "m-1", OWNER, benchmark(3));
+    expect(refused.statusCode, "a non-admin, even the poster").toBe(403);
+    expect(refused.json().error).toBe("admin_only");
+    expect((await asAdmin(app, "m-1", benchmark(3))).statusCode, "an admin").toBe(201);
+    expect((await asAdmin(app, "m-1", benchmark(0))).statusCode, "an admin again: write-once binds admins too").toBe(409);
+    expect((await create(app, "m-1", OTHER, benchmark(0))).statusCode, "a non-admin after").toBe(403);
+    const read = await app.inject({ method: "GET", url: "/api/milestones/m-1/tmp-task" });
+    expect(read.json().task.acceptedTier).toBe(3);
+    // The admin's request still needs a tier.
+    expect((await asAdmin(app, "m-2", benchmark(undefined))).statusCode).toBe(400);
     await app.close();
+  });
+
+  it("the admin check fails closed: no isAdmin, a throwing one, or any answer but true is no admin", async () => {
+    const answers: Array<TmpTaskRouteOptions["isAdmin"]> = [
+      undefined,
+      () => { throw new Error("key store unavailable"); },
+      async () => { throw new Error("key store unavailable"); },
+      () => "yes" as unknown as boolean,
+      async () => 1 as unknown as boolean,
+      () => false,
+    ];
+    for (const isAdmin of answers) {
+      const app = await appWith(isAdmin === undefined ? {} : { isAdmin });
+      const res = await asAdmin(app, "m-1", benchmark(3));
+      expect(res.statusCode, String(isAdmin)).toBe(403);
+      expect(res.json().error).toBe("admin_only");
+      await app.close();
+    }
+  });
+
+  it("with an owner resolver wired, the admin exception no longer applies: only the owner creates", async () => {
+    const app = await appWith({ milestoneOwner: () => OWNER, isAdmin: () => true });
+    expect((await asAdmin(app, "m-1", benchmark(3))).statusCode).toBe(403);
+    expect((await create(app, "m-1", OWNER, benchmark(3))).statusCode).toBe(201);
+    await app.close();
+  });
+
+  it("the gateway registers the route with the admin exception and no owner resolver", () => {
+    // A source pin of the production wiring (server.ts), which no test boots: hasAdminScope decides, and
+    // no milestoneOwner is wired until the caller's principal is proven (WP-A).
+    const server = readFileSync(new URL("../server.ts", import.meta.url), "utf-8");
+    expect(server).toContain("await app.register(tmpTaskRoutes, { isAdmin: hasAdminScope });");
+    expect(server).not.toMatch(/tmpTaskRoutes,\s*\{[^}]*milestoneOwner/);
   });
 
   it("an unauthenticated caller cannot create a task", async () => {
     const app = await appWith({ milestoneOwner: () => OWNER });
     expect((await create(app, "m-1", undefined, benchmark(3))).statusCode).toBe(401);
+    const adminOnly = await appWith({ isAdmin: () => true });
+    expect((await create(adminOnly, "m-1", undefined, benchmark(3))).statusCode).toBe(401);
+    await adminOnly.close();
     await app.close();
   });
 
