@@ -13,15 +13,17 @@
  *     (`pinnedBundleSetDigest`, see `computeBundleSetDigest`). A caller that
  *     passes a subset (for example the first bundle that verifies) gets
  *     `bundle-set-mismatch`, never admit, so a stored failure cannot be left out;
- *   - SIGNATURE: every bundle's `bundleHash` verifies under the key registered
- *     for its declared signer (`kernelSignature.signer`), and the leg
- *     (`verifyBundleSignature`: gateway `verifyDeviceSignedEvidence`, the
- *     oracle's registered-key check) names the signer that verified, which
- *     must be the declared one. The bundle's TRUST DOMAIN is that signer's
- *     operator principal in ONE pinned registry snapshot (`signerTrustDomains`),
- *     looked up here, never answered bundle by bundle, so one signer has one
- *     domain (astra pack 271). Levels judge independence between trust domains
- *     (evidence-level.ts, #345's one rule), so a signer whose operator the
+ *   - SIGNATURE, run here: every bundle's Ed25519 signature over its
+ *     `bundleHash` (`signingPreimage`) verifies, through node:crypto, under the
+ *     key its declared signer names in ONE pinned registry snapshot
+ *     (`registryKeys`, bound by `pinnedRegistryDigest`, see
+ *     `computeRegistryDigest`). A signer id is 0x and the key's first 40 hex
+ *     digits, as kernels declare it. The bundle's TRUST DOMAIN is the operator
+ *     that key's row names, or none. The key that verifies and its domain come
+ *     from the same pinned row, and rows are unique by key and by signer id, so
+ *     one key has one domain and no other registry can stand in (astra packs
+ *     271, 275). Levels judge independence between trust domains
+ *     (evidence-level.ts, #345's one rule), so a key whose operator the
  *     registry does not name caps that bundle's inspections below
  *     inspected_output;
  *   - BINDING, run here (`verifyEvidenceSubjectBinding`, LO-EV-9): each digest
@@ -64,6 +66,12 @@
  *     evidence is one bundle.
  *   - Either way, the pin is never recomputed from `bundles` at evaluation
  *     time; that would make the check vacuous.
+ *   - The registry is pinned the same way: when it pins the evidence set, the
+ *     pinning party snapshots the registry rows its key check uses (each
+ *     registered Ed25519 key, and the operator that owns it or null) and pins
+ *     `computeRegistryDigest` over them. Admission is handed exactly those rows
+ *     and that pin, never a later registry, so a key rotated or reassigned
+ *     after the pin cannot change a decision.
  *   - Still OPEN on the caller side, and required before this gates money
  *     (astra, pack 39 round 2):
  *       - finalize collection atomically with pinning: define job closure,
@@ -99,8 +107,10 @@
  *     over the authenticated bundles, each with its signer's trust domain, and
  *     the deal's `executorTrustDomains`: an inspection is inspected_output only
  *     from a trust domain independent of every executor. An event present in
- *     several bundles counts at the LOWEST level any of them gives it, so a copy
- *     in a fabricated or executor's bundle never lifts it (steward #6478);
+ *     several bundles counts at the HIGHEST level any of its occurrences gets,
+ *     each levelled by its own bundle, exactly as #345 does (steward #6623,
+ *     evidence #6559): with one domain per key (the pinned registry), only a
+ *     copy in a truly independent key's bundle can lift it;
  *   - if it is an inspection, carries its own positive verdict: evidence's
  *     pinned verdict field (`inspectionVerdict` is pass: cv_inspection_result
  *     `passed: true`, instrument_result `pass: true`, batch_sample_result
@@ -215,23 +225,28 @@
  *     awaited through `awaitedHere`, so that `await` reads only its own
  *     `constructor` and looks nothing up on the answer. The primitive leg's
  *     promise is followed through the `then` captured at load
- *     (`fulfillsWithTrue`). So is the signature leg's (`followedPromise`), whose
- *     answer is a signer id, a string: no resolution looks `then` up on it. The
- *     result is a null-prototype object, so a `then` written on
+ *     (`fulfillsWithTrue`). The signatures are checked synchronously, through
+ *     node:crypto's `verify` as captured at load, on bytes built here code
+ *     unit by code unit (the key's SPKI, the signature hex, the tagged
+ *     digest's ASCII), never through TextEncoder, parseInt or a string method
+ *     (astra pack 275). No promise is on that path: Web Crypto resolves
+ *     importKey with a CryptoKey object, and that resolution would look `then`
+ *     up on Object.prototype.
+ *     The result is a null-prototype object, so a `then` written on
  *     Object.prototype cannot take over its resolution.
- * The boundary, named honestly: the verification callbacks are the caller's
+ * The boundary, named honestly: the verification callback is the caller's
  * trusted code (the primitive leg's answer must be true, false or a native
- * promise; the signature leg's a signer id or false, or a native promise of
- * one; any other thenable is refused). A realm whose intrinsics were replaced BEFORE
+ * promise; any other thenable is refused). A realm whose intrinsics were replaced BEFORE
  * @pcc/spec loaded is out of scope: no in-process check can tell. Anything
  * replaced after load can make admission refuse, or, for a promise that never
  * settles, never answer; it cannot change an acceptance or a value.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, verify } from "node:crypto";
 
 import { isFabricated } from "./is-fabricated.js";
 import {
+  evidenceLevelOfBundles,
   evidenceLevelRank,
   evidenceLevelsOfEvents,
   meetsEvidenceLevel,
@@ -262,7 +277,6 @@ import {
   deepFreeze,
   defineIndex,
   ErrorCtor,
-  followedPromise,
   fulfillsWithTrue,
   hasOwn,
   includesValue,
@@ -287,6 +301,7 @@ import {
   StringCtor,
   stringSet,
   StructuredClone,
+  Uint8ArrayCtor,
   uncurryThis,
 } from "../util/primordials.js";
 
@@ -300,6 +315,9 @@ export const NON_NUMERIC_UNIT = "none";
 
 /** Domain separator: a bundle-set digest can never be taken for a bundle hash. */
 export const BUNDLE_SET_DOMAIN = "PCC:evidence-bundle-set:v1";
+
+/** Domain separator for a pinned registry snapshot's digest. */
+export const REGISTRY_SNAPSHOT_DOMAIN = "PCC:evidence-registry-snapshot:v1";
 
 /** The payload field that carries a qualifying observation's record. */
 export const PROFILE_OBSERVATION_FIELD = "profileObservation";
@@ -384,14 +402,15 @@ export function isOperatorPrincipalId(value: unknown): value is string {
 }
 
 /**
- * A signer id as kernel bundles declare it (`kernelSignature.signer`): 0x and
- * exactly 40 lowercase hex digits, checked code unit by code unit with no
- * RegExp (pack 167). Exported; a test holds it equal to `^0x[0-9a-f]{40}$`.
+ * A registry key as the pinned snapshot spells it: 0x and exactly 64 LOWERCASE
+ * hex digits, the raw 32-byte Ed25519 key, one spelling per key. Checked code
+ * unit by code unit with no RegExp (pack 167). Exported; a test holds it equal
+ * to `^0x[0-9a-f]{64}$`.
  */
-export function isSignerId(value: unknown): value is string {
-  if (typeof value !== "string" || value.length !== 42) return false;
+export function isRegistryKey(value: unknown): value is string {
+  if (typeof value !== "string" || value.length !== 66) return false;
   if (charCodeAt(value, 0) !== 0x30 || charCodeAt(value, 1) !== 0x78) return false; // "0x"
-  for (let i = 2; i < 42; i++) {
+  for (let i = 2; i < 66; i++) {
     const unit = charCodeAt(value, i);
     if (!(isDigit(unit) || (unit >= 0x61 && unit <= 0x66))) return false;
   }
@@ -438,6 +457,8 @@ export type ProfileAdmissionCode =
   | "no-bundles"
   | "bundle-set-pin-invalid"
   | "bundle-set-mismatch"
+  | "registry-pin-invalid"
+  | "registry-mismatch"
   | "unauthenticated-bundle"
   | "unbound-bundle"
   | "simulated-evidence"
@@ -462,16 +483,13 @@ export interface ProfileAdmissionResult {
   reasons: ProfileAdmissionReason[];
 }
 
-/** The signature leg's answer: the id of the signer whose registered key verified the bundle (its declared `kernelSignature.signer`), or false. */
-export type BundleSignatureAnswer = string | false;
-
 /**
- * One row of the pinned registry snapshot: a registered signer's id, as kernel
- * bundles declare it (`kernelSignature.signer`, 0x + 40 lowercase hex), and the
- * operator principal that owns its key, or null when the registry names none.
+ * One row of the pinned registry snapshot: a registered Ed25519 public key, the
+ * raw 32 bytes as 0x and 64 LOWERCASE hex digits (one spelling per key), and the
+ * operator principal that owns it, or null when the registry names none.
  */
-export interface SignerTrustDomain {
-  readonly signer: string;
+export interface RegistryKey {
+  readonly publicKey: string;
   readonly trustDomain: string | null;
 }
 
@@ -500,22 +518,16 @@ export interface ProfileAdmissionInput {
    */
   executorTrustDomains: readonly string[];
   /**
-   * ONE pinned registry snapshot, as data: every signer the signature leg
-   * verifies against, with the operator principal that owns its key (or null).
-   * From the registry at the same pin as the leg's keys, never from the evidence.
-   * Each bundle's trust domain is looked up here, so a signer has exactly one;
-   * a signer listed twice is refused (astra pack 271).
+   * ONE pinned registry snapshot, as data: each registered Ed25519 key and the
+   * operator that owns it (or null), from the registry at the pin, never from
+   * the evidence. Admission verifies every bundle's signature HERE, under the
+   * key its declared signer names, and takes that row's operator as the
+   * bundle's trust domain. A key listed twice, two keys whose signer ids
+   * collide, or a malformed row is refused (astra packs 271, 275).
    */
-  signerTrustDomains: readonly SignerTrustDomain[];
-  /**
-   * The registered-key signature leg. When the bundle's `bundleHash` verifies
-   * under the key registered for its declared signer, it answers that signer's
-   * id (the bundle's `kernelSignature.signer`); otherwise false. The answer, or
-   * the value a native promise of it fulfills with, is a string. Anything else
-   * fails the leg: false, a throw, `true` (it names no signer), a thenable that
-   * is not a native promise, or a signer other than the one the bundle declares.
-   */
-  verifyBundleSignature: (bundle: AdmissionBundle) => BundleSignatureAnswer | Promise<BundleSignatureAnswer>;
+  registryKeys: readonly RegistryKey[];
+  /** `computeRegistryDigest(registryKeys)`, from where the registry was pinned (see the caller contract). A malformed pin rejects; rows that do not digest to it are refused. */
+  pinnedRegistryDigest: string;
   /**
    * The primitive leg: is `observation` an authentic instance of `primitiveId`
    * for this job, and is its `profileObservation` record TRUE of it? It must
@@ -563,19 +575,19 @@ const ACTIVE_PRIMITIVES = ((): Readonly<Record<string, true>> => {
 /** The input fields admission reads, in the order it reads them. */
 const INPUT_FIELDS = deepFreeze([
   "pinnedBundleSetDigest",
-  "verifyBundleSignature",
   "verifyPrimitiveInstance",
   "subject",
   "bundles",
   "committedDigest",
   "profile",
   "executorTrustDomains",
-  "signerTrustDomains",
+  "registryKeys",
+  "pinnedRegistryDigest",
 ] as const);
 type InputField = (typeof INPUT_FIELDS)[number];
 
 /** The input fields that are data, walked for code before anything is copied. */
-const DATA_FIELDS = deepFreeze(["profile", "subject", "bundles", "executorTrustDomains", "signerTrustDomains"] as const);
+const DATA_FIELDS = deepFreeze(["profile", "subject", "bundles", "executorTrustDomains", "registryKeys"] as const);
 
 const VERSION_PIN_FIELDS = deepFreeze(["permittedAdapterVersions", "permittedFirmwareVersions"] as const);
 
@@ -673,6 +685,161 @@ export function computeBundleSetDigest(
       }
     }),
   );
+}
+
+/** A checked registry row: its key, its operator (or null), and the signer id kernels declare for it. No prototype. */
+interface RegistryRow {
+  readonly publicKey: string;
+  readonly trustDomain: string | null;
+  readonly signer: string;
+}
+
+/**
+ * The rows of a registry snapshot, checked and sorted by key, or why they are
+ * not one. Each key has one spelling and one row, and no two keys share a signer
+ * id (0x + the first 40 hex digits): a declared signer names at most one key.
+ * Reads own data only; the rows are frozen null-prototype records.
+ */
+function readRegistry(value: unknown): { ok: true; rows: readonly RegistryRow[] } | { ok: false; reason: string } {
+  if (!ArrayIsArray(value)) {
+    return { ok: false, reason: "registryKeys (the pinned registry snapshot) must be a list of { publicKey, trustDomain } rows" };
+  }
+  const rowOfKey = ObjectCreate(null) as Record<string, RegistryRow>;
+  const signers = ObjectCreate(null) as Record<string, true>;
+  const keys = newList<string>(0);
+  for (let k = 0; k < value.length; k++) {
+    const row = ownDataValue(value, k);
+    const publicKey = ownDataValue(row, "publicKey");
+    const trustDomain = ownDataValue(row, "trustDomain");
+    if (!isRegistryKey(publicKey) || !(trustDomain === null || isOperatorPrincipalId(trustDomain)) || !hasOwn(row as object, "trustDomain")) {
+      return {
+        ok: false,
+        reason: `registryKeys[${k}] must be { publicKey: 0x<64 lowercase hex>, trustDomain: an operator principal id or null }`,
+      };
+    }
+    if (hasOwn(rowOfKey, publicKey)) return { ok: false, reason: `registryKeys lists key ${publicKey} twice: a key has one trust domain` };
+    let signer = "";
+    for (let i = 0; i < 42; i++) signer = `${signer}${publicKey[i]!}`;
+    if (hasOwn(signers, signer)) {
+      return { ok: false, reason: `registryKeys lists two keys whose signer id is ${signer}: a declared signer would not name one key` };
+    }
+    signers[signer] = true;
+    const record = ObjectCreate(null) as { publicKey: string; trustDomain: string | null; signer: string };
+    record.publicKey = publicKey;
+    record.trustDomain = trustDomain as string | null;
+    record.signer = signer;
+    rowOfKey[publicKey] = ObjectFreeze(record);
+    append(keys, publicKey);
+  }
+  const sorted = sortedStrings(keys);
+  const rows = newList<RegistryRow>(0);
+  for (let i = 0; i < sorted.length; i++) append(rows, rowOfKey[sorted[i]!]!);
+  return { ok: true, rows: ObjectFreeze(rows) };
+}
+
+/** sha256(canonicalize({ domain, keys })), over rows sorted by key: byte-identical to the unhardened admission's. */
+function registryDigestOf(rows: readonly RegistryRow[]): SHA256 {
+  const keys = newList<Record<string, unknown>>(0);
+  for (let i = 0; i < rows.length; i++) {
+    const key = ObjectCreate(null) as Record<string, unknown>;
+    key.publicKey = rows[i]!.publicKey;
+    key.trustDomain = rows[i]!.trustDomain;
+    append(keys, key);
+  }
+  const preimage = ObjectCreate(null) as Record<string, unknown>;
+  preimage.domain = REGISTRY_SNAPSHOT_DOMAIN;
+  preimage.keys = keys;
+  return taggedSha256(canonicalize(preimage));
+}
+
+/**
+ * The digest a pinned registry snapshot is committed to:
+ *   sha256(canonicalize({ domain, keys }))
+ * `sha256:`-tagged, over the rows sorted by key. The pinning party computes it
+ * over the rows its key check uses when it pins the evidence set (see the
+ * caller contract). Rejects on rows admission would refuse: there is nothing
+ * meaningful to pin. Reads own data only, hashes with the SHA-256 captured at
+ * load, and returns an `ownPromise`, as computeBundleSetDigest does.
+ */
+export function computeRegistryDigest(registryKeys: readonly RegistryKey[]): Promise<SHA256> {
+  return ownPromise(
+    new PromiseCtor<SHA256>((resolve, reject) => {
+      try {
+        const registry = readRegistry(registryKeys);
+        if (!registry.ok) throw new ErrorCtor(`computeRegistryDigest: ${registry.reason}`);
+        resolve(registryDigestOf(registry.rows));
+      } catch (err) {
+        reject(err);
+      }
+    }),
+  );
+}
+
+/** The value of one hex digit's code unit, or -1. Lowercase and uppercase are both digits here. */
+function hexValue(unit: number): number {
+  if (unit >= 0x30 && unit <= 0x39) return unit - 0x30;
+  if (unit >= 0x61 && unit <= 0x66) return unit - 0x57;
+  if (unit >= 0x41 && unit <= 0x46) return unit - 0x37;
+  return -1;
+}
+
+/**
+ * Exactly `count` bytes of hex, after an optional 0x or 0X, read code unit by
+ * code unit into a fresh Uint8Array, or null: parseEd25519SignatureHex's
+ * acceptance, with no RegExp, parseInt or string method.
+ */
+function hexBytes(text: unknown, count: number): Uint8Array | null {
+  if (typeof text !== "string") return null;
+  let start = 0;
+  if (text.length >= 2 && charCodeAt(text, 0) === 0x30 && (charCodeAt(text, 1) === 0x78 || charCodeAt(text, 1) === 0x58)) start = 2;
+  if (text.length - start !== count * 2) return null;
+  const out = new Uint8ArrayCtor(count);
+  for (let i = 0; i < count; i++) {
+    const high = hexValue(charCodeAt(text, start + 2 * i));
+    const low = hexValue(charCodeAt(text, start + 2 * i + 1));
+    if (high < 0 || low < 0) return null;
+    out[i] = high * 16 + low;
+  }
+  return out;
+}
+
+/** The bytes `signingPreimage` signs for a tagged digest: its UTF-8, which is its ASCII, one byte per code unit. */
+function digestPreimage(digest: string): Uint8Array {
+  const out = new Uint8ArrayCtor(digest.length);
+  for (let i = 0; i < digest.length; i++) out[i] = charCodeAt(digest, i);
+  return out;
+}
+
+/** node:crypto's one-shot verify, captured at load: synchronous, so no promise, `then` or species is on its path. */
+const verifyAtLoad = verify;
+/** An Ed25519 SubjectPublicKeyInfo in DER, up to the raw key: SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING ( */
+const ED25519_SPKI_PREFIX = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00] as const;
+
+/**
+ * Whether `signature` is the Ed25519 signature of `message` under the raw
+ * `publicKey` (0x + 64 hex), through node:crypto's one-shot `verify` as
+ * captured at load (astra pack 275). Synchronous: Web Crypto's importKey
+ * resolves its promise with a CryptoKey object, and resolving with an object
+ * looks `then` up on it, which code running after load can plant on
+ * Object.prototype to hand verify another key. The key travels as SPKI DER in
+ * a null-prototype options record, so no option (padding, dsaEncoding, ...)
+ * is read from a prototype. Any failure is false.
+ */
+function ed25519Verifies(publicKey: string, message: Uint8Array, signature: Uint8Array): boolean {
+  const raw = hexBytes(publicKey, 32);
+  if (raw === null) return false;
+  const der = new Uint8ArrayCtor(ED25519_SPKI_PREFIX.length + 32);
+  for (let i = 0; i < ED25519_SPKI_PREFIX.length; i++) der[i] = ED25519_SPKI_PREFIX[i]!;
+  for (let i = 0; i < 32; i++) der[ED25519_SPKI_PREFIX.length + i] = raw[i]!;
+  const key = ObjectCreate(null) as Record<string, unknown>;
+  key.key = der;
+  key.format = "der";
+  key.type = "spki";
+  try {
+    return verifyAtLoad(null, message, key as never, signature) === true;
+  } catch {
+    return false;
+  }
 }
 
 /** A result with no prototype: an async return is resolved with it, and a `then` on Object.prototype must not be consulted. */
@@ -928,30 +1095,11 @@ function legAnswer(leg: () => unknown): boolean | Promise<boolean> {
   }
 }
 
-/** The signature leg's answer: the verified signer's id, or null (false, true, a thenable, or anything that is not a signer id). */
-function signerIdOf(answer: unknown): string | null {
-  return isSignerId(answer) ? answer : null;
-}
-
-/**
- * The signature leg's answer, ready to await. A native promise is followed
- * through the `then` captured at load (`followedPromise`); the answer is a
- * string, so no resolution looks `then` up on it. A leg that throws fails.
- */
-function signerAnswer(leg: () => unknown): string | null | Promise<string | null> {
-  try {
-    const answer = leg();
-    const followed = followedPromise(answer, signerIdOf, null);
-    return followed === null ? signerIdOf(answer) : followed;
-  } catch {
-    return null;
-  }
-}
-
-/** The lower of two levels; null (no level) is the lowest. */
-function lowerLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
-  if (a === null || b === null) return null;
-  return evidenceLevelRank(a) <= evidenceLevelRank(b) ? a : b;
+/** The higher of two levels; null (no level) is the lowest. */
+function higherLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return evidenceLevelRank(a) >= evidenceLevelRank(b) ? a : b;
 }
 
 /** A list of operator principal ids, every index its own (a plain-data copy has no holes). */
@@ -1014,18 +1162,17 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   }
 
   const pinnedBundleSetDigest = read.pinnedBundleSetDigest;
-  const verifyBundleSignature = read.verifyBundleSignature as ProfileAdmissionInput["verifyBundleSignature"];
   const verifyPrimitiveInstance = read.verifyPrimitiveInstance as ProfileAdmissionInput["verifyPrimitiveInstance"];
   // Each read happens once, inside one guard, so a throw resolves to a reject, never to a rejected promise.
   let subjectCopy: ReturnType<typeof plainDataCopy>;
   let bundlesCopy: ReturnType<typeof plainDataCopy>;
   let executorsCopy: ReturnType<typeof plainDataCopy>;
-  let signersCopy: ReturnType<typeof plainDataCopy>;
+  let registryCopy: ReturnType<typeof plainDataCopy>;
   try {
     subjectCopy = plainDataCopy(read.subject);
     bundlesCopy = plainDataCopy(read.bundles);
     executorsCopy = plainDataCopy(read.executorTrustDomains);
-    signersCopy = plainDataCopy(read.signerTrustDomains);
+    registryCopy = plainDataCopy(read.registryKeys);
   } catch {
     return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
   }
@@ -1052,29 +1199,12 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   }
   const executorTrustDomains = deepFreeze(executors);
 
-  // The pinned registry snapshot: each signer's one trust domain, in a null-prototype record (astra pack 271).
-  // A signer listed twice is refused, whatever the domains, so no lookup depends on which row it reads.
-  const snapshot: unknown = signersCopy.ok ? signersCopy.value : undefined;
-  if (!ArrayIsArray(snapshot)) {
-    return reject("input-unreadable", "signerTrustDomains (the pinned registry snapshot) must be a list of { signer, trustDomain } rows");
-  }
-  const domainOf = ObjectCreate(null) as Record<string, string | null>;
-  for (let k = 0; k < snapshot.length; k++) {
-    const row: unknown = snapshot[k];
-    const signer: unknown = isRecord(row) ? row.signer : undefined;
-    const domain: unknown = isRecord(row) ? row.trustDomain : undefined;
-    if (!isSignerId(signer) || !(domain === null || isOperatorPrincipalId(domain))) {
-      return reject(
-        "input-unreadable",
-        `signerTrustDomains[${k}] must be { signer: 0x<40 lowercase hex>, trustDomain: an operator principal id or null }`,
-      );
-    }
-    if (hasOwn(domainOf, signer)) {
-      return reject("input-unreadable", `signerTrustDomains lists signer ${signer} twice: a signer has one trust domain`);
-    }
-    domainOf[signer] = domain;
-  }
-  ObjectFreeze(domainOf);
+  // The pinned registry snapshot (astra packs 271, 275): each key's one trust domain, unique by key and by signer id.
+  const registry = readRegistry(registryCopy.ok ? registryCopy.value : undefined);
+  if (!registry.ok) return reject("input-unreadable", registry.reason);
+  const rowOfSigner = ObjectCreate(null) as Record<string, RegistryRow>;
+  for (let r = 0; r < registry.rows.length; r++) rowOfSigner[registry.rows[r]!.signer] = registry.rows[r]!;
+  ObjectFreeze(rowOfSigner);
 
   const terms = unverifiableProfileTerms(profile);
   if (terms.length > 0) return reject("unverifiable-term", joinStrings(terms, "; "));
@@ -1083,6 +1213,20 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   const presented: unknown = deepFreeze(bundlesCopy.value);
   if (!ArrayIsArray(presented) || presented.length === 0) {
     return result(policyDecision(profile.onMissingData), only("no-bundles", "no evidence bundle was presented for the job"));
+  }
+
+  // The registry's pin binds the keys and their domains to the registry as it was pinned: a malformed pin, or rows
+  // that are not the pinned ones (a key rotated or reassigned since), are refused before any signature is checked.
+  const pinnedRegistryDigest = read.pinnedRegistryDigest;
+  if (!isTaggedSha256(pinnedRegistryDigest)) {
+    return reject("registry-pin-invalid", "the pinned registry digest is not a sha256: tagged digest, so no registry is committed to");
+  }
+  const presentedRegistry = registryDigestOf(registry.rows);
+  if (presentedRegistry !== pinnedRegistryDigest) {
+    return reject(
+      "registry-mismatch",
+      `the registry rows digest to ${presentedRegistry}, not the pinned ${pinnedRegistryDigest}: they are not the registry the evidence was pinned with`,
+    );
   }
 
   // The pin is authority: a malformed one is refused outright, never read as
@@ -1142,23 +1286,20 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   const authenticated = newList<AuthenticatedBundle>(0);
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
-    let verifiedSigner: string | null;
-    try {
-      verifiedSigner = await signerAnswer(() => verifyBundleSignature(bundle));
-    } catch {
-      verifiedSigner = null;
+    // SIGNATURE, run here (astra packs 271, 275): the declared signer names one key of the pinned registry, the
+    // bundle hash's Ed25519 signature must verify under THAT key, and the bundle's trust domain is that key's row.
+    // Everything is read from admission's own null-prototype copy of the bundle.
+    const signature: unknown = bundle.kernelSignature;
+    const declared: unknown = isRecord(signature) ? signature.signer : undefined;
+    const row = typeof declared === "string" && hasOwn(rowOfSigner, declared) ? rowOfSigner[declared]! : null;
+    if (!isRecord(signature) || signature.algorithm !== "ed25519" || row === null) {
+      return rejectNow("unauthenticated-bundle", `bundle ${i}: its signature is not an ed25519 signature by a key of the pinned registry (registryKeys)`);
     }
-    if (verifiedSigner === null) return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
-    // The leg must name the signer the bundle declares, and the snapshot must hold it: the trust domain is
-    // the domain of the key that verified, from the one snapshot (astra pack 271). Read from admission's copy.
-    const declared: unknown = isRecord(bundle.kernelSignature) ? bundle.kernelSignature.signer : undefined;
-    if (verifiedSigner !== declared) {
-      return rejectNow("unauthenticated-bundle", `bundle ${i}: the leg verified signer ${verifiedSigner}, not the bundle's declared signer`);
+    const signatureBytes = hexBytes(signature.value, 64);
+    if (signatureBytes === null || !ed25519Verifies(row.publicKey, digestPreimage(bundle.bundleHash), signatureBytes)) {
+      return rejectNow("unauthenticated-bundle", `bundle ${i}: its signature does not verify under the registered key of ${row.signer}`);
     }
-    if (!hasOwn(domainOf, verifiedSigner)) {
-      return rejectNow("unauthenticated-bundle", `bundle ${i}: signer ${verifiedSigner} is not in the pinned registry snapshot (signerTrustDomains)`);
-    }
-    const trustDomain = domainOf[verifiedSigner] ?? null;
+    const trustDomain = row.trustDomain;
 
     let answer: unknown;
     try {
@@ -1212,17 +1353,21 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   // completion is a device failure, judged here under onDeviceFailure.
   let contradictions: ContradictionKind[];
   let eventLevels: readonly EventLevel[];
-  // The level of each distinct event: the LOWEST any of its copies gets (steward #6478).
+  let reached: EvidenceLevel | null;
+  // The level an event counts at: the MAX over its occurrences, each levelled by its own bundle, as #345 takes it
+  // (steward #6623, evidence #6559). A test holds this and `reached` equal to evidence-level.ts on duplicates.
   const levelByHash = ObjectCreate(null) as Record<string, EvidenceLevel | null>;
   try {
     contradictions = deriveContradictions(authenticated);
     const context = ObjectCreate(null) as { executorTrustDomains: readonly string[] };
     context.executorTrustDomains = executorTrustDomains;
     eventLevels = evidenceLevelsOfEvents(authenticated, context);
+    // The strongest level the bundles prove: #345's own function, the maximum over every occurrence.
+    reached = evidenceLevelOfBundles(authenticated, context);
     for (let x = 0; x < eventLevels.length; x++) {
       const level = eventLevels[x]!;
       const hash = authenticated[level.bundleIndex]!.events[level.eventIndex]!.hash;
-      levelByHash[hash] = hasOwn(levelByHash, hash) ? lowerLevel(levelByHash[hash] ?? null, level.level) : level.level;
+      levelByHash[hash] = hasOwn(levelByHash, hash) ? higherLevel(levelByHash[hash] ?? null, level.level) : level.level;
     }
   } catch (err) {
     return rejectNow("input-unreadable", `the evidence levels could not classify the bundles: ${messageOf(err)}`);
@@ -1249,11 +1394,6 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   }
 
   const required = profile.interpretation.acceptanceLevel;
-  let reached: EvidenceLevel | null = null;
-  for (let k = 0; k < events.length; k++) {
-    const level = levelOf(events[k]!);
-    if (level !== null && (reached === null || evidenceLevelRank(level) > evidenceLevelRank(reached))) reached = level;
-  }
   const device = profile.device;
   const window = captureWindow(profile, events);
 

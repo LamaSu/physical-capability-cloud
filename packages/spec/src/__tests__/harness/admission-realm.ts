@@ -20,12 +20,14 @@
  * change is in place (`results`, `summarize`, `copyList` and the recipes'
  * items) uses index loops, literals and operators only.
  */
-import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
 
 import * as admissionModule from "../../evidence/profile-admission.js";
 import {
   computeBundleSetDigest,
+  computeRegistryDigest,
   NON_NUMERIC_UNIT,
   PROFILE_OBSERVATION_FIELD,
   profileAdmitsBundle,
@@ -87,15 +89,28 @@ const NONCE = "0x" + "ef".repeat(32);
 const SUBJECT: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
 const UNIT_SUBJECT: EvidenceSubject = { jobId: JOB, kernelId: KERNEL, settlementUnitId: UNIT, challengeNonce: NONCE };
 
-const key = generateKeyPairSync("ed25519");
+/**
+ * An Ed25519 key pair from a fixed 32-byte seed (PKCS#8 DER). Every child realm builds the same keys, so the
+ * signer ids derived from them, and every reason that names one, are the same in each realm's clean run.
+ */
+const seededKey = (seedByte: number): { privateKey: KeyObject; publicKey: KeyObject } => {
+  const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.alloc(32, seedByte)]), format: "der", type: "pkcs8" });
+  return { privateKey, publicKey: createPublicKey(privateKey) };
+};
+const key = seededKey(0xa1);
 // Two operators with registered keys (#345's one rule, steward #6478): A runs the job (the deal assigns it),
 // B is an independent inspector. An inspection is inspected_output only from B's bundle.
-const keyB = generateKeyPairSync("ed25519");
+const keyB = seededKey(0xb2);
 const OPERATOR_A = `eip155:84532:0x${"aa".repeat(20)}`;
 const OPERATOR_B = `eip155:84532:0x${"bb".repeat(20)}`;
-const SIGNER_A = "0x1111111111111111111111111111111111111111";
-const SIGNER_B = "0x2222222222222222222222222222222222222222";
-const KEYS: Record<string, ReturnType<typeof generateKeyPairSync>> = { [SIGNER_A]: key, [SIGNER_B]: keyB };
+/** A key's raw 32 bytes as 0x + lowercase hex: the last 32 bytes of its SPKI DER. */
+const rawKey = (k: { publicKey: KeyObject }) => `0x${(k.publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(12).toString("hex")}`;
+const KEY_A = rawKey(key);
+const KEY_B = rawKey(keyB);
+/** Each key's signer id, as kernels declare it: 0x and the key's first 40 hex digits (astra pack 275). */
+const SIGNER_A = KEY_A.slice(0, 42);
+const SIGNER_B = KEY_B.slice(0, 42);
+const KEYS: Record<string, { privateKey: KeyObject; publicKey: KeyObject }> = { [SIGNER_A]: key, [SIGNER_B]: keyB };
 const DOMAINS: Record<string, string> = { [SIGNER_A]: OPERATOR_A, [SIGNER_B]: OPERATOR_B };
 const T0 = Date.parse("2026-09-24T12:00:00.000Z");
 const at = (seconds: number) => new Date(T0 + seconds * 1000).toISOString();
@@ -182,18 +197,24 @@ async function toBundles(drafts: Draft[], profile: MeasurementProfileV1): Promis
   return out;
 }
 
-/** The registered-key leg: verifies under the declared signer's key and names that signer (astra pack 271). */
-const verifySignature = (b: AdmissionBundle) => {
-  const signer = (b.kernelSignature as { signer?: string }).signer ?? "";
-  const k = KEYS[signer];
-  const ok = k !== undefined && verify(null, signingPreimage(b.bundleHash), k.publicKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
-  return ok ? signer : (false as const);
-};
-/** The pinned registry snapshot: each signer's one trust domain, the operator that owns its key. */
-const SIGNER_DOMAINS = [
-  { signer: SIGNER_A, trustDomain: DOMAINS[SIGNER_A]! },
-  { signer: SIGNER_B, trustDomain: DOMAINS[SIGNER_B]! },
+/** The pinned key registry (astra packs 271, 275): each registered key and the operator that owns it. */
+const REGISTRY = [
+  { publicKey: KEY_A, trustDomain: DOMAINS[SIGNER_A]! },
+  { publicKey: KEY_B, trustDomain: DOMAINS[SIGNER_B]! },
 ];
+const REGISTRY_PIN = await computeRegistryDigest(REGISTRY);
+/** The pin for `rows`, or a well-formed stand-in when admission is to refuse the rows themselves. */
+async function pinOf(rows: unknown): Promise<string> {
+  try {
+    return await computeRegistryDigest(rows as ProfileAdmissionInput["registryKeys"]);
+  } catch {
+    return "sha256:" + "0".repeat(64);
+  }
+}
+/** `bundle` with its kernelSignature changed. */
+function resigned(bundle: AdmissionBundle, change: Record<string, unknown>): AdmissionBundle {
+  return { ...bundle, kernelSignature: { ...(bundle.kernelSignature as Record<string, unknown>), ...change } };
+}
 
 const PILOT: Draft[] = [
   { type: "execution_started", t: 0, device: PRINTER },
@@ -263,9 +284,9 @@ async function input(
     subject,
     bundles,
     pinnedBundleSetDigest,
-    verifyBundleSignature: verifySignature,
+    registryKeys: REGISTRY,
+    pinnedRegistryDigest: over.registryKeys !== undefined ? await pinOf(over.registryKeys) : REGISTRY_PIN,
     executorTrustDomains: [OPERATOR_A],
-    signerTrustDomains: SIGNER_DOMAINS,
     verifyPrimitiveInstance: () => true,
     ...over,
   };
@@ -364,30 +385,36 @@ async function buildCases(): Promise<void> {
   FORGE_TO.push(pin2);
   add("reject: a bundle outside the pinned set", await input(p, [...pilot, failure], { pinnedBundleSetDigest: presented }));
   add("reject: a malformed pin", await input(p, pilot, { pinnedBundleSetDigest: "0x" + "a".repeat(64) }));
-  const signatureFails = await input(p, pilot, { verifyBundleSignature: () => false });
-  add("reject: the signature leg fails", signatureFails);
+  // The signature is checked here, under the pinned registry's key (astra pack 275): a flipped bit fails it.
+  const printerValue = (pilot[0]!.kernelSignature as { value: string }).value;
+  const flipped = resigned(pilot[0]!, { value: `${printerValue.slice(0, -1)}${printerValue.endsWith("0") ? "1" : "0"}` });
+  const signatureFails = await input(p, [flipped, pilot[1]!]);
+  add("reject: the signature fails", signatureFails);
   RECIPE.signatureFails = signatureFails;
-  const asyncSignatureFails = await input(p, pilot, { verifyBundleSignature: async () => false });
-  add("reject: an async signature leg answers false", asyncSignatureFails);
-  RECIPE.asyncSignatureFails = asyncSignatureFails;
   const asyncPrimitiveFails = await input(p, pilot, { verifyPrimitiveInstance: async () => false });
   add("reject: an async primitive leg answers false", asyncPrimitiveFails);
   RECIPE.asyncPrimitiveFails = asyncPrimitiveFails;
-  add("admit: async legs that answer (a signer id, and true)", await input(p, pilot, { verifyBundleSignature: async (b) => verifySignature(b), verifyPrimitiveInstance: async () => true }));
-  add("reject: a signature leg answering bare true, naming no signer", await input(p, pilot, { verifyBundleSignature: (() => true) as unknown as () => false }));
-  add("reject: a signature leg answering a domain record, the old contract", await input(p, pilot, { verifyBundleSignature: (() => ({ trustDomain: OPERATOR_B })) as unknown as () => false }));
-  add("reject: a leg naming another signer than the bundle declares", await input(p, pilot, { verifyBundleSignature: (b) => (verifySignature(b) === SIGNER_A ? SIGNER_B : verifySignature(b)) }));
-  const unknownOperators = [{ signer: SIGNER_A, trustDomain: null }, { signer: SIGNER_B, trustDomain: null }];
-  add("admit: a snapshot naming no operator, for a device_reported profile", await input(dr, await toBundles(PILOT, dr), { signerTrustDomains: unknownOperators }));
-  add("reject: a snapshot naming no operator, for an inspected profile", await input(p, pilot, { signerTrustDomains: unknownOperators }));
-  const sameKey = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), await toBundle(PILOT.slice(2), p, SIGNER_A)];
+  add("admit: an async primitive leg that answers true", await input(p, pilot, { verifyPrimitiveInstance: async () => true }));
+  // The pinned key registry (astra packs 271, 275): the declared signer names one key, which must verify the signature.
+  const byB = await toBundle(PILOT.slice(0, 2), p, SIGNER_B);
+  add("reject: a bundle signed by another registered key than it declares", await input(p, [resigned(byB, { signer: SIGNER_A }), pilot[1]!]));
+  const cameraByA = await toBundle(PILOT.slice(2), p, SIGNER_A);
+  add("reject: one key under two signer ids (astra pack 275)", await input(p, [pilot[0]!, resigned(cameraByA, { signer: SIGNER_B })]));
+  add("reject: a declared signer no registry key has", await input(p, [resigned(pilot[0]!, { signer: `0x${"9".repeat(40)}` }), pilot[1]!]));
+  add("reject: another signature algorithm", await input(p, [resigned(pilot[0]!, { algorithm: "secp256k1" }), pilot[1]!]));
+  add("reject: a signature over another digest", await input(p, [resigned(pilot[0]!, { value: (pilot[1]!.kernelSignature as { value: string }).value }), pilot[1]!]));
+  const unknownOperators = [{ publicKey: KEY_A, trustDomain: null }, { publicKey: KEY_B, trustDomain: null }];
+  add("admit: a registry naming no operator, for a device_reported profile", await input(dr, await toBundles(PILOT, dr), { registryKeys: unknownOperators }));
+  add("reject: a registry naming no operator, for an inspected profile", await input(p, pilot, { registryKeys: unknownOperators }));
+  const sameKey = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), cameraByA];
   add("reject: the executor's own camera, one key signing both bundles (astra pack 271)", await input(p, sameKey));
-  add("reject: a signer missing from the snapshot", await input(p, pilot, { signerTrustDomains: [SIGNER_DOMAINS[0]!] }));
-  add("reject: a snapshot listing one signer twice", await input(p, pilot, { signerTrustDomains: [...SIGNER_DOMAINS, { signer: SIGNER_B, trustDomain: OPERATOR_A }] }));
-  add("reject: a malformed snapshot row", await input(p, pilot, { signerTrustDomains: [{ signer: SIGNER_A.toUpperCase(), trustDomain: OPERATOR_A }, SIGNER_DOMAINS[1]!] }));
+  add("reject: a registry listing one key twice", await input(p, pilot, { registryKeys: [...REGISTRY, { publicKey: KEY_B, trustDomain: OPERATOR_A }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: another spelling of a registry key", await input(p, pilot, { registryKeys: [{ publicKey: `0x${KEY_A.slice(2).toUpperCase()}`, trustDomain: OPERATOR_A }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: two registry keys sharing a signer id", await input(p, pilot, { registryKeys: [...REGISTRY, { publicKey: `0x${"ab".repeat(20)}${"00".repeat(12)}`, trustDomain: null }, { publicKey: `0x${"ab".repeat(20)}${"11".repeat(12)}`, trustDomain: null }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a registry rotated after the pin", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { publicKey: KEY_B, trustDomain: OPERATOR_A }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a malformed registry pin", await input(p, pilot, { pinnedRegistryDigest: "0x" + "a".repeat(64) }));
   add("reject: no executor assigned", await input(p, pilot, { executorTrustDomains: [] }));
   add("reject: executorTrustDomains naming no operator principal", await input(p, pilot, { executorTrustDomains: ["not-a-principal"] }));
-  add("reject: a leg answering with a thenable", await input(p, pilot, { verifyBundleSignature: (() => ({ then: (f: (v: unknown) => void) => f(SIGNER_A) })) as unknown as () => false }));
   add("reject: a leg answering 1, truthy but not true", await input(p, pilot, { verifyPrimitiveInstance: (() => 1) as unknown as () => boolean }));
   add("reject: an async leg answering \"true\", truthy but not true", await input(p, pilot, { verifyPrimitiveInstance: (async () => "true") as unknown as () => Promise<boolean> }));
   add("reject: evidence from another job", await input(p, await toBundles(PILOT.map((d) => ({ ...d, jobId: "job-other" })), p)));
@@ -586,7 +613,7 @@ async function buildCases(): Promise<void> {
     return ["admission", label, () => profileAdmitsBundle(made)];
   };
   DELIVERIES = [
-    deliverAdmission("reject: the signature leg fails"),
+    deliverAdmission("reject: the signature fails"),
     deliverAdmission("admit: the pilot, inspected_output"),
     deliverAdmission("hold: too few samples"),
     deliverAdmission("reject: a stored failure bundle left out of the pinned set"),
@@ -622,9 +649,9 @@ async function buildCases(): Promise<void> {
   const accessorPin = { ...RECIPE.massOmitted.input } as Record<string, unknown>;
   Object.defineProperty(accessorPin, "pinnedBundleSetDigest", nullDescriptor({ get: () => RECIPE.massOmitted.pin, enumerable: true, configurable: true }));
   RECIPE.accessorPin = accessorPin as unknown as ProfileAdmissionInput;
-  const accessorLeg = { ...RECIPE.badlySigned } as Record<string, unknown>;
-  Object.defineProperty(accessorLeg, "verifyBundleSignature", nullDescriptor({ get: () => verifySignature, enumerable: true, configurable: true }));
-  RECIPE.accessorLeg = accessorLeg as unknown as ProfileAdmissionInput;
+  const accessorRegistry = { ...RECIPE.badlySigned } as Record<string, unknown>;
+  Object.defineProperty(accessorRegistry, "registryKeys", nullDescriptor({ get: () => REGISTRY, enumerable: true, configurable: true }));
+  RECIPE.accessorRegistry = accessorRegistry as unknown as ProfileAdmissionInput;
 }
 
 // -- running items while a change is in place: index loops, literals and operators only --
@@ -730,6 +757,21 @@ function replace(target: object, key: PropertyKey, make: (original: any) => unkn
     const changed = nullDescriptor({ configurable: original.configurable, enumerable: original.enumerable, writable: original.writable, value: make(original.value) });
     ReflectDefineProperty(target, key, changed);
     return () => void ReflectDefineProperty(target, key, original);
+  };
+}
+
+/** node:crypto's CommonJS exports: what `require("node:crypto")` hands any code in the process. */
+const NODE_CRYPTO = createRequire(import.meta.url)("node:crypto") as object;
+
+/** `replace` on a builtin module's exports, synced into its ES module bindings (and synced back on undo). */
+function replaceBuiltin(target: object, key: PropertyKey, make: (original: any) => unknown): Apply {
+  return () => {
+    const undo = replace(target, key, make)();
+    syncBuiltinESMExports();
+    return () => {
+      undo();
+      syncBuiltinESMExports();
+    };
   };
 }
 
@@ -897,6 +939,13 @@ const PATCH_ROWS: Array<[string, Apply]> = [
   ["structuredClone", replace(globalThis, "structuredClone", () => () => [])],
   ["TextEncoder.prototype.encode", replace(TextEncoder.prototype, "encode", () => () => new Uint8Array(0))],
   ["crypto.subtle.digest", replace(SubtleCryptoPrototype, "digest", () => () => Promise.resolve(new ArrayBuffer(32)))],
+  // astra pack 275: the signature check is node:crypto's verify as captured at load, synchronous, on bytes it builds
+  // itself, with its key options in a null-prototype record. Web Crypto is not on the path at all.
+  ["node:crypto verify answers true", replaceBuiltin(NODE_CRYPTO, "verify", () => () => true)],
+  ["Object.prototype.dsaEncoding, padding, saltLength, encoding and passphrase", pollute(() => ({ dsaEncoding: "not-an-encoding", padding: 0.5, saltLength: 0.5, encoding: "base64", passphrase: "x" }))],
+  ["crypto.subtle.verify answers true", replace(SubtleCryptoPrototype, "verify", () => () => Promise.resolve(true))],
+  ["crypto.subtle.importKey refuses", replace(SubtleCryptoPrototype, "importKey", () => () => Promise.reject(new Error("importKey replaced")))],
+  ["parseInt", replace(globalThis, "parseInt", () => () => 0)],
   ["Hash.prototype.update", replace(HashPrototype, "update", (o) => function (this: unknown) { return ReflectApply(o, this, ["tampered"]); })],
   ["Hash.prototype.digest", replace(HashPrototype, "digest", () => () => "0".repeat(64))],
   ["Promise.prototype.then, forging a carried digest", replace(Promise.prototype, "then", forgingThen)],
@@ -997,9 +1046,9 @@ const RECIPES: Scenario[] = [
     items: one("an accessor pin, a stored failure bundle left out", () => RECIPE.accessorPin),
   },
   {
-    id: "recipe: Object.prototype.value written; an accessor signature leg on the input",
-    apply: pollute(() => ({ value: () => true })),
-    items: one("an accessor signature leg, a bundle signed over another digest", () => RECIPE.accessorLeg),
+    id: "recipe: Object.prototype.value written; an accessor registry on the input",
+    apply: pollute(() => ({ value: REGISTRY })),
+    items: one("an accessor registry, a bundle signed over another digest", () => RECIPE.accessorRegistry),
   },
   {
     id: "recipe: Object.prototype.value written; an accessor deep in the bundles (codeInData)",
@@ -1061,8 +1110,7 @@ const RECIPES: Scenario[] = [
         digest = "threw";
       }
       const rows: Row[] = [
-        await admissionRow("the signature leg fails", RECIPE.signatureFails),
-        await admissionRow("an async signature leg answers false", RECIPE.asyncSignatureFails),
+        await admissionRow("the signature fails", RECIPE.signatureFails),
         await admissionRow("an async primitive leg answers false", RECIPE.asyncPrimitiveFails),
         await admissionRow("a stored failure bundle left out", RECIPE.omitted.input),
         ["digest", "the presented set", digest],
@@ -1155,7 +1203,7 @@ const RECIPES: Scenario[] = [
     },
     // Directly, and through every delivery shape: a derived promise is resolved with the result too.
     items: async () => {
-      const rows: Row[] = [await admissionRow("the signature leg fails", RECIPE.signatureFails)];
+      const rows: Row[] = [await admissionRow("the signature fails", RECIPE.signatureFails)];
       for (let s = 0; s < SHAPES.length; s++) rows[s + 1] = await deliveredRow(RECIPE.signatureFailsDelivery, SHAPES[s]!);
       return rows;
     },
