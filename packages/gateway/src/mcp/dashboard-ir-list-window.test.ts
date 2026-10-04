@@ -200,11 +200,17 @@ describe("N110 server defaults are pinned against the real producers (never gues
   // Why: if the facade's own default page size ever drifts, the window's "first N; more may
   // exist" / "showing N of total" disclosure must drift WITH it, or it would silently lie about
   // how many rows the server actually hands back by default.
-  it("LIST_PROFILES['/api/jobs'].paged.defaultLimit matches job.facade.ts's own default", () => {
-    const text = readFileSync(resolve(HERE, "../facades/job.facade.ts"), "utf8");
-    const m = /pagination\?\.limit\s*\?\?\s*(\d+)/.exec(text);
-    expect(m, "job.facade.ts: could not find `pagination?.limit ?? <default>`").not.toBeNull();
-    expect(LIST_PROFILES["/api/jobs"]!.paged!.defaultLimit).toBe(Number(m![1]));
+  it("LIST_PROFILES['/api/jobs'].paged.defaultLimit matches BOTH the jobs route's query-schema default and the facade's fallback", () => {
+    // N111 (on master) gave GET /api/jobs a querystring schema whose `limit` default the route applies
+    // first; job.facade.ts keeps its own coercion fallback. The view's page size must equal both.
+    const route = readFileSync(resolve(HERE, "../routes/jobs.ts"), "utf8");
+    const r = /limit:\s*\{\s*type:\s*"integer"[^}]*default:\s*(\d+)/.exec(route);
+    expect(r, "routes/jobs.ts: could not find the limit schema's `default:`").not.toBeNull();
+    expect(LIST_PROFILES["/api/jobs"]!.paged!.defaultLimit).toBe(Number(r![1]));
+    const facade = readFileSync(resolve(HERE, "../facades/job.facade.ts"), "utf8");
+    const f = /toSafeOffsetOrLimit\(\s*pagination\?\.limit\s*,\s*(\d+)\s*\)/.exec(facade);
+    expect(f, "job.facade.ts: could not find `toSafeOffsetOrLimit(pagination?.limit, <default>)`").not.toBeNull();
+    expect(LIST_PROFILES["/api/jobs"]!.paged!.defaultLimit).toBe(Number(f![1]));
   });
 
   it("LIST_PROFILES['/api/capabilities'].paged.defaultLimit matches routes/capabilities.ts's query-schema default", () => {
