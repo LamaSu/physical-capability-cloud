@@ -7,15 +7,21 @@
  * much. The accepted deal seals it through each node's canonical-plan hash, so it must be exactly
  * JSON, and bounded:
  *   - allowed: null, booleans, finite numbers, strings, arrays and plain objects;
- *   - refused: undefined, NaN, ±Infinity, bigint, functions, symbols, array holes, and objects whose
- *     prototype is not Object.prototype or null (Date, Map, class instances, ...);
+ *   - refused: an INTEGER outside ±(2^53 − 1) (number policy D5: VCR, the oracle and @pcc/spec #359 all
+ *     refuse to hash one, so sealing it would seal a deal nobody can recompute; see the
+ *     shared crossrepo-accepted-bundle-v1 vector's `policyD5`). Send a larger value as a decimal string;
+ *   - refused: undefined, NaN, ±Infinity, bigint, function and symbol VALUES, array holes, and objects
+ *     whose prototype is not Object.prototype or null (Date, Map, class instances, ...);
+ *   - ignored, exactly as JSON.stringify ignores them: symbol-keyed and non-enumerable properties;
  *   - refused: the key "__proto__" (so no copy can ever set a prototype);
  *   - bounded: depth, keys per object, array length, string length, key length, total values and
- *     canonical size (PLAN_JSON_LIMITS).
+ *     canonical size (PLAN_JSON_LIMITS). The size bound is checked AS the copy grows, on a sound lower
+ *     bound (string and key lengths), so an oversized input is refused before it is fully read.
  *
  * `copyPlanJson` reads every property, key list and length EXACTLY ONCE into owned, frozen data. A
- * getter, a proxy or a mutation during the read cannot make the copy disagree with itself. A throw
- * while reading is a refusal ("unreadable"), never an exception, and the thrown value is never
+ * getter, a proxy or a mutation during the read cannot make the copy disagree with itself. Keys are
+ * visited in sorted order, so which refusal an input gets never depends on key insertion order. A
+ * throw while reading is a refusal ("unreadable"), never an exception, and the thrown value is never
  * inspected.
  */
 
@@ -44,6 +50,7 @@ export type PlanJsonRefusal =
   | "not-an-object"
   | "unsupported-value"
   | "non-finite-number"
+  | "unsafe-integer"
   | "reserved-key"
   | "too-deep"
   | "too-many-keys"
@@ -71,6 +78,9 @@ function isPlainPrototype(v: object): boolean {
 export function copyPlanJson(untrusted: unknown): PlanJsonCopy {
   const L = PLAN_JSON_LIMITS;
   let values = 0;
+  // A running LOWER bound on the canonical form's UTF-8 size: every string value and key contributes at
+  // least its UTF-16 length. Past the limit the input is refused before the rest is read.
+  let sizeFloor = 0;
   // A refusal found while copying. Thrown as this function's own token so the catch never inspects a
   // caller's thrown value.
   const STOP = Object.freeze({});
@@ -83,8 +93,16 @@ export function copyPlanJson(untrusted: unknown): PlanJsonCopy {
   const copy = (v: unknown, depth: number): PlanJsonValue => {
     if (++values > L.maxValues) refuse("too-many-values");
     if (v === null || typeof v === "boolean") return v;
-    if (typeof v === "number") return Number.isFinite(v) ? (Object.is(v, -0) ? 0 : v) : refuse("non-finite-number");
-    if (typeof v === "string") return v.length > L.maxStringLength ? refuse("string-too-long") : v;
+    if (typeof v === "number") {
+      if (!Number.isFinite(v)) return refuse("non-finite-number");
+      if (Number.isInteger(v) && !Number.isSafeInteger(v)) return refuse("unsafe-integer"); // D5
+      return Object.is(v, -0) ? 0 : v;
+    }
+    if (typeof v === "string") {
+      if (v.length > L.maxStringLength) return refuse("string-too-long");
+      if ((sizeFloor += v.length) > L.maxCanonicalBytes) return refuse("too-large");
+      return v;
+    }
     if (typeof v !== "object") return refuse("unsupported-value"); // undefined (array holes too), bigint, function, symbol
     if (depth > L.maxDepth) refuse("too-deep");
     if (Array.isArray(v)) {
@@ -100,11 +118,13 @@ export function copyPlanJson(untrusted: unknown): PlanJsonCopy {
     }
     if (!isPlainPrototype(v)) return refuse("unsupported-value");
     const keys = Object.keys(v);
-    if (keys.length > L.maxKeysPerObject) refuse("too-many-keys");
+    if (keys.length > L.maxKeysPerObject) refuse("too-many-keys"); // the bound before the sort it limits
+    keys.sort();
     const out: Record<string, PlanJsonValue> = {};
     for (const k of keys) {
       if (k === "__proto__") refuse("reserved-key");
       if (k.length > L.maxKeyLength) refuse("key-too-long");
+      if ((sizeFloor += k.length) > L.maxCanonicalBytes) refuse("too-large");
       const item: unknown = (v as Record<string, unknown>)[k];
       Object.defineProperty(out, k, { value: copy(item, depth + 1), enumerable: true, writable: false, configurable: false });
     }
