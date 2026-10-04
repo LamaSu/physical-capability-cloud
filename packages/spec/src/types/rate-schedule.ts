@@ -346,14 +346,68 @@ export function computeScheduleHash(
   return `0x${hex}` as `0x${string}`;
 }
 
+/** The largest schedule `version`: the `version` range of docs/ECONOMIC_AGREEMENTS.md §1. */
+export const MAX_SCHEDULE_VERSION = 1_000_000_000;
+
 /**
- * Validate that a RateSchedule's segments are non-overlapping and time-ordered.
- * Throws on violation. Used by upstream `setRateSchedule` callers; pure.
+ * The numeric fields a segment kind defines. Unknown fields are not checked: they are dropped before
+ * hashing, and nothing reads them (docs/ECONOMIC_AGREEMENTS.md §3).
  */
-export function assertScheduleIsWellFormed(schedule: RateSchedule): void {
+const INTEGER_SEGMENT_FIELDS = ["startTime", "endTime", "bps", "startBps", "endBps", "floorBps", "capBps", "thresholdCents", "bpsLow", "bpsHigh", "default"] as const;
+const REAL_SEGMENT_FIELDS = ["scale", "decayPerSecond"] as const;
+
+/**
+ * Validate that a RateSchedule's segments are non-overlapping and time-ordered, and that every number in
+ * it reads the same in every JSON implementation. Throws on violation. Used by upstream
+ * `setRateSchedule` callers, the registry's publish route and the economics compiler; pure.
+ */
+export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segments"> & { version?: number }): void {
+  if (schedule.version !== undefined && !(Number.isSafeInteger(schedule.version) && schedule.version >= 1 && schedule.version <= MAX_SCHEDULE_VERSION)) {
+    throw new Error(`RateSchedule version ${schedule.version} is not an integer in 1..${MAX_SCHEDULE_VERSION}`);
+  }
+  if (!Array.isArray(schedule.segments) || schedule.segments.length === 0) {
+    throw new Error("RateSchedule has no segments: a schedule needs at least one segment");
+  }
   let prevEnd: number | null = null;
   for (let i = 0; i < schedule.segments.length; i++) {
     const seg = schedule.segments[i];
+
+    // A schedule is sealed under a hash of its numbers, so each must mean one value to every reader. An
+    // integer above 2^53 - 1 is rounded by a JavaScript reader but not by an exact one, and JSON 1e400
+    // reads as Infinity, which no rate can be computed from (pcc-economics clean-room round 3b, P100c).
+    // The range starts at 0, as in the parsers: callers such as the licensing engine hand this check raw
+    // objects that no parser has seen (astra EC1 M3).
+    const fields = seg as unknown as Readonly<Record<string, unknown>>;
+    for (const field of INTEGER_SEGMENT_FIELDS) {
+      const v = fields[field];
+      if (typeof v === "number" && !(Number.isSafeInteger(v) && v >= 0)) {
+        throw new Error(`RateSchedule segments[${i}].${field} ${v} is not an integer in 0..2^53-1`);
+      }
+    }
+    for (const field of REAL_SEGMENT_FIELDS) {
+      const v = fields[field];
+      if (typeof v === "number" && !Number.isFinite(v)) {
+        throw new Error(`RateSchedule segments[${i}].${field} ${v} is not a finite number`);
+      }
+    }
+    // And the segment schema's own kinds, types and ranges: bps at most 10000, a positive scale or decay, the
+    // six capture classes and their rates. The licensing engine hands this check raw objects that no parser
+    // has seen, so without this it stored segments every parser refuses (astra EC1b M3). Unknown keys stay
+    // ignored, as the schema ignores them.
+    const parsed = RateSegmentSchema.safeParse(seg);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new Error(`RateSchedule segments[${i}] is not a valid segment: ${issue?.path.join(".") || "kind"}: ${issue?.message ?? "invalid"}`);
+    }
+
+    // An open-ended segment (endTime null) covers every later moment, and evaluation returns the FIRST
+    // covering segment, so anything after it could never apply. Before this check, `prevEnd = null`
+    // silently disabled the overlap test below for every later segment (pcc-economics D1).
+    if (i > 0 && prevEnd === null) {
+      throw new Error(
+        `RateSchedule segments[${i}] follows an open-ended segment (endTime null) and could never apply`,
+      );
+    }
 
     if (prevEnd !== null && seg.startTime < prevEnd) {
       throw new Error(
