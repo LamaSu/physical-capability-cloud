@@ -183,6 +183,10 @@ process.env.EVIDENCE_STORAGE = "storacha";
 // any non-loopback attempt even if some OTHER integration's mock gate is missed).
 process.env.NODE_ENV = "test";
 process.env.NEAR_MOCK = "true";
+// The /api/compose/:id/execute fixture relies on compose.ts's NOOP step runner; the real runner
+// (and its SQLite store) is switched on only by this variable, so it is never left to the ambient
+// environment (orchestrator review of 189e4fbc).
+delete process.env.PCC_COMPOSE_EXECUTE_REAL;
 process.env.STORY_MOCK = process.env.STORY_MOCK ?? "true";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
