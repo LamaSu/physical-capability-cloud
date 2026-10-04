@@ -96,7 +96,12 @@ afterAll(async () => {
 
 const SCOPE_BODY = { createdBy: "anyone", allowedTools: ["printer_print_text"], maxCommands: 5, expiresInMinutes: 5 };
 
-describe("N31 device relay: only the kernel's operator or the admin", () => {
+describe("N31 device relay on master: #400's relayAccessGuard refuses a stranger (cross-check)", () => {
+  // The relay's guard is master's #400 relayAccessGuard (routes/device-relay.ts), tested in full by
+  // device-relay.test.ts. This cross-check pins the N31 hole (bus #6505) closed on this branch: a
+  // stranger's key gets nothing from another operator's kernel, and the kernel's own key keeps the
+  // executor side. The steward's #6508 decision layer (proven or admin for actuation) waits on the
+  // re-ruling of #6578, since #400's grant model was unknown when #6508 was written.
   it("anonymous is 401 on a write and a read", async () => {
     expect((await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: ANON, payload: SCOPE_BODY })).statusCode).toBe(401);
     expect((await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: ANON })).statusCode).toBe(401);
@@ -109,40 +114,20 @@ describe("N31 device relay: only the kernel's operator or the admin", () => {
     expect(getStore().db.select().from(schema.executionScopes).all().length).toBe(before);
   });
 
-  it("a stranger cannot queue a tool call, even a safe one", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: `/api/relay/${KERNEL}/tool-call`,
-      headers: asStranger(),
-      payload: { toolName: "printer_status", args: {} },
-    });
-    expect(res.statusCode).toBe(403);
-    expect(res.json()).toMatchObject({ error: "forbidden", reason: "not_kernel_operator" });
-  });
-
-  it("a stranger cannot read or claim the kernel's pending calls", async () => {
+  it("a stranger cannot queue a tool call, read or claim the pending queue, or forge a result", async () => {
+    const call = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: asStranger(), payload: { toolName: "printer_status", args: {} } });
+    expect(call.statusCode).toBe(403);
     queueCall("call-n31-pending");
     getStore().db.update(schema.toolCallRelay).set({ status: "pending", claimedAt: null }).where(eq(schema.toolCallRelay.id, "call-n31-pending")).run();
-    const res = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: asStranger() });
-    expect(res.statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: asStranger() })).statusCode).toBe(403);
     expect(callRow("call-n31-pending")?.status).toBe("pending");
-  });
-
-  it("a stranger cannot forge the result of the kernel's tool call", async () => {
     queueCall("call-n31-forge");
-    const res = await app.inject({
-      method: "POST",
-      url: `/api/relay/${KERNEL}/tool-result`,
-      headers: asStranger(),
-      payload: { callId: "call-n31-forge", result: { forged: true } },
-    });
-    expect(res.statusCode).toBe(403);
-    expect(res.json()).toMatchObject({ error: "forbidden", reason: "not_kernel_operator" });
-    expect(callRow("call-n31-forge")?.status).toBe("claimed");
+    const forged = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: asStranger(), payload: { callId: "call-n31-forge", result: { forged: true } } });
+    expect(forged.statusCode).toBe(403);
     expect(callRow("call-n31-forge")?.result ?? null).toBeNull();
   });
 
-  it("a stranger cannot read the kernel's camera or post to its chat", async () => {
+  it("a stranger cannot read the kernel's camera, chat or manifest, or post to its chat or camera", async () => {
     for (const [method, url, payload] of [
       ["GET", `/api/relay/${KERNEL}/camera/latest`, undefined],
       ["GET", `/api/relay/${KERNEL}/chat/messages`, undefined],
@@ -152,107 +137,13 @@ describe("N31 device relay: only the kernel's operator or the admin", () => {
     ] as const) {
       const res = await app.inject({ method, url, headers: asStranger(), ...(payload ? { payload } : {}) });
       expect(res.statusCode, `${method} ${url}`).toBe(403);
-      expect(res.json(), `${method} ${url}`).toMatchObject({ reason: "not_kernel_operator" });
     }
   });
 
-  it("an unregistered kernel is 404 for a non-admin", async () => {
-    const res = await app.inject({ method: "POST", url: "/api/relay/kernel-n31-relay-missing/scope", headers: asOperator(), payload: SCOPE_BODY });
-    expect(res.statusCode).toBe(404);
-  });
-
-  it("the executor side stays the kernel's own principal's: the pending queue", async () => {
-    for (const headers of [asOperator(), asProvenOperator(), asAdmin()]) {
-      const pending = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers });
-      expect(pending.statusCode).toBe(200);
-    }
-  });
-
-  it("opening a scope is a decision: the operator's claimed key is 403; its proven wallet and the admin open one", async () => {
-    const claimed = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: asOperator(), payload: SCOPE_BODY });
-    expect(claimed.statusCode).toBe(403);
-    expect(claimed.json()).toMatchObject({ error: "forbidden", reason: "operator_proof_required" });
-    for (const headers of [asProvenOperator(), asAdmin()]) {
-      const scope = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers, payload: SCOPE_BODY });
-      expect(scope.statusCode).toBeLessThan(300);
-    }
-  });
-
-  it("queueing a WRITE tool is a decision: the operator's claimed key is 403 before any scope check", async () => {
-    const claimed = await app.inject({
-      method: "POST",
-      url: `/api/relay/${KERNEL}/tool-call`,
-      headers: asOperator(),
-      payload: { scopeId: "scope-n31-any", toolName: "printer_print_text", args: { text: "n31" } },
-    });
-    expect(claimed.statusCode).toBe(403);
-    expect(claimed.json()).toMatchObject({ error: "forbidden", reason: "operator_proof_required" });
-    // The admin passes the guard; what follows is the relay's own scope check.
-    const admin = await app.inject({
-      method: "POST",
-      url: `/api/relay/${KERNEL}/tool-call`,
-      headers: asAdmin(),
-      payload: { scopeId: "scope-n31-any", toolName: "printer_print_text", args: { text: "n31" } },
-    });
-    expect(admin.json()?.reason).not.toBe("operator_proof_required");
-    expect(admin.json()?.reason).not.toBe("not_kernel_operator");
-  });
-
-  it("revoking a scope is a decision, and only this kernel's scope can be revoked here", async () => {
-    const opened = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: asAdmin(), payload: SCOPE_BODY });
-    const scopeId = opened.json().id as string;
-    const claimed = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: asOperator(), payload: {} });
-    expect(claimed.statusCode).toBe(403);
-    // A scope of another kernel is not found through this kernel's path, even for the admin.
-    getStore().db.update(schema.executionScopes).set({ kernelId: "kernel-n31-relay-other" }).where(eq(schema.executionScopes.id, scopeId)).run();
-    expect((await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: asAdmin(), payload: {} })).statusCode).toBe(404);
-    getStore().db.update(schema.executionScopes).set({ kernelId: KERNEL }).where(eq(schema.executionScopes.id, scopeId)).run();
-    expect((await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: asProvenOperator(), payload: {} })).statusCode).toBeLessThan(300);
-  });
-
-  it("a chat instruction is a decision; the device agent's reply is the executor side", async () => {
-    const claimed = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/chat`, headers: asOperator(), payload: { message: "n31" } });
-    expect(claimed.statusCode).toBe(403);
-    expect(claimed.json()).toMatchObject({ reason: "operator_proof_required" });
-    const asked = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/chat`, headers: asAdmin(), payload: { message: "n31" } });
-    expect(asked.statusCode).toBe(201);
-    const reply = await app.inject({
-      method: "POST",
-      url: `/api/relay/${KERNEL}/chat/respond`,
-      headers: asOperator(),
-      payload: { messageId: asked.json().id, response: "done" },
-    });
-    expect(reply.statusCode).toBe(201);
-  });
-
-  it("the device agent's reply cannot complete another kernel's message", async () => {
-    getStore().db.insert(schema.ot2ChatMessages).values({
-      id: "msg-n31-other-kernel",
-      kernelId: "kernel-n31-relay-other",
-      role: "user",
-      content: "other",
-      status: "pending",
-      createdAt: new Date().toISOString(),
-    }).run();
-    const res = await app.inject({
-      method: "POST",
-      url: `/api/relay/${KERNEL}/chat/respond`,
-      headers: asOperator(),
-      payload: { messageId: "msg-n31-other-kernel", response: "x" },
-    });
-    expect(res.statusCode).toBe(201);
-    const row = getStore().db.select().from(schema.ot2ChatMessages).where(eq(schema.ot2ChatMessages.id, "msg-n31-other-kernel")).get();
-    expect(row?.status).toBe("pending");
-  });
-
-  it("the kernel's operator may post its own call's result", async () => {
+  it("the kernel's own key keeps the executor side: the pending queue and its call's result", async () => {
+    expect((await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: asOperator() })).statusCode).toBe(200);
     queueCall("call-n31-own");
-    const res = await app.inject({
-      method: "POST",
-      url: `/api/relay/${KERNEL}/tool-result`,
-      headers: asOperator(),
-      payload: { callId: "call-n31-own", result: { ok: true } },
-    });
+    const res = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: asOperator(), payload: { callId: "call-n31-own", result: { ok: true } } });
     expect(res.statusCode).toBeLessThan(300);
   });
 });

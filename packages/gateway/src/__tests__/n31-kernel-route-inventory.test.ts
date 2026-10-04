@@ -26,15 +26,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // packages/gateway/src/__tests__ -> packages/gateway/src
 const SRC_ROOT = path.join(__dirname, "..");
 const MUTATING = new Set(["post", "put", "patch", "delete"]);
-const GUARD_NAMES = new Set(["refuseKernelAction"]);
+/**
+ * The guards: auth/kernel-authority.ts's refuseKernelAction, and master's #400 relayAccessGuard
+ * (routes/device-relay.ts: the relay plugin's preHandler, a default-deny per-route table over the
+ * kernel's recorded operator). Unifying #400's ownership check into kernel-authority.ts is a
+ * tracked follow-up.
+ */
+const GUARD_NAMES = new Set(["refuseKernelAction", "refuseKernelRequest", "relayAccessGuard"]);
 const GUARDED_TABLES = new Set(["operatorPolicies", "pendingApprovals"]);
 
 /**
- * Kernel routes with no ownership check yet. #575 r2 listed the 10 this inventory found (bus
- * #6505); N31b guarded the 9 shop-kernel routes (the device relay, heartbeat and capability
- * announce) and fixed the manifest verify's self-auth (now CLASSIFIED), so it is empty. Keys
- * are "METHOD path".
+ * Kernel routes with no ownership check yet, found by this inventory (bus #6505). The stacked PR
+ * on #575 guards each and removes it from this list. Keys are "METHOD path".
  */
+// The device relay is guarded on master by #400's relayAccessGuard (merged after #575 opened);
+// N31b guards heartbeat and capability announce and fixes the manifest verify's self-auth (now
+// CLASSIFIED), so nothing is left.
 const KNOWN_UNGUARDED = new Set<string>([]);
 
 /**
@@ -117,7 +124,7 @@ function scanSource(fileName: string, text: string): Scan {
       n.arguments.length >= 2 &&
       ts.isStringLiteralLike(n.arguments[0]!) &&
       n.arguments[0]!.text === "preHandler" &&
-      callsAny(n.arguments[1]!, guards)
+      (callsAny(n.arguments[1]!, guards) || (ts.isIdentifier(n.arguments[1]!) && guards.has(n.arguments[1]!.text)))
     ) {
       let fn: ts.Node | undefined = n.parent;
       while (fn && !ts.isFunctionLike(fn)) fn = fn.parent;
@@ -212,6 +219,11 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       '  app.put<{ Params: { kernelId: string } }>(\n    "/api/probe/:kernelId/direct",\n    async (req: any) => { if (refuseKernelAction(req, {} as any, "k", "decide")) return; db.update(schema.pendingApprovals).set({}); },\n  );',
       '  app.patch("/api/probe/:kernelId/helper", async (req: any) => { if (refuseHelper(req, "k")) return; });',
       "}",
+      "async function namedGuard(req: any) { refuseKernelAction(req, {} as any, 'k', 'operate'); }",
+      "export async function byName(app: any) {",
+      '  app.addHook("preHandler", namedGuard);',
+      '  app.post("/api/probe/:kernelId/named-hook", async () => {});',
+      "}",
       "export async function hooked(app: any) {",
       '  app.post("/api/probe/:kernelId/before-hook", async () => {});',
       '  app.addHook("preHandler", async (req: any) => { refuseKernelAction(req, {} as any, "k", "operate"); });',
@@ -227,6 +239,7 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       "POST /api/probe/:kernelId/open": false,
       "PUT /api/probe/:kernelId/direct": true,
       "PATCH /api/probe/:kernelId/helper": true,
+      "POST /api/probe/:kernelId/named-hook": true,
       "POST /api/probe/:kernelId/before-hook": false,
       "DELETE /api/probe/:kernelId/after-hook": true,
     });
@@ -236,7 +249,7 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
     expect(probe.writes.map((w) => [w.line, w.route?.key ?? null, w.route?.guarded ?? null])).toEqual([
       [4, "POST /api/probe/:kernelId/open", false],
       [7, "PUT /api/probe/:kernelId/direct", true],
-      [16, null, null],
+      [21, null, null],
     ]);
   });
 });
@@ -275,6 +288,7 @@ describe("N31 route inventory: packages/gateway/src", () => {
       "POST /api/relay/:kernelId/scope",
       "POST /api/relay/:kernelId/scope/:scopeId/revoke",
       "POST /api/relay/:kernelId/tool-call",
+      "POST /api/relay/:kernelId/tool-call/:callId/start",
       "POST /api/relay/:kernelId/tool-result",
       "PUT /api/kernels/:kernelId/agent-package/configure",
       "PUT /api/operator/policy/:kernelId",
