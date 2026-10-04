@@ -179,6 +179,12 @@ describe("the patch harness: nothing changed after load changes a decision, a di
     // An inherited option would make node:crypto's verify throw, a refusal; identical shows the key options
     // record has no prototype (astra pack 275).
     "patch: Object.prototype.dsaEncoding, padding, saltLength, encoding and passphrase",
+    // An inherited grant, root or domain would admit a row that has none; identical shows none is read (astra pack 281).
+    "patch: Object.prototype.role, kernelId, jobId, grants, delegatedBy and trustDomain",
+    // A replaced JSON.stringify or Date.parse would only make a delegation or its window fail, which is a refusal;
+    // identical shows the delegation preimage and the window use the ones captured at load (astra pack 281).
+    "patch: JSON.stringify",
+    "patch: Date.parse",
   ]);
 
   for (const id of SCENARIOS) {

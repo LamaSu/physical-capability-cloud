@@ -47,7 +47,7 @@ import {
 } from "../../evidence/evidence-level.js";
 import { computeMeasurementProfileDigest, type MeasurementProfileV1 } from "../../evidence/measurement-profile.js";
 import { EVIDENCE_PRIMITIVES } from "../../evidence/primitives.js";
-import { signingPreimage, TAGGED_DIGEST_PATTERN } from "../../evidence/signing-preimage.js";
+import { sessionKeyDelegationPreimage, signingPreimage, TAGGED_DIGEST_PATTERN } from "../../evidence/signing-preimage.js";
 import type { EvidenceSubject } from "../../evidence/subject-binding.js";
 import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES, type EvidenceEvent } from "../../types/evidence.js";
 import { canonicalize, hashBundle, hashEvent } from "../../util/canonical.js";
@@ -103,6 +103,7 @@ const key = seededKey(0xa1);
 const keyB = seededKey(0xb2);
 const OPERATOR_A = `eip155:84532:0x${"aa".repeat(20)}`;
 const OPERATOR_B = `eip155:84532:0x${"bb".repeat(20)}`;
+const OPERATOR_C = `eip155:84532:0x${"cc".repeat(20)}`;
 /** A key's raw 32 bytes as 0x + lowercase hex: the last 32 bytes of its SPKI DER. */
 const rawKey = (k: { publicKey: KeyObject }) => `0x${(k.publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(12).toString("hex")}`;
 const KEY_A = rawKey(key);
@@ -197,10 +198,14 @@ async function toBundles(drafts: Draft[], profile: MeasurementProfileV1): Promis
   return out;
 }
 
-/** The pinned key registry (astra packs 271, 275): each registered key and the operator that owns it. */
+/**
+ * The pinned key registry (astra packs 271, 275, 281): each registered key, the operator that owns it, and its
+ * grants. A is the executor of KERNEL (the kernel's own key); B is an independent witness for KERNEL.
+ */
+const EXECUTOR_GRANTS = [{ role: "executor" as const, kernelId: KERNEL }];
 const REGISTRY = [
-  { publicKey: KEY_A, trustDomain: DOMAINS[SIGNER_A]! },
-  { publicKey: KEY_B, trustDomain: DOMAINS[SIGNER_B]! },
+  { publicKey: KEY_A, trustDomain: DOMAINS[SIGNER_A]!, grants: EXECUTOR_GRANTS },
+  { publicKey: KEY_B, trustDomain: DOMAINS[SIGNER_B]!, grants: [{ role: "witness" as const, kernelId: KERNEL }] },
 ];
 const REGISTRY_PIN = await computeRegistryDigest(REGISTRY);
 /** The pin for `rows`, or a well-formed stand-in when admission is to refuse the rows themselves. */
@@ -211,6 +216,29 @@ async function pinOf(rows: unknown): Promise<string> {
     return "sha256:" + "0".repeat(64);
   }
 }
+/**
+ * A session key `root` delegates (LO-EV-1), as kernel-sdk makes one, from a fixed seed so every realm builds the
+ * same key and the same signature. Its key pair joins KEYS, so toBundle can sign with it. By default it is valid from
+ * a minute before the pilot to an hour after, for JOB.
+ */
+function delegate(root: { privateKey: KeyObject }, seedByte: number, over: { contractIds?: string[]; expiresAt?: number } = {}) {
+  const pair = seededKey(seedByte);
+  const raw = rawKey(pair);
+  const body = {
+    sessionId: "session-0001",
+    parentAgentId: "eip155:84532:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432:7",
+    publicKey: Buffer.from(raw.slice(2), "hex"),
+    issuedAt: Math.floor(T0 / 1000) - 60,
+    expiresAt: over.expiresAt ?? Math.floor(T0 / 1000) + 3600,
+    scope: { allowedActions: ["evidence_submit"], contractIds: over.contractIds ?? [JOB], maxSignatures: 1000 },
+  };
+  const parentSignature = sign(null, sessionKeyDelegationPreimage(body as never), root.privateKey).toString("hex");
+  KEYS[raw.slice(0, 42)] = pair;
+  return { raw, signer: raw.slice(0, 42), authorization: { ...body, publicKey: raw.slice(2), parentSignature } };
+}
+/** The registry row of a delegated session key: its key, its root's key, and the root's delegation as received. */
+const sessionRow = (session: ReturnType<typeof delegate>, root: string = KEY_A) => ({ publicKey: session.raw, delegatedBy: root, authorization: session.authorization });
+
 /** `bundle` with its kernelSignature changed. */
 function resigned(bundle: AdmissionBundle, change: Record<string, unknown>): AdmissionBundle {
   return { ...bundle, kernelSignature: { ...(bundle.kernelSignature as Record<string, unknown>), ...change } };
@@ -403,15 +431,45 @@ async function buildCases(): Promise<void> {
   add("reject: a declared signer no registry key has", await input(p, [resigned(pilot[0]!, { signer: `0x${"9".repeat(40)}` }), pilot[1]!]));
   add("reject: another signature algorithm", await input(p, [resigned(pilot[0]!, { algorithm: "secp256k1" }), pilot[1]!]));
   add("reject: a signature over another digest", await input(p, [resigned(pilot[0]!, { value: (pilot[1]!.kernelSignature as { value: string }).value }), pilot[1]!]));
-  const unknownOperators = [{ publicKey: KEY_A, trustDomain: null }, { publicKey: KEY_B, trustDomain: null }];
+  const unknownOperators = REGISTRY.map((row) => ({ ...row, trustDomain: null }));
   add("admit: a registry naming no operator, for a device_reported profile", await input(dr, await toBundles(PILOT, dr), { registryKeys: unknownOperators }));
   add("reject: a registry naming no operator, for an inspected profile", await input(p, pilot, { registryKeys: unknownOperators }));
   const sameKey = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), cameraByA];
   add("reject: the executor's own camera, one key signing both bundles (astra pack 271)", await input(p, sameKey));
-  add("reject: a registry listing one key twice", await input(p, pilot, { registryKeys: [...REGISTRY, { publicKey: KEY_B, trustDomain: OPERATOR_A }], pinnedRegistryDigest: REGISTRY_PIN }));
-  add("reject: another spelling of a registry key", await input(p, pilot, { registryKeys: [{ publicKey: `0x${KEY_A.slice(2).toUpperCase()}`, trustDomain: OPERATOR_A }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN }));
-  add("reject: two registry keys sharing a signer id", await input(p, pilot, { registryKeys: [...REGISTRY, { publicKey: `0x${"ab".repeat(20)}${"00".repeat(12)}`, trustDomain: null }, { publicKey: `0x${"ab".repeat(20)}${"11".repeat(12)}`, trustDomain: null }], pinnedRegistryDigest: REGISTRY_PIN }));
-  add("reject: a registry rotated after the pin", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { publicKey: KEY_B, trustDomain: OPERATOR_A }], pinnedRegistryDigest: REGISTRY_PIN }));
+  const G = EXECUTOR_GRANTS;
+  add("reject: a registry listing one key twice", await input(p, pilot, { registryKeys: [...REGISTRY, { publicKey: KEY_B, trustDomain: OPERATOR_A, grants: G }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: another spelling of a registry key", await input(p, pilot, { registryKeys: [{ publicKey: `0x${KEY_A.slice(2).toUpperCase()}`, trustDomain: OPERATOR_A, grants: G }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: two registry keys sharing a signer id", await input(p, pilot, { registryKeys: [...REGISTRY, { publicKey: `0x${"ab".repeat(20)}${"00".repeat(12)}`, trustDomain: null, grants: G }, { publicKey: `0x${"ab".repeat(20)}${"11".repeat(12)}`, trustDomain: null, grants: G }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a registry rotated after the pin", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, trustDomain: OPERATOR_A }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a registry re-granted after the pin", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: JOB }] }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a row with no grants", await input(p, pilot, { registryKeys: [{ publicKey: KEY_A, trustDomain: OPERATOR_A }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a grant with an unknown role", await input(p, pilot, { registryKeys: [{ ...REGISTRY[0]!, grants: [{ role: "owner", kernelId: KERNEL }] }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN }));
+  // Grants (astra pack 281, DECISIONS 00:26): a signature authorizes only what its key's grant names.
+  add("reject: astra 281, a witness signs the kernel's execution", await input(dr, [await toBundle(PILOT.slice(0, 2), dr, SIGNER_B)]));
+  const bElsewhere = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "executor" as const, kernelId: "kernel-other" }] }];
+  add("reject: a registered key with no grant for the subject", await input(dr, [await toBundle(PILOT.slice(0, 2), dr, SIGNER_B)], { registryKeys: bElsewhere }));
+  add("admit: a witness for this one job", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: JOB }] }] }));
+  add("reject: a witness for another job", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: "job-other" }] }] }));
+  add("reject: the executor's grant names another kernel", await input(dr, [await toBundle(PILOT.slice(0, 2), dr, SIGNER_A)], { registryKeys: [{ ...REGISTRY[0]!, grants: [{ role: "executor" as const, kernelId: "kernel-other" }] }, REGISTRY[1]!] }));
+  add("reject: a witness bundle holding the completion", await input(p, [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), await toBundle(PILOT.slice(1), p, SIGNER_B)]));
+  // Session keys count only through a delegation rooted in a registered row and committed in the pin.
+  const session = delegate(key, 0xc3);
+  const withSession = [...REGISTRY, sessionRow(session)];
+  const bySession = [await toBundle(PILOT.slice(0, 2), p, session.signer), pilot[1]!];
+  add("admit: a session key delegated by the executor, committed in the pin", await input(p, bySession, { registryKeys: withSession }));
+  add("reject: a session key left out of the pinned rows", await input(p, bySession));
+  add("reject: a session row whose authorization has a field the wire form does not", await input(p, bySession, { registryKeys: [...REGISTRY, { ...sessionRow(session), authorization: { ...session.authorization, extra: 1 } }], pinnedRegistryDigest: await pinOf(withSession) }));
+  add("reject: a session row with a field beside delegatedBy", await input(p, bySession, { registryKeys: [...REGISTRY, { ...sessionRow(session), trustDomain: OPERATOR_B }], pinnedRegistryDigest: await pinOf(withSession) }));
+  const otherJob = delegate(key, 0xc4, { contractIds: ["job-other"] });
+  add("reject: a session key delegated for another job", await input(p, [await toBundle(PILOT.slice(0, 2), p, otherJob.signer), pilot[1]!], { registryKeys: [...REGISTRY, sessionRow(otherJob)] }));
+  const expired = delegate(key, 0xc5, { expiresAt: Math.floor(T0 / 1000) + 5 });
+  add("reject: a session key whose window the events fall outside", await input(p, [await toBundle(PILOT.slice(0, 2), p, expired.signer), pilot[1]!], { registryKeys: [...REGISTRY, sessionRow(expired)] }));
+  add("reject: a delegation its named root did not sign", await input(p, pilot, { registryKeys: [...REGISTRY, sessionRow(delegate(keyB, 0xc6))], pinnedRegistryDigest: REGISTRY_PIN }));
+  const widened = [...REGISTRY, sessionRow(delegate(key, 0xc3, { contractIds: [JOB, "job-other"] }))];
+  add("reject: a delegation re-scoped after the pin", await input(p, bySession, { registryKeys: widened, pinnedRegistryDigest: await pinOf(withSession) }));
+  // Only a witness reaches inspected_output (steward #6694).
+  add("reject: no witness granted for the subject", await input(p, [await toBundle(PILOT, p, SIGNER_A)], { registryKeys: [REGISTRY[0]!] }));
+  add("reject: the executor's own inspections-only bundle, its operator left out of the deal", await input(p, [await toBundle(PILOT.slice(2), p, SIGNER_A)], { executorTrustDomains: [OPERATOR_C] }));
   add("reject: a malformed registry pin", await input(p, pilot, { pinnedRegistryDigest: "0x" + "a".repeat(64) }));
   add("reject: no executor assigned", await input(p, pilot, { executorTrustDomains: [] }));
   add("reject: executorTrustDomains naming no operator principal", await input(p, pilot, { executorTrustDomains: ["not-a-principal"] }));
@@ -946,6 +1004,10 @@ const PATCH_ROWS: Array<[string, Apply]> = [
   ["crypto.subtle.verify answers true", replace(SubtleCryptoPrototype, "verify", () => () => Promise.resolve(true))],
   ["crypto.subtle.importKey refuses", replace(SubtleCryptoPrototype, "importKey", () => () => Promise.reject(new Error("importKey replaced")))],
   ["parseInt", replace(globalThis, "parseInt", () => () => 0)],
+  // astra pack 281: grants, delegations and the delegation preimage read own data and captured intrinsics only.
+  ["Object.prototype.role, kernelId, jobId, grants, delegatedBy and trustDomain", pollute(() => ({ role: "executor", kernelId: KERNEL, jobId: JOB, grants: EXECUTOR_GRANTS, delegatedBy: KEY_A, trustDomain: null }))],
+  ["Math.floor", replace(Math, "floor", () => () => 0)],
+  ["String.prototype.toLowerCase", replace(String.prototype, "toLowerCase", () => () => "0x" + "00".repeat(32))],
   ["Hash.prototype.update", replace(HashPrototype, "update", (o) => function (this: unknown) { return ReflectApply(o, this, ["tampered"]); })],
   ["Hash.prototype.digest", replace(HashPrototype, "digest", () => () => "0".repeat(64))],
   ["Promise.prototype.then, forging a carried digest", replace(Promise.prototype, "then", forgingThen)],
