@@ -196,12 +196,13 @@ export const BUDGET_RESERVATIONS_SCHEMA_VERSION = 2;
  *
  * The version record is written only by the run that CREATES the table (pack 92, MEDIUM): `CREATE TABLE IF
  * NOT EXISTS` keeps an existing table as it is, so stamping after it would certify a table of any age. An
- * existing table is never stamped here; `ensureBudgetReservationsSchema` alone decides about it.
+ * existing table is never stamped here; `ensureBudgetReservationsSchema` alone decides about it. Its presence
+ * is checked with COLLATE NOCASE (pack 252), because SQLite resolves table names case-insensitively.
  */
 export const BUDGET_RESERVATIONS_DDL = `
     CREATE TABLE IF NOT EXISTS pcc_schema_versions (object TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL);
     INSERT OR REPLACE INTO pcc_schema_versions (object, version) SELECT 'budget_reservations', ${BUDGET_RESERVATIONS_SCHEMA_VERSION}
-      WHERE NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations');
+      WHERE NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations' COLLATE NOCASE);
     CREATE TABLE IF NOT EXISTS ${TABLE};
     CREATE INDEX IF NOT EXISTS budget_reservations_request_idx ON budget_reservations(request_id, state);
     CREATE INDEX IF NOT EXISTS budget_reservations_parent_idx ON budget_reservations(parent_reservation_id, parent_unit);
@@ -245,9 +246,10 @@ export const BUDGET_RESERVATIONS_DDL = `
 export function ensureBudgetReservationsSchema(sqlite: Database.Database): void {
   sqlite
     .transaction(() => {
-      const table = sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations'").get();
+      // COLLATE NOCASE (pack 252): SQLite resolves table names case-insensitively, so Budget_Reservations IS this table.
+      const table = sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations' COLLATE NOCASE").get();
       if (table) {
-        const versions = sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pcc_schema_versions'").get();
+        const versions = sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pcc_schema_versions' COLLATE NOCASE").get();
         const recorded = versions
           ? (sqlite.prepare("SELECT version FROM pcc_schema_versions WHERE object = 'budget_reservations'").get() as { version: unknown } | undefined)
           : undefined;

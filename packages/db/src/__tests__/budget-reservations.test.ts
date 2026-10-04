@@ -601,6 +601,52 @@ describe("H3: migration 0004 is the runtime DDL, and a table of another shape is
     expect(() => ensureBudgetReservationsSchema(v1)).toThrow(/holds rows but its recorded schema version is 1/);
   });
 
+  // Pack 252 (MEDIUM): SQLite resolves table names case-insensitively, so a table named with other letter
+  // case IS budget_reservations to every statement. The presence checks must see it too.
+  const CASE_VARIANT_V1 = BUDGET_RESERVATIONS_DDL.replace("id TEXT NOT NULL PRIMARY KEY", "id TEXT PRIMARY KEY").replace(
+    "CREATE TABLE IF NOT EXISTS budget_reservations (",
+    "CREATE TABLE IF NOT EXISTS Budget_Reservations (",
+  );
+  function caseVariantV1(rows: number): Database.Database {
+    const db = new Database(":memory:");
+    db.exec(CASE_VARIANT_V1);
+    db.exec("UPDATE pcc_schema_versions SET version = 1 WHERE object = 'budget_reservations'");
+    for (let i = 0; i < rows; i++) {
+      db.prepare("INSERT INTO Budget_Reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, expires_at, state, created_at) VALUES (?, 'p', 'w', 'USDC', '1', 'p', 'r', 2, 'issued', 1)").run(`x${i}`);
+    }
+    return db;
+  }
+  it.each([
+    ["BUDGET_RESERVATIONS_DDL", () => BUDGET_RESERVATIONS_DDL],
+    ["migration 0004", () => readFileSync(SQL_FILE, "utf8")],
+  ])("pack 252 MEDIUM: %s run on a case-variant v1 table (Budget_Reservations) recorded as v1 never re-stamps it v2", (_label, ddl) => {
+    const db = caseVariantV1(1);
+    expect(versionOf(db)).toBe(1);
+    db.exec(ddl());
+    expect(versionOf(db)).toBe(1);
+  });
+
+  it("pack 252 MEDIUM: the guarded path sees a case-variant table: one holding rows stops the boot, an empty one is rebuilt", () => {
+    const held = caseVariantV1(1);
+    expect(() => ensureBudgetReservationsSchema(held)).toThrow(/holds rows but its recorded schema version is 1/);
+    expect(held.prepare("SELECT count(*) AS n FROM budget_reservations").get()).toEqual({ n: 1 });
+
+    const empty = caseVariantV1(0);
+    ensureBudgetReservationsSchema(empty);
+    const id = (empty.prepare("PRAGMA table_info(budget_reservations)").all() as Array<{ name: string; notnull: number }>).find((c) => c.name === "id");
+    expect(id?.notnull).toBe(1);
+    expect(versionOf(empty)).toBe(BUDGET_RESERVATIONS_SCHEMA_VERSION);
+  });
+
+  it("pack 252 MEDIUM: a case-variant version table (PCC_Schema_Versions) holding the current record is read, so a current store still boots", () => {
+    const db = new Database(":memory:");
+    db.exec(BUDGET_RESERVATIONS_DDL.replace("CREATE TABLE IF NOT EXISTS pcc_schema_versions", "CREATE TABLE IF NOT EXISTS PCC_Schema_Versions"));
+    expect(versionOf(db)).toBe(BUDGET_RESERVATIONS_SCHEMA_VERSION);
+    new BudgetReservationStore(db, { clock: () => NOW }).issue(issueInput());
+    expect(() => ensureBudgetReservationsSchema(db)).not.toThrow();
+    expect(db.prepare("SELECT count(*) AS n FROM budget_reservations").get()).toEqual({ n: 1 });
+  });
+
   it("pack 92 MEDIUM: the run that creates the table records its version, and a later run keeps that record", () => {
     const db = new Database(":memory:");
     db.exec(BUDGET_RESERVATIONS_DDL);

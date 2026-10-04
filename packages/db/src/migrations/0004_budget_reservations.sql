@@ -10,14 +10,15 @@
 -- without the current version is rebuilt when empty and stops the boot when it holds rows.
 --
 -- The version record is written only by the run that CREATES the table: run against an existing table of
--- any age, this file leaves the table and its record as they are (pack 92, MEDIUM).
+-- any age, this file leaves the table and its record as they are (pack 92, MEDIUM). The presence check uses
+-- COLLATE NOCASE, because SQLite resolves table names case-insensitively (pack 252).
 -- Amounts are exact base units stored as canonical decimal TEXT (SQLite has no
 -- numeric(78,0)) and compared as BigInt in application code. Issue and consume run in BEGIN IMMEDIATE
 -- transactions. The guard triggers hold no data, so they are dropped and recreated on every run.
 
 CREATE TABLE IF NOT EXISTS pcc_schema_versions (object TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL);
 INSERT OR REPLACE INTO pcc_schema_versions (object, version) SELECT 'budget_reservations', 2
-  WHERE NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations');
+  WHERE NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations' COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS budget_reservations (
   id TEXT NOT NULL PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
   principal TEXT NOT NULL CHECK (length(principal) BETWEEN 1 AND 128),
