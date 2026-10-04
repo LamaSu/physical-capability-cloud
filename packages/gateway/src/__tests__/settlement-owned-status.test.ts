@@ -15,8 +15,6 @@ import { afterAll, describe, it, expect, beforeEach, afterEach, vi } from "vites
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
-import { ot2RelayRoutes } from "../routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { settlementRoutes } from "../routes/settlement.js";
@@ -95,8 +93,7 @@ beforeEach(async () => {
   app.addHook("onRequest", asN31cAdmin);
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
+  // The legacy OT-2 relay and scope routes are retired (N4b-gw, #400); no test here calls them.
   await app.register(jobRoutes);
   await app.register(operatorRelayRoutes);
   await app.register(settlementRoutes);

@@ -16,8 +16,6 @@ import nacl from "tweetnacl";
 import { hashBundle, hashEvent, signingPreimage, type EvidenceEvent } from "@pcc/spec";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
-import { ot2RelayRoutes } from "../routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
@@ -76,8 +74,7 @@ async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
+  // The legacy OT-2 relay and scope routes are retired (N4b-gw, #400); no test here calls them.
   await app.register(jobRoutes);
   await app.ready();
   return app;

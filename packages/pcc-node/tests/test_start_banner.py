@@ -16,6 +16,7 @@ from click.testing import CliRunner
 
 from pcc_node import cli
 from pcc_node.cli import main
+from pcc_node.register import RegistrationError
 
 PUBLIC = "https://capability.network"
 
@@ -104,3 +105,67 @@ def test_the_banner_comes_before_everything_else(tmp_path):
     lines = result.output.splitlines()
     assert lines[0].startswith(f"Target gateway: {PUBLIC}")
     assert "already running" in result.output
+
+
+def test_register_401_stops_start_and_does_not_claim_running(tmp_path):
+    # item 133 (board N119): a 401 on kernel registration must stop `start` -- the node is NOT
+    # registered, so no device registration, no "Node running", no daemon.
+    config_path = tmp_path / "node-config.json"
+    with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
+         mock.patch("pcc_node.cli._interactive", return_value=False), \
+         mock.patch("pcc_node.cli.detect_all", return_value=[]), \
+         mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 16, "cd" * 16)), \
+         mock.patch("pcc_node.cli.provision_api_key", return_value="test-key"), \
+         mock.patch("pcc_node.cli.register_kernel",
+                    side_effect=RegistrationError(401, {"error": "unauthorized"})) as register, \
+         mock.patch("pcc_node.cli.register_devices") as reg_devices, \
+         mock.patch("pcc_node.cli.run_daemon") as daemon:
+        result = CliRunner().invoke(
+            main, ["start", "-c", str(config_path), "--api-key", "k", "--yes"], env={"PCC_BASE": ""})
+    assert result.exit_code == 1, result.output
+    assert "Registration failed (HTTP 401)" in result.output
+    assert "Node running" not in result.output
+    register.assert_called_once()
+    reg_devices.assert_not_called()
+    daemon.assert_not_called()
+
+
+def test_no_key_with_default_gateway_refuses_before_any_network_step(tmp_path):
+    # item 133 (board N119): no API key + an unchosen (default public) gateway must refuse BEFORE
+    # detect / provision / register -- pcc-node must not assume capability.network.
+    config_path = tmp_path / "node-config.json"
+    with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
+         mock.patch("pcc_node.cli._interactive", return_value=False), \
+         mock.patch("pcc_node.cli.detect_all") as detect, \
+         mock.patch("pcc_node.cli.provision_api_key") as provision, \
+         mock.patch("pcc_node.cli.register_kernel") as register, \
+         mock.patch("pcc_node.cli.run_daemon"):
+        result = CliRunner().invoke(
+            main, ["start", "-c", str(config_path), "--yes"], env={"PCC_BASE": "", "PCC_API_KEY": ""})
+    assert result.exit_code == 1, result.output
+    assert "no gateway chosen and no API key" in result.output
+    detect.assert_not_called()
+    provision.assert_not_called()
+    register.assert_not_called()
+
+
+def test_whitespace_only_api_key_does_not_bypass_the_no_key_guard(tmp_path):
+    # verdict 133a MED: `--api-key "   "` is not a usable key -- it must not slip past the fix-2 guard
+    # (which now trims), so no discovery / detect / provision / register happens.
+    config_path = tmp_path / "node-config.json"
+    with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
+         mock.patch("pcc_node.cli._interactive", return_value=False), \
+         mock.patch("pcc_node.cli.discover_network") as discover, \
+         mock.patch("pcc_node.cli.detect_all") as detect, \
+         mock.patch("pcc_node.cli.provision_api_key") as provision, \
+         mock.patch("pcc_node.cli.register_kernel") as register, \
+         mock.patch("pcc_node.cli.run_daemon"):
+        result = CliRunner().invoke(
+            main, ["start", "-c", str(config_path), "--api-key", "   ", "--yes", "--discover"],
+            env={"PCC_BASE": ""})
+    assert result.exit_code == 1, result.output
+    assert "no gateway chosen and no API key" in result.output
+    discover.assert_not_called()
+    detect.assert_not_called()
+    provision.assert_not_called()
+    register.assert_not_called()

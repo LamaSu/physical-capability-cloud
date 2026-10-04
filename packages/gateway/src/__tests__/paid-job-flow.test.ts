@@ -10,10 +10,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
-import { ot2RelayRoutes } from "../routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
+import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
+import { schema, eq } from "@pcc/store";
 import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
@@ -74,15 +74,75 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
-
-  actAsJobParty(app); // job reads are object-authorized (F3)
+  // Stand-in for apiGate: an API key sets operatorId and userId.
+  app.decorateRequest("operatorId", null);
+  app.decorateRequest("userId", null);
+  app.decorateRequest("apiKeyId", null);
+  app.addHook("onRequest", async (req) => {
+    const key = req.headers["x-test-key"];
+    if (typeof key === "string") {
+      req.operatorId = key;
+      req.userId = key as `0x${string}`;
+    }
+  });
+  // Job reads are object-authorized (#382, readmodels F3). This runs after the stand-in above,
+  // so a request with x-test-key keeps that operator; one without it reads as the seeded
+  // kernel-nyc operator.
+  actAsJobParty(app);
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
+  // The legacy OT-2 relay is retired (N4b-gw); tool calls go through
+  // /api/relay/:kernelId as the scope's holder, and every relay call a holder
+  // makes is as the PROVEN holder (DECISIONS 00:42 and 00:53; buyer below).
+  await app.register(deviceRelayRoutes);
   await app.register(jobRoutes);
   await app.ready();
   return app;
+}
+
+/** Headers for a principal, e.g. the buyer agent holding the job's scope. */
+const asKey = (id: string) => ({ "x-test-key": id });
+
+// DECISIONS 00:42 (the steward's #6690, f6359711): a scope holder's write tool call needs an
+// AUTHENTIC holder, a buyer wallet the caller PROVED that holds the active scope the call names.
+// The same address merely claimed through an API key is refused (operator_proof_required).
+// DECISIONS 00:53 (#6711) extends the proof to the holder's other relay calls (safe calls, scope
+// and result reads), so every relay call a holder makes here is as the proven holder.
+//
+// buyer(tag) is a buyer agent's wallet, all lowercase: the stand-in gate (actAsJobParty) proves
+// a wallet principal lowercased (provenWalletFor), and the relay compares the scope's createdBy
+// exactly with the proven wallet (the guard) and with the caller's principal (the handler). The
+// job is submitted with userAgentId = that wallet, so the gateway mints the scope for it.
+const buyer = (tag: string) => `0x${"b".repeat(40 - tag.length)}${tag}`;
+/** The same address on an API key without proof: a claim only. */
+const claimedOnly = (wallet: string) => ({ ...asKey(wallet), "x-test-proven-wallet": "none" });
+
+/**
+ * The buyer's address merely claimed (an API key, no proof) is refused its scoped write, 403
+ * operator_proof_required, and queues and spends nothing: no relay row under the scope, and
+ * the scope's command count unchanged.
+ */
+async function expectClaimedOnlyWriteRefused(
+  app: FastifyInstance,
+  wallet: string,
+  payload: { scopeId: string; toolName: string; args?: Record<string, unknown> },
+) {
+  const { db } = getStore();
+  const rows = () => db.select().from(schema.toolCallRelay).where(eq(schema.toolCallRelay.scopeId, payload.scopeId)).all();
+  const spent = () => db.select().from(schema.executionScopes).where(eq(schema.executionScopes.id, payload.scopeId)).get()!.commandCount;
+  const rowsBefore = rows().length;
+  const spentBefore = spent();
+  const res = await app.inject({ method: "POST", url: "/api/relay/kernel-nyc/tool-call", headers: claimedOnly(wallet), payload });
+  expect(res.statusCode).toBe(403);
+  expect(res.json().reason).toBe("operator_proof_required");
+  expect(rows()).toHaveLength(rowsBefore);
+  expect(spent()).toBe(spentBefore);
+}
+
+/** The recorded operator of a seeded kernel. */
+function operatorOf(kernelId: string): string {
+  const row = getStore().db.select().from(schema.shopKernels).where(eq(schema.shopKernels.id, kernelId)).get();
+  return row!.operatorAddress;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,23 +258,25 @@ describe("Paid Job Flow", () => {
     });
 
     it("creates an active execution scope tied to the job", async () => {
+      const wallet = buyer("001");
       const res = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-001",
+          userAgentId: wallet,
         },
       });
 
       expect(res.statusCode).toBe(201);
       const body = res.json();
 
-      // Verify scope in DB
+      // Verify scope in DB (read by its proven holder through the device relay)
       const scopeRes = await app.inject({
         method: "GET",
-        url: `/api/ot2/scope/${body.scopeId}`,
+        url: `/api/relay/kernel-nyc/scope/${body.scopeId}`,
+        headers: asKey(wallet),
       });
 
       expect(scopeRes.statusCode).toBe(200);
@@ -289,29 +351,30 @@ describe("Paid Job Flow", () => {
 
   describe("PUT /api/jobs/:jobId/complete", () => {
     it("completes a job and settles (mock settlement)", async () => {
-      // First create a job via fast-track
+      // First create a job via fast-track, for the buyer's wallet
+      const wallet = buyer("003");
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-003",
+          userAgentId: wallet,
         },
       });
       const { jobId, scopeId } = createRes.json();
 
-      // Simulate some tool calls under the scope
-      await app.inject({
+      // Simulate some tool calls under the scope: the buyer's proven wallet writes, and the same
+      // address only claimed is refused (DECISIONS 00:42).
+      const write = { scopeId, toolName: "ot2_aspirate", args: { volume: 100, well: "A1" } };
+      await expectClaimedOnlyWriteRefused(app, wallet, write);
+      const call = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
-        payload: {
-          kernelId: "kernel-nyc",
-          scopeId,
-          toolName: "ot2_aspirate",
-          args: { volume: 100, well: "A1" },
-        },
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey(wallet),
+        payload: write,
       });
+      expect(call.statusCode).toBe(201);
 
       // Complete the job
       const completeRes = await app.inject({
@@ -379,13 +442,14 @@ describe("Paid Job Flow", () => {
     });
 
     it("leaves execution scopes active after completion (revoked at expiry, not on complete)", async () => {
+      const wallet = buyer("005");
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-005",
+          userAgentId: wallet,
         },
       });
       const { jobId, scopeId } = createRes.json();
@@ -403,7 +467,8 @@ describe("Paid Job Flow", () => {
       // report scopesRevoked === 0 accordingly.
       const scopeRes = await app.inject({
         method: "GET",
-        url: `/api/ot2/scope/${scopeId}`,
+        url: `/api/relay/kernel-nyc/scope/${scopeId}`,
+        headers: asKey(wallet),
       });
 
       expect(scopeRes.statusCode).toBe(200);
@@ -499,57 +564,167 @@ describe("Paid Job Flow", () => {
 
   describe("Escrow verification on tool calls", () => {
     it("allows tool calls when escrow is funded", async () => {
+      const wallet = buyer("008");
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-008",
+          userAgentId: wallet,
         },
       });
       const { scopeId } = createRes.json();
 
-      // Tool call should succeed — escrow is mock-funded
+      // Tool call should succeed — escrow is mock-funded — from the buyer's proven wallet; the
+      // same address only claimed is refused (DECISIONS 00:42).
+      const write = { scopeId, toolName: "ot2_aspirate", args: { volume: 50 } };
+      await expectClaimedOnlyWriteRefused(app, wallet, write);
       const toolRes = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
-        payload: {
-          kernelId: "kernel-nyc",
-          scopeId,
-          toolName: "ot2_aspirate",
-          args: { volume: 50 },
-        },
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey(wallet),
+        payload: write,
       });
 
       expect(toolRes.statusCode).toBe(201);
     });
 
     it("allows safe tools regardless of escrow status", async () => {
+      const wallet = buyer("009");
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-009",
+          userAgentId: wallet,
         },
       });
       const { scopeId } = createRes.json();
 
-      // Safe tool (ot2_health) should always work
+      // A safe tool (the relay manifest's "health") works whatever the escrow
+      // status, so make the escrow unfunded first.
+      const escrowId = createRes.json().escrowId;
+      getRepos().escrows.updateStatus(escrowId, "created");
       const toolRes = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey(wallet),
         payload: {
-          kernelId: "kernel-nyc",
           scopeId,
-          toolName: "ot2_health",
+          toolName: "health",
           args: {},
         },
       });
 
       expect(toolRes.statusCode).toBe(201);
+    });
+
+    // Carried over from the retired legacy OT-2 tool-call route (N4b-gw item 1).
+    it("refuses a scoped write while the job's escrow is not funded (402), and records the refusal", async () => {
+      const wallet = buyer("010");
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        payload: {
+          kernelId: "kernel-nyc",
+          capabilityType: "liquid-handler",
+          userAgentId: wallet,
+        },
+      });
+      const { scopeId, escrowId } = createRes.json();
+      getRepos().escrows.updateStatus(escrowId, "created");
+
+      // The buyer's proven wallet passes the relay guard (DECISIONS 00:42), so the escrow gate
+      // (escrowRefusal) is what refuses its write.
+      const toolRes = await app.inject({
+        method: "POST",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey(wallet),
+        payload: { scopeId, toolName: "ot2_aspirate", args: { volume: 50 } },
+      });
+
+      expect(toolRes.statusCode).toBe(402);
+      expect(toolRes.json().reason).toBe("escrow_not_funded");
+      expect(toolRes.json().escrowStatus).toBe("created");
+      const { db } = getStore();
+      const row = db.select().from(schema.toolCallRelay).where(eq(schema.toolCallRelay.id, toolRes.json().callId)).get();
+      expect(row!.status).toBe("rejected");
+      const scope = db.select().from(schema.executionScopes).where(eq(schema.executionScopes.id, scopeId)).get();
+      expect(scope!.commandCount).toBe(0);
+    });
+
+    it("refuses a scoped write when the escrow lookup fails (503), instead of letting it through", async () => {
+      const wallet = buyer("011");
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        payload: {
+          kernelId: "kernel-nyc",
+          capabilityType: "liquid-handler",
+          userAgentId: wallet,
+        },
+      });
+      const { scopeId } = createRes.json();
+      const spy = vi.spyOn(getRepos().escrows, "findByCwm").mockImplementation(() => {
+        throw new Error("escrow store unavailable");
+      });
+
+      // The buyer's proven wallet passes the relay guard (DECISIONS 00:42), so a failed escrow
+      // lookup is what refuses its write.
+      const toolRes = await app.inject({
+        method: "POST",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey(wallet),
+        payload: { scopeId, toolName: "ot2_aspirate", args: { volume: 50 } },
+      });
+      spy.mockRestore();
+
+      expect(toolRes.statusCode).toBe(503);
+      expect(toolRes.json().error).toBe("escrow_check_unavailable");
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // N4b-gw: a relay scope can bind only a job on its own kernel
+  // ═══════════════════════════════════════════════════════════════════════
+
+  describe("Relay scope minting and jobs", () => {
+    it("refuses an operator binding a scope to a job on another kernel", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: "user-agent-012" },
+      });
+      const { jobId } = createRes.json();
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/relay/kernel-nanoclaw/scope",
+        headers: asKey(operatorOf("kernel-nanoclaw")),
+        payload: { createdBy: operatorOf("kernel-nanoclaw"), allowedTools: ["ot2_aspirate"], jobId },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("job_not_on_kernel");
+    });
+
+    it("lets the job's own kernel operator bind a scope to it", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: "user-agent-013" },
+      });
+      const { jobId } = createRes.json();
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/relay/kernel-nyc/scope",
+        headers: asKey(operatorOf("kernel-nyc")),
+        payload: { createdBy: operatorOf("kernel-nyc"), allowedTools: ["ot2_aspirate"], jobId },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().jobId).toBe(jobId);
     });
   });
 
@@ -560,6 +735,7 @@ describe("Paid Job Flow", () => {
   describe("Full end-to-end: discovery -> negotiation -> execution -> settlement", () => {
     it("completes the entire paid job lifecycle", async () => {
       // ── Step 1: Submit from discovery (fast-track) ─────────────────
+      const wallet = buyer("e2e");
       const submitRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
@@ -568,7 +744,7 @@ describe("Paid Job Flow", () => {
           capabilityType: "liquid-handler",
           parameters: { protocol: "pcr-prep", volume: 50 },
           paymentMethod: "testnet-mock",
-          userAgentId: "user-agent-e2e",
+          userAgentId: wallet,
         },
       });
 
@@ -577,27 +753,23 @@ describe("Paid Job Flow", () => {
       expect(escrowStatus).toBe("funded");
 
       // ── Step 2: Execute tool calls under scope ─────────────────────
+      // The buyer's proven wallet writes; the same address only claimed is refused
+      // (DECISIONS 00:42).
+      const aspirate = { scopeId, toolName: "ot2_aspirate", args: { volume: 50, well: "A1" } };
+      await expectClaimedOnlyWriteRefused(app, wallet, aspirate);
       const call1 = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
-        payload: {
-          kernelId: "kernel-nyc",
-          scopeId,
-          toolName: "ot2_aspirate",
-          args: { volume: 50, well: "A1" },
-        },
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey(wallet),
+        payload: aspirate,
       });
       expect(call1.statusCode).toBe(201);
 
       const call2 = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
-        payload: {
-          kernelId: "kernel-nyc",
-          scopeId,
-          toolName: "ot2_dispense",
-          args: { volume: 50, well: "B1" },
-        },
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey(wallet),
+        payload: { scopeId, toolName: "ot2_dispense", args: { volume: 50, well: "B1" } },
       });
       expect(call2.statusCode).toBe(201);
 
@@ -640,7 +812,8 @@ describe("Paid Job Flow", () => {
       // completeBody.scopesRevoked === 0 above already asserts none were revoked.
       const scopeRes = await app.inject({
         method: "GET",
-        url: `/api/ot2/scope/${scopeId}`,
+        url: `/api/relay/kernel-nyc/scope/${scopeId}`,
+        headers: asKey(wallet),
       });
       expect(scopeRes.statusCode).toBe(200);
       expect(scopeRes.json().status).toBe("active");

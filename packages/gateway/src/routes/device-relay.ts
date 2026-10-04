@@ -30,21 +30,129 @@
  *
  * Manifest:
  *   GET  /api/relay/:kernelId/manifest              -- Get tool manifest for this kernel
+ *
+ * Access (N4b-gw item 4): default-deny, per kernel. Every route is listed in
+ * RELAY_ROUTE_ACCESS below and a preHandler enforces it; a route missing from
+ * the table is refused. The caller is the authenticated principal (req.userId,
+ * set by apiGate for an API key or a SIWE session); with none the answer is
+ * 401, never an "anonymous" pass.
+ *   - kernel_operator: the device side (claim pending calls, report results,
+ *     push camera frames, read and answer chat) and minting scopes. Only the
+ *     principal recorded as the kernel's operatorAddress.
+ *   - operator_or_grant: the operator, or a principal holding an active,
+ *     unexpired execution scope on this kernel.
+ *   - object_owner: routes addressing one scope or one call. The handler
+ *     allows the kernel operator or the scope's creator, and the object must
+ *     belong to the :kernelId in the path. The creator keeps these records
+ *     after its scope ends; nothing here commands or observes the device.
+ *
+ * Authority is checked again where it is used later (astra r2 on #400):
+ *   - GET /tool-call/pending re-checks every queued call before handing it
+ *     to the device (dispatchRefusal), and closes a refused call as rejected.
+ *   - A camera stream re-checks its caller before every frame and heartbeat,
+ *     and a revoke ends the streams the scope was holding open.
+ *
+ * The kernel's emergency stop (N4b-gw r6) is read fail-closed on every route
+ * that queues or hands out device work, as stopped / clear / unavailable
+ * (emergencyStopState):
+ *   - POST /tool-call and POST /scope answer 409 kernel_emergency_stopped while
+ *     stopped, and 503 policy_unavailable when the policy cannot be read.
+ *   - GET /tool-call/pending withholds while stopped (200, calls [], emergencyStop
+ *     true) and rejects what is still queued; 503 policy_unavailable, claiming
+ *     and changing nothing, when the policy cannot be read.
+ *   - Scope revoke and reads, the audit, results and the camera stay open: a
+ *     revoke is a safety action and a result is a device's report of what ran.
+ * POST /api/operator/emergency-stop (routes/operator.ts) also rejects the calls
+ * still queued at the stop, so a resume cannot restart them.
+ *
+ * Delivery is at-most-once (N4b-gw r6, F2): a call is claimed once, and a claim
+ * the executor does not report within 120 s is closed by the next pending poll
+ * as failed (claim_timeout), never handed out again. The caller resubmits. A
+ * late report for such a call is still recorded, once.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { getStore } from "../db.js";
-import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { getStore, getRepos } from "../db.js";
+import { authorityOf, isAnonymous, refuseKernelAction, type KernelAuthority } from "../auth/kernel-authority.js";
+import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { isToolSafe, getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
 
-const { toolCallRelay, executionScopes, ot2CameraFrames, ot2ChatMessages, shopKernels } = schema;
+const {
+  toolCallRelay,
+  executionScopes,
+  ot2CameraFrames,
+  ot2ChatMessages,
+  shopKernels,
+  negotiationSessions,
+  operatorPolicies,
+} = schema;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function generateId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Delivery is at-most-once (N4b-gw r6, F2). A call the executor claimed and
+ * never reported within CLAIM_TIMEOUT_MS is closed by the next pending poll as
+ * `failed` with the error CLAIM_TIMEOUT_ERROR. It is not requeued: the executor
+ * may still be running the command, and handing a physical command out twice is
+ * worse than failing it once. The caller resubmits if it still wants the work.
+ */
+const CLAIM_TIMEOUT_MS = 120_000;
+const CLAIM_TIMEOUT_ERROR = "claim_timeout";
+
+// ── The execution lease (N4b-gw r7, F3) ─────────────────────────────────────
+// A claimed call is not yet a command the device may run. The executor must
+// first take the call's lease, POST /tool-call/:callId/start with the claim
+// token the poll gave it. That re-checks, in one synchronous step at the moment
+// of actuation, everything that moves between the claim and the run (the
+// emergency stop, the scope's status/expiry/budget, the breaker, the claim's
+// age) and moves the row claimed -> executing exactly once. An executor runs a
+// call only on that 200 (docs/EXECUTION_SCOPE_PROTOCOL.md; pcc-node ships no relay
+// executor since #442, N66). This is the
+// same wire shape as #471's job claim: claim, then start with the token, the
+// token opaque to the node.
+//
+// An executor that does not send `X-PCC-Lease: 1` predates the lease. While
+// RELAY_LEASE_ENFORCE is on (the default; anything but "off"), it is handed no
+// calls: `{calls: [], count: 0, leaseRequired: true}` makes it idle, not unsafe.
+// "off" is a transition window for installed nodes, an operator decision: such a
+// poller is served as before, without a lease.
+
+/** A claim older than this cannot be started: the executor sat on it too long. */
+const LEASE_MAX_AGE_MS = 60_000;
+/**
+ * How long after the start a granted lease lets the executor BEGIN actuating
+ * (r8, F3). The start's 200 says so (`leaseMs`). pcc-node anchors the window
+ * before it sends the start request and re-checks it right before each adapter
+ * call, so a slow answer can't stretch it. A stop or revoke after a grant can't
+ * reach a call already granted, but every grant is dead within this window.
+ */
+const LEASE_VALIDITY_MS = 5_000;
+const CLAIM_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+function leaseEnforced(): boolean {
+  return (process.env.RELAY_LEASE_ENFORCE ?? "").trim().toLowerCase() !== "off";
+}
+
+/** An executor's report that it did NOT run the call (a lease refusal on the node). */
+function isNotExecuted(error: unknown): boolean {
+  return typeof error === "string" && error.startsWith("not_executed:");
+}
+
+function claimTokenHash(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+/** Constant-time comparison of two SHA-256 hex digests. */
+function sameHash(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
 }
 
 /** Resolve the device type for a kernel. Falls back to "generic". */
@@ -83,18 +191,9 @@ function validateToolCall(
     return { allowed: true, reason: "safe_tool" };
   }
 
-  // Check scope is active and not expired
-  if (scope.status !== "active") {
-    return { allowed: false, reason: "scope_not_active" };
-  }
-  if (new Date(scope.expiresAt) < new Date()) {
-    return { allowed: false, reason: "scope_expired" };
-  }
-
-  // Check tool is in allowed list
-  const allowedTools = scope.allowedTools as string[];
-  if (!allowedTools.includes(toolName)) {
-    return { allowed: false, reason: "tool_not_allowed" };
+  const refusal = scopeWriteRefusal(scope, toolName);
+  if (refusal) {
+    return { allowed: false, reason: refusal };
   }
 
   // Check command count
@@ -105,109 +204,438 @@ function validateToolCall(
   return { allowed: true, reason: "scope_approved" };
 }
 
-/** Check if a caller has camera access for a kernel */
-function hasCameraAccess(
-  callerId: string,
-  kernelId: string,
-): boolean {
-  if (!callerId || callerId === "anonymous") return false;
+/** Why `scope` does not authorize a write of `toolName` now, or null. */
+function scopeWriteRefusal(scope: typeof executionScopes.$inferSelect, toolName: string): string | null {
+  if (scope.status !== "active") return "scope_not_active";
+  if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
+  if (!(scope.allowedTools as string[]).includes(toolName)) return "tool_not_allowed";
+  return null;
+}
 
+// ── Access control (N4b-gw item 4) ──────────────────────────────────────────
+
+export type RelayAccess = "kernel_operator" | "operator_or_grant" | "object_owner";
+
+/**
+ * The complete access table for this plugin, keyed "METHOD /route/pattern".
+ * The preHandler refuses any route of this plugin that is not listed here, so
+ * a new relay route stays closed until someone decides who may call it.
+ */
+export const RELAY_ROUTE_ACCESS: Readonly<Record<string, RelayAccess>> = {
+  "GET /api/relay/:kernelId/manifest": "operator_or_grant",
+  "POST /api/relay/:kernelId/tool-call": "operator_or_grant",
+  "GET /api/relay/:kernelId/tool-call/pending": "kernel_operator",
+  "POST /api/relay/:kernelId/tool-call/:callId/start": "kernel_operator",
+  "POST /api/relay/:kernelId/tool-result": "kernel_operator",
+  "GET /api/relay/:kernelId/tool-result/:id": "object_owner",
+  "POST /api/relay/:kernelId/scope": "kernel_operator",
+  "GET /api/relay/:kernelId/scope/:scopeId": "object_owner",
+  "POST /api/relay/:kernelId/scope/:scopeId/revoke": "object_owner",
+  "GET /api/relay/:kernelId/scope/:scopeId/audit": "object_owner",
+  "POST /api/relay/:kernelId/camera/frame": "kernel_operator",
+  "GET /api/relay/:kernelId/camera/latest": "operator_or_grant",
+  "GET /api/relay/:kernelId/camera/snapshot": "operator_or_grant",
+  "GET /api/relay/:kernelId/camera/stream": "operator_or_grant",
+  "POST /api/relay/:kernelId/chat": "operator_or_grant",
+  "GET /api/relay/:kernelId/chat/messages": "operator_or_grant",
+  "GET /api/relay/:kernelId/chat/pending": "kernel_operator",
+  "POST /api/relay/:kernelId/chat/respond": "kernel_operator",
+};
+
+
+/** The authenticated principal apiGate resolved (API key or SIWE), or null. */
+function relayPrincipal(req: FastifyRequest): string | null {
+  const id = req.userId ?? req.operatorId ?? null;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/**
+ * True when the caller runs this kernel at the "operate" tier of auth/kernel-authority.ts: the
+ * admin, a proven wallet that is its operator, or the kernel's own principal (its recorded
+ * operatorAddress). N126: the relay's operator check is the shared guard's, not its own copy.
+ */
+function isRelayOperator(req: FastifyRequest, kernelId: string): boolean {
+  return refuseKernelAction(req, authorityOf(req), kernelId, "operate") === null;
+}
+
+/** True when `principal` created an active, unexpired scope on `kernelId`. */
+function holdsActiveScope(kernelId: string, principal: string): boolean {
   const { db } = getStore();
-
-  // Check if caller is the kernel operator
-  const kernel = db.select().from(shopKernels).where(eq(shopKernels.id, kernelId)).get();
-  if (kernel && kernel.operatorAddress === callerId) return true;
-
-  // Check if caller has an active scope for this kernel
-  const scope = db
+  const now = new Date();
+  return db
     .select()
     .from(executionScopes)
     .where(
       and(
         eq(executionScopes.kernelId, kernelId),
-        eq(executionScopes.createdBy, callerId),
+        eq(executionScopes.createdBy, principal),
         eq(executionScopes.status, "active"),
       ),
     )
-    .limit(1)
-    .get();
+    .all()
+    .some((scope) => new Date(scope.expiresAt) > now);
+}
 
-  return !!scope;
+/** Operator of the kernel (any tier above), or the creator of this scope. */
+function ownsScope(
+  req: FastifyRequest,
+  scope: typeof executionScopes.$inferSelect,
+  kernelId: string,
+  principal: string,
+): boolean {
+  return scope.createdBy === principal || isRelayOperator(req, kernelId);
+}
+
+// DECISIONS 00:53 (the steward's #6711): the relay's human- and agent-facing side needs a PROVEN
+// principal or the admin, through either #400 branch. A kernel's operatorAddress is public (the
+// kernel listing shows it), so a key that merely claims it may not watch the camera, read the
+// chat, call a tool or read a result. The device's own side (its polling, starts, results, frame
+// uploads and chat replies) stays claimed-or-admin (the steward's 20:16).
+
+/** The admin, or a proven wallet that is the kernel's operator: what "decide" admits. */
+function isProvenOperator(req: FastifyRequest, kernelId: string): boolean {
+  return refuseKernelAction(req, authorityOf(req), kernelId, "decide") === null;
+}
+
+/** A proven wallet holding an active scope on the kernel. */
+function isProvenScopeHolder(req: FastifyRequest, kernelId: string): boolean {
+  const wallet = authorityOf(req).provenWallet;
+  return wallet !== null && holdsActiveScope(kernelId, wallet);
+}
+
+/** The scope's owner, proven: the admin, the proven operator, or the proven wallet that created it. */
+function provenOwnsScope(req: FastifyRequest, scope: typeof executionScopes.$inferSelect, kernelId: string): boolean {
+  const wallet = authorityOf(req).provenWallet;
+  return (wallet !== null && scope.createdBy === wallet) || isProvenOperator(req, kernelId);
 }
 
 /**
- * Whether `callerId` is authorized to report a result for a relay tool call.
- * Authorized = the operator of the call's kernel (the on-device executor runs
- * under the operator), or the creator of the call's execution scope. Mirrors
- * the ownership gate enforced on POST /tool-call. The caller resolves and
- * allows the anonymous (unauthenticated relay) case before invoking this.
- *
- * Authorization is checked against the call's OWN kernel (`call.kernelId`) —
- * the resource whose circuit breaker the result mutates — not the URL param,
- * so a callId cannot be replayed against an unrelated kernel's operator.
+ * Load the scope a scope/:scopeId route addresses. Replies 404 unless the
+ * scope is on :kernelId, and 403 unless the caller owns it: for a revoke at the
+ * stop tier (#6677: the scope's creator, the kernel's claimed operator or the
+ * admin), for a read with proof (DECISIONS 00:53).
  */
-function callerOwnsCall(
-  call: typeof toolCallRelay.$inferSelect,
-  callerId: string,
-): boolean {
+function ownedScopeOrReply(
+  req: FastifyRequest<{ Params: { kernelId: string; scopeId: string } }>,
+  reply: FastifyReply,
+  tier: "stop" | "proof",
+): typeof executionScopes.$inferSelect | null {
+  const { kernelId, scopeId } = req.params;
   const { db } = getStore();
-
-  // Kernel operator may always report outcomes for their own kernel.
-  const kernel = db
-    .select()
-    .from(shopKernels)
-    .where(eq(shopKernels.id, call.kernelId))
-    .get();
-  if (kernel && kernel.operatorAddress === callerId) return true;
-
-  // Otherwise the creator of the call's execution scope may report it.
-  if (call.scopeId) {
-    const scope = db
-      .select()
-      .from(executionScopes)
-      .where(eq(executionScopes.id, call.scopeId))
-      .get();
-    if (scope && scope.createdBy === callerId) return true;
+  const scope = db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get();
+  if (!scope || scope.kernelId !== kernelId) {
+    reply.status(404).send({ error: "Scope not found", id: scopeId });
+    return null;
   }
-
-  return false;
+  const owns = tier === "stop" ? ownsScope(req, scope, kernelId, relayPrincipal(req) ?? "") : provenOwnsScope(req, scope, kernelId);
+  if (!owns) {
+    reply.status(403).send({
+      error: "scope_not_yours",
+      message:
+        tier === "stop"
+          ? "Only the kernel operator or the scope's creator may use this scope."
+          : "Only the kernel's operator or the scope's creator, by a proven wallet, or the admin may read this scope.",
+    });
+    return null;
+  }
+  return scope;
 }
 
-// ── Active SSE clients for camera streams (per kernel) ──────────────────────
-const cameraStreamClients = new Map<string, Set<FastifyReply>>();
+/**
+ * Routes that authorize or drive a device: a DECISION (the steward's #6508 (2), N126). Opening an
+ * execution scope, and a chat instruction (the kernel's device agent reads and may act on it), need
+ * the admin or a PROVEN wallet that is the kernel's operator. A write tool call is a decision too
+ * (relayAccessGuard checks the tool). A scope grant is a claimed identity, so it never authorizes
+ * actuation until WP-A proves identities (operator item 138 may loosen this).
+ *
+ * Revoking a scope is NOT a decision: it takes the stop tier (the steward's #6677 (2)). It only
+ * removes authority, so the scope's creator, the kernel's claimed operator or the admin may revoke
+ * (#400's object_owner check, ownsScope, whose operator test admits what "stop_or_submit" does).
+ */
+const RELAY_DECISION_ROUTES: ReadonlySet<string> = new Set([
+  "POST /api/relay/:kernelId/scope",
+  "POST /api/relay/:kernelId/chat",
+]);
 
-function getStreamClients(kernelId: string): Set<FastifyReply> {
+/** A tool call whose tool is not a safe (read-only) tool for this kernel's device: a write. */
+function isWriteToolCall(req: FastifyRequest, kernelId: string): boolean {
+  const toolName = (req.body as { toolName?: unknown } | undefined)?.toolName;
+  return typeof toolName !== "string" || !isToolSafe(resolveDeviceType(kernelId), toolName);
+}
+
+/**
+ * DECISIONS 00:42 (the steward's #6690): #400's table decides WHO may write through the tool-call
+ * route (the kernel's operator, or an active scope holder), and the decision tier requires that
+ * WHO to be AUTHENTIC. So a wallet the caller PROVED may make a write under the scope the call
+ * names when that scope is on this kernel, active, unexpired and created for that wallet. The same
+ * address merely claimed through an API key may not. The handler still requires the caller to be
+ * the scope's holder, and checks its tools, budget and escrow.
+ */
+function isProvenHolderOfNamedScope(req: FastifyRequest, authority: KernelAuthority, kernelId: string): boolean {
+  const scopeId = (req.body as { scopeId?: unknown } | undefined)?.scopeId;
+  if (authority.provenWallet === null || typeof scopeId !== "string") return false;
+  const scope = getStore().db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get();
+  return (
+    scope !== undefined &&
+    scope.kernelId === kernelId &&
+    scope.createdBy === authority.provenWallet &&
+    scope.status === "active" &&
+    new Date(scope.expiresAt) > new Date()
+  );
+}
+
+/**
+ * preHandler for every relay route: default-deny, per kernel, on the kernel-authority tiers
+ * (N126). A route missing from RELAY_ROUTE_ACCESS is refused. Decisions take the "decide" tier;
+ * every other route takes "operate" (the admin, the proven operator wallet, or the kernel's own
+ * principal), and an operator_or_grant route also admits the holder of an active scope on the
+ * kernel. object_owner routes are checked by their handler against the addressed object.
+ */
+async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
+  const authority = authorityOf(req);
+  if (isAnonymous(authority)) {
+    return reply.status(401).send({
+      error: "authentication_required",
+      message: "The device relay requires the kernel operator's key or an execution scope holder's key.",
+    });
+  }
+
+  const routeKey = `${req.method} ${req.routeOptions.url}`;
+  const access = RELAY_ROUTE_ACCESS[routeKey];
+  if (!access) {
+    return reply.status(403).send({ error: "relay_route_not_allowed", route: routeKey });
+  }
+
+  const { kernelId } = req.params as { kernelId: string };
+  const writeToolCall = routeKey === "POST /api/relay/:kernelId/tool-call" && isWriteToolCall(req, kernelId);
+  if (RELAY_DECISION_ROUTES.has(routeKey) || writeToolCall) {
+    const decision = refuseKernelAction(req, authority, kernelId, "decide");
+    if (decision && !(writeToolCall && decision.status === 403 && isProvenHolderOfNamedScope(req, authority, kernelId))) {
+      return reply.status(decision.status).send(decision.body);
+    }
+    return;
+  }
+  // The handler checks the addressed object: a revoke at the stop tier, a read with proof.
+  if (access === "object_owner") return;
+
+  if (access === "kernel_operator") {
+    // The device's own side (the steward's 20:16; DECISIONS 00:53): the kernel's executor polls,
+    // starts, reports, uploads frames and replies with its own key, or the admin does.
+    const refusal = refuseKernelAction(req, authority, kernelId, "operate");
+    if (!refusal) return;
+    if (refusal.status !== 403) return reply.status(refusal.status).send(refusal.body);
+    return reply.status(403).send({
+      error: "relay_access_denied",
+      required: "kernel_operator",
+      message: "Only this kernel's operator may use this relay route.",
+    });
+  }
+
+  // operator_or_grant reads and safe calls face people and agents (DECISIONS 00:53): the admin,
+  // the proven operator wallet, or a proven wallet holding an active scope on this kernel (for a
+  // tool call, the scope the call names).
+  const proof = refuseKernelAction(req, authority, kernelId, "decide");
+  if (!proof) return;
+  if (proof.status !== 403) return reply.status(proof.status).send(proof.body);
+  const provenGrant =
+    routeKey === "POST /api/relay/:kernelId/tool-call"
+      ? isProvenHolderOfNamedScope(req, authority, kernelId)
+      : authority.provenWallet !== null && holdsActiveScope(kernelId, authority.provenWallet);
+  if (provenGrant) return;
+  // The kernel's claimed operator, or a claimed scope holder, lacks only the proof. Anyone else is
+  // #400's stranger.
+  const principal = relayPrincipal(req);
+  const claimsAccess =
+    refuseKernelAction(req, authority, kernelId, "operate") === null || (principal !== null && holdsActiveScope(kernelId, principal));
+  if (claimsAccess) return reply.status(403).send(proof.body);
+  return reply.status(403).send({
+    error: "relay_access_denied",
+    required: "kernel_operator_or_active_scope",
+    message: "Requires this kernel's operator or an active execution scope on this kernel.",
+  });
+}
+
+/**
+ * Parity with the retired /api/ot2/tool-call: a scoped write under a scope
+ * bound to a job is refused while that job's escrow exists and is not funded.
+ * Unlike the legacy route, a lookup error refuses the call instead of
+ * letting it through. This is parity, not a funding gate: a job with no
+ * session, CWM or escrow record, or a completed escrow, does not stop the
+ * call. N4b-gw item 5 (gateway, R30) replaces this with the accepted, funded
+ * job and committed-protocol check.
+ */
+function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | null {
+  if (!scope.jobId) return null;
+  const repos = getRepos();
+  const job = repos.jobs.findById(scope.jobId);
+  if (!job) return null;
+  const { db } = getStore();
+  const session = db
+    .select()
+    .from(negotiationSessions)
+    .where(eq(negotiationSessions.jobId, scope.jobId))
+    .get();
+  if (!session?.cwmId) return null;
+  const escrow = repos.escrows.findByCwm(session.cwmId);
+  if (escrow && escrow.status !== "funded" && escrow.status !== "active" && escrow.status !== "completed") {
+    return escrow.status;
+  }
+  return null;
+}
+
+/**
+ * Where a kernel's emergency stop stands (N4b-gw r6). Callers must handle all
+ * three answers:
+ *   - "clear": the kernel has no operator_policies row, or its policy object's
+ *     emergencyStop is falsy.
+ *   - "stopped": its policy object's emergencyStop is truthy. Truthy, not
+ *     `=== true`, the way the kernel's policy engine reads it, so that any
+ *     value but a falsy one engages the stop.
+ *   - "unavailable": the stop cannot be told, and the relay refuses rather than
+ *     guess, because a policy it cannot read may hold a stop it cannot see. The
+ *     read throws, the stored JSON does not parse (the column is a drizzle json
+ *     column, which parses on read and throws), or the policy is not a plain
+ *     object (null, an array, a string, a number, a boolean).
+ * Synchronous (better-sqlite3), so a caller can read the state and act on it
+ * with no await in between.
+ */
+type EmergencyStopState = "stopped" | "clear" | "unavailable";
+
+function emergencyStopState(kernelId: string): EmergencyStopState {
+  try {
+    const { db } = getStore();
+    const row = db.select().from(operatorPolicies).where(eq(operatorPolicies.kernelId, kernelId)).get();
+    if (!row) return "clear";
+    const policy: unknown = row.policy;
+    if (typeof policy !== "object" || policy === null || Array.isArray(policy)) return "unavailable";
+    return (policy as Record<string, unknown>).emergencyStop ? "stopped" : "clear";
+  } catch {
+    return "unavailable";
+  }
+}
+
+/** The refusal for a kernel whose emergency stop is not "clear". */
+function stopRefusal(reply: FastifyReply, state: Exclude<EmergencyStopState, "clear">): FastifyReply {
+  return state === "stopped"
+    ? reply.status(409).send({ error: "kernel_emergency_stopped" })
+    : reply.status(503).send({ error: "policy_unavailable" });
+}
+
+/**
+ * Why a queued call may not be handed to the device now, or null when it may.
+ * GET /tool-call/pending is where a call leaves the gateway, so it re-checks
+ * what admission checked: a row can wait while its scope expires or is
+ * revoked, and older writers stored rows that admission never saw.
+ *   - A named scope must exist and be on the call's own kernel, for any tool.
+ *   - A call with no scope must be a safe tool; admission lets only the
+ *     operator queue one.
+ *   - A SCOPED call — safe OR non-safe — needs its scope still active and
+ *     unexpired at dispatch (finding F2: a holder's `home` moves the robot, so
+ *     it must not dispatch after the scope expired; only an operator's
+ *     scope-free safe call skips the scope).
+ *   - A non-safe write must also be in the scope's allowed tools, be within the
+ *     command budget re-derived from the rows (finding F3, so a legacy row
+ *     admission never counted can't exceed maxCommands), and pass escrow parity.
+ * Throws when the escrow lookup fails; the caller then leaves the call queued.
+ * The poll runs this twice per call: before the safety governor is consulted,
+ * and again, in the same synchronous section as the claim, after the governor
+ * has answered, because the governor is async and everything here moves while
+ * it is awaited. The governor/breaker and the emergency stop are checked
+ * separately, at the dispatch site (finding F1).
+ */
+function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: string): string | null {
+  const safe = isToolSafe(deviceType, call.toolName);
+  if (!call.scopeId) return safe ? null : "scope_required";
+  const { db } = getStore();
+  const scope = db.select().from(executionScopes).where(eq(executionScopes.id, call.scopeId)).get();
+  if (!scope) return "scope_not_found";
+  if (scope.kernelId !== call.kernelId) return "scope_kernel_mismatch";
+  // F2: a scoped call needs live scope authority, safe tool or not.
+  if (scope.status !== "active") return "scope_not_active";
+  if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
+  if (safe) return null;
+  if (!(scope.allowedTools as string[]).includes(call.toolName)) return "tool_not_allowed";
+  // F3: re-derive the command budget from the rows. Admission increments
+  // scope.commandCount, but a legacy row it never saw would not have been
+  // counted; counting the scope's already-dispatched non-safe calls (claimed or
+  // terminal, excluding this one) catches that. If the cap is already reached,
+  // this queued call is beyond budget.
+  const dispatchedNonSafe = db
+    .select()
+    .from(toolCallRelay)
+    .where(and(eq(toolCallRelay.scopeId, scope.id), eq(toolCallRelay.kernelId, call.kernelId)))
+    .all()
+    .filter(
+      (c) =>
+        c.id !== call.id &&
+        (c.status === "claimed" || c.status === "executing" || c.status === "completed" || c.status === "failed") &&
+        !isToolSafe(deviceType, c.toolName),
+    );
+  if (dispatchedNonSafe.length >= scope.maxCommands) return "max_commands_reached";
+  return escrowRefusal(scope) ? "escrow_not_funded" : null;
+}
+
+// ── Camera streams (per kernel) ─────────────────────────────────────────────
+// The relay guard admits a stream once, when it opens. Each subscriber keeps
+// how it was admitted, and before every frame and every heartbeat the stream
+// checks again that its credential still stands and that its principal is
+// still the kernel's operator or holds an active, unexpired scope there. A
+// revoke ends the streams a scope was holding open. A stream that loses its
+// authority is ended and never receives another frame.
+
+interface CameraSubscriber {
+  reply: FastifyReply;
+  /** Still allowed to watch this kernel's camera? Fails closed on any error. */
+  authorized: () => boolean;
+  heartbeat?: ReturnType<typeof setInterval>;
+}
+
+const cameraStreamClients = new Map<string, Set<CameraSubscriber>>();
+
+function getStreamClients(kernelId: string): Set<CameraSubscriber> {
   if (!cameraStreamClients.has(kernelId)) {
     cameraStreamClients.set(kernelId, new Set());
   }
   return cameraStreamClients.get(kernelId)!;
 }
 
+/**
+ * Whether the credential apiGate resolved for `req` still stands for
+ * `principal`: an API key neither revoked nor expired, or a live SIWE session.
+ */
+function credentialStands(req: FastifyRequest, principal: string): boolean {
+  if (req.apiKeyId) {
+    const key = getRepos().apiKeys.findById(req.apiKeyId);
+    return (
+      !!key &&
+      !key.revokedAt &&
+      (!key.expiresAt || new Date(key.expiresAt).getTime() > Date.now()) &&
+      key.operatorId === principal
+    );
+  }
+  return resolveSession(req)?.address === principal;
+}
+
+function closeCameraStream(kernelId: string, subscriber: CameraSubscriber, reason: string): void {
+  getStreamClients(kernelId).delete(subscriber);
+  clearInterval(subscriber.heartbeat);
+  try {
+    subscriber.reply.raw.end(`event: closed\ndata: ${JSON.stringify({ reason })}\n\n`);
+  } catch {
+    // The socket is already gone.
+  }
+}
+
+/** End every stream on `kernelId` that is no longer authorized. */
+function closeLapsedCameraStreams(kernelId: string, reason: string): void {
+  for (const subscriber of [...getStreamClients(kernelId)]) {
+    if (!subscriber.authorized()) closeCameraStream(kernelId, subscriber, reason);
+  }
+}
+
 // ── Route Registration ──────────────────────────────────────────────────────
 
 export async function deviceRelayRoutes(app: FastifyInstance) {
-  // N31 (#575 r2; bus #6505): every relay route acts on ONE kernel's devices, execution scopes,
-  // tool-call queue, results, camera or chat, and none checked who operates that kernel: any key
-  // could open a scope on any kernel and queue commands its executor runs. One hook for the whole
-  // plugin, registered before every route, so a relay route added later is guarded by
-  // construction: the kernel's own principal, its proven operator wallet, or the admin. That is
-  // the floor (the executor side: the pending queue, tool results, camera frames, chat replies).
-  // What authorizes or drives a device is a decision on top (#6508): opening or revoking an
-  // execution scope, a write tool call and a chat instruction need the admin or the kernel's
-  // PROVEN operator wallet (decideRefusal below).
-  const decideRefusal = (req: FastifyRequest, kernelId: string) => refuseKernelAction(req, authorityOf(req), kernelId, "decide");
-
-  app.addHook("preHandler", async (req, reply) => {
-    const authority = authorityOf(req);
-    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
-    const kernelId = (req.params as { kernelId?: unknown } | undefined)?.kernelId;
-    if (typeof kernelId !== "string" || kernelId.length === 0) {
-      return reply.code(404).send({ error: "kernel_not_found", message: "No kernel with this id is registered." });
-    }
-    const refusal = refuseKernelAction(req, authority, kernelId, "operate");
-    if (refusal) return reply.code(refusal.status).send(refusal.body);
-  });
-
   // Ensure the safety gateway singleton is initialized. In production this is
   // a no-op (KernelService constructor calls initSafetyGateway first). In
   // test environments where KernelService is not running, this creates a
@@ -217,7 +645,10 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   // Pre-warm manifest cache so sync lookups work
   await warmManifestCache();
 
-  // Ensure tables exist (idempotent — same DDL as OT-2 routes)
+  // Default-deny, per kernel, for every route below (see RELAY_ROUTE_ACCESS).
+  app.addHook("preHandler", relayAccessGuard);
+
+  // Ensure tables exist (idempotent; packages/db/src/migrate.ts creates them too)
   const { db } = getStore();
 
   db.run(sql`CREATE TABLE IF NOT EXISTS tool_call_relay (
@@ -306,25 +737,36 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     }
 
     const { db } = getStore();
-    const callerId = (req as any).operatorId ?? "anonymous";
+    // The guard admitted this caller as the operator or an active scope holder.
+    const callerId = relayPrincipal(req) ?? "";
+    const isOperator = isRelayOperator(req, kernelId);
     const deviceType = resolveDeviceType(kernelId);
 
-    // N31b: a write tool drives the device, so queueing one is a decision (#6508); a safe
-    // (read-only) tool needs only the guard's floor.
-    if (!isToolSafe(deviceType, toolName)) {
-      const refusal = decideRefusal(req, kernelId);
-      if (refusal) return reply.code(refusal.status).send(refusal.body);
-    }
-
-    // Non-safe tools require a scope
-    if (!isToolSafe(deviceType, toolName) && !scopeId) {
+    // Non-safe tools require a scope, and anyone but the operator must name
+    // their own scope for every call.
+    if (!scopeId && (!isOperator || !isToolSafe(deviceType, toolName))) {
       return reply.status(403).send({
         error: "scope_required",
-        message: `Write operations require an execution scope. Create one via POST /api/relay/${kernelId}/scope`,
+        message: isOperator
+          ? `Write operations require an execution scope. Create one via POST /api/relay/${kernelId}/scope`
+          : "Name the execution scope you were granted on this kernel (scopeId).",
       });
     }
 
+    // The kernel's emergency stop (N4b-gw r6). Authentication, authorization
+    // and validation have answered above; a stopped, or unreadable, kernel
+    // takes nothing from here on: no row and no scope budget spent. This early
+    // read only spares those side effects. The authoritative read is the one
+    // just before the insert, below.
+    const stopAtEntry = emergencyStopState(kernelId);
+    if (stopAtEntry !== "clear") return stopRefusal(reply, stopAtEntry);
+
     // Validate scope if provided
+    // A scoped non-safe call spends one command of its scope's budget, charged only
+    // when the call is queued (r7 MEDIUM): a refusal after this point (the safety
+    // governor, an unavailable governor, the stop read again before the insert)
+    // spends nothing.
+    let chargesBudget = false;
     if (scopeId) {
       const scope = db
         .select()
@@ -345,15 +787,11 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       }
 
       // Verify caller owns this scope (or is the kernel operator)
-      if (scope.createdBy !== callerId && callerId !== "anonymous") {
-        const kernel = db.select().from(shopKernels).where(eq(shopKernels.id, kernelId)).get();
-        const isOperator = kernel && kernel.operatorAddress === callerId;
-        if (!isOperator) {
-          return reply.status(403).send({
-            error: "scope_not_yours",
-            message: "This scope belongs to a different agent.",
-          });
-        }
+      if (scope.createdBy !== callerId && !isOperator) {
+        return reply.status(403).send({
+          error: "scope_not_yours",
+          message: "This scope belongs to a different agent.",
+        });
       }
 
       const validation = validateToolCall(scope, toolName, deviceType);
@@ -381,12 +819,40 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         });
       }
 
-      // Increment command count for non-safe tools
       if (!isToolSafe(deviceType, toolName)) {
-        db.update(executionScopes)
-          .set({ commandCount: scope.commandCount + 1 })
-          .where(eq(executionScopes.id, scopeId))
-          .run();
+        // Escrow gate carried over from the retired /api/ot2/tool-call.
+        let unfundedStatus: string | null;
+        try {
+          unfundedStatus = escrowRefusal(scope);
+        } catch (err) {
+          return reply.status(503).send({
+            error: "escrow_check_unavailable",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (unfundedStatus) {
+          const id = generateId("tc");
+          db.insert(toolCallRelay).values({
+            id,
+            scopeId,
+            kernelId,
+            toolName,
+            toolArgs: args ?? {},
+            status: "rejected",
+            error: "escrow_not_funded",
+            createdAt: new Date().toISOString(),
+          }).run();
+          return reply.status(402).send({
+            error: "Escrow not funded",
+            reason: "escrow_not_funded",
+            escrowStatus: unfundedStatus,
+            callId: id,
+            toolName,
+            scopeId,
+          });
+        }
+
+        chargesBudget = true;
       }
     }
 
@@ -435,18 +901,66 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     }
     // ────────────────────────────────────────────────────────────────────────
 
+    // The authoritative emergency-stop read (N4b-gw r6). The governor above was
+    // awaited, so a stop may have landed since the read at entry. Read it again
+    // and queue the call in the same synchronous section, with no await between
+    // the two: better-sqlite3 is synchronous and Node is single-threaded, so no
+    // stop request can run between this check and the insert. A stop after the
+    // insert finds the row pending, and the stop route rejects it.
+    const stop = emergencyStopState(kernelId);
+    if (stop !== "clear") return stopRefusal(reply, stop);
+
     const id = generateId("tc");
     const now = new Date().toISOString();
 
-    db.insert(toolCallRelay).values({
-      id,
-      scopeId: scopeId ?? null,
-      kernelId,
-      toolName,
-      toolArgs: args ?? {},
-      status: "pending",
-      createdAt: now,
-    }).run();
+    // The budget is charged and the call queued in ONE transaction (r8 MEDIUM): an
+    // insert that fails rolls the charge back. The charge is conditional: the scope
+    // is read again here (the governor was awaited since the early check) and must
+    // still be active, unexpired, allow the tool and have a command left, and the
+    // increment itself only applies below maxCommands, so two submits that both
+    // passed the early check can't both spend the last command.
+    let scopeRefusal: string | null = null;
+    db.transaction((tx) => {
+      if (chargesBudget && scopeId) {
+        const current = tx.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get();
+        scopeRefusal = !current
+          ? "scope_not_found"
+          : (scopeWriteRefusal(current, toolName) ??
+            (current.commandCount >= current.maxCommands ? "max_commands_reached" : null));
+        if (!scopeRefusal) {
+          const charged = tx
+            .update(executionScopes)
+            .set({ commandCount: sql`${executionScopes.commandCount} + 1` })
+            .where(
+              and(
+                eq(executionScopes.id, scopeId),
+                sql`${executionScopes.commandCount} < ${executionScopes.maxCommands}`,
+              ),
+            )
+            .run();
+          if ((charged as { changes?: number }).changes !== 1) scopeRefusal = "max_commands_reached";
+        }
+      }
+      tx.insert(toolCallRelay).values({
+        id,
+        scopeId: scopeId ?? null,
+        kernelId,
+        toolName,
+        toolArgs: args ?? {},
+        status: scopeRefusal ? "rejected" : "pending",
+        ...(scopeRefusal ? { error: scopeRefusal } : {}),
+        createdAt: now,
+      }).run();
+    });
+    if (scopeRefusal) {
+      return reply.status(403).send({
+        error: "Tool call rejected by execution scope",
+        reason: scopeRefusal,
+        callId: id,
+        toolName,
+        scopeId,
+      });
+    }
 
     return reply.status(201).send({
       id,
@@ -461,14 +975,46 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   // GET /api/relay/:kernelId/tool-call/pending
   app.get<{
     Params: { kernelId: string };
-  }>("/api/relay/:kernelId/tool-call/pending", async (req) => {
+  }>("/api/relay/:kernelId/tool-call/pending", async (req, reply) => {
     const { kernelId } = req.params;
 
     const { db } = getStore();
 
-    // Reclaim stale claimed calls (claimed >120s ago without completion).
-    // This prevents calls from being stuck forever if the executor crashes.
-    const CLAIM_TIMEOUT_MS = 120_000;
+    // The kernel's emergency stop (N4b-gw r6), read before anything below
+    // changes a row, so an unreadable policy leaves the queue exactly as it was.
+    //   - unavailable: refuse. Nothing is reclaimed, claimed or rejected.
+    //   - stopped: withhold. Every call still pending for this kernel is
+    //     rejected (a compare-and-set on `pending`, so a row a concurrent poll
+    //     claimed is left alone), and the executor is answered with no calls and
+    //     `emergencyStop: true`. The list key and count stay as they were, so a
+    //     poller that predates the flag reads it as "nothing to do".
+    const stopAtEntry = emergencyStopState(kernelId);
+    if (stopAtEntry === "unavailable") return stopRefusal(reply, stopAtEntry);
+    if (stopAtEntry === "stopped") {
+      db.update(toolCallRelay)
+        .set({ status: "rejected", error: "emergency_stopped", completedAt: new Date().toISOString() })
+        .where(and(eq(toolCallRelay.kernelId, kernelId), eq(toolCallRelay.status, "pending")))
+        .run();
+      return { calls: [], count: 0, emergencyStop: true };
+    }
+
+    // The execution lease (F3): a poller that cannot take one gets no calls
+    // while it is enforced, and nothing is claimed for it.
+    const leaseCapable = req.headers["x-pcc-lease"] === "1";
+    if (!leaseCapable && leaseEnforced()) {
+      return { calls: [], count: 0, leaseRequired: true };
+    }
+
+    // At-most-once delivery (N4b-gw r6, F2). A claim the executor has not
+    // reported within CLAIM_TIMEOUT_MS is CLOSED as failed, never put back in
+    // the queue: the executor may still be running the command, and handing a
+    // physical command out twice is worse than failing it once. The row keeps
+    // counting against its scope's command budget (dispatchRefusal counts failed
+    // rows), no poll returns it again, and the caller resubmits if it still wants
+    // the work. The update is a compare-and-set on `claimed`, so a result
+    // reported in the same instant wins. An executor that reports late is still
+    // recorded, once (POST /tool-result).
+    const now = new Date().toISOString();
     const staleThreshold = new Date(Date.now() - CLAIM_TIMEOUT_MS).toISOString();
     const staleClaimed = db
       .select()
@@ -484,12 +1030,12 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     for (const stale of staleClaimed) {
       db.update(toolCallRelay)
-        .set({ status: "pending", claimedAt: null })
-        .where(eq(toolCallRelay.id, stale.id))
+        .set({ status: "failed", error: CLAIM_TIMEOUT_ERROR, completedAt: now })
+        .where(and(eq(toolCallRelay.id, stale.id), eq(toolCallRelay.status, "claimed")))
         .run();
     }
 
-    const pending = db
+    const queued = db
       .select()
       .from(toolCallRelay)
       .where(
@@ -499,29 +1045,211 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         ),
       )
       .orderBy(toolCallRelay.createdAt)
-      .limit(5)
       .all();
 
-    // Mark them as claimed
-    const now = new Date().toISOString();
-    for (const call of pending) {
-      db.update(toolCallRelay)
-        .set({ status: "claimed", claimedAt: now })
-        .where(eq(toolCallRelay.id, call.id))
+    // Hand out up to 5 calls, oldest first, each re-checked on the way out
+    // (dispatchRefusal). A refused call is closed as rejected with its reason,
+    // so no later poll can claim it and it does not hold back the calls behind
+    // it. A call whose escrow lookup fails stays queued for the next poll.
+    const deviceType = resolveDeviceType(kernelId);
+    const pending: Array<{ call: typeof toolCallRelay.$inferSelect; claimToken: string | null }> = [];
+    for (const call of queued) {
+      if (pending.length === 5) break;
+      let refusal: string | null;
+      try {
+        refusal = dispatchRefusal(call, deviceType);
+      } catch {
+        continue;
+      }
+      if (refusal) {
+        db.update(toolCallRelay)
+          .set({ status: "rejected", error: refusal, completedAt: now })
+          .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
+          .run();
+        continue;
+      }
+      // F1: re-establish the physical-safety boundary at the dispatch site. A
+      // call admitted while the breaker was closed must not reach the device
+      // after failures opened it. Fail closed: an open breaker or a governor
+      // denial rejects the row; if the safety gateway can't be consulted, the
+      // call is left queued (like an escrow-lookup failure) rather than
+      // dispatched. The governor is async, so what it was asked is stale by the
+      // time it answers: the use-time section after this block re-reads the
+      // time-varying checks before the claim.
+      try {
+        const gateway = getSafetyGateway();
+        const verdict = await gateway.validateOnly({
+          commandId: generateId("cmd"),
+          deviceId: kernelId,
+          class: call.scopeId ? "scoped" : "safe",
+          type: call.toolName,
+          params: (call.toolArgs ?? {}) as Record<string, unknown>,
+          agentDid: kernelId,
+          scopeId: call.scopeId ?? undefined,
+        });
+        if (!verdict.allowed) {
+          db.update(toolCallRelay)
+            .set({
+              // Prefer the top-level reason (e.g. "circuit_open") over the
+              // verbose nested verdict, so the stored reason is stable.
+              status: "rejected",
+              error: verdict.reason ?? verdict.verdict?.reason ?? "safety_denied",
+              completedAt: now,
+            })
+            .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
+            .run();
+          continue;
+        }
+      } catch {
+        // The safety gateway is unavailable — do not dispatch a physical command
+        // we cannot clear. Leave the call queued for the next poll.
+        continue;
+      }
+      // ── Use time (N4b-gw r6, F1) ─────────────────────────────────────────
+      // Everything checked above was checked before, or while we awaited, the
+      // governor, and all of it moves in that window: a scope expires or is
+      // revoked, the operator hits the emergency stop, the breaker opens on a
+      // failure reported meanwhile, a concurrent poll claims the scope's last
+      // command. So what can change is read again here, in ONE synchronous
+      // section with no await between these reads and the claim below, and the
+      // row is claimed only if every one still passes. Nothing can run between
+      // the reads and the claim (better-sqlite3 is synchronous, Node is
+      // single-threaded), so a command the world no longer allows is never
+      // handed to the device.
+      //   - the emergency stop: stopped rejects the row. Unavailable claims
+      //     nothing more in this request: this row and every later one stay
+      //     pending, and rows claimed earlier in the request are returned.
+      //   - dispatchRefusal again: the scope's status, expiry and kernel, the
+      //     allowed tool, the row-derived command budget and funding. If its
+      //     escrow lookup throws, the row stays queued, as above.
+      //   - the circuit breaker, by a look that moves nothing (isCircuitOpen,
+      //     not canExecute): validateOnly consulted it before its await.
+      // A refusal closes the row as rejected with its reason, guarded on
+      // `pending` so a row some other path already closed keeps its own reason.
+      const stop = emergencyStopState(kernelId);
+      if (stop === "unavailable") break;
+      let useRefusal: string | null;
+      try {
+        useRefusal =
+          stop === "stopped"
+            ? "emergency_stopped"
+            : (dispatchRefusal(call, deviceType) ??
+              (getSafetyGateway().isCircuitOpen(kernelId) ? "circuit_open" : null));
+      } catch {
+        continue;
+      }
+      if (useRefusal) {
+        db.update(toolCallRelay)
+          .set({ status: "rejected", error: useRefusal, completedAt: now })
+          .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
+          .run();
+        continue;
+      }
+      // Atomic, EXCLUSIVE claim (findings F1/F2): claim the row only if it is
+      // still `pending`. This is a compare-and-set — SQLite runs it as one
+      // statement — so (a) two concurrent polls cannot both take the same row
+      // (no duplicate dispatch past the budget), and (b) a revoke, expiry or
+      // e-stop that rejected the row while our async safety check awaited leaves
+      // it non-`pending`, so this claim changes 0 rows and we do NOT return it.
+      // The row is returned to the executor only if THIS poll won the claim.
+      // A lease-capable executor gets a fresh claim token with the call; only
+      // its hash is stored, so the row alone can't start the call (F3).
+      const claimToken = leaseCapable ? randomBytes(32).toString("hex") : null;
+      const claimed = db
+        .update(toolCallRelay)
+        .set({ status: "claimed", claimedAt: now, claimTokenHash: claimToken ? claimTokenHash(claimToken) : null })
+        .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
         .run();
+      if ((claimed as { changes?: number }).changes !== 1) continue;
+      pending.push({ call, claimToken });
     }
 
     return {
-      calls: pending.map((c) => ({
+      calls: pending.map(({ call: c, claimToken }) => ({
         id: c.id,
         scopeId: c.scopeId,
         kernelId: c.kernelId,
         toolName: c.toolName,
         args: c.toolArgs,
         createdAt: c.createdAt,
+        ...(claimToken ? { claimToken } : {}),
       })),
       count: pending.length,
     };
+  });
+
+  // POST /api/relay/:kernelId/tool-call/:callId/start
+  // The execution lease (F3; see LEASE_MAX_AGE_MS). 200 {started: true} once,
+  // and the executor may run the call. 409 {error: "lease_refused", reason}: do
+  // not run it; a refusal for a reason that closes the call (the emergency stop,
+  // the scope, the budget, the breaker, a stale claim) has already closed it as
+  // rejected. 503 policy_unavailable: do not run it; it stays claimed, and the
+  // claim timeout closes it unless the executor reports first.
+  app.post<{
+    Params: { kernelId: string; callId: string };
+    Body: { claimToken?: unknown };
+  }>("/api/relay/:kernelId/tool-call/:callId/start", async (req, reply) => {
+    const { kernelId, callId } = req.params;
+    const token = (req.body ?? {}).claimToken;
+    if (typeof token !== "string" || !CLAIM_TOKEN_RE.test(token)) {
+      return reply.status(400).send({ error: "claim_token_required" });
+    }
+    const { db } = getStore();
+    const call = db.select().from(toolCallRelay).where(eq(toolCallRelay.id, callId)).get();
+    if (!call || call.kernelId !== kernelId) {
+      return reply.status(404).send({ error: "not_found" });
+    }
+    const presented = claimTokenHash(token);
+    if (!call.claimTokenHash || !sameHash(presented, call.claimTokenHash)) {
+      return reply.status(409).send({ error: "lease_refused", reason: "token_mismatch" });
+    }
+    if (call.status !== "claimed") {
+      return reply.status(409).send({ error: "lease_refused", reason: "not_claimed" });
+    }
+
+    // ── One synchronous section: re-check everything that moves, then start.
+    // No await from here to the compare-and-set, so nothing can change between
+    // the reads and the start (better-sqlite3 is synchronous).
+    const stop = emergencyStopState(kernelId);
+    if (stop === "unavailable") return reply.status(503).send({ error: "policy_unavailable" });
+    let refusal: string | null;
+    try {
+      const claimedMs = call.claimedAt ? Date.parse(call.claimedAt) : NaN;
+      refusal =
+        stop === "stopped"
+          ? "emergency_stopped"
+          : !Number.isFinite(claimedMs) || Date.now() - claimedMs > LEASE_MAX_AGE_MS
+            ? "stale_claim"
+            : (dispatchRefusal(call, resolveDeviceType(kernelId)) ??
+              (getSafetyGateway().isCircuitOpen(kernelId) ? "circuit_open" : null));
+    } catch {
+      // An escrow lookup or the safety gateway failed: we can't clear it, so it
+      // does not start. It stays claimed for the claim timeout.
+      return reply.status(503).send({ error: "policy_unavailable" });
+    }
+    const now = new Date().toISOString();
+    if (refusal) {
+      db.update(toolCallRelay)
+        .set({ status: "rejected", error: refusal, completedAt: now })
+        .where(and(eq(toolCallRelay.id, callId), eq(toolCallRelay.status, "claimed")))
+        .run();
+      return reply.status(409).send({ error: "lease_refused", reason: refusal });
+    }
+    const started = db
+      .update(toolCallRelay)
+      .set({ status: "executing", startedAt: now })
+      .where(
+        and(
+          eq(toolCallRelay.id, callId),
+          eq(toolCallRelay.status, "claimed"),
+          eq(toolCallRelay.claimTokenHash, presented),
+        ),
+      )
+      .run();
+    if ((started as { changes?: number }).changes !== 1) {
+      return reply.status(409).send({ error: "lease_refused", reason: "not_claimed" });
+    }
+    return { started: true, callId, startedAt: now, leaseMs: LEASE_VALIDITY_MS };
   });
 
   // POST /api/relay/:kernelId/tool-result
@@ -551,21 +1279,17 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Tool call not found", callId });
     }
 
-    // ── Caller-ownership check (safety review S3, finding F2) ────────────────
+    // ── Caller-ownership check (safety review S3 F2; N4b-gw) ────────────────
     // Reporting a result mutates the safety circuit breaker for call.kernelId
-    // (recordDeviceFailure/Success below). Only the kernel operator (whose
-    // executor produced this outcome) or the creator of the call's execution
-    // scope may report it. Without this gate, any authenticated caller who
-    // learns a callId could force-trip a kernel's breaker (DoS) or force-reset
-    // it (masking real device failures). Mirrors the ownership gate on POST
-    // /tool-call. Anonymous callers (unauthenticated relay mode) are preserved
-    // for backward-compat, exactly as /tool-call allows.
-    const callerId = (req as any).operatorId ?? "anonymous";
-    if (callerId !== "anonymous" && !callerOwnsCall(call, callerId)) {
+    // (recordDeviceFailure/Success below) and is the device's own outcome.
+    // The guard admitted only the operator of :kernelId (the on-device
+    // executor runs under the operator). The call must also belong to that
+    // kernel, so an operator cannot report, trip or reset another kernel's
+    // calls by naming their callId. A scope holder commands; it never reports.
+    if (call.kernelId !== req.params.kernelId) {
       return reply.status(403).send({
         error: "tool_result_not_yours",
-        message:
-          "Only the kernel operator or the owning execution scope may report this result.",
+        message: "This tool call belongs to a different kernel.",
       });
     }
 
@@ -575,10 +1299,20 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // no-op ack: a poll-based executor retrying its POST after a dropped 200 —
     // or a replayed callId — must neither double-count a breaker trip nor
     // spuriously reset a tripped breaker.
+    //
+    // One exception (N4b-gw r6, F2): a call the pending poll closed as
+    // failed/claim_timeout, because the executor never reported within the
+    // claim timeout, is still the device's call. If the executor was running
+    // it, its report is the first and only outcome the device gives, so it is
+    // recorded, once: the row goes from one terminal status to another and is
+    // never returned to the queue. A report that only echoes the timeout says
+    // nothing new, and a replay of a recorded late report finds a row that no
+    // longer says claim_timeout, so both stay idempotent acks.
+    const lateReport =
+      call.status === "failed" && call.error === CLAIM_TIMEOUT_ERROR && error !== CLAIM_TIMEOUT_ERROR;
     if (
-      call.status === "completed" ||
-      call.status === "failed" ||
-      call.status === "rejected"
+      !lateReport &&
+      (call.status === "completed" || call.status === "failed" || call.status === "rejected")
     ) {
       return reply.status(200).send({
         callId,
@@ -586,6 +1320,14 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         completedAt: call.completedAt ?? null,
         idempotent: true,
       });
+    }
+
+    // The lease (F3): a call claimed with a token runs only after /start moved it
+    // to executing. A success reported for one that was never started is not a
+    // device outcome the gateway authorized, so it is refused and the row stays
+    // claimed (an error still closes it, below).
+    if (call.status === "claimed" && call.claimTokenHash && !error) {
+      return reply.status(409).send({ error: "not_started", callId });
     }
 
     const now = new Date().toISOString();
@@ -599,9 +1341,21 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // the relay row carries no finer deviceId.) Non-fatal if gateway is absent.
     //
     // Guarded on 'claimed': only a call that was admitted AND picked up by an
-    // executor carries a real device outcome. The terminal-state guard above
-    // already excluded replays, so this is the single first-transition record.
-    if (call.status === "claimed") {
+    // executor carries a real device outcome, and so does a late report for a
+    // claim the poll timed out (it was picked up too). The terminal-state guard
+    // above already excluded replays, so this is the single first-transition
+    // record.
+    //
+    // A report is a device outcome only if the device may have run the call:
+    // it was started under the lease (executing), or it was claimed without a
+    // token (a lease-less executor, RELAY_LEASE_ENFORCE=off) and so may have run
+    // straight from the claim. A not_executed:* report, or any report on a
+    // token-claimed call that never started, ran nothing: it closes the call,
+    // but the breaker never counts it as a device failure (F3).
+    const mayHaveRun =
+      !isNotExecuted(error) &&
+      (call.status === "executing" || ((call.status === "claimed" || lateReport) && !call.claimTokenHash));
+    if (mayHaveRun) {
       try {
         const gateway = getSafetyGateway();
         if (error) {
@@ -614,12 +1368,13 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       }
     }
 
-    // If failed and scope has retries left, update retry count
+    // If failed and scope has retries left, update retry count. Only a scope on
+    // this call's own kernel counts: an old row can link a call to another kernel's scope.
     if (error && call.scopeId) {
       const scope = db
         .select()
         .from(executionScopes)
-        .where(eq(executionScopes.id, call.scopeId))
+        .where(and(eq(executionScopes.id, call.scopeId), eq(executionScopes.kernelId, call.kernelId)))
         .get();
 
       if (scope && scope.retryCount < scope.maxRetries) {
@@ -651,7 +1406,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   app.get<{
     Params: { kernelId: string; id: string };
   }>("/api/relay/:kernelId/tool-result/:id", async (req, reply) => {
-    const { id } = req.params;
+    const { kernelId, id } = req.params;
 
     const { db } = getStore();
     const call = db
@@ -660,8 +1415,27 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       .where(eq(toolCallRelay.id, id))
       .get();
 
-    if (!call) {
+    if (!call || call.kernelId !== kernelId) {
       return reply.status(404).send({ error: "Tool call not found", id });
+    }
+
+    // Object owner, proven (DECISIONS 00:53): the admin, the proven operator, or the
+    // proven creator of the call's scope. The scope must be on this kernel too: the
+    // retired /api/ot2 writer could link a call to another kernel's scope, and that
+    // link grants nothing.
+    const scope = call.scopeId
+      ? db
+          .select()
+          .from(executionScopes)
+          .where(and(eq(executionScopes.id, call.scopeId), eq(executionScopes.kernelId, kernelId)))
+          .get()
+      : undefined;
+    const allowed = scope ? provenOwnsScope(req, scope, kernelId) : isProvenOperator(req, kernelId);
+    if (!allowed) {
+      return reply.status(403).send({
+        error: "tool_result_not_yours",
+        message: "Only the kernel operator or the owning execution scope may read this result.",
+      });
     }
 
     let parsedResult = null;
@@ -707,9 +1481,6 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     };
   }>("/api/relay/:kernelId/scope", async (req, reply) => {
     const { kernelId } = req.params;
-    // N31b: an execution scope authorizes device writes, so opening one is a decision.
-    const refusal = decideRefusal(req, kernelId);
-    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const {
       jobId,
       createdBy,
@@ -721,9 +1492,9 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       expiresInMinutes,
     } = req.body ?? {};
 
-    if (!createdBy || !allowedTools) {
+    if (!allowedTools) {
       return reply.status(400).send({
-        error: "createdBy and allowedTools are required",
+        error: "allowedTools is required",
       });
     }
 
@@ -732,6 +1503,29 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         error: "allowedTools must be a non-empty array of tool names",
       });
     }
+
+    // Only the kernel operator reaches this handler (guard). The scope is the
+    // operator's own unless the operator names the principal it delegates to.
+    const holder = createdBy ?? relayPrincipal(req)!;
+
+    // A scope may only be bound to a job on this kernel: its tool calls are
+    // counted into that job's completion record.
+    if (jobId) {
+      const job = getRepos().jobs.findById(jobId);
+      if (!job || job.kernelId !== kernelId) {
+        return reply.status(400).send({
+          error: "job_not_on_kernel",
+          message: "jobId must name a job on this kernel.",
+        });
+      }
+    }
+
+    // The kernel's emergency stop (N4b-gw r6): no scope is minted while the stop
+    // is engaged, or while it cannot be read. Nothing below awaits, so this read
+    // and the insert are one synchronous section and no stop request can run
+    // between them. Revoking a scope is a safety action and stays open.
+    const stop = emergencyStopState(kernelId);
+    if (stop !== "clear") return stopRefusal(reply, stop);
 
     const id = generateId("scope");
     const now = new Date().toISOString();
@@ -742,7 +1536,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       id,
       kernelId,
       jobId: jobId ?? null,
-      createdBy,
+      createdBy: holder,
       status: "active",
       allowedTools,
       allowedPipettes: allowedPipettes ?? null,
@@ -759,7 +1553,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       id,
       kernelId,
       jobId: jobId ?? null,
-      createdBy,
+      createdBy: holder,
       status: "active",
       allowedTools,
       allowedPipettes: allowedPipettes ?? null,
@@ -780,15 +1574,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const { scopeId } = req.params;
 
     const { db } = getStore();
-    const scope = db
-      .select()
-      .from(executionScopes)
-      .where(eq(executionScopes.id, scopeId))
-      .get();
-
-    if (!scope) {
-      return reply.status(404).send({ error: "Scope not found", id: scopeId });
-    }
+    const scope = ownedScopeOrReply(req, reply, "proof");
+    if (!scope) return reply;
 
     // Check if expired and auto-update status
     if (scope.status === "active" && new Date(scope.expiresAt) < new Date()) {
@@ -811,21 +1598,10 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     Params: { kernelId: string; scopeId: string };
   }>("/api/relay/:kernelId/scope/:scopeId/revoke", async (req, reply) => {
     const { kernelId, scopeId } = req.params;
-    // N31b: revoking changes what a device may be driven to do, so it is a decision (#6508).
-    const refusal = decideRefusal(req, kernelId);
-    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const { db } = getStore();
-    const scope = db
-      .select()
-      .from(executionScopes)
-      .where(eq(executionScopes.id, scopeId))
-      .get();
-
-    // N31b: the guard authorized THIS kernel; a scope of another kernel is not found here.
-    if (!scope || scope.kernelId !== kernelId) {
-      return reply.status(404).send({ error: "Scope not found", id: scopeId });
-    }
+    const scope = ownedScopeOrReply(req, reply, "stop");
+    if (!scope) return reply;
 
     if (scope.status === "revoked") {
       return reply.status(409).send({ error: "Scope already revoked", id: scopeId });
@@ -836,11 +1612,11 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       .where(eq(executionScopes.id, scopeId))
       .run();
 
-    // Reject any pending tool calls under this scope
+    // Reject any pending tool calls under this scope, on this kernel only.
     const pendingCalls = db
       .select()
       .from(toolCallRelay)
-      .where(eq(toolCallRelay.scopeId, scopeId))
+      .where(and(eq(toolCallRelay.scopeId, scopeId), eq(toolCallRelay.kernelId, kernelId)))
       .all();
 
     const now = new Date().toISOString();
@@ -859,6 +1635,9 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       }
     }
 
+    // Streams this scope was holding open end now, not at their next frame.
+    closeLapsedCameraStreams(kernelId, "scope_revoked");
+
     return {
       id: scopeId,
       status: "revoked",
@@ -871,25 +1650,19 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     Params: { kernelId: string; scopeId: string };
     Querystring: { limit?: string };
   }>("/api/relay/:kernelId/scope/:scopeId/audit", async (req, reply) => {
-    const { scopeId } = req.params;
+    const { kernelId, scopeId } = req.params;
     const limit = Math.min(parseInt(req.query.limit ?? "100", 10), 500);
 
     const { db } = getStore();
 
-    const scope = db
-      .select()
-      .from(executionScopes)
-      .where(eq(executionScopes.id, scopeId))
-      .get();
+    const scope = ownedScopeOrReply(req, reply, "proof");
+    if (!scope) return reply;
 
-    if (!scope) {
-      return reply.status(404).send({ error: "Scope not found", id: scopeId });
-    }
-
+    // This kernel's calls only, whatever other rows name the scope.
     const calls = db
       .select()
       .from(toolCallRelay)
-      .where(eq(toolCallRelay.scopeId, scopeId))
+      .where(and(eq(toolCallRelay.scopeId, scopeId), eq(toolCallRelay.kernelId, kernelId)))
       .orderBy(toolCallRelay.createdAt)
       .limit(limit)
       .all();
@@ -985,14 +1758,17 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       }
     }
 
-    // Notify SSE clients for this kernel
-    const clients = getStreamClients(kernelId);
+    // Notify this kernel's stream subscribers that are still authorized.
     const ssePayload = `event: frame\ndata: ${JSON.stringify({ id, kernelId, capturedAt: now })}\n\n`;
-    for (const client of clients) {
+    for (const subscriber of [...getStreamClients(kernelId)]) {
+      if (!subscriber.authorized()) {
+        closeCameraStream(kernelId, subscriber, "authorization_ended");
+        continue;
+      }
       try {
-        client.raw.write(ssePayload);
+        subscriber.reply.raw.write(ssePayload);
       } catch {
-        clients.delete(client);
+        closeCameraStream(kernelId, subscriber, "write_failed");
       }
     }
 
@@ -1008,16 +1784,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   app.get<{
     Params: { kernelId: string };
   }>("/api/relay/:kernelId/camera/latest", async (req, reply) => {
+    // Camera auth (operator or active scope holder) is the relay guard's.
     const { kernelId } = req.params;
-    const callerId = (req as any).operatorId ?? "anonymous";
-
-    // Camera auth: only operator or active scope holder
-    if (!hasCameraAccess(callerId, kernelId)) {
-      return reply.status(403).send({
-        error: "camera_access_denied",
-        message: "Camera access requires operator privileges or an active execution scope.",
-      });
-    }
 
     const { db } = getStore();
     const latest = db
@@ -1044,16 +1812,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   app.get<{
     Params: { kernelId: string };
   }>("/api/relay/:kernelId/camera/snapshot", async (req, reply) => {
+    // Camera auth (operator or active scope holder) is the relay guard's.
     const { kernelId } = req.params;
-    const callerId = (req as any).operatorId ?? "anonymous";
-
-    // Camera auth: only operator or active scope holder
-    if (!hasCameraAccess(callerId, kernelId)) {
-      return reply.status(403).send({
-        error: "camera_access_denied",
-        message: "Camera access requires operator privileges or an active execution scope.",
-      });
-    }
 
     const { db } = getStore();
     const latest = db
@@ -1103,21 +1863,39 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     reply.raw.write(`event: connected\ndata: ${JSON.stringify({ type: "connected", kernelId })}\n\n`);
 
-    const clients = getStreamClients(kernelId);
-    clients.add(reply);
+    // The guard admitted this caller as the admin, the proven operator or a proven
+    // active scope holder (DECISIONS 00:53); the stream keeps checking that it still is.
+    const principal = relayPrincipal(req)!;
+    const subscriber: CameraSubscriber = {
+      reply,
+      authorized: () => {
+        try {
+          return (
+            credentialStands(req, principal) &&
+            (isProvenOperator(req, kernelId) || isProvenScopeHolder(req, kernelId))
+          );
+        } catch {
+          return false;
+        }
+      },
+    };
+    getStreamClients(kernelId).add(subscriber);
 
-    const heartbeat = setInterval(() => {
+    subscriber.heartbeat = setInterval(() => {
+      if (!subscriber.authorized()) {
+        closeCameraStream(kernelId, subscriber, "authorization_ended");
+        return;
+      }
       try {
         reply.raw.write(": heartbeat\n\n");
       } catch {
-        clearInterval(heartbeat);
-        clients.delete(reply);
+        closeCameraStream(kernelId, subscriber, "write_failed");
       }
     }, 15_000);
 
     req.raw.on("close", () => {
-      clearInterval(heartbeat);
-      clients.delete(reply);
+      clearInterval(subscriber.heartbeat);
+      getStreamClients(kernelId).delete(subscriber);
     });
 
     await new Promise<void>(() => {});
@@ -1135,10 +1913,6 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     };
   }>("/api/relay/:kernelId/chat", async (req, reply) => {
     const { kernelId } = req.params;
-    // N31b: a chat message instructs the kernel's device agent, which may drive the device, so
-    // posting one is a decision (#6508's rule: anything that authorizes or drives a device).
-    const refusal = decideRefusal(req, kernelId);
-    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const { message } = req.body ?? {};
 
     if (!message) {
@@ -1240,9 +2014,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     const { db } = getStore();
 
-    // Mark original message as completed if provided
+    // Mark original message as completed if provided (only this kernel's)
     if (messageId) {
-      // N31b: the guard authorized this kernel; a message of another kernel is left alone.
       db.update(ot2ChatMessages)
         .set({ status: "completed" })
         .where(and(eq(ot2ChatMessages.id, messageId), eq(ot2ChatMessages.kernelId, kernelId)))
