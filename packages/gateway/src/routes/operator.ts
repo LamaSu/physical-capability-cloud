@@ -5,7 +5,7 @@ import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 
-const { operatorPolicies, pendingApprovals } = schema;
+const { operatorPolicies, pendingApprovals, toolCallRelay } = schema;
 
 /**
  * An operator read the gateway has no real source for yet. It answers 501 with a
@@ -204,6 +204,18 @@ export async function operatorRoutes(app: FastifyInstance) {
         .where(and(
           eq(pendingApprovals.kernelId, kernelId),
           eq(pendingApprovals.status, "pending"),
+        ))
+        .run();
+
+      // Reject the relay calls still queued for this kernel. A reset must not
+      // restart motion (ISO 13850): a command queued before a stop must not run
+      // after the resume, even if the node never polled during the stop. Calls
+      // the node has already claimed are the operator node's to stop.
+      db.update(toolCallRelay)
+        .set({ status: "rejected", error: "emergency_stopped", completedAt: now })
+        .where(and(
+          eq(toolCallRelay.kernelId, kernelId),
+          eq(toolCallRelay.status, "pending"),
         ))
         .run();
 
