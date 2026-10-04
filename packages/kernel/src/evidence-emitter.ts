@@ -68,6 +68,56 @@ export interface StepUnitContext {
 
 const UNIT_FIELD = /^0x[0-9a-f]{64}$/;
 
+/** Deeper than this, a value is refused rather than walked (a cycle, or a structure no device emits). */
+const MAX_EVIDENCE_DEPTH = 64;
+
+/**
+ * Where `value` is not plain JSON data, or null when it is all plain. The event hash is
+ * canonical JSON, which has no faithful form for anything else (astra pack 265): it hashes a
+ * Date, a Map, a Set, a RegExp or an Error as {}, a typed array as an object of its indices, a
+ * SharedArrayBuffer's bytes as they are at that moment (they can change after), an array hole or
+ * an undefined element as null, and an array without its named members; JSON carries NaN and
+ * Infinity as null. #359's canonicalize refuses all of these, and so do the oracle and VCR.
+ *
+ * It walks the emitter's own copy (structuredClone). The copy makes every array an ordinary
+ * Array and gives every plain object Object.prototype, a class instance's or a null-prototype
+ * one's included; it keeps a Date, a Map, a typed array or a boxed primitive what it is. Plain
+ * data is null, a boolean, a string, a finite number that is not an integer outside the safe
+ * range (D5), an array whose every index holds plain data and which has no other member, and an
+ * object whose prototype is Object.prototype and whose own enumerable string-keyed members are
+ * plain data. A member that is undefined is skipped, as canonical JSON skips it.
+ */
+function jsonProblem(value: unknown, path: string, depth: number): string | null {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return `${path} is ${value}`;
+    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+      return `${path} is the integer ${value}, outside the safe range (D5: send it as a decimal string)`;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return `${path} is a ${typeof value}`;
+  if (depth >= MAX_EVIDENCE_DEPTH) return `${path} nests deeper than ${MAX_EVIDENCE_DEPTH}`;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(value, i)) return `${path}[${i}] is a hole`;
+      const problem = jsonProblem(value[i], `${path}[${i}]`, depth + 1);
+      if (problem !== null) return problem;
+    }
+    if (Object.keys(value).length !== value.length) return `${path} has a named member besides its elements`;
+    return null;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype) return `${path} is not a plain object`;
+  const keys = Object.keys(value);
+  for (let i = 0; i < keys.length; i++) {
+    const member = (value as Record<string, unknown>)[keys[i]!];
+    if (member === undefined) continue;
+    const problem = jsonProblem(member, `${path}.${keys[i]}`, depth + 1);
+    if (problem !== null) return problem;
+  }
+  return null;
+}
+
 export class EvidenceEmitter {
   private kernelId: string;
   /**
@@ -206,7 +256,22 @@ export class EvidenceEmitter {
       }
       payload[field] = value;
     }
-    const bound = { ...rawEvent, payload } as Omit<EvidenceEvent, "id" | "hash">;
+    // The emitter's own deep copy of exactly the fields the hash covers, taken at the call: the
+    // event is hashed and stored from it, so nothing the emitting adapter changes afterwards
+    // reaches what is stored (steward #6450), and nothing the hash does not cover is stored. A
+    // value that cannot be copied fails the call here, before it takes a place.
+    const bound = structuredClone({
+      type: rawEvent.type,
+      timestamp: rawEvent.timestamp,
+      source: rawEvent.source,
+      payload,
+    }) as Omit<EvidenceEvent, "id" | "hash">;
+    // It must be plain JSON data, or canonical JSON would commit to something else than what is
+    // stored (astra pack 265). Checked on the copy, before the event takes a place.
+    const problem = jsonProblem(bound, "event", 0);
+    if (problem !== null) {
+      throw new Error(`${problem}: evidence must be plain JSON data, which its hash commits to faithfully`);
+    }
 
     // Hashed now, from the event as called, and stored in call order (N123): an event waits for
     // the step's earlier events to be stored, or to fail, never for their hashes alone, so a slow
@@ -226,7 +291,8 @@ export class EvidenceEmitter {
         }
         const event: EvidenceEvent = { ...bound, id, hash };
         stepEv.events.push(event);
-        return event;
+        // The caller gets a copy: a stored event is never shared, so nothing changes it.
+        return structuredClone(event);
       } catch (err) {
         stepEv.lost ??= { type: bound.type, error: err instanceof Error ? err.message : String(err) };
         throw err;
@@ -261,9 +327,8 @@ export class EvidenceEmitter {
         `an event of step ${stepId} of job ${jobId} could not be stored (${stepEv.lost.type}: ${stepEv.lost.error}), so its evidence is incomplete`,
       );
     }
-    // A deep copy: callers still hold the stored events (addEvent returns them, getEvents hands
-    // them out), so a change made through such a reference while the bundle is hashed and
-    // signed must never reach the bundle (astra pack 261).
+    // A deep copy, so the bundle shares no object with the stored record, and a change made to
+    // either while the bundle is hashed and signed never reaches the other (astra pack 261).
     const events = structuredClone(stepEv.events);
     if (events.length === 0) {
       throw new Error(`No evidence events for ${jobId}:${stepId}`);
@@ -377,9 +442,10 @@ export class EvidenceEmitter {
     return { met: missing.length === 0, missing };
   }
 
-  /** Get events for a job step */
+  /** A copy of the events stored for a job step, in call order. */
   getEvents(jobId: string, stepId: string): EvidenceEvent[] {
-    return this.step(jobId, stepId)?.events ?? [];
+    // A copy, as from addEvent: changing it (or pushing into it) changes nothing stored.
+    return structuredClone(this.step(jobId, stepId)?.events ?? []);
   }
 
   /** Subscribe to finalized bundles */

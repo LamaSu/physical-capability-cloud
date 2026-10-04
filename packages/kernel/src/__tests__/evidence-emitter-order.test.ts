@@ -258,6 +258,126 @@ describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
     expect(await verifyEventHash(bundle.events[0]!), "the event hash covers its content").toBe(true);
   });
 
+  it("stores a detached copy of each event: the emitting adapter changing its payload afterwards changes nothing stored", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const reading = { celsius: 21, probe: { id: "p1" } }; // the adapter's own objects
+    await emitter.addEvent(JOB, "s1", raw("sensor_data_summary", 0, { reading }));
+    reading.celsius = 99;
+    reading.probe.id = "p2";
+
+    const bundle = await emitter.finalizeBundle(JOB, "s1");
+    expect((bundle.events[0]?.payload as { reading: unknown }).reading).toEqual({ celsius: 21, probe: { id: "p1" } });
+    expect(await verifyEventHash(bundle.events[0]!), "the event hash covers its content").toBe(true);
+    expect(await verifyBundleHash(bundle)).toBe(true);
+  });
+
+  it("hands callers detached copies: changing what addEvent or getEvents returned changes nothing stored", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const returned = await emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { pages: 3 }));
+    (returned as { hash: string }).hash = `sha256:${"0".repeat(64)}`;
+    (returned.payload as { pages: number }).pages = 99;
+    const listed = emitter.getEvents(JOB, "s1");
+    (listed[0]!.payload as { pages: number }).pages = 98;
+    listed.push({ ...listed[0]!, id: "ev_injected" });
+
+    const bundle = await emitter.finalizeBundle(JOB, "s1");
+    expect(bundle.events.map((e) => e.id)).toEqual([returned.id]);
+    expect((bundle.events[0]?.payload as { pages: number }).pages).toBe(3);
+    expect(await verifyEventHash(bundle.events[0]!), "the event hash covers its content").toBe(true);
+    expect(await verifyBundleHash(bundle)).toBe(true);
+  });
+
+  it("a bundle shares no object with the stored record: changing a returned bundle changes nothing stored", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    await emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { pages: 3 }));
+    const first = await emitter.finalizeBundle(JOB, "s1");
+    (first.events[0]!.payload as { pages: number }).pages = 99;
+    (first.events[0] as { hash: string }).hash = `sha256:${"0".repeat(64)}`;
+
+    expect((emitter.getEvents(JOB, "s1")[0]?.payload as { pages: number }).pages).toBe(3);
+    const second = await emitter.finalizeBundle(JOB, "s1");
+    expect((second.events[0]?.payload as { pages: number }).pages).toBe(3);
+    expect(await verifyBundleHash(second)).toBe(true);
+    expect(await verifyEventHash(second.events[0]!)).toBe(true);
+  });
+
+  it("refuses an event whose hashed fields are not plain JSON data, before it takes a place (pack 265)", async () => {
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    class Reading {
+      celsius = 21;
+    }
+    const sparse: unknown[] = [1];
+    sparse[2] = 3;
+    const refused: Array<[string, Record<string, unknown>, string]> = [
+      ["a Date", { at: new Date(0) }, "event.payload.at is not a plain object"],
+      ["a Map", { m: new Map([["a", 1]]) }, "event.payload.m is not a plain object"],
+      ["a Set", { s: new Set([1]) }, "event.payload.s is not a plain object"],
+      ["a typed array", { bytes: new Uint8Array([1, 2]) }, "event.payload.bytes is not a plain object"],
+      ["shared memory", { bytes: new Uint8Array(new SharedArrayBuffer(2)) }, "event.payload.bytes is not a plain object"],
+      ["a RegExp", { r: /x/ }, "event.payload.r is not a plain object"],
+      ["an undefined element", { list: [1, undefined] }, "event.payload.list[1] is a undefined"],
+      ["a hole", { list: sparse }, "event.payload.list[1] is a hole"],
+      ["a bigint", { n: 1n }, "event.payload.n is a bigint"],
+      ["NaN", { x: NaN }, "event.payload.x is NaN"],
+      ["Infinity", { x: Infinity }, "event.payload.x is Infinity"],
+      ["-Infinity", { x: -Infinity }, "event.payload.x is -Infinity"],
+      ["an integer past the safe range (D5)", { n: 2 ** 53 }, "event.payload.n is the integer 9007199254740992, outside the safe range"],
+      ["a negative one", { n: -(2 ** 53) }, "event.payload.n is the integer -9007199254740992, outside the safe range"],
+      ["a magnitude only an integer has", { n: 6.02e23 }, "event.payload.n is the integer 6.02e+23, outside the safe range"],
+      ["a named member on an array", { list: Object.assign([1, 2], { unit: "mm" }) }, "event.payload.list has a named member besides its elements"],
+      ["a boxed primitive", { s: new String("x") }, "event.payload.s is not a plain object"],
+    ];
+    for (const [label, payload, problem] of refused) {
+      await expect(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, payload)), label).rejects.toThrow(problem);
+    }
+    // A cycle (structuredClone keeps it) is refused at the depth cap, never walked forever.
+    const cyclic: Record<string, unknown> = { a: 1 };
+    cyclic.self = cyclic;
+    await expect(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { cyclic }))).rejects.toThrow("nests deeper than 64");
+    // In the source too.
+    const fromSource = { ...(raw("execution_progress", 0) as unknown as Record<string, unknown>), source: { deviceId: "dev-1", at: new Date(0) } };
+    await expect(emitter.addEvent(JOB, "s1", fromSource as never)).rejects.toThrow("event.source.at is not a plain object");
+    // None took a place: plain data still stores, and the step holds only it.
+    const nested = {
+      reading: { celsius: 21, probes: [{ id: "p1" }, null, true, "x"] },
+      skipped: undefined,
+      bare: Object.create(null),
+      numbers: [2 ** 53 - 1, -(2 ** 53 - 1), 0.5, 1e-300, -0],
+    };
+    const plain = await emitter.addEvent(JOB, "s1", raw("execution_completed", 1, nested));
+    expect(types(emitter)).toEqual(["execution_completed"]);
+    expect(await verifyEventHash(plain)).toBe(true);
+    // A class instance's own fields are copied as a plain object, so what is hashed is what is stored.
+    const stored = await emitter.addEvent(JOB, "s1", raw("execution_progress", 2, { reading: new Reading() }));
+    expect(Object.getPrototypeOf((stored.payload as { reading: object }).reading)).toBe(Object.prototype);
+    expect((stored.payload as { reading: unknown }).reading).toEqual({ celsius: 21 });
+    expect(await verifyEventHash(stored)).toBe(true);
+  });
+
+  it("stores only the fields the hash covers: anything else on the event is dropped at the call", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const extra = { ...raw("execution_completed", 0, { pages: 3 }), note: "never hashed", id: "ev_chosen", hash: `sha256:${"0".repeat(64)}` };
+    const stored = await emitter.addEvent(JOB, "s1", extra as never);
+    const fields = ["hash", "id", "payload", "source", "timestamp", "type"];
+    expect(Object.keys(stored).sort()).toEqual(fields);
+    expect(stored.id).not.toBe("ev_chosen");
+
+    const bundle = await emitter.finalizeBundle(JOB, "s1");
+    expect(Object.keys(bundle.events[0]!).sort()).toEqual(fields);
+    expect(Object.keys(emitter.getEvents(JOB, "s1")[0]!).sort()).toEqual(fields);
+    expect(await verifyEventHash(bundle.events[0]!)).toBe(true);
+    expect(await verifyBundleHash(bundle)).toBe(true);
+  });
+
   it("finalizeBundle waits for an add accepted before it", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const digests = controlDigests();
