@@ -85,8 +85,9 @@ export async function batchRoutes(app: FastifyInstance) {
     }
 
     // N31c (the body/query inventory; the steward's #6540): a shared batch offers slots on the kernel it names, at a price, so it needs that kernel's
-    // operator at the "operate" tier: its own key, a proven operator wallet, or the admin.
-    const refusal = refuseKernelRequest(req, String(body.kernelId), "operate");
+    // operator's DECISION (DECISIONS 01:25: acting as the operator, or spending a paid resource):
+    // the admin or the PROVEN operator wallet, never a claimed key.
+    const refusal = refuseKernelRequest(req, String(body.kernelId), "decide");
     if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const batch: SharedBatch = {

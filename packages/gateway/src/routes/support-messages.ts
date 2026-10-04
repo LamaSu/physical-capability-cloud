@@ -170,8 +170,9 @@ export async function supportMessageRoutes(app: FastifyInstance) {
     }
     // N31c (the body/query inventory; the steward's #6540): a message joins the kernel's open support thread as from its
     // operator, so a stranger must not post into it, so it needs that kernel's
-    // operator at the "operate" tier: its own key, a proven operator wallet, or the admin.
-    const refusal = refuseKernelRequest(req, String(kernelId), "operate");
+    // operator's DECISION (DECISIONS 01:25: acting as the operator, or spending a paid resource):
+    // the admin or the PROVEN operator wallet, never a claimed key.
+    const refusal = refuseKernelRequest(req, String(kernelId), "decide");
     if (refusal) return reply.code(refusal.status).send(refusal.body);
     if (!message) {
       return reply.code(400).send({ error: "message required" });

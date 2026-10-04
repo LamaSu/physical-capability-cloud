@@ -240,7 +240,12 @@ describe("N31c POST /api/operator/diagnostics: a bundle that names a kernel need
   });
 });
 
-describe("N31c body/query inventory finds: kernel-owned writes that named any kernel now need its operator (operate)", () => {
+describe("N31c body/query inventory finds: acting as the operator or spending a paid resource is a DECISION (DECISIONS 01:25)", () => {
+  const claimedRefused = async (url: string, body: unknown) => {
+    const res = await post(url, asOperator(), body);
+    expect(res.statusCode, `${url} with the operator's claimed key`).toBe(403);
+    expect(res.json().reason).toBe("operator_proof_required");
+  };
   const post = (url: string, headers: Record<string, string>, payload: unknown) => app.inject({ method: "POST", url, headers, payload });
   const batchesOnKernel = async () =>
     ((await app.inject({ method: "GET", url: `/api/batches/shared/open?kernelId=${KERNEL}`, headers: asOperator() })).json().batches ?? []).length;
@@ -250,8 +255,9 @@ describe("N31c body/query inventory finds: kernel-owned writes that named any ke
     const batch = { kernelId: KERNEL, capabilityType: "3d-printing", totalSlots: 4, pricePerSlot: "1.00", protocolType: "n31c" };
     const before = await batchesOnKernel();
     expect((await post("/api/batches/shared", asStranger(), batch)).statusCode).toBe(403);
+    await claimedRefused("/api/batches/shared", batch);
     expect(await batchesOnKernel()).toBe(before);
-    for (const headers of [asOperator(), asAdmin()]) expect((await post("/api/batches/shared", headers, batch)).statusCode).toBeLessThan(300);
+    for (const headers of [asProvenOperator(), asAdmin()]) expect((await post("/api/batches/shared", headers, batch)).statusCode).toBeLessThan(300);
     expect(await batchesOnKernel()).toBe(before + 2);
   });
 
@@ -259,23 +265,26 @@ describe("N31c body/query inventory finds: kernel-owned writes that named any ke
     const claim = { kernelId: KERNEL, industry: "n31c-forged", jurisdictions: ["nowhere"] };
     const before = await profileOf();
     expect((await post("/api/compliance/profiles", asStranger(), claim)).statusCode).toBe(403);
+    await claimedRefused("/api/compliance/profiles", claim);
     expect(await profileOf()).toBe(before);
-    const own = await post("/api/compliance/profiles", asOperator(), { kernelId: KERNEL, industry: "n31c-own" });
+    const own = await post("/api/compliance/profiles", asProvenOperator(), { kernelId: KERNEL, industry: "n31c-own" });
     expect(own.statusCode).toBeLessThan(300);
     expect(own.json().profile.industry).toBe("n31c-own");
   });
 
-  it("POST /api/lit/provision: a stranger cannot spend the Lit account key on another kernel; the operator passes the guard", async () => {
+  it("POST /api/lit/provision: neither a stranger nor a claim spends the gateway's Lit key; the proven operator passes the guard", async () => {
     const body = { kernelId: KERNEL, operatorDid: "did:pcc:n31c" };
     expect((await post("/api/lit/provision", asStranger(), body)).statusCode).toBe(403);
+    await claimedRefused("/api/lit/provision", body);
     // No LIT_API_KEY in tests: past the guard the route answers its own 503, and calls nothing.
-    const own = await post("/api/lit/provision", asOperator(), body);
+    const own = await post("/api/lit/provision", asProvenOperator(), body);
     expect(own.statusCode).toBe(503);
     expect(own.json().error).toBe("lit_not_configured");
   });
 
   it("POST /api/operator/support: a stranger cannot post into another kernel's support thread as its operator", async () => {
-    const opened = await post("/api/operator/support", asOperator(), { kernelId: KERNEL, message: "n31c: the operator opens a thread" });
+    await claimedRefused("/api/operator/support", { kernelId: KERNEL, message: "n31c: a claim posting as the operator" });
+    const opened = await post("/api/operator/support", asProvenOperator(), { kernelId: KERNEL, message: "n31c: the operator opens a thread" });
     expect(opened.statusCode).toBe(200);
     const forged = await post("/api/operator/support", asStranger(), { kernelId: KERNEL, message: "n31c: forged as the operator", retrievalCode: "forged" });
     expect(forged.statusCode).toBe(403);
