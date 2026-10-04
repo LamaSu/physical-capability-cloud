@@ -292,7 +292,8 @@
           Press <strong>Start</strong> to subscribe to the live event stream and begin narration.
           <br /><br />
           The stream needs your PCC API key: paste it in the key field. It is sent to this gateway only, and
-          kept in the field only (never stored), so a reload asks for it again.
+          only over https (or to this page's own server on localhost). It is kept in the field only (never
+          stored), so a reload asks for it again.
           <br /><br />
           This page consumes <code>POST /api/commentary/stream</code> as an SSE feed. Each event window
           is summarized by Claude into a sports-broadcaster-style line. If <code>ANTHROPIC_API_KEY</code>
@@ -328,13 +329,29 @@
     voice: $("voice"),
   };
 
-  // Per-host fallback — when this page is hosted by the gateway itself
-  // (SERVE_DASHBOARD=true), the relative URL works. Otherwise fall back to
-  // capability.network for the live demo embed scenario.
-  const GATEWAY_BASE = (() => {
-    if (location.origin && location.origin.startsWith("http")) return location.origin;
-    return "https://capability.network";
+  // Where the stream goes, and whether an API key may go with it. When the
+  // gateway serves this page (SERVE_DASHBOARD=true) that is the page's own
+  // origin; a page not served over http(s) at all (opened from a file, or an
+  // embed without an origin) streams from capability.network. A key goes by
+  // the dashboard's rule (lib/gateway-base.ts, N50): over https, or over http
+  // only to this page's own server on loopback. Over plain HTTP from any other
+  // host it is never sent (astra n103c-586-r1).
+  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
+  const GATEWAY = (() => {
+    if (location.protocol === "https:") return { base: location.origin, keyRefusal: null };
+    if (location.protocol === "http:") {
+      return {
+        base: location.origin,
+        keyRefusal: LOOPBACK.has(location.hostname) ? null : "this page is served over plain HTTP from " + location.host,
+      };
+    }
+    return { base: "https://capability.network", keyRefusal: null };
   })();
+  if (GATEWAY.keyRefusal) {
+    els.apiKey.disabled = true;
+    els.apiKey.placeholder = "needs https";
+    els.apiKey.title = "An API key is sent only over https: " + GATEWAY.keyRefusal + ".";
+  }
 
   const state = {
     controller: null,
@@ -492,6 +509,18 @@
     els.narration.appendChild(div);
   }
 
+  function showKeyRefused() {
+    ensurePlaceholderHidden();
+    const div = document.createElement("div");
+    div.className = "placeholder";
+    div.style.borderColor = "rgba(255, 170, 0, 0.5)";
+    div.innerHTML =
+      "<strong style='color: var(--amber);'>Your API key was not sent.</strong><br/><br/>" +
+      escapeHtml(GATEWAY.keyRefusal) + ", and a key goes only over https (or to this page's own " +
+      "server on localhost). Open this page over https.";
+    els.narration.appendChild(div);
+  }
+
   function escapeHtml(s) {
     return String(s).replace(/[&<>\"']/g, (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[c]
@@ -559,21 +588,25 @@
 
   async function startStream() {
     if (state.controller) return;
+    // The key stays in its field: it is never stored, and the dashboard's own
+    // stored key is not read here (lib/authorized-fetch.ts owns that slot).
+    const apiKey = els.apiKey.value.trim();
+    if (apiKey && GATEWAY.keyRefusal) {
+      showKeyRefused();
+      return;
+    }
     els.btnStart.disabled = true;
     els.btnPause.disabled = false;
     els.btnStop.disabled = false;
     setLive("warn", "connecting…");
 
-    const url = GATEWAY_BASE + "/api/commentary/stream?topic=" + encodeURIComponent(els.topic.value);
+    const url = GATEWAY.base + "/api/commentary/stream?topic=" + encodeURIComponent(els.topic.value);
     const controller = new AbortController();
     state.controller = controller;
 
     // The gateway honors a SIWE session cookie only beside the API key the
-    // session was verified under (N103), so the request carries the key. The
-    // key stays in its field: it is never stored, and the dashboard's own
-    // stored key is not read here (lib/authorized-fetch.ts owns that slot).
+    // session was verified under (N103), so the request carries the key.
     const headers = { "Content-Type": "application/json" };
-    const apiKey = els.apiKey.value.trim();
     if (apiKey) headers.Authorization = "Bearer " + apiKey;
 
     try {
@@ -582,6 +615,8 @@
         headers,
         body: JSON.stringify({ topic: els.topic.value, windowMs: 1500 }),
         credentials: "include",
+        // Never follow a redirect elsewhere with the key (as fetchWithKey, N50).
+        redirect: "error",
         signal: controller.signal,
       });
 

@@ -39,8 +39,10 @@ and all the other gateway streams.
 4. Paste your PCC API key in the key field, pick a topic (`all`, `jobs`,
    `escrows`, `attestations`) and press **Start**. The stream is behind the
    API gate, so the page sends the key as `Authorization: Bearer <key>` to the
-   gateway that served it. It keeps the key in the field only and never
-   stores it, so a reload asks again. A SIWE session cookie alone will not
+   gateway that served it, by the dashboard's rule: only over https, or over
+   http to the page's own server on localhost. Served over plain HTTP from any
+   other host, the page disables the key field and never sends a key. It keeps
+   the key in the field only and never stores it, so a reload asks again. A SIWE session cookie alone will not
    do once the gateway binds sessions to their API key (N103).
 
 5. The left column shows the raw event feed, color-coded by category. The
