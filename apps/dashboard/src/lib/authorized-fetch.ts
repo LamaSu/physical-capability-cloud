@@ -47,9 +47,16 @@ function readKey(): string | null {
  * the next account's key never goes out beside the previous account's cookie
  * (astra 19f, 19g). Both are read from storage here, at use: the pending
  * change can only withhold the key, never choose one.
+ *
+ * The key is read FIRST (astra 19l). A tab sees another tab's writes in the
+ * order they were made, so if this read sees the next key, the generation's
+ * move came before it, and the reads after it find the change pending. Read
+ * the other way round, a login landing between the reads passed the gate on
+ * the old markers and then sent the new key.
  */
 function keyToSend(): string | null {
-  return walletSessionEnding() ? null : readKey();
+  const key = readKey();
+  return walletSessionEnding() ? null : key;
 }
 
 /**

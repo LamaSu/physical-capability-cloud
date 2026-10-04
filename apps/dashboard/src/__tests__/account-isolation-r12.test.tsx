@@ -139,6 +139,21 @@ describe("19l MEDIUM: a generation write that lands and then throws doesn't leav
     expect(sends()).toBe(KEY_B);
   });
 
+  it("a move storage can't confirm at all: login stores nothing and says why, and the boundary still runs, so a move that landed gets its teardown", async () => {
+    const { store } = await page();
+    const epoch = store.useAuthStore.getState().keyEpoch;
+    Storage.prototype.getItem = function (this: Storage, key: string) {
+      if (key === "pcc-account-generation") throw new DOMException("The operation is insecure.", "SecurityError");
+      return original.getItem.call(this, key);
+    };
+    const ok = await store.useAuthStore.getState().login(KEY_B);
+    restoreStorage();
+    expect(ok).toBe(false);
+    expect(localStorage.getItem("pcc-api-key"), "the key isn't stored (fail closed)").toBeNull();
+    expect(store.useAuthStore.getState().keyEpoch, "this tab's account boundary runs").not.toBe(epoch);
+    expect(store.useAuthStore.getState().error).toMatch(/couldn't save your sign-in/);
+  });
+
   describe("on the login page", () => {
     let container: HTMLDivElement;
     let root: Root;

@@ -28,14 +28,22 @@ export function accountGeneration(): string | null {
 }
 
 /**
- * Moves the generation on, before a different API key is stored. False when
- * storage refused it: then no other tab would see the change pending, so the
- * caller must not store the next key (fail closed).
+ * Moves the generation on, before a different API key is stored. True only
+ * when storage reads the new generation back. Otherwise the caller must not
+ * store the next key (fail closed): another tab might not see the change
+ * pending. The write may have landed all the same, since a write can land and
+ * then throw (astra 19l). If it did, every tab now sees a change pending that
+ * only a teardown confirms, so the caller must also run its account boundary.
  */
 export function beginAccountChange(): boolean {
+  const next = newToken();
   try {
-    localStorage.setItem("pcc-account-generation", newToken());
-    return true;
+    localStorage.setItem("pcc-account-generation", next);
+  } catch {
+    // Not proof that it didn't land: the read below decides.
+  }
+  try {
+    return localStorage.getItem("pcc-account-generation") === next;
   } catch {
     return false;
   }

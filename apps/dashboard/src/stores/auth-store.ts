@@ -25,7 +25,11 @@ interface AuthState {
   // -- API Key auth (primary gate) --
   /** Whether the slot held a key at the last change. The key itself is never in the store. */
   isAuthenticated: boolean;
-  /** Bumped on every change of the stored key, whoever makes it (onStoredKeyChange). Never the key. */
+  /**
+   * Bumped on every change of the stored key, whoever makes it
+   * (onStoredKeyChange), and when a login may have begun an account change
+   * it couldn't confirm (astra 19l). Never the key.
+   */
   keyEpoch: number;
   login: (key: string) => Promise<boolean>;
   /** Signs out, and says how it came out. Also kept as lastSignOut. */
@@ -60,6 +64,8 @@ const KEY_UNCONFIRMED_SAVE =
 const KEY_UNCONFIRMED_REMOVAL =
   "This browser couldn't confirm it removed your saved API key, so you may still be signed in here or in another tab. Clear this site's data to sign out.";
 const KEY_CHANGE_BUSY = "Another sign-in or sign-out was under way, so this one didn't happen. Try again.";
+const SIGN_IN_NOT_SAVED =
+  "This browser couldn't save your sign-in, so you're not signed in as that account. Check that this site may store data, then sign in again.";
 
 export const useAuthStore = create<AuthState>((set) => ({
   // -- API Key auth --
@@ -74,12 +80,17 @@ export const useAuthStore = create<AuthState>((set) => ({
       const res = await fetchWithKey("/api/auth/validate", key);
       if (!res.ok) return false;
       // The generation moves first, so a tab that sees this key sees the
-      // change pending (astra 19g). If it can't move, no tab would know: store
-      // nothing (fail closed). This store can't tell the key from the one in
-      // the slot (N50 keeps the key out of its reach), so every login is a
-      // change: a second login with the same key ends the wallet session and
-      // remounts, which fails closed.
-      if (!beginAccountChange()) return false;
+      // change pending (astra 19g). If storage doesn't show it moved, store
+      // nothing (fail closed). The move may have landed all the same (astra
+      // 19l): every request then waits for a teardown to confirm it, so this
+      // tab's account boundary runs, as for any change. This store can't tell
+      // the key from the one in the slot (N50 keeps the key out of its reach),
+      // so every login is a change: a second login with the same key ends the
+      // wallet session and remounts, which fails closed.
+      if (!beginAccountChange()) {
+        set((s) => ({ keyEpoch: s.keyEpoch + 1, error: SIGN_IN_NOT_SAVED }));
+        return false;
+      }
       // The slot is the account every tab, this one included, and the next
       // load act as (DECISIONS 04:14). A save it didn't confirm is reported,
       // never taken as made or as refused (astra 19i, 19j, 19k).
@@ -178,7 +189,8 @@ export function onIdentityChange(onChange: () => void): () => void {
 /**
  * Calls `onChange` whenever the signed-in account may have changed: any change
  * of the stored key, here or in another tab, including login() with a key
- * while signed in. App resets every account-scoped store on it and remounts
+ * while signed in, and a login whose generation move storage couldn't
+ * confirm (astra 19l). App resets every account-scoped store on it and remounts
  * the signed-in shell (astra 19c). The account follows the key, not
  * isAuthenticated: a key replaced while signed in is a different account. The
  * store can't tell one key from another (N50), so every key change counts as
