@@ -13,14 +13,17 @@
  *     (`pinnedBundleSetDigest`, see `computeBundleSetDigest`). A caller that
  *     passes a subset (for example the first bundle that verifies) gets
  *     `bundle-set-mismatch`, never admit, so a stored failure cannot be left out;
- *   - SIGNATURE: every bundle's `bundleHash` verifies under the node's
- *     registered key (`verifyBundleSignature`: gateway
- *     `verifyDeviceSignedEvidence`, the oracle's registered-key check), and the
- *     leg names the verified signer's operator principal in the pinned
- *     registry: the bundle's TRUST DOMAIN, or null when the registry names
- *     none. Levels judge independence between trust domains (evidence-level.ts,
- *     #345's one rule), so a leg that cannot name the signer's operator caps
- *     that bundle's inspections below inspected_output;
+ *   - SIGNATURE: every bundle's `bundleHash` verifies under the key registered
+ *     for its declared signer (`kernelSignature.signer`), and the leg
+ *     (`verifyBundleSignature`: gateway `verifyDeviceSignedEvidence`, the
+ *     oracle's registered-key check) names the signer that verified, which
+ *     must be the declared one. The bundle's TRUST DOMAIN is that signer's
+ *     operator principal in ONE pinned registry snapshot (`signerTrustDomains`),
+ *     looked up here, never answered bundle by bundle, so one signer has one
+ *     domain (astra pack 271). Levels judge independence between trust domains
+ *     (evidence-level.ts, #345's one rule), so a signer whose operator the
+ *     registry does not name caps that bundle's inspections below
+ *     inspected_output;
  *   - BINDING, run here (`verifyEvidenceSubjectBinding`, LO-EV-9): each digest
  *     opens to its events, and they commit the job and the kernel that
  *     accepted it;
@@ -69,8 +72,9 @@
  *         validation must end in an explicit terminal state (reject or
  *         quarantine), never be silently left out of the pin;
  *       - persist the exact manifest and context with the decision: bundle
- *         roots, profile commitment, subject, unit and challenge, and the
- *         verifier and program identity, so recovery re-evaluates the same set;
+ *         roots, profile commitment, subject, unit and challenge, the executor
+ *         domains and the signer snapshot, and the verifier and program
+ *         identity, so recovery re-evaluates the same set;
  *       - under v1, present exactly the committed bundle at /settle, and hold
  *         producers to the one-bundle rule (evidence states it in LO-EV-9 and
  *         EvidenceBlockV2); a multi-bundle set would need the seal seam;
@@ -280,8 +284,18 @@ export interface ProfileAdmissionResult {
   reasons: ProfileAdmissionReason[];
 }
 
-/** The signature leg's answer: verified, naming the signer's trust domain, or not verified. */
-export type BundleSignatureAnswer = { readonly trustDomain: string | null } | false;
+/** The signature leg's answer: the id of the signer whose registered key verified the bundle (its declared `kernelSignature.signer`), or false. */
+export type BundleSignatureAnswer = string | false;
+
+/**
+ * One row of the pinned registry snapshot: a registered signer's id, as kernel
+ * bundles declare it (`kernelSignature.signer`, 0x + 40 lowercase hex), and the
+ * operator principal that owns its key, or null when the registry names none.
+ */
+export interface SignerTrustDomain {
+  readonly signer: string;
+  readonly trustDomain: string | null;
+}
 
 /** The part of an EvidenceBundle admission reads. */
 export interface AdmissionBundle {
@@ -308,11 +322,19 @@ export interface ProfileAdmissionInput {
    */
   executorTrustDomains: readonly string[];
   /**
-   * The registered-key signature leg. It answers `{ trustDomain }` when the
-   * bundle verifies: the verified signer's operator principal in the pinned
-   * registry, or null when the registry names none. Anything else fails the
-   * leg: false, a throw, a bare `true` (it names no signer), or a trustDomain
-   * that is not an operator principal id.
+   * ONE pinned registry snapshot, as data: every signer the signature leg
+   * verifies against, with the operator principal that owns its key (or null).
+   * From the registry at the same pin as the leg's keys, never from the evidence.
+   * Each bundle's trust domain is looked up here, so a signer has exactly one;
+   * a signer listed twice is refused (astra pack 271).
+   */
+  signerTrustDomains: readonly SignerTrustDomain[];
+  /**
+   * The registered-key signature leg. When the bundle's `bundleHash` verifies
+   * under the key registered for its declared signer, it answers that signer's
+   * id (the bundle's `kernelSignature.signer`); otherwise false. Anything else
+   * fails the leg: false, a throw, `true` (it names no signer), or a signer
+   * other than the one the bundle declares.
    */
   verifyBundleSignature: (bundle: AdmissionBundle) => BundleSignatureAnswer | Promise<BundleSignatureAnswer>;
   /**
@@ -539,22 +561,14 @@ async function legPasses(leg: () => boolean | Promise<boolean>): Promise<boolean
   }
 }
 
-/**
- * The signature leg's answer, read once from its own data: the verified signer's
- * trust domain (undefined when the registry names none), or null when the leg
- * failed. A throw, false, a bare true, a non-object, an accessor or a trustDomain
- * that is neither null nor an operator principal id all fail.
- */
-async function signatureLeg(leg: () => BundleSignatureAnswer | Promise<BundleSignatureAnswer>): Promise<{ trustDomain: string | undefined } | null> {
+/** A signer id as kernel bundles declare it (`kernelSignature.signer`): 0x and 40 lowercase hex digits. */
+const SIGNER_ID = /^0x[0-9a-f]{40}$/;
+
+/** The signature leg's answer: the verified signer's id, or null when the leg failed (a throw, false, true, or anything not a signer id). */
+async function signatureLeg(leg: () => BundleSignatureAnswer | Promise<BundleSignatureAnswer>): Promise<string | null> {
   try {
     const answer: unknown = await leg();
-    if (typeof answer !== "object" || answer === null || Array.isArray(answer)) return null;
-    const descriptor = Object.getOwnPropertyDescriptor(answer, "trustDomain");
-    if (descriptor === undefined || !Object.prototype.hasOwnProperty.call(descriptor, "value")) return null;
-    const domain: unknown = descriptor.value;
-    if (domain === null) return { trustDomain: undefined };
-    if (typeof domain !== "string" || parseOperatorPrincipalId(domain) === null) return null;
-    return { trustDomain: domain };
+    return typeof answer === "string" && SIGNER_ID.test(answer) ? answer : null;
   } catch {
     return null;
   }
@@ -588,7 +602,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   if (typeof input !== "object" || input === null || isProxy === null || isProxy(input)) {
     return reject("input-unreadable", "the admission input must be a plain object, not a proxy");
   }
-  const fields = ["pinnedBundleSetDigest", "verifyBundleSignature", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile", "executorTrustDomains"] as const;
+  const fields = ["pinnedBundleSetDigest", "verifyBundleSignature", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile", "executorTrustDomains", "signerTrustDomains"] as const;
   const read = Object.create(null) as Record<(typeof fields)[number], unknown>;
   for (const key of fields) {
     const descriptor = Object.getOwnPropertyDescriptor(input, key);
@@ -597,7 +611,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     }
     read[key] = descriptor?.value;
   }
-  for (const key of ["profile", "subject", "bundles", "executorTrustDomains"] as const) {
+  for (const key of ["profile", "subject", "bundles", "executorTrustDomains", "signerTrustDomains"] as const) {
     const code = codeInData(read[key], `input.${key}`, new Set());
     if (code !== null) return reject("input-unreadable", `${code}: no code supplied with the data may run during admission`);
   }
@@ -610,6 +624,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     subjectCopy: ReturnType<typeof plainDataCopy>;
     bundlesCopy: ReturnType<typeof plainDataCopy>;
     executorsCopy: ReturnType<typeof plainDataCopy>;
+    signersCopy: ReturnType<typeof plainDataCopy>;
     committedDigest: string;
     presentedProfile: MeasurementProfileV1;
   };
@@ -621,13 +636,14 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       subjectCopy: plainDataCopy(read.subject),
       bundlesCopy: plainDataCopy(read.bundles),
       executorsCopy: plainDataCopy(read.executorTrustDomains),
+      signersCopy: plainDataCopy(read.signerTrustDomains),
       committedDigest: read.committedDigest as string,
       presentedProfile: read.profile as MeasurementProfileV1,
     };
   } catch {
     return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
   }
-  const { pinnedBundleSetDigest, verifyBundleSignature, verifyPrimitiveInstance, subjectCopy, bundlesCopy, executorsCopy } = entry;
+  const { pinnedBundleSetDigest, verifyBundleSignature, verifyPrimitiveInstance, subjectCopy, bundlesCopy, executorsCopy, signersCopy } = entry;
 
   const governance = profileGoverns(entry.committedDigest, entry.presentedProfile);
   if (!governance.governs || governance.profile === null || governance.presentedDigest === null) {
@@ -650,6 +666,33 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     );
   }
   const executorTrustDomains = deepFreeze([...executors]) as readonly string[];
+
+  // The pinned registry snapshot: each signer's one trust domain (astra pack 271). A signer listed twice is refused,
+  // whatever the domains, so no lookup can depend on which row it reads.
+  const snapshot: unknown = signersCopy.ok ? signersCopy.value : undefined;
+  if (!Array.isArray(snapshot)) {
+    return reject("input-unreadable", "signerTrustDomains (the pinned registry snapshot) must be a list of { signer, trustDomain } rows");
+  }
+  const domainOf = new Map<string, string | null>();
+  for (let k = 0; k < snapshot.length; k++) {
+    const row: unknown = snapshot[k];
+    const signer = isRecord(row) ? row.signer : undefined;
+    const domain = isRecord(row) ? row.trustDomain : undefined;
+    if (
+      typeof signer !== "string" ||
+      !SIGNER_ID.test(signer) ||
+      !(domain === null || (typeof domain === "string" && parseOperatorPrincipalId(domain) !== null))
+    ) {
+      return reject(
+        "input-unreadable",
+        `signerTrustDomains[${k}] must be { signer: 0x<40 lowercase hex>, trustDomain: an operator principal id or null }`,
+      );
+    }
+    if (domainOf.has(signer)) {
+      return reject("input-unreadable", `signerTrustDomains lists signer ${signer} twice: a signer has one trust domain`);
+    }
+    domainOf.set(signer, domain);
+  }
 
   const terms = unverifiableProfileTerms(profile);
   if (terms.length > 0) return reject("unverifiable-term", terms.join("; "));
@@ -708,10 +751,20 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   const authenticated: AuthenticatedBundle[] = [];
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
-    const signer = await signatureLeg(() => verifyBundleSignature(bundle));
-    if (signer === null) {
+    const verified = await signatureLeg(() => verifyBundleSignature(bundle));
+    if (verified === null) {
       return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
     }
+    // The leg must name the signer the bundle declares, and the snapshot must hold it: the trust domain is the
+    // domain of the key that verified, from the one snapshot (astra pack 271).
+    const declared: unknown = isRecord(bundle.kernelSignature) ? bundle.kernelSignature.signer : undefined;
+    if (verified !== declared) {
+      return rejectNow("unauthenticated-bundle", `bundle ${i}: the leg verified signer ${verified}, not the bundle's declared signer`);
+    }
+    if (!domainOf.has(verified)) {
+      return rejectNow("unauthenticated-bundle", `bundle ${i}: signer ${verified} is not in the pinned registry snapshot (signerTrustDomains)`);
+    }
+    const trustDomain = domainOf.get(verified) ?? null;
     const binding = await verifyEvidenceSubjectBinding({
       bundleHash: bundle.bundleHash,
       events: bundle.events,
@@ -721,9 +774,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       const at = binding.eventIndex === undefined ? "" : ` at event ${binding.eventIndex}`;
       return rejectNow("unbound-bundle", `bundle ${i}: ${binding.reason}${at}`);
     }
-    authenticated.push(
-      signer.trustDomain === undefined ? { events: binding.events } : { events: binding.events, trustDomain: signer.trustDomain },
-    );
+    authenticated.push(trustDomain === null ? { events: binding.events } : { events: binding.events, trustDomain });
     // Evaluate only what was hashed: the verified canonical snapshots.
     for (const e of binding.events) {
       if (seen.has(e.hash)) continue;
