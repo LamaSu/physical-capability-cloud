@@ -1256,7 +1256,7 @@ describe("the print's setup, its latch's event label and the recovery log, whate
     const { emitter } = recordingEmitter();
     const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-hook", jobName: "a.pdf", totalPages: 1 })));
     expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
-    expect.soft("value" in out ? out.value.success : undefined, "the print").toBe(false);
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("the print's adapter could not be checked: a reason with no text form");
   });
 
   it("registerStep throws: the print resolves with a failure, and releases the session and the step's lease", async () => {
@@ -1311,5 +1311,106 @@ describe("the print's setup, its latch's event label and the recovery log, whate
     expect.soft(second.busy?.reason, "the second print, refused").toBe("quiescing");
     expect.soft(unhandled.length, "unhandled rejections").toBe(0);
     expect.soft(console.error, "the hook's failure, logged").toHaveBeenCalledWith(expect.stringMatching(/could not confirm its evidence is complete: /));
+  });
+});
+
+describe("a print's releases are each attempted, the step's lease last, whatever one throws (astra pack 213)", () => {
+  const settled = <T,>(p: Promise<T>) => p.then((value) => ({ value }), (err: unknown) => ({ rejected: err instanceof Error ? "an Error" : "a reason with no text form" }));
+  /** A print on `printer` that completes normally. */
+  async function printOn(printer: TestPrinter, emitter: EvidenceEmitter, jobId: string) {
+    const run = runPrintJob({ adapter: printer, emitter, jobId, jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.complete();
+    return drive(run);
+  }
+  /** The emitter's registerStep registers the step, as the real one does, and then throws: once. */
+  function registersThenThrows(emitter: EvidenceEmitter, before: () => void = () => {}): void {
+    const register = emitter.registerStep.bind(emitter);
+    vi.spyOn(emitter, "registerStep").mockImplementationOnce((jobId, stepId, tier) => {
+      register(jobId, stepId, tier);
+      before();
+      throw new Error("registry wedged");
+    });
+  }
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("registerStep registers and then throws: the print fails with a result, and the same step then prints", async () => {
+    const printer = testPrinter("partial-213");
+    const { emitter } = recordingEmitter();
+    registersThenThrows(emitter);
+    const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-partial", jobName: "a.pdf", totalPages: 1 })));
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("the print's step could not be registered: registry wedged");
+    expect.soft((await printOn(printer, emitter, "print-partial")).success, "the same step, printed again").toBe(true);
+  });
+
+  it("registerStep registers and throws, and cleanup() throws: the print fails with a result, the lease is released, and the same step then prints", async () => {
+    const printer = testPrinter("partial-cleanup-213");
+    const { emitter } = recordingEmitter();
+    registersThenThrows(emitter);
+    vi.spyOn(emitter, "cleanup").mockImplementationOnce(() => {
+      throw Object.create(null);
+    });
+    const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-partial-cleanup", jobName: "a.pdf", totalPages: 1 })));
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("the print's step could not be registered: registry wedged");
+    expect.soft(console.error, "the failed release, logged").toHaveBeenCalledWith(expect.stringMatching(/print print-partial-cleanup: detaching the step failed: a reason with no text form/));
+    expect.soft((await printOn(printer, emitter, "print-partial-cleanup")).success, "the same step, printed again").toBe(true);
+  });
+
+  it("registerStep registers and throws, and session.close() throws (the printer's id cannot be read): the step is detached, the lease released, and the same step then prints", async () => {
+    const printer = testPrinter("partial-close-213");
+    const ownId = printer.id;
+    let hostile = false;
+    Object.defineProperty(printer, "id", {
+      get: () => {
+        if (hostile) throw Object.create(null); // the session's close reads it
+        return ownId;
+      },
+    });
+    const { emitter } = recordingEmitter();
+    registersThenThrows(emitter, () => {
+      hostile = true;
+    });
+    const cleanup = vi.spyOn(emitter, "cleanup");
+    const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-partial-close", jobName: "a.pdf", totalPages: 1 })));
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("the print's step could not be registered: registry wedged");
+    expect.soft(cleanup, "the step, detached").toHaveBeenCalledWith("print-partial-close", "print-partial-close");
+    hostile = false;
+    expect.soft((await printOn(printer, emitter, "print-partial-close")).success, "the same step, printed again").toBe(true);
+  });
+
+  it("a failed print whose cleanup() throws in the final release: the print resolves with its own failure, and the same step then prints", async () => {
+    const jammed = testPrinter("final-cleanup-213", { start: () => ({ success: false, message: "paper jam" }) });
+    const { emitter, bundles } = recordingEmitter();
+    vi.spyOn(emitter, "cleanup").mockImplementationOnce(() => {
+      throw Object.create(null);
+    });
+    const out = await drive(settled(runPrintJob({ adapter: jammed, emitter, jobId: "print-final-cleanup", jobName: "a.pdf", totalPages: 1 })));
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("paper jam");
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+    expect.soft((await printOn(testPrinter("final-cleanup-213"), emitter, "print-final-cleanup")).success, "the same step, printed again").toBe(true);
+  });
+
+  it("a job id that is not text: refused before anything is held, so its printer prints the next job", async () => {
+    const printer = testPrinter("ids-213");
+    const { emitter } = recordingEmitter();
+    // Text once, then a throw: without the check, the print's session opens on the first read
+    // and a later read (its lease, or a cleanup log) throws while the printer is claimed.
+    let reads = 0;
+    const jobId = {
+      toString() {
+        if (++reads > 1) throw Object.create(null);
+        return "print-ids";
+      },
+    } as unknown as string;
+    const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId, stepId: "step-ids", jobName: "a.pdf", totalPages: 1 })));
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("the print's job id and step id must be text");
+    expect.soft(reads, "the id was never read as text").toBe(0);
+    expect.soft((await printOn(printer, emitter, "print-ids-next")).success, "the printer's next job").toBe(true);
   });
 });

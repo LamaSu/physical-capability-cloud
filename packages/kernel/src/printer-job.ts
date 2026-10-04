@@ -234,6 +234,26 @@ export interface PrintJobResult {
  * the top of this file.
  */
 export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult> {
+  // It always resolves with a result, never rejects, whatever a collaborator throws: the caller's
+  // options included, and the cleanup's own releases (astra packs 210 and 213, steward #5604).
+  const startTime = Date.now();
+  try {
+    return await printOnce(opts, startTime);
+  } catch (err) {
+    return { success: false, events: [], error: failureText(err), durationMs: Date.now() - startTime };
+  }
+}
+
+/** One release of a print's cleanup: attempted, and logged if it throws, so the next is attempted too (astra pack 213). */
+function release(jobId: string, what: string, step: () => void): void {
+  try {
+    step();
+  } catch (err) {
+    console.error(`[printer-job] print ${jobId}: ${what} failed: ${failureText(err)}`);
+  }
+}
+
+async function printOnce(opts: PrintJobOptions, startTime: number): Promise<PrintJobResult> {
   const {
     adapter,
     emitter,
@@ -248,7 +268,6 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
     evidenceSettleTimeoutMs = 30_000,
   } = opts;
 
-  const startTime = Date.now();
   // Every unsuccessful result: no bundle, no events.
   const failure = (error: string, busy?: PrintJobResult["busy"]): PrintJobResult => ({
     success: false,
@@ -257,6 +276,10 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
     ...(busy ? { busy } : {}),
     durationMs: Date.now() - startTime,
   });
+  // The ids key the step and its lease and name the print in every log line, the cleanup's
+  // included: ids that are not text could throw from any of those, so they are refused before
+  // anything is held (astra pack 213, as in JobRunner).
+  if (typeof jobId !== "string" || typeof stepId !== "string") return failure("the print's job id and step id must be text");
 
   // Every refusal below comes before the start command, and before registerStep, which
   // would overwrite the step of a print already running under the same ids. The checks,
@@ -394,9 +417,11 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
   try {
     emitter.registerStep(jobId, stepId, assuranceTier);
   } catch (err) {
-    // Nothing was sent to the printer: release what this print took, and fail with a result.
-    session.close();
-    emitter.cleanup(jobId, stepId);
+    // Nothing was sent to the printer: release what this print took, and fail with a result. Each
+    // release is attempted even if another throws, and the lease is always released (astra pack
+    // 213).
+    release(jobId, "closing the evidence session", () => session.close());
+    release(jobId, "detaching the step", () => emitter.cleanup(jobId, stepId));
     releaseStep();
     return failure(`the print's step could not be registered: ${failureText(err)}`);
   }
@@ -551,14 +576,19 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
     // queued is never written; waits, bounded, for the addEvent in flight; and then detaches
     // its step (cleanup), so getEvents() for it is empty from then on. An addEvent still
     // running at that bound appends to the detached record, which nothing reads.
-    session.close();
-    if (!succeeded) {
-      sealed = true;
-      if (!settleTimedOut) await settle();
-      emitter.cleanup(jobId, stepId);
+    // Each release is attempted even if another throws, and the lease is always released
+    // (astra pack 213). settle() cannot reject: the chain's handler catches every failure.
+    try {
+      release(jobId, "closing the evidence session", () => session.close());
+      if (!succeeded) {
+        sealed = true;
+        if (!settleTimedOut) await settle();
+        release(jobId, "detaching the step", () => emitter.cleanup(jobId, stepId));
+      }
+    } finally {
+      // Released last, so a later print of this step registers a fresh record.
+      releaseStep();
     }
-    // Released last, so a later print of this step registers a fresh record.
-    releaseStep();
   }
 }
 
