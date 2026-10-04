@@ -192,6 +192,18 @@ ITEMS[ITEMS.length] = ["a hole in bundles", () => evidenceLevelOfBundles(SPARSE_
 ITEMS[ITEMS.length] = ["a hole in a bundle's events", () => evidenceLevelOfBundles(SPARSE_EVENTS, ctx)];
 ITEMS[ITEMS.length] = ["a hole in bundles: contradictions", () => deriveContradictions(SPARSE_BUNDLES)];
 
+// Primitive sources and payloads: a read through them would box the primitive and consult
+// Number.prototype, String.prototype and Object.prototype (pack 267 HIGH 2).
+const PRIMITIVE_SOURCE = [bundle([ev("execution_completed", PRINTER), { type: "execution_failed", timestamp: T, source: 0, payload: {} } as unknown as EvidenceEvent], EXEC)];
+const PRIMITIVE_PAYLOAD = [bundle([ev("execution_completed", PRINTER), { type: "execution_failed", timestamp: T, source: { deviceId: PRINTER, deviceType: "machine" }, payload: "x" } as unknown as EvidenceEvent], EXEC)];
+ITEMS[ITEMS.length] = ["a primitive source: contradictions", () => deriveContradictions(PRIMITIVE_SOURCE)];
+ITEMS[ITEMS.length] = ["a primitive source: level", () => evidenceLevelOfBundles(PRIMITIVE_SOURCE, ctx)];
+ITEMS[ITEMS.length] = ["a primitive payload: contradictions", () => deriveContradictions(PRIMITIVE_PAYLOAD)];
+ITEMS[ITEMS.length] = ["a primitive payload: level", () => evidenceLevelOfBundles(PRIMITIVE_PAYLOAD, ctx)];
+
+/** The unattributed completion's own source object (B.noDevice): a getter elsewhere could write to it. */
+const NO_DEVICE_SOURCE = (B.noDevice[0]!.events[0] as unknown as { source: Record<string, unknown> }).source;
+
 // -- running items while a change is in place: index loops, literals and operators only --
 type Row = [label: string, value: unknown];
 
@@ -326,6 +338,31 @@ const SCENARIOS: Array<[id: string, apply: Apply]> = [
   ["Object.prototype.deviceId", pollute(() => ({ deviceId: PRINTER }))],
   ["Object.prototype.simulated = true", pollute(() => ({ simulated: true }))],
   ["Object.prototype.mock = true", pollute(() => ({ mock: true }))],
+  // Pack 267 HIGH 1: an inherited mock GETTER that attributes the unattributed event, then answers false.
+  ["Object.prototype.mock getter that writes source.deviceId", () => {
+    ReflectDefineProperty(Object.prototype, "mock", nullDescriptor({ configurable: true, enumerable: false, get: () => {
+      NO_DEVICE_SOURCE.deviceId = PRINTER;
+      return false;
+    } }));
+    return () => {
+      ReflectDeleteProperty(Object.prototype, "mock");
+      ReflectDeleteProperty(NO_DEVICE_SOURCE, "deviceId");
+    };
+  }],
+  ["Object.prototype.mock getter that throws", () => {
+    ReflectDefineProperty(Object.prototype, "mock", nullDescriptor({ configurable: true, enumerable: false, get: () => {
+      throw new Error("inherited mock");
+    } }));
+    return () => void ReflectDeleteProperty(Object.prototype, "mock");
+  }],
+  ["Number.prototype.simulated = true", () => {
+    ReflectDefineProperty(Number.prototype, "simulated", nullDescriptor({ value: true, writable: true, configurable: true, enumerable: false }));
+    return () => void ReflectDeleteProperty(Number.prototype, "simulated");
+  }],
+  ["String.prototype.mock = true", () => {
+    ReflectDefineProperty(String.prototype, "mock", nullDescriptor({ value: true, writable: true, configurable: true, enumerable: false }));
+    return () => void ReflectDeleteProperty(String.prototype, "mock");
+  }],
   ["Object.prototype.trustDomain", pollute(() => ({ trustDomain: OTHER }))],
   ["Object.prototype.executorTrustDomains", pollute(() => ({ executorTrustDomains: [EXEC] }))],
   ["Object.prototype.type = execution_completed", pollute(() => ({ type: "execution_completed" }))],

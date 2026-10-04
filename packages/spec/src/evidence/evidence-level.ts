@@ -124,13 +124,12 @@
  *    frozen null-prototype records built from them at load. Rule 7's reads stay
  *    one read each, but of OWN properties only: an event's type, source and
  *    payload, source.deviceId and source.simulated, a bundle's events and
- *    trustDomain, the context's executorTrustDomains and every list element. A
- *    value written on Object.prototype or Array.prototype is never taken for the
- *    input's (an own accessor still runs once). payload.mock keeps
- *    isFabricated's own read: written there it can only make evidence
- *    fabricated, which refuses. The boundary: a realm whose intrinsics were
- *    replaced before @pcc/spec loaded is out of scope, since no in-process check
- *    can tell.
+ *    trustDomain, payload.mock, the context's executorTrustDomains and every
+ *    list element. A value or getter written on Object.prototype or
+ *    Array.prototype is never taken for the input's (an own accessor still runs
+ *    once), and a primitive source or payload is read as having no fields, never
+ *    boxed. The boundary: a realm whose intrinsics were replaced before
+ *    @pcc/spec loaded is out of scope, since no in-process check can tell.
  */
 
 import type { EvidenceEvent, EvidenceEventType } from "../types/evidence.js";
@@ -721,11 +720,14 @@ interface PreparedBundle {
   readonly events: readonly EventFacts[];
 }
 
-/** A null-prototype view of `source` holding only its own `simulated`, read once; a non-object as it is. */
-function ownSimulatedView(source: unknown): unknown {
-  if (typeof source !== "object" || source === null) return source;
+/**
+ * A null-prototype snapshot holding only `key`, read once as an OWN property of `value`, and
+ * undefined when `value` is not an object or `key` is inherited or absent. isFabricated reads
+ * these, so no inherited value or getter and no boxed primitive can answer (astra pack 267).
+ */
+function ownFieldView(value: unknown, key: string): Record<string, unknown> {
   const view = ObjectCreate(null) as Record<string, unknown>;
-  view.simulated = own(source, "simulated");
+  view[key] = typeof value === "object" && value !== null ? own(value, key) : undefined;
   return view;
 }
 
@@ -739,10 +741,15 @@ function readEventFacts(event: Record<string, unknown>): EventFacts {
   const source: unknown = own(event, "source");
   const payload: unknown = own(event, "payload");
   const type = typeof rawType === "string" ? rawType : null;
-  // The canonical predicate, over a snapshot of the values read: it reads
-  // source.simulated (from an own-only view) and payload.mock once each, so this
-  // cannot drift from it.
-  const fabricated = isFabricated({ type, source: ownSimulatedView(source), payload } as unknown as EvidenceEvent);
+  // The canonical predicate, over null-prototype snapshots of the two values it reads, each
+  // read once as an OWN property: source.simulated and payload.mock. An inherited mock getter
+  // could otherwise write source.deviceId before it is read, and a primitive source or
+  // payload would box and consult its prototypes (astra pack 267).
+  const fabricated = isFabricated({
+    type,
+    source: ownFieldView(source, "simulated"),
+    payload: ownFieldView(payload, "mock"),
+  } as unknown as EvidenceEvent);
   let deviceAttributed = false;
   if (typeof source === "object" && source !== null) {
     const deviceId: unknown = own(source, "deviceId");

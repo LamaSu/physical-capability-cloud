@@ -76,9 +76,6 @@ beforeAll(async () => {
   );
 }, 900_000);
 
-/** The one scenario allowed to change answers, and only toward refusal (see below). */
-const MOCK_SCENARIO = "Object.prototype.mock = true";
-
 /** Each answer that changed. */
 function changes(clean: Row[], patched: Row[]): string[] {
   const out: string[] = [];
@@ -104,16 +101,7 @@ describe("evidence-level answers do not change under post-load realm mutation (h
     const outcome = OUTCOMES.get(id)!;
     expect(outcome.error, "the child failed").toBeUndefined();
     expect(Array.isArray(outcome.patched), String(outcome.patched)).toBe(true);
-    const changed = changes(outcome.clean, outcome.patched as Row[]);
-    if (id === MOCK_SCENARIO) {
-      // payload.mock keeps isFabricated's own read (E5 pins it: evidence-level.test.ts, the
-      // payload trap test). Written on Object.prototype it makes every event fabricated, so it
-      // may only refuse: no level, and no contradiction derived from a fabricated bundle.
-      for (const line of changed) expect(line, "a change that is not a refusal").toMatch(/-> (null|\[\]|\[(\{"bundleIndex":\d+,"eventIndex":\d+,"level":null\},?)+\])$/);
-      expect(changed.length).toBeGreaterThan(0);
-    } else {
-      expect(changed).toEqual([]);
-    }
+    expect(changes(outcome.clean, outcome.patched as Row[])).toEqual([]);
   });
 });
 
