@@ -501,7 +501,11 @@ A unit's default outcome is `released`. A **released** unit pays its legs and it
   - `passThroughBps` and `baseModelWeightBps` are explicit inputs, and are refused when missing.
   - The manifest must pass its own schema, so its dataset weights total exactly 10000 (`MANIFEST_INVALID`). Its model and dataset ids must be Ids (`INVALID_ID`).
   - The expansion subdivides one allocation and never adds to it.
-- **Both manifests** are checked against their `manifestHash`. A manifest holding a number the canonical form cannot write (one that is not finite, or of magnitude `2^53` or more) has no hash, so it is refused before hashing (`MANIFEST_INVALID`), with or without D5 in `canonicalize`. Anything else the hash refuses is `MANIFEST_INVALID` too: an adapter never throws.
+- **Every adapter reads its input once**, into a plain copy (`snapshotJson` with `canonical`, economics/input.ts). Everything after that, the schema, the hash and the payout, uses that one copy, so the hash and the payout always see the same manifest.
+  - The copy refuses an accessor without calling it, a cycle, a non-plain object, nesting deeper than 64, anything that cannot be read as plain JSON data (a throwing proxy trap included), and a number the canonical form cannot write (one that is not finite, or of magnitude `2^53` or more). The refusal is `INPUT_INVALID`, or `GRAPH_INVALID` for a contribution graph. It is the same with or without D5 in `canonicalize`.
+  - An undefined object member is dropped, as `canonicalize` drops it.
+  - A manifest that fails its schema is `MANIFEST_INVALID`. So is one whose hash still cannot be computed. Each manifest is then checked against its `manifestHash`.
+  - On any input, an adapter returns a result. It does not throw.
 - **`ContributionGraphV1`** (optional, for open ecosystems): each node keeps a `retain` weight and passes shares along **accepted** edges. An edge is dropped when:
   - it is not accepted;
   - it leads to a node that requires participation and whose component does not run in the unit;
