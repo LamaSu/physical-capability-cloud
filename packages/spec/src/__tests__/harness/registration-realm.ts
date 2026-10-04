@@ -139,6 +139,15 @@ function replace(target: object, key: PropertyKey, make: (original: any) => unkn
   };
 }
 
+/** An accessor's getter replaced, as post-load code could: Promise[Symbol.species], for one. */
+function replaceGetter(target: object, key: PropertyKey, make: (original: any) => () => unknown): Apply {
+  return () => {
+    const original = ReflectGetOwnPropertyDescriptor(target, key)!;
+    ReflectDefineProperty(target, key, nullDescriptor({ configurable: original.configurable, enumerable: original.enumerable, get: make(original.get), set: original.set }));
+    return () => void ReflectDefineProperty(target, key, original);
+  };
+}
+
 function pollute(values: () => Record<string, unknown>): Apply {
   return () => {
     const v = values();
@@ -194,6 +203,28 @@ const SCENARIOS: Array<[string, Apply]> = [
   ["patch: Object.prototype.claimedDigest", pollute(() => ({ claimedDigest: "0x" + "1".repeat(64) }))],
   ["patch: Object.prototype.tolerance", pollute(() => ({ tolerance: { comparator: ">=", target: 1 } }))],
   ["patch: Object.prototype.value = true", pollute(() => ({ value: true }))],
+  // astra pack 188: every intrinsic the registration path captures at load gets a scenario, so a capture
+  // later turned back into a live lookup changes a result here. The list is checked against a fixed
+  // inventory in profile-registration-intrinsics.test.ts.
+  ["patch: Number.isInteger", replace(Number, "isInteger", () => () => false)],
+  ["patch: Object.create", replace(Object, "create", () => () => ({}))],
+  ["patch: Object.defineProperty", replace(Object, "defineProperty", () => (o: unknown) => o)],
+  ["patch: Object.is", replace(Object, "is", () => () => true)],
+  ["patch: Object.prototype.hasOwnProperty", replace(Object.prototype, "hasOwnProperty", () => () => true)],
+  ["patch: Reflect.apply", replace(Reflect, "apply", () => () => undefined)],
+  ["patch: Date.parse", replace(Date, "parse", () => () => 0)],
+  ["patch: String.prototype.charAt", replace(String.prototype, "charAt", () => () => "x")],
+  ["patch: Set.prototype.add", replace(Set.prototype, "add", () => function (this: unknown) { return this; })],
+  ["patch: Function.prototype.bind", replace(Function.prototype, "bind", () => () => () => undefined)],
+  ["patch: Promise.prototype.then", replace(Promise.prototype, "then", () => () => undefined)],
+  ["patch: Promise.prototype.catch", replace(Promise.prototype, "catch", () => () => undefined)],
+  ["patch: Promise.prototype.finally", replace(Promise.prototype, "finally", () => () => undefined)],
+  ["patch: Promise[Symbol.species]", replaceGetter(Promise, Symbol.species, () => () => function NotPromise() {})],
+  ["patch: TypeError", replace(globalThis, "TypeError", () => function NotTypeError() {})],
+  ["patch: Error", replace(globalThis, "Error", () => function NotError() {})],
+  ["patch: Proxy", replace(globalThis, "Proxy", () => function NotProxy(target: object) { return target; })],
+  ["patch: structuredClone", replace(globalThis, "structuredClone", () => () => ({}))],
+  ["patch: Uint8Array", replace(globalThis, "Uint8Array", () => function NotUint8Array() { return []; })],
 ];
 
 // -- main --

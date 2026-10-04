@@ -50,7 +50,7 @@ import {
   type MeasurementProfileV1,
 } from "./measurement-profile.js";
 import { unverifiableProfileTerms } from "./profile-admission.js";
-import { append, JSONStringify, mapList, newList } from "../util/primordials.js";
+import { append, JSONStringify, listAt, mapList, newList } from "../util/primordials.js";
 
 export type ProfileRegistrationCode =
   | "profile-invalid"
@@ -113,7 +113,7 @@ export function checkProfileRegistration(input: ProfileRegistrationRequest): Pro
     );
   }
   const terms = unverifiableProfileTerms(profile);
-  for (let i = 0; i < terms.length; i++) append(problems, problem("unverifiable-term", terms[i]!));
+  for (let i = 0; i < terms.length; i++) append(problems, problem("unverifiable-term", listAt(terms, i)!));
 
   const profileDigest = computeMeasurementProfileDigest(profile);
   if (request.claimedDigest !== undefined && request.claimedDigest !== profileDigest) {

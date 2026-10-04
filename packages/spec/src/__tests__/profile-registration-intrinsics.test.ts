@@ -11,9 +11,13 @@
 import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import ts from "typescript";
 import { beforeAll, describe, expect, it } from "vitest";
+
+import { closureReads, compilerOptions, type CheckOptions } from "./builtin-reads-check.js";
 
 const SPEC_DIR = fileURLToPath(new URL("../../", import.meta.url));
 const REALM = fileURLToPath(new URL("./harness/registration-realm.ts", import.meta.url));
@@ -85,6 +89,22 @@ describe("registration: nothing changed after load makes a request registrable, 
     const all = reference.clean.find((r) => r[1] === "refused: every problem at once")![2] as { problems: { code: string }[] };
     expect(all.problems.map((p) => p.code)).toEqual(["device-mismatch", "capability-type-mismatch", "unverifiable-term", "digest-mismatch"]);
     for (const id of SCENARIOS) expect(OUTCOMES.get(id)?.clean, id).toEqual(reference.clean);
+  });
+
+  it("has a scenario for every intrinsic the registration path captures at load (astra pack 188's inventory)", () => {
+    // The callable captures of the files the registration closure reaches (DECISIONS 04:06): profile-registration,
+    // measurement-profile, profile-admission (unverifiableProfileTerms), canonical, plain-data, primordials,
+    // evidence-level, primitives and types/evidence. Pack 188 named the first six as missing.
+    const INVENTORY = [
+      "Number.isInteger", "Object.create", "Object.defineProperty", "Object.is", "Object.prototype.hasOwnProperty", "Reflect.apply",
+      "Array.isArray", "Date.parse", "JSON.stringify", "Number.isFinite", "Object.freeze", "Object.getOwnPropertyDescriptor",
+      "Object.getPrototypeOf", "Object.isFrozen", "Object.keys", "Reflect.ownKeys", "Set.prototype.add", "Set.prototype.has",
+      "String", "String.prototype.charAt", "String.prototype.charCodeAt", "String.prototype.trim",
+      "Function.prototype.call", "Function.prototype.bind", "Promise.prototype.then", "Promise.prototype.catch",
+      "Promise.prototype.finally", "Promise[Symbol.species]", "TypeError", "Error", "Proxy", "structuredClone",
+      "Uint8Array", "Map.prototype.get",
+    ];
+    expect(INVENTORY.filter((name) => !SCENARIOS.includes(`patch: ${name}`))).toEqual([]);
   });
 
   for (const id of SCENARIOS) {
@@ -184,4 +204,30 @@ describe("source scan: profile-registration.ts", () => {
     const source = readFileSync(fileURLToPath(new URL("../evidence/profile-registration.ts", import.meta.url)), "utf8");
     expect(scan("profile-registration.ts", codeOnly(source), [...AMBIENT, ...NO_REGEXP])).toEqual([]);
   });
+});
+
+// -- the static check: registration's trusted path, computed from the program (DECISIONS 04:06) --
+describe("registration's trusted path passes the default-deny check, computed from the program (DECISIONS 04:06)", () => {
+  it("profile-registration.ts, and every in-repo function it can reach, have none", () => {
+    const REGISTRATION = join(SPEC_DIR, "src", "evidence", "profile-registration.ts");
+    const REPO = join(SPEC_DIR, "..", "..");
+    const inRepo = (fileName: string): boolean =>
+      fileName.startsWith(join(REPO, "packages")) && !/[\\/]node_modules[\\/]/.test(fileName) && !fileName.endsWith(".d.ts");
+    const options: CheckOptions = { primordials: /[\\/]src[\\/]util[\\/](primordials|plain-data)\.ts$/, awaitWrappers: new Set(["awaitedHere", "legAnswer"]) };
+    const program = ts.createProgram([REGISTRATION], compilerOptions(SPEC_DIR));
+    expect(program.getSemanticDiagnostics(program.getSourceFile(REGISTRATION)).map((d) => ts.flattenDiagnosticMessageText(d.messageText, " "))).toEqual([]);
+    const { reached, found, collaboratorsUsed } = closureReads(program, [REGISTRATION], options, inRepo);
+    // Not vacuous: the closure enters the copy, the validation, the term check, the digest and canonical JSON.
+    expect(reached).toEqual(
+      expect.arrayContaining([
+        "plain-data.ts:plainDataCopy",
+        "measurement-profile.ts:validateMeasurementProfile",
+        "profile-admission.ts:unverifiableProfileTerms",
+        "measurement-profile.ts:computeMeasurementProfileDigest",
+        "canonical.ts:canonicalize",
+      ]),
+    );
+    expect(collaboratorsUsed).toEqual([]);
+    expect(found).toEqual([]);
+  }, 120_000);
 });
