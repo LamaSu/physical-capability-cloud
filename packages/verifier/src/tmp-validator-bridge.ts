@@ -15,6 +15,7 @@
  */
 
 import type { Address, AssuranceTier, Timestamp, SHA256, EvidenceBundle, ZKProof } from "@pcc/spec";
+import { canonicalize } from "@pcc/spec";
 import { EvidenceVerifier } from "./evidence-verifier.js";
 import { CommitmentService } from "./commitment-service.js";
 import { ZKProofService } from "./zk-proof-service.js";
@@ -33,14 +34,27 @@ export interface ValidationContext {
   proofType?: BenchmarkProofEnvelope["proofType"];
 }
 
+/**
+ * The pipelines that can enforce an assurance tier. zk_proof and merkle_commitment can't: neither evidences
+ * the events every tier requires, so validation refuses them (tier_unenforceable), and a task may not be
+ * created on them (E11e, E11f).
+ */
+export const TIER_ENFORCING_PIPELINES: readonly BenchmarkProofEnvelope["proofType"][] = [
+  "sensor_evidence",
+  "bittensor_verification",
+  "oracle_verification",
+];
+
 /** A one-finding refusal. */
 function refusal(check: string, details: string): ValidationResult {
   return { valid: false, confidence: 0, findings: [{ check, passed: false, details }] };
 }
 
-/** The accepted tier as the routes need it, or a refusal: absent, or contradicted by the worker's proof. */
+/**
+ * The task's accepted tier, or a refusal when it has none. The worker's own claim (proof.requiredTier) is
+ * never read (E11f): an unsigned field changes no verdict, in either direction.
+ */
 function acceptedTierOf(
-  envelope: BenchmarkProofEnvelope,
   context: ValidationContext | undefined,
   check: string,
 ): { tier: AssuranceTier } | { refusal: ValidationResult } {
@@ -51,16 +65,6 @@ function acceptedTierOf(
         valid: false,
         confidence: 0,
         findings: [{ check, passed: false, details: "No accepted tier for this task: a worker's proof cannot choose one" }],
-      },
-    };
-  }
-  const claimed = envelope.proof.requiredTier;
-  if (claimed !== undefined && claimed !== tier) {
-    return {
-      refusal: {
-        valid: false,
-        confidence: 0,
-        findings: [{ check, passed: false, details: `The proof claims tier ${String(claimed)}, but the task was accepted at tier ${tier}` }],
       },
     };
   }
@@ -226,6 +230,73 @@ export class TMPValidatorBridge {
     };
   }
 
+  /**
+   * The bundle a network judges, bound to the hash the worker names (E11f). bundleData must parse to an
+   * evidence bundle that EvidenceVerifier accepts at the task's tier: every event hash and the bundle hash
+   * recomputed, the tier's required events present, the consistency checks passed. The supplied bundleHash
+   * must be that bundle's hash. The network then receives ONLY what that hash commits: the bundle hash and
+   * each event's hashed fields and hash, in an order chosen by committed fields, as canonical JSON. No
+   * uncommitted field (the bundle's id, jobId, assuranceTier or signatures, an event's id, the array order,
+   * the payload's key order) reaches it, and its answer can only add a refusal.
+   *
+   * The boundary: "committed" means hash-committed. EvidenceVerifier recomputes hashes; it checks no
+   * kernel or device signature (it has no key registry), exactly as on the sensor_evidence pipeline.
+   */
+  private async boundBundle(
+    bundleHash: string,
+    bundleData: string,
+    tier: AssuranceTier,
+    check: string,
+  ): Promise<{ bundleData: string; local: ValidationResult["findings"][number] } | { refusal: ValidationResult }> {
+    let bundle: unknown;
+    try {
+      bundle = JSON.parse(bundleData);
+    } catch {
+      return { refusal: refusal(check, "bundleData is not JSON") };
+    }
+    if (
+      bundle === null ||
+      typeof bundle !== "object" ||
+      Array.isArray(bundle) ||
+      !Array.isArray((bundle as { events?: unknown }).events)
+    ) {
+      return { refusal: refusal(check, "bundleData is not an evidence bundle with an events array") };
+    }
+    let attestation: Awaited<ReturnType<EvidenceVerifier["verify"]>>;
+    try {
+      attestation = await this.evidenceVerifier.verify(bundle as EvidenceBundle, { acceptedTier: tier });
+    } catch (err) {
+      return { refusal: refusal(check, `bundleData could not be verified: ${err instanceof Error ? err.message : String(err)}`) };
+    }
+    if (attestation.result !== "valid") {
+      return {
+        refusal: {
+          valid: false,
+          confidence: 0,
+          findings: [
+            { check, passed: false, details: `The bundle fails verification at the task's tier ${tier}, so no network is asked` },
+            ...attestation.findings.filter((f) => !f.passed).map((f) => ({ check: f.check, passed: f.passed, details: f.details })),
+          ],
+        },
+      };
+    }
+    const verified = bundle as EvidenceBundle;
+    if (verified.bundleHash !== bundleHash) {
+      return { refusal: refusal(check, "The supplied bundleHash is not the hash of the verified bundle") };
+    }
+    const at = (e: { timestamp: string }) => {
+      const t = Date.parse(e.timestamp);
+      return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+    };
+    const events = verified.events
+      .map((e) => ({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload, hash: e.hash }))
+      .sort((a, b) => at(a) - at(b) || (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
+    return {
+      bundleData: canonicalize({ bundleHash: verified.bundleHash, events }),
+      local: { check, passed: true, details: `The bundle verifies at the task's tier ${tier}, with its event and bundle hashes recomputed` },
+    };
+  }
+
   private async validateViaBittensor(
     envelope: BenchmarkProofEnvelope,
     context?: ValidationContext,
@@ -244,14 +315,14 @@ export class TMPValidatorBridge {
       };
     }
 
-    const bundleHash = envelope.proof.bundleHash as string | undefined;
-    const bundleData = envelope.proof.bundleData as string | undefined;
+    const bundleHash = envelope.proof.bundleHash;
+    const bundleData = envelope.proof.bundleData;
     // The tier is the task's accepted one, never the worker's own claim (N118).
-    const accepted = acceptedTierOf(envelope, context, "bittensor_accepted_tier");
+    const accepted = acceptedTierOf(context, "bittensor_accepted_tier");
     if ("refusal" in accepted) return accepted.refusal;
     const requiredTier = accepted.tier;
 
-    if (!bundleHash || !bundleData) {
+    if (typeof bundleHash !== "string" || bundleHash.length === 0 || typeof bundleData !== "string" || bundleData.length === 0) {
       return {
         valid: false,
         confidence: 0,
@@ -265,9 +336,13 @@ export class TMPValidatorBridge {
       };
     }
 
+    // The network judges only the bundle verified here, bound to bundleHash (E11f).
+    const bound = await this.boundBundle(bundleHash, bundleData, requiredTier, "bittensor_bundle");
+    if ("refusal" in bound) return bound.refusal;
+
     const result = await this.bittensorBridge.submitForVerification(
       bundleHash,
-      bundleData,
+      bound.bundleData,
       requiredTier,
     );
 
@@ -287,6 +362,7 @@ export class TMPValidatorBridge {
           passed: result.passed,
           details: `${isLegacyBittensor ? "Bittensor" : "Oracle"} consensus (${oracleName ?? "unknown"}): ${result.passed ? "PASS" : "FAIL"} (score: ${(score * 100).toFixed(1)}%, sources: ${minerCount})`,
         },
+        bound.local,
       ],
     };
   }
@@ -313,14 +389,14 @@ export class TMPValidatorBridge {
       };
     }
 
-    const bundleHash = envelope.proof.bundleHash as string | undefined;
-    const bundleData = envelope.proof.bundleData as string | undefined;
+    const bundleHash = envelope.proof.bundleHash;
+    const bundleData = envelope.proof.bundleData;
     // The tier is the task's accepted one, never the worker's own claim (N118).
-    const accepted = acceptedTierOf(envelope, context, "oracle_accepted_tier");
+    const accepted = acceptedTierOf(context, "oracle_accepted_tier");
     if ("refusal" in accepted) return accepted.refusal;
     const requiredTier = accepted.tier;
 
-    if (!bundleHash || !bundleData) {
+    if (typeof bundleHash !== "string" || bundleHash.length === 0 || typeof bundleData !== "string" || bundleData.length === 0) {
       return {
         valid: false,
         confidence: 0,
@@ -334,9 +410,13 @@ export class TMPValidatorBridge {
       };
     }
 
+    // The network judges only the bundle verified here, bound to bundleHash (E11f).
+    const bound = await this.boundBundle(bundleHash, bundleData, requiredTier, "oracle_bundle");
+    if ("refusal" in bound) return bound.refusal;
+
     const result = await this.bittensorBridge.submitForVerification(
       bundleHash,
-      bundleData,
+      bound.bundleData,
       requiredTier,
     );
 
@@ -352,6 +432,7 @@ export class TMPValidatorBridge {
           passed: result.passed,
           details: `Oracle (${oracleName ?? "unknown"}): ${result.passed ? "PASS" : "FAIL"} (score: ${(score * 100).toFixed(1)}%)`,
         },
+        bound.local,
       ],
     };
   }
