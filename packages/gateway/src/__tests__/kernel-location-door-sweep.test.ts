@@ -69,6 +69,19 @@
  * the fix (FINAL COUNTS, STRUCTURAL test): registered=318 called=234 reached=202 notReached=32
  * excluded=84 — all 32 NOT_REACHED entries carry a reviewable reason, zero are the bare
  * "⚠ NO ENTRY" that failed this merge (up from reached=193 of called=235 pre-fix).
+ *
+ * N68b MERGED INTO #533's MASTER REFRESH (implementer-romeo): N68b (empirical NOT_REACHED
+ * verification, below) branched from the same a6268d21 this refresh did, moving 10 of that
+ * paragraph's 32 NOT_REACHED entries into dynamic fixtures (asset-outbound budget+demand,
+ * automation-status episode/advance, protocol template publish/fork/runs/validate, protocol-run
+ * pause/cancel — none of their underlying handlers were touched by this merge's master pull, so
+ * all ten still reach 2xx the same way) and two more (carrier/shipments, lob/letters) into
+ * POST_EXCLUSIONS (self-satisfiable ownership, excluded on principle rather than chained-into).
+ * Neither side's changed routes overlap this refresh's relay/bounty/ot2/setup work, so the merge
+ * combined without rewriting either. Re-verified empirically post-merge (this merge's own run,
+ * not carried over from either parent): registered=318 called=232 reached=212 notReached=20
+ * excluded=86 — all 20 remaining NOT_REACHED entries now carry an executable `witness` (BY
+ * CONSTRUCTION test, below), proven against the merged code, not just a reviewable reason.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
