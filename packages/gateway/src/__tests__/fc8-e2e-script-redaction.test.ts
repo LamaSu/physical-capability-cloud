@@ -135,3 +135,64 @@ describe("FC-8 round 2 (astra pack 61b) — smoke-digital-verifier.sh", () => {
     expect(src()).not.toMatch(/API key validation returned: \$VALIDATE_RESP/);
   });
 });
+
+describe("FC-8 round 4 (astra pack 61c) — safeLogId call-site allowlist (finding 3)", () => {
+  // Mutation testing this round found a real gap: the generic canary test
+  // (fc8-round4-*.test.ts) cannot catch safeLogId being reintroduced on a
+  // banned non-ID field (status/mode/network/type/fee/route/amount) —
+  // fingerprinting hides the misuse exactly as well as it hides correct
+  // use, because a 12-hex fingerprint of a canary is just as absent from
+  // the output as a fingerprint of a real id would be. For a LOW-cardinality
+  // field (e.g. a 2-3 value mode/network enum) this is worse than it looks:
+  // the fingerprint's one-wayness is only as strong as the search space an
+  // attacker must brute-force, and a handful of candidate plaintexts
+  // inverts trivially. So finding 3's rule ("safeLogId may NOT be used on
+  // non-ID fields") needs its OWN guard, independent of the leak test: an
+  // explicit allowlist of every argument expression safeLogId is called
+  // with, per script, so any NEW call site (banned or merely unreviewed)
+  // fails loudly instead of fingerprinting its way past the canary test.
+  function callSiteArgs(text: string): string[] {
+    const out: string[] = [];
+    const re = /safeLogId\(([^()]*)\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) out.push(m[1].trim());
+    return out;
+  }
+
+  it("real-e2e-verbose.ts: every safeLogId call site is a known, reviewed identifier field", () => {
+    const allowed = new Set([
+      "jobResult?.jobId",
+      "evidence.jobId",
+      "attestationStruct.jobId",
+      "archiveResult?.cid",
+      "archiveResult?.metadataCid",
+      "zkCommit?.commitment?.id",
+      "proofId",
+      "quoteId",
+      "intentId",
+    ]);
+    const found = callSiteArgs(readScript("scripts/real-e2e-verbose.ts"));
+    expect(found.length).toBeGreaterThan(0); // sanity: the helper is still used here
+    for (const arg of found) {
+      expect(allowed.has(arg), `unreviewed safeLogId call site: safeLogId(${arg})`).toBe(true);
+    }
+  });
+
+  it("hp-full-chain-e2e.ts: every safeLogId call site is a known, reviewed identifier field", () => {
+    const allowed = new Set(["scopeIdRaw", "toolCallId", "evidence.printResult"]);
+    const found = callSiteArgs(readScript("scripts/hp-full-chain-e2e.ts"));
+    expect(found.length).toBeGreaterThan(0);
+    for (const arg of found) {
+      expect(allowed.has(arg), `unreviewed safeLogId call site: safeLogId(${arg})`).toBe(true);
+    }
+  });
+
+  it("real-e2e.ts: every safeLogId call site is a known, reviewed identifier field", () => {
+    const allowed = new Set(["jobResult?.jobId", "printResult?.jobId"]);
+    const found = callSiteArgs(readScript("scripts/real-e2e.ts"));
+    expect(found.length).toBeGreaterThan(0);
+    for (const arg of found) {
+      expect(allowed.has(arg), `unreviewed safeLogId call site: safeLogId(${arg})`).toBe(true);
+    }
+  });
+});
