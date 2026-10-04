@@ -176,6 +176,15 @@ describe("the patch harness: nothing changed after load changes a decision, a di
     "recipe: Object.prototype.value written; an accessor deep in the bundles (codeInData)",
     // More terms would be a refusal; identical shows unverifiableProfileTerms read no inherited term at all.
     "recipe: Object.prototype.tolerance and maxIntervalMs written; unverifiableProfileTerms on an ordinary profile",
+    // An inherited option would make node:crypto's verify throw, a refusal; identical shows the key options
+    // record has no prototype (astra pack 275).
+    "patch: Object.prototype.dsaEncoding, padding, saltLength, encoding and passphrase",
+    // An inherited grant, root or domain would admit a row that has none; identical shows none is read (astra pack 281).
+    "patch: Object.prototype.role, kernelId, jobId, grants, delegatedBy and trustDomain",
+    // A replaced JSON.stringify or Date.parse would only make a delegation or its window fail, which is a refusal;
+    // identical shows the delegation preimage and the window use the ones captured at load (astra pack 281).
+    "patch: JSON.stringify",
+    "patch: Date.parse",
   ]);
 
   for (const id of SCENARIOS) {
@@ -358,23 +367,23 @@ describe("isOperatorPrincipalId: exactly what principal-id.ts parseOperatorPrinc
   });
 });
 
-describe("isSignerId: exactly ^0x[0-9a-f]{40}$, the signer id kernel bundles declare, by code unit (astra pack 271)", () => {
-  const isSignerId = (admissionModule as Record<string, unknown>).isSignerId as (v: unknown) => boolean;
-  const SIGNER = /^0x[0-9a-f]{40}$/;
-  const h40 = "0123456789abcdef0123456789abcdef01234567";
+describe("isRegistryKey: exactly ^0x[0-9a-f]{64}$, a registry key's one spelling, by code unit (astra pack 275)", () => {
+  const isRegistryKey = (admissionModule as Record<string, unknown>).isRegistryKey as (v: unknown) => boolean;
+  const KEY = /^0x[0-9a-f]{64}$/;
+  const h64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
   it("agrees on edge cases", () => {
-    expect(typeof isSignerId).toBe("function");
-    const cases = [`0x${h40}`, `0X${h40}`, `0x${h40.toUpperCase()}`, `0x${h40.slice(1)}`, `0x${h40}0`, `0x${h40}\n`, ` 0x${h40}`, h40 + "ab", "", "0x", `0x${h40.slice(0, 39)}g`, `0x${h40.slice(0, 39)}${ch(0x0663)}`];
-    for (const s of cases) expect(isSignerId(s), JSON.stringify(s)).toBe(SIGNER.test(s));
+    expect(typeof isRegistryKey).toBe("function");
+    const cases = [`0x${h64}`, `0X${h64}`, `0x${h64.toUpperCase()}`, `0x${h64.slice(1)}`, `0x${h64}0`, `0x${h64}\n`, ` 0x${h64}`, h64 + "ab", "", "0x", `0x${h64.slice(0, 40)}`, `0x${h64.slice(0, 63)}g`, `0x${h64.slice(0, 63)}${ch(0x0663)}`];
+    for (const s of cases) expect(isRegistryKey(s), JSON.stringify(s)).toBe(KEY.test(s));
   });
 
   it("agrees on 20,000 near-miss strings, with edits at every position", () => {
-    const rand = lcg(271);
+    const rand = lcg(275);
     const alphabet = ["0", "9", "a", "f", "g", "A", "F", "x", "X", "\n", ch(0xd800), ch(0x0663)];
     let accepted = 0;
     for (let n = 0; n < 20_000; n++) {
-      const chars = `0x${h40}`.split("");
+      const chars = `0x${h64}`.split("");
       const edits = Math.floor(rand() * 3);
       for (let e = 0; e < edits; e++) {
         const at = Math.floor(rand() * (chars.length + 1));
@@ -384,8 +393,8 @@ describe("isSignerId: exactly ^0x[0-9a-f]{40}$, the signer id kernel bundles dec
         else chars.splice(at, 0, alphabet[Math.floor(rand() * alphabet.length)]!);
       }
       const s = chars.join("");
-      const expected = SIGNER.test(s);
-      if (isSignerId(s) !== expected) expect.fail(`isSignerId(${JSON.stringify(s)}) !== ${expected}`);
+      const expected = KEY.test(s);
+      if (isRegistryKey(s) !== expected) expect.fail(`isRegistryKey(${JSON.stringify(s)}) !== ${expected}`);
       if (expected) accepted++;
     }
     expect(accepted).toBeGreaterThan(2000);
@@ -393,7 +402,7 @@ describe("isSignerId: exactly ^0x[0-9a-f]{40}$, the signer id kernel bundles dec
   });
 
   it("is false for non-strings", () => {
-    for (const v of [undefined, null, 1, [`0x${h40}`], { toString: () => `0x${h40}` }, new String(`0x${h40}`)]) expect(isSignerId(v)).toBe(false);
+    for (const v of [undefined, null, 1, [`0x${h64}`], { toString: () => `0x${h64}` }, new String(`0x${h64}`)]) expect(isRegistryKey(v)).toBe(false);
   });
 });
 
