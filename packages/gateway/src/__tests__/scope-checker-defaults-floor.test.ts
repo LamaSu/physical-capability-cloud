@@ -32,7 +32,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { apiGate } from "../middleware/api-gate.js";
-import { scopeChecker } from "../middleware/scope-checker.js";
+import { scopeChecker, __resetScopeCacheForTests } from "../middleware/scope-checker.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { generateApiKey } from "../auth/api-key-auth.js";
 
@@ -41,6 +41,11 @@ async function buildApp(): Promise<FastifyInstance> {
   // seed: true (the default) runs seedAll -> seedGovernance, exactly as a
   // real boot does. This is NOT a hand-rolled fixture of the seed's rows.
   initStore({ seed: true });
+  // The module-level scope cache has a 5-minute TTL and otherwise survives
+  // across it()s in this file (same module instance). Drop it so THIS
+  // test's governance rows (seeded + any inserted by the test itself) are
+  // what gets read on the first request, not a previous test's snapshot.
+  __resetScopeCacheForTests();
 
   const app = Fastify({ logger: false });
   // Same order as server.ts: apiGate resolves the principal, scopeChecker

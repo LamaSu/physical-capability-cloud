@@ -161,6 +161,18 @@ function ensureScopeCacheReady(): void {
   }
 }
 
+/**
+ * Test-only: drop the cached rows so the next request re-reads them.
+ *
+ * The cache is module-level with a 5-minute TTL, so a suite that changes
+ * what the governance table returns would otherwise assert against rows
+ * loaded by an earlier test in the same file.
+ */
+export function __resetScopeCacheForTests(): void {
+  scopeCache = [];
+  lastScopeCacheRefresh = 0;
+}
+
 // ── Route Matching ───────────────────────────────────────────────
 
 /**
