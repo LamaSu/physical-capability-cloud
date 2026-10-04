@@ -24,6 +24,8 @@ import {
   isPlainIdentifier,
   valueCarriesCredential,
   findEmitterManifestFormIssue,
+  knownErrorClassName,
+  logSafeId,
   REDACTED,
   INVALID_ID,
 } from "../redaction.js";
@@ -740,8 +742,14 @@ export async function setupRoutes(app: FastifyInstance) {
           getKernelService().refreshDeviceFromDb(deviceId);
         } catch (e) {
           // Service may not be initialized in some test paths; ignore.
-          const msg = e instanceof Error ? e.message : String(e);
-          (req as any).log?.warn?.({ err: msg, deviceId }, "kernel-service refresh failed");
+          // N71 round 6 (astra pack 83e, C1, 1st sink): never e.message (dependency
+          // text) and never a raw deviceId (caller text) — a fixed code, a closed-set
+          // error class, and a validated echo of the id, same shape as the upsert
+          // catch below.
+          (req as any).log?.warn?.(
+            { code: "kernel_service_refresh_failed", errorClass: knownErrorClassName(e), deviceId: logSafeId(deviceId) },
+            "kernel-service refresh failed",
+          );
         }
 
         // Auto-create capability rows for each capability the device contributes to
@@ -801,9 +809,12 @@ export async function setupRoutes(app: FastifyInstance) {
         // N71 round 3 (astra pack 83b): a fixed message, never the exception's own —
         // a repository error can quote whatever was being written, stored credentials
         // included. (req as any).log carries the real error for operators; this
-        // response does not.
+        // response does not. N71 round 6 (astra pack 83e, C1, 2nd sink): "the real
+        // error for operators" used to mean err.message verbatim — THE SINK IS THE
+        // BOUNDARY applies to the logger too, so it is now a fixed code plus the
+        // closed-set error class, same as every other sink this round.
         (req as any).log?.error?.(
-          { err: err instanceof Error ? err.message : String(err) },
+          { code: "setup_register_device_upsert_failed", errorClass: knownErrorClassName(err), deviceId: logSafeId(deviceId) },
           "setup/register-device upsert failed",
         );
         return reply.code(500).send({ error: "upsert_failed", message: "Device registration failed" });
@@ -936,9 +947,17 @@ export async function setupRoutes(app: FastifyInstance) {
       });
     } catch (err) {
       // N71 round 3 (astra pack 83b): a fixed message — the service's errors can
-      // quote the server-held configuration being submitted against.
+      // quote the server-held configuration being submitted against. N71 round 6
+      // (astra pack 83e): the scanner's sweep across every sink in this file found
+      // this catch used the same err.message pattern as the two astra named — fixed
+      // code, closed-set class, validated ids, same as the others.
       (req as any).log?.error?.(
-        { err: err instanceof Error ? err.message : String(err) },
+        {
+          code: "setup_test_job_submission_failed",
+          errorClass: knownErrorClassName(err),
+          kernelId: logSafeId(resolvedKernelId),
+          deviceId: logSafeId(deviceId),
+        },
         "setup/test-job submission failed",
       );
       return reply.code(500).send({

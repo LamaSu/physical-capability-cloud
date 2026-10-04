@@ -18,7 +18,7 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
-import { knownErrorClassName } from "../redaction.js";
+import { knownErrorClassName, logSafeId } from "../redaction.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -269,9 +269,13 @@ export class KernelService {
     // Track in-memory
     this.runningJobs.set(jobId, { jobId, deviceId, startedAt: Date.now() });
 
-    // Telemetry: job accepted by a device
-    pipelineTelemetry.emit(jobId, "job_accepted", "completed", {
-      metadata: { deviceId, kernelId: this.config.kernelId ?? "default" },
+    // Telemetry: job accepted by a device. N71 round 6 (astra pack 83e): jobId and
+    // deviceId are both caller-influenceable (a submitted jobId, or a deviceId that
+    // matched an existing registration with no shape check at registration time) —
+    // validated echo, never the raw value. this.config.kernelId is this service's own
+    // fixed KernelConfig, never per-request input.
+    pipelineTelemetry.emit(logSafeId(jobId), "job_accepted", "completed", {
+      metadata: { deviceId: logSafeId(deviceId), kernelId: this.config.kernelId ?? "default" },
     });
 
     // Start a local trace (alongside Sentry) so the dashboard waterfall sees it
@@ -306,17 +310,25 @@ export class KernelService {
           },
         },
         (lifecycleSpan) => {
-          // Telemetry: job execution starting
-          pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
+          // Telemetry: job execution starting. N71 round 6: validated echo, see
+          // job_accepted above.
+          pipelineTelemetry.emit(logSafeId(jobId), "job_started", "completed", { metadata: { deviceId: logSafeId(deviceId) } });
           runner
             .run({
               jobId,
               stepId,
               gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
               assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
-              // Bridge job-runner phase events to gateway telemetry
-              onPhase: (jid, phase, status, meta) => {
-                pipelineTelemetry.emit(jid, phase, status, { metadata: meta });
+              // Bridge job-runner phase events to gateway telemetry. N71 round 6
+              // (astra pack 83e): jid is validated the same as jobId above; phase and
+              // status are OnPhaseCallback's own closed-enum parameters
+              // (@pcc/kernel/job-runner.ts), never free text. meta is
+              // Record<string, unknown> — @pcc/kernel's own call sites (job-runner.ts,
+              // outside this PR's 12-file scope) look safe today, but that is not this
+              // file's boundary to audit; THE SINK IS THE BOUNDARY means it is dropped
+              // here rather than forwarded unexamined.
+              onPhase: (jid, phase, status) => {
+                pipelineTelemetry.emit(logSafeId(jid), phase, status);
               },
             })
             .then(async (result) => {
@@ -417,17 +429,21 @@ export class KernelService {
       );
     } catch {
       // Sentry not initialised — fall back to plain fire-and-forget
-      // Telemetry: job execution starting (fallback path)
-      pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
+      // Telemetry: job execution starting (fallback path). N71 round 6: validated
+      // echo, see job_accepted above.
+      pipelineTelemetry.emit(logSafeId(jobId), "job_started", "completed", { metadata: { deviceId: logSafeId(deviceId) } });
       runner
         .run({
           jobId,
           stepId,
           gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
           assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
-          // Bridge job-runner phase events to gateway telemetry (fallback path)
-          onPhase: (jid, phase, status, meta) => {
-            pipelineTelemetry.emit(jid, phase, status, { metadata: meta });
+          // Bridge job-runner phase events to gateway telemetry (fallback path).
+          // N71 round 6: same treatment as the primary (Sentry) path above — jid
+          // validated, phase/status are closed enums, meta dropped (not this file's
+          // boundary to audit @pcc/kernel's own call sites).
+          onPhase: (jid, phase, status) => {
+            pipelineTelemetry.emit(logSafeId(jid), phase, status);
           },
         })
         .then(async (result) => {
@@ -648,10 +664,16 @@ export class KernelService {
       const healthy = status !== "error" && status !== "offline";
       return { healthy, details: status };
     } catch (err) {
+      // N71 round 6 (astra pack 83e, C2): the error side of this log was already
+      // fixed (round 5) to a closed-set class name — but deviceId was still
+      // interpolated raw into the template, and a caller picks deviceId (register-
+      // device has no shape check on it). THE SINK IS THE BOUNDARY applies to every
+      // argument, not just the exception: validated echo, never the raw value.
       console.warn(
-        `[kernel-service] health check failed for ${deviceId}:`,
+        "[kernel-service] health check failed:",
         "adapter_health_failed",
         knownErrorClassName(err),
+        logSafeId(deviceId),
       );
       return { healthy: false, details: "adapter_error" };
     }

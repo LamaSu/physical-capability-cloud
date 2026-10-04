@@ -14,6 +14,7 @@ import { getJobFacade } from "../facades/index.js";
 import type { SubmitJobInput, RegisterDeviceInput } from "../facades/index.js";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { knownErrorClassName, logSafeId } from "../redaction.js";
 
 const { operatorPolicies, captureVerdicts, captureAnchors } = schema;
 
@@ -221,8 +222,12 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
           // Fail-open — a policy read failure should not block jobs that
           // don't actually require CVP. The facade and subsequent gates
           // will still run. Log for observability.
+          // N71 round 6 (astra pack 83e): err was the raw caught exception (a DB read
+          // failure can quote whatever it was reading) and kernelId is caller-supplied
+          // request-body text — a fixed code, closed-set class, and validated echo,
+          // same shape as every other sink this round.
           req.log.warn(
-            { err, kernelId },
+            { code: "capture_policy_gate_read_failed", errorClass: knownErrorClassName(err), kernelId: logSafeId(kernelId) },
             "capture policy gate read failed; proceeding without CVP check",
           );
         }

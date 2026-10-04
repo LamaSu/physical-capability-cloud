@@ -29,6 +29,7 @@ import {
 } from "./populators/kernel.populator.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { logSafeId } from "../redaction.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -138,8 +139,14 @@ export function resolveKernelTtlHours(): number {
     parsed < KERNEL_TTL_LOWER_BOUND_HOURS ||
     parsed > KERNEL_TTL_UPPER_BOUND_HOURS
   ) {
+    // N71 round 6 (astra pack 83e): raw is an operator env var, not caller input, but
+    // the SAME class of mistake applies — redaction.ts's own doc comment names "a
+    // credential pasted into the wrong env var" as a real leak class this lane
+    // already treats seriously (setup.ts's displayEnvValue). logSafeId's grammar
+    // (echo only if plain-identifier-shaped) fits a TTL-hours value exactly: a
+    // legitimate "abc"/"10000" typo still shows, a credential-shaped paste does not.
     console.warn(
-      `[kernel-ttl] KERNEL_TTL_HOURS="${raw}" out of band [${KERNEL_TTL_LOWER_BOUND_HOURS},${KERNEL_TTL_UPPER_BOUND_HOURS}]; using ${KERNEL_TTL_DEFAULT_HOURS}`,
+      `[kernel-ttl] KERNEL_TTL_HOURS="${logSafeId(raw)}" out of band [${KERNEL_TTL_LOWER_BOUND_HOURS},${KERNEL_TTL_UPPER_BOUND_HOURS}]; using ${KERNEL_TTL_DEFAULT_HOURS}`,
     );
     return KERNEL_TTL_DEFAULT_HOURS;
   }

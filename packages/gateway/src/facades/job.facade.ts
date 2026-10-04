@@ -31,6 +31,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { logSafeId } from "../redaction.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -266,8 +267,11 @@ export class JobFacade extends BaseFacade {
         svc = getKernelService();
       } catch {
         // KernelService not initialized — treat as external kernel path
-        pipelineTelemetry.emit(jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, external: true },
+        // N71 round 6 (astra pack 83e): jobId, kernelId and stepId are all caller-
+        // supplied (SubmitJobInput has no shape check on any of them) — validated
+        // echo, never the raw value, same as every other sink this round.
+        pipelineTelemetry.emit(logSafeId(jobId), "job_submit", "completed", {
+          metadata: { kernelId: logSafeId(kernelId), stepId: logSafeId(stepId), external: true },
         });
         return { jobId, deviceId: null, status: "queued" as const };
       }
@@ -276,8 +280,11 @@ export class JobFacade extends BaseFacade {
       const isExternalKernel = localKernelId && kernelId !== localKernelId;
 
       if (isExternalKernel) {
-        pipelineTelemetry.emit(jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, external: true },
+        // N71 round 6 (astra pack 83e): jobId, kernelId and stepId are all caller-
+        // supplied (SubmitJobInput has no shape check on any of them) — validated
+        // echo, never the raw value, same as every other sink this round.
+        pipelineTelemetry.emit(logSafeId(jobId), "job_submit", "completed", {
+          metadata: { kernelId: logSafeId(kernelId), stepId: logSafeId(stepId), external: true },
         });
         trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true }, actorId);
         auditService.log({
@@ -296,8 +303,11 @@ export class JobFacade extends BaseFacade {
       // Local kernel: fire-and-forget via KernelService
       try {
         const result = await svc.submitJob({ jobId, stepId, deviceId, gcodeHash, assuranceTier });
-        pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, deviceId: result.deviceId },
+        // N71 round 6 (astra pack 83e): same treatment as the two branches above —
+        // result.deviceId is KernelService's auto-selected OR the caller's own
+        // deviceId, neither shape-checked at registration time.
+        pipelineTelemetry.emit(logSafeId(result.jobId), "job_submit", "completed", {
+          metadata: { kernelId: logSafeId(kernelId), stepId: logSafeId(stepId), deviceId: logSafeId(result.deviceId) },
         });
         trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId }, actorId);
         auditService.log({

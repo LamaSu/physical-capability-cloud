@@ -432,8 +432,12 @@ export class SettlementFacade extends BaseFacade {
             body.reason,
             address,
           );
+      // N71 round 6 (astra pack 83e): body.reason is free-form caller text (checked
+      // only for truthiness) — THE SINK IS THE BOUNDARY means it is dropped from
+      // telemetry rather than forwarded unexamined; it remains fully available via
+      // auditService.log below (a permissioned audit trail, not a scanned sink).
       pipelineTelemetry.emit(address, "verification_result", "completed", {
-        metadata: { escrow: address, milestoneIndex, dispute: true, reason: body.reason },
+        metadata: { escrow: address, milestoneIndex, dispute: true },
       });
       auditService.log({
         eventType: "escrow.disputed",
@@ -508,8 +512,12 @@ export class SettlementFacade extends BaseFacade {
         evidenceBundleHash as `0x${string}`,
         address,
       );
+      // N71 round 6 (astra pack 83e): evidenceBundleHash is caller-supplied free-form
+      // text (checked only for truthiness, not hash-shaped) — dropped from telemetry
+      // for the same reason as fileDispute's `reason` above; it stays in
+      // auditService.log below and in the caller's own request.
       pipelineTelemetry.emit(address, "verification_request", "completed", {
-        metadata: { escrow: address, milestoneIndex, evidenceBundleHash },
+        metadata: { escrow: address, milestoneIndex },
       });
       auditService.log({
         eventType: "escrow.evidence_submitted",
@@ -554,11 +562,16 @@ export class SettlementFacade extends BaseFacade {
         attestation,
         address,
       );
+      // N71 round 6 (astra pack 83e): attestation.evidenceHash is caller-supplied
+      // (the OracleAttestation struct is accepted from the request body with no
+      // shape check beyond !attestation.escrowAddress) — dropped from telemetry for
+      // the same reason as the two sinks above. attestation.tier is kept: it is
+      // typed `number` (@pcc/contracts/ts/oracle-attestation.ts) — the assurance
+      // tier 0-3, never free text.
       pipelineTelemetry.emit(address, "verification_result", "completed", {
         metadata: {
           escrow: address,
           milestoneIndex,
-          evidenceHash: attestation.evidenceHash,
           tier: attestation.tier,
         },
       });

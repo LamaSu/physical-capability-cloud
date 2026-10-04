@@ -107,10 +107,17 @@ export function isPlainPort(value: string): boolean {
  * `err.message` (scrubbed, then not even that) when an adapter's getStatus() threw.
  * There is no scrub that closes every bypass of "find the secret inside arbitrary
  * prose" (see the file doc comment) — so the fix stops disclosing the message AT ALL,
- * fixed code + at most a class name. Checked via `instanceof`, never `.name` — same
- * reasoning as base.facade.ts's typed-error detection: `.name` is a writable string any
- * thrown value can forge, `instanceof` against a real global constructor cannot be.
- * Deliberately NOT exhaustive (no AggregateError, no Node `SystemError`): a closed set
+ * fixed code + at most a class name. Checked via `instanceof`, never `.name` — `.name`
+ * is a writable string any thrown value can forge with a plain property write.
+ * `instanceof` is harder to spoof (it takes rewriting the prototype chain, e.g.
+ * `Object.setPrototypeOf(new Error("x"), TypeError.prototype)`, not just a property
+ * write) but N71 round 6 (astra pack 83e, L3) is explicit that it is not an unforgeable
+ * identity proof either — that exact call makes `instanceof TypeError` pass without the
+ * value ever being constructed via `new TypeError(...)`. What makes knownErrorClassName
+ * (below) safe is not that its `instanceof` checks can't be spoofed; it is a closed
+ * CLASSIFIER — every branch returns one literal from the fixed list right below, so even
+ * a prototype-swapped error can only ever select a different fixed literal, never
+ * attacker text. Deliberately NOT exhaustive (no AggregateError, no Node `SystemError`): a closed set
  * is supposed to be small, and every adapter in this repo throws a plain `Error` anyway
  * (see 83e-n71-report.md's inventory) — this just leaves room for the handful of
  * standard subclasses a transport/parsing failure could plausibly throw.
@@ -164,6 +171,21 @@ export function isPlainIdentifier(value: unknown): value is string {
 }
 /** What `/setup/validate` shows in place of a non-plain identifier. */
 export const INVALID_ID = "[invalid id]";
+
+/**
+ * N71 round 6 (astra pack 83e): the general-purpose version of the `isPlainIdentifier`
+ * echo pattern above, for any sink (a log, a span attribute, a telemetry event) that
+ * wants to carry a caller- or operator-supplied id. Returns `value` unchanged when it IS
+ * a plain identifier (an ordinary job/kernel/device id — never a credential, URL or
+ * free-text sentence, since `isPlainIdentifier` already rejects those), else the fixed
+ * literal `INVALID_ID` — never throws, and never echoes anything that isn't `value`
+ * itself. THE SINK IS THE BOUNDARY: this is the one place every sink in the 12-file
+ * scope launders an id through before logging/recording it (see the sink scanner,
+ * n71-sink-scanner.test.ts, and 83f-n71-report.md for the full inventory).
+ */
+export function logSafeId(value: unknown): string {
+  return isPlainIdentifier(value) ? value : INVALID_ID;
+}
 
 // ---------------------------------------------------------------------------
 // N71 round 3 (astra pack 83b, Q3): does an arbitrary caller-supplied value carry
