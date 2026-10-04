@@ -26,7 +26,7 @@
  * with only the boolean health *result* coming from the mock.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { afterAll, describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { KernelConfig } from "@pcc/kernel";
 
@@ -120,6 +120,21 @@ import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { adminObservabilityRoutes } from "../routes/admin-observability.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { initKernelService, resetKernelService, _mockService } from "../services/kernel-service.js";
+
+// N31c (#575 stack; the steward's #6540): capability create, device registration, the operator
+// heartbeat, evidence and job status now take the kernel-ownership guard. This suite tests the
+// routes' own logic, so its apps act with the admin key unless a request sets its own.
+const N31C_ADMIN = "n31c-test-admin-secret";
+const PREV_N31C_ADMIN = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31C_ADMIN;
+afterAll(() => {
+  if (PREV_N31C_ADMIN === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_N31C_ADMIN;
+});
+const asN31cAdmin = async (req: { headers: Record<string, unknown> }) => {
+  if (req.headers["x-admin-key"] === undefined) req.headers["x-admin-key"] = N31C_ADMIN;
+};
+
 
 function opFunnelRows(): Array<Record<string, unknown>> {
   return h.logged.filter((r) => r.eventType === OPERATOR_FUNNEL_AUDIT_EVENT);
@@ -376,6 +391,7 @@ async function buildFullApp(): Promise<FastifyInstance> {
   getRepos().kernels.update("kernel-nyc", { operatorAddress: "op-test" } as never);
 
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", asN31cAdmin);
   // An authenticated caller, as apiGate sets it in production. Tests that need an
   // anonymous caller clear it with the x-test-anonymous header.
   app.decorateRequest("operatorId", null);
@@ -692,6 +708,7 @@ describe("operator funnel call sites (Fastify inject)", () => {
 
 async function buildAdminApp(operatorId: string | null): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", asN31cAdmin);
   app.decorateRequest("operatorId", null);
   if (operatorId !== null) {
     app.addHook("onRequest", async (req) => {
