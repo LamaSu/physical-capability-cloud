@@ -14,7 +14,7 @@
 
 import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
 import type { SHA256 } from "../types/common.js";
-import { ArrayIsArray, hasOwn, JSONStringify, ObjectKeys, sortedStrings, StringCtor } from "./primordials.js";
+import { ArrayIsArray, hasOwn, JSONStringify, listAt, ObjectKeys, sortedStrings, StringCtor } from "./primordials.js";
 
 /**
  * Canonicalize any value to a deterministic JSON string.
@@ -48,8 +48,12 @@ export function canonicalize(value: unknown): string {
     let out = "[";
     for (let i = 0; i < value.length; i++) {
       if (i > 0) out += ",";
-      // `map` skips a hole, and `join` writes the hole as nothing.
-      if (hasOwn(value, i)) out += canonicalize(value[i]);
+      // `map` skips a hole, and `join` writes the hole as nothing. The read is the first thing the
+      // guarded branch does, so nothing can remove the element between the check and the read.
+      if (hasOwn(value, i)) {
+        const item = value[i];
+        out += canonicalize(item);
+      }
     }
     return `${out}]`;
   }
@@ -58,9 +62,12 @@ export function canonicalize(value: unknown): string {
     let out = "{";
     let first = true;
     for (let i = 0; i < keys.length; i++) {
-      const member = (value as Record<string, unknown>)[keys[i]!];
+      // The keys are the object's own (ObjectKeys), so this read never reaches its prototype (astra pack 291).
+      const key = listAt(keys, i)!;
+      const record = value as Record<string, unknown>;
+      const member = hasOwn(record, key) ? record[key] : undefined;
       if (member === undefined) continue;
-      out += `${first ? "" : ","}${JSONStringify(keys[i]!)}:${canonicalize(member)}`;
+      out += `${first ? "" : ","}${JSONStringify(key)}:${canonicalize(member)}`;
       first = false;
     }
     return `${out}}`;

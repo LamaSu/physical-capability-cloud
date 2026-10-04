@@ -119,6 +119,7 @@ import {
   newList,
   sortedStrings,
   uncurryThis,
+  listAt,
 } from "../util/primordials.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 
@@ -292,14 +293,14 @@ function scopeEveryEvent(
   notInSubject: EvidenceSubjectBindingErrorCode,
 ): EvidenceSubjectBindingResult | null {
   for (let i = 0; i < snapshots.length; i++) {
-    const payload = snapshots[i]!.payload as Record<string, unknown>;
+    const payload = listAt(snapshots, i)!.payload as Record<string, unknown>;
     const committed = hasOwn(payload, field);
     if (expected === undefined) {
       if (committed) return refuse(notInSubject, i);
       continue;
     }
     if (!committed) return refuse(notCommitted, i);
-    if (payload[field] !== expected) return refuse(mismatch, i);
+    if ((hasOwn(payload, field) ? payload[field] : undefined) !== expected) return refuse(mismatch, i);
   }
   return null;
 }
@@ -329,7 +330,7 @@ export async function verifyEvidenceSubjectBinding(
     const subjectFields = ["jobId", "kernelId", "outputHash", "settlementUnitId", "challengeNonce"] as const;
     const named = ObjectCreate(null) as Record<(typeof subjectFields)[number], unknown>;
     for (let k = 0; k < subjectFields.length; k++) {
-      const key = subjectFields[k]!;
+      const key = listAt(subjectFields, k)!;
       const field = ownField(subject, key);
       if (field === ACCESSOR) return refuse("malformed-subject");
       named[key] = field === ABSENT ? undefined : field.value;
@@ -423,16 +424,16 @@ export async function verifyEvidenceSubjectBinding(
 
     // ── 5. Job: every event commits it.
     for (let i = 0; i < count; i++) {
-      const committed = snapshots[i]!.payload as Record<string, unknown>;
+      const committed = listAt(snapshots, i)!.payload as Record<string, unknown>;
       if (!hasOwn(committed, "jobId")) return refuse("job-not-committed", i);
       if (committed.jobId !== jobId) return refuse("job-mismatch", i);
     }
 
     // ── 6. Node: every event's source, and any payload kernel.
     for (let i = 0; i < count; i++) {
-      const eventSource = snapshots[i]!.source as Record<string, unknown>;
+      const eventSource = listAt(snapshots, i)!.source as Record<string, unknown>;
       if (!hasOwn(eventSource, "kernelId") || eventSource.kernelId !== kernelId) return refuse("kernel-mismatch", i);
-      const committed = snapshots[i]!.payload as Record<string, unknown>;
+      const committed = listAt(snapshots, i)!.payload as Record<string, unknown>;
       if (hasOwn(committed, "kernelId") && committed.kernelId !== kernelId) return refuse("kernel-mismatch", i);
     }
 
@@ -440,7 +441,7 @@ export async function verifyEvidenceSubjectBinding(
     if (outputHash !== undefined) {
       let committedOnce = false;
       for (let i = 0; i < count; i++) {
-        const committed = snapshots[i]!.payload as Record<string, unknown>;
+        const committed = listAt(snapshots, i)!.payload as Record<string, unknown>;
         if (!hasOwn(committed, "outputHash")) continue;
         if (committed.outputHash !== outputHash) return refuse("output-mismatch", i);
         committedOnce = true;

@@ -69,6 +69,9 @@ import {
   stringSet,
   trim,
   uncurryThis,
+  listAt,
+  ObjectCreate,
+  ObjectDefineProperty,
 } from "../util/primordials.js";
 
 /** Domain separator — a profile digest can never collide with another digest. */
@@ -267,7 +270,7 @@ function positiveFinite(v: unknown): boolean {
  */
 function denseStringList(v: unknown[]): boolean {
   for (let i = 0; i < v.length; i++) {
-    if (!hasOwn(v, i) || !nonEmptyString(v[i])) return false;
+    if (!hasOwn(v, i) || !nonEmptyString(listAt(v, i))) return false;
   }
   return true;
 }
@@ -297,13 +300,16 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
   const p = profile as Record<string, unknown>;
 
   for (let f = 0; f < V1_FIELDS.length; f++) {
-    const { path, segments, allowed } = V1_FIELDS[f]!;
+    const { path, segments, allowed } = listAt(V1_FIELDS, f)!;
     let at: unknown = p;
-    for (let s = 0; s < segments.length; s++) at = isObject(at) ? at[segments[s]!] : undefined;
+    for (let s = 0; s < segments.length; s++) {
+      const segment = listAt(segments, s)!;
+      at = isObject(at) && hasOwn(at, segment) ? at[segment] : undefined;
+    }
     if (!isObject(at)) continue;
     const keys = ObjectKeys(at);
     for (let k = 0; k < keys.length; k++) {
-      const key = keys[k]!;
+      const key = listAt(keys, k)!;
       if (!includesValue(allowed, key)) {
         push(path ? `${path}.${key}` : key, "unknown field: a v1 profile has only the v1 terms, and an unknown term would be committed but never evaluated");
       }
@@ -405,8 +411,8 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
     // Inert terms: with calibration not required, nothing evaluates them, so a
     // digest must not commit them (they would read as a requirement).
     for (let k = 0; k < CALIBRATION_TERMS.length; k++) {
-      const field = CALIBRATION_TERMS[k]!;
-      if (cal[field] !== undefined) {
+      const field = listAt(CALIBRATION_TERMS, k)!;
+      if (hasOwn(cal, field) && cal[field] !== undefined) {
         push(`calibration.${field}`, "only allowed when calibration.required is true; with calibration not required it would be committed but never evaluated");
       }
     }
@@ -449,7 +455,13 @@ export class InvalidMeasurementProfileError extends Error {
       `measurement profile invalid (${violations.length}): ` +
         joinStrings(mapList(violations, (x) => `${x.path || "<root>"}: ${x.message}`), "; "),
     );
-    this.name = "InvalidMeasurementProfileError";
+    // Defined, not assigned: an accessor planted on Error.prototype after load is never run (astra pack 291).
+    const descriptor = ObjectCreate(null) as PropertyDescriptor;
+    descriptor.value = "InvalidMeasurementProfileError";
+    descriptor.writable = true;
+    descriptor.enumerable = true;
+    descriptor.configurable = true;
+    ObjectDefineProperty(this, "name", descriptor);
   }
 }
 

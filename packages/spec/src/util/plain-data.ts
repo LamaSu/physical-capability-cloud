@@ -57,6 +57,7 @@ const ObjectPrototype = Object.prototype;
 const ObjectPrototypeHasOwnProperty = Object.prototype.hasOwnProperty;
 const ProxyCtor = Proxy;
 const ReflectApply = Reflect.apply;
+const TypeErrorCtor = TypeError;
 
 /** An own-property check that consults no prototype, and no `call` that could be replaced. */
 function hasOwn(o: object, key: PropertyKey): boolean {
@@ -98,6 +99,11 @@ const PROXY_TRAPS = [
   "setPrototypeOf",
 ];
 
+/** The element of `list` at `index` if `list` owns it, else undefined: a hole never continues to Array.prototype (astra pack 291). */
+function listAt<T>(list: readonly T[], index: number): T | undefined {
+  return hasOwn(list, index) ? list[index] : undefined;
+}
+
 /**
  * `candidate`, when it tells a proxy from plain data without running a trap.
  * It is asked about two probe proxies, whose every trap is recorded, and two
@@ -114,9 +120,9 @@ export function trapFreeProxyCheck(candidate: unknown): ((value: object) => bool
   let trapped = false;
   const handler = ObjectCreate(null) as Record<string, () => never>;
   for (let i = 0; i < PROXY_TRAPS.length; i++) {
-    handler[PROXY_TRAPS[i]!] = () => {
+    handler[listAt(PROXY_TRAPS, i)!] = () => {
       trapped = true;
-      throw new TypeError("the proxy check ran a trap");
+      throw new TypeErrorCtor("the proxy check ran a trap");
     };
   }
   let answers: unknown[];
@@ -130,7 +136,7 @@ export function trapFreeProxyCheck(candidate: unknown): ((value: object) => bool
   } catch {
     return null;
   }
-  if (trapped || answers[0] !== true || answers[1] !== true || answers[2] !== false || answers[3] !== false) return null;
+  if (trapped || listAt(answers, 0) !== true || listAt(answers, 1) !== true || listAt(answers, 2) !== false || listAt(answers, 3) !== false) return null;
   const check = candidate as (value: unknown) => unknown;
   return (value: object) => check(value) === true;
 }
@@ -171,7 +177,7 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
     if (typeof v !== "object") throw new NotPlainData(`${at}: a ${typeof v} is not JSON data`);
     if (isProxy === null) throw new NotPlainData(`${at}: this runtime has no trap-free proxy check, so no object is copied as plain data`);
     if (isProxy(v)) throw new NotPlainData(`${at}: a proxy`);
-    for (let i = 0; i < ancestors.length; i++) if (ancestors[i] === v) throw new NotPlainData(`${at}: a cycle`);
+    for (let i = 0; i < ancestors.length; i++) if (listAt(ancestors, i) === v) throw new NotPlainData(`${at}: a cycle`);
     ObjectDefineProperty(ancestors, ancestors.length, dataDescriptor(v));
     try {
       if (ArrayIsArray(v)) {
@@ -198,7 +204,7 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
       // By index, not for...of: the iterator protocol runs Array.prototype[Symbol.iterator] (astra pack 162).
       const keys = ObjectKeys(v);
       for (let k = 0; k < keys.length; k++) {
-        const key = keys[k]!;
+        const key = listAt(keys, k)!;
         // `out["__proto__"] = x` would set the copy's PROTOTYPE, not a property: the
         // value would be read through inheritance but never hashed. JSON.parse makes
         // it an ordinary own key, so it reaches here; no PCC document uses it.
