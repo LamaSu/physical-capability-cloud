@@ -1145,3 +1145,61 @@ describe("invariants kept", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// The evidence path's failure text (steward #5547; the class of astra pack 200)
+// ---------------------------------------------------------------------------
+
+describe("a collaborator of the print that rejects with a reason that has no text form", () => {
+  const REASONS = [
+    ["an object with no prototype", () => Object.create(null) as unknown],
+    ["an object whose toString throws", () => ({ toString: () => { throw new Error("no text"); } }) as unknown],
+    ["an Error whose message getter throws", () => Object.defineProperty(new Error("x"), "message", { get: () => { throw new Error("no message"); } }) as unknown],
+  ] as const;
+  const settled = <T,>(p: Promise<T>) => p.then((value) => ({ value }), (err: unknown) => ({ rejected: err instanceof Error ? err.message : "a reason with no text form" }));
+
+  // Each case has its own printer: a printer whose hook rejected stays quiescing.
+  it.each(REASONS)("addEvent rejects with %s: the print resolves with a failure naming the lost event, finalizing nothing", async (what, reason) => {
+    const printer = testPrinter(`unrecorded-ft-${what}`);
+    const { emitter, bundles } = recordingEmitter();
+    const record = emitter.addEvent.bind(emitter);
+    vi.spyOn(emitter, "addEvent").mockImplementation((jobId, stepId, event) => (event.type === "execution_completed" ? Promise.reject(reason()) : record(jobId, stepId, event)));
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-ft-add", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.complete(100);
+    const out = await drive(settled(run));
+
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.success : undefined, "the print").toBe(false);
+    expect.soft(("value" in out ? out.value.error : undefined) ?? "", "why").toMatch(/^a execution_completed event of this job could not be recorded \(.+\), so its evidence is incomplete$/);
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+  });
+
+  it.each(REASONS)("the printer's start throws %s: the print resolves with a failure", async (what, reason) => {
+    const printer = testPrinter(`start-ft-${what}`, {
+      start: () => {
+        throw reason();
+      },
+    });
+    const { emitter, bundles } = recordingEmitter();
+    const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-ft-start", jobName: "a.pdf", totalPages: 1 })));
+
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.success : undefined, "the print").toBe(false);
+    expect.soft(typeof ("value" in out ? out.value.error : undefined), "its error is text").toBe("string");
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+  });
+
+  it.each(REASONS)("the printer's quiesceEvidence rejects with %s: the print resolves with a failure, finalizing nothing", async (what, reason) => {
+    const printer = testPrinter(`broken-ft-${what}`, { quiesceEvidence: () => Promise.reject(reason()) });
+    const { emitter, bundles } = recordingEmitter();
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-ft-quiesce", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.complete(100);
+    const out = await drive(settled(run));
+
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.success : undefined, "the print").toBe(false);
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+  });
+});
