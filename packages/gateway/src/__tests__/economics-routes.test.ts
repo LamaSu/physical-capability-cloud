@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { canonicalize, computeScheduleHash, economics, type RateSchedule } from "@pcc/spec";
 import { configuredProtocolFee, economicsRoutes } from "../routes/economics.js";
@@ -138,13 +139,22 @@ describe("PX-12 economics routes", () => {
   });
 
   it("a registry body the compiler cannot use is left out, so the refusal names the clause, not the agreement", async () => {
-    // Sealed before the registry checked number ranges: 2^53 hashes fine, but it is not one number to every reader.
-    const segments = [{ kind: "piecewise-value", startTime: 0, endTime: null, thresholdCents: 2 ** 53, bpsLow: 40, bpsHigh: 40 }];
-    const scheduleHash = computeScheduleHash({ version: 1, segments } as unknown as RateSchedule);
+    // Sealed before the registry checked number ranges: 2^53 hashed fine then, but it is not one number to every
+    // reader, and the canonical form now has no form for it at all (evidence's D5, #359). So the row is built as the
+    // literal bytes it was stored with and their sha256 (computeScheduleHash's algorithm), never through canonicalize.
+    const segmentsJson = '[{"bpsHigh":40,"bpsLow":40,"endTime":null,"kind":"piecewise-value","startTime":0,"thresholdCents":9007199254740992}]';
+    const scheduleHash = `0x${createHash("sha256").update(`{"segments":${segmentsJson},"version":1}`).digest("hex")}`;
+    // The literal is exactly what the old canonical form wrote; under D5 the same body has no hash at all.
+    const segments = JSON.parse(segmentsJson) as RateSchedule["segments"];
+    try {
+      expect(computeScheduleHash({ version: 1, segments } as RateSchedule)).toBe(scheduleHash);
+    } catch (e) {
+      expect((e as Error).name).toBe("NonCanonicalValueError");
+    }
     getRepos().contributors.publishSchedule({
       scheduleHash,
       version: 1,
-      segmentsJson: canonicalize(segments),
+      segmentsJson,
       notes: null,
       publishedBy: "0x00000000000000000000000000000000009a1a03",
       publishedAt: "2026-06-01T00:00:00Z",
@@ -154,7 +164,9 @@ describe("PX-12 economics routes", () => {
     const royalty = ag.clauses.find((c) => c.clauseId === "kit-royalty")!;
     if (royalty.rule.kind !== "percent" || royalty.rule.rateSource === null) throw new Error("fixture");
     royalty.rule.rateSource.scheduleHash = scheduleHash;
-    const { preview: p } = await preview({ agreement: ag });
+    // The route answers (no 500) with the pin refused at its own clause: reading the legacy row never throws.
+    const { status, preview: p } = await preview({ agreement: ag });
+    expect(status).toBe(200);
     expect(p.refusals.map((r) => [r.code, r.path])).toEqual([["RATE_UNVERIFIED", ["clause", "kit-royalty", "rateSource"]]]);
   });
 
