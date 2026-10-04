@@ -52,7 +52,9 @@ function builtinKinds(checker: ts.TypeChecker, type: ts.Type, program: ts.Progra
   const kinds: string[] = [];
   for (const part of parts) {
     if (part.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Never)) continue;
-    if (part.flags & ts.TypeFlags.StringLike) kinds.push("string");
+    // A receiver whose type is unknown to the checker could be any built-in: the allowlist is closed, so it is refused.
+    if (part.flags & ts.TypeFlags.Any) kinds.push("any");
+    else if (part.flags & ts.TypeFlags.StringLike) kinds.push("string");
     else if (part.flags & ts.TypeFlags.NumberLike) kinds.push("number");
     else if (part.flags & ts.TypeFlags.BooleanLike) kinds.push("boolean");
     else if (part.flags & ts.TypeFlags.BigIntLike) kinds.push("bigint");
@@ -128,13 +130,13 @@ function programOf(fileName: string, text: string): ts.Program {
 }
 
 describe("profile-admission.ts reads nothing from a built-in except through a primordial (DECISIONS 01:30, astra pack 289)", () => {
-  it("the check finds every read and call on a built-in that the allowlist does not name, and nothing it names", () => {
+  it("the check finds every read and call on a built-in (or on an `any`, which could be one) that the allowlist does not name, and nothing it names", () => {
     const fileName = join(SPEC_DIR, "src", "__tests__", "builtin-reads-fixture.ts");
     const text = [
       "declare const bytes: Uint8Array; declare const list: number[]; declare const ro: readonly string[]; declare const s: string;",
       "declare const p: Promise<number>; declare const m: Map<string, number>; declare const st: Set<string>; declare const re: RegExp;",
       "declare const d: Date; declare const buf: ArrayBuffer; declare const f: (x: number) => number; declare const maybe: Uint8Array | null;",
-      "declare const n: number; declare const rec: { length: number; then: number };",
+      "declare const n: number; declare const rec: { length: number; then: number }; declare const loose: any;",
       "export const ok = [bytes[0], list[1], list.length, ro.length, ro[0], s.length, s[0], f(1), rec.length, rec.then];",
       "export const a = bytes.length;",
       "export const b = list.push(1);",
@@ -150,6 +152,7 @@ describe("profile-admission.ts reads nothing from a built-in except through a pr
       "export const q = bytes[\"length\"];",
       "export const r = n.toString();",
       "export const t = ro.map((x) => x);",
+      "export const u = loose.length;",
     ].join("\n");
     const found = builtinReads(programOf(fileName, text), fileName).map((line) => line.split(" ").slice(0, 1).join(""));
     expect(found).toEqual([
@@ -167,6 +170,7 @@ describe("profile-admission.ts reads nothing from a built-in except through a pr
       "builtin-reads-fixture.ts:17",
       "builtin-reads-fixture.ts:18",
       "builtin-reads-fixture.ts:19",
+      "builtin-reads-fixture.ts:20",
     ]);
   }, 60_000);
 
