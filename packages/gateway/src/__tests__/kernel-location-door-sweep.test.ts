@@ -83,9 +83,10 @@
  * excluded=86 — all 20 remaining NOT_REACHED entries now carry an executable `witness` (BY
  * CONSTRUCTION test, below), proven against the merged code, not just a reviewable reason.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes as cryptoRandomBytes } from "node:crypto";
 import nodeHttpMod from "node:http";
 import nodeHttpsMod from "node:https";
@@ -2576,6 +2577,14 @@ interface CalledWitness {
   /** True when this route requires no Authorization header (public per api-gate.ts). Every
    *  other witness gets the stranger's own Bearer token automatically. */
   noAuth?: true;
+  /** N68b r2 (astra r1 item 1a): optional live-state setup for a witness whose blocking
+   *  precondition needs a REAL row minted first, not a fixed/missing id — run through the
+   *  SAME app, reusing the existing fixtureCall/FixtureCtx machinery above (so it runs with
+   *  whatever identity the caller passes in, with no network and no money). Returns a map of
+   *  literal tokens (e.g. ":verdictId") to their resolved values; each token is substituted
+   *  into BOTH `url` and `body` (substituteTokens, below) before the call — the SAME ":batchId"
+   *  treatment the live-batch lookup already gets, generalized to any field. */
+  prepare?: (ctx: FixtureCtx) => Promise<Record<string, string>>;
   expect: { status: number[]; code?: string };
 }
 
@@ -2588,10 +2597,32 @@ interface PolicyExclusionWitness {
   closedList: readonly string[];
 }
 
-type NotReachedWitness = CalledWitness | PolicyExclusionWitness;
+/** N68b r2 (astra r1 item 1a): a witness that proves "no reachable route ever creates the row
+ *  this lookup needs" NOT by calling the route under test (a missing-id call can only ever
+ *  prove that ONE id is absent, never that no OTHER id-minting path exists — astra's exact
+ *  complaint about the old archive witness), but by grepping every PRODUCTION .ts file under
+ *  `scanDir` (resolved against this test file's own directory; any directory literally named
+ *  __tests__ is always excluded) for a call site matching `callPattern` — the repository
+ *  method that is the ONLY writer of the table the route's own lookup reads. Zero matches is
+ *  the proof; a match means the "no creation route" claim just went FALSE and this entry must
+ *  become a dynamic fixture instead. `httpCheck`, when present, is additionally run as an
+ *  ordinary CalledWitness — kept because "this specific id is absent" is still a true, separate
+ *  fact worth asserting; it is NOT what proves "no creation route exists at all". */
+interface StructuralNoCreationWitness {
+  repoMethod: string;
+  scanDir: string;
+  callPattern: RegExp;
+  httpCheck?: CalledWitness;
+}
+
+type NotReachedWitness = CalledWitness | PolicyExclusionWitness | StructuralNoCreationWitness;
 
 function isPolicyExclusionWitness(w: NotReachedWitness): w is PolicyExclusionWitness {
   return "hazard" in w;
+}
+
+function isStructuralNoCreationWitness(w: NotReachedWitness): w is StructuralNoCreationWitness {
+  return "repoMethod" in w;
 }
 
 /** The two closed, hand-reviewed lists a PolicyExclusionWitness may cite. */
@@ -2620,13 +2651,27 @@ const NOT_REACHED: Record<string, NotReachedEntry> = {
     },
   },
   "/api/capture/anchor": {
-    category: "no_creation_route", cite: "capture.ts:690-693",
-    reason: "Gate A only accepts a PASS verdict with anchorCandidate:true. /api/capture/upload's own dynamic fixture (above) DOES reach 2xx and insert a real verdict row, but with a minimal CC0 manifest carrying no webAuthn/platform/C2PA attestation the real CaptureVerifier's G1..G6 gates produce a FAIL verdict, not a PASS — confirmed by reading the gates (verifier.ts:284-310+); no route in this harness mints a PASS-verdict row. Verified empirically at a6268d21 (N68b): any id this sweep can supply 404s first, before the PASS/FAIL question is even reached.",
+    category: "no_creation_route", cite: "capture.ts:690-704",
+    reason: "N68b r2 (astra r1 item 1a, OPEN MEDIUM): the old witness supplied a nonexistent UUID and saw verdict_not_found — true, but that 404 fires at capture.ts:683, BEFORE the claimed Gate A (capture.ts:690-704) is ever reached, so it never proved the gate's own refusal. Fixed by a `prepare` step: mints a REAL verdict row first, through the SAME /api/capture/upload route (and the exact minimal-CC0-manifest mechanism) this file's own dynamic fixture above already uses, so there is only one place that knows what a minimal manifest looks like. CORRECTING a stale claim in the prior reason: that minimal manifest does NOT produce a FAIL verdict — CC0's only mandatory gate is G1 (MANDATORY_GATES, verifier.ts:226-240), which a well-formed minimal manifest passes, so mandatoryPassed is true with no ceiling slip, landing in the PASS branch (verifier.ts:396-399). What IS false for this manifest is anchorCandidate: verifier.ts:401-408 requires verifiedClass to rank ABOVE CC0, or a detector-asserted anchorCandidate (never set — no sensorFusion supplied) — \"CC0 captures with no positive evidence at all are NOT anchored\" (verifier.ts:401-402, its own comment). The witness now calls anchor with THAT real PASS-but-not-anchor-candidate verdict's id: selectVerdict finds the row (capture.ts:682-683, no longer a 404), the first half of Gate A passes (verdict.verdict===\"PASS\", capture.ts:691), and the second half (capture.ts:698, `!verdict.anchorCandidate`) is what actually refuses it, returning its own 400/not_anchor_candidate — the gate's own refusal, not the existence check's, and not the guess in the prior reason either. Freshly confirmed empirically at N68b r2: calling the real route and reading the real response is what caught the stale FAIL-verdict claim prose alone had missed.",
     witness: {
-      // Must be UUID-SHAPED (AnchorBodySchema: z.string().uuid(), capture.ts:111) or the
-      // witness would only prove a 400 schema rejection, never reaching the claimed 404.
-      method: "POST", url: "/api/capture/anchor", body: { verdictId: "00000000-0000-4000-8000-000000000000" },
-      expect: { status: [404], code: "verdict_not_found" },
+      // Must be UUID-SHAPED (AnchorBodySchema: z.string().uuid(), capture.ts:111); :verdictId
+      // is replaced with a REAL id by `prepare` below before the call is ever made.
+      method: "POST", url: "/api/capture/anchor", body: { verdictId: ":verdictId" },
+      prepare: async (ctx) => {
+        const bytes = Buffer.from(`N68b r2 witness capture bytes ${ctx.ip()}`, "utf8");
+        const mediaHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+        const upload = await fixtureCall(ctx, "POST", "/api/capture/upload", {
+          manifest: {
+            class: "CC0", declaredAt: new Date().toISOString(),
+            deviceFingerprint: "n68b-r2-witness-device", mediaHash,
+          },
+          captureBytesBase64: bytes.toString("base64"),
+        });
+        const verdictId = String(upload.json.verdictId ?? "");
+        expect(verdictId, "witness setup: POST /api/capture/upload must mint a real verdictId").toBeTruthy();
+        return { ":verdictId": verdictId };
+      },
+      expect: { status: [400], code: "not_anchor_candidate" },
     },
   },
   "/api/carrier/webhook/easypost": {
@@ -2647,10 +2692,15 @@ const NOT_REACHED: Record<string, NotReachedEntry> = {
   },
   "/api/evidence/:bundleId/archive": {
     category: "no_creation_route", cite: "evidence-encrypted.ts:130-131",
-    reason: "findEncryptedByBundleId() has no row for any synthetic bundleId. Grepped every repos.encryption.insert* call site in the whole package (zk-proofs.ts's insertCommitment/insertTree/insertProof, evidence-encrypted.ts's own insertGrant) — none of them is the encrypted-bundle insert this lookup needs; no reachable route creates one. Verified empirically at a6268d21 (N68b).",
+    reason: "N68b r2 (astra r1 item 1a, OPEN MEDIUM): the old witness called a synthetic, nonexistent bundleId and saw not_found — true, but that only proves THIS id is absent, never that no reachable route mints ANY row satisfying findEncryptedByBundleId (evidence-encrypted.ts:17, read again at :130). That row is written by exactly one repository method, insertEncryptedBundle (IEncryptionRepository.ts:26, implemented at db/src/repositories/encryption.ts:26) — the ONLY writer of the encryptedEvidenceBundles table (db/src/schema). Fixed by a STRUCTURAL witness (below, a new witness kind): greps every production .ts file under packages/gateway/src, excluding __tests__, for a call to insertEncryptedBundle and asserts zero hits — re-run mechanically on every test run, not a one-time grep result. Confirmed fresh at N68b r2: zk-proofs.ts calls insertCommitment/insertTree/insertProof, and evidence-encrypted.ts's own /grant route calls insertGrant — neither is insertEncryptedBundle; no call site exists anywhere in gateway/src. The original HTTP call is kept as `httpCheck` — still true and still worth asserting, just not what proves \"no creation route exists\" by itself. Verified empirically at a6268d21 (N68b) for the single-id absence; the structural no-call-site proof added at N68b r2.",
     witness: {
-      method: "POST", url: "/api/evidence/n68b-witness-nonexistent-bundle/archive", body: {},
-      expect: { status: [404], code: "not_found" },
+      repoMethod: "insertEncryptedBundle",
+      scanDir: "..",
+      callPattern: /\binsertEncryptedBundle\s*\(/,
+      httpCheck: {
+        method: "POST", url: "/api/evidence/n68b-witness-nonexistent-bundle/archive", body: {},
+        expect: { status: [404], code: "not_found" },
+      },
     },
   },
   "/api/fiat-ramp/stripe/credits/deposit": {
@@ -2678,11 +2728,20 @@ const NOT_REACHED: Record<string, NotReachedEntry> = {
     },
   },
   "/api/jobs/:jobId/attestations/aggregate": {
-    category: "admin_or_owner_only", cite: "job.facade.ts:230",
-    reason: "N68b widened the lens past the canary's one specific owner, per the reviewer's own method: could a STRANGER satisfy ownership with a self-created job, the way the asset-outbound/automation-status/protocols fixtures above now do? Checked both of compliance.ts:122-127's OR'd ownership paths fresh: (1) job.submittedBy===operatorId — job.facade.ts's submit() (job.facade.ts:230) never assigns `submittedBy` anywhere in its body (grepped the whole method: zero writes to that field; contrast kernels.ts:163's actorId, which kernel.facade.ts:493 DOES stamp onto a new kernel's operatorAddress), so this path is false for every job, self-created or not. (2) kernel.operatorId===operatorId — reads a field distinct from the `operatorAddress` kernel creation actually populates; never written anywhere in the package either. Both paths are structurally dead, not merely unmet by this sweep's stranger identity — a real kernel operator would hit the identical 404 this witness does for any id it cannot mint. (Contrast carrier.ts's /shipments and lob.ts's /letters, now in POST_EXCLUSIONS: THEIR ownership check genuinely is self-satisfiable — this route's is not.)",
+    category: "admin_or_owner_only", cite: "compliance.ts:122-133",
+    reason: "N68b r2 (astra r1 item 1a, OPEN MEDIUM): the old witness called a nonexistent jobId and saw not_found at compliance.ts:120 — true, but that 404 fires BEFORE the owner gate at compliance.ts:122-133 is ever reached, so it never exercised the OR'd ownership check or saw its 403. Fixed by a `prepare` step: submits a REAL job first (POST /api/jobs/submit, as the SAME stranger identity, on the canary's own kernel/capability — the exact body FIXTURE_POST_BODIES already uses for this route), then calls aggregate on THAT real jobId. compliance.ts:119's findById now succeeds (no longer a 404), so the owner gate itself runs: (1) job.submittedBy===operatorId — job.facade.ts's submit() (job.facade.ts:260-307) never assigns `submittedBy` anywhere in its DB insert (job.facade.ts:293-307; grepped the whole method, zero writes to that field; contrast kernels.ts's actorId, which kernel.facade.ts:493 DOES stamp onto a new kernel's operatorAddress), so this path is false for every job, self-created or not. (2) kernel.operatorId===operatorId — kernels.ts (db/src/schema) has no operatorId COLUMN at all, only operatorAddress (kernels.ts:7); `(kernel as any).operatorId` is always undefined, never equal to any real operatorId string. Both paths are structurally dead, not merely unmet by this sweep's stranger identity — freshly confirmed at N68b r2: the stranger's own self-submitted job still gets refused, by the gate itself, with its own 403/forbidden (compliance.ts:128-133), not a 404. (Contrast carrier.ts's /shipments and lob.ts's /letters, in POST_EXCLUSIONS: THEIR ownership check genuinely is self-satisfiable — this route's is not.)",
     witness: {
-      method: "POST", url: "/api/jobs/n68b-witness-nonexistent-job/attestations/aggregate", body: { attestations: [] },
-      expect: { status: [404], code: "not_found" },
+      method: "POST", url: "/api/jobs/:jobId/attestations/aggregate", body: { attestations: [] },
+      prepare: async (ctx) => {
+        const submitted = await fixtureCall(ctx, "POST", "/api/jobs/submit", {
+          stepId: "step-n68b-r2-aggregate-witness", kernelId: CANARY.kernelId,
+          capabilityType: "3d-printing", parameters: {},
+        });
+        const jobId = String(submitted.json.jobId ?? "");
+        expect(jobId, "witness setup: POST /api/jobs/submit must mint a real jobId").toBeTruthy();
+        return { ":jobId": jobId };
+      },
+      expect: { status: [403], code: "forbidden" },
     },
   },
   "/api/lit/provision": {
@@ -3160,18 +3219,155 @@ describe("N68: no read of the real gateway shows an operator's exact location or
   });
 
   // ───────────────────────────────────────────────────────────────────────────────────────
-  // N68b (follow-up to #533 r5, closing the MEDIUM "by construction, not by another hand
-  // re-read"): every remaining NOT_REACHED entry's `witness` is exercised here. A CalledWitness
-  // is actually sent through the SAME app this file already booted; a 2xx response means the
-  // entry's unreachability claim was FALSE and this test fails loudly, by name, rather than the
-  // claim silently rotting the way round 5's four examples did. A PolicyExclusionWitness is
-  // never called (that is the whole point for money/subprocess/external-service hazards) — it
-  // is instead checked for closed-list membership, which is itself a mechanical, reviewable
-  // assertion a future edit cannot silently drift out of sync with.
+  // N68b r2 (astra r1 item 1a, OPEN MEDIUM): three CalledWitness entries didn't prove their
+  // declared blocker (their fixed/missing id 404d at an EXISTENCE check before the claimed
+  // gate was ever reached), and nothing bound a witness's `url` to the NOT_REACHED key it
+  // lives under — astra's cheapest repro pointed the aggregate witness at the archive
+  // witness's own URL and the suite still passed. witnessBindingError (pinned just below)
+  // closes the second gap; the three entries above now use `prepare` (anchor, aggregate) or a
+  // new StructuralNoCreationWitness kind (archive) to close the first.
   // ───────────────────────────────────────────────────────────────────────────────────────
-  it("BY CONSTRUCTION: every NOT_REACHED entry's witness proves its blocker, or proves the policy exclusion without ever calling it", async () => {
-    const bearer = { authorization: `Bearer ${strangerKey}` };
+  const THIS_DIR = fileURLToPath(new URL(".", import.meta.url));
 
+  /** Recursively lists every production .ts file under `relDir` (resolved against this test
+   *  file's own directory), skipping any directory literally named __tests__ at any depth —
+   *  used by StructuralNoCreationWitness to grep only shipped route/service code, never test
+   *  fixtures (which legitimately DO call insert* helpers directly). */
+  function listProductionTsFiles(relDir: string): string[] {
+    const root = join(THIS_DIR, relDir);
+    const out: string[] = [];
+    const walk = (dir: string) => {
+      for (const ent of readdirSync(dir, { withFileTypes: true })) {
+        if (ent.name === "__tests__") continue;
+        const full = join(dir, ent.name);
+        if (ent.isDirectory()) walk(full);
+        else if (ent.name.endsWith(".ts")) out.push(full);
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  /** Replaces every literal occurrence of each `subs` token with its resolved value, inside a
+   *  URL string or (recursively) inside a JSON-shaped request body — the SAME ":token" syntax
+   *  works in either position. A string that EQUALS a token is replaced wholesale (so a
+   *  UUID-typed body field gets a real UUID, not a string merely containing one); a token
+   *  embedded inside a longer string (a URL path segment) is replaced via substring
+   *  split/join. */
+  function substituteTokens<T>(value: T, subs: Record<string, string>): T {
+    if (typeof value === "string") {
+      let out: string = value;
+      for (const [token, replacement] of Object.entries(subs)) {
+        if (out === token) return replacement as unknown as T;
+        if (out.includes(token)) out = out.split(token).join(replacement);
+      }
+      return out as unknown as T;
+    }
+    if (Array.isArray(value)) return value.map((v) => substituteTokens(v, subs)) as unknown as T;
+    if (value && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = substituteTokens(v, subs);
+      return out as T;
+    }
+    return value;
+  }
+
+  /** Pure: does a CalledWitness's ACTUAL call (after any token substitution) prove it hit the
+   *  route its own NOT_REACHED key claims to be testing? Every NOT_REACHED key is a POST route
+   *  (this whole table is built from classifyPost's POST-only enumeration, above), so the
+   *  method itself must be POST; then the path (query string stripped) must satisfy the key's
+   *  own pattern, segment-for-segment — a `:param` segment matches exactly one non-empty path
+   *  segment, every other segment must match literally, and segment COUNTS must be equal (no
+   *  partial/prefix match). Returns null when correctly bound, else a reviewable message
+   *  naming the mismatch. */
+  function witnessBindingError(key: string, method: string, callUrl: string): string | null {
+    if (method !== "POST") {
+      return `NOT_REACHED["${key}"] witness calls ${method} ${callUrl}, not its own route`;
+    }
+    const patternSegs = key.split("/");
+    const pathSegs = callUrl.split("?")[0].split("/");
+    const bound =
+      patternSegs.length === pathSegs.length &&
+      patternSegs.every((seg, i) => (seg.startsWith(":") ? pathSegs[i].length > 0 : seg === pathSegs[i]));
+    return bound ? null : `NOT_REACHED["${key}"] witness calls ${method} ${callUrl}, not its own route`;
+  }
+
+  /** Runs one CalledWitness through the real app exactly as the BY CONSTRUCTION test did
+   *  inline before N68b r2 — extracted so a StructuralNoCreationWitness's optional
+   *  `httpCheck` can reuse the identical call/assert path instead of a second copy. */
+  async function runCalledWitness(key: string, w: CalledWitness): Promise<void> {
+    const bearer = { authorization: `Bearer ${strangerKey}` };
+    let callUrl = w.url;
+    let callBody: unknown = w.body;
+
+    if (callUrl.includes(":batchId")) {
+      // The one entry whose blocker is live state, not a fixed id: discover the real seeded
+      // batch id instead of guessing one (a synthetic id would 404 for an unrelated reason).
+      const list = await app.inject({ method: "GET", url: "/api/batches", headers: { ...bearer, "x-forwarded-for": ip() } });
+      const batches = (list.json().batches as Array<{ id: string }> | undefined) ?? [];
+      const realId = batches[0]?.id;
+      expect(realId, "witness setup: GET /api/batches must return the one seeded batch").toBeTruthy();
+      callUrl = callUrl.replace(":batchId", encodeURIComponent(realId));
+    }
+
+    if (w.prepare) {
+      const subs = await w.prepare({ app, key: strangerKey, ip });
+      callUrl = substituteTokens(callUrl, subs);
+      callBody = substituteTokens(callBody, subs);
+    }
+
+    const bindingError = witnessBindingError(key, w.method, callUrl);
+    if (bindingError) throw new Error(bindingError);
+
+    const headers: Record<string, string> = { "x-forwarded-for": ip() };
+    if (!w.noAuth) Object.assign(headers, bearer);
+    const res = await app.inject({ method: w.method, url: callUrl, headers, payload: callBody as object });
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      throw new Error(
+        `NOT_REACHED["${key}"] claimed unreachable but reached: witness ${w.method} ${callUrl} ` +
+        `returned ${res.statusCode}. body=${res.body.slice(0, 300)}`,
+      );
+    }
+    expect(w.expect.status, `${key}: witness status (body=${res.body.slice(0, 200)})`).toContain(res.statusCode);
+    if (w.expect.code) {
+      let json: Record<string, unknown> = {};
+      try {
+        json = res.json();
+      } catch {
+        // non-JSON body — code match falls through to the raw body substring below.
+      }
+      const codeMatch = json.error === w.expect.code || json.code === w.expect.code || res.body.includes(w.expect.code);
+      expect(codeMatch, `${key}: witness code "${w.expect.code}" (body=${res.body.slice(0, 200)})`).toBe(true);
+    }
+  }
+
+  describe("witnessBindingError: pure matcher pins (N68b r2, astra r1 item 1a)", () => {
+    it("binds when the real call satisfies its own :param pattern", () => {
+      expect(witnessBindingError(
+        "/api/jobs/:jobId/attestations/aggregate", "POST", "/api/jobs/job-abc123/attestations/aggregate",
+      )).toBeNull();
+    });
+    it("rejects a :param shifted into the wrong segment position", () => {
+      expect(witnessBindingError(
+        "/api/jobs/:jobId/attestations/aggregate", "POST", "/api/jobs/attestations/job-abc123/aggregate",
+      )).not.toBeNull();
+    });
+    it("rejects a completely different route — astra's own cheapest reproduction", () => {
+      // The exact regression this guards: pointing the aggregate witness at the archive
+      // witness's own URL (and expected 404/not_found) used to still pass.
+      expect(witnessBindingError(
+        "/api/jobs/:jobId/attestations/aggregate", "POST", "/api/evidence/n68b-witness-nonexistent-bundle/archive",
+      )).not.toBeNull();
+    });
+    it("rejects a different method even on a textually-matching path", () => {
+      expect(witnessBindingError(
+        "/api/jobs/:jobId/attestations/aggregate", "GET", "/api/jobs/job-abc123/attestations/aggregate",
+      )).not.toBeNull();
+    });
+  });
+
+  it("BY CONSTRUCTION: every NOT_REACHED entry's witness proves its blocker, or proves the policy exclusion without ever calling it", async () => {
     for (const [url, entry] of Object.entries(NOT_REACHED)) {
       const w = entry.witness;
 
@@ -3184,38 +3380,19 @@ describe("N68: no read of the real gateway shows an operator's exact location or
         continue; // Never called — see PolicyExclusionWitness's own docstring ("Don't call it").
       }
 
-      let callUrl = w.url;
-      if (callUrl.includes(":batchId")) {
-        // The one entry whose blocker is live state, not a fixed id: discover the real seeded
-        // batch id instead of guessing one (a synthetic id would 404 for an unrelated reason).
-        const list = await app.inject({ method: "GET", url: "/api/batches", headers: { ...bearer, "x-forwarded-for": ip() } });
-        const batches = (list.json().batches as Array<{ id: string }> | undefined) ?? [];
-        const realId = batches[0]?.id;
-        expect(realId, "witness setup: GET /api/batches must return the one seeded batch").toBeTruthy();
-        callUrl = callUrl.replace(":batchId", encodeURIComponent(realId));
+      if (isStructuralNoCreationWitness(w)) {
+        const files = listProductionTsFiles(w.scanDir);
+        const hits = files.filter((f) => w.callPattern.test(readFileSync(f, "utf8")));
+        expect(
+          hits,
+          `${url}: structural witness found a call to ${w.repoMethod} in production source — ` +
+            `the "no creation route" claim is now FALSE; this entry must become a dynamic fixture`,
+        ).toEqual([]);
+        if (w.httpCheck) await runCalledWitness(url, w.httpCheck);
+        continue;
       }
 
-      const headers: Record<string, string> = { "x-forwarded-for": ip() };
-      if (!w.noAuth) Object.assign(headers, bearer);
-      const res = await app.inject({ method: w.method, url: callUrl, headers, payload: w.body as object });
-
-      if (res.statusCode >= 200 && res.statusCode < 300) {
-        throw new Error(
-          `NOT_REACHED["${url}"] claimed unreachable but reached: witness ${w.method} ${callUrl} ` +
-          `returned ${res.statusCode}. body=${res.body.slice(0, 300)}`,
-        );
-      }
-      expect(w.expect.status, `${url}: witness status (body=${res.body.slice(0, 200)})`).toContain(res.statusCode);
-      if (w.expect.code) {
-        let json: Record<string, unknown> = {};
-        try {
-          json = res.json();
-        } catch {
-          // non-JSON body — code match falls through to the raw body substring below.
-        }
-        const codeMatch = json.error === w.expect.code || json.code === w.expect.code || res.body.includes(w.expect.code);
-        expect(codeMatch, `${url}: witness code "${w.expect.code}" (body=${res.body.slice(0, 200)})`).toBe(true);
-      }
+      await runCalledWitness(url, w);
     }
   });
 });
