@@ -78,6 +78,7 @@ import { authorityOf, isAnonymous, refuseKernelAction, type KernelAuthority } fr
 import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
+import { mockFundsWrites } from "../services/settlement-mode.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
 
 const {
@@ -452,6 +453,9 @@ async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
  * session, CWM or escrow record, or a completed escrow, does not stop the
  * call. N4b-gw item 5 (gateway, R30) replaces this with the accepted, funded
  * job and committed-protocol check.
+ * N133 r1 (astra, HIGH): a mock escrow funds nothing outside a test process (mockFundsWrites), so
+ * a scope bound to a job with a mock escrow is refused there, at admission and at dispatch, even
+ * if it went live earlier (under a flag since changed, or before N133).
  */
 function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | null {
   if (!scope.jobId) return null;
@@ -466,6 +470,7 @@ function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | nul
     .get();
   if (!session?.cwmId) return null;
   const escrow = repos.escrows.findByCwm(session.cwmId);
+  if (escrow && escrow.contractAddress.startsWith("mock-escrow-") && !mockFundsWrites()) return "mock_escrow";
   if (escrow && escrow.status !== "funded" && escrow.status !== "active" && escrow.status !== "completed") {
     return escrow.status;
   }

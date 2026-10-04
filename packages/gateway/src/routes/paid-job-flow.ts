@@ -9,8 +9,9 @@
  *   PUT  /api/jobs/:jobId/complete        — Job completion -> evidence -> settlement
  *   GET  /api/jobs/:jobId/settlement      — Settlement status for a job
  *
- * Mock escrow (no real on-chain funding) only when MOCK_SETTLEMENT=true; otherwise real escrow
- * interactions (N133: mock settlement is off by default; services/settlement-mode.ts).
+ * Mock escrow (no real on-chain funding) only when MOCK_SETTLEMENT=true, and never in production;
+ * otherwise real escrow interactions (N133: mock settlement is off by default; a mock escrow funds
+ * a write scope only in a test process; services/settlement-mode.ts).
  *
  * N133 (the steward's DECISIONS 01:01): a paid job's buyer is the caller's proven identity (or the
  * admin acts for it), and the write scope createJobFromSession mints goes live only on the kernel

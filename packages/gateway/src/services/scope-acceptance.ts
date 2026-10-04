@@ -21,7 +21,7 @@
 import { getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { sameIdentity } from "../auth/buyer-identity.js";
-import { isMockSettlement } from "./settlement-mode.js";
+import { mockFundsWrites } from "./settlement-mode.js";
 
 /** Minted, not live: the kernel's operator accepts it or revokes it. */
 export const SCOPE_AWAITING_ACCEPTANCE = "awaiting_acceptance";
@@ -61,13 +61,14 @@ export interface FundingEscrow {
  * and POST /api/escrow/chain/:address/fund funds from the gateway signer too. So no real escrow is
  * the buyer's own funding until a path exists in which the buyer's wallet is the payer and funds
  * it; that path must record it and move `awaiting_funding` scopes to `active`. A mock escrow
- * counts only while mock settlement is explicitly on, which is to say in tests.
+ * counts only in a test process with mock settlement on (mockFundsWrites; N133 r1, astra HIGH):
+ * never in production, and never in a development gateway either.
  */
 export function buyerFundingRefusal(escrow: FundingEscrow | undefined | null, buyer: string): string | null {
   if (!escrow) return "escrow_missing";
   if (!sameIdentity(escrow.payer, buyer)) return "escrow_payer_not_buyer";
   if (escrow.status !== "funded" && escrow.status !== "active") return "escrow_not_funded";
-  if (escrow.contractAddress.startsWith("mock-escrow-")) return isMockSettlement() ? null : "mock_escrow";
+  if (escrow.contractAddress.startsWith("mock-escrow-")) return mockFundsWrites() ? null : "mock_escrow";
   return "escrow_not_buyer_funded";
 }
 

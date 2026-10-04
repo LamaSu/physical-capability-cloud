@@ -22,7 +22,7 @@ import { schema, eq, sql } from "@pcc/store";
 import { actAsJobParty } from "./helpers/job-read-party.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { acceptanceFor, buyerFundingRefusal } from "../services/scope-acceptance.js";
-import { isMockSettlement } from "../services/settlement-mode.js";
+import { isMockSettlement, isTestProcess, mockFundsWrites } from "../services/settlement-mode.js";
 import { bindBuyer, sameIdentity } from "../auth/buyer-identity.js";
 
 const KERNEL = "kernel-nyc"; // operator 0x1111…, default (manual) policy
@@ -508,5 +508,80 @@ describe("N133 rule 4: mock settlement is on only when MOCK_SETTLEMENT is exactl
     expect(res.json().error).toBe("fast_track_failed");
     expect(db().select().from(schema.escrows).where(eq(schema.escrows.payer, BUYER)).all()).toHaveLength(0);
     expect(db().select().from(schema.executionScopes).where(eq(schema.executionScopes.createdBy, BUYER)).all()).toHaveLength(0);
+  });
+});
+
+// ── r1 HIGH (astra): mock funding never authorizes a write outside tests ───────────────────────
+
+describe("N133 r1 HIGH (astra): a mock escrow never funds a physical write outside a test process", () => {
+  const withNodeEnv = async (value: string, fn: () => Promise<void>) => {
+    const saved = process.env.NODE_ENV;
+    process.env.NODE_ENV = value;
+    try {
+      await fn();
+    } finally {
+      if (saved === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = saved;
+    }
+  };
+  const activeScopesOf = (holder: string) =>
+    db().select().from(schema.executionScopes).where(eq(schema.executionScopes.createdBy, holder)).all().filter((s) => s.status === "active");
+
+  it("astra's repro: NODE_ENV=production, MOCK_SETTLEMENT=true, an auto policy, a proven buyer for itself: no live scope, no write", async () => {
+    setPolicy(KERNEL, { ...basePolicy(), approvalMode: "auto" });
+    await withNodeEnv("production", async () => {
+      const res = await submit(asKey(BUYER), BUYER);
+      // Mock settlement is refused in production: the real path runs, and with no settlement key
+      // here it mints nothing.
+      expect(res.statusCode).toBe(500);
+      expect(res.json().error).toBe("fast_track_failed");
+      expect(activeScopesOf(BUYER)).toHaveLength(0);
+      expect(queued()).toHaveLength(0);
+    });
+  });
+
+  it("a development process with MOCK_SETTLEMENT=true settles in mock, but its mock escrow funds no live scope", async () => {
+    setPolicy(KERNEL, { ...basePolicy(), approvalMode: "auto" });
+    await withNodeEnv("development", async () => {
+      const res = await submit(asKey(BUYER), BUYER);
+      expect(res.statusCode).toBe(201);
+      expect(res.json()).toMatchObject({ escrowStatus: "funded", scopeStatus: "awaiting_funding" });
+      expect((await writeAs(asKey(BUYER), res.json().scopeId)).statusCode).toBe(403);
+      expect(activeScopesOf(BUYER)).toHaveLength(0);
+      expect(queued()).toHaveLength(0);
+    });
+  });
+
+  it("the flag alone is not enough: refused in production; a mock escrow funds writes only in a test process", () => {
+    const saved = { nodeEnv: process.env.NODE_ENV, vitest: process.env.VITEST };
+    process.env.MOCK_SETTLEMENT = "true";
+    try {
+      process.env.NODE_ENV = "production";
+      expect([isMockSettlement(), mockFundsWrites()]).toEqual([false, false]);
+      process.env.NODE_ENV = "development";
+      expect([isMockSettlement(), isTestProcess(), mockFundsWrites()]).toEqual([true, false, false]);
+      process.env.NODE_ENV = "test";
+      expect([isMockSettlement(), isTestProcess(), mockFundsWrites()]).toEqual([true, true, true]);
+      delete process.env.VITEST; // NODE_ENV=test alone is not a test process
+      expect([isTestProcess(), mockFundsWrites()]).toEqual([false, false]);
+    } finally {
+      for (const [key, value] of [["NODE_ENV", saved.nodeEnv], ["VITEST", saved.vitest]] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it("a scope that went live on a mock escrow in a test is refused by the relay once the process is not a test", async () => {
+    setPolicy(KERNEL, { ...basePolicy(), approvalMode: "auto" });
+    const res = await submit(asKey(BUYER), BUYER);
+    expect(res.json().scopeStatus).toBe("active"); // the test process: the mock stands in for buyer funding
+    await withNodeEnv("production", async () => {
+      const write = await writeAs(asKey(BUYER), res.json().scopeId);
+      // The relay's escrow gate: refused 402, recorded as a rejected call, never dispatchable.
+      expect(write.statusCode).toBe(402);
+      expect(write.json()).toMatchObject({ reason: "escrow_not_funded", escrowStatus: "mock_escrow" });
+      expect(queued().map((c) => [c.status, c.error])).toEqual([["rejected", "escrow_not_funded"]]);
+    });
   });
 });
