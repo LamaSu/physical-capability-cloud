@@ -301,10 +301,15 @@ function makeBundle(jobId: string, over: Partial<EvidenceBundle> = {}): Evidence
 describe("N79 round 4: the review's findings, reproduced", () => {
   let app: FastifyInstance;
   let savedEscrowEnv: string | undefined;
+  // N79 round 8, lead review iteration 2, item 5(i): also save/restore ESCROW_CONTRACT_VERSION in this SAME
+  // scoped hook -- the rowless default now resolves through it, not the address alone.
+  let savedEscrowVersionEnv: string | undefined;
 
   beforeEach(async () => {
     savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
     delete process.env.ESCROW_CONTRACT_ADDRESS;
+    savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+    delete process.env.ESCROW_CONTRACT_VERSION;
     delete process.env.PCC_USE_EAS_V2;
     vi.mocked(chain.isWriteEnabled).mockReset().mockReturnValue(false);
     vi.mocked(chain.submitEvidence).mockReset();
@@ -325,6 +330,8 @@ describe("N79 round 4: the review's findings, reproduced", () => {
     delete process.env.PCC_USE_EAS_V2;
     if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
     else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+    if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+    else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
   });
 
   it("R4-H1: the job-level release is bound to ONE escrow: job A naming escrow B's address is refused before the chain, and B's refund is unaffected", async () => {
@@ -389,6 +396,7 @@ describe("N79 round 4: the review's findings, reproduced", () => {
     const jobA = await submitPaidJob(app, "user-n79r4-h1-kernel");
     const addressA = pointEscrowAtChain(jobA, addr(0xe5c405), "v2");
     process.env.ESCROW_CONTRACT_ADDRESS = addr(0xe5c4fe); // the global default, which is NOT job A's escrow
+    process.env.ESCROW_CONTRACT_VERSION = "v1"; // N79 round 8, lead review iteration 2, item 5(i)
     expect(autoReleaseContractAddress(jobA)).toBe(addressA);
     // A job with no escrow of its own keeps the configured default (legacy single-contract deployments).
     expect(autoReleaseContractAddress("job-without-any-escrow")).toBe(addr(0xe5c4fe));

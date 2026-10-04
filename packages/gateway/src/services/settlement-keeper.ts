@@ -456,10 +456,11 @@ export async function runKeeperSweep(
 
           // P1: the ONE guarded writer, chain-required. `postPassStatuses` already carries this pass's TRUE
           // result; identity + cardinality were already confirmed above.
+          // N79 round 8 (P4, astra 126i MEDIUM-2): abiVersion "v2" -- `onChain` above is getEscrowStateV2.
           const outcome = recordChainSettlement(claim, {
             stepIds: onChain.milestones.map((cm) => cm.stepId as Hex),
             statuses: postPassStatuses,
-            releasedStatus: MilestoneStatusV2.Released,
+            abiVersion: "v2",
           });
           if (!outcome.ok) {
             recordFailed = true;

@@ -65,7 +65,6 @@ import {
   waitForReceipt,
   GAS_LIMITS,
   getEscrowStateV2,
-  MilestoneStatusV2,
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
 import {
@@ -125,10 +124,11 @@ async function completeClaimedEscrowFromChain(
   }
   try {
     const chainState = await getEscrowStateV2(escrowAddress as `0x${string}`);
+    // N79 round 8 (P4, astra 126i MEDIUM-2): abiVersion "v2" -- the reader one line up is getEscrowStateV2.
     const outcome = recordChainSettlement(claim, {
       stepIds: chainState.milestones.map((m) => m.stepId as Hex),
       statuses: chainState.milestones.map((m) => m.status),
-      releasedStatus: MilestoneStatusV2.Released,
+      abiVersion: "v2",
     });
     if (!outcome.ok) {
       console.error("[escrow] settlement_record_failed", {

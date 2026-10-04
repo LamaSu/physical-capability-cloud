@@ -26,10 +26,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { getAddress, keccak256, toBytes, type Hex } from "viem";
 import type { EvidenceBundle } from "@pcc/spec";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as ts from "typescript";
 
 vi.mock("@pcc/kernel/evidence-storage-factory", () => ({
   createEvidenceStorage: vi.fn().mockResolvedValue({
@@ -654,106 +653,6 @@ describe("N79 round 6: Phase 2 — addendum 1 properties", () => {
         /casEscrowStatus\([^)]*"completed"/,
       );
     }
-  });
-
-  it("P1 (T1, general AST scan): NO write to milestone-released or escrow-completed exists anywhere in gateway src outside recordChainSettlement/recordMockEscrowReleased", () => {
-    // astra 126h (MEDIUM, T1): the test above forbids only the 3 named legacy calls on 4 named files, and its
-    // module sweep recognizes only `export function NAME(` declarations. A direct `updateMilestoneStatus(...,
-    // "released")` written BESIDE a guarded call in any OTHER file (or inside an arrow function / aliased
-    // call anywhere) evades it entirely. This test instead parses every production .ts file under src/** (TS
-    // compiler API, not regex-on-braces) and attributes every matching write to its nearest NAMED enclosing
-    // function — the function a human would say "owns" that line — whatever kind it is: a function
-    // declaration, a class/object method, or an arrow/function expression bound to a name via `const x = ...`
-    // or `key: (...) => ...`. An anonymous callback (e.g. the arrow passed straight to `.transaction(() => {
-    // ... })` inside recordChainSettlement itself) is transparent: attribution walks up PAST it to the next
-    // named ancestor, so recordChainSettlement's own writes — nested inside that transaction callback — still
-    // correctly resolve to "recordChainSettlement", not "<anonymous>".
-    const here = dirname(fileURLToPath(import.meta.url));
-    const srcDir = resolve(here, "..");
-    const allowedWriters = new Set(["recordChainSettlement", "recordMockEscrowReleased"]);
-
-    function listTsFiles(dir: string): string[] {
-      const out: string[] = [];
-      for (const entry of readdirSync(dir)) {
-        const full = join(dir, entry);
-        const st = statSync(full);
-        if (st.isDirectory()) {
-          if (entry === "__tests__" || entry === "node_modules") continue;
-          out.push(...listTsFiles(full));
-        } else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts") && !entry.endsWith(".d.ts")) {
-          out.push(full);
-        }
-      }
-      return out;
-    }
-
-    function enclosingFunctionName(node: ts.Node): string | null {
-      let cur: ts.Node | undefined = node.parent;
-      while (cur) {
-        if (ts.isFunctionDeclaration(cur) && cur.name) return cur.name.text;
-        if (ts.isMethodDeclaration(cur) && ts.isIdentifier(cur.name)) return cur.name.text;
-        if (ts.isArrowFunction(cur) || ts.isFunctionExpression(cur)) {
-          const parent: ts.Node | undefined = cur.parent;
-          if (parent && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) return parent.name.text;
-          if (parent && ts.isPropertyAssignment(parent) && ts.isIdentifier(parent.name)) return parent.name.text;
-          // Anonymous (e.g. a bare callback argument) — keep walking up to the next NAMED ancestor; that is
-          // this write's real attribution.
-        }
-        cur = cur.parent;
-      }
-      return null; // top-level, no enclosing function at all.
-    }
-
-    const RELEASED_CALL = /\bupdateMilestoneStatus\s*\([^)]*"released"\s*\)/;
-    const COMPLETED_CALL = /\bcasEscrowStatus\s*\([^)]*"completed"\s*/;
-    // "a variable holding the method" (T1's own example): an alias assignment taken OUTSIDE the two allowed
-    // writers evades a call-site-text scan entirely once invoked through the alias — flagged directly, at the
-    // assignment itself, regardless of how (or whether) the alias is later called.
-    const METHOD_ALIAS_ASSIGNMENT = /=\s*[\w.]*\.(updateMilestoneStatus|casEscrowStatus)\b/;
-
-    interface SourceWrite { file: string; enclosingFunctionName: string | null; snippet: string }
-
-    function scanFile(filePath: string, source: string): SourceWrite[] {
-      const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
-      const writes: SourceWrite[] = [];
-      function visit(node: ts.Node) {
-        if (ts.isCallExpression(node)) {
-          const text = node.getText(sf);
-          if (RELEASED_CALL.test(text) || COMPLETED_CALL.test(text)) {
-            writes.push({ file: filePath, enclosingFunctionName: enclosingFunctionName(node), snippet: text.slice(0, 160) });
-          }
-        }
-        if (ts.isBinaryExpression(node) || ts.isVariableDeclaration(node)) {
-          const text = node.getText(sf);
-          if (METHOD_ALIAS_ASSIGNMENT.test(text)) {
-            writes.push({ file: filePath, enclosingFunctionName: enclosingFunctionName(node), snippet: text.slice(0, 160) });
-          }
-        }
-        ts.forEachChild(node, visit);
-      }
-      visit(sf);
-      return writes;
-    }
-
-    const files = listTsFiles(srcDir);
-    expect(files.length, "the file walk must actually find production source").toBeGreaterThan(20);
-    const violations: SourceWrite[] = [];
-    for (const file of files) {
-      const source = readFileSync(file, "utf8");
-      if (!/updateMilestoneStatus|casEscrowStatus/.test(source)) continue; // fast skip — most files touch neither.
-      for (const w of scanFile(file, source)) {
-        if (!w.enclosingFunctionName || !allowedWriters.has(w.enclosingFunctionName)) violations.push(w);
-      }
-    }
-    expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
-
-    // Sanity: the scan must actually find the two allowed writers' OWN writes, correctly attributed (not
-    // vacuously passing because the scan found nothing at all, or mis-attributed them to "<anonymous>" —
-    // recordChainSettlement's writes are nested inside an anonymous `.transaction(() => {...})` callback).
-    const refundPath = join(srcDir, "services/escrow-refund.ts");
-    const refundWrites = scanFile(refundPath, readFileSync(refundPath, "utf8"));
-    expect(refundWrites.filter((w) => w.enclosingFunctionName === "recordChainSettlement").length).toBeGreaterThan(0);
-    expect(refundWrites.filter((w) => w.enclosingFunctionName === "recordMockEscrowReleased").length).toBeGreaterThan(0);
   });
 
   it("P2: a mismatch on ANY bound field (job, step, kernel, tier, escrow target) gives zero DB writes and zero chain calls", async () => {

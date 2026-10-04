@@ -422,7 +422,7 @@ describe("the hand-back and the release record act only for the claim that holds
     for (const status of ["funded", "completing", "created"]) {
       const { jobId, escrowId } = seed({ status });
       const claim = claimOf(beginSettlement({ jobId }));
-      recordChainSettlement(claim, { stepIds: [stepHash(1)], statuses: [REL()], releasedStatus: REL() });
+      recordChainSettlement(claim, { stepIds: [stepHash(1)], statuses: [REL()], abiVersion: "v2" /* N79 round 8, rule (a): was releasedStatus: REL() */ });
       expect(escrowRow(escrowId)).toEqual({ escrow: "completed", milestones: ["released"] });
       endSettlement(claim);
     }
@@ -431,11 +431,11 @@ describe("the hand-back and the release record act only for the claim that holds
   it("recordChainSettlement: one of several milestones is recorded and an acquired claim hands the escrow back; the last completes it (was: recordMilestoneReleased)", () => {
     const { jobId, escrowId } = seed({ milestones: ["funded", "funded"] });
     const first = claimOf(beginSettlement({ jobId }));
-    recordChainSettlement(first, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), chain.MilestoneStatusV2.Funded], releasedStatus: REL() });
+    recordChainSettlement(first, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), chain.MilestoneStatusV2.Funded], abiVersion: "v2" /* N79 round 8, rule (a): was releasedStatus: REL() */ });
     endSettlement(first);
     expect(escrowRow(escrowId)).toEqual({ escrow: "funded", milestones: ["released", "funded"] });
     const second = claimOf(beginSettlement({ jobId }));
-    recordChainSettlement(second, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), REL()], releasedStatus: REL() });
+    recordChainSettlement(second, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), REL()], abiVersion: "v2" /* N79 round 8, rule (a): was releasedStatus: REL() */ });
     endSettlement(second);
     expect(escrowRow(escrowId)).toEqual({ escrow: "completed", milestones: ["released", "released"] });
   });
@@ -444,14 +444,14 @@ describe("the hand-back and the release record act only for the claim that holds
     const { jobId, escrowId } = seed();
     const claim = claimOf(beginSettlement({ jobId }));
     endSettlement(claim); // the lease is gone; the escrow reads completing
-    recordChainSettlement(claim, { stepIds: [stepHash(1)], statuses: [REL()], releasedStatus: REL() });
+    recordChainSettlement(claim, { stepIds: [stepHash(1)], statuses: [REL()], abiVersion: "v2" /* N79 round 8, rule (a): was releasedStatus: REL() */ });
     expect(escrowRow(escrowId)).toEqual({ escrow: "completing", milestones: ["released"] });
   });
 
   it.each(["refund_pending", "refunded"])("recordChainSettlement never writes over %s (was: recordMilestoneReleased and recordEscrowReleased)", (status) => {
     const { escrowId } = seed({ status });
     const stale: SettlementClaim = { escrowId, token: Symbol("stale"), leasedStatus: "completing" };
-    const outcome = recordChainSettlement(stale, { stepIds: [stepHash(1)], statuses: [REL()], releasedStatus: REL() });
+    const outcome = recordChainSettlement(stale, { stepIds: [stepHash(1)], statuses: [REL()], abiVersion: "v2" /* N79 round 8, rule (a): was releasedStatus: REL() */ });
     expect(outcome.completed).toBeFalsy();
     expect(escrowRow(escrowId).escrow).toBe(status);
   });
@@ -461,10 +461,10 @@ describe("the hand-back and the release record act only for the claim that holds
     const claim = claimOf(beginSettlement({ jobId }));
     getRepos().escrows.updateStatus(escrowId, "refund_pending"); // decided outside the protocol, beneath a live lease
     // Not every milestone released: the hand-back branch.
-    recordChainSettlement(claim, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), chain.MilestoneStatusV2.Funded], releasedStatus: REL() });
+    recordChainSettlement(claim, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), chain.MilestoneStatusV2.Funded], abiVersion: "v2" /* N79 round 8, rule (a): was releasedStatus: REL() */ });
     expect(escrowRow(escrowId).escrow).toBe("refund_pending");
     // Every milestone released: the completion branch.
-    const completion = recordChainSettlement(claim, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), REL()], releasedStatus: REL() });
+    const completion = recordChainSettlement(claim, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), REL()], abiVersion: "v2" /* N79 round 8, rule (a): was releasedStatus: REL() */ });
     expect(completion.completed).toBeFalsy();
     expect(escrowRow(escrowId).escrow).toBe("refund_pending");
     endSettlement(claim);
@@ -481,7 +481,7 @@ describe("the hand-back and the release record act only for the claim that holds
   it("recordChainSettlement stamps a partial release's row and hands the claim back; idempotent; the final milestone then completes it (was: recordMilestoneRowReleased)", () => {
     const { jobId, escrowId } = seed({ milestones: ["funded", "funded"] });
     const claim = claimOf(beginSettlement({ jobId })); // acquired: funded -> completing, prior funded
-    const partial = { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), chain.MilestoneStatusV2.Funded], releasedStatus: REL() };
+    const partial = { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), chain.MilestoneStatusV2.Funded], abiVersion: "v2" /* N79 round 8, rule (a): was releasedStatus: REL() */ };
     recordChainSettlement(claim, partial);
     recordChainSettlement(claim, partial); // idempotent: row0 already released, hand-back already landed
     expect(escrowRow(escrowId)).toEqual({ escrow: "funded", milestones: ["released", "funded"] });
@@ -496,7 +496,7 @@ describe("the hand-back and the release record act only for the claim that holds
   it("recordChainSettlement: every milestone row reads released and the holder completes the escrow (was: recordEscrowReleased)", () => {
     const { escrowId } = seed({ status: "disputed", milestones: ["funded", "locked"] });
     const claim = claimOf(beginSettlement({ escrowId }, { leaseOnly: true }));
-    const outcome = recordChainSettlement(claim, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), REL()], releasedStatus: REL() });
+    const outcome = recordChainSettlement(claim, { stepIds: [stepHash(1), stepHash(2)], statuses: [REL(), REL()], abiVersion: "v2" /* N79 round 8, rule (a): was releasedStatus: REL() */ });
     expect(outcome.completed).toBe(true);
     expect(escrowRow(escrowId)).toEqual({ escrow: "completed", milestones: ["released", "released"] });
     endSettlement(claim);
@@ -1194,15 +1194,30 @@ describe("the callers refuse an escrow they cannot own, and give back what they 
       const { escrowId, address } = seed();
       // N79 round 6: the post-release mapping read (H2-A), V1 ABI (SettlementService.releaseMilestone) — fixture only.
       vi.mocked(chain.getEscrowState).mockResolvedValue(chainState(address, [chain.MilestoneStatusV2.Released]) as never);
-      const held = claimOf(beginSettlement({ escrowId }));
-      expect(await getSettlementService().releaseMilestone("job-without-an-escrow", 0, attestation(address), address)).toEqual(
-        expect.objectContaining({ status: "failed", error: "settlement_in_progress" }),
-      );
-      endSettlement(held);
-      expect(await getSettlementService().releaseMilestone("job-without-an-escrow", 0, attestation(address), address)).toEqual(
-        expect.objectContaining({ status: "released" }),
-      );
-      expect(escrowRow(escrowId)).toEqual({ escrow: "completed", milestones: ["released"] });
+      // N79 round 8, lead review iteration 2, item 4 (fixture-only, no assertion changed): "job-without-an-
+      // escrow" supplies `address` explicitly with no row of its own -- the rowless-target fix now requires
+      // that supplied address to equal the CONFIGURED rowless default. `address` is generated fresh by seed()
+      // each call, so it is set here (not in a shared hook) and restored after.
+      const savedAddr = process.env.ESCROW_CONTRACT_ADDRESS;
+      const savedVer = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_ADDRESS = address;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
+      try {
+        const held = claimOf(beginSettlement({ escrowId }));
+        expect(await getSettlementService().releaseMilestone("job-without-an-escrow", 0, attestation(address), address)).toEqual(
+          expect.objectContaining({ status: "failed", error: "settlement_in_progress" }),
+        );
+        endSettlement(held);
+        expect(await getSettlementService().releaseMilestone("job-without-an-escrow", 0, attestation(address), address)).toEqual(
+          expect.objectContaining({ status: "released" }),
+        );
+        expect(escrowRow(escrowId)).toEqual({ escrow: "completed", milestones: ["released"] });
+      } finally {
+        if (savedAddr === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+        else process.env.ESCROW_CONTRACT_ADDRESS = savedAddr;
+        if (savedVer === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+        else process.env.ESCROW_CONTRACT_VERSION = savedVer;
+      }
     });
 
     it("a confirmed release whose bookkeeping failed is still released, says recorded:false, and keeps the escrow owned", async () => {

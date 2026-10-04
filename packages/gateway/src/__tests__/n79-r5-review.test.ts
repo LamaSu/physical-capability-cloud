@@ -282,6 +282,11 @@ describe("N79 round 5: the review's findings, reproduced", () => {
     vi.mocked(chain.getEscrowStateV2).mockResolvedValue(
       chainState(address, [chain.MilestoneStatusV2.Funded], { 0: keccak256(toBytes(job.stepId)) }),
     );
+    // N79 round 8, lead review iteration 2, item 5(iv) (determinism sweep): FIXED createdAt, not `new Date()` —
+    // this manual insert and makeBundle(jobId) below each independently call `new Date().toISOString()` by
+    // default, and createdAt has been compared since round 7, so two independent wall-clock reads straddling a
+    // millisecond (likelier under full-suite load) made this test flaky for the wrong reason.
+    const pinnedCreatedAt = "2026-01-01T00:00:00.000Z";
     getRepos().evidence.insert({
       id: "bundle-r5-A",
       jobId,
@@ -290,11 +295,11 @@ describe("N79 round 5: the review's findings, reproduced", () => {
       assuranceTier: 0,
       bundleHash: HASH_A,
       kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "secp256k1", value: "mock_sig_r5" },
-      createdAt: new Date().toISOString(),
+      createdAt: pinnedCreatedAt,
     });
 
-    // Identical in every field the conflict check reads: jobId, stepId, kernelId, assuranceTier, hash.
-    const result = await getSettlementService().processEvidence(makeBundle(jobId), jobId, { milestoneIndex: 0, contractAddress: address });
+    // Identical in every field the conflict check reads: jobId, stepId, kernelId, assuranceTier, hash, createdAt.
+    const result = await getSettlementService().processEvidence(makeBundle(jobId, { createdAt: pinnedCreatedAt }), jobId, { milestoneIndex: 0, contractAddress: address });
 
     expect(chain.submitEvidence).toHaveBeenCalledTimes(1);
     expect(result.error).toBeUndefined();
@@ -476,7 +481,7 @@ describe("N79 round 5: the review's findings, reproduced", () => {
       const outcome = recordChainSettlement(claim, {
         stepIds: [keccak256(toBytes("step-1")), keccak256(toBytes("step-2")), keccak256(toBytes("step-3"))],
         statuses: [chain.MilestoneStatusV2.Funded, chain.MilestoneStatusV2.Funded, chain.MilestoneStatusV2.Released],
-        releasedStatus: chain.MilestoneStatusV2.Released,
+        abiVersion: "v2", // N79 round 8, rule (a): was releasedStatus: chain.MilestoneStatusV2.Released
       });
       expect(outcome.drifted).toBe(true);
       // Nothing was recorded — not even the two valid-looking indices beside the missing one.
@@ -500,7 +505,7 @@ describe("N79 round 5: the review's findings, reproduced", () => {
       const outcome = recordChainSettlement(claim, {
         stepIds: [wrongChainStepId],
         statuses: [chain.MilestoneStatusV2.Released],
-        releasedStatus: chain.MilestoneStatusV2.Released,
+        abiVersion: "v2", // N79 round 8, rule (a): was releasedStatus: chain.MilestoneStatusV2.Released
       });
       expect(outcome.drifted).toBe(true);
       // Nothing was recorded.
@@ -524,7 +529,7 @@ describe("N79 round 5: the review's findings, reproduced", () => {
       const outcome = recordChainSettlement(claim, {
         stepIds: [wrongChainStepId],
         statuses: [chain.MilestoneStatusV2.Released],
-        releasedStatus: chain.MilestoneStatusV2.Released,
+        abiVersion: "v2", // N79 round 8, rule (a): was releasedStatus: chain.MilestoneStatusV2.Released
       });
       expect(outcome.completed).toBeFalsy();
       expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["funded"] });
@@ -544,7 +549,7 @@ describe("N79 round 5: the review's findings, reproduced", () => {
       const outcome = recordChainSettlement(claim, {
         stepIds: [keccak256(toBytes("step-1")), keccak256(toBytes("step-2"))],
         statuses: [chain.MilestoneStatusV2.Released, chain.MilestoneStatusV2.Released],
-        releasedStatus: chain.MilestoneStatusV2.Released,
+        abiVersion: "v2", // N79 round 8, rule (a): was releasedStatus: chain.MilestoneStatusV2.Released
       });
       expect(outcome.completed).toBeFalsy();
       expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["funded"] });

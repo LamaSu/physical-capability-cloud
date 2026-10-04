@@ -15,18 +15,21 @@ import type { MachineAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
-import { escrowForJob, setJobStatusWithRefund } from "./escrow-refund.js";
+import { escrowForJob, resolveRowlessDefaultTarget, setJobStatusWithRefund } from "./escrow-refund.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
 
 /**
- * The escrow a local-kernel auto-release targets: THIS job's own escrow when it has one, else the configured default
- * (N79 round 4, H1). SettlementService.releaseMilestone refuses a release whose target is not the job's own escrow,
- * so naming the global default for a job that has its own per-job escrow would only ever be refused.
+ * The escrow a local-kernel auto-release targets: THIS job's own escrow when it has one, else the configured
+ * rowless default (N79 round 4, H1; round 8 P2, astra 126i MEDIUM-1: the rowless default is resolved through
+ * {@link resolveRowlessDefaultTarget}, not read directly — an address alone does not say which ABI answers at
+ * it, so a job with no escrow row gets a target only when `ESCROW_CONTRACT_VERSION` is explicitly configured).
+ * SettlementService.releaseMilestone refuses a release whose target is not the job's own escrow, so naming the
+ * global default for a job that has its own per-job escrow would only ever be refused.
  */
 export function autoReleaseContractAddress(jobId: string): string | undefined {
-  return escrowForJob(jobId)?.contractAddress ?? process.env.ESCROW_CONTRACT_ADDRESS;
+  return escrowForJob(jobId)?.contractAddress ?? resolveRowlessDefaultTarget()?.address;
 }
 
 // ---------------------------------------------------------------------------

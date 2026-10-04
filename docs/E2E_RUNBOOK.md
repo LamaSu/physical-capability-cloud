@@ -69,6 +69,7 @@ Currently gateway routes return mock data. Need to:
 ```bash
 export PCC_NETWORK=base-sepolia
 export ESCROW_CONTRACT_ADDRESS=0x...deployed_address...
+export ESCROW_CONTRACT_VERSION=v1
 export DEPLOYER_PRIVATE_KEY=0x...
 ```
 

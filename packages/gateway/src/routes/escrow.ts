@@ -23,7 +23,6 @@ import {
   getEscrowState as getEscrowStateV1,
   getEscrowStateV2,
   getMilestoneMappingV3,
-  MilestoneStatus,
 } from "../contracts/escrow-client.js";
 import { getRepos } from "../db.js";
 import {
@@ -93,7 +92,9 @@ async function recordRelease(
               stepIds: s.milestones.map((m) => m.stepId as Hex),
               statuses: s.milestones.map((m) => m.status),
             }));
-    const outcome = recordChainSettlement(claim, { ...chain, releasedStatus: MilestoneStatus.Released });
+    // N79 round 8 (P4, astra 126i MEDIUM-2): abiVersion is `version` itself -- the SAME version that picked the
+    // reader `chain` was just built from above (v1/v2/v3), already in hand.
+    const outcome = recordChainSettlement(claim, { ...chain, abiVersion: version });
     if (outcome.ok) return true;
     const tx = (result ?? {}) as { transactionHash?: string; txHash?: string };
     console.error("[escrow] settlement_record_failed", {

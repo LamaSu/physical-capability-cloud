@@ -392,7 +392,7 @@ describe("N79 round 3: settlement ownership is exclusive, and a settlement never
     // chain mapping matches (no drift) — the point of this case is that the escrow is already given back.
     recordChainSettlement(
       { escrowId: escrow.id, token: Symbol("late-release"), leasedStatus: "completing" } as never,
-      { stepIds: [keccak256(toBytes(stepId))], statuses: [chain.MilestoneStatusV2.Released], releasedStatus: chain.MilestoneStatusV2.Released },
+      { stepIds: [keccak256(toBytes(stepId))], statuses: [chain.MilestoneStatusV2.Released], abiVersion: "v2" }, // N79 round 8, rule (a): was releasedStatus: chain.MilestoneStatusV2.Released
     );
 
     expect(getRepos().escrows.findById(escrow.id)!.status).toBe("refund_pending");

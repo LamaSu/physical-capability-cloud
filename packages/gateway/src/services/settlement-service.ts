@@ -17,6 +17,7 @@ import { isAddress, getAddress, keccak256, toBytes } from "viem";
 import type { Address, Hex } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos, getStore } from "../db.js";
+import { schema, getTableColumns } from "@pcc/store";
 import {
   beginSettlement,
   endSettlement,
@@ -24,6 +25,7 @@ import {
   givenBackEscrow,
   recordChainSettlement,
   releaseEscrowFromSettlement,
+  resolveRowlessDefaultTarget,
 } from "./escrow-refund.js";
 import {
   submitEvidence as onChainSubmitEvidence,
@@ -31,15 +33,18 @@ import {
   getEscrowState as getEscrowStateV1,
   getEscrowStateV2,
   isWriteEnabled,
-  MilestoneStatus,
 } from "../contracts/escrow-client.js";
 import { Sentry } from "../sentry.js";
 import { traceCollector, TraceCollector } from "../trace-collector.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "./audit-service.js";
 
+/** The authoritative job row shape, as the bind-first block reads it — used to type the hoisted
+ *  `authoritativeJob` binding (N79 round 8, P3) so Step 2's header computation can read it too. */
+type AuthoritativeJobRow = ReturnType<ReturnType<typeof getRepos>["jobs"]["findById"]>;
+
 // ---------------------------------------------------------------------------
-// P3 (N79 round 7, astra 126g HIGH): exact re-delivery comparison helpers
+// P3 (N79 round 8, astra 126i HIGH-1): exact re-delivery comparison helpers — GENERIC over every column
 // ---------------------------------------------------------------------------
 
 /** Recursively sorts object keys so two values differing only in key order still compare equal when stringified. */
@@ -54,87 +59,192 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
-/** Deep equality by canonical JSON — used below for kernelSignature (header) and event source/payload. */
+/** Deep equality by canonical JSON. */
 function deepEqualCanonical(a: unknown, b: unknown): boolean {
   return JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));
 }
 
-/** The event shape both a DB-read row and an incoming `EvidenceBundle` event satisfy, for comparison purposes. */
-interface ComparableEvent {
-  id: string;
-  type: string;
-  timestamp: string;
-  source: unknown;
-  payload: unknown;
-  hash: string;
+/**
+ * N79 round 8 (P3, astra 126i HIGH-1): canonical deep equality with `null` and `undefined` treated as the SAME
+ * value. A stored column reads back as SQLite `NULL` (`null`); a freshly computed column for an omitted
+ * optional bundle field is `undefined`. `deepEqualCanonical` alone does not unify them —
+ * `JSON.stringify(null) === "null"` (a string) but `JSON.stringify(undefined) === undefined` (the JS value) —
+ * so a round-tripped `null` never read as equal to a freshly computed `undefined` before this normalization.
+ */
+function columnsEqual(a: unknown, b: unknown): boolean {
+  const na = a === undefined ? null : a;
+  const nb = b === undefined ? null : b;
+  if (na === nb) return true;
+  return deepEqualCanonical(na, nb);
+}
+
+/** Every column of `schema.evidenceBundles` except `id` (the lookup key, never compared) — enumerated from the
+ *  Drizzle table itself via `getTableColumns`, not a hand list (N79 round 8, P3, astra 126i HIGH-1: round 7's
+ *  hand-written header comparison omitted `sessionKeyAuthorization` and `tenantId` outright; this enumeration
+ *  makes a future column compared automatically). */
+const EVIDENCE_BUNDLE_COLUMNS: readonly string[] = Object.keys(getTableColumns(schema.evidenceBundles)).filter(
+  (k) => k !== "id",
+);
+
+/** Every column of `schema.evidenceEvents` except `id` (the per-event lookup key, never compared). */
+const EVIDENCE_EVENT_COLUMNS: readonly string[] = Object.keys(getTableColumns(schema.evidenceEvents)).filter(
+  (k) => k !== "id",
+);
+
+/**
+ * N79 round 8 (P3, astra 126i HIGH-1): the ONE function that computes the
+ * header row THIS call writes for `bundle`, from the AUTHORITATIVE job (never the bundle, for the job-bound
+ * columns): `jobId`, `stepId`, `kernelId`, `assuranceTier` and `tenantId` come from `job` — the schema comment
+ * on `evidenceBundles.tenantId` says it is "backfilled at write time from the buyer/operator on the parent
+ * job"; round 7 never wrote it at all. `job` is typed non-undefined
+ * — the caller narrows it (never `?.` here) — because this function's whole point is to be THE authoritative
+ * source for the job-bound columns; an optional job would silently fall back to trusting the bundle, which is
+ * exactly the bug being fixed. `bundleHash`, `kernelSignature`, `sessionKeyAuthorization` and `createdAt` are
+ * the bundle's own evidence content — `sessionKeyAuthorization` proves the signing key was authorized by the
+ * kernel principal (`packages/spec/src/types/evidence.ts:176`) and the schema persists it
+ * (`packages/db/src/schema/evidence.ts:19`), but round 7 never wrote or compared it (astra 126i HIGH-1's
+ * reproduction: a re-delivery carrying a DIFFERENT, or no, authorization read as an exact match). Called by
+ * both the fresh-insert path and the re-delivery comparison below, so the two can never drift apart.
+ *
+ * Note (equivalent mutant): after the bind-first check above (`bundle.jobId === jobId`, `bundle.stepId ===
+ * job.stepId`, `bundle.kernelId === job.kernelId`, `bundle.assuranceTier === (job.assuranceTier ?? 0)` all
+ * hold, or this function is never reached), `job.id`/`job.stepId`/`job.kernelId`/`job.assuranceTier ?? 0` are
+ * VALUE-IDENTICAL to `bundle.jobId`/`bundle.stepId`/`bundle.kernelId`/`bundle.assuranceTier`. A mutant that
+ * reads those four columns from `bundle` instead of `job` is therefore EQUIVALENT (no test can distinguish the
+ * two allocators), not a survivor — `tenantId` has no such bind-first guarantee (never compared there), so it
+ * is NOT equivalent: a mutant dropping it still gets caught (see the mutation table).
+ */
+function computeEvidenceHeaderRow(
+  bundle: EvidenceBundle,
+  job: NonNullable<AuthoritativeJobRow>,
+): typeof schema.evidenceBundles.$inferInsert {
+  return {
+    id: bundle.id,
+    jobId: job.id,
+    stepId: job.stepId,
+    kernelId: job.kernelId,
+    assuranceTier: job.assuranceTier ?? 0,
+    tenantId: job.tenantId ?? null,
+    bundleHash: bundle.bundleHash,
+    kernelSignature: bundle.kernelSignature,
+    sessionKeyAuthorization: bundle.sessionKeyAuthorization ?? null,
+    createdAt: bundle.createdAt,
+  };
+}
+
+/** N79 round 8 (P3): the ONE function that computes the event rows THIS call writes for `bundle.events`. Called
+ *  by both the fresh-insert path and the re-delivery comparison below. */
+function computeEvidenceEventRows(bundle: EvidenceBundle): (typeof schema.evidenceEvents.$inferInsert)[] {
+  return bundle.events.map((ev) => ({
+    id: ev.id,
+    bundleId: bundle.id,
+    type: ev.type,
+    timestamp: ev.timestamp,
+    source: ev.source,
+    payload: ev.payload as Record<string, unknown>,
+    hash: ev.hash,
+  }));
 }
 
 /**
- * P3 (N79 round 7, astra 126g HIGH): whether `incoming` is a true ONE-TO-ONE match against `existing` — every
- * persisted event field (id, type, timestamp, source by canonical JSON, payload by canonical JSON, hash) equal,
+ * N79 round 8 (P3, astra 126i HIGH-1 — generalizes round 7's `eventsExactMatch`): whether `incoming` (this
+ * call's OWN computed event rows) is a true ONE-TO-ONE match against `existing` (the stored rows) — EVERY
+ * column of `getTableColumns(schema.evidenceEvents)` equal via {@link columnsEqual}, keyed by id,
  * order-insensitive (a permuted delivery is still exact). NOT `length + every(...some(...))` (round 6's rule):
- * that passes on a bijection but ALSO on non-bijective coincidences like stored [A,B] / incoming [A,A], where
- * each incoming A independently matches stored A without the comparison ever being "consumed" — astra 126g
- * H3b's exact reproduction. Duplicate ids WITHIN `incoming` can never be part of a bijection (there is nothing
- * left for a second occurrence of the same id to match that the first one did not already claim), so they are
- * rejected immediately, before any id-keyed map is even built.
+ * that passes on a bijection but ALSO on non-bijective coincidences like stored [A,B] / incoming [A,A] — astra
+ * 126g H3b's exact reproduction. Duplicate ids WITHIN `incoming` can never be part of a bijection (there is
+ * nothing left for a second occurrence of the same id to match that the first one did not already claim), so
+ * they are rejected immediately, before any id-keyed map is even built.
  */
-function eventsExactMatch(existing: readonly ComparableEvent[], incoming: readonly ComparableEvent[]): boolean {
+function eventsExactMatch(existing: readonly Record<string, unknown>[], incoming: readonly Record<string, unknown>[]): boolean {
   const incomingIds = incoming.map((e) => e.id);
   if (new Set(incomingIds).size !== incomingIds.length) return false;
   if (existing.length !== incoming.length) return false;
-  const existingById = new Map(existing.map((e) => [e.id, e]));
+  const existingById = new Map(existing.map((e) => [e.id as string, e]));
   if (existingById.size !== existing.length) return false; // defend against a stored set with its own duplicate ids
   for (const ev of incoming) {
-    const match = existingById.get(ev.id);
-    if (
-      !match ||
-      match.type !== ev.type ||
-      match.timestamp !== ev.timestamp ||
-      match.hash !== ev.hash ||
-      !deepEqualCanonical(match.source, ev.source) ||
-      !deepEqualCanonical(match.payload, ev.payload)
-    ) {
-      return false;
+    const match = existingById.get(ev.id as string);
+    if (!match) return false;
+    for (const col of EVIDENCE_EVENT_COLUMNS) {
+      if (!columnsEqual(match[col], ev[col])) return false;
     }
   }
   return true;
 }
 
+/**
+ * N79 round 8 (P3, astra 126i HIGH-1): whether the STORED header row `existing` is an exact re-delivery of
+ * `computedHeader` — EVERY column of `getTableColumns(schema.evidenceBundles)` except `id` equal via
+ * {@link columnsEqual}. Enumerated from the table itself (not round 7's hand list, which omitted
+ * `sessionKeyAuthorization` and the authoritative `tenantId` entirely), so a column added later is compared
+ * automatically and this function need not change.
+ */
+function headerExactMatch(existing: Record<string, unknown>, computedHeader: Record<string, unknown>): boolean {
+  return EVIDENCE_BUNDLE_COLUMNS.every((col) => columnsEqual(existing[col], computedHeader[col]));
+}
+
 // ---------------------------------------------------------------------------
-// P2 (N79 round 7, astra 126g HIGH): milestone-index derivation helper
+// P2 (N79 round 8, astra 126i MEDIUM-1): escrow-version resolution + milestone-index derivation helpers
 // ---------------------------------------------------------------------------
 
 /**
- * P2 (N79 round 7): fresh confirmation, right before a chain WRITE, that the chain milestone at `derivedIndex`
- * still carries the step identity this call derived its target from. Dispatches to the reader that matches
- * the escrow's OWN recorded version, not the ABI the eventual write happens to use:
- *   - `escrowVersion === "v2"`: {@link getEscrowStateV2}, the proper V2 reader. Lead review (round 7
- *     addendum): decoding a V2 clone's 12-field milestone struct through the V1 ABI's shorter 9-field tuple
- *     is a PLAUSIBLE field-order-superset argument (`shapeMilestoneV2` appends exactly 3 fields after the
- *     same 9 V1 ones), but it is unproven against a live contract — a wrong decode here would fail closed
- *     every V2 job's evidence submit, silently, which is worse than the extra reader. Read with the reader
- *     the escrow's OWN version names instead of inferring one from what the write call happens to use.
- *   - `escrowVersion === "v3"`: refused outright, before any read — `getMilestoneMappingV3` needed its own
- *     bespoke minimal reader because no existing reader was known to decode it, so neither V1 nor V2 is a
- *     confirmed match.
- *   - anything else (`"v1"`, `null`, `undefined` — the no-row env-default path never has a version to read
- *     at all): {@link getEscrowStateV1}. The kernel's documented env-default fallback (kernel-service.ts:28-30)
- *     is always a v1-style escrow, so V1 is unambiguously correct there too.
- * A failed read refuses the same way: this never throws, and it adds no chain call on a path that was not
- * already about to make one (callers only reach this once a chain WRITE is already decided).
+ * N79 round 8 (P2, astra 126i MEDIUM-1): resolve a JOB-OWNED escrow row's OWN `version` column. The schema's
+ * documented default (`packages/db/src/schema/settlement.ts:14-21`) — and the direct chain routes'
+ * `resolveEscrowVersion` (`routes/escrow.ts`) — already treat a missing value (`null`/`undefined`, a
+ * pre-migration row) as `"v2"`; round 7 instead sent exactly those two values to the V1 reader below (astra
+ * 126i MEDIUM-1's reproduction: a null-version V2 row read `evidence_milestone_unbound` for a legitimate
+ * producer). `"v3"` resolves to itself. Anything else is UNKNOWN — a value nobody writes today, but the
+ * resolver must not silently guess a reader for it. This resolver is for a ROW's version only: the rowless
+ * configured default's `"v1"` sentinel ({@link resolveRowlessDefaultTarget}) never flows through it.
+ */
+type ResolvedRowEscrowVersion = "v2" | "v3" | "unknown";
+function resolveEscrowRowVersion(version: string | null | undefined): ResolvedRowEscrowVersion {
+  if (version === "v3") return "v3";
+  if (version === null || version === undefined || version === "v2") return "v2";
+  return "unknown";
+}
+
+/**
+ * N79 round 8 (P2, astra 126i MEDIUM-1): the verifier's CLOSED input. The CALLER computes ONE of these
+ * three — never a raw column value — so the verifier itself can never conflate "this came from the rowless
+ * configured default" with "this is what a row's `version` column happens to contain". Passing the raw column
+ * through to a verifier that dispatches on the string would send a row that literally holds `"v1"` (a value
+ * {@link resolveEscrowRowVersion} maps to UNKNOWN) to `getEscrowStateV1`, exactly like a real rowless target.
+ * The selector collapses both callers' own resolution into a type the verifier cannot misread:
+ *   - `"rowless-v1"`: ONLY the rowless configured default caller passes this (reachable only when
+ *     {@link resolveRowlessDefaultTarget} returned `version: "v1"` — i.e. `ESCROW_CONTRACT_VERSION` is
+ *     explicitly `"v1"`).
+ *   - `"v2"`: ONLY the job-owned-row caller passes this, and only after {@link resolveEscrowRowVersion} itself
+ *     resolved the row's version to `"v2"` — a raw `"v1"`, `"v3"`, or any other string never reaches here.
+ *   - `"refuse"`: everything else (a row resolved to `"v3"` or UNKNOWN).
+ */
+type MilestoneVerificationSelector = "rowless-v1" | "v2" | "refuse";
+
+/**
+ * P2 (N79 round 7/8): fresh confirmation, right before a chain WRITE, that the chain milestone at `derivedIndex`
+ * still carries the step identity this call derived its target from. Dispatches on the CLOSED `selector` (see
+ * {@link MilestoneVerificationSelector}): `"rowless-v1"` → {@link getEscrowStateV1}; `"v2"` → {@link
+ * getEscrowStateV2} (lead round-7 addendum: decoding a V2 clone's 12-field milestone struct through the V1
+ * ABI's shorter 9-field tuple is a PLAUSIBLE field-order-superset argument, but unproven against a live
+ * contract — a wrong decode here would fail closed every V2 job's evidence submit, silently, which is worse
+ * than the extra reader); `"refuse"` → no read at all (no existing reader is a confirmed match for v3;
+ * guessing for an unresolved value is worse than refusing). A failed read refuses the same way: this never
+ * throws, and it adds no chain call on a path that was not already about to make one (callers only reach this
+ * once a chain WRITE is already decided).
  */
 async function verifyDerivedMilestoneOnChain(
   contractAddress: string,
   derivedIndex: number,
   expectedStepId: string,
-  escrowVersion: string | null | undefined,
+  selector: MilestoneVerificationSelector,
 ): Promise<boolean> {
-  if (escrowVersion === "v3") return false; // the matching reader cannot be determined — refuse.
+  if (selector === "refuse") return false;
   try {
     const expectedHash = keccak256(toBytes(expectedStepId)).toLowerCase();
     const chainState =
-      escrowVersion === "v2" ? await getEscrowStateV2(contractAddress as Address) : await getEscrowStateV1(contractAddress as Address);
+      selector === "rowless-v1"
+        ? await getEscrowStateV1(contractAddress as Address)
+        : await getEscrowStateV2(contractAddress as Address);
     const m = chainState.milestones[derivedIndex];
     if (!m) return false;
     return m.stepId.toLowerCase() === expectedHash;
@@ -213,10 +323,14 @@ export class SettlementService {
     // (no job-owned escrow AND no matched env-default target) — Step 3/4 never fire on those paths anyway (no
     // contractAddress, or writes disabled), so nothing downstream ever acts on an undereived value.
     let derivedMilestoneIndex = suppliedMilestoneIndex ?? 0;
-    // The escrow version this call's derived index was checked against, for the fresh pre-chain-write
-    // verification below (`verifyDerivedMilestoneOnChain`). `undefined` for the env-default (no-row) path — the
-    // kernel's documented fallback is always a v1-style escrow (kernel-service.ts:28-30).
-    let derivedMilestoneEscrowVersion: string | null | undefined;
+    // The CLOSED selector for the fresh pre-chain-write verification below (`verifyDerivedMilestoneOnChain`) —
+    // computed HERE, by this function, never passed a raw column value (N79 round 8, P2; see
+    // {@link MilestoneVerificationSelector}'s doc). `undefined` for a path that derives nothing
+    // (Step 3/4 never fire on it anyway).
+    let derivedMilestoneSelector: MilestoneVerificationSelector | undefined;
+    // N79 round 8 (P3): hoisted so Step 2's header computation can read the SAME authoritative job this block
+    // already bound to, instead of a second, potentially-stale lookup.
+    let authoritativeJob: AuthoritativeJobRow;
 
     // N79 round 5 (R5-H1, astra 126e Q2 HIGH): true ONLY once this bundle's row is confirmed to hold exactly what
     // this call submits — inserted fresh, or found as an exact re-delivery. Any failure before that (a primary-key
@@ -245,25 +359,35 @@ export class SettlementService {
     // every caller before this round got a result object back. Touch nothing on failure: no persistence, no
     // chain activity — which the early return already guarantees.
     try {
-      const authoritativeJob = getRepos().jobs.findById(jobId);
+      authoritativeJob = getRepos().jobs.findById(jobId);
+      // A `const` alias, narrowed to non-undefined by the guard below: the OUTER `let authoritativeJob` is
+      // hoisted for Step 2 (N79 round 8, P3) to read later, but TypeScript cannot carry a `let`'s narrowing
+      // into a closure (e.g. the `.reduce` callback below) — only a `const` keeps it. `job` is that alias for
+      // the rest of THIS bind-first block.
+      const job = authoritativeJob;
       if (
-        !authoritativeJob ||
+        !job ||
         bundle.jobId !== jobId ||
-        bundle.stepId !== authoritativeJob.stepId ||
-        bundle.kernelId !== authoritativeJob.kernelId ||
-        bundle.assuranceTier !== (authoritativeJob.assuranceTier ?? 0)
+        bundle.stepId !== job.stepId ||
+        bundle.kernelId !== job.kernelId ||
+        bundle.assuranceTier !== (job.assuranceTier ?? 0)
       ) {
         return { ...result, error: "evidence_job_mismatch" };
       }
 
-      // ── The escrow target (N79 round 7, P2, astra 126g HIGH) ──────────────
-      // Resolve the ONE allowed target BEFORE Step 1: the job's own escrow row's address when a row exists, else
-      // the normalized env default when one is set, else none. Round 6 only ran the comparison `if
-      // (jobOwnEscrow)` — a job with NO escrow row skipped the comparison entirely, letting ANY supplied
-      // contractAddress through (astra 126g H2: an unrelated address reached the chain for a job with no row).
+      // ── The escrow target (N79 round 7/8, P2, astra 126g HIGH / 126i MEDIUM-1) ─
+      // Resolve the ONE allowed target BEFORE Step 1: the job's own escrow row's address when a row exists,
+      // else the rowless configured default when one is explicitly configured, else none. Round 6 only ran the
+      // comparison `if (jobOwnEscrow)` — a job with NO escrow row skipped the comparison entirely, letting ANY
+      // supplied contractAddress through (astra 126g H2). Round 7 then read the env address unconditionally,
+      // assuming it always answers to V1 (astra 126i MEDIUM-1: production sets it to the V2 factory —
+      // docs/V2_DEPLOY.md:183 — so an address alone proves nothing about which ABI is behind it). Round 8:
+      // {@link resolveRowlessDefaultTarget} returns a target ONLY when `ESCROW_CONTRACT_VERSION` is explicitly
+      // configured — with no configured version, a rowless job has NO chain target, and a supplied
+      // contractAddress is still `escrow_mismatch` below.
       const jobOwnEscrow = escrowForJob(jobId);
-      const envDefault = process.env.ESCROW_CONTRACT_ADDRESS;
-      const allowedTarget = jobOwnEscrow ? jobOwnEscrow.contractAddress : envDefault || undefined;
+      const rowlessDefault = resolveRowlessDefaultTarget();
+      const allowedTarget = jobOwnEscrow ? jobOwnEscrow.contractAddress : rowlessDefault?.address;
       if (contractAddress) {
         if (!allowedTarget) {
           return { ...result, error: "escrow_mismatch" };
@@ -292,26 +416,32 @@ export class SettlementService {
         // so this runs even when no contractAddress was supplied (Step 3/4 just never act on it then).
         const localRows = getRepos().escrows.findMilestonesByEscrow(jobOwnEscrow.id);
         const localMatches = localRows.reduce<number[]>((acc, row, i) => {
-          if (row.stepId === authoritativeJob.stepId) acc.push(i);
+          if (row.stepId === job.stepId) acc.push(i);
           return acc;
         }, []);
         if (localMatches.length !== 1) {
           return { ...result, error: "evidence_milestone_unbound" };
         }
         derivedMilestoneIndex = localMatches[0]!;
-        derivedMilestoneEscrowVersion = jobOwnEscrow.version;
+        // N79 round 8 (P2): resolved HERE, not passed as the raw column — a row
+        // that literally holds "v1" (never written by {@link resolveRowlessDefaultTarget}; a value
+        // {@link resolveEscrowRowVersion} maps to UNKNOWN) must refuse, not dispatch through the rowless
+        // sentinel.
+        derivedMilestoneSelector = resolveEscrowRowVersion(jobOwnEscrow.version) === "v2" ? "v2" : "refuse";
         if (suppliedMilestoneIndex !== undefined && suppliedMilestoneIndex !== derivedMilestoneIndex) {
           return { ...result, error: "evidence_milestone_mismatch" };
         }
       } else if (allowedTarget && contractAddress && isWriteEnabled()) {
-        // Without a row (the env default): the unique ON-CHAIN milestone whose stepId equals
+        // Without a row (the rowless configured default): the unique ON-CHAIN milestone whose stepId equals
         // keccak256(toBytes(job.stepId)) — derivation itself requires a chain read here, since there is no
         // local row to consult. Skipped when writes are disabled or no target is supplied: Step 3/4 can never
         // make a chain call on that path, and this derivation's own read must not be added where nothing else
-        // would ever read or write the chain.
+        // would ever read or write the chain. `allowedTarget` is truthy here ONLY because `rowlessDefault`
+        // resolved above (no job-owned row) — i.e. `ESCROW_CONTRACT_VERSION === "v1"` is already confirmed, so
+        // V1 is the unambiguous reader (N79 round 8, P2: NOT "always v1-style" — explicitly configured v1-style).
         try {
           const chainState = await getEscrowStateV1(contractAddress as Address);
-          const expectedHash = keccak256(toBytes(authoritativeJob.stepId)).toLowerCase();
+          const expectedHash = keccak256(toBytes(job.stepId)).toLowerCase();
           const chainMatches = chainState.milestones.reduce<number[]>((acc, m, i) => {
             if (m.stepId.toLowerCase() === expectedHash) acc.push(i);
             return acc;
@@ -320,7 +450,7 @@ export class SettlementService {
             return { ...result, error: "evidence_milestone_unbound" };
           }
           derivedMilestoneIndex = chainMatches[0]!;
-          derivedMilestoneEscrowVersion = undefined; // the env default is always v1-style.
+          derivedMilestoneSelector = "rowless-v1"; // the ONLY caller allowed to pass this selector value.
           if (suppliedMilestoneIndex !== undefined && suppliedMilestoneIndex !== derivedMilestoneIndex) {
             return { ...result, error: "evidence_milestone_mismatch" };
           }
@@ -440,20 +570,36 @@ export class SettlementService {
                 const repos = getRepos();
                 const storeDb = getStore().db;
 
+                // N79 round 8 (P3, astra 126i HIGH-1): ONE computed header row and ONE computed set of event
+                // rows for THIS call — from the AUTHORITATIVE job (bind-first already confirmed it names this
+                // bundle), never the bundle, for the job-bound columns. The SAME two values feed the fresh
+                // insert below AND the re-delivery comparison, so they can never drift apart.
+                //
+                // Narrowed here, not with `?.`: Step 2 only ever runs when bind-first above already returned
+                // early otherwise (there is no path from a falsy `authoritativeJob` to this line), but that
+                // invariant does not survive TypeScript's closure analysis for a hoisted `let` — an explicit
+                // guard, not a blind `!` assertion, keeps `computeEvidenceHeaderRow`'s `job` parameter honestly
+                // non-undefined and leaves a clear error if the invariant is ever actually violated.
+                if (!authoritativeJob) {
+                  throw new Error("processEvidence: authoritativeJob missing in Step 2 after bind-first succeeded");
+                }
+                const computedHeader = computeEvidenceHeaderRow(bundle, authoritativeJob);
+                const computedEvents = computeEvidenceEventRows(bundle);
+
                 // N79 round 6 (H1-A / addendum 1 P3): the header row and all its events are written in ONE
                 // transaction, and `bundlePersisted` is set only once it COMMITS. Before this, the header insert
                 // and the events insert were two separate writes: a header that landed followed by an events
                 // write that threw left `bundlePersisted` true forever (nothing ever reset it), so the job still
                 // settled — on-chain submission and auto-release both included — on evidence this call never
                 // actually finished persisting (astra 126f H1-A). Re-delivery now must match the header AND the
-                // stored events (the same set of (event id, event hash)) to count as exact: a header whose events
-                // are missing or different (a LEGACY partial row, possibly from before this fix existed) is a
-                // conflict, not an idempotent retry — healing it silently here would let a call settle on
-                // evidence it did not itself commit. Deliberately NOT wrapped in its own try/catch: any throw
-                // (the deliberate re-throws below, or anything unanticipated, e.g. a re-read that itself fails)
-                // propagates to the SAME outer catch the original two-write version relied on, so it skips
-                // `bundlePersisted = true` AND the unconditional status marker below exactly as before — the
-                // outer catch's own fallback (`if (!bundlePersisted && !result.error) ...`) still applies.
+                // stored events (EVERY column of each) to count as exact: a header whose events are missing or
+                // different (a LEGACY partial row, possibly from before this fix existed) is a conflict, not an
+                // idempotent retry — healing it silently here would let a call settle on evidence it did not
+                // itself commit. Deliberately NOT wrapped in its own try/catch: any throw (the deliberate
+                // re-throws below, or anything unanticipated, e.g. a re-read that itself fails) propagates to
+                // the SAME outer catch the original two-write version relied on, so it skips `bundlePersisted =
+                // true` AND the unconditional status marker below exactly as before — the outer catch's own
+                // fallback (`if (!bundlePersisted && !result.error) ...`) still applies.
                 let bundleRejectedAsInvalid = false; // N79 round 7 (P3): set only by the up-front reject below —
                 // must NOT count as persisted even though the transaction returns without throwing.
                 storeDb.transaction(() => {
@@ -477,37 +623,25 @@ export class SettlementService {
                   }
 
                   try {
-                    repos.evidence.insert({
-                        id: bundle.id,
-                        jobId: bundle.jobId,
-                        stepId: bundle.stepId,
-                        kernelId: bundle.kernelId,
-                        assuranceTier: bundle.assuranceTier,
-                        bundleHash: bundle.bundleHash,
-                        kernelSignature: bundle.kernelSignature,
-                        createdAt: bundle.createdAt,
-                      });
+                    repos.evidence.insert(computedHeader);
                     } catch (insertErr) {
                       // A PRE-EXISTING row under this id (from a prior call, possibly a different bundle
-                      // entirely). N79 round 7 (P3, astra 126g HIGH): exact ONLY when the header matches on
-                      // EVERY persisted column — kernelSignature by canonical deep equality, and createdAt, are
-                      // now both compared (round 6 omitted both: a re-delivery differing ONLY in kernelSignature
-                      // or createdAt used to read as identical) — AND the stored + incoming events are a true
-                      // one-to-one match via {@link eventsExactMatch} (round 6's `length + every(...some(...))`
-                      // is not a bijection: stored [A,B] wrongly accepted incoming [A,A], since each incoming A
-                      // independently matched stored A without the comparison ever consuming it).
+                      // entirely). N79 round 8 (P3, astra 126i HIGH-1): exact ONLY when the STORED header
+                      // matches the COMPUTED header on EVERY persisted column — enumerated from
+                      // `getTableColumns(schema.evidenceBundles)` itself via {@link headerExactMatch}, not a
+                      // hand list (round 7's hand list omitted `sessionKeyAuthorization` and `tenantId`
+                      // entirely: a re-delivery differing ONLY in the signing key's delegation, or landing under
+                      // a different tenant, used to read as identical) — AND the stored + computed events are a
+                      // true one-to-one match via {@link eventsExactMatch} over every event column (round 6's
+                      // `length + every(...some(...))` is not a bijection: stored [A,B] wrongly accepted
+                      // incoming [A,A], since each incoming A independently matched stored A without the
+                      // comparison ever consuming it).
                       const existing = repos.evidence.findById(bundle.id);
                       const existingEvents = existing ? repos.evidence.findEventsByBundle(bundle.id) : [];
                       const exactReDelivery =
                         existing !== undefined &&
-                        existing.jobId === bundle.jobId &&
-                        existing.stepId === bundle.stepId &&
-                        existing.kernelId === bundle.kernelId &&
-                        existing.assuranceTier === bundle.assuranceTier &&
-                        existing.bundleHash === bundle.bundleHash &&
-                        deepEqualCanonical(existing.kernelSignature, bundle.kernelSignature) &&
-                        existing.createdAt === bundle.createdAt &&
-                        eventsExactMatch(existingEvents, bundle.events);
+                        headerExactMatch(existing, computedHeader) &&
+                        eventsExactMatch(existingEvents, computedEvents);
                       if (exactReDelivery) {
                         console.warn(`[settlement] Evidence bundle ${bundle.id} already persisted identically — idempotent re-delivery, proceeding.`);
                         return; // nothing to write; the transaction commits as a no-op.
@@ -526,19 +660,9 @@ export class SettlementService {
                     }
 
                     // The header was freshly inserted by THIS call. Write its events in the SAME transaction.
-                    if (bundle.events.length > 0) {
+                    if (computedEvents.length > 0) {
                       try {
-                        repos.evidence.insertEvents(
-                          bundle.events.map((ev) => ({
-                            id: ev.id,
-                            bundleId: bundle.id,
-                            type: ev.type,
-                            timestamp: ev.timestamp,
-                            source: ev.source,
-                            payload: ev.payload as Record<string, unknown>,
-                            hash: ev.hash,
-                          })),
-                        );
+                        repos.evidence.insertEvents(computedEvents);
                       } catch (eventsErr) {
                         // This call's OWN attempt failed partway — not a conflict with anything pre-existing (no
                         // such row was found a moment ago). Roll back the header too: partial persistence must
@@ -618,7 +742,7 @@ export class SettlementService {
                     addr,
                     derivedMilestoneIndex,
                     bundle.stepId,
-                    derivedMilestoneEscrowVersion,
+                    derivedMilestoneSelector ?? "refuse", // never actually undefined here — Step 3 only runs once bind-first set one of the two real selectors; "refuse" is the fail-closed default if that invariant were ever violated.
                   );
                   if (!onChainBindingOk) {
                     result.error = "evidence_milestone_unbound";
@@ -759,7 +883,7 @@ export class SettlementService {
                     contractAddress as Address,
                     derivedMilestoneIndex,
                     bundle.stepId,
-                    derivedMilestoneEscrowVersion,
+                    derivedMilestoneSelector ?? "refuse", // same fail-closed default as Step 3's call above.
                   );
                   if (!onChainBindingOk) {
                     traceCollector.endSpan({ traceId: localTraceId, spanId: onchainReleaseSpanId, status: "error" });
@@ -866,19 +990,31 @@ export class SettlementService {
 
     // N79 round 4 (R4-H1, astra 126b Q1 HIGH); reordered round 5 (R5-M1, astra 126e Q1 MEDIUM): resolve ONE escrow
     // BEFORE checking anything else about it. The target is the caller's contractAddress, else the JOB's own
-    // escrow's address, else the env default. When the job has its own escrow, the target must name THAT exact
-    // row: a caller supplying a different escrow's address (or a stale env default, for a job whose escrow is a
-    // per-job V2 clone) is refused here, before the chain and before any lease. Without this, the service could
-    // lease the job's own escrow while releasing, and recording the release against, a completely different one.
+    // escrow's address, else the rowless configured default. When the job has its own escrow, the target must
+    // name THAT exact row: a caller supplying a different escrow's address (or a stale rowless default, for a
+    // job whose escrow is a per-job V2 clone) is refused here, before the chain and before any lease. Without
+    // this, the service could lease the job's own escrow while releasing, and recording the release against, a
+    // completely different one.
     //
     // R5-M1: this resolution + mismatch check now runs BEFORE the given-back check below. It used to run after: an
     // UNRELATED refunded env default, or an explicitly-named refunded escrow that was not even the job's own, was
     // checked for "given back" before the job's actual target was ever resolved — wrongly refusing a job A whose
     // OWN escrow was perfectly fine, with the wrong error (`escrow_refunded` instead of `escrow_mismatch`, or
     // instead of no refusal at all).
+    //
+    // N79 round 8 (P2, astra 126i MEDIUM-1): the rowless fallback goes through
+    // {@link resolveRowlessDefaultTarget} (the SAME resolver `processEvidence`'s allowed target uses), not a
+    // direct `ESCROW_CONTRACT_ADDRESS` read — an address alone does not say which ABI answers at it (production
+    // sets it to the V2 factory address, docs/V2_DEPLOY.md:183). Before this round, a rowless job's
+    // CALLER-SUPPLIED address was never compared against anything (the `if (!contractAddress)` block only
+    // FILLS IN a missing address; it is not a comparison), so an unrelated escrow's address, belonging to a
+    // completely different job, went through `givenBackEscrow`/`beginSettlement` below and could lease, and
+    // call the chain release against, that escrow. A supplied address for a rowless job must now be the
+    // configured rowless default. `rowlessTarget` is resolved once; the fill-in and the comparison read it.
     const jobRow = escrowForJob(jobId);
+    const rowlessTarget = jobRow ? undefined : resolveRowlessDefaultTarget();
     if (!contractAddress) {
-      contractAddress = jobRow?.contractAddress ?? process.env.ESCROW_CONTRACT_ADDRESS;
+      contractAddress = jobRow?.contractAddress ?? rowlessTarget?.address;
     }
     if (!contractAddress) {
       return {
@@ -900,6 +1036,27 @@ export class SettlementService {
         targetIsJobsOwnEscrow = false;
       }
       if (!targetIsJobsOwnEscrow) {
+        return { jobId, txHash: "", status: "failed", error: "escrow_mismatch" };
+      }
+    } else {
+      // A rowless job: the ONLY allowed target is the configured rowless default — a SUPPLIED address must
+      // equal it (string or checksum equality), before `givenBackEscrow`, `beginSettlement`, or any chain call.
+      // No configured default (`rowlessTarget` undefined) plus a supplied address is `escrow_mismatch` too —
+      // there is nothing a rowless job's target could legitimately equal. (When no address was supplied and
+      // the fallback above filled one in from `rowlessTarget?.address`, this trivially passes: the same value
+      // compared to itself.)
+      let targetIsRowlessDefault = false;
+      try {
+        targetIsRowlessDefault =
+          !!rowlessTarget &&
+          (contractAddress === rowlessTarget.address ||
+            (isAddress(contractAddress) &&
+              isAddress(rowlessTarget.address) &&
+              getAddress(contractAddress) === getAddress(rowlessTarget.address)));
+      } catch {
+        targetIsRowlessDefault = false;
+      }
+      if (!targetIsRowlessDefault) {
         return { jobId, txHash: "", status: "failed", error: "escrow_mismatch" };
       }
     }
@@ -947,10 +1104,11 @@ export class SettlementService {
         // refund can land on funds that moved) — the caller is told it was not recorded (F5).
         try {
           const chainState = await getEscrowStateV1(contractAddress as Address);
+          // N79 round 8 (P4, astra 126i MEDIUM-2): abiVersion "v1" -- the reader two lines up is getEscrowStateV1.
           const outcome = recordChainSettlement(claim, {
             stepIds: chainState.milestones.map((m) => m.stepId as Hex),
             statuses: chainState.milestones.map((m) => m.status),
-            releasedStatus: MilestoneStatus.Released,
+            abiVersion: "v1",
           });
           if (!outcome.ok) {
             recordFailed = true;

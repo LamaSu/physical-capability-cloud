@@ -67,6 +67,11 @@ import { getRepos, getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 // The words this module writes live in @pcc/spec, so the job read (readmodels) reads the same ones.
 import { ESCROW_REFUND_STATUS, TERMINAL_JOB_STATUSES } from "@pcc/spec";
+// N79 round 8 (P4, astra 126i MEDIUM-2): the three ABIs' own status enums are the writer's ONLY source for
+// "Released" and for the valid status domain (never a new numeric literal). They come from @pcc/contracts/abi,
+// which exports all three and which no test mocks: not from the chain client (viem and env reads at module
+// load), and not from the @pcc/contracts root (story-pipeline.test.ts mocks that root with a non-hoisted factory).
+import { MilestoneStatus, MilestoneStatusV2, MilestoneStatusV3 } from "@pcc/contracts/abi";
 
 /** The job statuses that end a job without completing it: every terminal status in the spec except `completed`. */
 export const TERMINAL_FAILURE_JOB_STATUSES: ReadonlySet<string> = new Set(
@@ -169,6 +174,26 @@ export function escrowByContractAddress(contractAddress: string) {
     if (row) return row;
   }
   return undefined;
+}
+
+/**
+ * N79 round 8 (P2, astra 126i MEDIUM-1): the ONE resolver for the rowless default target — the address a job
+ * with NO escrow row of its own may still settle against, when the deployment is configured for it. An address
+ * alone (`ESCROW_CONTRACT_ADDRESS`) proves nothing about which ABI answers at it: production sets it to the V2
+ * factory address (`docs/V2_DEPLOY.md:183`), not a V1 escrow. Returns the v1 target ONLY when
+ * `ESCROW_CONTRACT_VERSION` is explicitly `"v1"` (the one case the rowless default is still unambiguous — see
+ * `verifyDerivedMilestoneOnChain`'s doc comment in settlement-service.ts); otherwise none. Every consumer of the
+ * rowless default (`autoReleaseContractAddress` in kernel-service.ts; `processEvidence`'s allowed target and its
+ * rowless milestone derivation, and `releaseMilestone`'s rowless fallback, both in settlement-service.ts) calls
+ * this instead of reading `ESCROW_CONTRACT_ADDRESS` directly, so a rowless job with no configured version has NO
+ * chain target: the evidence is persisted, nothing touches the chain (round 7 wrongly assumed v1 unconditionally
+ * — the false "always v1-style" comments this round removes).
+ */
+export function resolveRowlessDefaultTarget(): { address: string; version: "v1" } | undefined {
+  const address = process.env.ESCROW_CONTRACT_ADDRESS;
+  if (!address) return undefined;
+  if (process.env.ESCROW_CONTRACT_VERSION !== "v1") return undefined;
+  return { address, version: "v1" };
 }
 
 /**
@@ -431,10 +456,32 @@ export function checkChainMapping(escrowId: string, chain: ChainMapping): ChainM
   return { ok: true, chainCount, localCount };
 }
 
-/** `chain` plus the version-specific "fully paid" status value (V1/V2/V3 all currently encode Released=5, but
- *  this module takes no dependency on any one version's enum — the caller names it explicitly). */
+/**
+ * `chain` plus the ABI whose enum decoded `statuses` (N79 round 8, P4, astra 126i MEDIUM-2: round 7 let the
+ * caller hand in a bare `releasedStatus` number with no domain behind it — any two equal integers, in or out of
+ * the real enum, read as "released". `abiVersion` names the reader instead, so the writer derives BOTH the
+ * "fully paid" value and the full valid domain from that version's own enum object — never a new numeric
+ * literal here). V1/V2/V3 currently encode an identical 0..8 domain (Released=5), but this module takes no
+ * assumption of that: each version's domain comes from its own enum export.
+ */
 export interface ChainSettlementInput extends ChainMapping {
-  releasedStatus: number;
+  abiVersion: "v1" | "v2" | "v3";
+}
+
+/** `abiVersion` -> that ABI's own enum object, as `MilestoneStatus` / `MilestoneStatusV2` / `MilestoneStatusV3`
+ *  (all three from `@pcc/contracts/abi` — see the import comment above) already export them — the writer's
+ *  ONLY source for "what is Released" and "what is a valid status at all" (see {@link ChainSettlementInput}). */
+function abiStatusEnum(abiVersion: string): Record<string, number> | undefined {
+  switch (abiVersion) {
+    case "v1":
+      return MilestoneStatus;
+    case "v2":
+      return MilestoneStatusV2;
+    case "v3":
+      return MilestoneStatusV3;
+    default:
+      return undefined;
+  }
 }
 
 /** The outcome of {@link recordChainSettlement}. */
@@ -488,17 +535,34 @@ export interface ChainSettlementResult {
 export function recordChainSettlement(claim: SettlementClaim, chain: ChainSettlementInput): ChainSettlementResult {
   const repos = getRepos();
   const localRows = repos.escrows.findMilestonesByEscrow(claim.escrowId);
-  // N79 round 7 (P4, astra 126g MEDIUM): `releasedStatus` is the value every status in `chain.statuses` is
-  // compared against below — a non-integer (NaN, a float, a string that slipped through a loose caller) can
-  // never legitimately equal an on-chain enum value, so treat it as drift too: refuse before any write, exactly
-  // like a cardinality or identity mismatch.
-  if (!Number.isInteger(chain.releasedStatus)) {
+  // N79 round 8 (P4, astra 126i MEDIUM-2): an `abiVersion` this writer does not recognize is drift — refuse
+  // before any write, exactly like a cardinality or identity mismatch. (TypeScript's own union already refuses
+  // this for in-tree callers; a test or a loosely-typed caller can still hand in a garbage string at runtime.)
+  const statusEnum: Record<string, number> | undefined = abiStatusEnum(chain.abiVersion);
+  if (!statusEnum) {
     console.error("[escrow] settlement_mapping_mismatch", {
       escrowId: claim.escrowId,
-      error: "releasedStatus must be an integer",
-      releasedStatus: chain.releasedStatus,
+      error: "unknown abiVersion",
+      abiVersion: chain.abiVersion,
     });
     return { ok: false, drifted: true };
+  }
+  const releasedStatus = statusEnum.Released!;
+  const statusDomain = new Set(Object.values(statusEnum));
+  // Round 7 (P4, astra 126g MEDIUM) checked only that `releasedStatus` itself was an integer — any two equal
+  // integers, in or out of the real enum, then read as "released" (astra 126i MEDIUM-2's own reproduction:
+  // statuses:[999], releasedStatus:999 completed the escrow). Every entry of `statuses` must be an integer
+  // INSIDE this version's domain, or it is drift: refuse before any write.
+  for (const s of chain.statuses) {
+    if (!Number.isInteger(s) || !statusDomain.has(s)) {
+      console.error("[escrow] settlement_mapping_mismatch", {
+        escrowId: claim.escrowId,
+        error: "status outside the ABI's domain",
+        abiVersion: chain.abiVersion,
+        status: s,
+      });
+      return { ok: false, drifted: true };
+    }
   }
   const mapping = checkChainMapping(claim.escrowId, chain);
   if (!mapping.ok) {
@@ -513,7 +577,7 @@ export function recordChainSettlement(claim: SettlementClaim, chain: ChainSettle
 
   return storeDb().transaction(() => {
     for (let i = 0; i < localRows.length; i++) {
-      if (chain.statuses[i] !== chain.releasedStatus) continue;
+      if (chain.statuses[i] !== releasedStatus) continue;
       if (localRows[i]!.status === "released") continue;
       try {
         repos.escrows.updateMilestoneStatus(localRows[i]!.id, "released");
@@ -532,7 +596,7 @@ export function recordChainSettlement(claim: SettlementClaim, chain: ChainSettle
     // for a claim that is no longer the live holder.
     if (settlementLeases.get(claim.escrowId) !== claim.token) return { ok: true, completed: false };
 
-    const allReleased = chain.statuses.length > 0 && chain.statuses.every((s) => s === chain.releasedStatus);
+    const allReleased = chain.statuses.length > 0 && chain.statuses.every((s) => s === releasedStatus);
     if (allReleased) {
       const completed = casEscrowStatus(claim.escrowId, claim.leasedStatus, "completed");
       return { ok: true, completed };

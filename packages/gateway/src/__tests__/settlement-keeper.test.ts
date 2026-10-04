@@ -50,15 +50,23 @@ vi.mock("../services/settlement-crank.js", () => ({
 // `checkChainMapping` (the P4 compare) and `recordChainSettlement` (the ONE guarded writer, P1), which the keeper now
 // calls UNCONDITIONALLY once per escrow whenever the mapping is clean — not only when every milestone turns out
 // Released. The fake mirrors just enough of the real logic (no DB, no drift unless a test asks for it) to keep
-// `result.reconciledCompleted` meaningful: completed iff every status in the chain set equals `releasedStatus`.
+// `result.reconciledCompleted` meaningful: completed iff every status in the chain set is Released.
+//
+// N79 round 8, lead review iteration 2, item 5(iii) (fixture-only, no assertion changed): the real
+// `recordChainSettlement` dropped the caller-supplied `releasedStatus` number for an `abiVersion` the writer
+// resolves its OWN domain from (escrow-refund.ts) — the keeper's production call (settlement-keeper.ts) now
+// passes `abiVersion: "v2"`, not `releasedStatus`. This fake's `completed` check is updated to match: `5` is
+// `MilestoneStatus.Released` / `MilestoneStatusV2.Released` / `MilestoneStatusV3.Released` in all three ABIs
+// today (identical 0..8 domains), so comparing against the literal is faithful to what the real writer would
+// resolve `abiVersion: "v2"`'s `Released` value to, without this fake needing to import any ABI enum itself.
 vi.mock("../services/escrow-refund.js", () => ({
   beginSettlement: vi.fn(), // its default implementation (claim everything) is set in beforeEach below
   endSettlement: vi.fn(),
   releaseEscrowFromSettlement: vi.fn(),
   checkChainMapping: vi.fn(() => ({ ok: true, chainCount: 0, localCount: 0 })),
-  recordChainSettlement: vi.fn((_claim: unknown, chain: { statuses: number[]; releasedStatus: number }) => ({
+  recordChainSettlement: vi.fn((_claim: unknown, chain: { statuses: number[]; abiVersion: string }) => ({
     ok: true,
-    completed: chain.statuses.length > 0 && chain.statuses.every((s) => s === chain.releasedStatus),
+    completed: chain.statuses.length > 0 && chain.statuses.every((s) => s === 5), // 5 = Released in v1/v2/v3
   })),
 }));
 

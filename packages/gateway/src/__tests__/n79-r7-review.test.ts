@@ -358,11 +358,27 @@ describe("N79 round 7: Phase 1 — the review's findings, reproduced", () => {
     vi.mocked(chain.submitEvidence).mockResolvedValue({ transactionHash: "0xr7h3a-sig", status: "submitted" } as never);
     vi.mocked(chain.getEscrowStateV2).mockResolvedValue(v2ChainStateFor(getRepos().jobs.findById(jobId)!.stepId, address));
 
-    // createdAt pinned identically on BOTH calls — makeBundle()'s own default is `new Date().toISOString()`,
-    // which would otherwise ALSO differ between these two calls (real time elapses between them) and mask
-    // whether kernelSignature's own check does any work at all.
+    // N79 round 8, lead review iteration 2, item 5(iv) (determinism sweep): createdAt pinned identically on
+    // BOTH calls — makeBundle()'s own default is `new Date().toISOString()`, which would otherwise ALSO differ
+    // between these two calls (real time elapses between them) and mask whether kernelSignature's own check
+    // does any work at all. The event is ALSO pinned to the SAME object (reused, not independently
+    // reconstructed): makeBundle()'s default event timestamp is `new Date().toISOString()` too, and this test
+    // previously left it unpinned — under full-suite load the two independent `new Date()` reads could land on
+    // the same millisecond (masking whether kernelSignature was the actual reason for the conflict) or, if the
+    // SUITE were ever slow enough to straddle a millisecond there AS WELL, the event mismatch alone would still
+    // produce "conflict" and this test would falsely read as passing for the wrong reason either way — it
+    // never actually isolated kernelSignature. Reusing one event object makes the ONLY difference between the
+    // two deliveries the one this test names.
     const pinnedCreatedAt = "2026-01-01T00:00:00.000Z";
-    const bundleX = makeBundle(jobId, { id: "bundle-r7-h3a-sig", createdAt: pinnedCreatedAt });
+    const pinnedEvent = {
+      id: `ev-r7-${jobId}`,
+      type: "execution_started" as const,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      source: { deviceId: "dev-r7", deviceType: "controller" as const, kernelId: getRepos().jobs.findById(jobId)!.kernelId },
+      payload: { message: "Job started" },
+      hash: `sha256:${"c3".repeat(32)}` as `sha256:${string}`,
+    };
+    const bundleX = makeBundle(jobId, { id: "bundle-r7-h3a-sig", createdAt: pinnedCreatedAt, events: [pinnedEvent] });
     const first = await getSettlementService().processEvidence(bundleX, jobId, { milestoneIndex: 0, contractAddress: address });
     expect(first.error).toBeUndefined();
     expect(chain.submitEvidence).toHaveBeenCalledTimes(1);
@@ -370,6 +386,7 @@ describe("N79 round 7: Phase 1 — the review's findings, reproduced", () => {
     const redelivered = makeBundle(jobId, {
       id: "bundle-r7-h3a-sig",
       createdAt: pinnedCreatedAt,
+      events: [pinnedEvent],
       kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "secp256k1", value: "DIFFERENT_SIG" },
     });
     const second = await getSettlementService().processEvidence(redelivered, jobId, { milestoneIndex: 0, contractAddress: address });
@@ -385,12 +402,24 @@ describe("N79 round 7: Phase 1 — the review's findings, reproduced", () => {
     vi.mocked(chain.submitEvidence).mockResolvedValue({ transactionHash: "0xr7h3a-created", status: "submitted" } as never);
     vi.mocked(chain.getEscrowStateV2).mockResolvedValue(v2ChainStateFor(getRepos().jobs.findById(jobId)!.stepId, address));
 
-    const bundleX = makeBundle(jobId, { id: "bundle-r7-h3a-created", createdAt: "2026-01-01T00:00:00.000Z" });
+    // N79 round 8, lead review iteration 2, item 5(iv) (determinism sweep): the event is pinned to the SAME
+    // object on both deliveries, same reasoning as R7-H3a (kernelSignature) above — this test's own createdAt
+    // mismatch already guarantees "conflict" regardless (so it was never flaky), but it did not actually
+    // isolate createdAt as cleanly as its name claims while the event timestamp was free to vary too.
+    const pinnedEvent = {
+      id: `ev-r7-${jobId}`,
+      type: "execution_started" as const,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      source: { deviceId: "dev-r7", deviceType: "controller" as const, kernelId: getRepos().jobs.findById(jobId)!.kernelId },
+      payload: { message: "Job started" },
+      hash: `sha256:${"c3".repeat(32)}` as `sha256:${string}`,
+    };
+    const bundleX = makeBundle(jobId, { id: "bundle-r7-h3a-created", createdAt: "2026-01-01T00:00:00.000Z", events: [pinnedEvent] });
     const first = await getSettlementService().processEvidence(bundleX, jobId, { milestoneIndex: 0, contractAddress: address });
     expect(first.error).toBeUndefined();
     expect(chain.submitEvidence).toHaveBeenCalledTimes(1);
 
-    const redelivered = makeBundle(jobId, { id: "bundle-r7-h3a-created", createdAt: "2026-06-06T00:00:00.000Z" });
+    const redelivered = makeBundle(jobId, { id: "bundle-r7-h3a-created", createdAt: "2026-06-06T00:00:00.000Z", events: [pinnedEvent] });
     const second = await getSettlementService().processEvidence(redelivered, jobId, { milestoneIndex: 0, contractAddress: address });
 
     expect(second.error).toBe("evidence_bundle_conflict");
@@ -429,7 +458,7 @@ describe("N79 round 7: Phase 1 — the review's findings, reproduced", () => {
     const claim: SettlementClaim = begun.claim;
     const matchingStepId = keccak256(toBytes("step-1")) as Hex; // the one local row's stepId, hashed as production does on-chain
 
-    const outcome = recordChainSettlement(claim, { stepIds: [matchingStepId], statuses: [], releasedStatus: 5 });
+    const outcome = recordChainSettlement(claim, { stepIds: [matchingStepId], statuses: [], abiVersion: "v2" }); // N79 round 8, rule (a): was releasedStatus: 5; seed()'s escrow version is "v2"
 
     // Correct: drifted, nothing written, no hand-back — a cardinality mismatch between stepIds and statuses is
     // drift exactly like a cardinality mismatch between the chain and the local rows.
@@ -502,10 +531,12 @@ describe("N79 round 7: Phase 2 — properties (P2 / P3 / P4)", () => {
       // no row + env default + matching address: allowed.
       const { jobId } = seedBareJob();
       process.env.ESCROW_CONTRACT_ADDRESS = addr(0xfe1005);
+      process.env.ESCROW_CONTRACT_VERSION = "v1"; // N79 round 8, lead review iteration 2, item 5(ii)
       vi.mocked(chain.submitEvidence).mockClear().mockResolvedValue({ transactionHash: "0xp2-t4", status: "submitted" } as never);
       const r = await getSettlementService().processEvidence(makeBundle(jobId, { id: "bundle-p2-t4" }), jobId, { contractAddress: addr(0xfe1005) });
       expect(r.error, "no-row+env-match").not.toBe("escrow_mismatch");
       delete process.env.ESCROW_CONTRACT_ADDRESS;
+      delete process.env.ESCROW_CONTRACT_VERSION;
     }
     {
       // no row + env default + mismatching address: refused.
@@ -571,18 +602,21 @@ describe("N79 round 7: Phase 2 — properties (P2 / P3 / P4)", () => {
       // env-default chain scan finding NONE: refused, no submit.
       const { jobId, stepId } = seedBareJob();
       process.env.ESCROW_CONTRACT_ADDRESS = addr(0xfe2004);
+      process.env.ESCROW_CONTRACT_VERSION = "v1"; // N79 round 8, lead review iteration 2, item 5(ii)
       vi.mocked(chain.submitEvidence).mockClear().mockResolvedValue({ transactionHash: "0xp2-idx4", status: "submitted" } as never);
       vi.mocked(chain.getEscrowState).mockResolvedValue(v1ChainStateFor("not-this-jobs-step-at-all", addr(0xfe2004)));
       const r = await getSettlementService().processEvidence(makeBundle(jobId, { id: "bundle-p2-idx4" }), jobId, { contractAddress: addr(0xfe2004) });
       expect(r.error, "env-default-scan-finds-none").toBe("evidence_milestone_unbound");
       expect(chain.submitEvidence, "env-default-scan-finds-none").not.toHaveBeenCalled();
       delete process.env.ESCROW_CONTRACT_ADDRESS;
+      delete process.env.ESCROW_CONTRACT_VERSION;
       void stepId;
     }
     {
       // env-default chain scan finding SEVERAL (two milestones both matching): refused, no submit.
       const { jobId, stepId } = seedBareJob();
       process.env.ESCROW_CONTRACT_ADDRESS = addr(0xfe2005);
+      process.env.ESCROW_CONTRACT_VERSION = "v1"; // N79 round 8, lead review iteration 2, item 5(ii)
       vi.mocked(chain.submitEvidence).mockClear().mockResolvedValue({ transactionHash: "0xp2-idx5", status: "submitted" } as never);
       // Two on-chain milestones, BOTH carrying this job's own stepId identity — an ambiguous chain scan.
       const dupMatch = v1ChainStateFor(stepId, addr(0xfe2005), 0, 2) as { milestones: Array<{ stepId: string }> };
@@ -592,6 +626,7 @@ describe("N79 round 7: Phase 2 — properties (P2 / P3 / P4)", () => {
       expect(r.error, "env-default-scan-finds-several").toBe("evidence_milestone_unbound");
       expect(chain.submitEvidence, "env-default-scan-finds-several").not.toHaveBeenCalled();
       delete process.env.ESCROW_CONTRACT_ADDRESS;
+      delete process.env.ESCROW_CONTRACT_VERSION;
     }
   });
 
@@ -789,7 +824,7 @@ describe("N79 round 7: Phase 2 — properties (P2 / P3 / P4)", () => {
     // recordChainSettlement must refuse and write nothing for the LONGER case too, via a live claim.
     const begun = beginSettlement({ escrowId });
     if (!("claim" in begun)) throw new Error(`expected an acquired claim, got ${begun.disposition}`);
-    const outcome = recordChainSettlement(begun.claim, { stepIds: [matchingStepId], statuses: [5, 6], releasedStatus: 5 });
+    const outcome = recordChainSettlement(begun.claim, { stepIds: [matchingStepId], statuses: [5, 6], abiVersion: "v2" }); // N79 round 8, rule (a): was releasedStatus: 5; seed()'s escrow version is "v2"
     expect(outcome).toEqual(expect.objectContaining({ ok: false, drifted: true }));
     expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: ["funded"] });
   });

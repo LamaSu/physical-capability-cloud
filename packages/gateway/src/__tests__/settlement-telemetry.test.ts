@@ -234,10 +234,16 @@ describe("Settlement Pipeline Telemetry", () => {
     // N79 round 7 (P2 + the fresh pre-submit/pre-auto-release chain verification): job-settle-telemetry-001
     // has no escrow row, so the tests below that supply a contractAddress need the env default to resolve it,
     // plus a matching V1 milestone for the verification read. Fixture only; no assertion in this file changed.
+    // N79 round 8 (P2, astra 126i MEDIUM-1, authorized test change class (b)): also set/restore
+    // ESCROW_CONTRACT_VERSION in this SAME scoped hook — the rowless default now resolves through it, not the
+    // address alone (an address proves nothing about which ABI answers at it).
     let savedEscrowEnv: string | undefined;
+    let savedEscrowVersionEnv: string | undefined;
     beforeEach(async () => {
       savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
       process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
       const escrowMod = await import("../contracts/escrow-client.js");
       vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
         milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-settle-telemetry-001")!.stepId)) }],
@@ -246,6 +252,8 @@ describe("Settlement Pipeline Telemetry", () => {
     afterEach(() => {
       if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
       else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
     });
 
     it("emits settlement_claim started via pipelineTelemetry in processEvidence", async () => {
@@ -306,10 +314,16 @@ describe("Settlement Pipeline Telemetry", () => {
     // — only the FIRST test below supplies a contractAddress through processEvidence; the other two call
     // releaseMilestone directly and manage ESCROW_CONTRACT_ADDRESS themselves (unaffected either way, since
     // their own in-test set/delete runs after this beforeEach). Fixture only; no assertion changed.
+    // N79 round 8 (P2, astra 126i MEDIUM-1, authorized test change class (b)): also set/restore
+    // ESCROW_CONTRACT_VERSION in this SAME scoped hook — the rowless default now resolves through it, not the
+    // address alone (an address proves nothing about which ABI answers at it).
     let savedEscrowEnv: string | undefined;
+    let savedEscrowVersionEnv: string | undefined;
     beforeEach(async () => {
       savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
       process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
       const escrowMod = await import("../contracts/escrow-client.js");
       vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
         milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-settle-telemetry-001")!.stepId)) }],
@@ -318,6 +332,8 @@ describe("Settlement Pipeline Telemetry", () => {
     afterEach(() => {
       if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
       else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
     });
 
     it("passes contractAddress to on-chain submit when write is enabled", async () => {
@@ -448,10 +464,16 @@ describe("Settlement Pipeline Telemetry", () => {
     // N79 round 7 (P2 + the fresh pre-submit/pre-auto-release chain verification): same fixture as
     // "settlement_complete phase" above — only the THIRD test below supplies a contractAddress. Fixture only;
     // no assertion in this file changed.
+    // N79 round 8 (P2, astra 126i MEDIUM-1, authorized test change class (b)): also set/restore
+    // ESCROW_CONTRACT_VERSION in this SAME scoped hook — the rowless default now resolves through it, not the
+    // address alone (an address proves nothing about which ABI answers at it).
     let savedEscrowEnv: string | undefined;
+    let savedEscrowVersionEnv: string | undefined;
     beforeEach(async () => {
       savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
       process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
       const escrowMod = await import("../contracts/escrow-client.js");
       vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
         milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-settle-telemetry-001")!.stepId)) }],
@@ -460,6 +482,8 @@ describe("Settlement Pipeline Telemetry", () => {
     afterEach(() => {
       if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
       else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
     });
 
     it("processEvidence always returns jobId and evidenceBundleId", async () => {
