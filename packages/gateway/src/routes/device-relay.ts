@@ -74,7 +74,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getStore, getRepos } from "../db.js";
-import { authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
+import { authorityOf, isAnonymous, refuseKernelAction, type KernelAuthority } from "../auth/kernel-authority.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { isToolSafe, getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
@@ -335,6 +335,27 @@ function isWriteToolCall(req: FastifyRequest, kernelId: string): boolean {
 }
 
 /**
+ * DECISIONS 00:42 (the steward's #6690): #400's table decides WHO may write through the tool-call
+ * route (the kernel's operator, or an active scope holder), and the decision tier requires that
+ * WHO to be AUTHENTIC. So a wallet the caller PROVED may make a write under the scope the call
+ * names when that scope is on this kernel, active, unexpired and created for that wallet. The same
+ * address merely claimed through an API key may not. The handler still requires the caller to be
+ * the scope's holder, and checks its tools, budget and escrow.
+ */
+function isProvenHolderOfNamedScope(req: FastifyRequest, authority: KernelAuthority, kernelId: string): boolean {
+  const scopeId = (req.body as { scopeId?: unknown } | undefined)?.scopeId;
+  if (authority.provenWallet === null || typeof scopeId !== "string") return false;
+  const scope = getStore().db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get();
+  return (
+    scope !== undefined &&
+    scope.kernelId === kernelId &&
+    scope.createdBy === authority.provenWallet &&
+    scope.status === "active" &&
+    new Date(scope.expiresAt) > new Date()
+  );
+}
+
+/**
  * preHandler for every relay route: default-deny, per kernel, on the kernel-authority tiers
  * (N126). A route missing from RELAY_ROUTE_ACCESS is refused. Decisions take the "decide" tier;
  * every other route takes "operate" (the admin, the proven operator wallet, or the kernel's own
@@ -357,9 +378,12 @@ async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
   }
 
   const { kernelId } = req.params as { kernelId: string };
-  if (RELAY_DECISION_ROUTES.has(routeKey) || (routeKey === "POST /api/relay/:kernelId/tool-call" && isWriteToolCall(req, kernelId))) {
+  const writeToolCall = routeKey === "POST /api/relay/:kernelId/tool-call" && isWriteToolCall(req, kernelId);
+  if (RELAY_DECISION_ROUTES.has(routeKey) || writeToolCall) {
     const decision = refuseKernelAction(req, authority, kernelId, "decide");
-    if (decision) return reply.status(decision.status).send(decision.body);
+    if (decision && !(writeToolCall && decision.status === 403 && isProvenHolderOfNamedScope(req, authority, kernelId))) {
+      return reply.status(decision.status).send(decision.body);
+    }
     return;
   }
   if (access === "object_owner") return; // the handler checks the addressed object

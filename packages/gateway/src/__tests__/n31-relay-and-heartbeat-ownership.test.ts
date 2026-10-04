@@ -150,6 +150,78 @@ describe("N31 device relay on master: #400's relayAccessGuard refuses a stranger
   });
 });
 
+describe("DECISIONS 00:42 (#6690): a PROVEN scope holder may make its scoped write; the same address claimed may not", () => {
+  // #400's table says WHO may write through the tool-call route: the kernel's operator, or an
+  // active scope holder. N31b's decision tier asks that WHO to be AUTHENTIC: proven or admin.
+  const BUYER = "0xB0B0000000000000000000000000000000000531";
+  const WRITE = "printer_print_text"; // not a safe tool for this kernel's (generic) device
+  let buyerRawKey = "";
+  const buyerKey = () => (buyerRawKey ||= provisionApiKey({ operatorId: BUYER, name: "n31-relay-buyer", scopes: ["*"] }).rawKey);
+  const asClaimedBuyer = () => bearer(buyerKey());
+  const asProvenBuyer = () => ({ ...bearer(buyerKey()), "x-test-proven-wallet": BUYER });
+  const rowsUnder = (scopeId: string) =>
+    getStore().db.select().from(schema.toolCallRelay).where(eq(schema.toolCallRelay.scopeId, scopeId)).all().length;
+  const mint = async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/relay/${KERNEL}/scope`,
+      headers: asProvenOperator(),
+      payload: { createdBy: BUYER, allowedTools: [WRITE], maxCommands: 5, expiresInMinutes: 5 },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
+  };
+  const write = (headers: Record<string, string>, scopeId?: string) =>
+    app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers, payload: { ...(scopeId ? { scopeId } : {}), toolName: WRITE, args: {} } });
+
+  it("the buyer's claimed key is refused its scoped write, and nothing is queued", async () => {
+    const scopeId = await mint();
+    const res = await write(asClaimedBuyer(), scopeId);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().reason).toBe("operator_proof_required");
+    expect(rowsUnder(scopeId)).toBe(0);
+  });
+
+  it("the buyer's PROVEN wallet makes its scoped write", async () => {
+    const scopeId = await mint();
+    const res = await write(asProvenBuyer(), scopeId);
+    expect(res.statusCode).toBe(201);
+    expect(rowsUnder(scopeId)).toBe(1);
+  });
+
+  it("a proven wallet is admitted only for a scope created for it, active, on this kernel", async () => {
+    const scopeId = await mint();
+    // A proven stranger naming the buyer's scope: the scope is not the stranger's.
+    const stranger = await write({ ...asStranger(), "x-test-proven-wallet": STRANGER }, scopeId);
+    expect(stranger.statusCode).toBe(403);
+    expect(stranger.json().reason).toBe("operator_proof_required");
+    // The buyer's proof on someone else's key: the handler still requires the caller to be the holder.
+    const mixed = await write({ ...asStranger(), "x-test-proven-wallet": BUYER }, scopeId);
+    expect(mixed.statusCode).toBe(403);
+    expect(mixed.json().error).toBe("scope_not_yours");
+    // A proven buyer naming no scope.
+    const scopeless = await write(asProvenBuyer());
+    expect(scopeless.statusCode).toBe(403);
+    // Once the scope is revoked, the proof admits nothing.
+    const revoke = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: asOperator() });
+    expect(revoke.statusCode).toBe(200);
+    const afterRevoke = await write(asProvenBuyer(), scopeId);
+    expect(afterRevoke.statusCode).toBe(403);
+    expect(afterRevoke.json().reason).toBe("operator_proof_required");
+    expect(rowsUnder(scopeId)).toBe(0);
+  });
+
+  it("a proven scope holder still cannot open a scope or send a chat instruction", async () => {
+    await mint();
+    const scope = await app.inject({
+      method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: asProvenBuyer(), payload: { createdBy: BUYER, allowedTools: [WRITE] },
+    });
+    expect(scope.statusCode).toBe(403);
+    const chat = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/chat`, headers: asProvenBuyer(), payload: { message: "start" } });
+    expect(chat.statusCode).toBe(403);
+  });
+});
+
 describe("N31 kernel heartbeat and capability announce: only the kernel's operator or the admin", () => {
   it("anonymous is 401", async () => {
     expect((await app.inject({ method: "POST", url: `/api/kernels/${KERNEL}/heartbeat`, headers: ANON, payload: {} })).statusCode).toBe(401);
