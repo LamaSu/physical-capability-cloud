@@ -30,12 +30,12 @@
  *     else looks up its toString):
  *       - an integer-indexed element of a typed array, always;
  *       - an element of an array, a string or any record only where it is proven OWN, with nothing
- *         running in between: `hasOwn(x, k) ? x[k] : ...`, `hasOwn(x, k) && x[k]`, or
+ *         running in between (a string's element is read through a captured `charAt`, which never
+ *         reaches String.prototype; a loop bound is no proof, astra pack 293): `hasOwn(x, k) ? x[k] : ...`, `hasOwn(x, k) && x[k]`, or
  *         `if (hasOwn(x, k))` whose branch begins with the read. The trusted hasOwn is the last
  *         thing the guard evaluates (alone, or the rightmost operand of a chain of `&&`), the read
  *         is the first thing the guarded part evaluates, and `x` and `k` are the same bindings (or
  *         the same literal key). A call or an assignment in between could remove the property;
- *       - an element of a string in range of a canonical `for (let i = n; i < s.length; i++)` loop;
  *       - any key of a binding declared `const x = ObjectCreate(null)`, with the trusted
  *         ObjectCreate (CheckOptions.primordials), which has no prototype;
  *   - a call whose callee is an identifier (a function value), `this.#private`, or `super`, under
@@ -247,40 +247,6 @@ export function builtinReads(program: ts.Program, fileName: string, options: Che
     }
     return false;
   };
-  const assigns = (body: ts.Node, name: string): boolean => {
-    let hit = false;
-    const walk = (n: ts.Node): void => {
-      if (hit) return;
-      if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment && ts.isIdentifier(n.left) && n.left.text === name) hit = true;
-      if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) && (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) && ts.isIdentifier(n.operand) && n.operand.text === name) hit = true;
-      ts.forEachChild(n, walk);
-    };
-    walk(body);
-    return hit;
-  };
-  /** A string element read in range of `for (let i = <n>; i < s.length; i++)` that assigns neither. */
-  const provenInRange = (node: ts.ElementAccessExpression): boolean => {
-    if (!ts.isIdentifier(node.expression) || !ts.isIdentifier(node.argumentExpression)) return false;
-    const text = node.expression.text;
-    const index = node.argumentExpression.text;
-    for (let parent = node.parent; parent !== undefined; parent = parent.parent) {
-      if (ts.isFunctionLike(parent)) return false;
-      if (!ts.isForStatement(parent) || parent.initializer === undefined || !ts.isVariableDeclarationList(parent.initializer)) continue;
-      const declaration = parent.initializer.declarations[0];
-      const init = declaration?.initializer;
-      const starts = declaration !== undefined && ts.isIdentifier(declaration.name) && declaration.name.text === index && init !== undefined && ts.isNumericLiteral(init);
-      const cond = parent.condition;
-      const bounded = cond !== undefined && ts.isBinaryExpression(cond) && cond.operatorToken.kind === ts.SyntaxKind.LessThanToken &&
-        ts.isIdentifier(cond.left) && cond.left.text === index && ts.isPropertyAccessExpression(cond.right) && cond.right.name.text === "length" &&
-        ts.isIdentifier(cond.right.expression) && cond.right.expression.text === text;
-      const inc = parent.incrementor;
-      const steps = inc !== undefined &&
-        (((ts.isPostfixUnaryExpression(inc) || ts.isPrefixUnaryExpression(inc)) && inc.operator === ts.SyntaxKind.PlusPlusToken && ts.isIdentifier(inc.operand) && inc.operand.text === index) ||
-          (ts.isBinaryExpression(inc) && inc.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken && ts.isIdentifier(inc.left) && inc.left.text === index && ts.isNumericLiteral(inc.right) && inc.right.text === "1"));
-      if (starts && bounded && steps && !assigns(parent.statement, index) && !assigns(parent.statement, text)) return true;
-    }
-    return false;
-  };
   /** The trusted `ObjectCreate`: a top-level `const ObjectCreate = Object.create` in a primordials file. */
   const isTrustedObjectCreate = (callee: ts.Identifier): boolean => {
     const declaration = declarationOf(callee);
@@ -453,7 +419,6 @@ export function builtinReads(program: ts.Program, fileName: string, options: Che
         }
         if (isTypedElement(n) || isNullPrototypeRecord(n.expression) || provenOwn(n, unwrap(n.expression), n.argumentExpression)) return true;
         const kinds = kindsOf(typeOf(n.expression));
-        if (kinds.includes("string") && kinds.every((k) => k === "string") && provenInRange(n)) return true;
         report(n, `[${n.argumentExpression.getText(source)}] not proven own${kinds.length > 0 ? ` on a ${kinds.join("|")}` : ""}`);
         return true;
       }

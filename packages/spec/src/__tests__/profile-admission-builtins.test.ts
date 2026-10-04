@@ -23,13 +23,13 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
   it("allows exactly the forms it names, and refuses every other form, astra pack 291's included (a self-test)", () => {
     const fileName = join(SPEC_DIR, "src", "__tests__", "builtin-reads-fixture.ts");
     const head = [
-      "import { hasOwn, ObjectCreate, awaitedHere } from \"../util/primordials.js\";",
+      "import { hasOwn, ObjectCreate, awaitedHere, charAt } from \"../util/primordials.js\";",
       "import * as nc from \"node:crypto\";",
       "import { verify } from \"node:crypto\";",
       "declare const bytes: Uint8Array; declare const list: number[]; declare const ro: readonly string[]; declare const s: string;",
       "declare const p: Promise<number>; declare const m: Map<string, number>; declare const f: (x: number) => number;",
       "declare const n: number; declare const rec: { length: number; then: number; inner: { x: number } }; declare const loose: any;",
-      "declare const maybe: Uint8Array | null; declare const o: { toString(): string }; declare function shrink(): boolean;",
+      "declare const maybe: Uint8Array | null; declare const o: { toString(): string }; declare function shrink(): boolean; let t = \"abc\"; const resetT = () => { t = \"\"; };",
       "class Derived extends Uint8Array {} declare const derived: Derived; declare const both: Uint8Array & { tag: 1 };",
       "const capturedVerify = verify; const capturedGet = Map.prototype.get; const capturedNs = nc.hash; const capturedLater = (() => verify)();",
       "const Uint8ArrayCtor = Uint8Array;",
@@ -40,7 +40,7 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
       "export function okOwn(i: number) { if (hasOwn(list, i)) return list[i]; return i > 0 && hasOwn(ro, i) ? ro[i] : undefined; }",
       "export function okGuards(k: string, r: Record<string, number>, i: number) { const a = hasOwn(r, k) && r[k]! > 0; if (hasOwn(list, i)) { const first = list[i]; return a ? first : 0; } return hasOwn(r, k) ? (r as Record<string, number>)[k] : 0; }",
       "export function okWrites() { const stack = [1, 2]; stack.length = stack.length - 1; return (f as (x: number) => number)(stack.length); }",
-      "export function okString() { let out = 0; for (let i = 0; i < s.length; i++) out += s[i]!.length; return out; }",
+      "export function okString() { let out = \"\"; for (let i = 0; i < s.length; i++) out += charAt(s, i); return out; }",
       "export function okRecord(k: string) { const r = ObjectCreate(null) as Record<string, number>; r[k] = 1; r.x = 2; return r[k]! + r.x!; }",
       "export function okCalls() { return f(1) + (undefined === undefined ? NaN : Infinity); }",
       "export async function okAwait() { return await awaitedHere(p); }",
@@ -102,17 +102,26 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
       "export function lengthFromObject() { const stack = [1]; stack.length = loose; return stack; }",
       "export function objectKey() { const r = ObjectCreate(null) as Record<string, number>; return r[loose]; }",
       "export function lookAlikeCreate(k: string) { const ObjectCreate = (_p: null) => ({}) as Record<string, number>; const r = ObjectCreate(null); return r[k]; }",
+      // astra pack 293: a loop bound proves nothing at the read (a shadowed string or index, or a call that
+      // reassigns the string), so a string's element is read only through charAt, even in a canonical loop.
+      "export function canonicalLoop() { let out = 0; for (let i = 0; i < s.length; i++) out += s[i]!.length; return out; }",
+      "export function shadowedRange() { for (let i = 0; i < s.length; i++) { const s = \"\"; return s[i]; } return \"\"; }",
+      "export function shadowedIndex() { for (let i = 0; i < s.length; i++) { const i = 99; return s[i]; } return \"\"; }",
+      "export function reassignedByCall() { for (let i = 0; i < t.length; i++) { resetT(); return t[i]; } return \"\"; }",
     ];
     const text = [...head, ...allowed, ...refused].join("\n");
     const lines = builtinReads(programOf(SPEC_DIR, fileName, text), fileName, OPTIONS);
     const reported = new Set(lines.map((line) => Number(line.split(" ")[0]!.split(":")[1])));
     const firstAllowed = head.length + 1;
     const firstRefused = head.length + allowed.length + 1;
+    // Every misclassified line at once, so a failure (or a mutation run) names all of them.
+    const wrong: string[] = [];
+    for (let k = 0; k < head.length; k++) if (reported.has(k + 1)) wrong.push(`a load-time line was reported: ${head[k]}`);
     for (let k = 0; k < allowed.length; k++) {
-      expect(reported.has(firstAllowed + k), `allowed line reported: ${allowed[k]} => ${lines.filter((l) => l.includes(`:${firstAllowed + k} `)).join("; ")}`).toBe(false);
+      if (reported.has(firstAllowed + k)) wrong.push(`allowed line reported: ${allowed[k]} => ${lines.filter((l) => l.includes(`:${firstAllowed + k} `)).join("; ")}`);
     }
-    for (let k = 0; k < refused.length; k++) expect(reported.has(firstRefused + k), `refused line not reported: ${refused[k]}`).toBe(true);
-    for (let k = 0; k < head.length; k++) expect(reported.has(k + 1), `a load-time line was reported: ${head[k]}`).toBe(false);
+    for (let k = 0; k < refused.length; k++) if (!reported.has(firstRefused + k)) wrong.push(`refused line not reported: ${refused[k]}`);
+    expect(wrong).toEqual([]);
   }, 60_000);
 
   it("the forms it refuses do read a prototype, and the helpers it requires do not (astra pack 291's controls)", () => {
