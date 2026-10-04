@@ -26,8 +26,6 @@ export function DiscoverPage() {
   const { data: templatesData, isLoading: templatesLoading } = useCapabilityTemplates();
   const { data: kernels = [], isLoading: kernelsLoading } = useKernels();
 
-  if (templatesLoading || kernelsLoading) return <LoadingShell rows={4} />;
-
   const templates = (templatesData?.templates ?? []) as any[];
 
   // Parse min-score: accepts "0.7" or "70" (percent). Empty → no filter.
@@ -68,6 +66,11 @@ export function DiscoverPage() {
     });
     return copy;
   }, [filtered, sortMode]);
+
+  // Every hook above must run before this early return: a hook called after
+  // an early return changes the hook count between the loading and loaded
+  // renders on a cold load (React #310).
+  if (templatesLoading || kernelsLoading) return <LoadingShell rows={4} />;
 
   return (
     <div className="space-y-6">
