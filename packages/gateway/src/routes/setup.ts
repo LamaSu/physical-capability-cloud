@@ -743,7 +743,83 @@ export async function setupRoutes(app: FastifyInstance) {
   // ── POST /api/setup/test-job ──────────────────────────────────────────────
 
   app.post<{ Body: TestJobBody }>("/api/setup/test-job", async (req, reply) => {
+   try {
     const { kernelId, deviceId, assuranceTier = 0 } = req.body ?? {};
+
+    // N59 (board) / ADK item 8: a test job must exercise the OPERATOR's own
+    // machine, or say plainly that it did not. So it is owner-gated and honest:
+    //   - kernelId is required (no "kernel_dev_001" fallback);
+    //   - the caller must be the kernel's recorded operator;
+    //   - a device on that kernel must be named and loaded in THIS gateway's
+    //     runtime — otherwise the gateway cannot run it and says so;
+    //   - a deviceless self-attestation is never reported as a pass.
+    // The reply carries ran/passed. `ran` is true only when the device's
+    // adapter executed in this gateway. `passed` is true only when that run
+    // completed AND the adapter it ran on was not serving simulation
+    // (jobRanSimulated, read after the run). Neither proves which physical
+    // machine is attached: the route checks recorded ownership and local
+    // dispatch. A run verified against the kernel's registered key (D4a, #428)
+    // will tighten `passed` when it lands; this route never loosens it.
+    if (!kernelId || typeof kernelId !== "string") {
+      return reply.code(400).send({
+        error: "kernel_id_required",
+        message: "kernelId is required: a test job must name the operator kernel it exercises.",
+        ran: false,
+        passed: false,
+      });
+    }
+
+    const repos = getRepos();
+    const kernel = repos.kernels.findById(kernelId);
+    if (!kernel) {
+      return reply.code(404).send({
+        error: "kernel_not_found",
+        message: `No kernel "${kernelId}" is registered.`,
+        ran: false,
+        passed: false,
+      });
+    }
+
+    // Owner check: the authenticated principal apiGate resolved must be the
+    // kernel's operator. Both identities are trimmed (N59 F3: a whitespace
+    // principal must not match a whitespace/legacy operatorAddress), a
+    // normalized-empty principal is rejected, and the zero address is matched
+    // case-insensitively as an unowned placeholder.
+    const principal = (
+      (typeof req.userId === "string" && req.userId) ||
+      (typeof req.operatorId === "string" && req.operatorId) ||
+      ""
+    ).trim();
+    const operatorAddress = (kernel.operatorAddress ?? "").trim();
+    const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+    const isUnowned = operatorAddress === "" || operatorAddress.toLowerCase() === ZERO_ADDRESS;
+    if (!principal || isUnowned || operatorAddress !== principal) {
+      return reply.code(403).send({
+        error: "not_kernel_operator",
+        message: "Only this kernel's operator may run its test job.",
+        ran: false,
+        passed: false,
+      });
+    }
+
+    // The test must name a device on this kernel.
+    if (!deviceId || typeof deviceId !== "string") {
+      return reply.code(400).send({
+        error: "device_id_required",
+        message: "deviceId is required: name the device on this kernel to exercise.",
+        ran: false,
+        passed: false,
+      });
+    }
+    const deviceRow = repos.kernels.findDeviceById(deviceId);
+    if (!deviceRow || deviceRow.kernelId !== kernelId) {
+      return reply.code(404).send({
+        error: "device_not_on_kernel",
+        message: `Device "${deviceId}" is not registered on kernel "${kernelId}".`,
+        ran: false,
+        passed: false,
+      });
+    }
 
     let svc;
     try {
@@ -752,17 +828,63 @@ export async function setupRoutes(app: FastifyInstance) {
       return reply.code(503).send({
         error: "kernel_service_not_ready",
         message: "KernelService is not initialized",
+        ran: false,
+        passed: false,
+      });
+    }
+
+    // N59 F1 (CRITICAL): the gateway runs jobs only for its OWN in-process
+    // kernel. The runner map is keyed by device id alone, so without this a
+    // device-id that collides with another kernel's loaded device could be
+    // actuated by this kernel's owner. Bind the run to the service's kernel
+    // identity before anything is loaded or dispatched.
+    if (svc.kernelId !== kernelId) {
+      return reply.code(409).send({
+        error: "gateway_does_not_run_this_kernel",
+        message:
+          `This gateway runs kernel "${svc.kernelId}", not "${kernelId}". Run the test job on ` +
+          "the node that operates this kernel (for example `pcc-node`), which submits real " +
+          "evidence back to the gateway.",
+        kernelId,
+        ran: false,
+        passed: false,
+      });
+    }
+
+    // Refuse a kernel this gateway does not run. The gateway executes jobs on
+    // the adapters loaded in its own in-process runtime; a remote operator node
+    // runs its own. Try to load this device from the DB; if no runner results,
+    // the operator must run the test on their own node (e.g. `pcc-node`), not
+    // here. This is the honest replacement for the old mock-fallback that made
+    // every test-job "complete" on a gateway mock regardless of kernel.
+    if (!svc.hasRunner(deviceId)) {
+      try {
+        svc.refreshDeviceFromDb(deviceId);
+      } catch {
+        // fall through to the not-runnable answer below
+      }
+    }
+    if (!svc.hasRunner(deviceId)) {
+      return reply.code(409).send({
+        error: "device_not_runnable_here",
+        message:
+          `This gateway does not run device "${deviceId}" on kernel "${kernelId}". ` +
+          "Run the test job on the node that operates this kernel (for example `pcc-node`), " +
+          "which submits real evidence back to the gateway.",
+        kernelId,
+        deviceId,
+        ran: false,
+        passed: false,
       });
     }
 
     const jobId = `test-job-${uuidv4()}`;
     const stepId = `setup-test-${Date.now()}`;
-    const resolvedKernelId = kernelId ?? "kernel_dev_001";
+    const resolvedKernelId = kernelId;
     const startTime = Date.now();
 
     // Insert a job record into the DB so status polling works
     try {
-      const repos = getRepos();
       let capabilityId: string | undefined;
       try {
         const caps = repos.capabilities.findByKernel(resolvedKernelId);
@@ -789,70 +911,10 @@ export async function setupRoutes(app: FastifyInstance) {
       // DB insert is best-effort for test jobs
     }
 
-    // ── Deviceless branch (coord be246d92) ──────────────────────────────
-    // If this kernel has no registered devices AND the caller didn't specify
-    // a target deviceId (rideshare, wood-fired-pizza, courier, etc), don't
-    // try to submit a job to a mock printer — generate a self-attested
-    // evidence bundle directly and return a completed test-job. The old
-    // behavior landed EVERY test-job on the KERNEL_CONFIG mock device
-    // regardless of capability type, so a rideshare operator got a printer
-    // job report. Now: for deviceless kernels, we self-attest. Explicit
-    // deviceId requests bypass this branch (existing tests exercise that).
-    let isDeviceless = false;
-    if (!deviceId) {
-      try {
-        const devices = getRepos().kernels.findDevicesByKernel(resolvedKernelId);
-        isDeviceless = devices.length === 0;
-      } catch {
-        // If the repo lookup fails, fall through to the existing submitJob path
-        // (best-effort — same behavior as before).
-      }
-    }
-    if (isDeviceless) {
-      // Self-attested completion — no device to invoke. Persist a real
-      // evidence bundle row so downstream consumers (compliance facade,
-      // dashboard evidence list, /api/jobs/:id/evidence) see the same
-      // shape as evidence from real devices — just with algorithm:"none"
-      // + signer:"self-attest" on the kernelSignature JSON to make the
-      // self-attest provenance explicit.
-      const evidenceBundleId = `bundle-self-attest-${uuidv4().slice(0, 12)}`;
-      const now = new Date().toISOString();
-      const bundleHash = `sha256:self-attest:${stepId}`;
-      try {
-        getRepos().evidence.insert({
-          id: evidenceBundleId,
-          jobId,
-          stepId,
-          kernelId: resolvedKernelId,
-          assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
-          bundleHash,
-          kernelSignature: {
-            signer: "self-attest",
-            algorithm: "none",
-            value: `self-attested by kernel ${resolvedKernelId} at ${now}`,
-          },
-          createdAt: now,
-        });
-      } catch {
-        // Bundle persistence is best-effort. If it fails (e.g. the parent
-        // job row was never inserted because the kernel has no capabilities),
-        // the response still returns the id + status. A follow-up can add
-        // the missing job row here + retry.
-      }
-      try {
-        getRepos().jobs.updateStatus(jobId, "completed");
-      } catch {
-        // best-effort
-      }
-      return {
-        jobId,
-        deviceId: null,
-        status: "completed",
-        evidenceBundleId,
-        evidencePath: "self-attested",
-        duration: Date.now() - startTime,
-      };
-    }
+    // A deviceless kernel has nothing to exercise, so a self-attested bundle is
+    // never reported as a passing test job (N59). We reach this route only with
+    // a device that is loaded in the runtime (checked above), so submit and run
+    // it for real; there is no self-attest fallback.
 
     // Submit the job
     let submitResult: { jobId: string; deviceId: string; status: string };
@@ -868,6 +930,8 @@ export async function setupRoutes(app: FastifyInstance) {
         error: "job_submission_failed",
         message: err instanceof Error ? err.message : "Unknown error",
         jobId,
+        ran: false,
+        passed: false,
         duration: Date.now() - startTime,
       });
     }
@@ -906,9 +970,23 @@ export async function setupRoutes(app: FastifyInstance) {
       }
     }
 
-    // Operator-onboarding funnel (ADK track item 4): test_job_passed. Only
-    // the real device path can reach here (the deviceless self-attest branch
-    // returns earlier, above); still gate on finalStatus + a non-empty
+    // The device's adapter ran here (ran:true). It passes only when that run
+    // reached "completed" AND the adapter it ran on was not serving simulation.
+    // N59 F2: a mock, mockMode or downgraded adapter's completion is not a
+    // hardware pass. This is judged now, after the run, on the adapter
+    // instance the job was dispatched to (not one a refresh installed since),
+    // from its source.simulated marker; an adapter that leaves the marker out
+    // counts as real only if it is a built-in known to set it whenever it
+    // simulates (see adapterIsSimulated). "failed", "unknown" (ran without DB
+    // tracking) and a poll timeout are not passes either.
+    const simulated = deviceRow.adapterType === "mock" || svc.jobRanSimulated(jobId);
+    const passed = finalStatus === "completed" && !simulated;
+
+    // Operator-onboarding funnel (ADK track item 4): test_job_passed, only for
+    // a job this route reports as passed (N59's rule above: completed AND not
+    // simulated), so the funnel never counts what the reply calls simulated.
+    // Only the real device path can reach here (the deviceless self-attest
+    // branch returns earlier, above); still gate on a non-empty
     // submitResult.deviceId, and — critically — on the CALLER having
     // supplied kernelId explicitly (never the "kernel_dev_001" default),
     // per the stage inventory's self-attest/shared-placeholder trap.
@@ -918,7 +996,7 @@ export async function setupRoutes(app: FastifyInstance) {
     // would count (#469 round 1). Ownership of the kernel is WP-C's guard (#445).
     try {
       const operatorId = (req as unknown as { operatorId?: string | null }).operatorId ?? null;
-      if (kernelId && operatorId && finalStatus === "completed" && submitResult.deviceId) {
+      if (passed && kernelId && operatorId && submitResult.deviceId) {
         const repos = getRepos();
         const device = repos.kernels.findDeviceById(submitResult.deviceId);
         if (repos.kernels.findById(kernelId) && device?.kernelId === kernelId && isExecutingAdapter(device.adapterType)) {
@@ -933,9 +1011,28 @@ export async function setupRoutes(app: FastifyInstance) {
       jobId,
       deviceId: submitResult.deviceId,
       status: finalStatus,
+      ran: true,
+      passed,
+      simulated,
+      passReason: simulated
+        ? "simulated: a mock/simulator run is not a hardware pass (real verification is D4a)"
+        : finalStatus === "completed"
+          ? null
+          : `not completed: status ${finalStatus}`,
       evidenceBundleId: evidenceBundleId ?? null,
       duration: Date.now() - startTime,
     };
+   } catch (err) {
+     // N59 F4: every reply from this route carries ran/passed, even an
+     // unexpected internal error, so no caller reads a bare Fastify 500 as
+     // an ambiguous result.
+     return reply.code(500).send({
+       error: "test_job_error",
+       message: err instanceof Error ? err.message : String(err),
+       ran: false,
+       passed: false,
+     });
+   }
   });
 
   // ── GET /api/setup/status ────────────────────────────────────────────────

@@ -369,7 +369,8 @@ describe("the captured replacements are byte-identical to what they replace", ()
     0,
     -0,
     1.5e-7,
-    1e21,
+    2 ** 53 - 1,
+    -(2 ** 53 - 1),
     "",
     "\u00e9 \u2603 \u2028 \\ \" \u0000",
     [1, "a", null, [2, [3]], { z: 1, a: 2 }],
@@ -380,6 +381,13 @@ describe("the captured replacements are byte-identical to what they replace", ()
     for (const v of values) expect(canonicalJson(v)).toBe(canonicalize(v));
     const confirmed = confirmSafetyEnvelope(input(), DECISION);
     expect(canonicalJson(confirmed.envelope)).toBe(canonicalize(confirmed.envelope));
+  });
+
+  it("canonicalJson refuses a number canonical JSON has no form for, as D5's canonicalize does: a non-finite one, or an integer outside the safe range", () => {
+    // D5 (evidence profile v1 sec 1, #359). Every number of magnitude 2^53 or more is an integer outside the safe range.
+    for (const v of [1e21, -1e21, 2 ** 53, -(2 ** 53), 1.5e300, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, { a: [1, { b: 1e21 }] }, [2 ** 53]]) {
+      expect(() => canonicalJson(v), JSON.stringify(v) ?? String(v)).toThrow(/canonical JSON has no form for the number/);
+    }
   });
 
   it("the registration preimage equals LO-EV-1's signingPreimage of the statement digest", () => {
