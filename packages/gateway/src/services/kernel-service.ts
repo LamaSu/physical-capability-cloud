@@ -360,8 +360,17 @@ export class KernelService {
                       contractAddress,
                     });
                   } catch (err) {
-                    // Settlement pipeline is non-fatal — the job itself succeeded
-                    console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                    // Settlement pipeline is non-fatal — the job itself succeeded.
+                    // N71 round 5 followup: never err.message/String(err) here —
+                    // a fixed code plus, at most, knownErrorClassName(err)
+                    // (closed set, instanceof-checked). THE SINK IS THE
+                    // BOUNDARY, same as checkDeviceHealth's console.warn below
+                    // and base.facade.ts's span — see redaction.ts.
+                    console.warn(
+                      "[kernel-service] Settlement pipeline failed:",
+                      "settlement_pipeline_failed",
+                      knownErrorClassName(err),
+                    );
                   } finally {
                     // Clean up in-memory evidence data
                     this.emitter.cleanup(jobId, stepId);
@@ -370,7 +379,16 @@ export class KernelService {
                 }
               }
 
-              lifecycleSpan.setStatus({ code: result.success ? 1 : 2, message: result.error ?? "ok" });
+              // N71 round 5 followup: result.error is JobRunner's OWN
+              // JobResult.error (job-runner.ts:38), not a facade Result — it
+              // can carry an adapter's raw MachineCommandResult.message
+              // ("Failed to load G-code: ...") or JobRunner's own caught
+              // err.message/String(err). The span gets a fixed code only;
+              // result.error is never read here.
+              lifecycleSpan.setStatus({
+                code: result.success ? 1 : 2,
+                message: result.success ? "ok" : "job_run_failed",
+              });
               lifecycleSpan.end();
               // End local trace span
               endTrace(traceId, lifecycleLocalSpanId, result.success ? "ok" : "error");
@@ -385,7 +403,12 @@ export class KernelService {
               } catch {
                 // DB update failure is non-fatal
               }
-              lifecycleSpan.setStatus({ code: 2, message: String(err) });
+              // N71 round 5 followup: never String(err)/err.message on the
+              // span — fixed code plus, at most, the closed-set class name.
+              lifecycleSpan.setStatus({
+                code: 2,
+                message: `job_run_failed:${knownErrorClassName(err)}`,
+              });
               lifecycleSpan.end();
               // End local trace span
               endTrace(traceId, lifecycleLocalSpanId, "error");
@@ -444,7 +467,14 @@ export class KernelService {
                   contractAddress,
                 });
               } catch (err) {
-                console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                // N71 round 5 followup: same boundary as the primary
+                // (Sentry) path's settlement catch above — fixed code plus,
+                // at most, knownErrorClassName(err). Never err.message/err.
+                console.warn(
+                  "[kernel-service] Settlement pipeline failed:",
+                  "settlement_pipeline_failed",
+                  knownErrorClassName(err),
+                );
               } finally {
                 // Clean up in-memory evidence data
                 this.emitter.cleanup(jobId, stepId);
