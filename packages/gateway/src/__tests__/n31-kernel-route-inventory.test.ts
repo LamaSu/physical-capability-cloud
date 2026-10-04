@@ -20,9 +20,11 @@
  *     A same-file helper is a guard only when it ends in `return G(...);` after plain
  *     declarations and early object-literal refusals. astra's probes (a named hook that ignores
  *     the refusal, a refusal on the wrong branch, a refusal ANDed away) are pinned as unguarded.
- *   - A route registration the scan cannot read fails CI: any app.route(...), a route-shaped call
- *     on any receiver but `app` (every production route uses `app`), or a handler that is not
- *     inline or a same-file function. A computed path is resolved
+ *   - A route registration the scan cannot read fails CI: any app.route(...), any route-method
+ *     call on a receiver but `app` (every production route uses `app`) unless NOT_A_ROUTE
+ *     classifies it, or a handler that is not inline or a same-file function.
+ *   - #579 r2 item 2: a refused path's return is the refusal only: absent, call-free, or a reply
+ *     chain whose arguments call nothing. A return that writes or calls anything else is no refusal. A computed path is resolved
  *     through the file's string constants. One that cannot be resolved must be EXACTLY one entry of
  *     COMPUTED_PATHS, which says why it is not a kernel route. If its handler reads
  *     req.params.kernelId, it is a kernel route anyway and must be guarded.
@@ -45,6 +47,21 @@ const SRC_ROOT = path.join(__dirname, "..");
 const MUTATING = new Set(["post", "put", "patch", "delete", "all"]);
 /** The Fastify instance's name in every production route plugin. A route on another receiver fails CI. */
 const ROUTE_RECEIVER = "app";
+
+/**
+ * #579 r2 item 2: route-method calls (post, put, patch, delete, all with 2+ arguments) on a receiver
+ * other than `app` that are NOT route registrations, each read and classified by a reviewer.
+ * Keyed by file, receiver text and method; every other such call is unreadable and fails CI, and an
+ * entry no call matches any more is stale and fails too.
+ */
+const NOT_A_ROUTE: Record<string, string> = {
+  "routes/courier-jobs.ts store.patch": "the job-offers store's patch(id, poster, fields) (getJobOffersStore), a data write",
+  "routes/job-offers.ts store.patch": "the job-offers store's patch(id, poster, fields) (getJobOffersStore), a data write",
+  "services/courier-jobs-store.ts store.patch": "the job-offers store's patch(id, poster, fields) (getJobOffersStore), a data write",
+  "routes/registry-snapshot.ts getRegistrySnapshotStore().put": "the registry snapshot store's put(digest, bytes), a content write",
+  "routes/storage.ts storage.put": "the content store's put(bytes, { mediaType }), a content write",
+  "services/easypost-client.ts store.put": "the content store's put(bytes, { mediaType }) for a label, a content write",
+};
 /**
  * The guards: auth/kernel-authority.ts's refuseKernelAction and refuseKernelRequest. A function
  * counts as a guard when it consumes one (the same-file helper rule below), and a preHandler counts
@@ -111,7 +128,9 @@ interface RouteSite {
 interface Scan {
   routes: RouteSite[];
   /** Writes of the guarded tables: where, and the route that encloses them (null: none). */
-  writes: Array<{ file: string; line: number; route: RouteSite | null }>;
+  writes: Array<{ file: string; line: number; route: RouteSite | null   /** Route-method calls on another receiver that NOT_A_ROUTE classifies (file receiver.method). */
+  notRoutes: string[];
+}>;
   /** Route registrations the scan cannot read (app.route, another receiver). */
   unreadable: string[];
   /** A guarded table reached by another name (an alias, a value, raw SQL). */
@@ -151,10 +170,33 @@ function guardCall(e: ts.Expression | undefined, guards: Set<string>): boolean {
   return x !== undefined && ts.isCallExpression(x) && ts.isIdentifier(x.expression) && guards.has(x.expression.text);
 }
 
-/** `return E;`, or a block holding exactly that; for a hook, E sends the reply. */
+/** Reply methods a refusal's own chain may call: `reply.code(s).send(b)`, `reply.status(s).send(b)`. */
+const REPLY_METHODS = new Set(["code", "status", "send", "header", "type"]);
+/** No call of any kind in `n` (a function literal inside it is not run by returning it). */
+const callFree = (n: ts.Node) => !within(n, (x) => ts.isCallExpression(x) || ts.isNewExpression(x) || ts.isTaggedTemplateExpression(x));
+
+/**
+ * #579 r2 item 2 (astra): a refused path returns the refusal and does nothing else. The return's
+ * expression is absent, calls nothing (`return refused;`), or is a reply chain whose own arguments
+ * call nothing (`return reply.code(r.status).send(r.body);`). A return that writes
+ * (`return db.insert(...).run();`), or calls anything else, is no refusal.
+ */
+function refusalExpression(e: ts.Expression | undefined): boolean {
+  if (e === undefined) return true;
+  let x = unwrap(e);
+  if (callFree(x)) return true;
+  while (ts.isCallExpression(x)) {
+    if (!ts.isPropertyAccessExpression(x.expression) || !REPLY_METHODS.has(x.expression.name.text)) return false;
+    if (!x.arguments.every(callFree)) return false;
+    x = unwrap(x.expression.expression);
+  }
+  return ts.isIdentifier(x);
+}
+
+/** `return E;`, or a block holding exactly that, where E is a refusal; for a hook, E sends the reply. */
 function canonicalReturn(s: ts.Statement, mustSend: boolean): boolean {
   const r = ts.isBlock(s) && s.statements.length === 1 ? s.statements[0]! : s;
-  if (!ts.isReturnStatement(r)) return false;
+  if (!ts.isReturnStatement(r) || !refusalExpression(r.expression)) return false;
   return !mustSend || (r.expression !== undefined && within(r.expression, isSendCall));
 }
 
@@ -350,6 +392,7 @@ function scanSource(fileName: string, text: string): Scan {
 
   const routes: RouteSite[] = [];
   const unreadable: string[] = [];
+  const notRoutes: string[] = [];
   const routeOf = new Map<ts.Node, RouteSite>();
   const findRoutes = (n: ts.Node): void => {
     if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
@@ -364,13 +407,13 @@ function scanSource(fileName: string, text: string): Scan {
         unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.route(${shown})`);
       } else if (MUTATING.has(method) && n.arguments.length >= 2 && last) {
         if (!isApp) {
-          // A route-shaped call on another receiver: an inline handler, a handler naming a same-file
-          // function (#579 r1 item 6), or a first argument that is a path.
-          const l = unwrap(last);
-          const routeShaped =
-            ts.isArrowFunction(l) || ts.isFunctionExpression(l) || (ts.isIdentifier(l) && functions.has(l.text)) ||
-            (first !== undefined && ts.isStringLiteralLike(unwrap(first)) && (unwrap(first) as ts.StringLiteralLike).text.startsWith("/"));
-          if (routeShaped) unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.${method}(...)`);
+          // #579 r2 item 2 (astra): a route-method call on any receiver but `app` is unreadable,
+          // whatever its arguments (an imported handler at a computed path escaped every shape
+          // test), unless a reviewer classified it as not a route (NOT_A_ROUTE: a store's put or
+          // patch), by file, receiver and method.
+          const site = `${fileName} ${receiver.getText(sf)}.${method}`;
+          if (site in NOT_A_ROUTE) notRoutes.push(site);
+          else unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.${method}(...)`);
         } else if (!(ts.isArrowFunction(unwrap(last)) || ts.isFunctionExpression(unwrap(last)) || (ts.isIdentifier(unwrap(last)) && functions.has((unwrap(last) as ts.Identifier).text)))) {
           // #6771: a handler the scan cannot read (imported, or built by a call) is unreadable.
           unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.${method}(<handler>)`);
@@ -452,7 +495,7 @@ function scanSource(fileName: string, text: string): Scan {
     ts.forEachChild(n, find);
   };
   find(sf);
-  return { routes, writes, unreadable, aliases };
+  return { routes, writes, unreadable, aliases, notRoutes };
 }
 
 function productionFiles(dir: string): string[] {
@@ -469,13 +512,14 @@ function productionFiles(dir: string): string[] {
 }
 
 function scanGateway(): Scan {
-  const all: Scan = { routes: [], writes: [], unreadable: [], aliases: [] };
+  const all: Scan = { routes: [], writes: [], unreadable: [], aliases: [], notRoutes: [] };
   for (const file of productionFiles(SRC_ROOT)) {
     const s = scanSource(path.relative(SRC_ROOT, file), fs.readFileSync(file, "utf8"));
     all.routes.push(...s.routes);
     all.writes.push(...s.writes);
     all.unreadable.push(...s.unreadable);
     all.aliases.push(...s.aliases);
+    all.notRoutes.push(...s.notRoutes);
   }
   return all;
 }
@@ -555,6 +599,13 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       '  app.post("/api/probe/:kernelId/write-before-check", async (req: any, reply: any) => { const r = refuseKernelAction(req, {} as any, "k", "decide"); db.insert(pendingApprovals).values({}); if (r) return reply.code(r.status).send(r.body); });',
       '  app.post("/api/probe/:kernelId/nested-guard", async (req: any) => { const unused = () => { if (refuseKernelAction(req, {} as any, "k", "decide")) return; }; db.insert(pendingApprovals).values({}); });',
       '  app.post("/api/probe/:kernelId/writing-helper", async (req: any) => { if (writingHelper(req)) return; });',
+      // line 65: #579 r2 item 2 (astra): the refused path's own return expression writes; an imported
+      // handler at a computed path on another receiver; a reply chain whose argument, or whose root,
+      // writes.
+      '  app.post("/api/probe/:kernelId/write-in-return", async (req: any) => { if (refuseKernelAction(req, {} as any, "k", "decide")) return db.insert(pendingApprovals).values({}).run(); });',
+      "  child.post(routePath, importedHandler);",
+      '  app.post("/api/probe/:kernelId/send-a-write", async (req: any, reply: any) => { if (refuseKernelAction(req, {} as any, "k", "decide")) return reply.code(403).send(db.insert(pendingApprovals).values({}).run()); });',
+      '  app.post("/api/probe/:kernelId/root-writes", async (req: any, replies: any) => { if (refuseKernelAction(req, {} as any, "k", "decide")) return replies[db.insert(pendingApprovals).values({}).run()].send(403); });',
       "}",
       "function writingHelper(req: any) { const written = db.insert(operatorPolicies).values({}).run(); return refuseKernelAction(req, {} as any, 'k', 'decide'); }",
     ].join("\n"),
@@ -594,6 +645,10 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       "POST /api/probe/:kernelId/write-before-check": false,
       "POST /api/probe/:kernelId/nested-guard": false,
       "POST /api/probe/:kernelId/writing-helper": false,
+      // #579 r2 item 2: a refusal whose return expression writes is no refusal.
+      "POST /api/probe/:kernelId/write-in-return": false,
+      "POST /api/probe/:kernelId/send-a-write": false,
+      "POST /api/probe/:kernelId/root-writes": false,
     });
   });
 
@@ -611,7 +666,10 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       [59, "POST /api/probe/:kernelId/negated-to-write", false],
       [62, "POST /api/probe/:kernelId/write-before-check", false],
       [63, "POST /api/probe/:kernelId/nested-guard", false],
-      [66, null, null],
+      [65, "POST /api/probe/:kernelId/write-in-return", false],
+      [67, "POST /api/probe/:kernelId/send-a-write", false],
+      [68, "POST /api/probe/:kernelId/root-writes", false],
+      [70, null, null],
     ]);
   });
 
@@ -623,6 +681,7 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       "probe.ts:58 child.post(...)",
       "probe.ts:60 child.put(...)",
       "probe.ts:61 app.post(<handler>)",
+      "probe.ts:66 child.post(...)",
     ]);
     const computed = probe.routes.filter((r) => r.computed).map((r) => [r.key, isKernelRoute(r)]);
     expect(computed).toEqual([
@@ -646,6 +705,10 @@ describe("N31 route inventory: packages/gateway/src", () => {
   it("reads every route registration and every guarded-table reference", () => {
     expect(scan.unreadable).toEqual([]);
     expect(scan.aliases).toEqual([]);
+  });
+
+  it("#579 r2 item 2: NOT_A_ROUTE is exact: every entry still matches a call", () => {
+    expect(Object.keys(NOT_A_ROUTE).filter((site) => !scan.notRoutes.includes(site))).toEqual([]);
   });
 
   it("A: every write of operator_policies or pending_approvals is inside a guarded route", () => {
