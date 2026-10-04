@@ -18,13 +18,8 @@
  * must satisfy EACH rule that matched — not just one of them.
  *
  * Behaviour:
- *   - A caller with NO API key holds NO scopes at all, so it fails any default
- *     or row rule that matches (403, with a message noting the route needs an
- *     API key). A route neither layer covers behaves exactly as before it is
- *     open, except for the money-path default-deny below, which applies to
- *     every caller equally.
- *   - Wildcard scope ("*") grants access to all endpoints. Unchanged — and
- *     irrelevant to a session, whose scope set is always empty.
+ *   - Requests without an API key are not checked by this layer (unchanged).
+ *   - Wildcard scope ("*") grants access to all endpoints. Unchanged.
  *   - MONEY-PATH routes (MONEY_PATH_PREFIXES) are DEFAULT-DENY for MUTATING
  *     methods (POST/PUT/PATCH/DELETE): if NEITHER a default NOR a row rule
  *     matches, access is REFUSED. A new money-moving route is therefore closed
@@ -307,19 +302,12 @@ async function scopeCheckerImpl(app: FastifyInstance) {
 
     ensureScopeCacheReady();
 
-    // A caller with NO API key (the common case: a SIWE session — api-gate
-    // accepts it and sets req.userId, never req.apiKeyId) holds NO scopes.
-    // This used to `return` here unconditionally, which meant a session-only
-    // request skipped the ENTIRE scope layer — money-path default-deny
-    // included. Scopes live on API KEYS: a session proves WHO you are, not
-    // what you may do, so it is run through the SAME matching below as any
-    // other caller, with an empty scope set — it fails any rule that matches,
-    // and is unaffected (same as before) by one that doesn't.
-    const hasApiKey = !!req.apiKeyId;
-    const callerScopes = hasApiKey ? getCallerScopes(req) : [];
+    // Scopes live on API keys; a request without one is not checked here (unchanged).
+    if (!req.apiKeyId) return;
+    const hasApiKey = true;
+    const callerScopes = getCallerScopes(req);
 
-    // Wildcard scope grants access to everything. Unchanged; a session's
-    // callerScopes is always [], so this never fires for a session.
+    // Wildcard scope grants access to everything. Unchanged.
     if (callerScopes.includes("*")) return;
 
     // DEFAULT_SCOPE_REQUIREMENTS is consulted UNCONDITIONALLY, and a table

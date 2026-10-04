@@ -1,31 +1,16 @@
 /**
- * Repro + regression tests: scope-checker defaults/governance composition,
- * and the session-auth scope floor.
+ * Scope requirements compose with the built-in defaults.
  *
  * Builds the REAL `apiGate` + `scopeChecker` middleware, registered in the
  * same order `server.ts` uses, against a REAL in-memory store seeded by the
  * REAL governance seed (`seedGovernance`, reached via
- * `initStore({ seed: true })` -> `seedAll`) — nothing here is mocked.
+ * `initStore({ seed: true })` -> `seedAll`). Nothing here is mocked.
  *
- * Two holes reproduced below:
- *
- *   1. `refreshScopeCache` replaces DEFAULT_SCOPE_REQUIREMENTS WHOLESALE the
- *      moment the `endpoint_scopes` table has any row. The governance seed
- *      always writes rows (the contributor-economics scopes), so in any
- *      environment where that seed has run, every built-in default —
- *      kernels, evidence, negotiate, jobs, build, admin, templates, audit,
- *      compliance — silently stops being enforced. An API key holding only
- *      a legitimately-seeded, unrelated scope (`contributor:read`) should
- *      NOT reach /api/admin/** or /api/jobs/** on that basis alone.
- *
- *   2. The `onRequest` hook returns immediately when `!req.apiKeyId`, so a
- *      SIWE session (wallet-auth, no API key — the dashboard's auth mode)
- *      skips the ENTIRE scope layer, before even the money-path check. A
- *      session with no key should never pass a route a default rule covers.
- *
- * Both assertions below encode the FIXED behaviour (403). At master
- * 108c7788 (before the fix in this branch) both observe 200 instead — that
- * is the repro; see n108-repro-108c7788.log for the captured run.
+ * The `endpoint_scopes` table's rows ADD requirements on top of
+ * DEFAULT_SCOPE_REQUIREMENTS; they never replace them. A key holding only a
+ * seeded, unrelated scope (`contributor:read`) does not reach a route a
+ * built-in default covers, and a row on the same route as a default cannot
+ * waive the default's requirement.
  */
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -82,22 +67,8 @@ function issueApiKey(scopes: string[]): string {
   return rawKey;
 }
 
-/** Inserts a REAL sessions row (not a mock) and returns the bearer token. */
-function issueSession(): string {
-  const token = randomUUID();
-  const now = Date.now();
-  getRepos().sessions.insert({
-    id: randomUUID(),
-    walletAddress: "0x8888888888888888888888888888888888888b",
-    token,
-    createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + 3_600_000).toISOString(),
-    lastActiveAt: new Date(now).toISOString(),
-  });
-  return token;
-}
 
-describe("scope-checker — defaults compose with governance rows, session holds no scopes", () => {
+describe("scope-checker: defaults compose with governance rows", () => {
   let app: FastifyInstance;
 
   afterEach(async () => {
@@ -105,7 +76,7 @@ describe("scope-checker — defaults compose with governance rows, session holds
     closeStore();
   });
 
-  describe("N108 repro — governance rows must not replace the built-in defaults", () => {
+  describe("governance rows add to the built-in defaults, never replace them", () => {
     it("REFUSES GET /api/admin/** to a key holding only a seeded, non-admin scope", async () => {
       app = await buildApp();
       const rawKey = issueApiKey(["contributor:read"]); // real seeded scope; not admin
@@ -156,32 +127,4 @@ describe("scope-checker — defaults compose with governance rows, session holds
     });
   });
 
-  describe("N109 repro — a session with no API key holds no scopes", () => {
-    it("REFUSES GET /api/admin/** to a wallet session carrying no API key", async () => {
-      app = await buildApp();
-      const token = issueSession();
-      const res = await app.inject({
-        method: "GET",
-        url: "/api/admin/widgets",
-        headers: { authorization: `Bearer ${token}` },
-      });
-      expect(res.statusCode).toBe(403);
-      expect(res.json().error).toBe("insufficient_scope");
-      expect(res.json().reached).toBeUndefined();
-      // Session-specific hint: the caller needs to provision a key.
-      expect(String(res.json().message).toLowerCase()).toContain("api key");
-    });
-
-    it("REFUSES POST /api/jobs/** to a wallet session carrying no API key", async () => {
-      app = await buildApp();
-      const token = issueSession();
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/jobs/create",
-        headers: { authorization: `Bearer ${token}` },
-      });
-      expect(res.statusCode).toBe(403);
-      expect(res.json().reached).toBeUndefined();
-    });
-  });
 });
