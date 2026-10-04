@@ -125,15 +125,20 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
     closeStore();
   });
 
-  it("R0 G2's path, the operator relay, marks the job failed but gives nothing back until N85's owner check lands", async () => {
+  // Merge-up with master's N85(a): the relay (routes/operator-relay.ts, untouched by this merge) now guards
+  // EVERY write through writeJobStatusGuarded directly -- not just "marks but never refunds" (the ORIGINAL
+  // premise this test pinned), but refused outright, before anything is marked at all.
+  it("R0 G2's path, the operator relay, is refused entirely on a paid job: N85(a) guards it before N85's owner check ever gets a say", async () => {
     const jobId = await submitPaidJob(app, "user-n79-failed");
+    const before = getRepos().jobs.findById(jobId)?.status;
     const res = await app.inject({
       method: "POST",
       url: "/api/operator/job-status",
       payload: { jobId, status: "failed", metadata: { reason: "wavelength out of range" } },
     });
-    expect(res.statusCode).toBe(200);
-    expect(getRepos().jobs.findById(jobId)?.status).toBe("failed");
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("settlement_owned_status");
+    expect(getRepos().jobs.findById(jobId)?.status).toBe(before);
     const after = escrowOf(jobId);
     expect(after.escrow.status).toBe("funded");
     expect(after.milestones.every((m) => m.status === "funded")).toBe(true);
@@ -153,20 +158,28 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
     expect(getRepos().jobs.findById(jobId)?.status).toBe("failed");
   });
 
-  // The facade path. In production PATCH currently answers 403 to every caller (its owner check compares columns that
-  // don't exist); the owner-checked MCP cancel reaches the same facade.
-  it("a job cancelled through PATCH /api/jobs/:id/status is refunded too", async () => {
+  // The facade path (this request carries no operatorId/userId, so jobs.ts's OWN owner check -- which in
+  // production answers 403 to every authenticated caller, its check compares columns that don't exist -- never
+  // runs; the request reaches JobFacade.updateStatus unauthenticated, same as the owner-checked MCP cancel would
+  // once authenticated). Merge-up with master's N85(a): the facade now writes through
+  // writeJobStatusGuardedWithRefund (escrow-refund.ts), which refuses a terminal write on a job with a
+  // settlement record outright -- this job's refund-on-cancel property is therefore unreachable today (same
+  // reasoning as escrow-refund.ts's module doc), consistent with n79-refund-authority.test.ts's "a buyer's
+  // cancel after execution started never gives the escrow back" pinning the same outcome through the real gate.
+  it("a job cancelled through PATCH /api/jobs/:id/status is refused outright (N85(a)), never reaches the refund", async () => {
     const jobId = await submitPaidJob(app, "user-n79-cancelled");
+    const before = getRepos().jobs.findById(jobId)?.status;
     const res = await app.inject({
       method: "PATCH",
       url: `/api/jobs/${jobId}/status`,
       payload: { status: "cancelled" },
     });
-    expect(res.statusCode).toBeLessThan(300);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("settlement_owned_status");
     const after = escrowOf(jobId);
-    expect(after.escrow.status).toBe("refunded");
-    expect(after.milestones.every((m) => m.status === "refunded")).toBe(true);
-    expect(getRepos().jobs.findById(jobId)?.status).toBe("cancelled");
+    expect(after.escrow.status).toBe("funded");
+    expect(after.milestones.every((m) => m.status === "funded")).toBe(true);
+    expect(getRepos().jobs.findById(jobId)?.status).toBe(before);
   });
 
   it("reporting the failure again changes nothing: the refund happens once", async () => {

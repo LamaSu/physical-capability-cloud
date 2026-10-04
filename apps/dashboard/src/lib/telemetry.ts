@@ -13,6 +13,20 @@ const GA_MEASUREMENT_ID = import.meta.env.VITE_GA_MEASUREMENT_ID || "";
 const SENTRY_DSN = import.meta.env.VITE_SENTRY_DSN || "";
 const IS_PROD = import.meta.env.PROD;
 
+/**
+ * Origins that may receive beacons the egress guard can't read synchronously:
+ * the PostHog host, when PostHog is on. Its SDK wraps every beacon body in a
+ * Blob (lib/gateway-base.ts, installKeyEgressGuard).
+ */
+export function telemetryBeaconOrigins(): string[] {
+  if (!POSTHOG_KEY) return [];
+  try {
+    return [new URL(POSTHOG_HOST).origin];
+  } catch {
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // initTelemetry — call once before ReactDOM.createRoot()
 // ---------------------------------------------------------------------------
@@ -33,9 +47,13 @@ export function initTelemetry(): void {
       capture_performance: true,
       session_recording: {
         recordCrossOriginIframes: true,
-        // networkPayloadCapture is a runtime-supported feature not yet in the PostHog TS types
-        networkPayloadCapture: { recordBody: true, recordHeaders: true },
-      } as any,
+        // Never record request or response headers and bodies, whatever the
+        // PostHog project's settings say (N50): requests carry the API key,
+        // and responses carry newly issued keys and recovery phrases. The
+        // client can only switch these off; the project settings switch them on.
+        recordHeaders: false,
+        recordBody: false,
+      },
       loaded: (ph) => {
         ph.register({
           app: "pcc-dashboard",

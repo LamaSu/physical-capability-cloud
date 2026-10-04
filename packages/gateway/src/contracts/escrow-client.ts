@@ -27,6 +27,7 @@ import {
   http,
   encodeFunctionData,
   decodeEventLog,
+  keccak256,
   type Address,
   type Hex,
   type PublicClient,
@@ -1568,6 +1569,31 @@ export async function reclaimAfterDeadlineV3(
     gas: GAS_LIMITS.reclaim,
   });
   return { transactionHash: hash, status: "submitted" };
+}
+
+/**
+ * Prepare and SIGN `reclaimAfterDeadline(milestoneIndex)` from the gateway signer, WITHOUT broadcasting it, so its
+ * transaction hash is known before anything leaves this process (astra, #477). A failure here is proven pre-broadcast.
+ */
+export async function signReclaimAfterDeadlineV3(
+  milestoneIndex: number,
+  contractAddress: Address,
+): Promise<{ transactionHash: Hex; serializedTransaction: Hex }> {
+  const wallet = getWalletClient();
+  const request = await wallet.prepareTransactionRequest({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    to: contractAddress,
+    data: encodeReclaimAfterDeadlineV3(milestoneIndex),
+    gas: GAS_LIMITS.reclaim,
+  });
+  const serializedTransaction = await wallet.signTransaction(request as never);
+  return { transactionHash: keccak256(serializedTransaction), serializedTransaction };
+}
+
+/** Broadcast a signed transaction. A failure here does NOT prove it was not sent: the node may have taken it. */
+export async function broadcastSignedTransaction(serializedTransaction: Hex): Promise<void> {
+  await getWalletClient().sendRawTransaction({ serializedTransaction });
 }
 
 /** Submit evidence bundle hash for a V3 milestone (same shape as V1/V2, V3 ABI). */

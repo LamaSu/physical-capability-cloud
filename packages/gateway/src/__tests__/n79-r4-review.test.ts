@@ -96,6 +96,11 @@ import { verifyWithOracle } from "../services/oracle-client.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "../services/audit-service.js";
 import * as chain from "../contracts/escrow-client.js";
+// Merge-up with master's LO-EV-9: resume now re-verifies the PINNED bundle (verifyPinnedSettlementEvidence)
+// before settling, so a resume fixture's bundle must be a genuine anchor the same way
+// completion-resume-settlement.test.ts's makeTrappedJob is -- never a hardcoded HASH_A/HASH_B literal.
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { createHash } from "node:crypto";
 
 /** Every deferred a test makes is flushed in afterEach, so no handler is left hanging on a pause. */
 const dangling: Array<() => void> = [];
@@ -298,6 +303,21 @@ function makeBundle(jobId: string, over: Partial<EvidenceBundle> = {}): Evidence
   };
 }
 
+/** Overrides that make `makeBundle`'s result a GENUINE gateway anchor: `kernelSignature` a zero-address/
+ *  ed25519/"gateway-auto-sign" sentinel (isDeviceSignedSignature reads it as NOT device-signed, so
+ *  verifyPinnedSettlementEvidence recomputes the envelope rather than checking a device signature), and
+ *  `bundleHash` the actual sha256 of that envelope -- same construction as completion-resume-settlement.test.ts's
+ *  makeTrappedJob, but for a bundle that still goes through the real processEvidence (so its own events are
+ *  kept empty here, same as makeTrappedJob's own DB-direct insert, rather than guessed at). */
+function genuineAnchorOverrides(jobId: string, id: string): Pick<EvidenceBundle, "id" | "kernelSignature" | "bundleHash" | "createdAt" | "events"> {
+  const job = getRepos().jobs.findById(jobId)!;
+  const createdAt = new Date().toISOString();
+  const kernelSignature = { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519" as const, value: "gateway-auto-sign" };
+  const meta = { id, jobId, stepId: job.stepId, kernelId: job.kernelId, assuranceTier: 0, createdAt, kernelSignature };
+  const bundleHash = `sha256:${createHash("sha256").update(buildCanonicalEvidenceEnvelope(meta as never, [])).digest("hex")}` as const;
+  return { id, kernelSignature, bundleHash, createdAt, events: [] };
+}
+
 describe("N79 round 4: the review's findings, reproduced", () => {
   let app: FastifyInstance;
   let savedEscrowEnv: string | undefined;
@@ -417,7 +437,9 @@ describe("N79 round 4: the review's findings, reproduced", () => {
     vi.mocked(chain.getEscrowStateV2).mockResolvedValue(r4h2ChainState as never);
 
     // Bundle A: the kernel path stores it and submits its hash on-chain; the job reads evidence_submitted.
-    const bundleA = makeBundle(jobId);
+    // Merge-up with master's LO-EV-9: resume re-verifies the PINNED bundle, so A must be a genuine gateway
+    // anchor (genuineAnchorOverrides), never the shared makeBundle default's literal HASH_A sentinel.
+    const bundleA = makeBundle(jobId, genuineAnchorOverrides(jobId, "bundle-r4-kernel-A"));
     await getSettlementService().processEvidence(bundleA, jobId, { milestoneIndex: 0, contractAddress: address });
     expect(getRepos().jobs.findById(jobId)?.status).toBe("evidence_submitted");
 
@@ -438,11 +460,19 @@ describe("N79 round 4: the review's findings, reproduced", () => {
     vi.mocked(driveSettlement).mockResolvedValue(NOT_SETTLED);
     const resumed = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement` });
 
-    // The hash the oracle verifies and the hash the crank settles is A's, on every pass.
-    expect(vi.mocked(verifyWithOracle).mock.calls.map((c) => c[0].evidenceHash)).toEqual([HASH_A]);
+    // The hash the oracle verifies and the hash the crank settles is A's, on every pass. Compared against
+    // bundleA.bundleHash itself (genuineAnchorOverrides computed it), never the literal HASH_A sentinel, since
+    // resume's pinned-evidence re-verification now requires A's hash to actually BE its envelope's sha256.
+    expect(vi.mocked(verifyWithOracle).mock.calls.map((c) => c[0].evidenceHash)).toEqual([bundleA.bundleHash]);
+    // Merge-up with master's LO-EV-9: the crank now takes the pinned digest as bytes32 -- the same 0x<hex>
+    // /complete's V3 path submits and the oracle attests (paid-job-flow.ts's chainEvidenceHash) -- never the
+    // sha256:-tagged string resume used to hand it before this merge. bundleA.bundleHash itself stays the
+    // sha256:-tagged form (that's what the oracle check above still compares, and what pins the job); only the
+    // CRANK's own hash is hex-converted, so this comparison converts the same way paid-job-flow.ts does.
+    const expectedChainHash = `0x${bundleA.bundleHash.replace(/^sha256:/, "")}`;
     const crankHashes = vi.mocked(driveSettlement).mock.calls.map((c) => c[2]?.evidenceBundleHash);
     expect(crankHashes.length).toBeGreaterThan(0);
-    expect(crankHashes.every((h) => h === HASH_A)).toBe(true);
+    expect(crankHashes.every((h) => h === expectedChainHash)).toBe(true);
     expect(resumed.json().evidenceBundleId).toBe(bundleA.id);
     expect(resumed.statusCode).toBe(200);
     // ...because processEvidence recorded A's id on the job, in the write that said evidence_submitted.

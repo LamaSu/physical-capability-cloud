@@ -18,21 +18,28 @@
  * IDEMPOTENT. A milestone already Refunded is skipped, so a repeat sends only what is left. With nothing left, the
  * outcome is `already_refunded`.
  *
- * ONE TRANSACTION PER MILESTONE, so an escrow with several milestones is not atomic on-chain. Two cases leave some
- * milestones Refunded and the rest not, and the outcome is then `incomplete`, naming what was sent and where it
- * stopped:
- *   - a third party attests a remaining milestone between the read and a send (the contract makes that race safe
- *     either way);
- *   - a transaction is dropped.
- * A retry finishes the rest, or refuses it with the reason.
+ * ONE TRANSACTION PER MILESTONE, so an escrow with several milestones is not atomic on-chain. When a sequence stops
+ * part-way, the outcome is `incomplete`: it names every reclaim that went through and exactly where and why it stopped
+ * (astra, #472 F1; #477 round 2). It never throws away that record, not even when the error cannot be printed. Each
+ * reclaim is SIGNED locally first, so its hash is known before anything leaves this process. Where it stopped, `receipt`
+ * says:
+ *   - `not_sent`: preparing or signing failed. Nothing left this process for that milestone (proven).
+ *   - `unknown`: the broadcast failed, or the receipt could not be read. The node may have taken the transaction
+ *     (a lost response is not proof of absence), so look up the returned `transactionHash`: it may still mine.
+ *   - `timeout`: sent, but not confirmed within the wait. It may still mine.
+ *   - `reverted`: the transaction executed and reverted. For example, a third party attested that milestone between
+ *     the read and the send; the contract makes that race safe either way.
+ * A retry finishes the rest, or refuses it with the reason. Refunded milestones are skipped, so a retry never pays a
+ * principal twice.
  * The whole sequence runs under the signer lock, so the gateway's own writes cannot interleave with it.
  */
 import type { Address, Hex } from "viem";
 import {
+  broadcastSignedTransaction,
   getReclaimStateV3,
   getSignerAddress,
   isWriteEnabled,
-  reclaimAfterDeadlineV3,
+  signReclaimAfterDeadlineV3,
   waitForReceipt,
   type ReclaimStateV3,
 } from "../contracts/escrow-client.js";
@@ -108,8 +115,26 @@ export type ReclaimOutcomeV3 =
       outcome: "incomplete";
       escrow: Address;
       reclaimed: Array<{ index: number; transactionHash: string }>;
-      stoppedAt: { index: number; transactionHash: string; receipt: "reverted" | "timeout" };
+      stoppedAt: {
+        index: number;
+        /** Absent only when signing itself failed, before broadcast (`not_sent`). Present whenever a
+         *  transaction was actually signed, including after a broadcast failure (`unknown`) — the hash is
+         *  known locally before the broadcast attempt, so it is never lost by that attempt failing. */
+        transactionHash?: string;
+        receipt: "not_sent" | "reverted" | "timeout" | "unknown";
+        error?: string;
+      };
     };
+
+/** A one-line description of any thrown value. It never throws itself: a value that cannot be printed gets a fixed text. */
+const messageOf = (e: unknown): string => {
+  try {
+    if (e instanceof Error) return e.message.split("\n")[0] ?? e.message;
+    return String(e);
+  } catch {
+    return "unprintable error";
+  }
+};
 
 /**
  * Reclaim every milestone of a V3 escrow whose deadline has passed, from the gateway signer (the payer), all or
@@ -129,8 +154,36 @@ export async function reclaimEscrowV3(escrow: Address): Promise<ReclaimOutcomeV3
 
     const reclaimed: Array<{ index: number; transactionHash: string }> = [];
     for (const index of plan.toReclaim) {
-      const { transactionHash } = await reclaimAfterDeadlineV3(index, escrow);
-      const receipt = await waitForReceipt(transactionHash as Hex);
+      let signed: Awaited<ReturnType<typeof signReclaimAfterDeadlineV3>>;
+      try {
+        signed = await signReclaimAfterDeadlineV3(index, escrow);
+      } catch (e) {
+        // Preparing or signing failed: nothing left this process for this milestone.
+        return { outcome: "incomplete", escrow, reclaimed, stoppedAt: { index, receipt: "not_sent", error: messageOf(e) } };
+      }
+      const transactionHash: string = signed.transactionHash;
+      try {
+        await broadcastSignedTransaction(signed.serializedTransaction);
+      } catch (e) {
+        // The node may have taken it even though the response was lost: indeterminate, with the hash to look up.
+        return {
+          outcome: "incomplete",
+          escrow,
+          reclaimed,
+          stoppedAt: { index, transactionHash, receipt: "unknown", error: messageOf(e) },
+        };
+      }
+      let receipt: Awaited<ReturnType<typeof waitForReceipt>>;
+      try {
+        receipt = await waitForReceipt(transactionHash as Hex);
+      } catch (e) {
+        return {
+          outcome: "incomplete",
+          escrow,
+          reclaimed,
+          stoppedAt: { index, transactionHash, receipt: "unknown", error: messageOf(e) },
+        };
+      }
       if (receipt.status !== "success") {
         return { outcome: "incomplete", escrow, reclaimed, stoppedAt: { index, transactionHash, receipt: receipt.status } };
       }

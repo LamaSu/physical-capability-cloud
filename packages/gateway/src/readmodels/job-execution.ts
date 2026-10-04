@@ -402,6 +402,14 @@ export function reconcilePayout(
   return ESCROW_ALL_RELEASED.has(e) ? conflict : { payout: "not_paid", unknownReason: null };
 }
 
+/**
+ * The settlement axis alone, for read models that need only this job's money (operator
+ * work and income). Same resolver output, same payout rule, same notices basis.
+ */
+export function buildSettlementAxis(job: JobRow, read: SourceRead<SettlementSource>): SettlementAxis {
+  return buildSettlement(job, read);
+}
+
 function buildSettlement(job: JobRow, read: SourceRead<SettlementSource>): SettlementAxis {
   const empty = {
     source: "gateway_escrow_record" as const,
@@ -474,6 +482,14 @@ function buildSettlement(job: JobRow, read: SourceRead<SettlementSource>): Settl
     payout = r.payout;
     payoutUnknownReason = r.unknownReason;
     payoutBasis = "milestone_record";
+    // The job row saying `settled` while this job's milestone record says not released (or
+    // refunded) means one of the two records is wrong. SettlementService.releaseMilestone,
+    // for one, updates the job row after an on-chain release and never the milestone
+    // record. So the payout is unknown, never "not paid". The row never makes it released.
+    if ((payout === "not_paid" || payout === "refunded") && normalizeJobRowStatus(job.status) === "settled") {
+      payout = "unknown";
+      payoutUnknownReason = "job_row_conflict";
+    }
   } else {
     payoutUnknownReason = milestoneMatch === "shared_by_jobs" ? "milestone_shared" : "no_single_milestone";
   }
@@ -506,6 +522,7 @@ function buildNotices(
   if ((evidence.fabricatedEventCount ?? 0) > 0) notices.push("fabricated_evidence");
   if (settlement.record?.simulated) notices.push("simulated_settlement");
   if (settlement.payoutUnknownReason === "records_conflict") notices.push("settlement_records_conflict");
+  if (settlement.payoutUnknownReason === "job_row_conflict") notices.push("settlement_row_conflict");
   if (settlement.payoutUnknownReason === "status_unrecognized") notices.push("settlement_status_unrecognized");
   if (settlement.payoutUnknownReason === "milestone_shared") notices.push("milestone_shared_by_jobs");
   if (settlement.link === "conflicting") notices.push("settlement_link_conflict");

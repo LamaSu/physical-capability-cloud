@@ -2,13 +2,17 @@
  * N79 x N85 (steward #4218): a status write gives an escrow back only when its writer is entitled to.
  *
  * Run through the real API gate, with real API keys.
- * - The operator relay (POST /api/operator/job-status) has no owner check on master (N85): any authenticated key
- *   can report any job failed. Such a report may mark the job, but it must NOT give the escrow back. Otherwise one
- *   key could refund anyone's escrow and lock the operator out of the payout for good, since every release path
- *   refuses a given-back escrow. The refund on a relay report waits on N85's owner check.
+ * - The operator relay (POST /api/operator/job-status) has no OWNER check on master (N85(b)/WP-C): any
+ *   authenticated key can post there. Merge-up with master's N85(a): the relay now guards every write through
+ *   writeJobStatusGuarded directly (routes/operator-relay.ts, untouched by this merge) -- a report on a job
+ *   WITH a settlement record is refused outright (409 settlement_owned_status), before N85(b)'s still-missing
+ *   owner check would ever get a say; the escrow is never touched either way, refused or (on a job with no
+ *   settlement record) merely marked.
  * - PATCH /api/jobs/:id/status: a buyer must never give the escrow back after execution started. Today the route
  *   refuses every authenticated caller: its owner check compares `job.submittedBy` and `kernel.operatorId`, columns
- *   that don't exist. This pins the OUTCOME, whatever the route admits later.
+ *   that don't exist. Merge-up with master's N85(a): even an UNauthenticated request (bypassing that owner-check
+ *   bug entirely, as the relay tests above do) is now ALSO refused by JobFacade.updateStatus's own guard. This
+ *   pins the OUTCOME, whatever the route admits later.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -129,7 +133,10 @@ describe("N79 x N85: only a writer entitled to give the escrow back can trigger 
     closeStore();
   });
 
-  it("a relay report from a key that does not operate the job's kernel marks the job but gives nothing back", async () => {
+  // Merge-up with master's N85(a): a key that doesn't operate the job's kernel is no longer "accepted but
+  // refunds nothing" (N85(b)'s owner check, still absent, was never what stopped the refund) -- N85(a)'s
+  // settlement-record guard now refuses the write itself, before any owner check would run.
+  it("a relay report from a key that does not operate the job's kernel is refused outright once N85(a) guards the job, never mind N85(b)'s still-missing owner check", async () => {
     const { escrowId } = seedPaidJob("job-n85-grief", "in_progress");
     const attacker = provisionApiKey({ operatorId: "operator-attacker" }).rawKey;
     const res = await app.inject({
@@ -138,12 +145,15 @@ describe("N79 x N85: only a writer entitled to give the escrow back can trigger 
       headers: { authorization: `Bearer ${attacker}` },
       payload: { jobId: "job-n85-grief", status: "failed" },
     });
-    // N85 (WP-C's): the relay still accepts a report from any key. The status write is not this PR's to close.
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("settlement_owned_status");
+    expect(getRepos().jobs.findById("job-n85-grief")?.status).toBe("in_progress");
     expectStillFunded(escrowId);
   });
 
-  it("until N85's owner check lands, even the operator's own relay report gives nothing back (the relay can't tell who reports)", async () => {
+  // Same merge-up: N85(a) can't tell who reports any more than the relay itself could -- it refuses the
+  // OPERATOR'S OWN report on a job with a settlement record exactly as it refuses a stranger's.
+  it("N85(a) refuses even the operator's own relay report on a job with a settlement record, before N85(b)'s owner check ever gets a say", async () => {
     const { escrowId, operatorAddress } = seedPaidJob("job-n85-own", "in_progress");
     const owner = provisionApiKey({ operatorId: operatorAddress }).rawKey;
     const res = await app.inject({
@@ -152,8 +162,9 @@ describe("N79 x N85: only a writer entitled to give the escrow back can trigger 
       headers: { authorization: `Bearer ${owner}` },
       payload: { jobId: "job-n85-own", status: "failed" },
     });
-    expect(res.statusCode).toBe(200);
-    expect(getRepos().jobs.findById("job-n85-own")?.status).toBe("failed");
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("settlement_owned_status");
+    expect(getRepos().jobs.findById("job-n85-own")?.status).toBe("in_progress");
     expectStillFunded(escrowId);
   });
 

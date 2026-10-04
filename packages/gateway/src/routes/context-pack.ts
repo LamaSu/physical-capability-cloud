@@ -92,7 +92,7 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/escrow/chain/:address/attestation/:milestoneIndex | Submit attestation |
 | GET | /api/settlement/status | Settlement pipeline status |
 | GET | /api/settlement/epochs | Settlement epochs |
-| GET | /api/settlement/:jobId | Job settlement details |
+| GET | /api/settlement/:jobId | Job settlement status from the job's own escrow records (settled only when a settlement read confirms it; a recorded release is reported_released; mock escrows are simulated) |
 | POST | /api/settlement/flush | Flush pending settlements |
 
 ### Evidence & Verification
@@ -120,10 +120,12 @@ All endpoints are relative to the base URL above. Most return JSON.
 ### Operator Management
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /api/operator/machines | List operator machines |
-| GET | /api/operator/earnings | Operator earnings summary |
-| GET | /api/operator/certifications | Operator certifications |
-| GET | /api/operator/maintenance | Maintenance schedule |
+| GET | /api/operator/machines | Not available yet (501): use /api/agent/me for your kernels, devices and in-flight jobs |
+| GET | /api/operator/earnings | Not available yet (501): per-job payment state is at /api/jobs/:jobId/execution |
+| GET | /api/operator/certifications | Not available yet (501): no certification store |
+| GET | /api/operator/maintenance | Not available yet (501): nothing records maintenance events |
+| GET | /api/operator/work | Your work: job offers for your capability types, your kernels' jobs and approvals (OperatorWorkDTO: server-assigned phase, pay with its funding, actions with routes) |
+| GET | /api/operator/income | What the escrow records show for your kernels' jobs (OperatorIncomeDTO); totals are sums of rows; no payout history yet |
 | GET | /api/operator/approvals | Pending operator approvals |
 | POST | /api/operator/emergency-stop | Emergency stop a machine |
 | POST | /api/operator/emergency-resume | Resume after emergency stop |
@@ -205,7 +207,7 @@ All endpoints are relative to the base URL above. Most return JSON.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | /api/rewards/claims | Claim DePIN rewards |
-| POST | /api/certificates/mint | Mint a soulbound capability certificate |
+| POST | /api/certificates/mint | Not implemented (501): no certificate is minted yet |
 | GET | /api/treasury/summary | Treasury balance and allocation |
 
 ### IP (Intellectual Property via Story Protocol)
@@ -291,9 +293,9 @@ All endpoints are relative to the base URL above. Most return JSON.
 ### Bounties & Pools
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /api/bounty/demand | Create a demand bounty |
-| POST | /api/bounty/claim | Claim a bounty |
-| POST | /api/bounty/verify | Verify a bounty claim |
+| POST | /api/bounty/demand | Record a demand signal (unfunded; no bounty is auto-created) |
+| POST | /api/bounty/claim | Claim an open bounty (in-memory, unfunded) |
+| POST | /api/bounty/verify | Retired (410): verification is server-derived, never caller-supplied |
 | POST | /api/pool/create | Create a capability pool |
 | POST | /api/pool/stake | Stake into a pool |
 

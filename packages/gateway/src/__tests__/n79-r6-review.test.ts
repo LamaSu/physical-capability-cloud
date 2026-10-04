@@ -69,6 +69,11 @@ import { getSettlementService } from "../services/settlement-service.js";
 import { runKeeperSweep } from "../services/settlement-keeper.js";
 import { driveSettlement } from "../services/settlement-crank.js";
 import * as chain from "../contracts/escrow-client.js";
+// Merge-up with master's LO-EV-9: resume now re-verifies the PINNED bundle (verifyPinnedSettlementEvidence)
+// before settling, so every resume fixture below needs a genuine anchor's bundleHash (insertGenuineAnchor),
+// never the shared HASH_A literal.
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { createHash } from "node:crypto";
 
 const dangling: Array<() => void> = [];
 const inflight: Array<PromiseLike<unknown>> = [];
@@ -240,6 +245,25 @@ function makeBundle(jobId: string, over: Partial<EvidenceBundle> = {}): Evidence
   };
 }
 
+/** Insert a genuine evidence anchor for `jobId` and pin it (`jobs.evidenceBundleId`, status
+ *  `evidence_submitted`) -- same construction as completion-resume-settlement.test.ts's makeTrappedJob,
+ *  generalized to this file's many resume fixtures (all of which share this exact shape, just a different
+ *  bundle id per test). The stored kernelSignature keeps this file's existing `{ signer: "0x0", algorithm:
+ *  "secp256k1", value: "sig" }` -- isDeviceSignedSignature reads it as NOT device-signed (algorithm !==
+ *  "ed25519"), same as a real ed25519/zero-address sentinel would, so verifyPinnedSettlementEvidence takes the
+ *  same GATEWAY envelope-recompute branch either way. The only thing that was ever wrong is `bundleHash`: a
+ *  hardcoded HASH_A literal, never this row's own envelope hash. No events: none of these fixtures insert any. */
+function insertGenuineAnchor(jobId: string, bundleId: string): void {
+  const repos = getRepos();
+  const job = repos.jobs.findById(jobId)!;
+  const createdAt = new Date().toISOString();
+  const kernelSignature = { signer: "0x0", algorithm: "secp256k1" as const, value: "sig" };
+  const meta = { id: bundleId, jobId, stepId: job.stepId, kernelId: job.kernelId, assuranceTier: 0, createdAt, kernelSignature };
+  const bundleHash = `sha256:${createHash("sha256").update(buildCanonicalEvidenceEnvelope(meta as never, [])).digest("hex")}`;
+  repos.evidence.insert({ ...meta, bundleHash } as never);
+  repos.jobs.update(jobId, { evidenceBundleId: bundleId, status: "evidence_submitted" });
+}
+
 describe("N79 round 6: Phase 1 — the review's findings, reproduced", () => {
   let app: FastifyInstance;
   let savedEscrowEnv: string | undefined;
@@ -394,18 +418,7 @@ describe("N79 round 6: Phase 1 — the review's findings, reproduced", () => {
     const { jobId } = seed({ milestones: ["funded", "funded"] });
     const address = pointEscrowAtChain(jobId, addr(0xf2a001), "v2");
     // A recorded evidence bundle, as /complete would have left it, so resume can reclaim the job.
-    const repos = getRepos();
-    repos.evidence.insert({
-      id: "bundle-r6-h2a-a",
-      jobId,
-      stepId: repos.jobs.findById(jobId)!.stepId,
-      kernelId: repos.jobs.findById(jobId)!.kernelId,
-      assuranceTier: 0,
-      bundleHash: HASH_A,
-      kernelSignature: { signer: "0x0", algorithm: "secp256k1", value: "sig" },
-      createdAt: new Date().toISOString(),
-    });
-    repos.jobs.update(jobId, { evidenceBundleId: "bundle-r6-h2a-a", status: "evidence_submitted" });
+    insertGenuineAnchor(jobId, "bundle-r6-h2a-a");
 
     process.env.PCC_USE_EAS_V2 = "true";
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
@@ -517,18 +530,7 @@ describe("N79 round 6: Phase 1 — the review's findings, reproduced", () => {
   it("R6-H2B (c): resume must read the mapping and refuse to drive at all when it drifts", async () => {
     const jobId = await submitPaidJob(app, "user-n79r6-h2b-c"); // ONE local row
     const address = pointEscrowAtChain(jobId, addr(0xf2b003), "v2");
-    const repos = getRepos();
-    repos.evidence.insert({
-      id: "bundle-r6-h2b-c",
-      jobId,
-      stepId: repos.jobs.findById(jobId)!.stepId,
-      kernelId: repos.jobs.findById(jobId)!.kernelId,
-      assuranceTier: 0,
-      bundleHash: HASH_A,
-      kernelSignature: { signer: "0x0", algorithm: "secp256k1", value: "sig" },
-      createdAt: new Date().toISOString(),
-    });
-    repos.jobs.update(jobId, { evidenceBundleId: "bundle-r6-h2b-c", status: "evidence_submitted" });
+    insertGenuineAnchor(jobId, "bundle-r6-h2b-c");
 
     process.env.PCC_USE_EAS_V2 = "true";
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
@@ -915,18 +917,7 @@ describe("N79 round 6: Phase 2 — addendum 1 properties", () => {
   it("P4 (resume, a second read site): an identity drift is quarantined before the first drive too", async () => {
     const jobId = await submitPaidJob(app, "user-p4-resume-identity");
     const address = pointEscrowAtChain(jobId, addr(0xfd0001), "v2");
-    const repos = getRepos();
-    repos.evidence.insert({
-      id: "bundle-p4-resume-identity",
-      jobId,
-      stepId: repos.jobs.findById(jobId)!.stepId,
-      kernelId: repos.jobs.findById(jobId)!.kernelId,
-      assuranceTier: 0,
-      bundleHash: HASH_A,
-      kernelSignature: { signer: "0x0", algorithm: "secp256k1", value: "sig" },
-      createdAt: new Date().toISOString(),
-    });
-    repos.jobs.update(jobId, { evidenceBundleId: "bundle-p4-resume-identity", status: "evidence_submitted" });
+    insertGenuineAnchor(jobId, "bundle-p4-resume-identity");
 
     process.env.PCC_USE_EAS_V2 = "true";
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
@@ -955,17 +946,7 @@ describe("N79 round 6: Phase 2 — addendum 1 properties", () => {
     const address = pointEscrowAtChain(jobId, addr(0xfd0002), "v2");
     const repos = getRepos();
     const job = repos.jobs.findById(jobId)!;
-    repos.evidence.insert({
-      id: "bundle-t3-resume",
-      jobId,
-      stepId: job.stepId,
-      kernelId: job.kernelId,
-      assuranceTier: 0,
-      bundleHash: HASH_A,
-      kernelSignature: { signer: "0x0", algorithm: "secp256k1", value: "sig" },
-      createdAt: new Date().toISOString(),
-    });
-    repos.jobs.update(jobId, { evidenceBundleId: "bundle-t3-resume", status: "evidence_submitted" });
+    insertGenuineAnchor(jobId, "bundle-t3-resume");
 
     process.env.PCC_USE_EAS_V2 = "true";
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
@@ -1017,18 +998,7 @@ describe("N79 round 6: Phase 2 — addendum 1 properties", () => {
   it("addendum 2 (1): resume's pre-drive read failing is UNVERIFIED, not 'no drift' — never drives, 503s", async () => {
     const jobId = await submitPaidJob(app, "user-addendum2-resume-unverified");
     pointEscrowAtChain(jobId, addr(0xfe0001), "v2");
-    const repos = getRepos();
-    repos.evidence.insert({
-      id: "bundle-addendum2-resume",
-      jobId,
-      stepId: repos.jobs.findById(jobId)!.stepId,
-      kernelId: repos.jobs.findById(jobId)!.kernelId,
-      assuranceTier: 0,
-      bundleHash: HASH_A,
-      kernelSignature: { signer: "0x0", algorithm: "secp256k1", value: "sig" },
-      createdAt: new Date().toISOString(),
-    });
-    repos.jobs.update(jobId, { evidenceBundleId: "bundle-addendum2-resume", status: "evidence_submitted" });
+    insertGenuineAnchor(jobId, "bundle-addendum2-resume");
 
     process.env.PCC_USE_EAS_V2 = "true";
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);

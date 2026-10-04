@@ -15,10 +15,13 @@
  * trigger must come from someone entitled to give up the payout.
  *   - The gateway's own failure observations: the kernel service's failure writes and the dispatch rollback.
  *   - The job facade (`updateStatus`): the owner-checked MCP cancel (the job's own operator forfeits) and
- *     PATCH /api/jobs/:id/status. On master that route answers 403 to every caller: its owner check compares
- *     columns that don't exist.
- *   - NOT the operator relay (POST /api/operator/job-status). It has no owner check (N85), so any key can post any
- *     job's status there. A relay report marks the job and gives nothing back. Its refund waits on N85's owner check.
+ *     PATCH /api/jobs/:id/status. Merge-up with master's N85(a): the facade now writes through
+ *     {@link writeJobStatusGuardedWithRefund}, which composes this refund with {@link writeJobStatusGuarded}'s
+ *     settlement-owned-status guard in the SAME transaction, so a generic writer still cannot finish, fail,
+ *     cancel or re-open a paid job, but a terminal write it IS allowed to make still gives the escrow back.
+ *   - NOT the operator relay (POST /api/operator/job-status). It has no owner check (N85(b)), so any key can post
+ *     any job's status there. It never gives an escrow back: on a paid job N85(a) refuses its terminal write
+ *     outright, and an unpaid job has no escrow to give back.
  *
  * The refund itself:
  *   - MOCK settlement (`mock-escrow-*`): there is no chain, so the refund is complete at once. Every milestone
@@ -72,6 +75,9 @@ import { ESCROW_REFUND_STATUS, TERMINAL_JOB_STATUSES } from "@pcc/spec";
 // which exports all three and which no test mocks: not from the chain client (viem and env reads at module
 // load), and not from the @pcc/contracts root (story-pipeline.test.ts mocks that root with a non-hoisted factory).
 import { MilestoneStatus, MilestoneStatusV2, MilestoneStatusV3 } from "@pcc/contracts/abi";
+// N85(a)'s guard, composed with the N79 refund in writeJobStatusGuardedWithRefund below. One-way import:
+// settlement-owned-status.ts imports only "@pcc/store" and "../db.js", so there is no cycle.
+import { writeJobStatusGuarded, type GuardedStatusWrite } from "./settlement-owned-status.js";
 
 /** The job statuses that end a job without completing it: every terminal status in the spec except `completed`. */
 export const TERMINAL_FAILURE_JOB_STATUSES: ReadonlySet<string> = new Set(
@@ -680,5 +686,42 @@ export function setJobStatusWithRefund(jobId: string, status: string, progress?:
     const job = repos.jobs.updateStatus(jobId, status, progress);
     if (!job || !TERMINAL_FAILURE_JOB_STATUSES.has(status)) return { job, escrowRefund: undefined };
     return { job, escrowRefund: refundEscrowForTerminalJob(jobId, priorStatus) };
+  });
+}
+
+/**
+ * N79 x N85(a) merge-up composition: JobFacade.updateStatus's write (PATCH /api/jobs/:jobId/status, and the
+ * owner-checked MCP cancel once it reaches the same facade) must still give the escrow back on a terminal
+ * failure, through the SAME guard N85(a) already wraps that write in. NOT the operator relay (POST
+ * /api/operator/job-status): it calls {@link writeJobStatusGuarded} directly, never through this function —
+ * unchanged from N79's own rule, reaffirmed by the merge, that the relay can never trigger a refund (WHO MAY
+ * TRIGGER IT, above): it has no owner check, so any key could post there. Neither property depends on the
+ * other's current definition: {@link writeJobStatusGuarded} (`./settlement-owned-status.js` — a one-way
+ * import, no cycle: that module imports only `@pcc/store`/`../db.js`) decides whether a GENERIC writer may
+ * touch this job at all; this function decides, ONLY once that guard already said `written`, whether the
+ * now-terminal status also means the escrow goes back. Both run in ONE transaction, so a crash between them
+ * cannot strand the status write without its refund, or vice versa.
+ *
+ * Why the refund is unreachable today: `escrowForJob` finds an escrow only through the job's negotiation
+ * session, and {@link hasSettlementRecord} treats any session (or an escrow linked through the job's `cwmId`)
+ * as a settlement record — so N85(a) already refuses every terminal write on a job N79 could refund, before
+ * this function's refund branch is ever reached. The composition exists so N79's property survives if N85(a)
+ * is ever relaxed (gateway was asked in #6374 about a pre-execution cancel of a paid job) — at that point this
+ * function, not a second rewrite of the guard, is what gives the escrow back.
+ */
+export function writeJobStatusGuardedWithRefund(
+  jobId: string,
+  status: string,
+  progress?: number,
+): { outcome: GuardedStatusWrite; escrowRefund?: EscrowRefundOutcome } {
+  const repos = getRepos();
+  const { db } = getStore();
+  return db.transaction(() => {
+    const priorStatus = repos.jobs.findById(jobId)?.status;
+    const outcome = writeJobStatusGuarded(jobId, status, progress);
+    if (outcome.kind !== "written" || !TERMINAL_FAILURE_JOB_STATUSES.has(status)) {
+      return { outcome };
+    }
+    return { outcome, escrowRefund: refundEscrowForTerminalJob(jobId, priorStatus) };
   });
 }
