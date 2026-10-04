@@ -33,15 +33,20 @@
  *       - an entry point's parameter whose type may be an object is the CALLER's object, whose
  *         fields may be inherited, accessors, or missing and served by a prototype. It is used only
  *         as unknown: tested (`typeof`, `===` or `!==`, `!`, a condition), handed to an own-data
- *         reader (OWN_DATA_READERS) or to in-repo code at a parameter declared `unknown` or `any`,
- *         or held where an `unknown` is expected. Never read, aliased, held as a typed value or
- *         destructured where it is received;
- *       - an `unknown` or `any` becomes an object type (by `as` or `<T>`, by a type predicate, or as
- *         an implicit `any`), and an assertion claims fields its operand's type lacks (`{} as T`),
- *         only where CheckOptions.provenance names the place, with where its own data comes from. A
- *         fresh `ObjectCreate(null)` is the code's own empty record;
- *       - an `unknown` or `any` (or an array of them) is handed to code the check does not walk only
- *         if that code is an own-data reader.
+ *         reader or to in-repo code at a parameter declared `unknown` or `any`, or held where an
+ *         `unknown` is expected. Never read, aliased, held as a typed value or destructured where it
+ *         is received;
+ *       - an OPAQUE value (`unknown`, `any`, `object`, `{}`: nothing to read) becomes a readable
+ *         shape (by `as` or `<T>`, by a type predicate, or as an implicit `any`), and an assertion
+ *         claims fields its operand's type lacks (`{} as T`), only where CheckOptions.provenance
+ *         names the place, with where its own data comes from. A fresh `ObjectCreate(null)` is the
+ *         code's own empty record;
+ *       - an opaque value (or an array of them) is handed to code the check does not walk only if
+ *         that code is an own-data reader, or the call site is a named collaborator. An own-data
+ *         reader reads only its operands' own data or identity: one of OWN_DATA_READERS, by the path
+ *         it was captured from at load; an in-repo capture named in CheckOptions.ownDataReaders;
+ *         `Reflect.apply` of one of those; or the reject of an executor of the Promise captured at
+ *         load.
  *     An assertion to a PRIMITIVE type is a claim the operators then rely on, and is not named;
  *   - an element read, whose key must be a string, number or symbol (ToPropertyKey of anything
  *     else looks up its toString):
@@ -120,6 +125,12 @@ export interface CheckOptions {
    * that is unexplained, matches nothing or matches several is reported like any violation.
    */
   provenance?: ReadonlyMap<string, string>;
+  /**
+   * In-repo captures that are own-data readers, which OWN_DATA_READERS cannot name by path: a trap-free
+   * Proxy test taken at load through process.getBuiltinModule, say. `path:Name` of the capture, with
+   * its reason. Closed, like the collaborators.
+   */
+  ownDataReaders?: ReadonlyMap<string, string>;
 }
 
 /** A file's path relative to `root`, with forward slashes; a file outside `root` keeps its whole path. */
@@ -138,6 +149,7 @@ function collaboratorProblems(options: CheckOptions, matches: Matches): string[]
   const lists: Array<[string, string, ReadonlyMap<string, string> | undefined]> = [
     ["collaborator", "declaration or call site", options.collaborators],
     ["provenance", "conversion", options.provenance],
+    ["own-data reader", "capture", options.ownDataReaders],
   ];
   for (const [kind, what, list] of lists) {
     for (const [key, reason] of list ?? new Map<string, string>()) {
@@ -173,7 +185,7 @@ const PRIMITIVE = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFla
  */
 const OWN_DATA_READERS = new Set([
   // own data and shape
-  "Object.getOwnPropertyDescriptor", "Reflect.getOwnPropertyDescriptor", "Reflect.ownKeys", "Object.getOwnPropertyNames",
+  "Object.getOwnPropertyDescriptor", "Reflect.getOwnPropertyDescriptor", "Reflect.ownKeys", "Object.getOwnPropertyNames", "Object.keys",
   "Object.getPrototypeOf", "Reflect.getPrototypeOf", "Object.isFrozen", "uncurried Object.prototype.hasOwnProperty",
   // writes: defines the target's own property from a descriptor the code made, reading nothing of the target
   "Object.defineProperty",
@@ -295,7 +307,7 @@ export function closureReads(
   seedFiles: readonly string[],
   options: CheckOptions,
   inRepo: (fileName: string) => boolean,
-): { reached: string[]; found: string[]; collaboratorsUsed: string[]; provenanceUsed: string[] } {
+): { reached: string[]; found: string[]; collaboratorsUsed: string[]; provenanceUsed: string[]; readersUsed: string[] } {
   const matches: Matches = new Map();
   const roots = trustedClosure(program, seedFiles, inRepo, options, matches);
   const seeds = new Set(seedFiles.map((file) => program.getSourceFile(file)!));
@@ -306,6 +318,7 @@ export function closureReads(
     found: [...new Set([...walker.found, ...collaboratorProblems(options, matches)])],
     collaboratorsUsed: [...matches.keys()].filter((key) => options.collaborators?.has(key) === true).sort(),
     provenanceUsed: [...matches.keys()].filter((key) => options.provenance?.has(key) === true).sort(),
+    readersUsed: [...matches.keys()].filter((key) => options.ownDataReaders?.has(key) === true).sort(),
   };
 }
 
@@ -836,12 +849,22 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
 
   // -- provenance (astra pack 309): what a caller supplies is read only through an own-data reader --
   const isLoose = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
-  /** `unknown` or `any`, an array of either, or a union with one: a value the code may not read until an own-data reader has. */
+  /**
+   * A type with nothing the code can read: `unknown`, `any`, `object` or `{}`. A value of it can be
+   * read only once it is taken as a readable shape, which is a conversion.
+   */
+  const isOpaque = (type: ts.Type): boolean => {
+    if (isLoose(type) || (type.flags & ts.TypeFlags.NonPrimitive) !== 0) return true;
+    if (type.isIntersection()) return type.types.every(isOpaque);
+    return (type.flags & ts.TypeFlags.Object) !== 0 && checker.getPropertiesOfType(type).length === 0 && checker.getIndexInfosOfType(type).length === 0 &&
+      type.getCallSignatures().length === 0 && type.getConstructSignatures().length === 0;
+  };
+  /** An opaque value, an array of them, or a union with one: what the code may not read until an own-data reader has. */
   const holdsLoose = (type: ts.Type): boolean => {
-    if (isLoose(type)) return true;
+    if (isOpaque(type)) return true;
     if (type.isUnion()) return type.types.some(holdsLoose);
     const element = checker.isArrayType(type) || checker.isTupleType(type) ? checker.getIndexTypeOfType(type, ts.IndexKind.Number) : undefined;
-    return element !== undefined && isLoose(element);
+    return element !== undefined && isOpaque(element);
   };
   /** Whether a value of this type may be an object whose fields could be read: not only primitives, not a function (calls are call targets), and not unknown or any (opaque until narrowed). */
   const mayBeObject = (type: ts.Type, seen: Set<ts.Type> = new Set()): boolean => {
@@ -904,10 +927,32 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     }
     return undefined;
   };
-  /** Whether an opaque callee reads only its operands' own data or identity, running no getter on them: what a caller's value may be passed to. */
-  const isOwnDataReader = (callee: ts.Expression): boolean => {
+  /**
+   * Whether an opaque callee reads only its operands' own data or identity, running no getter on
+   * them: what a caller's value may be passed to. One of OWN_DATA_READERS by the path it was captured
+   * from, or an in-repo capture named in CheckOptions.ownDataReaders; `Reflect.apply` of one of them
+   * (`ReflectApply(HasOwnProperty, o, [k])`); or the reject of an executor handed to the Promise
+   * captured at load, which holds its reason and reads nothing of it.
+   */
+  const isOwnDataReader = (callee: ts.Expression, call?: ts.CallExpression | ts.NewExpression): boolean => {
     const path = capturedPath(callee);
-    return path !== undefined && OWN_DATA_READERS.has(path);
+    if (path !== undefined && OWN_DATA_READERS.has(path)) return true;
+    if (path === "Reflect.apply" && call !== undefined) {
+      const target = call.arguments?.[0];
+      const targetPath = target === undefined ? undefined : capturedPath(target);
+      if (targetPath !== undefined && (OWN_DATA_READERS.has(`uncurried ${targetPath}`) || OWN_DATA_READERS.has(targetPath))) return true;
+    }
+    const e = unwrap(callee);
+    if (!ts.isIdentifier(e)) return false;
+    const declaration = symbolOf(e)?.declarations?.[0];
+    if (declaration === undefined) return false;
+    if (ts.isParameter(declaration) && ts.isFunctionLike(declaration.parent) && isPromiseExecutor(declaration.parent) && declaration.parent.parameters.indexOf(declaration) === 1) return true;
+    const key = closureKey(declaration, options.root);
+    if (options.ownDataReaders?.has(key) !== true || !isLoadTimeConst(declaration)) return false;
+    let matched = matches.get(key);
+    if (matched === undefined) matches.set(key, (matched = new Set()));
+    matched.add(declaration);
+    return true;
   };
   /**
    * Whether `argument` is passed where the callee holds it as unknown: code the check walks, at a
@@ -918,7 +963,7 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     const index = ((call.arguments ?? []) as readonly ts.Node[]).indexOf(argument);
     if (index < 0) return false;
     const callee = unwrap(call.expression);
-    if (!walkedTarget(callee)) return isOwnDataReader(callee);
+    if (!walkedTarget(callee)) return isOwnDataReader(callee, call);
     const parameter = checker.getResolvedSignature(call)?.getDeclaration()?.parameters[index];
     if (parameter === undefined || parameter.dotDotDotToken !== undefined) return false;
     const declared = checker.getTypeAtLocation(parameter);
@@ -979,19 +1024,22 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
   };
   const elementOf = (type: ts.Type): ts.Type | undefined =>
     checker.isArrayType(type) || checker.isTupleType(type) ? checker.getIndexTypeOfType(type, ts.IndexKind.Number) : undefined;
+  /** Whether a value of this type has something to read: it may be an object, and is not opaque. */
+  const readable = (type: ts.Type): boolean => (type.isUnion() ? type.types : [type]).some((t) => mayBeObject(t) && !isOpaque(t));
   /**
-   * Whether taking a value of type `from` as `to` makes readable what `from` held as unknown or any:
-   * unknown or any taken as an object type, or an array of unknown or any taken as an array of objects.
+   * Whether taking a value of type `from` as `to` makes readable what `from` held opaque: an opaque
+   * value (unknown, any, `object`, `{}`) taken as a readable shape, or an array of them taken as an
+   * array of readable shapes.
    */
   const exposes = (from: ts.Type, to: ts.Type | undefined): boolean => {
     if (to === undefined) return false;
-    if (isLoose(from)) return mayBeObject(to);
+    if (isOpaque(from)) return readable(to);
     if (from.isUnion()) return from.types.some((part) => exposes(part, to));
     const element = elementOf(from);
-    if (element === undefined || !isLoose(element)) return false;
+    if (element === undefined || !isOpaque(element)) return false;
     return (to.isUnion() ? to.types : [to]).some((t) => {
       const target = elementOf(t);
-      return target !== undefined && mayBeObject(target);
+      return target !== undefined && readable(target);
     });
   };
   /**
@@ -1001,7 +1049,7 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
    */
   const addsFields = (from: ts.Type, to: ts.Type): boolean => {
     const target = checker.getNonNullableType(to);
-    if (isLoose(from) || !mayBeObject(target) || checker.isTypeAssignableTo(from, target)) return false;
+    if (isOpaque(from) || !mayBeObject(target) || checker.isTypeAssignableTo(from, target)) return false;
     const present = new Set(checker.getPropertiesOfType(checker.getNonNullableType(from)).map((p) => p.getName()));
     return checker.getPropertiesOfType(target).some((p) => !present.has(p.getName()));
   };
@@ -1056,11 +1104,14 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
    * value named directly is judged by checkIdentifier.
    */
   const checkOpaqueOperands = (call: ts.CallExpression | ts.NewExpression, callee: ts.Expression): void => {
-    if (walkedTarget(callee) || isOwnDataReader(callee)) return;
+    if (walkedTarget(callee) || isOwnDataReader(callee, call)) return;
     for (const argument of call.arguments ?? []) {
       const a = unwrap(argument);
       if (ts.isIdentifier(a) && isCallerValue(a)) continue;
-      if (holdsLoose(typeOf(argument))) report(argument, "an unknown handed to code the check does not walk, which may read it through [[Get]]: hand it to an own-data reader (astra pack 309)");
+      if (holdsLoose(typeOf(argument))) {
+        unseenTarget(call, callee, "an opaque value (unknown, any, object) handed to code the check does not walk, which may read it through [[Get]] (astra pack 309)");
+        return;
+      }
     }
   };
 
