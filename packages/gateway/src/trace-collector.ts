@@ -17,11 +17,14 @@
  *   - the attributes go through closeValue: a declared attribute keeps its key, anything else leaves
  *     keyed, key and value, at any depth;
  *   - a span's status is "ok", "error" or "in_progress", or its keyed hash;
- *   - every time is the server's clock, read here: a producer never sets a start or end time.
+ *   - every time is the server's clock, read here: a producer never sets a start or end time;
+ *   - every read (getRecentTraces, getTrace, and the subscribers the trace stream fans out from)
+ *     gets a tree built fresh and frozen, over attributes stored frozen (#538 round 3): no reader
+ *     can change what another reader, or the stream, gets.
  */
 
 import { randomBytes } from "node:crypto";
-import { closedText, closeValue, keyedHash, type Declared } from "./observability/closed-schema.js";
+import { closedText, closeValue, frozen, keyedHash, type Declared } from "./observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -154,7 +157,7 @@ export class TraceCollector {
       service: closedText(opts.service),
       status: "in_progress",
       startTime: Date.now(),
-      attributes: closedAttributes(opts.attributes),
+      attributes: frozen(closedAttributes(opts.attributes)),
     };
 
     trace.spans.push(span);
@@ -256,7 +259,8 @@ export class TraceCollector {
       throw new Error("Cannot build tree from empty span list");
     }
 
-    // Deep-clone spans (without children) so we don't mutate originals
+    // Copy each span (its attributes are stored frozen) with its own children list; the tree is
+    // frozen below, so a reader cannot change the store or what another reader gets.
     const cloned: TraceSpan[] = spans.map((s) => ({ ...s, children: [] }));
     const byId = new Map<string, TraceSpan>(cloned.map((s) => [s.spanId, s]));
 
@@ -292,7 +296,12 @@ export class TraceCollector {
         ? Math.max(...completedSpans.map((s) => s.endTime!))
         : undefined;
 
-    return {
+    for (const span of cloned) {
+      Object.freeze(span.children);
+      Object.freeze(span);
+    }
+    Object.freeze(cloned);
+    return Object.freeze({
       traceId: trace.id,
       rootSpan,
       spans: cloned,
@@ -300,7 +309,7 @@ export class TraceCollector {
       endTime,
       duration_ms: endTime !== undefined ? endTime - startTime : undefined,
       status,
-    };
+    });
   }
 }
 

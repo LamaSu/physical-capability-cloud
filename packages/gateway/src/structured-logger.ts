@@ -6,9 +6,11 @@
  *     (else keyed), the message declared (lit) or keyed, the source declared or keyed ("gateway"
  *     when there is none);
  *   - every other field is closed (closeValue): a declared field keeps its key, anything else
- *     leaves keyed, key and value, at any depth.
+ *     leaves keyed, key and value, at any depth;
+ *   - an entry is stored frozen, at every depth (#538 round 3): every read returns the same
+ *     immutable record, so no reader can change what a later reader gets.
  */
-import { closedText, closeValue, keyedHash, type Declared } from "./observability/closed-schema.js";
+import { closedText, closeValue, frozen, keyedHash, type Declared } from "./observability/closed-schema.js";
 
 export type LogLevel = "info" | "warn" | "error" | "debug";
 
@@ -37,14 +39,14 @@ export class StructuredLogger {
     } catch {
       closed = {};
     }
-    this.entries.push({
+    this.entries.push(frozen({
       ...closed,
       id: `log_${Date.now().toString(36)}`,
       timestamp: new Date().toISOString(),
       level: typeof level === "string" && LEVELS.has(level) ? level : keyedHash(level),
       message: closedText(message),
       source: source === undefined ? "gateway" : closedText(source),
-    });
+    }));
   }
 
   info(message: Declared, fields?: Record<string, unknown>) { this.log("info", message, fields); }

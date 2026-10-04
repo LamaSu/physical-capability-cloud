@@ -1083,3 +1083,79 @@ describe("#538 r3: the OTLP exporter (otel.ts) carries no marker from any span f
     await provider.shutdown();
   });
 });
+
+// ── #538 r3 (source pack): stored records are immutable ────────────────────
+
+/** Every write a reader could make to what it read: each string and number replaced by a marker, a marker key added, arrays grown. */
+function tamper(value: unknown, depth = 0): void {
+  if (depth > 6 || value === null || typeof value !== "object") return;
+  const target = value as Record<string, unknown>;
+  for (const key of Object.keys(target)) {
+    const item = target[key];
+    try {
+      if (typeof item === "string") target[key] = MARK;
+      else if (typeof item === "number") target[key] = NUM;
+      else tamper(item, depth + 1);
+    } catch {
+      // a frozen record refuses the write
+    }
+  }
+  try {
+    if (Array.isArray(target)) (target as unknown[]).push({ [MARK]: MARK });
+    else target[MARK] = MARK;
+  } catch {
+    // a frozen record refuses the write
+  }
+}
+
+describe("#538 r3: a stored record stays as its chokepoint closed it, whatever a reader does to what it read", () => {
+  it("the structured log: entries from getRecent, getEntries and query, mutated, read back unchanged, also through GET /api/telemetry/logs", async () => {
+    const { logger } = await import("../../structured-logger.js");
+    const write = logger as unknown as {
+      info(...a: unknown[]): void;
+      getRecent(n: number): unknown[];
+      getEntries(n: number): unknown[];
+      query(opts: Record<string, unknown>): unknown[];
+    };
+    write.info(schema.lit("n107b immutability probe"), { count: schema.declare.metric(1), nested: { inner: schema.declare.metric(2) } });
+    tamper(write.getRecent(1));
+    tamper(write.getEntries(1));
+    tamper(write.query({ limit: 1 }));
+    const { telemetryRoutes } = await import("../../routes/telemetry.js");
+    const app = Fastify({ logger: false });
+    await app.register(telemetryRoutes);
+    await app.ready();
+    const body = (await app.inject({ method: "GET", url: "/api/telemetry/logs?limit=1" })).body;
+    const text = render([write.getRecent(1), write.getEntries(1), write.query({ limit: 1 })]) + body;
+    expect(text).toContain("n107b immutability probe");
+    expect(markerIn(text), "a marker a reader wrote into what it read").toEqual([]);
+    await app.close();
+  });
+
+  it("the trace collector: traces from getRecentTraces, getTrace and a subscriber (the stream's path), mutated, read back unchanged", async () => {
+    const { traceCollector, TraceCollector } = await import("../../trace-collector.js");
+    const { traceRoutes } = await import("../../routes/traces.js");
+    const traceId = TraceCollector.newTraceId();
+    const spanId = TraceCollector.newSpanId();
+    traceCollector.startSpan({
+      traceId,
+      spanId,
+      operation: schema.lit("n107b.immutability"),
+      service: schema.lit("n107b"),
+      attributes: { count: schema.declare.metric(1), nested: { inner: schema.declare.metric(2) } },
+    } as never);
+    const unsubscribe = traceCollector.subscribe((trace) => tamper(trace));
+    traceCollector.endSpan({ traceId, spanId, status: "ok" });
+    unsubscribe();
+    tamper(traceCollector.getTrace(traceId));
+    tamper(traceCollector.getRecentTraces(5));
+    const app = Fastify({ logger: false });
+    await app.register(traceRoutes);
+    await app.ready();
+    const body = (await app.inject({ method: "GET", url: `/api/traces/${traceId}` })).body;
+    const text = render([traceCollector.getTrace(traceId), traceCollector.getRecentTraces(5)]) + body;
+    expect(text).toContain("n107b.immutability");
+    expect(markerIn(text), "a marker a reader wrote into what it read").toEqual([]);
+    await app.close();
+  });
+});

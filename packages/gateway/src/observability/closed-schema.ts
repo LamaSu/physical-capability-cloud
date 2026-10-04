@@ -417,6 +417,17 @@ export function closeValue(value: unknown, depth = 0): unknown {
 }
 
 /**
+ * A record as a sink stores it: every object and array in it frozen, so a reader can change
+ * nothing the chokepoint closed (#538 round 3, astra source pack). Closed values are plain data,
+ * so this reaches every leaf.
+ */
+export function frozen<T>(value: T, depth = 0): T {
+  if (typeof value !== "object" || value === null || depth > 64) return value;
+  for (const key of Object.keys(value)) frozen((value as Record<string, unknown>)[key], depth + 1);
+  return Object.freeze(value);
+}
+
+/**
  * A free-text line (a log message, a console argument): a declared message as itself, with its
  * printf arguments closed first; anything else as the keyed hash of the formatted text (a string
  * message alone formats as itself). It never throws: a message String() cannot convert is hashed whole.
