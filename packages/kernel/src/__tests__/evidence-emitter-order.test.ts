@@ -1356,6 +1356,16 @@ describe("EvidenceEmitter calls only what it captured at load: the closed allowl
     expect(clean[3]!.missing).toEqual(["Missing one of: a | b"]);
   });
 
+  it("a hole in a custom requirements list is skipped, as Array.prototype.find skipped it (astra pack 299 MEDIUM)", () => {
+    const emitter = new EvidenceEmitter(KERNEL);
+    const events = [{ id: "ev_g", hash: `sha256:${"a".repeat(64)}`, type: "gcode_hash_verified", timestamp: "2026-10-04T00:00:00.000Z", source, payload: {} }] as unknown as EvidenceEvent[];
+    // Index 0 is a hole; the requirement for tier 1 is at index 1.
+    const requirements = [] as unknown[];
+    requirements.length = 2;
+    requirements[1] = { tier: 1, requiredEventTypes: [["gcode_hash_verified"]], minimumEvents: 1, description: "custom" };
+    expect(emitter.checkTierRequirements(events, 1, requirements as never)).toEqual({ met: true, missing: [] });
+  });
+
   it("properties an adapter writes on the emitter change nothing: its state, signer and collaborators are JS private fields (steward #6668)", async () => {
     const signature = { signer: `0x${"11".repeat(20)}`, algorithm: "secp256k1", value: "sig_real" } as Signature;
     const emitter = new EvidenceEmitter(KERNEL, async () => signature);

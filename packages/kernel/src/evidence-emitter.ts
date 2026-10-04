@@ -761,6 +761,8 @@ export class EvidenceEmitter {
   ): { met: boolean; missing: string[] } {
     let tierReq: TierEvidenceRequirements | undefined;
     for (let r = 0; r < requirements.length; r++) {
+      // A hole is skipped, as Array.prototype.find skipped it (astra pack 299 MEDIUM).
+      if (!hasOwn(requirements, r)) continue;
       const candidate = listAt(requirements, r)!;
       if (candidate.tier === tier) {
         tierReq = candidate;
