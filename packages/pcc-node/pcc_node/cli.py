@@ -33,6 +33,7 @@ from .register import (
     register_kernel,
     register_devices,
     register_signing_key,
+    RegistrationError,
 )
 from .log_capture import LogSigningRefused
 
@@ -350,6 +351,22 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
         click.echo(f"Node is already running (PID {pid}). Use 'pcc-node status'.")
         sys.exit(1)
 
+    # item 133 (board N119): do not ASSUME the public network. With no gateway explicitly chosen (the
+    # default) AND no API key, refuse before any network step -- provisioning / registering / scanning
+    # against PROD by accident (a stray `pcc-node start`, e.g. the heredoc-backtick incident) is the
+    # hazard. Require an explicit gateway or an API key. The systemd unit sets PCC_BASE (-> source
+    # "env", not "default") and PCC_API_KEY, so it is unaffected; a provisioned flow (key present)
+    # still defaults to the public gateway as before.
+    if target_source == "default" and not (api_key or "").strip():
+        click.echo(
+            "Refusing to start: no gateway chosen and no API key, so pcc-node will not assume the "
+            "public network (capability.network). Choose a gateway with PCC_BASE or --pcc-base, and "
+            "provide an API key with PCC_API_KEY or --api-key (provision one first via "
+            "POST /api/auth/provision).",
+            err=True,
+        )
+        sys.exit(1)
+
     # N57: a default public registration needs a yes, before any network step.
     if not _confirm_public_target(target, target_source, yes):
         sys.exit(1)
@@ -427,9 +444,18 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
                 "Could not provision API key. Set PCC_API_KEY env var or use --api-key."
             )
 
-    # Register kernel
+    # Register kernel. A non-2xx (e.g. a 401) must stop the node HERE -- it is not registered, so we do
+    # not go on to register devices, save config, or print "Node running" (item 133, board N119).
     click.echo("Registering on PCC network...")
-    register_kernel(config.pcc_base, config.pcc_api_key, config)
+    try:
+        register_kernel(config.pcc_base, config.pcc_api_key, config)
+    except RegistrationError as exc:
+        click.echo(
+            f"Registration failed (HTTP {exc.status}) at {config.pcc_base}: {exc.data}. "
+            "The node is NOT registered; check the API key and gateway. Not starting.",
+            err=True,
+        )
+        sys.exit(1)
 
     # Devices reference the kernel, so register them only after the authenticated
     # kernel registration succeeds.
@@ -533,8 +559,12 @@ def discover_cmd(subnet, register, pcc_base, api_key):
                 node_config.pcc_api_key = api_key
             pub_key, _ = _load_node_keys()
             node_config.public_key = pub_key
-            register_kernel(pcc_base, api_key, node_config)
-            registered += 1
+            try:
+                register_kernel(pcc_base, api_key, node_config)
+                registered += 1
+            except RegistrationError as exc:
+                click.echo(f"  Registration failed (HTTP {exc.status}): {exc.data}", err=True)
+                skipped += 1
 
         click.echo(
             f"\nDiscovered {len(devices)} device(s), "
