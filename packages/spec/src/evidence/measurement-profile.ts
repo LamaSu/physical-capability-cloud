@@ -48,6 +48,7 @@
 import { createHash } from "node:crypto";
 
 import { canonicalize } from "../util/canonical.js";
+import { EVIDENCE_LEVELS, type EvidenceLevel } from "./evidence-level.js";
 import { plainDataCopy } from "../util/plain-data.js";
 import {
   append,
@@ -87,19 +88,20 @@ export function isMeasurementProfileDigest(value: unknown): value is Measurement
 
 /**
  * Which of the memo's three result levels this profile accepts as the proven
- * outcome. Ordered weakest to strongest; never treat one as another.
- *   - `submitted`        the command was accepted (a spool receipt). Proves a
+ * outcome. It IS the evidence contract's `EvidenceLevel` (evidence-level.ts) —
+ * one classification, not a second map. Weakest to strongest:
+ *   - `submitted`        the device took the work (a spool receipt). Proves a
  *                        request was made, never that work happened.
- *   - `device_reported`  the device reported completion. Proves the device said
- *                        so; a device that lies, or a log-summary event with no
- *                        success field, satisfies this.
- *   - `inspected_output` the relevant physical output was observed or measured.
- *                        The only level a sensor-grounded claim may rest on.
+ *   - `device_reported`  the device that did the work reports it finished.
+ *                        Proves the device said so.
+ *   - `inspected_output` the output was observed or measured by a device other
+ *                        than the one that produced it. The only level a
+ *                        sensor-grounded claim may rest on.
  */
-export type AcceptanceLevel = "submitted" | "device_reported" | "inspected_output";
+export type AcceptanceLevel = EvidenceLevel;
 
-/** Frozen: validation reads it, so nothing may add a level after load. */
-export const ACCEPTANCE_LEVELS: readonly AcceptanceLevel[] = deepFreeze(["submitted", "device_reported", "inspected_output"] as AcceptanceLevel[]);
+/** The evidence contract's own list, frozen where it is defined: validation reads it, so nothing may add a level after load. */
+export const ACCEPTANCE_LEVELS: readonly AcceptanceLevel[] = EVIDENCE_LEVELS;
 
 export interface ProfileOutcome {
   /** Provider-neutral capability identity, e.g. "document-printing". */
@@ -150,7 +152,12 @@ export interface ProfileMeasurement {
 }
 
 export interface ProfileCapture {
-  /** When capture may begin / must end, as event-type tokens or conditions. */
+  /**
+   * The capture window, as evidence event types. An observation counts only
+   * at or after the earliest `startCondition` event and at or before the
+   * latest `endCondition` event; `endCondition: "open"` sets no end bound.
+   * Admission (profile-admission.ts) fails closed on any other token.
+   */
   startCondition: string;
   endCondition: string;
   coverage: {
