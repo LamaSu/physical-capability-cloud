@@ -165,7 +165,7 @@ function matchSink(call: ts.CallExpression): string | null {
 
 /** Calls whose callee resolves to one of these names are unconditionally allowed — their
  *  OWN arguments are deliberately not recursed into (see the file doc comment). */
-const SAFE_CALLEE_NAMES = new Set(["knownErrorClassName", "logSafeId", "Date.now"]);
+const SAFE_CALLEE_NAMES = new Set(["knownErrorClassName", "logSafeId", "logSafeSmallInt", "Date.now"]);
 
 function calleeText(expr: ts.Expression): string | null {
   const n = unwrap(expr);
@@ -368,7 +368,6 @@ const ALLOWLIST: Allowlist = {
   "facades/settlement.facade.ts": {
     "address": "Every method's own parameter, validated via this.validateAddress()/isAddress() before any sink call in this file — a well-formed 0x+40hex Ethereum address.",
     "milestoneIndex": "Every method's own parameter, validated via this.validateMilestoneIndex() (rejects NaN/negative) before any sink call in this file — a number.",
-    "attestation.tier": "OracleAttestation.tier (@pcc/contracts/ts/oracle-attestation.ts) is typed `number` — the assurance tier 0-3, never free text.",
     "summary.epochId": "EpochSummary.epochId (@pcc/bundler/src/batch-settler.ts) is typed `number` — an internally-incremented batch counter, never caller input.",
     "summary.totalIntents": "EpochSummary.totalIntents (@pcc/bundler/src/batch-settler.ts) is typed `number` — a server-computed count.",
   },
@@ -496,5 +495,16 @@ describe("N71 round 6: the sink scanner over the PR's own 12 source files", () =
   it("finds zero unexplained sinks across the PR's scope (closes the class by construction)", () => {
     const violations = scanScopeFiles();
     expect(violations, formatViolations(violations)).toEqual([]);
+  });
+});
+
+describe("logSafeSmallInt (N71 round 6 follow-up)", () => {
+  it("passes an integer inside the bounds, and turns anything else into null", async () => {
+    const { logSafeSmallInt } = await import("../redaction.js");
+    expect(logSafeSmallInt(2, 0, 3)).toBe(2);
+    expect(logSafeSmallInt(0, 0, 3)).toBe(0);
+    for (const bad of [4, -1, 1.5, NaN, "2", "N71-SENTINEL", null, undefined, {}, [2]]) {
+      expect(logSafeSmallInt(bad as unknown, 0, 3), String(bad)).toBeNull();
+    }
   });
 });
