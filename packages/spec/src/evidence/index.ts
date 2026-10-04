@@ -32,6 +32,7 @@ export * from "./signing-preimage.js";
 // events that commit the job, the accepting kernel and (when known) the output.
 export * from "./subject-binding.js";
 export * from "./eligibility.js";
+export * from "./measurement-profile.js";
 // Principal ids for FinalMilestonePackageV2: operator = CAIP-10 (D1 signer),
 // device = ed25519:0x<key> (D2 signer, registry-held, never a compromised key).
 export * from "./principal-id.js";
