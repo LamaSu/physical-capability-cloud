@@ -77,7 +77,7 @@ import { getStore, getRepos } from "../db.js";
 import { authorityOf, isAnonymous, refuseKernelAction, type KernelAuthority } from "../auth/kernel-authority.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
-import { isToolSafe, getManifest, getManifestSync, warmManifestCache } from "../services/tool-manifest-service.js";
+import { getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
 
 const {
@@ -177,34 +177,17 @@ function resolveDeviceType(kernelId: string): string {
 }
 
 /**
- * #579 r1 (astra, HIGH): a SCOPED call may skip its scope's tool list, command budget and escrow
- * only for a READ tool of an authoritatively resolved device type. The manifests' safeTools also
- * list physical controls (category safe_control: home, reset, lights, identify, connect,
- * disconnect), and resolveDeviceType falls back to "generic" when no device on the kernel names an
- * adapter with its own manifest, so neither may widen a scope: the fallback fails closed.
+ * #579 (astra r1 HIGH; the steward's #6771): every tool call names a scope whose allowedTools lists
+ * the tool, and NOTHING bypasses that list, the command budget or escrow. A manifest's safeTools
+ * (which also list physical controls: home, reset, lights, identify, connect, disconnect) is only a
+ * hint for clients, never an authorization; so the device type, resolved or not, grants nothing.
  */
-function isScopeExemptRead(deviceType: string, toolName: string): boolean {
-  if (deviceType === "generic") return false; // the fallback, not an authoritative resolution
-  if (!isToolSafe(deviceType, toolName)) return false;
-  const tool = getManifestSync(deviceType)?.tools.find((t) => t.name === toolName);
-  return tool?.category === "read";
-}
-
 interface ScopeValidation {
   allowed: boolean;
   reason: string;
 }
 
-function validateToolCall(
-  scope: typeof executionScopes.$inferSelect,
-  toolName: string,
-  deviceType: string,
-): ScopeValidation {
-  // A read tool of a resolved device type passes; everything else is held to the scope.
-  if (isScopeExemptRead(deviceType, toolName)) {
-    return { allowed: true, reason: "read_tool" };
-  }
-
+function validateToolCall(scope: typeof executionScopes.$inferSelect, toolName: string): ScopeValidation {
   const refusal = scopeWriteRefusal(scope, toolName);
   if (refusal) {
     return { allowed: false, reason: refusal };
@@ -371,12 +354,6 @@ const RELAY_DECISION_ROUTES: ReadonlySet<string> = new Set([
   "POST /api/relay/:kernelId/chat",
 ]);
 
-/** A tool call whose tool is not a safe (read-only) tool for this kernel's device: a write. */
-function isWriteToolCall(req: FastifyRequest, kernelId: string): boolean {
-  const toolName = (req.body as { toolName?: unknown } | undefined)?.toolName;
-  return typeof toolName !== "string" || !isScopeExemptRead(resolveDeviceType(kernelId), toolName);
-}
-
 /**
  * DECISIONS 00:42 (the steward's #6690): #400's table decides WHO may write through the tool-call
  * route (the kernel's operator, or an active scope holder), and the decision tier requires that
@@ -405,6 +382,12 @@ function isProvenHolderOfNamedScope(req: FastifyRequest, authority: KernelAuthor
  * principal), and an operator_or_grant route also admits the holder of an active scope on the
  * kernel. object_owner routes are checked by their handler against the addressed object.
  */
+const KERNEL_OPERATOR_ONLY = {
+  error: "relay_access_denied",
+  required: "kernel_operator",
+  message: "Only this kernel's operator may use this relay route.",
+};
+
 async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
   const authority = authorityOf(req);
   if (isAnonymous(authority)) {
@@ -421,10 +404,11 @@ async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
   }
 
   const { kernelId } = req.params as { kernelId: string };
-  const writeToolCall = routeKey === "POST /api/relay/:kernelId/tool-call" && isWriteToolCall(req, kernelId);
-  if (RELAY_DECISION_ROUTES.has(routeKey) || writeToolCall) {
+  // Every tool call drives the device, whatever a manifest calls it (#6771): a decision.
+  const toolCall = routeKey === "POST /api/relay/:kernelId/tool-call";
+  if (RELAY_DECISION_ROUTES.has(routeKey) || toolCall) {
     const decision = refuseKernelAction(req, authority, kernelId, "decide");
-    if (decision && !(writeToolCall && decision.status === 403 && isProvenHolderOfNamedScope(req, authority, kernelId))) {
+    if (decision && !(toolCall && decision.status === 403 && isProvenHolderOfNamedScope(req, authority, kernelId))) {
       return reply.status(decision.status).send(decision.body);
     }
     return;
@@ -436,25 +420,16 @@ async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
     // The device's own side (the steward's 20:16; DECISIONS 00:53): the kernel's executor polls,
     // starts, reports, uploads frames and replies with its own key, or the admin does.
     const refusal = refuseKernelAction(req, authority, kernelId, "operate");
-    if (!refusal) return;
-    if (refusal.status !== 403) return reply.status(refusal.status).send(refusal.body);
-    return reply.status(403).send({
-      error: "relay_access_denied",
-      required: "kernel_operator",
-      message: "Only this kernel's operator may use this relay route.",
-    });
+    if (refusal) return reply.status(refusal.status).send(refusal.status === 403 ? KERNEL_OPERATOR_ONLY : refusal.body);
+    return;
   }
 
-  // operator_or_grant reads and safe calls face people and agents (DECISIONS 00:53): the admin,
-  // the proven operator wallet, or a proven wallet holding an active scope on this kernel (for a
-  // tool call, the scope the call names).
+  // operator_or_grant reads face people and agents (DECISIONS 00:53): the admin, the proven
+  // operator wallet, or a proven wallet holding an active scope on this kernel.
   const proof = refuseKernelAction(req, authority, kernelId, "decide");
   if (!proof) return;
   if (proof.status !== 403) return reply.status(proof.status).send(proof.body);
-  const provenGrant =
-    routeKey === "POST /api/relay/:kernelId/tool-call"
-      ? isProvenHolderOfNamedScope(req, authority, kernelId)
-      : authority.provenWallet !== null && holdsActiveScope(kernelId, authority.provenWallet);
+  const provenGrant = authority.provenWallet !== null && holdsActiveScope(kernelId, authority.provenWallet);
   if (provenGrant) return;
   // The kernel's claimed operator, or a claimed scope holder, lacks only the proof. Anyone else is
   // #400's stranger.
@@ -557,24 +532,22 @@ function stopRefusal(reply: FastifyReply, state: Exclude<EmergencyStopState, "cl
  * it is awaited. The governor/breaker and the emergency stop are checked
  * separately, at the dispatch site (finding F1).
  */
-function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: string): string | null {
-  const safe = isToolSafe(deviceType, call.toolName);
-  if (!call.scopeId) return safe ? null : "scope_required";
+function dispatchRefusal(call: typeof toolCallRelay.$inferSelect): string | null {
+  if (!call.scopeId) return "scope_required";
   const { db } = getStore();
   const scope = db.select().from(executionScopes).where(eq(executionScopes.id, call.scopeId)).get();
   if (!scope) return "scope_not_found";
   if (scope.kernelId !== call.kernelId) return "scope_kernel_mismatch";
-  // F2: a scoped call needs live scope authority, safe tool or not.
+  // F2: a call needs live scope authority (#6771: every call, whatever its tool).
   if (scope.status !== "active") return "scope_not_active";
   if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
-  if (isScopeExemptRead(deviceType, call.toolName)) return null;
   if (!(scope.allowedTools as string[]).includes(call.toolName)) return "tool_not_allowed";
   // F3: re-derive the command budget from the rows. Admission increments
   // scope.commandCount, but a legacy row it never saw would not have been
-  // counted; counting the scope's already-dispatched non-safe calls (claimed or
-  // terminal, excluding this one) catches that. If the cap is already reached,
-  // this queued call is beyond budget.
-  const dispatchedNonSafe = db
+  // counted; counting the scope's already-dispatched calls (claimed or terminal,
+  // excluding this one) catches that. If the cap is already reached, this queued
+  // call is beyond budget.
+  const dispatched = db
     .select()
     .from(toolCallRelay)
     .where(and(eq(toolCallRelay.scopeId, scope.id), eq(toolCallRelay.kernelId, call.kernelId)))
@@ -582,10 +555,9 @@ function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: st
     .filter(
       (c) =>
         c.id !== call.id &&
-        (c.status === "claimed" || c.status === "executing" || c.status === "completed" || c.status === "failed") &&
-        !isScopeExemptRead(deviceType, c.toolName),
+        (c.status === "claimed" || c.status === "executing" || c.status === "completed" || c.status === "failed"),
     );
-  if (dispatchedNonSafe.length >= scope.maxCommands) return "max_commands_reached";
+  if (dispatched.length >= scope.maxCommands) return "max_commands_reached";
   return escrowRefusal(scope) ? "escrow_not_funded" : null;
 }
 
@@ -757,15 +729,13 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // still be that scope's holder.
     const callerId = relayPrincipal(req) ?? "";
     const isOperator = isProvenOperator(req, kernelId);
-    const deviceType = resolveDeviceType(kernelId);
 
-    // Non-safe tools require a scope, and anyone but the operator must name
-    // their own scope for every call.
-    if (!scopeId && (!isOperator || !isToolSafe(deviceType, toolName))) {
+    // Every call names a scope that allows its tool, the operator's included (#6771).
+    if (!scopeId) {
       return reply.status(403).send({
         error: "scope_required",
         message: isOperator
-          ? `Write operations require an execution scope. Create one via POST /api/relay/${kernelId}/scope`
+          ? `Every tool call names an execution scope that allows the tool. Create one via POST /api/relay/${kernelId}/scope`
           : "Name the execution scope you were granted on this kernel (scopeId).",
       });
     }
@@ -811,7 +781,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         });
       }
 
-      const validation = validateToolCall(scope, toolName, deviceType);
+      const validation = validateToolCall(scope, toolName);
       if (!validation.allowed) {
         const id = generateId("tc");
         const now = new Date().toISOString();
@@ -836,8 +806,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         });
       }
 
-      if (!isScopeExemptRead(deviceType, toolName)) {
-        // Escrow gate carried over from the retired /api/ot2/tool-call.
+      {
+        // Escrow gate carried over from the retired /api/ot2/tool-call; every scoped call (#6771).
         let unfundedStatus: string | null;
         try {
           unfundedStatus = escrowRefusal(scope);
@@ -1068,13 +1038,12 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // (dispatchRefusal). A refused call is closed as rejected with its reason,
     // so no later poll can claim it and it does not hold back the calls behind
     // it. A call whose escrow lookup fails stays queued for the next poll.
-    const deviceType = resolveDeviceType(kernelId);
     const pending: Array<{ call: typeof toolCallRelay.$inferSelect; claimToken: string | null }> = [];
     for (const call of queued) {
       if (pending.length === 5) break;
       let refusal: string | null;
       try {
-        refusal = dispatchRefusal(call, deviceType);
+        refusal = dispatchRefusal(call);
       } catch {
         continue;
       }
@@ -1150,7 +1119,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         useRefusal =
           stop === "stopped"
             ? "emergency_stopped"
-            : (dispatchRefusal(call, deviceType) ??
+            : (dispatchRefusal(call) ??
               (getSafetyGateway().isCircuitOpen(kernelId) ? "circuit_open" : null));
       } catch {
         continue;
@@ -1237,7 +1206,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
           ? "emergency_stopped"
           : !Number.isFinite(claimedMs) || Date.now() - claimedMs > LEASE_MAX_AGE_MS
             ? "stale_claim"
-            : (dispatchRefusal(call, resolveDeviceType(kernelId)) ??
+            : (dispatchRefusal(call) ??
               (getSafetyGateway().isCircuitOpen(kernelId) ? "circuit_open" : null));
     } catch {
       // An escrow lookup or the safety gateway failed: we can't clear it, so it

@@ -273,8 +273,10 @@ describe("DECISIONS 00:53 (#6711): the relay's human- and agent-facing side need
   });
 
   it("the proven operator and the admin are admitted to each", async () => {
+    // Every tool call names a scope that allows the tool, the operator's included (#6771).
+    const opScope = await mintFor(OPERATOR);
     for (const headers of [asProvenOperator(), asAdmin()]) {
-      for (const [method, url, payload] of human()) {
+      for (const [method, url, payload] of human(opScope)) {
         const res = await app.inject({ method, url, headers, ...(payload ? { payload } : {}) });
         expect(res.statusCode, `${method} ${url}`).toBeLessThan(300);
       }
@@ -373,11 +375,14 @@ describe("#579 r1 HIGH (astra): a tool the manifest calls 'safe' never widens a 
     expect(scopeRow(scopeId).commandCount).toBe(1);
   });
 
-  it("control: a READ tool of a resolved device type stays outside the scope's tool list and budget", async () => {
+  it("nothing bypasses the scope (#6771): even a READ tool of a resolved device type must be listed, and spends budget", async () => {
     const scopeId = await mint(OT_KERNEL, ["run_create"]);
     const res = await call(OT_KERNEL, scopeId, "health");
-    expect(res.statusCode).toBe(201);
-    expect(scopeRow(scopeId).commandCount).toBe(0);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().reason).toBe("tool_not_allowed");
+    const listed = await mint(OT_KERNEL, ["health"]);
+    expect((await call(OT_KERNEL, listed, "health")).statusCode).toBe(201);
+    expect(scopeRow(listed).commandCount).toBe(1);
   });
 
   it("dispatch re-checks it: a queued home outside its scope is rejected when the executor polls", async () => {
