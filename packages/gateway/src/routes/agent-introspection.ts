@@ -78,6 +78,8 @@ export const AGENT_OPERATIONS: AgentOperation[] = [
   { id: "operator.earnings", method: "GET", path: "/api/operator/earnings", summary: "Not available yet (501); per-job payment state is at /api/jobs/{jobId}/execution", scope: "operator.read" },
   { id: "operator.certifications", method: "GET", path: "/api/operator/certifications", summary: "Not available yet (501): no certification store", scope: "operator.read" },
   { id: "operator.maintenance", method: "GET", path: "/api/operator/maintenance", summary: "Not available yet (501): nothing records maintenance events", scope: "operator.read" },
+  { id: "operator.work", method: "GET", path: "/api/operator/work", summary: "Your work across job offers, kernel jobs and approvals (OperatorWorkDTO); every field server-assigned", scope: "operator.read" },
+  { id: "operator.income", method: "GET", path: "/api/operator/income", summary: "What the escrow records show for your kernels' jobs (OperatorIncomeDTO); no payout history yet", scope: "operator.read" },
   { id: "operator.emergencyStop", method: "POST", path: "/api/operator/emergency-stop", summary: "Halt this operator's machines", scope: "operator.write", consequential: true },
 
   // Settlement — money. Always consequential, always separately scoped.

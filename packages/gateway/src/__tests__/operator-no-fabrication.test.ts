@@ -46,9 +46,18 @@ describe("operator read routes: no fabricated data", () => {
       expect(res.statusCode).toBe(501);
       const body = res.json();
       expect(body.error).toBe("not_available");
-      expect(body.message).toMatch(/not recorded/);
+      // Certifications' wording is deliberately different from the other three: registration
+      // DOES record a certification claim, so its 501 says there is no VERIFIED read rather
+      // than "not recorded" (verdict rm-n32-362-r2-7fccd046, M2).
+      if (url === "/api/operator/certifications") {
+        expect(body.message).toMatch(/no verified operator-certification read/);
+      } else {
+        expect(body.message).toMatch(/not recorded/);
+      }
       expect(Array.isArray(body.see)).toBe(true);
-      // NEGATIVE: none of the old fabricated fields come back.
+      // Narrow check for these five named fixtures only, not a general fabrication guard
+      // (verdict rm-n32-362-r2-7fccd046, L1): it would miss a differently named or shaped
+      // leak. The 501/not_available assertions above are the real, behavioral protection.
       for (const k of ["machines", "earnings", "total", "certifications", "events"]) {
         expect(body, k).not.toHaveProperty(k);
       }
@@ -308,6 +317,10 @@ describe("operator approvals: no silent substitution", () => {
 describe("operator.ts source ratchet", () => {
   const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../routes/operator.ts"), "utf-8");
 
+  // Narrow, source-text check for these exact fixture/API names only (verdict
+  // rm-n32-362-r2-7fccd046, L1): it misses a differently named mock const, an imported
+  // fixture, a `let` declaration, or any random API besides Math.random(). It is not a
+  // general fabrication guard; the behavioral contract tests above are the real protection.
   it("NEGATIVE: holds no mock arrays and no random VALUES (random id suffixes are fine)", () => {
     expect(src).not.toMatch(/\bconst mock[A-Z]/);
     // Math.random() is allowed only as an id suffix: Math.random().toString(36)

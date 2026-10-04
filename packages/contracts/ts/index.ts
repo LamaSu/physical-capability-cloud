@@ -125,3 +125,16 @@ export type {
   BuildPayoutMapInput,
   BuildPayoutMapResult,
 } from "./payouts.js";
+
+// N102 — read a milestone's ACTUAL on-chain recipients (pinned, read-only; V2 + V3)
+export { readMilestoneRecipients } from "./milestone-recipients.js";
+export type {
+  MilestoneVersion,
+  MilestoneRecipients,
+  MilestoneRecipientsCheck,
+  MilestoneRecipientFee,
+  MilestoneRecipientLeg,
+  MilestoneRecipientSplitLeg,
+  MilestoneRecipientOperatorLeg,
+  MilestoneRecipientProjection,
+} from "./milestone-recipients.js";
