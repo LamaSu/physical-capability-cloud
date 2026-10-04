@@ -135,16 +135,24 @@ export type CsdInvariant = z.infer<typeof CsdInvariantSchema>;
 // ── Evidence Tier Schema ────────────────────────────────────────────
 
 /**
- * `params` as every primitive-ref schema reads it (N128 r1, finding 5): first a copy made through property
- * descriptors only (`ownDataSnapshot`), then zod's record parse of the copy. An accessor inside params is
- * never called; a value the copy refuses stops the parse (fatal), so nothing after it reads the original.
+ * A zod preprocess step that hands the next schema a copy of its input made through property descriptors
+ * only (`ownDataSnapshot`, N128). A value the copy refuses stops the parse (a fatal issue), so nothing after
+ * this step reads the original, and no accessor in it is ever called.
  */
-const OwnDataParamsSchema = z.preprocess((value, ctx) => {
-  const copy = ownDataSnapshot(value);
-  if (copy.ok) return copy.value;
-  ctx.addIssue({ code: z.ZodIssueCode.custom, message: copy.reason, fatal: true });
-  return z.NEVER;
-}, z.record(z.unknown()));
+export function ownDataCopyStep(root: string): (value: unknown, ctx: z.RefinementCtx) => unknown {
+  return (value, ctx) => {
+    const copy = ownDataSnapshot(value, root);
+    if (copy.ok) return copy.value;
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: copy.reason, fatal: true });
+    return z.NEVER;
+  };
+}
+
+/**
+ * `params` as every primitive-ref schema reads it (N128 r1, finding 5): first the descriptor-only copy, then
+ * zod's record parse of the copy. An accessor inside params is never called.
+ */
+const OwnDataParamsSchema = z.preprocess(ownDataCopyStep("params"), z.record(z.unknown()));
 
 /**
  * Structured reference to an evidence primitive (evidence-vocabulary v1, §5.2).

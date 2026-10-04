@@ -18,6 +18,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createStore, type Store, type IRepositories } from "@pcc/store";
+import { closeStoredDeviceEmits } from "./services/closed-device-emits.js";
 
 let _store: Store | undefined;
 
@@ -47,6 +48,9 @@ export function initStore(options?: { seed?: boolean }): Store {
     dbPath,
     seed: options?.seed ?? true,
   });
+  // Device rows are served only with closed emitter declarations (N128): a row stored under the open
+  // grammar has its emits withheld, on every read and on the rows setup writes back.
+  closeStoredDeviceEmits(_store.repos.kernels);
 
   console.log(`[db] Store initialised (${dbPath === ":memory:" ? "in-memory" : dbPath})`);
   return _store;
