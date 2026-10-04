@@ -21,7 +21,7 @@ import { KERNEL_PULL_CAPTURE_TYPES, kernelPullCaptureIssue } from "../evidence/k
 const defineAtLoad = Reflect.defineProperty;
 const descriptorAtLoad = Reflect.getOwnPropertyDescriptor;
 const deleteAtLoad = Reflect.deleteProperty;
-const ITERATOR = Symbol.iterator;
+const ITERATOR: typeof Symbol.iterator = Symbol.iterator;
 
 const JOB = "job-lose1-r2-001";
 const AT = "2026-10-02T12:00:00.000Z";
