@@ -75,9 +75,10 @@ const MAX_EVIDENCE_DEPTH = 64;
  * Where `value` is not plain JSON data, or null when it is all plain. The event hash is
  * canonical JSON, which has no faithful form for anything else (astra pack 265): it hashes a
  * Date, a Map, a Set, a RegExp or an Error as {}, a typed array as an object of its indices, a
- * SharedArrayBuffer's bytes as they are at that moment (they can change after), an array hole or
- * an undefined element as null, and an array without its named members; JSON carries NaN and
- * Infinity as null. #359's canonicalize refuses all of these, and so do the oracle and VCR.
+ * SharedArrayBuffer's bytes as they are at that moment (they can change after), an undefined
+ * array element as null, an array hole, NaN and Infinity as text no JSON parser reads (JSON
+ * carries them as null), and an array without its named members. #359's canonicalize refuses
+ * all of these; the oracle and VCR also refuse D5's integers outside the safe range.
  *
  * It walks the emitter's own copy (structuredClone). The copy makes every array an ordinary
  * Array and gives every plain object Object.prototype, a class instance's or a null-prototype
