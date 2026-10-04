@@ -454,17 +454,12 @@ describe("PipelineTelemetryService.emit — Sentry breadcrumbs", () => {
     expect(mockAddBreadcrumb).toHaveBeenCalledTimes(phases.length);
   });
 
-  it("breadcrumb has a numeric timestamp (Unix seconds)", () => {
-    const before = Date.now() / 1000;
+  it("breadcrumb takes no time from the producer: Sentry's breadcrumb chokepoint gives it the server's clock (N107b round 4, C11)", () => {
     const telemetry = new PipelineTelemetryService();
     telemetry.emit("job-breadcrumb-ts", "escrow_fund", "started");
-    const after = Date.now() / 1000;
 
-    const call = mockAddBreadcrumb.mock.calls[0][0] as { timestamp: number };
-    expect(typeof call.timestamp).toBe("number");
-    // Should be within the test execution window
-    expect(call.timestamp).toBeGreaterThanOrEqual(before - 1);
-    expect(call.timestamp).toBeLessThanOrEqual(after + 1);
+    const call = mockAddBreadcrumb.mock.calls[0][0] as Record<string, unknown>;
+    expect(call).not.toHaveProperty("timestamp");
   });
 });
 
