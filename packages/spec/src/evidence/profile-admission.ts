@@ -160,7 +160,55 @@
  *   simulationProhibited             applied: any fabricated event rejects
  *   witnesses.requiredRoles          non-empty fails closed; independentOfClaimant
  *                                    only applies to required roles
+ *
+ * NOTHING THAT RUNS AFTER LOAD CHANGES A DECISION, A DIGEST OR A RETURNED VALUE
+ * (#363 round 9, steward #5186: the realm-mutation class of astra packs 162,
+ * 164, 167, 170 and 171).
+ *   - This module calls only intrinsics captured when util/primordials.ts
+ *     loads, plain loops and operators: never a method looked up on a prototype
+ *     or a global at the time of the call, never the iterator protocol, never
+ *     `in`, never a RegExp. Formats are checked code unit by code unit
+ *     (`isDecimalValue`, `isTaggedSha256`): RegExp.prototype.compile rewrites
+ *     a RegExp in place, frozen or not (pack 167).
+ *   - Its sets are null-prototype records built at load, the vocabulary's
+ *     active primitives included (primitives.ts's defs are exported, mutable
+ *     objects), and its exported data is frozen.
+ *   - Everything it evaluates is its own plain-data copy, with no prototype at
+ *     any depth, so a value written on Object.prototype is never read as the
+ *     input's. The input boundary reads descriptors through their own
+ *     properties: `"value" in descriptor` would also find one written on
+ *     Object.prototype and pass an accessor off as data (pack 162).
+ *   - The hash, for the bundle-set digest and the binding re-check, is
+ *     node:crypto's SHA-256 with its methods captured at load, as in
+ *     measurement-profile.ts, byte-identical to util/canonical.ts `sha256`.
+ *   - The binding leg (`verifyEvidenceSubjectBinding`, the evidence lane's
+ *     subject-binding.ts) is not built this way yet: it hashes through
+ *     Array.prototype methods, JSON.parse, crypto.subtle and promise
+ *     resolutions looked up at call time. Its answer is therefore re-verified
+ *     here before anything it returns is evaluated: each event re-hashed, the
+ *     bundle hash recomputed, and every subject commitment checked again, with
+ *     the captured hash and own reads. The re-check can only refuse more.
+ *   - Promises: `await` reads a promise's `constructor`, a resolution looks up
+ *     `then`, and a native `then` builds the promise it returns with
+ *     `constructor[Symbol.species]`. Every promise returned
+ *     (`profileAdmitsBundle`, `computeBundleSetDigest`) is an `ownPromise`:
+ *     its own `then`, `catch` and `finally` are the ones captured at load and
+ *     its species is pinned, so every promise a caller derives from it is
+ *     pinned too, at any depth (astra pack 187). The binding leg's promise is
+ *     awaited through `awaitedHere`, so that `await` reads only its own
+ *     `constructor` and looks nothing up on the answer. A leg's promise is
+ *     followed through the `then` captured at load (`fulfillsWithTrue`). The
+ *     result is a null-prototype object, so a `then` written on
+ *     Object.prototype cannot take over its resolution.
+ * The boundary, named honestly: the verification callbacks are the caller's
+ * trusted code (a leg's answer must be true, false or a native promise; a
+ * thenable is refused). A realm whose intrinsics were replaced BEFORE
+ * @pcc/spec loaded is out of scope: no in-process check can tell. Anything
+ * replaced after load can make admission refuse, or, for a promise that never
+ * settles, never answer; it cannot change an acceptance or a value.
  */
+
+import { createHash } from "node:crypto";
 
 import { isFabricated } from "./is-fabricated.js";
 import {
@@ -174,14 +222,48 @@ import {
   type EvidenceLevel,
 } from "./evidence-level.js";
 import { plainDataCopy, profileGoverns, type MeasurementProfileV1 } from "./measurement-profile.js";
-// The trap-free proxy check, loaded at runtime (no static node:util import, so browser bundles of @pcc/spec build).
+// The trap-free proxy check: util/plain-data.ts binds Node's own from node:util when it loads.
 import { isProxy } from "../util/plain-data.js";
-import { getPrimitive } from "./primitives.js";
-import { isTaggedDigest } from "./signing-preimage.js";
+import { EVIDENCE_PRIMITIVES } from "./primitives.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "./subject-binding.js";
 import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES, type EvidenceEvent } from "../types/evidence.js";
 import type { SHA256 } from "../types/common.js";
-import { canonicalize, sha256 } from "../util/canonical.js";
+import { canonicalize } from "../util/canonical.js";
+import {
+  append,
+  ArrayIsArray,
+  ArrayPrototype,
+  awaitedHere,
+  charCodeAt,
+  DateParse,
+  deepFreeze,
+  defineIndex,
+  ErrorCtor,
+  fulfillsWithTrue,
+  hasOwn,
+  includesValue,
+  inSet,
+  isHex256Digest,
+  isTaggedSha256,
+  joinStrings,
+  JSONStringify,
+  mapList,
+  newList,
+  NumberIsFinite,
+  ObjectCreate,
+  ObjectGetOwnPropertyDescriptor,
+  ObjectGetPrototypeOf,
+  ObjectKeys,
+  ownDataValue,
+  ownPromise,
+  PromiseCtor,
+  ReflectOwnKeys,
+  sortedStrings,
+  StringCtor,
+  stringSet,
+  StructuredClone,
+  uncurryThis,
+} from "../util/primordials.js";
 
 export const PROFILE_ADMISSION_CONTRACT = "pcc.evidence.profile-admission.v1";
 
@@ -197,8 +279,41 @@ export const BUNDLE_SET_DOMAIN = "PCC:evidence-bundle-set:v1";
 /** The payload field that carries a qualifying observation's record. */
 export const PROFILE_OBSERVATION_FIELD = "profileObservation";
 
-/** An observation's `value`: a plain decimal, no exponent, no leading zeros, no "+". */
-export const DECIMAL_VALUE_PATTERN = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/;
+function isDigit(unit: number): boolean {
+  return unit >= 0x30 && unit <= 0x39;
+}
+
+/**
+ * An observation's `value`: a plain decimal string, exactly
+ * `^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`. An optional minus, an integer part with no
+ * leading zero, and an optional fraction of at least one digit: no exponent,
+ * no "+", no whitespace, ASCII digits only. False for anything that is not a
+ * string. A predicate, not an exported RegExp, checked code unit by code
+ * unit: RegExp.prototype.compile rewrites a RegExp's matcher in place after
+ * load, frozen or not (astra pack 167; this replaces DECIMAL_VALUE_PATTERN).
+ */
+export function isDecimalValue(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const n = value.length;
+  let i = 0;
+  if (i < n && charCodeAt(value, i) === 0x2d) i++; // "-"
+  if (i >= n) return false;
+  const first = charCodeAt(value, i);
+  if (first === 0x30) {
+    i++; // a lone "0": no leading zero
+  } else if (first >= 0x31 && first <= 0x39) {
+    i++;
+    while (i < n && isDigit(charCodeAt(value, i))) i++;
+  } else {
+    return false;
+  }
+  if (i === n) return true;
+  if (charCodeAt(value, i) !== 0x2e) return false; // "."
+  i++;
+  if (i >= n) return false; // a fraction needs a digit
+  for (; i < n; i++) if (!isDigit(charCodeAt(value, i))) return false;
+  return true;
+}
 
 /**
  * What a qualifying observation states about itself, in its hashed payload
@@ -216,7 +331,7 @@ export interface ProfileObservation {
   quantity: string;
   unit: string;
   /**
-   * The measured value in `unit`, as a decimal string (`DECIMAL_VALUE_PATTERN`),
+   * The measured value in `unit`, as a decimal string (`isDecimalValue`),
    * present exactly when `unit` is not "none". A string, not a JSON number:
    * JS and Python print some floats differently (1e-7 vs 1e-07), which would
    * give one reading two event hashes.
@@ -281,7 +396,7 @@ export interface ProfileAdmissionInput {
   bundles: readonly AdmissionBundle[];
   /** The pinned set's digest (`computeBundleSetDigest`), from where it was pinned (see the caller contract). A malformed pin rejects. */
   pinnedBundleSetDigest: string;
-  /** The registered-key signature leg. */
+  /** The registered-key signature leg. Its answer must be true, or a native promise of true; anything else fails. */
   verifyBundleSignature: (bundle: AdmissionBundle) => boolean | Promise<boolean>;
   /**
    * The primitive leg: is `observation` an authentic instance of `primitiveId`
@@ -301,9 +416,113 @@ export interface ProfileAdmissionInput {
   ) => boolean | Promise<boolean>;
 }
 
-const EVENT_TYPES = new Set<string>(EVIDENCE_EVENT_TYPES);
-const DEVICE_TYPES = new Set<string>(EVIDENCE_DEVICE_TYPES);
-const INSPECTION = new Set<string>(INSPECTION_EVENT_TYPES);
+// -- built when this module loads --
+
+/** The vocabularies as null-prototype records: membership consults no prototype and no Set method. */
+const EVENT_TYPES = stringSet(EVIDENCE_EVENT_TYPES);
+const DEVICE_TYPES = stringSet(EVIDENCE_DEVICE_TYPES);
+const INSPECTION = stringSet(INSPECTION_EVENT_TYPES);
+
+/**
+ * The vocabulary's active primitive ids, read once, here. primitives.ts's defs
+ * are exported, mutable objects, and its `getPrimitive` answers from a Map, so
+ * a status written, or a Map method replaced, after load would change which
+ * terms registration and admission can evaluate. A later def wins, as it does
+ * in getPrimitive's Map.
+ */
+const ACTIVE_PRIMITIVES = ((): Readonly<Record<string, true>> => {
+  const status = ObjectCreate(null) as Record<string, unknown>;
+  for (let i = 0; i < EVIDENCE_PRIMITIVES.length; i++) {
+    const def = EVIDENCE_PRIMITIVES[i]!;
+    status[def.id] = def.status;
+  }
+  const ids = ObjectKeys(status);
+  const active = newList<string>(0);
+  for (let i = 0; i < ids.length; i++) if (status[ids[i]!] === "active") append(active, ids[i]!);
+  return stringSet(active);
+})();
+
+/** The input fields admission reads, in the order it reads them. */
+const INPUT_FIELDS = deepFreeze([
+  "pinnedBundleSetDigest",
+  "verifyBundleSignature",
+  "verifyPrimitiveInstance",
+  "subject",
+  "bundles",
+  "committedDigest",
+  "profile",
+] as const);
+type InputField = (typeof INPUT_FIELDS)[number];
+
+/** The input fields that are data, walked for code before anything is copied. */
+const DATA_FIELDS = deepFreeze(["profile", "subject", "bundles"] as const);
+
+const VERSION_PIN_FIELDS = deepFreeze(["permittedAdapterVersions", "permittedFirmwareVersions"] as const);
+
+/** SHA-256 through node:crypto's Hash, with its methods captured when this module loads (as measurement-profile.ts does). */
+const createHashAtLoad = createHash;
+const HashPrototype = ObjectGetPrototypeOf(createHash("sha256")) as { update: (data: string) => unknown; digest: (encoding: "hex") => string };
+const HashPrototypeUpdate = uncurryThis(HashPrototype.update);
+const HashPrototypeDigest = uncurryThis(HashPrototype.digest);
+
+/**
+ * `sha256:` + hex(SHA-256(UTF-8 text)): byte-identical to util/canonical.ts
+ * `sha256`, which calls crypto.subtle, Array.from, map and join at call time.
+ */
+function taggedSha256(text: string): SHA256 {
+  const hash = createHashAtLoad("sha256");
+  HashPrototypeUpdate(hash, text);
+  return `sha256:${HashPrototypeDigest(hash, "hex")}` as SHA256;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !ArrayIsArray(v);
+}
+
+/** A thrown value's own `message`, for a diagnostic; never runs code supplied with it. */
+function messageOf(err: unknown): string {
+  const message = ownDataValue(err, "message");
+  return typeof message === "string" ? message : "it threw";
+}
+
+/** A subject field for the set digest: its own data property; an accessor is refused, never run. */
+function subjectField(subject: unknown, key: string): unknown {
+  if (typeof subject !== "object" || subject === null) throw new ErrorCtor("computeBundleSetDigest: the subject is not an object");
+  const descriptor = ObjectGetOwnPropertyDescriptor(subject, key);
+  if (descriptor === undefined) return undefined;
+  if (!hasOwn(descriptor, "value")) throw new ErrorCtor(`computeBundleSetDigest: subject.${key} is an accessor`);
+  return descriptor.value;
+}
+
+/**
+ * The set digest, computed now: the hashes de-duplicated and sorted in
+ * code-unit order, the subject's own fields, the domain, hashed with the
+ * captured SHA-256. Throws on an empty set or an entry that is not a `sha256:`
+ * tagged digest; an index the array does not own (a hole, or one
+ * Array.prototype serves) is not an entry.
+ */
+function bundleSetDigest(subject: unknown, bundleHashes: unknown): SHA256 {
+  if (!ArrayIsArray(bundleHashes)) throw new ErrorCtor("computeBundleSetDigest: the bundle hashes are not an array");
+  if (bundleHashes.length === 0) throw new ErrorCtor("computeBundleSetDigest: the set is empty");
+  const distinct = ObjectCreate(null) as Record<string, true>;
+  const hashes = newList<string>(0);
+  for (let i = 0; i < bundleHashes.length; i++) {
+    const hash = ownDataValue(bundleHashes, i);
+    if (!isTaggedSha256(hash)) throw new ErrorCtor(`computeBundleSetDigest: entry ${i} is not a sha256: tagged digest`);
+    if (!hasOwn(distinct, hash)) {
+      distinct[hash] = true;
+      append(hashes, hash);
+    }
+  }
+  const preimage = ObjectCreate(null) as Record<string, unknown>;
+  preimage.domain = BUNDLE_SET_DOMAIN;
+  preimage.jobId = subjectField(subject, "jobId");
+  preimage.kernelId = subjectField(subject, "kernelId");
+  const settlementUnitId = subjectField(subject, "settlementUnitId");
+  if (settlementUnitId !== undefined) preimage.settlementUnitId = settlementUnitId;
+  preimage.bundleHashes = sortedStrings(hashes);
+  return taggedSha256(canonicalize(preimage));
+}
 
 /**
  * The digest a job's pinned evidence set is committed to:
@@ -312,98 +531,126 @@ const INSPECTION = new Set<string>(INSPECTION_EVENT_TYPES);
  * order. `settlementUnitId` is included exactly when the subject names one, so a
  * unit-scoped pin cannot stand for another unit. The pinning party computes it
  * with this function over every row it pins (see the caller contract).
- * Throws on an empty set or an entry that is not a `sha256:` tagged digest:
+ * Rejects on an empty set or an entry that is not a `sha256:` tagged digest:
  * there is nothing meaningful to pin.
+ *
+ * It reads only the subject's own data properties and the array's own
+ * indices, hashes with the SHA-256 captured at load, and returns an
+ * `ownPromise` (util/primordials.ts): awaiting it, or following it with
+ * `.then`, `.catch` or `.finally` at any depth, hands the caller this digest
+ * or this rejection, whatever code running after load replaced on Promise.
  */
-export async function computeBundleSetDigest(
+export function computeBundleSetDigest(
   subject: Pick<EvidenceSubject, "jobId" | "kernelId" | "settlementUnitId">,
   bundleHashes: readonly string[],
 ): Promise<SHA256> {
-  if (bundleHashes.length === 0) throw new Error("computeBundleSetDigest: the set is empty");
-  const bad = bundleHashes.findIndex((h) => !isTaggedDigest(h));
-  if (bad !== -1) throw new Error(`computeBundleSetDigest: entry ${bad} is not a sha256: tagged digest`);
-  return sha256(
-    canonicalize({
-      domain: BUNDLE_SET_DOMAIN,
-      jobId: subject.jobId,
-      kernelId: subject.kernelId,
-      ...(subject.settlementUnitId !== undefined ? { settlementUnitId: subject.settlementUnitId } : {}),
-      bundleHashes: [...new Set(bundleHashes)].sort(),
+  return ownPromise(
+    new PromiseCtor<SHA256>((resolve, reject) => {
+      try {
+        resolve(bundleSetDigest(subject, bundleHashes));
+      } catch (err) {
+        reject(err);
+      }
     }),
   );
 }
 
+/** A result with no prototype: an async return is resolved with it, and a `then` on Object.prototype must not be consulted. */
 function result(
   decision: ProfileAdmissionDecision,
   reasons: ProfileAdmissionReason[],
   reached: EvidenceLevel | null = null,
   qualifyingSamples = 0,
 ): ProfileAdmissionResult {
-  return { decision, admits: decision === "admit", reached, qualifyingSamples, reasons };
+  const out = ObjectCreate(null) as ProfileAdmissionResult;
+  out.decision = decision;
+  out.admits = decision === "admit";
+  out.reached = reached;
+  out.qualifyingSamples = qualifyingSamples;
+  out.reasons = reasons;
+  return out;
 }
 
-const reject = (code: ProfileAdmissionCode, detail: string) => result("reject", [{ code, detail }]);
+function reason(code: ProfileAdmissionCode, detail: string): ProfileAdmissionReason {
+  return { code, detail };
+}
+
+function only(code: ProfileAdmissionCode, detail: string): ProfileAdmissionReason[] {
+  const reasons = newList<ProfileAdmissionReason>(0);
+  append(reasons, reason(code, detail));
+  return reasons;
+}
+
+const reject = (code: ProfileAdmissionCode, detail: string) => result("reject", only(code, detail));
+
+/** True when `s` contains "*". */
+function hasWildcard(s: string): boolean {
+  for (let i = 0; i < s.length; i++) if (charCodeAt(s, i) === 0x2a) return true;
+  return false;
+}
 
 /**
  * Terms of a valid profile this version cannot evaluate. Registration refuses
  * a profile with any of them (profile-registration.ts), so admission and
- * registration share one definition.
+ * registration share one definition. It reads the profile's own data
+ * properties only, so a value on Object.prototype (a `tolerance`, say) is
+ * never taken for a term, and an accessor is never run.
  */
 export function unverifiableProfileTerms(profile: MeasurementProfileV1): string[] {
-  const terms: string[] = [];
-  if (profile.measurement.tolerance !== undefined) {
-    terms.push("measurement.tolerance: comparing the observed value with a tolerance is not evaluated yet");
+  const terms = newList<string>(0);
+  const measurement = ownDataValue(profile, "measurement");
+  if (ownDataValue(measurement, "tolerance") !== undefined) {
+    append(terms, "measurement.tolerance: comparing the observed value with a tolerance is not evaluated yet");
   }
-  if (profile.measurement.sampling.maxIntervalMs !== undefined) {
-    terms.push("measurement.sampling.maxIntervalMs: a continuous-capture term; only one-shot capture is evaluated");
+  if (ownDataValue(ownDataValue(measurement, "sampling"), "maxIntervalMs") !== undefined) {
+    append(terms, "measurement.sampling.maxIntervalMs: a continuous-capture term; only one-shot capture is evaluated");
   }
-  if (profile.calibration.required) {
-    terms.push("calibration.required: no evidence event carries a calibration record yet");
+  if (ownDataValue(ownDataValue(profile, "calibration"), "required")) {
+    append(terms, "calibration.required: no evidence event carries a calibration record yet");
   }
-  if (profile.witnesses.requiredRoles.length > 0) {
-    terms.push("witnesses.requiredRoles: independent witness attestation is not evaluated here");
+  if ((ownDataValue(ownDataValue(profile, "witnesses"), "requiredRoles") as readonly unknown[]).length > 0) {
+    append(terms, "witnesses.requiredRoles: independent witness attestation is not evaluated here");
   }
-  const coverage = profile.capture.coverage;
-  if (coverage.policy !== "one-shot") {
-    terms.push(`capture.coverage.policy ${JSON.stringify(coverage.policy)}: only "one-shot" is evaluated`);
-  } else if (coverage.minFraction !== 1) {
-    terms.push(
-      `capture.coverage.minFraction ${coverage.minFraction}: a one-shot capture covers its window whole, so only 1 is evaluated`,
-    );
+  const capture = ownDataValue(profile, "capture");
+  const coverage = ownDataValue(capture, "coverage");
+  const policy = ownDataValue(coverage, "policy");
+  const minFraction = ownDataValue(coverage, "minFraction");
+  if (policy !== "one-shot") {
+    append(terms, `capture.coverage.policy ${JSONStringify(policy)}: only "one-shot" is evaluated`);
+  } else if (minFraction !== 1) {
+    append(terms, `capture.coverage.minFraction ${StringCtor(minFraction)}: a one-shot capture covers its window whole, so only 1 is evaluated`);
   }
-  if (!DEVICE_TYPES.has(profile.device.kind)) {
-    terms.push(`device.kind ${JSON.stringify(profile.device.kind)} is not an evidence device type, so no evidence source can match it`);
+  const device = ownDataValue(profile, "device");
+  const kind = ownDataValue(device, "kind");
+  if (!inSet(DEVICE_TYPES, kind)) {
+    append(terms, `device.kind ${JSONStringify(kind)} is not an evidence device type, so no evidence source can match it`);
   }
-  for (const field of ["permittedAdapterVersions", "permittedFirmwareVersions"] as const) {
-    for (const pin of profile.device[field]) {
-      if (pin.includes("*")) {
-        terms.push(`device.${field} ${JSON.stringify(pin)}: version pins are exact strings, not patterns`);
+  for (let f = 0; f < VERSION_PIN_FIELDS.length; f++) {
+    const field = VERSION_PIN_FIELDS[f]!;
+    const pins = ownDataValue(device, field) as readonly unknown[];
+    for (let p = 0; p < pins.length; p++) {
+      const pin = ownDataValue(pins, p);
+      if (typeof pin === "string" && hasWildcard(pin)) {
+        append(terms, `device.${field} ${JSONStringify(pin)}: version pins are exact strings, not patterns`);
       }
     }
   }
-  for (const id of profile.interpretation.evidenceTypeIds) {
-    if (getPrimitive(id)?.status !== "active") {
-      terms.push(`interpretation.evidenceTypeIds ${JSON.stringify(id)} is not an active vocabulary primitive`);
+  const ids = ownDataValue(ownDataValue(profile, "interpretation"), "evidenceTypeIds") as readonly unknown[];
+  for (let i = 0; i < ids.length; i++) {
+    const id = ownDataValue(ids, i);
+    if (!inSet(ACTIVE_PRIMITIVES, id)) {
+      append(terms, `interpretation.evidenceTypeIds ${JSONStringify(id)} is not an active vocabulary primitive`);
     }
   }
-  if (!EVENT_TYPES.has(profile.capture.startCondition)) {
-    terms.push(`capture.startCondition ${JSON.stringify(profile.capture.startCondition)} is not an evidence event type`);
+  const start = ownDataValue(capture, "startCondition");
+  if (!inSet(EVENT_TYPES, start)) {
+    append(terms, `capture.startCondition ${JSONStringify(start)} is not an evidence event type`);
   }
-  const end = profile.capture.endCondition;
-  if (end !== OPEN_CAPTURE_WINDOW_END && !EVENT_TYPES.has(end)) {
-    terms.push(`capture.endCondition ${JSON.stringify(end)} is neither an evidence event type nor "${OPEN_CAPTURE_WINDOW_END}"`);
+  const end = ownDataValue(capture, "endCondition");
+  if (end !== OPEN_CAPTURE_WINDOW_END && !inSet(EVENT_TYPES, end)) {
+    append(terms, `capture.endCondition ${JSONStringify(end)} is neither an evidence event type nor "${OPEN_CAPTURE_WINDOW_END}"`);
   }
   return terms;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-/** Membership by own index reads, never through Array.prototype methods. */
-function ownIncludes(list: readonly unknown[], x: unknown): boolean {
-  for (let i = 0; i < list.length; i++) if (list[i] === x) return true;
-  return false;
 }
 
 /**
@@ -412,36 +659,89 @@ function ownIncludes(list: readonly unknown[], x: unknown): boolean {
  * Array.prototype (a prototype supplied with the data serves every index the
  * array lacks; astra pack 154), anywhere inside. It reads property
  * descriptors and prototypes only, so no getter runs; null when the value is
- * plain data. A cycle stops the walk here, and plainDataCopy refuses it later.
+ * plain data. A descriptor's `value` counts only as its OWN property: one
+ * written on Object.prototype must not pass an accessor off as data (astra
+ * pack 162). `ancestors` is the path from the root: a cycle stops the walk
+ * here, and plainDataCopy refuses it later.
  */
-function codeInData(value: unknown, path: string, seen: Set<object>): string | null {
+function codeInData(value: unknown, path: string, ancestors: object[]): string | null {
   if (value === null || typeof value !== "object") return null;
   if (isProxy === null) return `${path}: this runtime has no trap-free proxy check`;
   if (isProxy(value)) return `${path}: a proxy`;
-  if (Array.isArray(value) && Object.getPrototypeOf(value) !== Array.prototype) return `${path}: an array with a nonstandard prototype`;
-  if (seen.has(value)) return null;
-  seen.add(value);
-  for (const key of Reflect.ownKeys(value)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined) continue;
-    if (!("value" in descriptor)) return `${path}.${String(key)}: an accessor (a getter or setter)`;
-    const found = codeInData(descriptor.value, `${path}.${String(key)}`, seen);
-    if (found !== null) return found;
+  if (ArrayIsArray(value) && ObjectGetPrototypeOf(value) !== ArrayPrototype) return `${path}: an array with a nonstandard prototype`;
+  for (let i = 0; i < ancestors.length; i++) if (ancestors[i] === value) return null;
+  append(ancestors, value);
+  try {
+    const keys = ReflectOwnKeys(value);
+    for (let k = 0; k < keys.length; k++) {
+      const descriptor = ObjectGetOwnPropertyDescriptor(value, keys[k]!);
+      if (descriptor === undefined) continue;
+      const at = `${path}.${StringCtor(keys[k])}`;
+      if (!hasOwn(descriptor, "value")) return `${at}: an accessor (a getter or setter)`;
+      const found = codeInData(descriptor.value, at, ancestors);
+      if (found !== null) return found;
+    }
+    return null;
+  } finally {
+    ancestors.length = ancestors.length - 1;
   }
+}
+
+/** Every subject field binding checks, with the form binding requires. */
+function subjectProblem(subject: EvidenceSubject): string | null {
+  const nonEmpty = (v: unknown) => typeof v === "string" && v.length > 0;
+  if (!nonEmpty(subject.jobId) || !nonEmpty(subject.kernelId)) return "the subject names no job or kernel";
+  if (subject.outputHash !== undefined && !nonEmpty(subject.outputHash)) return "the subject's outputHash is malformed";
+  if (subject.settlementUnitId !== undefined && !isHex256Digest(subject.settlementUnitId)) return "the subject's settlementUnitId is malformed";
+  if (subject.challengeNonce !== undefined && !isHex256Digest(subject.challengeNonce)) return "the subject's challengeNonce is malformed";
   return null;
 }
 
-function deepFreeze<T>(value: T): T {
-  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const v of Object.values(value)) deepFreeze(v);
+/**
+ * Why the binding leg's answer does not hold, recomputed here with the
+ * captured hash and own reads; null when it does. `events` is admission's
+ * plain-data copy of what binding returned: no prototype at any depth. Each
+ * event must hash to its own `hash` (util/canonical.ts hashEvent's preimage),
+ * the events must hash to `bundleHash` (hashBundle's: the sorted event
+ * hashes), and every event must commit the subject, as LO-EV-9 requires: the
+ * job and kernel on every event, the settlement unit and challenge on every
+ * event when the subject names them, and the output on at least one event
+ * (and on no event otherwise) when the subject names one.
+ */
+function bindingDisagreement(events: readonly unknown[], bundleHash: string, subject: EvidenceSubject): string | null {
+  if (events.length === 0) return "no events";
+  const hashes = newList<string>(events.length);
+  let outputCommitted = false;
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    if (!isRecord(e) || typeof e.type !== "string" || typeof e.timestamp !== "string" || !isRecord(e.source) || !isRecord(e.payload) || !isTaggedSha256(e.hash)) {
+      return `event ${i} is not an event`;
+    }
+    if (taggedSha256(canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload })) !== e.hash) {
+      return `event ${i} does not hash to its hash`;
+    }
+    defineIndex(hashes, i, e.hash);
+    const payload = e.payload;
+    if (payload.jobId !== subject.jobId) return `event ${i} does not commit the job`;
+    if (e.source.kernelId !== subject.kernelId || (payload.kernelId !== undefined && payload.kernelId !== subject.kernelId)) {
+      return `event ${i} does not commit the kernel`;
+    }
+    if (subject.settlementUnitId !== undefined && payload.settlementUnitId !== subject.settlementUnitId) return `event ${i} does not commit the settlement unit`;
+    if (subject.challengeNonce !== undefined && payload.challengeNonce !== subject.challengeNonce) return `event ${i} does not commit the challenge`;
+    if (subject.outputHash !== undefined && payload.outputHash !== undefined) {
+      if (payload.outputHash !== subject.outputHash) return `event ${i} commits another output`;
+      outputCommitted = true;
+    }
   }
-  return value;
+  if (subject.outputHash !== undefined && !outputCommitted) return "no event commits the output";
+  if (taggedSha256(canonicalize(sortedStrings(hashes))) !== bundleHash) return "the events do not hash to the bundle hash";
+  return null;
 }
 
 /**
  * The observation record, if it matches the profile; otherwise why not (the
- * first profile term it fails, in a fixed order).
+ * first profile term it fails, in a fixed order). `event` is admission's
+ * copy: no prototype at any depth, so every read here is the event's own.
  */
 function readObservation(
   event: EvidenceEvent,
@@ -451,7 +751,7 @@ function readObservation(
   const record = isRecord(event.payload) ? event.payload[PROFILE_OBSERVATION_FIELD] : undefined;
   if (!isRecord(record)) return { ok: false, why: "without a profileObservation record" };
   if (record.profileDigest !== committedDigest) return { ok: false, why: "not matching the committed profile digest" };
-  if (typeof record.primitiveId !== "string" || !ownIncludes(profile.interpretation.evidenceTypeIds, record.primitiveId)) {
+  if (typeof record.primitiveId !== "string" || !includesValue(profile.interpretation.evidenceTypeIds, record.primitiveId)) {
     return { ok: false, why: "not matching interpretation.evidenceTypeIds" };
   }
   const object = record.object;
@@ -463,16 +763,15 @@ function readObservation(
   if (record.quantity !== profile.measurement.quantity) return { ok: false, why: "not matching measurement.quantity" };
   if (record.unit !== profile.measurement.unit) return { ok: false, why: "not matching measurement.unit" };
   const numeric = profile.measurement.unit !== NON_NUMERIC_UNIT;
-  const decimal = typeof record.value === "string" && DECIMAL_VALUE_PATTERN.test(record.value);
-  if (numeric ? !decimal : "value" in record) {
+  if (numeric ? !isDecimalValue(record.value) : hasOwn(record, "value")) {
     return { ok: false, why: numeric ? "without a decimal-string value" : "with a value on a non-numeric (unit none) observation" };
   }
-  if (!isTaggedDigest(record.sampleId)) return { ok: false, why: "without a sha256: sampleId" };
+  if (!isTaggedSha256(record.sampleId)) return { ok: false, why: "without a sha256: sampleId" };
   return { ok: true, observation: record as unknown as ProfileObservation };
 }
 
 function time(event: EvidenceEvent): number {
-  return Date.parse(event.timestamp);
+  return DateParse(event.timestamp);
 }
 
 /** [opens, closes] from the committed window events; null bound = event absent. */
@@ -480,18 +779,19 @@ function captureWindow(
   profile: MeasurementProfileV1,
   events: readonly EvidenceEvent[],
 ): { opens: number | null; closes: number | null } {
-  const at = (type: string, pick: (a: number, b: number) => number) => {
+  const bound = (type: string, earliest: boolean): number | null => {
     let t: number | null = null;
-    for (const e of events) {
+    for (let k = 0; k < events.length; k++) {
+      const e = events[k]!;
       if (e.type !== type) continue;
       const ms = time(e);
-      if (Number.isFinite(ms)) t = t === null ? ms : pick(t, ms);
+      if (NumberIsFinite(ms) && (t === null || (earliest ? ms < t : ms > t))) t = ms;
     }
     return t;
   };
-  const opens = at(profile.capture.startCondition, Math.min);
+  const opens = bound(profile.capture.startCondition, true);
   const end = profile.capture.endCondition;
-  const closes = end === OPEN_CAPTURE_WINDOW_END ? Number.POSITIVE_INFINITY : at(end, Math.max);
+  const closes = end === OPEN_CAPTURE_WINDOW_END ? Infinity : bound(end, false);
   return { opens, closes };
 }
 
@@ -499,12 +799,18 @@ function policyDecision(policy: "reject" | "hold"): ProfileAdmissionDecision {
   return policy === "hold" ? "hold" : "reject";
 }
 
-async function legPasses(leg: () => boolean | Promise<boolean>): Promise<boolean> {
+/** A trusted leg's answer, ready to await (see `fulfillsWithTrue`). A leg that throws fails. */
+function legAnswer(leg: () => unknown): boolean | Promise<boolean> {
   try {
-    return (await leg()) === true;
+    return fulfillsWithTrue(leg());
   } catch {
     return false;
   }
+}
+
+interface Finding {
+  decision: ProfileAdmissionDecision;
+  reason: ProfileAdmissionReason;
 }
 
 /**
@@ -515,62 +821,59 @@ async function legPasses(leg: () => boolean | Promise<boolean>): Promise<boolean
  * the profile (through `profileGoverns`, which returns the snapshot it
  * validated and digested), the subject, the pin and the bundles. Everything
  * after reads only the copies, so nothing the caller changes, or a getter
- * answers, after that point can reach the decision.
+ * answers, after that point can reach the decision. The promise returned is an
+ * `ownPromise` (util/primordials.ts): it, and every promise a caller derives
+ * from it with `.then`, `.catch` or `.finally`, delivers this decision,
+ * whatever code running after load replaced on Promise (see the header).
  */
-export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise<ProfileAdmissionResult> {
+export function profileAdmitsBundle(input: ProfileAdmissionInput): Promise<ProfileAdmissionResult> {
+  return ownPromise(admit(input));
+}
+
+async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   // No code supplied with the input runs during admission. The input object,
   // and everything in its profile, subject and bundles, must be plain data: a
   // proxy or an accessor anywhere is refused, found through property
   // descriptors alone, before anything is read. (A getter that ran during the
   // copy could change shared built-ins, such as Array.prototype.includes,
   // while admission waits; astra pack 127.) The verification callbacks are the
-  // caller's trusted code. A process whose built-ins were changed before the
-  // call is beyond what any in-process check can defend.
+  // caller's trusted code. A process whose built-ins were changed before
+  // @pcc/spec loaded is beyond what any in-process check can defend.
   if (typeof input !== "object" || input === null || isProxy === null || isProxy(input)) {
     return reject("input-unreadable", "the admission input must be a plain object, not a proxy");
   }
-  const fields = ["pinnedBundleSetDigest", "verifyBundleSignature", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile"] as const;
-  const read = Object.create(null) as Record<(typeof fields)[number], unknown>;
-  for (const key of fields) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (descriptor !== undefined && !("value" in descriptor)) {
+  const read = ObjectCreate(null) as Record<InputField, unknown>;
+  for (let k = 0; k < INPUT_FIELDS.length; k++) {
+    const key = INPUT_FIELDS[k]!;
+    const descriptor = ObjectGetOwnPropertyDescriptor(input, key);
+    // The descriptor's OWN value: one written on Object.prototype must not pass an accessor off as data.
+    if (descriptor !== undefined && !hasOwn(descriptor, "value")) {
       return reject("input-unreadable", `input.${key} is an accessor; the admission input must be plain data`);
     }
-    read[key] = descriptor?.value;
+    read[key] = descriptor === undefined ? undefined : descriptor.value;
   }
-  for (const key of ["profile", "subject", "bundles"] as const) {
-    const code = codeInData(read[key], `input.${key}`, new Set());
+  for (let k = 0; k < DATA_FIELDS.length; k++) {
+    const key = DATA_FIELDS[k]!;
+    const code = codeInData(read[key], `input.${key}`, newList<object>(0));
     if (code !== null) return reject("input-unreadable", `${code}: no code supplied with the data may run during admission`);
   }
 
-  // Every read happens once, inside one guard, so a throw resolves to a reject, never to a rejected promise.
-  let entry: {
-    pinnedBundleSetDigest: unknown;
-    verifyBundleSignature: ProfileAdmissionInput["verifyBundleSignature"];
-    verifyPrimitiveInstance: ProfileAdmissionInput["verifyPrimitiveInstance"];
-    subjectCopy: ReturnType<typeof plainDataCopy>;
-    bundlesCopy: ReturnType<typeof plainDataCopy>;
-    committedDigest: string;
-    presentedProfile: MeasurementProfileV1;
-  };
+  const pinnedBundleSetDigest = read.pinnedBundleSetDigest;
+  const verifyBundleSignature = read.verifyBundleSignature as ProfileAdmissionInput["verifyBundleSignature"];
+  const verifyPrimitiveInstance = read.verifyPrimitiveInstance as ProfileAdmissionInput["verifyPrimitiveInstance"];
+  // Each read happens once, inside one guard, so a throw resolves to a reject, never to a rejected promise.
+  let subjectCopy: ReturnType<typeof plainDataCopy>;
+  let bundlesCopy: ReturnType<typeof plainDataCopy>;
   try {
-    entry = {
-      pinnedBundleSetDigest: read.pinnedBundleSetDigest,
-      verifyBundleSignature: read.verifyBundleSignature as ProfileAdmissionInput["verifyBundleSignature"],
-      verifyPrimitiveInstance: read.verifyPrimitiveInstance as ProfileAdmissionInput["verifyPrimitiveInstance"],
-      subjectCopy: plainDataCopy(read.subject),
-      bundlesCopy: plainDataCopy(read.bundles),
-      committedDigest: read.committedDigest as string,
-      presentedProfile: read.profile as MeasurementProfileV1,
-    };
+    subjectCopy = plainDataCopy(read.subject);
+    bundlesCopy = plainDataCopy(read.bundles);
   } catch {
     return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
   }
-  const { pinnedBundleSetDigest, verifyBundleSignature, verifyPrimitiveInstance, subjectCopy, bundlesCopy } = entry;
 
-  const governance = profileGoverns(entry.committedDigest, entry.presentedProfile);
+  const governance = profileGoverns(read.committedDigest as string, read.profile as MeasurementProfileV1);
   if (!governance.governs || governance.profile === null || governance.presentedDigest === null) {
-    return reject(governance.code ?? "profile-invalid", governance.reasons.join("; "));
+    return reject(governance.code ?? "profile-invalid", joinStrings(governance.reasons, "; "));
   }
   const profile = governance.profile;
   const committedDigest = governance.presentedDigest;
@@ -581,19 +884,17 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   const subject = deepFreeze(subjectCopy.value) as unknown as EvidenceSubject;
 
   const terms = unverifiableProfileTerms(profile);
-  if (terms.length > 0) return reject("unverifiable-term", terms.join("; "));
+  if (terms.length > 0) return reject("unverifiable-term", joinStrings(terms, "; "));
 
   if (!bundlesCopy.ok) return reject("unbound-bundle", "the bundles are not plain JSON data");
   const presented: unknown = deepFreeze(bundlesCopy.value);
-  if (!Array.isArray(presented) || presented.length === 0) {
-    return result(policyDecision(profile.onMissingData), [
-      { code: "no-bundles", detail: "no evidence bundle was presented for the job" },
-    ]);
+  if (!ArrayIsArray(presented) || presented.length === 0) {
+    return result(policyDecision(profile.onMissingData), only("no-bundles", "no evidence bundle was presented for the job"));
   }
 
   // The pin is authority: a malformed one is refused outright, never read as
   // missing data.
-  if (!isTaggedDigest(pinnedBundleSetDigest)) {
+  if (!isTaggedSha256(pinnedBundleSetDigest)) {
     return reject(
       "bundle-set-pin-invalid",
       "the pinned bundle-set digest is not a sha256: tagged digest, so there is no valid commitment to evaluate against",
@@ -601,65 +902,98 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
 
   // SET leg: the presented bundles are exactly the pinned set.
-  const bundles: AdmissionBundle[] = [];
+  const bundles = newList<AdmissionBundle>(0);
   for (let i = 0; i < presented.length; i++) {
     const b: unknown = presented[i];
-    if (!isRecord(b) || !isTaggedDigest(b.bundleHash) || !Array.isArray(b.events)) {
+    if (!isRecord(b) || !isTaggedSha256(b.bundleHash) || !ArrayIsArray(b.events)) {
       return reject("unbound-bundle", `bundle ${i}: not a bundle with a sha256: tagged bundleHash and an events array`);
     }
-    bundles.push(b as unknown as AdmissionBundle);
+    append(bundles, b as unknown as AdmissionBundle);
   }
-  const hashes = bundles.map((b) => b.bundleHash);
-  const findings: { decision: ProfileAdmissionDecision; reason: ProfileAdmissionReason }[] = [];
+  const hashes = mapList(bundles, (b) => b.bundleHash);
+  const findings = newList<Finding>(0);
   let presentedSet: string;
   try {
-    presentedSet = await computeBundleSetDigest(subject, hashes);
+    presentedSet = bundleSetDigest(subject, hashes);
   } catch (err) {
-    presentedSet = `(not computable: ${err instanceof Error ? err.message : String(err)})`;
+    presentedSet = `(not computable: ${messageOf(err)})`;
   }
   if (presentedSet !== pinnedBundleSetDigest) {
     // Never admit, but keep evaluating: a set that is not the pinned one must
     // not hide a hard reject in what WAS presented (reject outranks hold).
-    findings.push({
+    const distinct = ObjectCreate(null) as Record<string, true>;
+    let presentedCount = 0;
+    for (let i = 0; i < hashes.length; i++) {
+      if (!hasOwn(distinct, hashes[i]!)) {
+        distinct[hashes[i]!] = true;
+        presentedCount++;
+      }
+    }
+    append(findings, {
       decision: policyDecision(profile.onMissingData),
-      reason: {
-        code: "bundle-set-mismatch",
-        detail: `the ${new Set(hashes).size} presented bundle(s) digest to ${presentedSet}, not the pinned set ${pinnedBundleSetDigest}: a bundle is missing or was not pinned`,
-      },
+      reason: reason(
+        "bundle-set-mismatch",
+        `the ${presentedCount} presented bundle(s) digest to ${presentedSet}, not the pinned set ${pinnedBundleSetDigest}: a bundle is missing or was not pinned`,
+      ),
     });
   }
-  const rejectNow = (code: ProfileAdmissionCode, detail: string): ProfileAdmissionResult =>
-    result("reject", [...findings.map((f) => f.reason), { code, detail }]);
+  const rejectNow = (code: ProfileAdmissionCode, detail: string): ProfileAdmissionResult => {
+    const reasons = mapList(findings, (f) => f.reason);
+    append(reasons, reason(code, detail));
+    return result("reject", reasons);
+  };
 
-  const events: EvidenceEvent[] = [];
-  const seen = new Set<string>();
+  const events = newList<EvidenceEvent>(0);
+  const seen = ObjectCreate(null) as Record<string, true>;
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
-    if (!(await legPasses(() => verifyBundleSignature(bundle)))) {
-      return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
+    let signed: boolean;
+    try {
+      signed = (await legAnswer(() => verifyBundleSignature(bundle))) === true;
+    } catch {
+      signed = false;
     }
-    const binding = await verifyEvidenceSubjectBinding({
-      bundleHash: bundle.bundleHash,
-      events: bundle.events,
-      subject,
-    });
-    if (!binding.ok) {
-      const at = binding.eventIndex === undefined ? "" : ` at event ${binding.eventIndex}`;
-      return rejectNow("unbound-bundle", `bundle ${i}: ${binding.reason}${at}`);
+    if (!signed) return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
+
+    let answer: unknown;
+    try {
+      answer = await awaitedHere(verifyEvidenceSubjectBinding({ bundleHash: bundle.bundleHash, events: bundle.events, subject }));
+    } catch {
+      answer = undefined;
     }
-    // Evaluate only what was hashed: the verified canonical snapshots.
-    for (const e of binding.events) {
-      if (seen.has(e.hash)) continue;
-      seen.add(e.hash);
-      events.push(e);
+    // The answer as plain data, read through its own properties: no prototype, no accessor.
+    const copied = plainDataCopy(answer);
+    const binding = copied.ok && isRecord(copied.value) ? copied.value : null;
+    if (binding === null) return rejectNow("unbound-bundle", `bundle ${i}: the binding leg's answer is not plain data`);
+    if (binding.ok !== true) {
+      const why = typeof binding.reason === "string" ? binding.reason : "the binding leg failed";
+      const at = typeof binding.eventIndex === "number" ? ` at event ${binding.eventIndex}` : "";
+      return rejectNow("unbound-bundle", `bundle ${i}: ${why}${at}`);
+    }
+    // Evaluate only what was hashed: the verified canonical snapshots, re-verified here first.
+    const opened = binding.events;
+    const disagreement = ArrayIsArray(opened)
+      ? subjectProblem(subject) ?? bindingDisagreement(opened, bundle.bundleHash, subject)
+      : "the binding leg returned no events";
+    if (disagreement !== null) {
+      return rejectNow("unbound-bundle", `bundle ${i}: the binding leg's answer does not re-verify with intrinsics captured at load: ${disagreement}`);
+    }
+    const verified = opened as readonly EvidenceEvent[];
+    for (let k = 0; k < verified.length; k++) {
+      const e = verified[k]!;
+      if (hasOwn(seen, e.hash)) continue;
+      seen[e.hash] = true;
+      append(events, e);
     }
   }
+  deepFreeze(events);
 
-  const fabricated = events.filter(isFabricated).length;
-  if (fabricated > 0) {
+  let fabricatedCount = 0;
+  for (let k = 0; k < events.length; k++) if (isFabricated(events[k]!)) fabricatedCount++;
+  if (fabricatedCount > 0) {
     return rejectNow(
       "simulated-evidence",
-      `${fabricated} fabricated event(s); the profile prohibits simulation, so the evidence is not authentic`,
+      `${fabricatedCount} fabricated event(s); the profile prohibits simulation, so the evidence is not authentic`,
     );
   }
 
@@ -667,39 +1001,54 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   // rejects on (evidence-level.ts deriveContradictions); a failure with no
   // completion is a device failure, judged here under onDeviceFailure.
   const contradictions = deriveContradictions(events);
-  const executionFailed = events.some((e) => e.type === "execution_failed");
-  const failedInspections = events.filter(inspectionFailed).length;
-  const failure = [
-    ...(executionFailed ? ["execution_failed"] : []),
-    ...(failedInspections > 0 ? [`${failedInspections} failed inspection(s)`] : []),
-  ].join(" and ");
+  let executionFailed = false;
+  let failedInspections = 0;
+  for (let k = 0; k < events.length; k++) {
+    if (events[k]!.type === "execution_failed") executionFailed = true;
+    if (inspectionFailed(events[k]!)) failedInspections++;
+  }
+  let failure = executionFailed ? "execution_failed" : "";
+  if (failedInspections > 0) failure = `${failure === "" ? "" : `${failure} and `}${failedInspections} failed inspection(s)`;
   if (contradictions.length > 0) {
-    findings.push({
+    append(findings, {
       decision: policyDecision(profile.onContradiction),
-      reason: { code: "contradictory-evidence", detail: `contradictions: ${contradictions.join(", ")}` },
+      reason: reason("contradictory-evidence", `contradictions: ${joinStrings(contradictions, ", ")}`),
     });
-  } else if (failure) {
-    findings.push({
+  } else if (failure !== "") {
+    append(findings, {
       decision: policyDecision(profile.interpretation.onDeviceFailure),
-      reason: { code: "device-failure", detail: `the evidence reports ${failure}` },
+      reason: reason("device-failure", `the evidence reports ${failure}`),
     });
   }
 
   const required = profile.interpretation.acceptanceLevel;
   const reached = evidenceLevelOfBundle(events);
   const executing = executingDeviceIds(events);
-  const { device } = profile;
+  const device = profile.device;
   const window = captureWindow(profile, events);
 
   let atLevel = 0;
   let otherDevices = 0;
-  const excluded = new Map<string, number>();
-  const exclude = (why: string) => excluded.set(why, (excluded.get(why) ?? 0) + 1);
-  const samples = new Set<string>();
+  // Exclusion reasons and counts, in the order first seen.
+  const excludedWhy = newList<string>(0);
+  const excludedCount = newList<number>(0);
+  const exclude = (why: string) => {
+    for (let x = 0; x < excludedWhy.length; x++) {
+      if (excludedWhy[x] === why) {
+        defineIndex(excludedCount, x, excludedCount[x]! + 1);
+        return;
+      }
+    }
+    append(excludedWhy, why);
+    append(excludedCount, 1);
+  };
+  const samples = ObjectCreate(null) as Record<string, true>;
+  let qualifying = 0;
   // What the primitive leg sees: frozen copies, so nothing it does can reach
   // the snapshots evaluated here (a leg that tries to mutate them throws, and
-  // a throw is a failure).
-  const legEvents = deepFreeze(structuredClone(events));
+  // a throw is a failure). The structured clone captured at load makes them
+  // ordinary objects, as the leg has always received.
+  const legEvents = deepFreeze((StructuredClone as <T>(value: T) => T)(events));
   for (let k = 0; k < events.length; k++) {
     const e = events[k]!;
     if (!meetsEvidenceLevel(evidenceLevelOf(e, executing), required)) continue;
@@ -712,7 +1061,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       exclude("failed inspection(s)");
       continue;
     }
-    if (INSPECTION.has(e.type) && (e.payload as Record<string, unknown> | undefined)?.passed !== true) {
+    if (inSet(INSPECTION, e.type) && (e.payload as Record<string, unknown>).passed !== true) {
       exclude("without a positive verdict");
       continue;
     }
@@ -720,51 +1069,50 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       exclude("from another device kind or adapter");
       continue;
     }
-    const { adapterVersion, firmwareVersion } = e.source;
+    const adapterVersion = e.source.adapterVersion;
+    const firmwareVersion = e.source.firmwareVersion;
     if (
       typeof adapterVersion !== "string" ||
       typeof firmwareVersion !== "string" ||
-      !ownIncludes(device.permittedAdapterVersions, adapterVersion) ||
-      !ownIncludes(device.permittedFirmwareVersions, firmwareVersion)
+      !includesValue(device.permittedAdapterVersions, adapterVersion) ||
+      !includesValue(device.permittedFirmwareVersions, firmwareVersion)
     ) {
       exclude("unpermitted version");
       continue;
     }
     const ms = time(e);
-    if (
-      window.opens === null ||
-      window.closes === null ||
-      !Number.isFinite(ms) ||
-      ms < window.opens ||
-      ms > window.closes
-    ) {
+    if (window.opens === null || window.closes === null || !NumberIsFinite(ms) || ms < window.opens || ms > window.closes) {
       exclude("outside the capture window");
       continue;
     }
-    const read = readObservation(e, profile, committedDigest);
-    if (!read.ok) {
-      exclude(read.why);
+    const observed = readObservation(e, profile, committedDigest);
+    if (!observed.ok) {
+      exclude(observed.why);
       continue;
     }
-    if (!(await legPasses(() => verifyPrimitiveInstance(read.observation.primitiveId, legEvents[k]!, legEvents)))) {
-      exclude(`not verified as ${read.observation.primitiveId}`);
+    const observation = observed.observation;
+    let verified: boolean;
+    try {
+      verified = (await legAnswer(() => verifyPrimitiveInstance(observation.primitiveId, legEvents[k]!, legEvents))) === true;
+    } catch {
+      verified = false;
+    }
+    if (!verified) {
+      exclude(`not verified as ${observation.primitiveId}`);
       continue;
     }
-    if (samples.has(read.observation.sampleId)) {
+    if (hasOwn(samples, observation.sampleId)) {
       exclude("repeating a counted sample");
       continue;
     }
-    samples.add(read.observation.sampleId);
+    samples[observation.sampleId] = true;
+    qualifying++;
   }
-  const qualifying = samples.size;
 
   if (!meetsEvidenceLevel(reached, required)) {
-    findings.push({
+    append(findings, {
       decision: policyDecision(profile.onMissingData),
-      reason: {
-        code: "level-not-reached",
-        detail: `the evidence reaches ${reached ?? "no level"}; the profile requires ${required}`,
-      },
+      reason: reason("level-not-reached", `the evidence reaches ${reached ?? "no level"}; the profile requires ${required}`),
     });
   } else if (qualifying < profile.measurement.sampling.minSamples) {
     const windowNote =
@@ -773,24 +1121,28 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
         : window.closes === null
           ? `; the window never closed (no ${profile.capture.endCondition} event)`
           : "";
-    const exclusions = [...excluded].map(([why, n]) => `${n} ${why}`).join(", ") || "none";
-    findings.push({
+    let exclusions = "";
+    for (let x = 0; x < excludedWhy.length; x++) {
+      exclusions = `${exclusions}${x === 0 ? "" : ", "}${excludedCount[x]} ${excludedWhy[x]}`;
+    }
+    if (exclusions === "") exclusions = "none";
+    append(findings, {
       decision: policyDecision(profile.onMissingData),
-      reason: {
-        code: "missing-measurements",
-        detail:
-          `${qualifying} qualifying sample(s) from ${device.deviceId}, the profile requires ${profile.measurement.sampling.minSamples}` +
+      reason: reason(
+        "missing-measurements",
+        `${qualifying} qualifying sample(s) from ${device.deviceId}, the profile requires ${profile.measurement.sampling.minSamples}` +
           ` (at ${required}: ${atLevel} from the profiled device, ${otherDevices} from other devices;` +
           ` excluded: ${exclusions}${windowNote})`,
-      },
+      ),
     });
   }
 
-  if (findings.length === 0) return result("admit", [], reached, qualifying);
-  const decision = findings.some((f) => f.decision === "reject") ? "reject" : "hold";
+  if (findings.length === 0) return result("admit", newList<ProfileAdmissionReason>(0), reached, qualifying);
+  let decision: ProfileAdmissionDecision = "hold";
+  for (let x = 0; x < findings.length; x++) if (findings[x]!.decision === "reject") decision = "reject";
   return result(
     decision,
-    findings.map((f) => f.reason),
+    mapList(findings, (f) => f.reason),
     reached,
     qualifying,
   );

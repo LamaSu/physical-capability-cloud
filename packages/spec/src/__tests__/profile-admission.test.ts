@@ -35,6 +35,7 @@ import { signingPreimage } from "../evidence/signing-preimage.js";
 import { canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "../evidence/subject-binding.js";
 import type { EvidenceEvent } from "../types/evidence.js";
+import { awaitedHere, fulfillsWithTrue, ownPromise } from "../util/primordials.js";
 
 const JOB = "job-admission-1";
 const KERNEL = "kernel-admission-1";
@@ -1461,5 +1462,332 @@ describe("profile admission: the proxy check is loaded at runtime, and fails clo
       vi.doUnmock("node:util");
       vi.resetModules();
     }
+  });
+});
+
+// ── astra pack 187 (#519): what a caller receives through the promise, and through every promise derived from it ──
+/**
+ * Native `then`, `catch` and `finally` build the promise they return with
+ * SpeciesConstructor(promise, %Promise%), that is
+ * `promise.constructor[Symbol.species]`. #363 round 9 gave each returned
+ * promise its own `constructor` (the Promise captured at load) and `then`, but
+ * the global Promise's species is a configurable accessor: code running after
+ * load can replace it with a constructor whose "promise" is a forged thenable,
+ * and `await profileAdmitsBundle(signatureFails).then((x) => x)` receives the
+ * forgery. Checked with it: `.catch` and `.finally` looked up on
+ * Promise.prototype, and the promise `.then` returned (not pinned) awaited
+ * after Promise.prototype.then and .constructor are replaced.
+ *
+ * Every input and clean value is built before a change; each change is undone
+ * in `finally`. The test's own awaits never run on a promise a live change can
+ * reach (see `deliveredUnder`).
+ */
+describe("profile admission — astra pack 187: .then, .catch and .finally deliver what admission decided", () => {
+  const FORGED_ADMIT = { decision: "admit", admits: true, reached: "inspected_output", qualifyingSamples: 1, reasons: [] };
+  const FORGED_DIGEST = "sha256:" + "f".repeat(64);
+  const SUBJECT: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+  const SET = ["sha256:" + "1".repeat(64), "sha256:" + "2".repeat(64)];
+
+  /** astra's `signatureFails`: a well-formed input, pinned to its own bundle, whose signature leg answers false. */
+  async function signatureFails(): Promise<ProfileAdmissionInput> {
+    const p = inspectedPageProfile();
+    const bundle = await toBundle(PILOT, p);
+    return {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject: SUBJECT,
+      bundles: [bundle],
+      pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, [bundle.bundleHash]),
+      verifyBundleSignature: () => false,
+      verifyPrimitiveInstance: () => true,
+    };
+  }
+
+  /** astra's recipe: a constructor that calls its executor with two no-op functions and returns a thenable resolving with `forged`. */
+  function forgingSpecies(forged: unknown) {
+    return function Forged(executor: (resolve: () => void, reject: () => void) => void) {
+      executor(
+        () => undefined,
+        () => undefined,
+      );
+      return {
+        then(resolve: (value: unknown) => void) {
+          resolve(forged);
+        },
+      };
+    };
+  }
+
+  /** Replace Promise[Symbol.species] (a configurable accessor on the global Promise), as code running after load can. */
+  function speciesReplaced(species: unknown): () => () => void {
+    return () => {
+      const original = Object.getOwnPropertyDescriptor(Promise, Symbol.species)!;
+      Object.defineProperty(Promise, Symbol.species, { value: species, configurable: true });
+      return () => void Object.defineProperty(Promise, Symbol.species, original);
+    };
+  }
+
+  /** Replace Promise.prototype[name] with a method answering a thenable that resolves with `forged`. `this` still gets a handler, so nothing is left unhandled. */
+  function methodReplaced(name: "catch" | "finally", forged: unknown): () => () => void {
+    return () => {
+      const original = Object.getOwnPropertyDescriptor(Promise.prototype, name)!;
+      const thenBefore = Promise.prototype.then;
+      Object.defineProperty(Promise.prototype, name, {
+        ...original,
+        value: function (this: Promise<unknown>) {
+          thenBefore.call(this, undefined, () => undefined);
+          return {
+            then(resolve: (value: unknown) => void) {
+              resolve(forged);
+            },
+          };
+        },
+      });
+      return () => void Object.defineProperty(Promise.prototype, name, original);
+    };
+  }
+
+  /**
+   * What `deliver` hands its caller while `change` is in place ("threw" for a
+   * rejection). Only for changes that leave Promise.prototype.then and
+   * .constructor alone: this helper's own promise is awaited while the change
+   * is live, and `await` reads both (the then-and-constructor test awaits
+   * inline instead).
+   */
+  async function deliveredUnder(change: () => () => void, deliver: () => Promise<unknown>): Promise<unknown> {
+    const undo = change();
+    try {
+      return await deliver();
+    } catch {
+      return "threw";
+    } finally {
+      undo();
+    }
+  }
+
+  const unchanged = () => () => undefined;
+
+  /** Every way a caller consumes the promise, each USING the promise `.then`, `.catch` or `.finally` returns. */
+  const SHAPES: Array<[string, (p: Promise<unknown>) => Promise<unknown>]> = [
+    ["p.then((x) => x)", (p) => p.then((x) => x)],
+    ["p.then((x) => x).then((y) => y)", (p) => p.then((x) => x).then((y) => y)],
+    ['p.then(undefined, () => "caught")', (p) => p.then(undefined, () => "caught")],
+    ['p.catch(() => "caught")', (p) => p.catch(() => "caught")],
+    ["p.finally(() => undefined)", (p) => p.finally(() => undefined)],
+  ];
+
+  /** Each shape whose value under `change` differs from its clean value, as "shape: clean -> delivered". `make` runs under the change too. */
+  async function forgedShapes(change: () => () => void, make: () => Promise<unknown>): Promise<string[]> {
+    const out: string[] = [];
+    for (const [name, consume] of SHAPES) {
+      const clean = await deliveredUnder(unchanged, () => consume(make()));
+      const delivered = await deliveredUnder(change, () => consume(make()));
+      if (JSON.stringify(delivered) !== JSON.stringify(clean)) out.push(`${name}: ${JSON.stringify(clean)} -> ${JSON.stringify(delivered)}`);
+    }
+    return out;
+  }
+
+  /** "label: expected -> delivered" for each pair that differs, so one failure shows every case. */
+  function mismatches(pairs: Array<[string, unknown, unknown]>): string[] {
+    const out: string[] = [];
+    for (const [label, delivered, expected] of pairs) {
+      if (JSON.stringify(delivered) !== JSON.stringify(expected)) out.push(`${label}: ${JSON.stringify(expected)} -> ${JSON.stringify(delivered)}`);
+    }
+    return out;
+  }
+
+  it("astra's recipe: with Promise[Symbol.species] replaced, await profileAdmitsBundle(signatureFails).then((x) => x) is still the rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    expect(codes(clean)).toEqual(["unauthenticated-bundle"]);
+    const original = Object.getOwnPropertyDescriptor(Promise, Symbol.species)!;
+    Object.defineProperty(Promise, Symbol.species, { value: forgingSpecies(FORGED_ADMIT), configurable: true });
+    let delivered: unknown;
+    try {
+      delivered = await profileAdmitsBundle(made).then((x) => x);
+    } finally {
+      Object.defineProperty(Promise, Symbol.species, original);
+    }
+    expect(delivered).toEqual(clean);
+  });
+
+  it("the replaced species, through every shape: admission's result is never forged", async () => {
+    const made = await signatureFails();
+    expect(await forgedShapes(speciesReplaced(forgingSpecies(FORGED_ADMIT)), () => profileAdmitsBundle(made))).toEqual([]);
+  });
+
+  it("the replaced species, through every shape: a chained digest is the digest", async () => {
+    expect(await forgedShapes(speciesReplaced(forgingSpecies(FORGED_DIGEST)), () => computeBundleSetDigest(SUBJECT, SET))).toEqual([]);
+  });
+
+  it("the replaced species, through every shape: a rejected digest (the empty set) is never turned into a value", async () => {
+    expect(await forgedShapes(speciesReplaced(forgingSpecies(FORGED_DIGEST)), () => computeBundleSetDigest(SUBJECT, []))).toEqual([]);
+  });
+
+  it("the replaced species, through every shape: fulfillsWithTrue's promise (util/primordials.ts) delivers false as false", async () => {
+    expect(await forgedShapes(speciesReplaced(forgingSpecies(true)), () => fulfillsWithTrue(Promise.resolve(false)) as Promise<boolean>)).toEqual([]);
+  });
+
+  it("Promise.prototype.catch replaced after load: p.catch(...) still delivers admission's rejection, the digest, and a digest's rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    const digest = await computeBundleSetDigest(SUBJECT, SET);
+    expect(
+      mismatches([
+        ["admission", await deliveredUnder(methodReplaced("catch", FORGED_ADMIT), () => profileAdmitsBundle(made).catch(() => "caught")), clean],
+        ["digest", await deliveredUnder(methodReplaced("catch", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, SET).catch(() => "caught")), digest],
+        ["rejected digest", await deliveredUnder(methodReplaced("catch", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, []).catch(() => "caught")), "caught"],
+      ]),
+    ).toEqual([]);
+  });
+
+  it("Promise.prototype.finally replaced after load: p.finally(...) still delivers admission's rejection, the digest, and a digest's rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    const digest = await computeBundleSetDigest(SUBJECT, SET);
+    expect(
+      mismatches([
+        ["admission", await deliveredUnder(methodReplaced("finally", FORGED_ADMIT), () => profileAdmitsBundle(made).finally(() => undefined)), clean],
+        ["digest", await deliveredUnder(methodReplaced("finally", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, SET).finally(() => undefined)), digest],
+        ["rejected digest", await deliveredUnder(methodReplaced("finally", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, []).finally(() => undefined)), "threw"],
+      ]),
+    ).toEqual([]);
+  });
+
+  it("Promise.prototype.then and .constructor replaced after load: the promise p.then(...) returns, awaited or chained, still delivers the rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    // Both taken before any change: `derived` is awaited under it, and `chained` gets its second link under it.
+    const derived = profileAdmitsBundle(made).then((x) => x);
+    const chained = profileAdmitsBundle(made).then((x) => x);
+    const hasOwn = Object.prototype.hasOwnProperty;
+    const forge = (v: unknown) => (typeof v === "object" && v !== null && hasOwn.call(v, "decision") ? FORGED_ADMIT : v);
+    const thenBefore = Promise.prototype.then;
+    const then = Object.getOwnPropertyDescriptor(Promise.prototype, "then")!;
+    const constructor = Object.getOwnPropertyDescriptor(Promise.prototype, "constructor")!;
+    Object.defineProperty(Promise.prototype, "constructor", { ...constructor, value: function NotPromise() {} });
+    Object.defineProperty(Promise.prototype, "then", {
+      ...then,
+      value: function (this: Promise<unknown>, f?: unknown, r?: unknown) {
+        const onFulfilled = typeof f === "function" ? (v: unknown) => (f as (x: unknown) => unknown)(forge(v)) : f;
+        return thenBefore.call(this, onFulfilled as (x: unknown) => unknown, r as (e: unknown) => unknown);
+      },
+    });
+    let awaited: unknown;
+    let secondLink: unknown;
+    try {
+      awaited = await derived;
+      secondLink = await chained.then((y) => y);
+    } finally {
+      Object.defineProperty(Promise.prototype, "then", then);
+      Object.defineProperty(Promise.prototype, "constructor", constructor);
+    }
+    expect(
+      mismatches([
+        ["await p.then((x) => x)", awaited, clean],
+        ["await p.then((x) => x).then((y) => y), second link under the change", secondLink, clean],
+      ]),
+    ).toEqual([]);
+  });
+
+  it("a caller holding any promise these functions return cannot re-point the species every other caller's .then uses", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    const held = computeBundleSetDigest(SUBJECT, SET);
+    await held;
+    const holder = held.constructor as unknown as object;
+    const before = Object.getOwnPropertyDescriptor(holder, Symbol.species);
+    let repointed = true;
+    let delivered: unknown;
+    try {
+      try {
+        Object.defineProperty(holder, Symbol.species, { value: forgingSpecies(FORGED_ADMIT), configurable: true });
+      } catch {
+        repointed = false;
+      }
+      delivered = await profileAdmitsBundle(made).then((x) => x);
+    } finally {
+      if (before !== undefined) {
+        try {
+          Object.defineProperty(holder, Symbol.species, before);
+        } catch {
+          // a frozen holder: nothing was changed
+        }
+      }
+    }
+    expect(delivered).toEqual(clean);
+    expect(repointed).toBe(false);
+  });
+
+  it("admission's own await of binding's answer looks nothing up on it: binding's own resolution is the only `then` lookup", async () => {
+    const p = inspectedPageProfile();
+    const bundle = await toBundle(PILOT, p);
+    const input: ProfileAdmissionInput = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject: SUBJECT,
+      bundles: [bundle],
+      pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, [bundle.bundleHash]),
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    };
+    const hasOwn = Object.prototype.hasOwnProperty;
+    // Lookups of `then` on binding's answer ({ ok, events }), counted per answer object; the getter answers
+    // undefined, as an absent `then` would, so nothing else changes.
+    const lookups = new Map<object, number>();
+    Object.defineProperty(Object.prototype, "then", {
+      configurable: true,
+      get(this: unknown) {
+        if (typeof this === "object" && this !== null && hasOwn.call(this, "ok") && hasOwn.call(this, "events")) {
+          lookups.set(this, (lookups.get(this) ?? 0) + 1);
+        }
+        return undefined;
+      },
+    });
+    let r: ProfileAdmissionResult | undefined;
+    try {
+      r = await profileAdmitsBundle(input);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).then;
+    }
+    expect(r?.decision).toBe("admit");
+    // LO-EV-9's binding (#341) answers with a frozen null-prototype object, so no inherited `then` is ever
+    // looked up on its answer: not when its own promise resolves, and not by any await of it, admission's
+    // included. A polluted Object.prototype.then cannot reach admission through binding's answer.
+    expect([...lookups.values()]).toEqual([]);
+    const answer = await verifyEvidenceSubjectBinding({ bundleHash: bundle.bundleHash, events: bundle.events, subject: SUBJECT });
+    expect(Object.getPrototypeOf(answer), "binding's answer has no prototype to inherit `then` from").toBeNull();
+    expect(Object.isFrozen(answer)).toBe(true);
+  });
+
+  it("awaitedHere (util/primordials.ts): awaiting it looks nothing up on the value; awaiting an ownPromise looks `then` up once", async () => {
+    const value = { k: 1 };
+    // Both settled before the lookup is counted: Promise.resolve looks `then` up on the value itself.
+    const here = awaitedHere(Promise.resolve(value));
+    const handedOut = ownPromise(Promise.resolve(value));
+    await Promise.resolve();
+    let lookups = 0;
+    Object.defineProperty(Object.prototype, "then", {
+      configurable: true,
+      get(this: unknown) {
+        if (this === value) lookups++;
+        return undefined;
+      },
+    });
+    let first: unknown;
+    let afterFirst = -1;
+    let second: unknown;
+    try {
+      first = await here;
+      afterFirst = lookups;
+      second = await handedOut;
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).then;
+    }
+    expect(first).toBe(value);
+    expect(afterFirst).toBe(0);
+    // Why only a primitive or a null-prototype object is handed out through ownPromise.
+    expect(second).toBe(value);
+    expect(lookups).toBe(1);
   });
 });
